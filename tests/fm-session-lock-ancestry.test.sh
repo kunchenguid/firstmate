@@ -21,6 +21,10 @@ fm_git_identity fmtest fmtest@example.invalid
 
 LIB="$ROOT/bin/fm-session-lock-lib.sh"
 
+sidecar_id() {  # <sidecar-file>
+  head -n 1 "$1"
+}
+
 # Claude Code's native installer names the per-session executable by its version,
 # so the harness identity has to survive a basename that says nothing.
 CLAUDE_VERSION_DIR="$TMP_ROOT/claude-install/share/claude/versions"
@@ -291,6 +295,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+[ "$pid" != "${FM_TEST_PS_FAIL_PID:-}" ] || exit 2
 case "$pid:$field:${FM_TEST_DAEMON_PRESENT:-0}" in
   700:comm=:*) printf '%s\n' claude ;;
   700:args=:*) printf '%s\n' 'claude --resume' ;;
@@ -356,8 +361,21 @@ test_same_session_id_owns_a_recycled_background_chain() {
       || fail "a foreign publisher suppressed the ownership diagnostic"
   done
   printf 'S1\n730\n' > "$state/.lock-session"
-  FM_TEST_DEAD_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state" \
-    || fail "an exited publisher prevented its replacement from owning the retained frontend"
+  if FM_TEST_DEAD_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
+    fail "an exited publisher granted ownership over the live frontend"
+  fi
+  FM_TEST_DEAD_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state" >/dev/null \
+    || fail "an exited publisher hid the foreign live frontend"
+  # An unavailable process lookup is not evidence that the publisher exited.
+  if FM_TEST_PS_FAIL_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 \
+    lib_eval "$fakebin" 'fm_harness_pid_alive 730'; then
+    fail "the publisher-only ps failure was not exercised"
+  fi
+  if FM_TEST_PS_FAIL_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
+    fail "a failed publisher lookup granted ownership over the live frontend"
+  fi
+  FM_TEST_PS_FAIL_PID=730 FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 foreign_owner "$fakebin" "$state" >/dev/null \
+    || fail "a failed publisher lookup hid the foreign live frontend"
   printf 'S1\n710\n' > "$state/.lock-session"
   # 2. A different id: the existing refusal, naming the live owner.
   if FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
@@ -674,7 +692,7 @@ test_windows_clear_rekeys_the_lock_under_the_same_pid() {
   }
   out=$(win_lock S1) || fail "the Windows session could not acquire its lock: $out"
   [ "$(cat "$home/state/.lock")" = 'win:7204' ] || fail "the lock names '$(cat "$home/state/.lock")', not win:7204"
-  [ "$(head -n 1 "$home/state/.lock-session" 2>/dev/null)" = S1 ] \
+  [ "$(sidecar_id "$home/state/.lock-session" 2>/dev/null)" = S1 ] \
     || fail "the Windows session did not record its session id beside the lock"
 
   printf 'S1\n' > "$home/state/.lock-session"
@@ -691,7 +709,7 @@ test_windows_clear_rekeys_the_lock_under_the_same_pid() {
   # changes. As on POSIX the session keeps its lock and the sidecar is re-keyed.
   out=$(win_lock S2) || fail "the Windows session was refused its own lock after /clear: $out"
   [ "$(cat "$home/state/.lock")" = 'win:7204' ] || fail "the /clear re-key rewrote the lock to '$(cat "$home/state/.lock")'"
-  [ "$(head -n 1 "$home/state/.lock-session")" = S2 ] || fail "the /clear re-key did not record the new session id"
+  [ "$(sidecar_id "$home/state/.lock-session")" = S2 ] || fail "the /clear re-key did not record the new session id"
   FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=7204 owned "$fakebin" "$home/state" \
     || fail "the Windows session did not own its lock after /clear"
   if FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_SESSION_ID=S2 FM_TEST_CLAUDE_PID=7204 foreign_owner "$fakebin" "$home/state" >/dev/null; then
@@ -959,8 +977,8 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 # exactly as in production, and the tree is orphaned before use. The daemon is
 # then ended while the front-end stays alive - the recycling that breaks the run
 # above the pty-host - and the spare fires the real Stop auto-arm, the real
-# turn-end guard, and the real lock script once per phase under a chosen hook
-# environment, recording every verdict for the assertions below.
+# turn-end guard on each Stop. Only startup, compact, and clear phases run
+# the lock script, matching the production SessionStart path.
 
 BG_FIXTURE_PIDS=()
 reap_background_fixture() {
@@ -1026,6 +1044,10 @@ while [ ! -e "$FM_HOME/state/stop-spare" ]; do
     unset CLAUDE_CODE_SESSION_ID CLAUDE_PID
     # shellcheck disable=SC1090
     . "$req"
+    if [ "$n" -eq 5 ] || [ "$n" -eq 6 ]; then
+      "$FM_HOME/bin/fm-lock.sh" > "$out/lock.out" 2>&1
+      printf '%s\n' "$?" > "$out/lock.rc"
+    fi
     ( . "$FM_HOME/bin/fm-session-lock-lib.sh" && fm_harness_ancestry_pids ) > "$out/ancestry" 2>/dev/null
     printf '%s\n' '{"session_id":"fixture","stop_hook_active":true}' \
       | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$out/hook.out" 2>&1
@@ -1033,8 +1055,6 @@ while [ ! -e "$FM_HOME/state/stop-spare" ]; do
     printf '%s\n' '{"session_id":"fixture","stop_hook_active":true}' \
       | "$FM_HOME/bin/fm-turnend-guard.sh" --claude > "$out/guard.out" 2>&1
     printf '%s\n' "$?" > "$out/guard.rc"
-    "$FM_HOME/bin/fm-lock.sh" > "$out/lock.out" 2>&1
-    printf '%s\n' "$?" > "$out/lock.rc"
     cp "$FM_HOME/state/.lock" "$out/lock-after"
     [ ! -e "$FM_HOME/state/.lock-session" ] || cp "$FM_HOME/state/.lock-session" "$out/session-after"
     : > "$out/done"
@@ -1094,11 +1114,13 @@ expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label> 
   if grep -q 'OWNED BY ANOTHER LIVE SESSION' "$dir/state/phase-$n/guard.out"; then
     fail "$label: the turn-end guard took the foreign-owner exit: $(cat "$dir/state/phase-$n/guard.out")"
   fi
-  expect_code 0 "$(phase_value "$dir" "$n" lock.rc)" "$label: fm-lock.sh refused the session's own lock: $(cat "$dir/state/phase-$n/lock.out")"
+  if [ -e "$dir/state/phase-$n/lock.rc" ]; then
+    expect_code 0 "$(phase_value "$dir" "$n" lock.rc)" "$label: SessionStart refused the lock: $(cat "$dir/state/phase-$n/lock.out")"
+  fi
   [ "$(phase_value "$dir" "$n" lock-after)" = "$lock_pid" ] \
     || fail "$label: lock line 1 is $(phase_value "$dir" "$n" lock-after), expected $lock_pid"
   if [ -n "$session_id" ]; then
-    [ "$(head -n 1 "$dir/state/phase-$n/session-after")" = "$session_id" ] \
+    [ "$(sidecar_id "$dir/state/phase-$n/session-after")" = "$session_id" ] \
       || fail "$label: the session sidecar names $(phase_value "$dir" "$n" session-after), expected $session_id"
   else
     cmp -s "$dir/state/phase-$n/session-after" "$dir/sidecar-initial" \
@@ -1115,9 +1137,6 @@ expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
   expect_code 0 "$(phase_value "$dir" "$n" guard.rc)" "$label: a non-owner Stop did not end safely"
   grep -q "OWNED BY ANOTHER LIVE SESSION.*lock owner pid $owner" "$dir/state/phase-$n/guard.out" \
     || fail "$label: the guard did not report the live owner $owner: $(cat "$dir/state/phase-$n/guard.out")"
-  expect_code 1 "$(phase_value "$dir" "$n" lock.rc)" "$label: fm-lock.sh accepted a lock this session does not own"
-  grep -q "another live firstmate session holds the lock (pid $owner, session S1)" "$dir/state/phase-$n/lock.out" \
-    || fail "$label: the refusal did not name the owner pid and recorded session: $(cat "$dir/state/phase-$n/lock.out")"
   [ "$(phase_value "$dir" "$n" lock-after)" = "$owner" ] || fail "$label: a non-owner rewrote the lock"
 }
 
@@ -1139,16 +1158,22 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   expect_code 0 "$(tr -d '[:space:]' < "$dir/state/frontend-lock.rc")" "the front-end could not acquire the lock: $(cat "$dir/state/frontend-lock.out")"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$frontend" ] \
     || fail "the front-end's lock names $(cat "$dir/state/.lock"), expected its own pid $frontend"
-  [ "$(head -n 1 "$dir/state/.lock-session")" = S1 ] \
+  [ "$(sidecar_id "$dir/state/.lock-session")" = S1 ] \
     || fail "the front-end did not record its trusted session id beside the lock"
   cp "$dir/state/.lock-session" "$dir/sidecar-initial"
 
-  # Phase 1: the healthy contiguous chain, the session's own id.
+  # Phase 1: an attached legacy session upgrades at Stop, without SessionStart.
+  printf 'S1\n' > "$dir/state/.lock-session"
+  touch -t 202001010000 "$dir/state/.lock-session"
+  cp -p "$dir/state/.lock-session" "$dir/sidecar-time"
   fire_phase "$dir" 1 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
   grep -qx "$frontend" "$dir/state/phase-1/ancestry" || fail "the healthy chain did not reach the front-end"
   expect_phase_owned "$dir" 1 2 "$frontend" "healthy chain" S1
   [ "$(sed -n '2p' "$dir/state/.lock-session")" = "$spare" ] \
     || fail "the model loop did not refresh its publisher before bridge recycling"
+  if [ "$dir/state/.lock-session" -nt "$dir/sidecar-time" ] || [ "$dir/state/.lock-session" -ot "$dir/sidecar-time" ]; then
+    fail "the legacy publisher upgrade changed the session-id boundary"
+  fi
   cp "$dir/state/.lock-session" "$dir/sidecar-initial"
 
   # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
@@ -1176,8 +1201,8 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   fire_phase "$dir" 4 ''
   expect_phase_foreign "$dir" 4 2 "$frontend" "recycled chain, no id"
 
-  # Phase 5: the same session id over the broken chain - the reported drift. The
-  # confirmation re-anchors line 1 from the live non-ancestor front-end onto the
+  # Phase 5: compact runs SessionStart under the same id over the broken chain.
+  # The confirmation re-anchors line 1 from the live non-ancestor front-end onto the
   # spare - the model-loop process - not onto the outermost pty-host.
   fire_phase "$dir" 5 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
   expect_phase_owned "$dir" 5 4 "$spare" "recycled chain, same session"
@@ -1190,6 +1215,19 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   fire_phase "$dir" 6 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
   expect_phase_owned "$dir" 6 6 "$spare" "same process after a session-id change" S2
 
+  # Phase 7: a current publisher needs no writer call or claim lock at Stop.
+  touch -t 202001010000 "$dir/state/.lock-session"
+  cp -p "$dir/state/.lock-session" "$dir/sidecar-current"
+  mv "$dir/bin/fm-lock.sh" "$dir/bin/fm-lock-real.sh"
+  printf '#!/usr/bin/env bash\ntouch "$FM_HOME/state/unexpected-lock-call"\nexit 1\n' > "$dir/bin/fm-lock.sh"
+  chmod +x "$dir/bin/fm-lock.sh"
+  fire_phase "$dir" 7 'export CLAUDE_CODE_SESSION_ID=S2; export CLAUDE_PID=$$'
+  expect_phase_owned "$dir" 7 8 "$spare" "current publisher Stop" S2
+  [ ! -e "$dir/state/unexpected-lock-call" ] || fail "a current sidecar Stop called the lock writer"
+  cmp -s "$dir/state/.lock-session" "$dir/sidecar-current" || fail "a current sidecar Stop changed its bytes"
+  if [ "$dir/state/.lock-session" -nt "$dir/sidecar-current" ] || [ "$dir/state/.lock-session" -ot "$dir/sidecar-current" ]; then
+    fail "a current sidecar Stop changed its mtime"
+  fi
   : > "$dir/state/stop-frontend"
   : > "$dir/state/stop-spare"
   pass "session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change"
@@ -1263,7 +1301,7 @@ SH
   wait_for_file "$dir/state/acquire.rc" "the initial lock acquisition"
   expect_code 0 "$(tr -d '[:space:]' < "$dir/state/acquire.rc")" \
     "the session could not acquire its lock: $(cat "$dir/state/acquire.out")"
-  [ "$(head -n 1 "$dir/state/sidecar-after-acquire")" = S1 ] \
+  [ "$(sidecar_id "$dir/state/sidecar-after-acquire")" = S1 ] \
     || fail "the initial acquire did not record S1"
   wait_for_file "$dir/state/holder-pid" "the claim-lock holder pid"
   holder_pid=$(tr -d '[:space:]' < "$dir/state/holder-pid")
@@ -1275,8 +1313,8 @@ SH
   wait "$session_pid" || true
   expect_code 0 "$(tr -d '[:space:]' < "$dir/state/confirm.rc")" \
     "the same-session confirmation failed while the claim lock was held: $(cat "$dir/state/confirm.out")"
-  [ "$(head -n 1 "$dir/state/.lock-session")" = S2 ] \
-    || fail "the sidecar still names $(head -n 1 "$dir/state/.lock-session"), expected the re-keyed id S2"
+  [ "$(sidecar_id "$dir/state/.lock-session")" = S2 ] \
+    || fail "the sidecar still names $(sidecar_id "$dir/state/.lock-session"), expected the re-keyed id S2"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$(tr -d '[:space:]' < "$dir/state/session-pid")" ] \
     || fail "the confirmation rewrote lock line 1"
   grep -q 'lock acquired: harness pid' "$dir/state/confirm.out" \
@@ -1385,8 +1423,8 @@ SH
   wait "$session_pid" || true
   [ "$(tr -d '[:space:]' < "$dir/state/confirm.rc")" != 0 ] \
     || fail "the waiter reported success after another live session published: $(cat "$dir/state/confirm.out")"
-  [ "$(head -n 1 "$dir/state/.lock-session")" = OTHER ] \
-    || fail "the waiter overwrote the other session's sidecar to $(head -n 1 "$dir/state/.lock-session")"
+  [ "$(sidecar_id "$dir/state/.lock-session")" = OTHER ] \
+    || fail "the waiter overwrote the other session's sidecar to $(sidecar_id "$dir/state/.lock-session")"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$other_pid" ] \
     || fail "the waiter rewrote lock line 1 off the other live session"
   grep -q "another live firstmate session holds the lock (pid $other_pid, session OTHER)" "$dir/state/confirm.out" \
@@ -1397,7 +1435,7 @@ SH
 # A failed line-1 write after publishing a new id must restore the previous
 # sidecar, not leave the new id beside the unclaimed pid.
 test_failed_lock_write_restores_previous_sidecar() {
-  local dir stale_pid
+  local dir stale_pid next_id
   dir="$TMP_ROOT/restore-sidecar"
   mkdir -p "$dir/state"
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
@@ -1409,32 +1447,40 @@ test_failed_lock_write_restores_previous_sidecar() {
     '
   expect_code 0 "$(tr -d '[:space:]' < "$dir/state/acquire.rc")" \
     "the first session could not acquire its lock: $(cat "$dir/state/acquire.out")"
-  [ "$(head -n 1 "$dir/state/.lock-session")" = S1 ] \
+  [ "$(sidecar_id "$dir/state/.lock-session")" = S1 ] \
     || fail "the first session did not record S1"
   stale_pid=$(tr -d '[:space:]' < "$dir/state/stale-pid")
   cp "$dir/state/.lock" "$dir/state/lock-before-reclaim"
-  cp "$dir/state/.lock-session" "$dir/state/sidecar-before-reclaim"
-  chmod a-w "$dir/state/.lock" || fail "could not make the stale lock read-only"
-  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
-    FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
-    "$NAMED_CLAUDE" -c '
-      CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reclaim.out" 2>&1
-      printf "%s\n" "$?" > "$FM_HOME/state/reclaim.rc"
-    '
-  chmod u+w "$dir/state/.lock" 2>/dev/null || true
-  [ "$(tr -d '[:space:]' < "$dir/state/reclaim.rc")" != 0 ] \
-    || fail "a read-only stale lock was overwritten: $(cat "$dir/state/reclaim.out")"
-  grep -q 'cannot write session lock' "$dir/state/reclaim.out" \
-    || fail "the reclaim did not fail on the lock write: $(cat "$dir/state/reclaim.out")"
-  [ "$(head -n 1 "$dir/state/.lock-session")" = S1 ] \
-    || fail "the failed reclaim left sidecar $(head -n 1 "$dir/state/.lock-session"), expected the previous id S1"
-  cmp -s "$dir/state/.lock-session" "$dir/state/sidecar-before-reclaim" \
-    || fail "the failed reclaim did not restore the publisher with its session id"
-  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$stale_pid" ] \
-    || fail "the failed reclaim rewrote lock line 1"
-  cmp -s "$dir/state/lock-before-reclaim" "$dir/state/.lock" \
-    || fail "the failed reclaim changed lock bytes when line 1 was unwritable"
-  pass "session-lock: a failed lock write restores the previous sidecar"
+  touch -t 202001010000 "$dir/state/.lock-session"
+  cp -p "$dir/state/.lock-session" "$dir/state/sidecar-before-reclaim"
+  # Keep the original id-change rollback and also cover publisher-only refresh.
+  for next_id in S2 S1; do
+    chmod a-w "$dir/state/.lock" || fail "could not make the stale lock read-only"
+    env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+      FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" FM_TEST_NEXT_SESSION_ID="$next_id" \
+      "$NAMED_CLAUDE" -c '
+        CLAUDE_CODE_SESSION_ID=$FM_TEST_NEXT_SESSION_ID CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reclaim.out" 2>&1
+        printf "%s\n" "$?" > "$FM_HOME/state/reclaim.rc"
+      '
+    chmod u+w "$dir/state/.lock" 2>/dev/null || true
+    [ "$(tr -d '[:space:]' < "$dir/state/reclaim.rc")" != 0 ] \
+      || fail "a read-only stale lock was overwritten: $(cat "$dir/state/reclaim.out")"
+    grep -q 'cannot write session lock' "$dir/state/reclaim.out" \
+      || fail "the reclaim did not fail on the lock write: $(cat "$dir/state/reclaim.out")"
+    [ "$(sidecar_id "$dir/state/.lock-session")" = S1 ] \
+      || fail "the failed reclaim left sidecar $(sidecar_id "$dir/state/.lock-session"), expected the previous id S1"
+    cmp -s "$dir/state/.lock-session" "$dir/state/sidecar-before-reclaim" \
+      || fail "the failed reclaim did not restore the publisher with its session id"
+    [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$stale_pid" ] \
+      || fail "the failed reclaim rewrote lock line 1"
+    cmp -s "$dir/state/lock-before-reclaim" "$dir/state/.lock" \
+      || fail "the failed reclaim changed lock bytes when line 1 was unwritable"
+    if [ "$dir/state/.lock-session" -nt "$dir/state/sidecar-before-reclaim" ] \
+      || [ "$dir/state/.lock-session" -ot "$dir/state/sidecar-before-reclaim" ]; then
+      fail "the failed publisher update changed the sidecar mtime"
+    fi
+  done
+  pass "session-lock: a failed lock write restores the previous sidecar and mtime"
 }
 
 # A failed line-1 write that had no previous sidecar must not leave the new id
@@ -1457,7 +1503,7 @@ test_failed_lock_write_removes_new_sidecar_when_none_existed() {
   grep -q 'cannot write session lock' "$dir/state/reclaim.out" \
     || fail "the reclaim did not fail on the lock write: $(cat "$dir/state/reclaim.out")"
   [ ! -e "$dir/state/.lock-session" ] \
-    || fail "the failed reclaim left sidecar $(head -n 1 "$dir/state/.lock-session"), expected none"
+    || fail "the failed reclaim left sidecar $(sidecar_id "$dir/state/.lock-session"), expected none"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = 1 ] \
     || fail "the failed reclaim rewrote lock line 1"
   pass "session-lock: a failed lock write removes a newly created sidecar"
@@ -1480,8 +1526,8 @@ test_verified_reclaim_keeps_new_sidecar() {
     '
   expect_code 0 "$(tr -d '[:space:]' < "$dir/state/reclaim.rc")" \
     "the reclaim failed: $(cat "$dir/state/reclaim.out")"
-  [ "$(head -n 1 "$dir/state/.lock-session")" = S2 ] \
-    || fail "the verified reclaim left sidecar $(head -n 1 "$dir/state/.lock-session"), expected S2"
+  [ "$(sidecar_id "$dir/state/.lock-session")" = S2 ] \
+    || fail "the verified reclaim left sidecar $(sidecar_id "$dir/state/.lock-session"), expected S2"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$(tr -d '[:space:]' < "$dir/state/new-pid")" ] \
     || fail "the verified reclaim did not record the new anchor pid"
   pass "session-lock: a verified reclaim keeps the new sidecar beside the new pid"

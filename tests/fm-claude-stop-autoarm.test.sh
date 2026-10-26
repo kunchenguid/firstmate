@@ -1357,9 +1357,9 @@ test_orphaned_claim_from_dead_session_is_superseded_by_replacement() {
 }
 
 # The same session restart, RESUMED (`claude --resume <id>`): the replacement
-# carries the dead session's conversation id, so bin/fm-lock.sh leaves the
-# state/.lock-session sidecar naming that id untouched and the orphan's recorded
-# owner_session_id still matches it. It must still be superseded, because the
+# carries the dead session's conversation id, so bin/fm-lock.sh preserves that
+# id while refreshing the publisher in state/.lock-session. The orphan's
+# recorded owner_session_id still matches it. It must still be superseded, because the
 # resumed session holds the lock in a new process and the orphan's recorded
 # lock-holder identity is the dead holder's. Deferring here would leave the resumed
 # home deaf for exactly the case this change exists to fix.
@@ -1389,7 +1389,7 @@ test_resumed_same_id_session_supersedes_the_orphan() {
   # Resumed session: same conversation id, new process. It does NOT write the
   # lock itself - the dead session's pid is still on line 1, so the hook reclaims
   # it through the real fm-lock.sh recovery path and line 1 becomes this
-  # process's own anchor pid, while the same-id sidecar is left untouched.
+  # process's own anchor pid, while the sidecar records its publisher.
   dead_lock_pid=$(sed -n 1p "$dir/state/.lock")
   printf '%s\n' '{"session_id":"sess-resumed","stop_hook_active":false}' \
     | FM_HOME="$dir" "$FAKE_CLAUDE" -c '

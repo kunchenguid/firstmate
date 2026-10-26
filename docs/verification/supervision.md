@@ -343,11 +343,47 @@ The current Stop-owned main/secondmate inclusion and child-worktree exclusion ar
 Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: a pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
 `bin/fm-session-lock-lib.sh` owns the trusted Claude identity and publisher test; `bin/fm-lock.sh` owns its sidecar format, ancestry-confirmed legacy upgrade, and re-anchor transaction.
 `tests/fm-session-lock-ancestry.test.sh` drives ancestry and publisher evidence apart, preserves the detached frontend re-anchor and same-process re-key, and checks lease and rewake movement.
-It also covers Windows pid tags, publication failures, missing or malformed publisher evidence, and replacement of an exited publisher.
+Its Stop-only phase upgrades a legacy publisher before bridge recycling, its current-publisher Stop leaves bytes and mtime unchanged without calling the lock writer, and its failed publisher write restores the sidecar mtime.
+It also covers Windows pid tags, publication failures, missing or malformed publisher evidence, and refusal of an exited or unverified publisher over a live lock.
 `tests/fm-turnend-foreign-owner-repro.py` exercises two live harness-shaped processes sharing one conversation id: acquisition stays refused, Stop ends read-only, auto-arm stays inert, and ownership and leases stay unchanged.
 These portable tests use synthetic harness processes; the real Claude resume test and its limits are recorded in [runtime backend verification](runtime-backends.md#claude-conversation-resume-ownership).
 
-Verified on 2026-10-26 on Linux with the focused commands:
+The following dated records are retained for the platform and re-anchor evidence.
+Their id-only ownership control was superseded by the publisher restriction verified below; the earlier same-id acquisition output is not the current ownership guarantee.
+
+The unit cases ran on 2026-09-18 on macOS with bash 3.2.57 as the fake harness interpreter:
+
+```sh
+tests/fm-session-lock-ancestry.test.sh
+```
+
+Observed output, bounded to the lines that coverage added:
+
+```text
+ok - session-lock: a trusted same-session id keeps owning a recycled background chain, and nothing weaker does
+ok - session-lock: a trusted id anchors the lock on the model-loop process, anything else on the outermost pid
+```
+
+The re-anchor, same-process re-key, and lease phases ran on 2026-10-15 on Linux with GNU bash 5.3.9 as the fake harness interpreter and Python 3.14.4 for the repro:
+
+```sh
+bin/fm-test-run.sh tests/fm-session-lock-ancestry.test.sh
+bin/fm-test-run.sh tests/fm-turnend-foreign-owner-arm-fix.test.sh
+```
+
+Observed output, bounded to the lines that coverage adds:
+
+```text
+ok - session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change
+ok - session-lock: a re-anchor keeps both supervision actors' task leases live
+same-session acquisition rc=0 pid=3116951 output='lock acquired: harness pid 3116951\n'
+other-session acquisition rc=0 stdout='lock_rc=1\n' stderr='error: another live firstmate session holds the lock (pid 3116951, session synthetic-same); operate read-only until resolved\n'
+FIXED same-session id re-anchors the lock onto its own process; a different id is still foreign
+COMPLETE
+```
+
+Verified on 2026-10-26 on Linux with GNU bash 5.3.9 and Python 3.14.4 using the focused commands below.
+These are synthetic process tests; the separate Claude Code 2.1.310 live result is recorded in [runtime backend verification](runtime-backends.md#claude-conversation-resume-ownership).
 
 ```sh
 bash tests/fm-session-lock-ancestry.test.sh

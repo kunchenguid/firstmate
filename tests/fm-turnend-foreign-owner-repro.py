@@ -209,7 +209,7 @@ try:
     require(healthy.returncode == 0, "a replacement owning session must still recover supervision")
     stop(replacement)
 
-    # Resuming a live conversation changes the id, not the process. The second
+    # Resuming a live conversation shares its id across distinct processes. The second
     # model loop must stay foreign, including its Stop and auto-arm paths.
     same, same_env = make("same-session")
     same_env["CLAUDE_CODE_SESSION_ID"] = "synthetic-same"
@@ -280,6 +280,24 @@ try:
     require(epoch.read_bytes() == saved[epoch], "resumed foreign auto-arm changed the generation")
     require(all(path.read_bytes() == data for path, data in saved.items()), "the resumed foreign process changed ownership, leases, or rewake")
     print("FIXED a second live model loop remains foreign after resuming the owner's conversation", flush=True)
+    # Retain the live frontend but record a publisher that has actually exited.
+    retired = subprocess.Popen(["sleep", "60"])
+    retired.terminate()
+    retired.wait()
+    sidecar = same / "state/.lock-session"
+    sidecar.write_text(f"synthetic-same\n{retired.pid}\n")
+    saved = {path: path.read_bytes() for path in (same_lock, sidecar, lease, epoch)}
+    dead_publisher = run(same_env, 'export CLAUDE_PID=$$; "$FM_ROOT_OVERRIDE/bin/fm-lock.sh"; rc=$?; exit "$rc"')
+    require(dead_publisher.returncode == 1, "an exited publisher let an outsider re-anchor the live frontend")
+    require("exited recorded publisher" in dead_publisher.stderr and "restarting the main session" in dead_publisher.stderr,
+            "the dead-publisher refusal omitted the restart diagnostic")
+    dead_stop = guard(same_env, "dead-publisher stop", prefix="export CLAUDE_PID=$$; ")
+    require("SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" in dead_stop.stdout, "the dead publisher hid the live foreign owner")
+    dead_auto = run(same_env, 'export CLAUDE_PID=$$; echo "{}" | "$FM_ROOT_OVERRIDE/bin/fm-claude-stop-autoarm.sh"')
+    require(dead_auto.returncode == 0, "dead-publisher foreign auto-arm did not stand down")
+    require(same_owner.poll() is None, "the frontend exited during the dead-publisher check")
+    require(all(path.read_bytes() == data for path, data in saved.items()), "dead-publisher refusal moved ownership, leases, or rewake")
+    print("FIXED an exited publisher cannot transfer a live frontend's lock, leases, or rewake", flush=True)
     stop(same_owner)
 
     single, single_env = make("single-idle")

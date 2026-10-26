@@ -11,13 +11,12 @@
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
 #   - Identity: only when THIS session holds state/.lock, as
-#     bin/fm-session-lock-lib.sh decides it: the recorded pid is a harness
-#     ancestor, or a live lock was recorded under this same trusted Claude
-#     session id (which is what keeps a background session arming after its
-#     transient helper chain is recycled).
+#     bin/fm-session-lock-lib.sh decides it. An owned Stop refreshes a stale
+#     publisher through fm-lock.sh before the helper chain can detach; an
+#     already-current sidecar takes no claim lock and stays untouched.
 #     When an existing numeric owner fails the shared harness-liveness predicate,
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
+#     ownership. A foreign live owner, missing lock, malformed lock, or unresolved
 #     ancestry remains inert, so a competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
@@ -203,7 +202,8 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # resolves a tagged identity too, so a dead Windows session is still recoverable
 # rather than being read as a malformed lock nobody may ever clear.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
-# idle or away home remains byte-for-byte inert. Missing or malformed locks are
+# idle or away home does not reclaim another session's stale lock.
+# Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
@@ -211,6 +211,12 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   fm_session_pid_valid "$LOCK_PID" || exit 0
   fm_harness_pid_alive "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
+elif fm_session_lock_trusted_session_id >/dev/null \
+  && ! fm_session_lock_publisher_current "$STATE"; then
+  # Refresh while ancestry still proves ownership, including legacy sidecars.
+  # The writer rechecks ownership under its claim lock before changing anything.
+  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
+  fm_session_lock_owned_by_self "$STATE" || exit 0
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------

@@ -25,7 +25,8 @@ ok - 2.1.310 (Claude Code): second live resume refused; owner /clear retained ow
 Claude allowed the second live process to resume the first conversation; the lock refused it while the original model loop remained alive.
 A separate native background probe stopped its private daemon with `claude daemon stop --any --keep-workers`: the pty host became orphaned, and hooks continued under the same model-loop pid.
 That verifies bridge recycling without a publisher change, not replacement of the model loop while its old pid remains alive.
-The portable ancestry suite covers exited-publisher replacement, detached frontend re-anchoring, and tagged Windows publisher records; macOS and Windows vendor behavior were not exercised in this run.
+No daemon-command stdout or stderr was recorded here; the observation above comes from the hook process records before and after the command.
+[Supervision verification](supervision.md) owns the portable ancestry-suite coverage and dated runs; macOS and Windows vendor behavior were not exercised in this run.
 New-id background continuation is a separate ownership path and is not asserted by this same-id resume test.
 
 ## Polytoken worker lifecycle
