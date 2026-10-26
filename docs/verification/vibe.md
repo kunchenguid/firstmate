@@ -55,7 +55,7 @@ The configured GLM reasoning default remained high; no effort-selection guarante
 The exact foreground name is `vibe-rs`; an unrelated `vibe-rs-helper` is not an agent.
 Herdr's native agent catalog did not recognize Vibe, so an exact pane-bound foreground process read supplies liveness; a failed or foreign process read is unknown.
 The composer is a ruled `>` region below the approval label and above a cwd footer containing `[PID ...]` and token usage.
-The busy hint `Generating… (Ns Esc/Ctrl+C to interrupt)` is delivery evidence only.
+The busy hint `Generating… (Ns Esc/Ctrl+C to interrupt)` is delivery evidence only, matched only for endpoints recorded as Vibe.
 
 Semantic state comes from the task's launch-generation journal directory and a unique session whose origin directory matches the worker.
 The checkpoint alone can remain at `latestTurn: null` while a turn runs.

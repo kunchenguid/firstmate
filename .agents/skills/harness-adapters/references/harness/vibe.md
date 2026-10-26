@@ -27,6 +27,7 @@ Use the router's lifecycle control path.
 One Escape leaves the agent alive; cancellation acknowledgement is unconfirmed, not a semantic cancellation guarantee.
 The exit command is `/exit` and completion requires observed process exit.
 Replacement launches start a fresh session from instructions on disk and retain old journal directories for recovery.
+Final teardown removes every generation's journals and Vibe's read-only plugin cache.
 Native `--continue` and `--resume` exist but are not verified recovery paths.
 
 ## State and scope
