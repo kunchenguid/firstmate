@@ -65,6 +65,7 @@ omp is anchored to the exact `omp` identity for the same reason, so `ompd` and `
 AGY, Devin, and Command Code are anchored to the exact `agy`, `devin`, and `command-code` identities for the same reason, so unrelated names containing any of those fragments remain ambiguous.
 Polytoken is anchored to the exact `polytoken` identity for the same reason, so unrelated names containing that fragment remain ambiguous.
 Cortex is anchored to the exact `cortex` identity for the same reason.
+Vibe is anchored to the exact `vibe-rs` TUI identity for the same reason, so `vibe-rs-helper` remains ambiguous.
 An unrelated tool that ships a binary named exactly `cortex` is still classified as an agent when it is a pane's foreground process, because the exact name is the only identity Cortex Code carries.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 

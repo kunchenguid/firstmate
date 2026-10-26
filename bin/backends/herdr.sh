@@ -2278,17 +2278,18 @@ EOF
 #                 is running, or something that is not a bare shell is, so the
 #                 registration keeps its authority. An idle or blocked agent
 #                 is still a genuine, still-registered agent, not a restored
-#                 husk, so it is never a close-and-replace candidate.
+#                 husk, so it is never a close-and-replace candidate. A
+#                 recorded Vibe endpoint with no registration is live on the
+#                 same `agent` or `other` process-level view.
 #   unknown     - anything else: an unparseable/unexpected response from
 #                 either call, a `pane get` success whose own echoed pane_id
 #                 does not round-trip (guards against misreading a herdr
 #                 response shape change as "the pane exists"), or a registered
 #                 agent or recorded Vibe endpoint whose process-level view is
-#                 unreadable - the
-#                 registration alone is no longer trusted, and its absence is
-#                 not claimed either. The caller must fail safe toward refusal
-#                 here, never toward closing - this is the conservative
-#                 backstop the husk check depends on.
+#                 unreadable - the registration alone is no longer trusted,
+#                 and its absence is not claimed either. The caller must fail
+#                 safe toward refusal here, never toward closing - this is the
+#                 conservative backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code presence status
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
