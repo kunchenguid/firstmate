@@ -2259,7 +2259,9 @@ EOF
 #                 agent get -> agent_not_found - docs/herdr-backend.md "ID
 #                 stability across a server restart"), and what a future
 #                 `resume_agents_on_restore = false` restore would produce too
-#                 (a plain shell, never an agent).
+#                 (a plain shell, never an agent). Recorded Vibe endpoints
+#                 instead require the process-level shell proof, because Herdr
+#                 does not recognize their running agent in its catalog.
 #   stale-agent - `agent get` reports a registered agent_status (working, idle,
 #                 done, or blocked) but fm_backend_herdr_pane_process_state
 #                 proves the pane is shell-only: the registered agent's process
@@ -2281,7 +2283,8 @@ EOF
 #                 either call, a `pane get` success whose own echoed pane_id
 #                 does not round-trip (guards against misreading a herdr
 #                 response shape change as "the pane exists"), or a registered
-#                 agent whose process-level view is unreadable - the
+#                 agent or recorded Vibe endpoint whose process-level view is
+#                 unreadable - the
 #                 registration alone is no longer trusted, and its absence is
 #                 not claimed either. The caller must fail safe toward refusal
 #                 here, never toward closing - this is the conservative
@@ -2300,14 +2303,20 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
     if [ "$code" = agent_not_found ]; then
-      # Vibe 3's Rust TUI is not recognized by Herdr's agent catalog yet.
-      # Its exact foreground executable, not a rendered title, proves liveness.
-      local vibe_info
-      vibe_info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) || vibe_info=
-      if ! printf '%s' "$vibe_info" | jq -e --arg pane "$pane_id" '.result.process_info | .pane_id == $pane and (.foreground_processes | type == "array" and length > 0)' >/dev/null 2>&1; then
-        printf 'unknown'
-      elif printf '%s' "$vibe_info" | jq -e '.result.process_info | any(.foreground_processes[]; .name == "vibe-rs")' >/dev/null 2>&1; then
-        printf 'live'
+      # Herdr does not catalog Vibe 3's Rust TUI. Only a recorded Vibe
+      # endpoint needs process evidence in place of that absent registration;
+      # other harnesses retain Herdr's ordinary agent_not_found semantics.
+      local meta='' harness=''
+      if command -v fm_backend_meta_for_window >/dev/null 2>&1; then
+        meta=$(fm_backend_meta_for_window "$session:$pane_id" "${STATE:-${FM_STATE_OVERRIDE:-$FM_HOME/state}}" 2>/dev/null || true)
+        [ -z "$meta" ] || harness=$(fm_meta_get "$meta" harness)
+      fi
+      if [ "$harness" = vibe ]; then
+        case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
+          agent|other) printf 'live' ;;
+          shell) printf 'no-agent' ;;
+          *) printf 'unknown' ;;
+        esac
       else
         printf 'no-agent'
       fi

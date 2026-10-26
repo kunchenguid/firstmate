@@ -50,29 +50,60 @@ python3 "$ROOT/tests/fm-vibe-state.test.py" || fail 'Vibe session-state regressi
 pass 'Vibe semantic session state and journal updates'
 # Herdr does not yet catalog Vibe: exact foreground evidence fills that gap,
 # but a failed process read cannot be taken as proof that no agent remains.
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
 # shellcheck source=bin/backends/herdr.sh
 . "$ROOT/bin/backends/herdr.sh"
+STATE="$TMP_ROOT/herdr-state"
+mkdir -p "$STATE"
+printf 'backend=herdr\nwindow=lab:w1:p1\nharness=vibe\n' > "$STATE/vibe.meta"
 fm_backend_herdr_pane_presence_state() { printf present; }
 probe_mode=vibe
+probe_shell_pid=$$
+probe_calls="$TMP_ROOT/process-calls"
 fm_backend_herdr_cli() {
   if [ "$2" = agent ]; then
     printf '%s' '{"error":{"code":"agent_not_found"}}'
   else
+    printf 'process-info\n' >> "$probe_calls"
     case "$probe_mode" in
-      vibe) printf '%s' '{"result":{"process_info":{"pane_id":"w1:p1","foreground_processes":[{"name":"vibe-rs"}]}}}' ;;
-      shell) printf '%s' '{"result":{"process_info":{"pane_id":"w1:p1","foreground_processes":[{"name":"zsh"}]}}}' ;;
-      foreign) printf '%s' '{"result":{"process_info":{"pane_id":"w2:p1","foreground_processes":[{"name":"vibe-rs"}]}}}' ;;
+      vibe|foreign)
+        local pane=w1:p1
+        [ "$probe_mode" != foreign ] || pane=w2:p1
+        jq -nc --arg pane "$pane" --argjson pid "$probe_shell_pid" '{result:{type:"pane_process_info",process_info:{pane_id:$pane,shell_pid:$pid,foreground_processes:[{pid:999999,name:"vibe-rs",argv0:"vibe-rs"}]}}}' ;;
+      malformed) printf '%s' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","foreground_processes":[]}}}' ;;
+      shell|empty)
+        jq -nc --arg mode "$probe_mode" --argjson pid "$probe_shell_pid" '{result:{type:"pane_process_info",process_info:{pane_id:"w1:p1",shell_pid:$pid,foreground_processes:(if $mode == "empty" then [] else [{pid:$pid,name:"bash",argv0:"bash"}] end)}}}' ;;
       *) return 1 ;;
     esac
   fi
 }
 [ "$(fm_backend_herdr_pane_agent_state lab w1:p1)" = live ] || fail 'Herdr foreground Vibe lost'
-probe_mode=shell
-[ "$(fm_backend_herdr_pane_agent_state lab w1:p1)" = no-agent ] || fail 'shell claimed as Vibe'
-for probe_mode in foreign unavailable; do
+for probe_mode in shell empty; do
+  [ "$(fm_backend_herdr_pane_agent_state lab w1:p1)" = no-agent ] || fail 'shell or empty handoff claimed as Vibe'
+done
+# An empty foreground cannot hide a verified descendant outside its group.
+mkfifo "$TMP_ROOT/vibe-input"
+exec 9<> "$TMP_ROOT/vibe-input"
+"$TMP_ROOT/names/vibe-rs" -c 'while IFS= read -r line; do :; done' <&9 &
+probe_child=$!
+probe_mode=empty
+[ "$(fm_backend_herdr_pane_agent_state lab w1:p1)" = live ] || fail 'empty handoff hid live Vibe descendant'
+kill "$probe_child" 2>/dev/null || true
+wait "$probe_child" 2>/dev/null || true
+exec 9>&-
+for probe_mode in foreign unavailable malformed; do
   [ "$(fm_backend_herdr_pane_agent_state lab w1:p1)" = unknown ] || fail 'unreadable or foreign process evidence claimed absence'
 done
-pass 'Herdr exact Vibe liveness and uncertain process-read safety'
+# Unregistered non-Vibe and unrecorded panes keep their original semantics
+# and must not consume a process-info response or inspect another pane.
+printf 'backend=herdr\nwindow=lab:w1:p1\nharness=pi\n' > "$STATE/vibe.meta"
+: > "$probe_calls"
+[ "$(fm_backend_herdr_pane_agent_state lab w1:p1)" = no-agent ] || fail 'non-Vibe agent_not_found changed'
+[ ! -s "$probe_calls" ] || fail 'non-Vibe fallback read process-info'
+[ "$(fm_backend_herdr_pane_agent_state lab w2:p1)" = no-agent ] || fail 'unrecorded pane agent_not_found changed'
+[ ! -s "$probe_calls" ] || fail 'unrecorded fallback read process-info'
+pass 'recorded Vibe liveness, empty handoff, uncertain reads and unchanged shared Herdr semantics'
 case_dir="$TMP_ROOT/spawn"
 fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
 # The model-free fixture needs only the vendor version surface.

@@ -53,7 +53,8 @@ The configured GLM reasoning default remained high; no effort-selection guarante
 ## Signals
 
 The exact foreground name is `vibe-rs`; an unrelated `vibe-rs-helper` is not an agent.
-Herdr's native agent catalog did not recognize Vibe, so an exact pane-bound foreground process read supplies liveness; a failed or foreign process read is unknown.
+Herdr's native agent catalog did not recognize Vibe, so endpoints recorded as Vibe use the shared pane-process classifier for liveness; a failed or foreign process read is unknown.
+An empty foreground list uses the same descendant-process proof as a shell foreground, while unregistered endpoints recorded as another runtime keep Herdr's original catalog behavior.
 The composer is a ruled `>` region below the approval label and above a cwd footer containing `[PID ...]` and token usage.
 The busy hint `Generating… (Ns Esc/Ctrl+C to interrupt)` is delivery evidence only, matched only for endpoints recorded as Vibe.
 
