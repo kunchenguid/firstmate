@@ -3137,6 +3137,16 @@ make_secondmate_liveness_case() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Socket-isolated spawns address the dedicated fleet socket: every invocation
+# may carry a leading `-L <socket>` (bin/fm-tmux-lib.sh's fm_tmux). Strip it;
+# this fixture models endpoint behavior, never socket routing (which
+# tests/fm-tmux-socket-isolation.test.sh owns).
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 log=${FM_TMUX_CALL_LOG:-/dev/null}
 probe=${FM_TMUX_CALL_LOG:-/dev/null}.probe
 cmd=${FM_FAKE_TMUX_CURRENT_COMMAND:-zsh}
