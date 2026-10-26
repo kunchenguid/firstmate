@@ -92,7 +92,7 @@ if [ "$mode" = hang ]; then
 fi
 drain=$("$FM_REPO/bin/fm-wake-drain.sh" 2>&1)
 printf '%s\n' "$drain" > "$FM_HOME/engine-drain.$n"
-ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p' | tail -1)
+ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED:.* run bin\/fm-wake-drain.sh //p' | tail -1)
 task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }')
 [ -n "$task" ] || task=fleet
 verdict=routine
@@ -1279,7 +1279,7 @@ hook_exited() { [ -s "$1/hook.rc" ]; }
 main_drain() {  # <home>; prints the drain and sets MAIN_ACK
   local out
   out=$(FM_HOME="$1" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  MAIN_ACK=$(printf '%s\n' "$out" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p' | tail -1)
+  MAIN_ACK=$(printf '%s\n' "$out" | sed -n 's/^WAKE_ACK_REQUIRED:.* run bin\/fm-wake-drain.sh //p' | tail -1)
   printf '%s\n' "$out"
 }
 
@@ -2908,7 +2908,7 @@ test_first_cycle_status_streams_and_owner_options_reach_it() {
 main_drain_and_ack() {  # <home>
   local out ack
   out=$(FM_HOME="$1" "$ROOT/bin/fm-wake-drain.sh" 2>&1)
-  ack=$(printf '%s\n' "$out" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p' | tail -1)
+  ack=$(printf '%s\n' "$out" | sed -n 's/^WAKE_ACK_REQUIRED:.* run bin\/fm-wake-drain.sh //p' | tail -1)
   # shellcheck disable=SC2086 # the printed acknowledgement arguments
   [ -z "$ack" ] || FM_HOME="$1" "$ROOT/bin/fm-wake-drain.sh" $ack >/dev/null 2>&1 || fail "main's acknowledgement failed: $ack"
 }

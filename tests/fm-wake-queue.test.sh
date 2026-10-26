@@ -2271,6 +2271,55 @@ test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake() {
   pass "wake drain: a branch acknowledgement that consumes nothing names the exact command for its granted wake"
 }
 
+# A supervisor that discards or filters the drain's stdout keeps the stderr
+# acknowledgement line, so that line must name the rows it asks to acknowledge.
+test_ack_line_names_the_rows_it_acknowledges() {
+  local dir state line sequence generation kind key i n
+  dir=$(make_case ack-rows-summary)
+  state="$dir/state"
+  append_wake "$state" stale test:fm-parked "stale: test:fm-parked" || fail "could not queue the stale row"
+  append_wake "$state" check due-recheck "check: due recheck" || fail "could not queue the check row"
+  append_wake "$state" signal alpha "signal: $state/alpha.status" || fail "could not queue the signal row"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" || fail "drain with queued rows failed"
+  line=$(sed -n '/^WAKE_ACK_REQUIRED:/p' "$dir/first.err" | head -1)
+  n=0
+  while IFS=$'\t' read -r _ sequence kind key _; do
+    n=$((n + 1))
+    case "$line" in
+      *"rows: 3 ["*"$sequence $kind $key"*) ;;
+      *) fail "the acknowledgement line did not name row $sequence $kind $key: $line" ;;
+    esac
+  done < "$dir/first.out"
+  [ "$n" -eq 3 ] || fail "expected 3 presented rows, got $n"
+  sequence=$(printf '%s\n' "$line" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p')
+  generation=$(printf '%s\n' "$line" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p')
+  [ -n "$sequence" ] && [ -n "$generation" ] \
+    || fail "the rows summary broke the machine-readable acknowledgement command: $line"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "the command parsed from the summarised line did not acknowledge"
+  [ ! -s "$state/.wake-queue" ] || fail "the parsed acknowledgement left rows queued"
+
+  dir=$(make_case ack-rows-summary-seven)
+  state="$dir/state"
+  i=1
+  while [ "$i" -le 7 ]; do
+    append_wake "$state" stale "window-$i" "stale: window-$i" || fail "could not queue row $i"
+    i=$((i + 1))
+  done
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > /dev/null 2> "$dir/seven.err" || fail "drain with seven queued rows failed"
+  line=$(sed -n '/^WAKE_ACK_REQUIRED:/p' "$dir/seven.err" | head -1)
+  case "$line" in
+    *"rows: 7 ["*"stale window-1"*"stale window-5"*"stale window-6"*"stale window-7] after handling completes run bin/fm-wake-drain.sh --ack-through "*) ;;
+    *) fail "the acknowledgement line did not name all seven rows: $line" ;;
+  esac
+  case "$line" in
+    *" more]"*) fail "the rows summary hid rows behind a count: $line" ;;
+  esac
+  sequence=$(printf '%s\n' "$line" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p')
+  [ -n "$sequence" ] || fail "the seven-row summary broke the machine-readable acknowledgement command: $line"
+  pass "wake drain: the acknowledgement line names every row it acknowledges, with its command intact"
+}
+
 test_recovery_ack_failure_is_reported() {
   local dir state fakebin real_mv rc generation
   dir=$(make_case recovery-ack-failure)
@@ -3670,6 +3719,7 @@ test_legacy_generationless_wake_is_adopted
 test_handover_restore_undoes_only_its_own_stop
 test_stale_recovery_generation_cannot_touch_a_newer_episode
 test_stale_ack_that_consumes_nothing_names_the_current_wake
+test_ack_line_names_the_rows_it_acknowledges
 test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit

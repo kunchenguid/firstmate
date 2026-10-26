@@ -1080,8 +1080,23 @@ case "$RECOVERY_MARKER_TOKEN" in
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
-printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
-  "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
+# The rows summary precedes the command because callers parse the command with
+# a pattern anchored to the end of this line. It lives on this line, not its own,
+# so a stdout discard or a single-line filter keeps the rows the command acks.
+ACK_ROWS_SUMMARY=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' '
+  NF >= 5 && $2 ~ /^[0-9]+$/ {
+    total++
+    kind = $3; key = $4
+    gsub(/[^A-Za-z0-9._:\/@+=-]/, "_", kind)
+    gsub(/[^A-Za-z0-9._:\/@+=-]/, "_", key)
+    list = list (total > 1 ? ", " : "") $2 " " kind " " substr(key, 1, 48)
+  }
+  END {
+    if (total) printf "rows: %d [%s] ", total, list
+  }
+') || exit 1
+printf 'WAKE_ACK_REQUIRED: %safter handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
+  "$ACK_ROWS_SUMMARY" "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
