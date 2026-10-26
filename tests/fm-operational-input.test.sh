@@ -30,7 +30,7 @@ set_age_secs() {  # <file> <age-seconds>
 
 test_current_generic_matrix() {
   local kind body encoded parsed stripped prefix_hex
-  prefix_hex=$(printf '%s' "$FM_OPERATIONAL_PREFIX" | od -An -tx1 | tr -d ' \n')
+  prefix_hex=$(printf '%s' "$FM_OPERATIONAL_PREFIX" | /usr/bin/od -An -tx1 | tr -d ' \n')
   [ "$prefix_hex" = e281a346495253544d4154455f4f503a20 ] \
     || fail "current operational prefix lost the landed U+2063 FIRSTMATE_OP bytes: $prefix_hex"
 

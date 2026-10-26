@@ -192,7 +192,7 @@ while :; do
       fi
       if [ "$SIZE" -gt "$OFFSET" ]; then
         tail -c "+$((OFFSET + 1))" "$TMP/source" | head -c "$MAX_BYTES" > "$TMP/chunk" || true
-        COMPLETE_BYTES=$(LC_ALL=C od -An -v -tu1 "$TMP/chunk" | awk '
+        COMPLETE_BYTES=$(LC_ALL=C /usr/bin/od -An -v -tu1 "$TMP/chunk" | awk '
           { for (i = 1; i <= NF; i++) { bytes++; if ($i == 10) complete=bytes } }
           END { print complete + 0 }
         ')

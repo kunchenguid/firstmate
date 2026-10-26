@@ -497,7 +497,7 @@ cmd_up() {
   ROOT=$(real_dir "$root")
   LAB="$ROOT/home"
   HARNESS=$harness EXPECT_HOST=$expect_host WANT_MATE=$mate WANT_WORKER=$worker
-  NONCE=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
+  NONCE=$(/usr/bin/od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
   MATE_ID="lab${NONCE:0:12}-mate" WORKER_ID="lab${NONCE:0:12}-worker"
   GATE="$LAB/data/$WORKER_ID/gate"
   PI_TRUST_BEFORE=$(digest "$PI_TRUST_STORE")

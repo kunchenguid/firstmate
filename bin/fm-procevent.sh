@@ -701,7 +701,7 @@ cmd_register_task() {
 
 new_extension_registration_token() {
   local hex
-  hex=$(LC_ALL=C od -An -v -tx1 -N 32 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  hex=$(LC_ALL=C /usr/bin/od -An -v -tx1 -N 32 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
   [ "${#hex}" -eq 64 ] || return 1
   printf 'sha256:%s\n' "$hex"
 }

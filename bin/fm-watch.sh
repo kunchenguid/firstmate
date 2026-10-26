@@ -976,7 +976,7 @@ secondmate_idle_ring_safe() {  # <window>
 secondmate_ring_to_drain() {  # <task> <window>
   local task=$1 w=$2 rec backend delivery_id
   backend=$(window_backend "$w")
-  delivery_id=$(LC_ALL=C od -An -v -tx1 -N 8 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  delivery_id=$(LC_ALL=C /usr/bin/od -An -v -tx1 -N 8 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
   case "$delivery_id" in ''|*[!0-9a-f]*) return 1 ;; esac
   [ "${#delivery_id}" -eq 16 ] || return 1
   rec=$(fm_task_inbox_write "$STATE" "$task" \
@@ -2805,7 +2805,7 @@ scan_signals() {
 # and re-announcement, drain-time deduplication, and the handled acknowledgement
 # keep their existing owners untouched.
 procevent_surfaced_marker() {  # <queue-key>
-  printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
+  printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C /usr/bin/od -An -tx1 | tr -d ' \n')"
 }
 
 procevent_surface_after_output() {
