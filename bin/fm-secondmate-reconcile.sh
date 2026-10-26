@@ -40,7 +40,15 @@
 #     earns one gentle re-nudge. Deliberately coarse: a timestamp cannot go
 #     stale, cannot mis-order against a concurrent snapshot, and cannot
 #     mis-classify a repair as a new problem, which an identity-precise record
-#     has to get right in every direction to avoid silently swallowing a nudge;
+#     has to get right in every direction to avoid silently swallowing a nudge.
+#     The one exception is a NEW mismatch: the kind and flagged ids last nudged
+#     are kept beside the timestamp (<mate-id>.reconcile-nudged-ids, one
+#     <kind>:<sorted,ids> line), and a snapshot of a different kind, or one
+#     naming an id the last nudge did not, restarts the window, so a new
+#     mismatch is never muted by an old nudge. A set that only shrinks is
+#     progress, not news. A record without that shape (a digest-only line)
+#     counts as unknown and so as new; a home with no record at all (nudged
+#     before it existed) keeps the plain timestamp rule;
 #   - sending through bin/fm-send.sh's fire-and-forget plane, which records the
 #     instruction durably for local and remote mates alike while staying out of
 #     the steering inbox's re-ring and escalation ladder: the parent expects no
@@ -211,15 +219,73 @@ delivery_id() {
   printf '%s' "$digest" | cut -c1-16
 }
 
-# The instruction is deliberately independent of the sampled mismatch details.
-# A delayed snapshot can therefore ask only for a check of the mate's current
-# books, never prescribe a repair for rows that may already have changed.
-reconcile_text() {
-  cat <<'EOF'
-A fleet snapshot found that your home's backlog and task metadata disagreed.
+# The instruction names the mismatch kind and the flagged ids so the mate checks
+# the right thing, but only ever asks for a check against its CURRENT books: a
+# delayed snapshot must not prescribe a repair for rows that may already have
+# changed. At most NUDGE_IDS_SHOWN ids are listed; the rest are counted.
+NUDGE_IDS_SHOWN=12
+reconcile_text() {  # <kind> <csv-ids>
+  local kind=$1 csv=$2 ids='' total=0 shown=0 id what action more=''
+  local oldifs=$IFS
+  IFS=,
+  for id in $csv; do
+    [ -n "$id" ] || continue
+    total=$((total + 1))
+    if [ "$shown" -lt "$NUDGE_IDS_SHOWN" ]; then
+      ids="${ids}${ids:+, }$id"
+      shown=$((shown + 1))
+    fi
+  done
+  IFS=$oldifs
+  [ "$total" -le "$shown" ] || more=" (and $((total - shown)) more)"
+  case "$kind" in
+    orphan_in_flight)
+      what="in-flight backlog items with no task record"
+      action="land or close each item, or move it back to Queued when no work is under way"
+      ;;
+    unowned_current)
+      what="live task records with no in-flight backlog item"
+      action="file or restore the matching backlog item, or retire the task record"
+      ;;
+    terminal_in_flight)
+      what="in-flight backlog items whose worker already finished or failed"
+      action="land or close each item, or record why it stays in flight"
+      ;;
+    *)
+      what="items where your backlog and task metadata disagree"
+      action="reconcile each to match reality"
+      ;;
+  esac
+  printf "A fleet snapshot found that your home's backlog and task metadata disagreed (%s).\n\n" "$kind"
+  if [ -n "$ids" ]; then
+    printf 'Flagged: %s%s - %s.\n\n' "$ids" "$more" "$what"
+    printf 'Please check your current books for each of them and, if one still disagrees, %s. Skip any that no longer apply. ' "$action"
+  else
+    printf 'Please check your current books and, if they still disagree, reconcile them to match reality. '
+  fi
+  printf 'Nothing outside your home has been changed, and no reply is expected.\n'
+}
 
-Please check your current books and, if they still disagree, reconcile them to match reality. Nothing outside your home has been changed, and no reply is expected.
-EOF
+# <mate-id>.reconcile-nudged-ids holds one <kind>:<sorted,ids> line for the nudge
+# last sent; see the cooldown paragraph in the header.
+nudge_ids_path() {  # <mate-id>
+  printf '%s/%s.reconcile-nudged-ids\n' "$STATE" "$1"
+}
+
+ids_fingerprint() {  # <kind> <csv-ids>
+  local sorted
+  sorted=$(printf '%s' "$2" | tr ',' '\n' | LC_ALL=C sort -u | tr '\n' ',')
+  delivery_id "$1:$sorted"
+}
+
+mismatch_is_new() {  # <kind> <csv-ids> <record>
+  local rec=$3 id
+  case "$rec" in "$1":*) ;; *) return 0 ;; esac
+  rec=",${rec#*:},"
+  for id in $(printf '%s' "$2" | tr ',' ' '); do
+    case "$rec" in *",$id,"*) ;; *) return 0 ;; esac
+  done
+  return 1
 }
 
 request_target_key() {
@@ -457,11 +523,15 @@ cmd_notify() {
     | select((.host | type) == "string" and (.host | test("[[:cntrl:]]") | not))
     | .kind as $kind
     | select(["orphan_in_flight","unowned_current","terminal_in_flight"] | index($kind))
-    | [.id, .spawn_gen, .host, $kind]
+    | ((.ids | if type == "array" then . else [] end)
+       | map(select(type == "string" and test("^[A-Za-z0-9._-]+$")))
+       | unique | join(",")) as $ids
+    | [.id, .spawn_gen, .host, $kind, $ids]
     | join($sep)')
 
-  local id sampled_spawn_gen sampled_host expected_remote_host kind path last age now delivered_at reconcile_lock control_lock meta meta_lock did send_rc
-  while IFS=$'\037' read -r id sampled_spawn_gen sampled_host kind; do
+  local id sampled_spawn_gen sampled_host expected_remote_host kind ids_csv path last age now delivered_at reconcile_lock control_lock meta meta_lock did send_rc
+  local fp ids_path last_rec
+  while IFS=$'\037' read -r id sampled_spawn_gen sampled_host kind ids_csv; do
     [ -n "${id:-}" ] || continue
     path=$(nudge_path "$id")
     reconcile_lock="$STATE/.$id.reconcile.lock"
@@ -474,10 +544,17 @@ cmd_notify() {
     last=
     if [ -f "$path" ] && [ ! -L "$path" ]; then last=$(cat "$path" 2>/dev/null || true); fi
     case "$last" in ''|*[!0-9]*) last= ;; esac
+    fp=$(ids_fingerprint "$kind" "$ids_csv") || fp=
+    ids_path=$(nudge_ids_path "$id")
+    last_rec=
+    if [ -f "$ids_path" ] && [ ! -L "$ids_path" ]; then last_rec=$(cat "$ids_path" 2>/dev/null || true); fi
     if [ -n "$last" ]; then
       age=$((now - last))
-      # A clock that moved backwards must not silence the home forever.
-      if [ "$age" -ge 0 ] && [ "$age" -lt "$FM_RECONCILE_COOLDOWN_SECONDS" ]; then
+      # A clock that moved backwards must not silence the home forever. A
+      # NEW mismatch (a different kind, or an id the last nudge did not name)
+      # restarts the window; a home with no recorded set keeps the timestamp rule.
+      if [ "$age" -ge 0 ] && [ "$age" -lt "$FM_RECONCILE_COOLDOWN_SECONDS" ] \
+        && { [ -z "$last_rec" ] || ! mismatch_is_new "$kind" "$ids_csv" "$last_rec"; }; then
         printf 'cooldown: %s %s\n' "$id" "$age"
         release_active_locks
         continue
@@ -512,7 +589,7 @@ cmd_notify() {
       release_active_locks
       continue
     fi
-    did=$(delivery_id "$id:$sampled_spawn_gen:${last:-none}") || {
+    did=$(delivery_id "$id:$sampled_spawn_gen:${last:-none}:$fp") || {
       printf 'failed: %s %s\n' "$id" "$kind"
       rc=1
       release_active_locks
@@ -525,7 +602,7 @@ cmd_notify() {
     FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
       FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" \
       "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
-      "$(reconcile_text)" >/dev/null 2>&1 || send_rc=$?
+      "$(reconcile_text "$kind" "$ids_csv")" >/dev/null 2>&1 || send_rc=$?
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
     # record the nudge rather than risk asking twice.
     if [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 3 ]; then
@@ -561,6 +638,12 @@ cmd_notify() {
     if revalidate_identity "$meta" "$sampled_spawn_gen" "$sampled_host" \
       && (umask 077; printf '%s\n' "$delivered_at" > "$path.tmp") \
       && mv -f -- "$path.tmp" "$path"; then
+      # The set record is an optimization of the window, never of correctness:
+      # when it cannot be written it is removed so the plain timestamp rule stands.
+      if ! { (umask 077; printf '%s:%s\n' "$kind" "$ids_csv" > "$ids_path.tmp") \
+        && mv -f -- "$ids_path.tmp" "$ids_path"; }; then
+        rm -f -- "$ids_path.tmp" "$ids_path"
+      fi
       printf 'sent: %s %s\n' "$id" "$kind"
     else
       rm -f -- "$path.tmp"
