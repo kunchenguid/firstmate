@@ -26,6 +26,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
 | How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
 | Where the away daemon runs and how it stops | [Away-mode supervisor support](#away-mode-supervisor-support) |
+| Which firstmate pane holds the fleet lock | [Lock-holder pane tag](#lock-holder-pane-tag) |
 | Stopping or deleting Herdr sessions during verification | [Destructive lab safety](#destructive-lab-safety) |
 | Known limits and the test suite | [Active limits](#active-limits) and [Regression entry points](#regression-entry-points) |
 
@@ -934,6 +935,22 @@ On stop:
 
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 
+## Lock-holder pane tag
+
+`bin/fm-session-start.sh` tags its own Herdr pane right after the lock step, through `bin/fm-lock-pane-tag.sh`, so the fleet-lock holder is distinguishable from read-only sessions.
+A lock holder gets the display-only token `fm_lock` (`LOCK HOLDER`) and the border label `firstmate (lock)`.
+A lock-refused session gets the token `fm_readonly` (`READ-ONLY`) and the border label `firstmate (read-only)`.
+Each state clears the other's token, so a later start in the same pane flips the tag, and a pane that closes takes its tags with it.
+Tagging is best effort: outside a Herdr pane, without a `herdr` client, or on any Herdr failure it does nothing and never changes the session-start result.
+Herdr renders a token only where its sidebar config names it, so add these entries to the agent row in `~/.config/herdr/config.toml`, then run `herdr server reload-config`:
+
+```toml
+{ token = "$fm_lock", fg = "#7E9CD8", bold = true },
+{ token = "$fm_readonly", fg = "#2A2A2A" },
+```
+
+The lock holder is blue and bold; a read-only pane is very dark gray so it recedes.
+
 ## Destructive lab safety
 
 Never use ambient `herdr server stop` for Firstmate verification.
@@ -980,6 +997,7 @@ tests/fm-herdr-pi-stale-registration-live-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-control-herdr-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
+tests/fm-lock-pane-tag.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-herdr-groups.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh

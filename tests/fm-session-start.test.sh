@@ -3094,6 +3094,45 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_session_start_tags_its_herdr_pane() {
+  local rec root home fakebin holder_pid log out status
+  rec=$(new_world pane-tag)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  log="$home/herdr-tag.log"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_HERDR_TAG_LOG"
+SH
+  chmod +x "$fakebin/herdr"
+  : > "$log"
+
+  status=0
+  out=$(HERDR_PANE_ID=w9:p9 FM_FAKE_HERDR_TAG_LOG="$log" run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 when it tags a lock-holder pane"
+  assert_contains "$(cat "$log")" "--token fm_lock=LOCK HOLDER" "a lock-holding start did not tag its pane"
+  case "$(cat "$log")" in *fm_readonly=READ-ONLY*) fail "a lock-holding start must not carry the read-only token" ;; esac
+
+  : > "$log"
+  rm -f "$home/state/.lock"
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  status=0
+  out=$(HERDR_PANE_ID=w9:p9 FM_FAKE_HERDR_TAG_LOG="$log" run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 when it tags a read-only pane"
+  assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing"
+  assert_contains "$(cat "$log")" "--token fm_readonly=READ-ONLY" "a lock-refused start did not tag its pane read-only"
+  case "$(cat "$log")" in *fm_lock=LOCK*) fail "a lock-refused start must not carry the lock token" ;; esac
+  pass "session start tags its pane as lock holder or read-only"
+}
+
+test_session_start_tags_its_herdr_pane
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path

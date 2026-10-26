@@ -713,6 +713,13 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
   }
 fi
+# Mark this pane as lock holder or read-only so the two are visually distinct
+# in Herdr; best effort and silent, never able to change the session start.
+if [ "$READ_ONLY" -eq 0 ]; then
+  "$SCRIPT_DIR/fm-lock-pane-tag.sh" holder >/dev/null 2>&1 || true
+else
+  "$SCRIPT_DIR/fm-lock-pane-tag.sh" readonly >/dev/null 2>&1 || true
+fi
 REBUILDING_SESSION_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
 print_agents_refresh_if_required "$REBUILDING_SESSION_PID"
 
