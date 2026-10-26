@@ -1088,6 +1088,15 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   unset FM_BUSY_REGEX
   capture="$TMP_ROOT/busy-pane"
   tmux() {
+    # Socket-isolated spawns carry a leading `-L <socket>` (fm_tmux); strip it
+    # so dispatch still sees capture-pane as $1 even when FM_TMUX_SOCKET leaks
+    # in from the surrounding environment.
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -L) shift 2 ;;
+        *) break ;;
+      esac
+    done
     case "${1:-}" in
       capture-pane) cat "$capture" ;;
       *) return 0 ;;

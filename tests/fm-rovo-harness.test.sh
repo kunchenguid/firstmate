@@ -33,6 +33,14 @@ make_rovo_fakebin() {
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
+# Socket-isolated spawns carry a leading `-L <socket>` (fm_tmux); strip it
+# after logging so the subcommand dispatch below keeps working.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -L) shift 2 ;;
+    *) break ;;
+  esac
+done
 state=$(cat "$FM_FAKE_ROVO_STATE" 2>/dev/null || true)
 fake_screen() {
   case "$state" in
