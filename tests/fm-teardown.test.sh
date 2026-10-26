@@ -5364,21 +5364,20 @@ test_record_export_archives_before_teardown_or_preserves_sources_on_failure() {
     write_meta "$case_dir" local-only ship
     export_root="$case_dir/export"
     printf '%s\n' "$export_root" > "$case_dir/config/record-export-root"
-    mkdir -p "$case_dir/state/task-x1.inbox/handled" "$case_dir/outside"
+    mkdir -p "$case_dir/state/task-x1.inbox/handled"
     printf 'working: export me\ndone: complete\n' > "$case_dir/state/task-x1.status"
     printf 'pending captain text\n' > "$case_dir/state/task-x1.inbox/001.msg"
     printf 'handled captain text\n' > "$case_dir/state/task-x1.inbox/handled/002.msg"
     cp "$case_dir/state/task-x1.meta" "$case_dir/expected.meta"
     cp "$case_dir/state/task-x1.status" "$case_dir/expected.status"
     if [ "$mode" = failure ]; then
-      rm -rf "$export_root"
-      ln -s "$case_dir/outside" "$export_root"
+      printf 'not an export directory\n' > "$export_root"
     elif [ "$mode" = inaccessible-config ]; then
-      chmod 000 "$case_dir/config"
+      mv "$case_dir/config" "$case_dir/config-target"
+      ln -s "$case_dir/config-target" "$case_dir/config"
     fi
     rc=0
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-    [ "$mode" != inaccessible-config ] || chmod 0755 "$case_dir/config"
     if [ "$mode" = success ]; then
       expect_code 0 "$rc" "record export teardown: $(cat "$case_dir/stderr")"
       archive="$export_root/archive/task-x1/teardown-test-task-x1"
@@ -5391,7 +5390,7 @@ test_record_export_archives_before_teardown_or_preserves_sources_on_failure() {
       assert_absent "$case_dir/state/task-x1.status" "successful export retained status"
       assert_absent "$case_dir/state/task-x1.inbox" "successful export retained inbox"
     else
-      [ "$rc" -ne 0 ] || fail "teardown ignored a record export commit failure"
+      [ "$rc" -ne 0 ] || fail "teardown ignored a record export failure in $mode mode: $(cat "$case_dir/stderr")"
       assert_grep 'record export' "$case_dir/stderr" \
         "teardown did not report the export failure reason"
       assert_grep 'retaining task records for retry' "$case_dir/stderr" \
