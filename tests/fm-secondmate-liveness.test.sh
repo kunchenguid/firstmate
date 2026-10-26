@@ -51,7 +51,7 @@ make_probe_tmux() {
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
-# A socket-scoped probe carries a leading `-L <socket>` (fm_tmux); strip it.
+# A socket-scoped probe carries a leading -L socket pair (fm_tmux); strip it.
 while [ \$# -gt 0 ]; do
   case "\$1" in
     -L) shift 2 ;;

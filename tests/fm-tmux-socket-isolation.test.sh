@@ -35,7 +35,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/bin/fm-control-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
-SPAWN="$ROOT/bin/fm-spawn.sh"
+SEND="$ROOT/bin/fm-send.sh"
 PEEK="$ROOT/bin/fm-peek.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-tmux-socket-isolation)
@@ -61,7 +61,7 @@ command -v lsof >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1 && HAVE_PROO
 # --- A. addressing contract --------------------------------------------------
 
 test_fm_tmux_routes_every_invocation_through_one_owner() {
-  local dir recorder
+  local dir
   dir="$TMP_ROOT/a1"; mkdir -p "$dir/bin"
   cat > "$dir/bin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -75,7 +75,7 @@ SH
     PATH="$dir/bin:$PATH"
     FM_TMUX_SOCKET=fleet-a fm_tmux list-windows -a
     [ "$(cat "$dir/argv")" = "-L fleet-a list-windows -a" ] || exit 11
-    FM_TMUX_SOCKET= fm_tmux list-windows -a
+    FM_TMUX_SOCKET='' fm_tmux list-windows -a
     [ "$(cat "$dir/argv")" = "list-windows -a" ] || exit 12
     unset FM_TMUX_SOCKET
     fm_tmux has-session -t firstmate
@@ -103,7 +103,7 @@ SH
     fm_backend_source tmux || exit 20
     : > "$shim/argv"
     fm_backend_tmux_container_ensure >/dev/null || exit 21
-    wid=$(fm_backend_tmux_create_task firstmate "fm-a1" "$TMP_ROOT") || exit 22
+    fm_backend_tmux_create_task firstmate "fm-a1" "$TMP_ROOT" >/dev/null || exit 22
     fm_backend_tmux_capture "firstmate:fm-a1" 5 >/dev/null || exit 23
     fm_backend_tmux_target_exists "firstmate:fm-a1" || exit 24
     fm_backend_tmux_current_command "firstmate:fm-a1" >/dev/null || exit 25
@@ -120,7 +120,7 @@ SH
 }
 
 test_fm_tmux_fleet_socket_resolution() {
-  local dir cfg
+  local dir
   dir="$TMP_ROOT/a2"; mkdir -p "$dir/cfg"
   # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-tmux-lib.sh"
@@ -162,7 +162,7 @@ EOF
   [ "$(fm_backend_tmux_socket_of_meta "$meta")" = fleet-rt ] \
     || fail "socket= must round-trip through fm_backend_tmux_socket_of_meta"
   fm_backend_validate_task_endpoint "$meta" t1 || fail "a well-formed socket= record must validate"
-  FM_BACKEND_VALIDATED_BACKEND= FM_BACKEND_VALIDATED_TARGET=
+  FM_BACKEND_VALIDATED_BACKEND='' FM_BACKEND_VALIDATED_TARGET=''
 
   # Legacy record: no socket line at all - same validation pass, empty scope.
   grep -v '^socket=' "$meta" > "$dir/t1-legacy.meta"
@@ -684,6 +684,75 @@ test_relaunch_refuses_when_the_worktree_survived_the_server() {
   pass "fm-control relaunch: a worktree survivor refuses the reclaim"
 }
 
+# --- E. real-script screen read and doorbell through the recorded socket -----
+
+test_real_socket_peek_and_doorbell_end_to_end() {
+  [ "$HAVE_TMUX" = 1 ] || { pass "fm-peek/fm-send through the recorded socket (skipped: no real tmux)"; return 0; }
+  local sock="fme2e-$$" home="$TMP_ROOT/e2e-home" wt="$TMP_ROOT/e2e-wt" id="e2e1" target
+  local meta before after out rc
+  mkdir -p "$home/state" "$home/data" "$wt"
+  tmux -L "$sock" new-session -d -s firstmate -x 120 -y 30 \
+    || fail "real tmux: e2e session failed"
+  tmux -L "$sock" new-window -d -t "firstmate:" -n "fm-$id" -c "$wt" \
+    || fail "real tmux: e2e window failed"
+  target="firstmate:fm-$id"
+
+  # Prove command execution with a marker, retrying until the shell is ready.
+  local i=0
+  while [ "$i" -lt 50 ]; do
+    tmux -L "$sock" send-keys -t "$target" "printf 'e2e-marker-%s\\n' ready" Enter
+    if tmux -L "$sock" capture-pane -p -t "$target" -S -20 2>/dev/null | grep -q 'e2e-marker-ready'; then
+      break
+    fi
+    i=$((i + 1))
+    sleep 0.2
+  done
+  [ "$i" -lt 50 ] || { tmux -L "$sock" kill-server 2>/dev/null; fail "the e2e pane shell never became ready"; }
+
+  # A task record ON THE FLEET SOCKET: fm-peek reads the window through the
+  # recorded socket= scope.
+  meta="$home/state/$id.meta"
+  cat > "$meta" <<EOF
+window=$target
+endpoint_task_id=$id
+worktree=$wt
+project=$TMP_ROOT
+harness=claude
+kind=ship
+socket=$sock
+EOF
+  out=$(FM_HOME="$home" "$PEEK" "$id" 20 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || { tmux -L "$sock" kill-server 2>/dev/null; fail "fm-peek through the recorded socket failed: $out"; }
+  case "$out" in
+    *e2e-marker-ready*) : ;;
+    *) tmux -L "$sock" kill-server 2>/dev/null; fail "fm-peek did not return the pane marker through the recorded socket" ;;
+  esac
+  pass "fm-peek.sh: the recorded socket scope reaches the fleet window"
+
+  # The doorbell: fm-send --key Enter lands on the fleet window, not the
+  # ambient server - the pane's last line (a fresh prompt) changes.
+  before=$(tmux -L "$sock" capture-pane -p -t "$target")
+  out=$(FM_HOME="$home" "$SEND" "$id" --key Enter 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || { tmux -L "$sock" kill-server 2>/dev/null; fail "fm-send --key Enter through the recorded socket failed: $out"; }
+  sleep 1
+  after=$(tmux -L "$sock" capture-pane -p -t "$target")
+  [ "$before" != "$after" ] \
+    || { tmux -L "$sock" kill-server 2>/dev/null; fail "the doorbell key never reached the fleet window" ; }
+  pass "fm-send.sh: the doorbell key addresses the recorded socket"
+
+  # A legacy record (no socket=) must NOT see the fleet window: peek resolves
+  # through the ambient server and fails read-only.
+  grep -v '^socket=' "$meta" > "$home/state/$id.meta.legacy"
+  mv "$home/state/$id.meta.legacy" "$meta"
+  if FM_HOME="$home" "$PEEK" "$id" 10 >/dev/null 2>&1; then
+    tmux -L "$sock" kill-server 2>/dev/null
+    fail "a legacy record must not read a fleet window through the ambient server"
+  fi
+  pass "fm-peek.sh: a legacy record stays on the ambient server and misses the fleet window"
+
+  tmux -L "$sock" kill-server 2>/dev/null || true
+}
+
 # --- entrypoint ---------------------------------------------------------------
 
 test_fm_tmux_routes_every_invocation_through_one_owner
@@ -692,6 +761,7 @@ test_socket_meta_round_trip_and_validation
 test_real_tmux_scoped_addressing_isolates_servers
 test_real_tmux_death_proof_primitives
 test_verdict_real_socket_gone_and_refusal_cases
+test_real_socket_peek_and_doorbell_end_to_end
 test_relaunch_rebinds_a_proven_dead_socket_recorded_endpoint
 test_relaunch_refuses_a_dead_socket_legacy_record_unchanged
 test_relaunch_refuses_when_the_worktree_survived_the_server
