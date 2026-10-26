@@ -3,7 +3,7 @@
 # every shape a verified harness draws, every glyph, every container proof, and
 # the empty|pending|pending-unproven|unknown verdict, shared by every
 # session-provider adapter (tmux via bin/fm-tmux-lib.sh, and
-# bin/backends/{herdr,orca,cmux,zellij}.sh) and by fm-spawn.sh's kimi
+# bin/backends/{herdr,orca,cmux,zellij,tern}.sh) and by fm-spawn.sh's kimi
 # launch-readiness check.
 #
 # WHY THIS EXISTS (tasks fm-composer-shellglyph-safety and
@@ -23,7 +23,7 @@
 # judged; they never change what the shapes ARE:
 #   styled=1    the capture preserves ANSI styling, so ghost/placeholder text
 #               is detectable and can be stripped (tmux -e, herdr --format
-#               ansi, zellij dump-screen --ansi). With styled=0 (cmux, orca)
+#               ansi, zellij dump-screen --ansi). With styled=0 (cmux, orca, tern)
 #               ghost text is unreadable, so a bare glyph row or left-bar row
 #               carrying trailing non-idle text degrades to `unknown` rather
 #               than `pending`: the text may be the harness's own idle
@@ -361,7 +361,7 @@ fm_composer_strip_ghost() {
 # single backend adapter, because every backend needs them for the SAME job:
 # proving a submitted Enter actually landed. Keeping them in bin/fm-tmux-lib.sh
 # made cursor's signature reachable only from tmux, even though herdr, zellij,
-# cmux, and orca run the same harnesses and face the same acknowledgement
+# cmux, orca, and tern run the same harnesses and face the same acknowledgement
 # problem.
 #
 # This is a DELIVERY guard, deliberately NOT a worker-state source. The semantic
@@ -2241,7 +2241,7 @@ EOF
 }
 
 # fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop
-# for the cursor-less backends (cmux, orca, zellij), parameterised by the
+# for the cursor-less backends (cmux, orca, zellij, tern), parameterised by the
 # adapter's send-key and composer-state functions. The caller has already
 # typed the text ONCE (send_literal) and settled; this loop submits with
 # Enter, re-reading the composer verdict, and retries Enter ONLY - never

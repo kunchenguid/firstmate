@@ -330,6 +330,9 @@
 # logs and orphaned staging files older than 30 completed days by mtime.
 # Pruning failures warn, never abort teardown, and leave other task data and
 # symlinks alone.
+# Opt-in config/record-export-root delegates the record archive transaction to
+# bin/fm-record-export.sh immediately before status, metadata, or inbox records
+# for the retiring task are removed. A failed commit retains those sources.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -490,6 +493,26 @@ teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
   for entry in "$DATA"/*; do
     teardown_prune_status_archives "$entry"
   done
+}
+
+teardown_export_records() {  # <state> <task-id>
+  local state=$1 task=$2
+  if [ ! -e "$CONFIG/record-export-root" ] && [ ! -L "$CONFIG/record-export-root" ]; then
+    return 0
+  fi
+  if [ -e "$CONFIG" ] || [ -L "$CONFIG" ]; then
+    if [ ! -d "$CONFIG" ] || [ -L "$CONFIG" ] || [ ! -r "$CONFIG" ] || [ ! -x "$CONFIG" ]; then
+      echo "error: record export config directory is inaccessible or unsafe: $CONFIG" >&2
+      echo "error: record export archive failed for $task; retaining task records for retry" >&2
+      return 1
+    fi
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_RECORD_EXPORT_META_LOCK_HELD=1 \
+    "$SCRIPT_DIR/fm-record-export.sh" archive-task "$task" || {
+      echo "error: record export archive failed for $task; retaining task records for retry" >&2
+      return 1
+    }
 }
 
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
@@ -1166,6 +1189,7 @@ remote_secondmate_teardown() {
   if [ "$rc" -eq "$TEARDOWN_LOST_SLOT_EXIT" ]; then
     printf '%s\n' "$out" | grep -E '^(warning: treehouse return left pool slot |  )' >&2 || true
   fi
+  teardown_export_records "$STATE" "$ID" || return 1
   remote_recovery_paths_validate recheck || {
     echo "error: remote home retired but local recovery paths changed; preserving the local route for retry" >&2
     return 1
@@ -3448,6 +3472,7 @@ cleanup_firstmate_home_children() {
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
+    teardown_export_records "$sub_state" "$child_id" || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3981,6 +4006,7 @@ if [ "$KIND" != secondmate ]; then
     exit 1
   fi
 fi
+teardown_export_records "$STATE" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \

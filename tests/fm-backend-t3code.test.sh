@@ -8,6 +8,10 @@
 # shellcheck disable=SC2016  # $1/$2 inside single quotes belong to the bash -c snippet t3_run forwards.
 set -u
 
+# A fleet pane already carries GIT_CONFIG core.hooksPath. These cases set the
+# Git config they assert on themselves, so drop the inherited one before any git command.
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/t3-fake-lib.sh

@@ -103,7 +103,7 @@
 # Supported backends: herdr, tmux, and rex for `start`; t3code only through
 # `start-native` (T3 hosts no terminal to create, so the daemon runs as the
 # captain's own tracked background job, which means a Codex captain on t3code
-# has no away mode). Others (zellij, orca, cmux, paseo) have no verified
+# has no away mode). Others (zellij, orca, cmux, paseo, tern) have no verified
 # non-visible-launch primitive here yet and refuse loudly. On rex the daemon
 # runs in a dedicated Rex session of its own, so the captain's session gains no
 # tab and keeps its focus.

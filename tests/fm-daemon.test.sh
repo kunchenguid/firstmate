@@ -69,6 +69,22 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
   pass "fm-afk-start.sh ignores stale pidfile-only live pids"
 }
 
+test_afk_start_refuses_tern_supervisor_backend() {
+  local dir state out status
+  dir=$(make_supercase afk-start-tern-unsupported)
+  state="$dir/state"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=tern "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should refuse a tern supervisor backend (away mode supports only tmux, herdr, and rex)"
+  case "$out" in
+    *"does not support supervisor backend 'tern'"*|*"no non-visible daemon-launch primitive for backend 'tern'"*) : ;;
+    *) fail "away mode did not name tern as an unsupported supervisor backend: $out" ;;
+  esac
+  pass "fm-afk-start.sh refuses tern as an away-mode supervisor backend (unsupported; documented in docs/tern-backend.md)"
+}
+
 test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   local dir state out status lock
   dir=$(make_supercase afk-start-stale-lock-reused-pid)
@@ -3433,6 +3449,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
+test_afk_start_refuses_tern_supervisor_backend
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
