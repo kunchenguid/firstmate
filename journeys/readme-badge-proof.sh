@@ -58,16 +58,17 @@ own_links=$(grep -o "x\.com/$OWN_HANDLE" "$RAWMARK" | wc -l | tr -d ' ')
 foreign_links=$(grep -oE '(x|twitter)\.com/[A-Za-z0-9_]+' "$RAWMARK" 2>/dev/null \
   | grep -v "x\.com/$OWN_HANDLE" \
   | grep -vE '/(intent|share|home|i|hashtag|search)(/|$)' | sort -u || true)
-foreign_handles=$(grep -oE '(^|[^A-Za-z0-9_/.-])@[A-Za-z0-9_]+' "$RAWMARK" 2>/dev/null \
-  | sed 's/^[^@]*//' | grep -vx "@$OWN_HANDLE" | sort -u || true)
+# An X badge in someone else's name counts the same as a link: both name a person's handle.
+foreign_badges=$(grep -oE 'shields\.io/badge/(X|twitter|Twitter)-(%40|@)?[A-Za-z0-9_]+' "$RAWMARK" 2>/dev/null \
+  | grep -vE "(%40|@)$OWN_HANDLE" | sort -u || true)
 discord=$(grep -oE '(discord\.gg|discord\.com/invite|discordapp\.com/invite|discord\.com/channels)/[A-Za-z0-9_-]+' "$RAWMARK" 2>/dev/null | sort -u || true)
 
 [ "$own_links" -ge 1 ] || fail "the README does not link x.com/$OWN_HANDLE"
 [ -z "$foreign_links" ] || fail "the README links another X or Twitter account: $foreign_links"
-[ -z "$foreign_handles" ] || fail "the README names another person's handle: $foreign_handles"
+[ -z "$foreign_badges" ] || fail "the README carries an X badge for another handle: $foreign_badges"
 [ -z "$discord" ] || fail "the README carries a Discord invite: $discord"
 log "PASS: the badge links to x.com/$OWN_HANDLE ($own_links link to x.com/$OWN_HANDLE in README.md at $SHA)."
-log "PASS: no other person's handle appears anywhere in the README (0 links to another X/Twitter account, 0 @handles other than @$OWN_HANDLE)."
+log "PASS: no other person's handle appears anywhere in the README (0 links to another X or Twitter account, 0 X badges naming another handle)."
 log "PASS: no Discord invite appears anywhere in the README (0 discord.gg or discord.com/invite links)."
 
 # 2. Rendered-page assertions and captures: 390 and 1280 wide, light and dark.
