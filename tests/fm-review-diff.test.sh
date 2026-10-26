@@ -23,7 +23,6 @@
 #       /pulls/ segment names the number, never an earlier one
 #   (k) pr= forgejo URL with no remote pull ref -> offline fallback to a
 #       recorded pr_head=
-
 set -u
 
 # shellcheck source=tests/lib.sh

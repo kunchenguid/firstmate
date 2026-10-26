@@ -247,7 +247,6 @@ if [ "$MODE" != local-only ] && [ -n "$PROMOTE_PROJECT" ]; then
     ;;
   esac
 fi
-
 PROMOTE_BASE_WORDS='default-branch base'
 [ -z "$BASE_BRANCH" ] || PROMOTE_BASE_WORDS="copy of the base branch \`$BASE_BRANCH\`"
 # An unbound project keeps the exact wording it always had.
