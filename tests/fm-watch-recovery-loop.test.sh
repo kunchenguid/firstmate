@@ -305,6 +305,107 @@ test_handling_successor_resurfaces_a_row_appended_during_startup() {
   pass "a handling successor resurfaces a row appended during startup"
 }
 
+# Queue a re-announcement of an already-surfaced process-event result: the
+# surfaced marker exists and no copy is queued, so fm_wake_append takes the
+# re-announcement path.
+queue_procevent_reannouncement() {  # <state>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"
+    printf "seen\n" > "$(fm_wake_procevent_surfaced_marker procevent:lavish:src:1)"
+    fm_wake_append check procevent:lavish:src:1 "check: procevent lavish src 1"
+  ' _ "$ROOT/bin/fm-wake-lib.sh"
+}
+
+# T4: settling a handled turn must not turn a queued re-announcement into a
+# recovery episode, or the supervision host re-wakes on it every turn.
+test_handling_settlement_ignores_a_queued_procevent_reannouncement() {
+  local dir state marker
+  dir=$(make_case recovery-settle-reannounce)
+  state="$dir/state"
+  marker="$state/.watcher-down"
+  printf 'pending:downtime:later.1.aaa\n' > "$marker"
+  chmod 600 "$marker"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_begin_handling "$2" later.1.aaa' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "fixture: begin handling failed"
+  queue_procevent_reannouncement "$state" || fail "fixture: re-announcement append failed"
+  grep -F "$(printf '\tcheck\tprocevent:lavish:src:1\t')" "$state/.wake-queue" >/dev/null \
+    || fail "fixture: the re-announcement was not queued"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_handling_settled "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "handled-turn settlement failed"
+  grep -E '^(pending|announced):handling:later\.1\.aaa$' "$marker" >/dev/null \
+    || fail "a queued re-announcement reopened the handled episode as downtime: $(cat "$marker")"
+
+  printf '%s\t9\tcheck\tinbox:n1\tcheck: captain inbox note n1\n' "$(date +%s)" >> "$state/.wake-queue"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_handling_settled "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$marker" || fail "handled-turn settlement failed"
+  grep -E '^pending:downtime:later\.1\.aaa$' "$marker" >/dev/null \
+    || fail "a genuine row left for main did not become recoverable downtime: $(cat "$marker")"
+  pass "handled-turn settlement ignores a queued process-event re-announcement"
+}
+
+# T5: a handling successor must not close with the recovery wake when the only
+# queued row is a re-announcement, while a genuine append still resurfaces.
+test_handling_successor_does_not_resurface_only_a_procevent_reannouncement() {
+  local dir home state child now out
+  dir=$(make_case recovery-successor-reannounce)
+  home="$dir/home"
+  state="$dir/state"
+  out="$dir/watch.out"
+  mkdir -p "$home/data"
+  printf 'pending:downtime:later.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  queue_procevent_reannouncement "$state" || fail "fixture: re-announcement append failed"
+
+  PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=0.2 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" > "$out" 2>&1 &
+  child=$!
+  wait_for_watcher_lock "$child" "$state" || fail "handling successor did not take the watcher lock: $(cat "$out")"
+  now=0
+  while [ "$now" -lt 100 ] && ! grep -q '^announced:downtime:' "$state/.watcher-down"; do
+    is_live_non_zombie "$child" || break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  grep -q '^announced:downtime:' "$state/.watcher-down" \
+    || { wait_for_exit "$child" 0 || true; fail "fixture: the successor startup never took the pending episode: $(cat "$out")"; }
+
+  # A genuine append opens a fresh pending episode after startup, and that row
+  # is consumed in the same queue-lock window, so the successor's poll-loop arm
+  # check recovers while the re-announcement is the only row left.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+    fm_wake_append_locked check inbox:n0 "check: captain inbox note n0" || exit 1
+    awk -F "\t" "\$4 != \"inbox:n0\"" "$FM_WAKE_QUEUE" > "$FM_WAKE_QUEUE.tmp" \
+      && mv -f "$FM_WAKE_QUEUE.tmp" "$FM_WAKE_QUEUE" || exit 1
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" || { wait_for_exit "$child" 0 || true; fail "fixture: consumed append failed"; }
+  grep -q '^pending:downtime:' "$state/.watcher-down" \
+    || { wait_for_exit "$child" 0 || true; fail "fixture: the consumed append opened no pending episode: $(cat "$state/.watcher-down")"; }
+  now=0
+  while [ "$now" -lt 100 ] && grep -q '^pending:downtime:' "$state/.watcher-down"; do
+    is_live_non_zombie "$child" || break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  grep -q '^announced:downtime:' "$state/.watcher-down" \
+    || { wait_for_exit "$child" 0 || true; fail "fixture: the successor poll loop never took the pending episode: $(cat "$out")"; }
+  sleep 1
+  if ! is_live_non_zombie "$child"; then
+    wait "$child" 2>/dev/null || true
+    fail "a lone queued re-announcement woke the handling successor: $(cat "$out")"
+  fi
+
+  append_wake "$state" check inbox:n1 "check: captain inbox note n1" || fail "fixture: genuine append failed"
+  wait_for_exit "$child" 100 || fail "a genuine row did not resurface from the handling successor: $(cat "$out")"
+  [ "$(grep -c '^check: rearm-resurface$' "$out")" -eq 1 ] \
+    || fail "handling successor did not close once with the recovery wake: $(cat "$out")"
+  pass "a handling successor does not resurface a lone process-event re-announcement"
+}
+
 test_handling_successor_does_not_go_blind
 test_handling_successor_resurfaces_a_row_appended_during_startup
+test_handling_settlement_ignores_a_queued_procevent_reannouncement
+test_handling_successor_does_not_resurface_only_a_procevent_reannouncement
 test_unacknowledged_recovery_is_announced_once_per_generation

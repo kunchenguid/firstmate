@@ -3303,7 +3303,7 @@ fi
 handling_successor_has_queued_row() {
   local queued=1
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  [ ! -s "$FM_WAKE_QUEUE" ] || queued=0
+  ! _fm_wake_queue_has_new_work_locked || queued=0
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$queued"
 }

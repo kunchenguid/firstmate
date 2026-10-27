@@ -896,7 +896,7 @@ _fm_recovery_marker_handling_settled() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
-  if [ -s "$FM_WAKE_QUEUE" ]; then
+  if _fm_wake_queue_has_new_work_locked; then
     if ! fm_recovery_marker_read "$marker"; then
       fm_lock_release "$lock"
       fm_lock_release "$FM_WAKE_QUEUE_LOCK"
