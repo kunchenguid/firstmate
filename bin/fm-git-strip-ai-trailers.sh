@@ -193,7 +193,8 @@ write_executable() {
 # Refuse as well when the lookup names a directory holding a copy of this
 # very file, so the wrapper cannot exec itself: beads preserves the pane's
 # hooks into .beads/hooks on init and then points core.hooksPath there. Every
-# wrapper also carries a re-entrancy sentinel first: when FM_GIT_HOOK_ACTIVE is
+# wrapper but the push-guard pre-push, which must never fail open, also carries
+# a re-entrancy sentinel first: when FM_GIT_HOOK_ACTIVE is
 # already set the hook exits zero at once, else it sets and exports it.
 # Path comparisons miss mixed fresh/stale cycles - installed copies outlive
 # the task that wrote them, beads preserves pane hooks by copy (new inode),
@@ -366,7 +367,6 @@ EOF
     write_executable "$hooks_dir/pre-push" <<EOF
 #!/usr/bin/env bash
 set -u
-$(sentinel_body)
 refs=\$(cat)
 if [ -n "\$refs" ]; then
   printf '%s\\n' "\$refs" | $guard_cmd "\$@" || exit 1

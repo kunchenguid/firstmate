@@ -30,6 +30,24 @@ make_repo() {
   fm_git_init_commit "$dir"
 }
 
+test_push_guard_runs_with_inherited_reentrancy_sentinel() {
+  local repo hooks guard bare out rc
+  repo="$TMP_ROOT/push-guard-sentinel"
+  make_repo "$repo"
+  bare="$TMP_ROOT/push-guard-sentinel-origin.git"
+  git init -q --bare "$bare"
+  git -C "$repo" remote add origin "file://$bare"
+  guard="$TMP_ROOT/push-guard-sentinel-file"
+  "$ROOT/bin/fm-git-push-guard.sh" write "$guard" "$repo" fm/t1 fm/ || fail "guard write failed"
+  hooks="$TMP_ROOT/hooks-push-guard-sentinel"
+  "$STRIP" install --push-guard "$guard" "$hooks" "$repo" || fail "install --push-guard should succeed"
+  out=$(FM_GIT_HOOK_ACTIVE=1 with_hooks_env "$hooks" git -C "$repo" push origin HEAD:refs/heads/main 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "an inherited FM_GIT_HOOK_ACTIVE let a refused push through the guard"
+  assert_contains "$out" "fm-git-push-guard: refused:" "the guard was skipped under an inherited sentinel"
+  pass "the push guard still runs and refuses with FM_GIT_HOOK_ACTIVE inherited"
+}
+
 test_cursor_trailer_does_not_reach_the_commit_object() {
   local repo hooks body author
   repo="$TMP_ROOT/cursor-object"
@@ -643,5 +661,6 @@ test_wrapper_copy_inside_repository_hookspath_completes
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 test_no_strip_keeps_the_message_and_still_chains
 test_push_guard_install_runs_the_guard_before_chaining
+test_push_guard_runs_with_inherited_reentrancy_sentinel
 
 echo "# all fm-git-strip-ai-trailers tests passed"
