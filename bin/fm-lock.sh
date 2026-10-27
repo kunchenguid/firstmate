@@ -13,16 +13,20 @@
 # POSIX. Line 1 keeps its whole-line pid format because every other reader
 # takes the first line as the pid.
 #
-# The trusted id itself is recorded beside the lock in state/.lock-session, a
-# sidecar written only here and only under the claim lock: refreshed on every
-# confirmed-own acquisition, including the early already-mine exit that waits
+# The trusted id, the publisher pid and that pid's fm_pid_identity
+# (bin/fm-wake-lib.sh) are lines 1 to 3 of state/.lock-session; a publisher
+# whose identity cannot be computed is not recorded, leaving the id alone. The
+# sidecar is written only here and only under the claim lock: refreshed on every
+# confirmed-own acquisition at SessionStart or an owned Stop with a stale
+# publisher, including the early already-mine exit that waits
 # for the claim lock, removed when the acquiring session proves no trusted id,
-# and left byte-identical when it already names that id. A same-session
-# confirmation keeps a live line 1 that is in this session's harness ancestry,
-# because bin/fm-startup-network.sh compares that pid across its deferred
-# sweeps; a dead recorded pid is reclaimed and rewritten to this session's
+# and left byte-identical when both values match. Publisher-only updates keep
+# its mtime because fm-afk-return.sh uses that time as a session-id boundary.
+# A same-session confirmation keeps a live line 1 in this session's harness
+# ancestry, because bin/fm-startup-network.sh compares that pid across its
+# deferred sweeps; a dead recorded pid is reclaimed and rewritten to this session's
 # anchor. A live line 1 outside the ancestry, owned only through the trusted
-# id, is rewritten to the anchor under the claim lock and then the
+# id and publisher, is rewritten to the anchor under the claim lock and then the
 # lease-command lock, and task leases recorded against the old pid move to the
 # anchor in that same section (fm_lease_rekey_holder in bin/fm-lease-lib.sh),
 # as does a Claude auto-arm rewake bound to the old pid, under
@@ -37,6 +41,10 @@
 # re-anchors.
 #
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
+#        fm-lock.sh refresh-publisher
+#                             refresh only the publisher of an owned, same-id
+#                             sidecar under the claim lock; never re-key the id
+#                             or re-anchor the lock; exit 1 if not confirmed.
 #        fm-lock.sh status    print holder and liveness; always exits 0.
 #                             A held lock is not proof the holder is consuming
 #                             wakes. Machine-readable lock fields live on
@@ -159,7 +167,7 @@ remember_lock_session() {
   [ "$LOCK_SESSION_PHASE" -eq 0 ] || return 0
   if [ -e "$LOCK_SESSION" ] || [ -L "$LOCK_SESSION" ]; then
     rm -f "$LOCK_SESSION_PREV" 2>/dev/null || true
-    cp -P "$LOCK_SESSION" "$LOCK_SESSION_PREV" 2>/dev/null || return 1
+    cp -pP "$LOCK_SESSION" "$LOCK_SESSION_PREV" 2>/dev/null || return 1
     LOCK_SESSION_KIND=1
   else
     LOCK_SESSION_KIND=2
@@ -169,17 +177,33 @@ remember_lock_session() {
 
 # Record the trusted session id beside the lock, or remove a sidecar that no
 # trusted id backs. Called only while the claim lock is held. A sidecar already
-# naming this id is left untouched, so a same-session confirmation keeps it
-# byte-identical.
-publish_lock_session() {
-  local trusted recorded tmp
-  if trusted=$(fm_session_lock_trusted_session_id); then
-    if recorded=$(fm_session_lock_recorded_session_id "$STATE") && [ "$recorded" = "$trusted" ]; then
+# naming this id and publisher is left untouched. An ancestry-confirmed owner
+# upgrades an id-only sidecar at SessionStart or an owned Stop before detaching.
+# An id already verified under the claim lock is published as given.
+publish_lock_session() {  # [<verified-id>]
+  local trusted=${1:-} recorded publisher identity='' recorded_publisher recorded_identity tmp
+  if [ -n "$trusted" ] || trusted=$(fm_session_lock_trusted_session_id); then
+    publisher=$me
+    fm_session_lock_pid_identity "$STATE" "$me" identity || publisher=
+    recorded=
+    recorded_publisher=
+    recorded_identity=
+    if fm_session_lock_read_record "$STATE"; then
+      recorded=$FM_SESSION_LOCK_RECORDED_ID
+      recorded_publisher=$FM_SESSION_LOCK_RECORDED_PUBLISHER
+      recorded_identity=$FM_SESSION_LOCK_RECORDED_IDENTITY
+    fi
+    if [ "$recorded" = "$trusted" ] && [ "$recorded_publisher" = "$publisher" ] \
+      && [ "$recorded_identity" = "$identity" ]; then
       return 0
     fi
     remember_lock_session || return 1
     tmp=$(mktemp "$STATE/.lock-session.XXXXXX" 2>/dev/null) || return 1
-    if ! { printf '%s\n' "$trusted" > "$tmp" && mv -f "$tmp" "$LOCK_SESSION"; } 2>/dev/null; then
+    if ! {
+      { printf '%s\n' "$trusted" && { [ -z "$publisher" ] || printf '%s\n%s\n' "$publisher" "$identity"; }; } > "$tmp" \
+        && { [ "${recorded:-}" != "$trusted" ] || touch -r "$LOCK_SESSION" "$tmp"; } \
+        && mv -f "$tmp" "$LOCK_SESSION"
+    } 2>/dev/null; then
       rm -f "$tmp" 2>/dev/null
       return 1
     fi
@@ -192,8 +216,8 @@ publish_lock_session() {
   return 0
 }
 
-publish_lock_session_or_die() {
-  publish_lock_session && return 0
+publish_lock_session_or_die() {  # [<verified-id>]
+  publish_lock_session "$@" && return 0
   echo "error: cannot record the session identity beside the lock; operate read-only until resolved" >&2
   exit 1
 }
@@ -239,14 +263,36 @@ confirm_own_lock() {  # <recorded-pid>
 }
 
 refuse_live_owner() {  # <recorded-pid>
-  local recorded
+  local recorded remedy
   if recorded=$(fm_session_lock_recorded_session_id "$STATE"); then
     echo "error: another live firstmate session holds the lock (pid $1, session $recorded); operate read-only until resolved" >&2
   else
     echo "error: another live firstmate session holds the lock (pid $1); operate read-only until resolved" >&2
   fi
+  if remedy=$(fm_session_lock_same_id_remedy "$STATE"); then
+    echo "error: $remedy" >&2
+  fi
   exit 1
 }
+
+# Stop may refresh the publisher, but only SessionStart may change the id or
+# anchor. Recheck the id and the CLAUDE_PID anchor under the claim lock as well
+# as in the caller, and publish exactly those; anything unproven exits 1 with
+# the sidecar untouched.
+if [ "${1:-}" = refresh-publisher ]; then
+  fm_lock_acquire_wait "$CLAIM_LOCK"
+  CLAIM_LOCK_HELD=1
+  fm_session_lock_owned_by_self "$STATE" || exit 1
+  trusted=$(fm_session_lock_trusted_session_id) || exit 1
+  fm_session_lock_read_record "$STATE" || exit 1
+  [ "$FM_SESSION_LOCK_RECORDED_ID" = "$trusted" ] || exit 1
+  anchor=$(fm_session_lock_anchor_pid) || exit 1
+  case "$anchor" in "$CLAUDE_PID"|"$FM_WIN_PID_PREFIX$CLAUDE_PID") ;; *) exit 1 ;; esac
+  [ "$me" = "$anchor" ] || exit 1
+  publish_lock_session_or_die "$trusted"
+  commit_lock_session
+  exit 0
+fi
 
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
@@ -290,8 +336,8 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     fi
   fi
 fi
-# The sidecar goes first: a fresh pid beside a previous session's id would let
-# that session's resume own this lock. If the sidecar changes before line 1 is
+# Publish the identity before line 1 so a new anchor never carries the previous
+# owner's identity. If the sidecar changes before line 1 is
 # written, a failure restores the previous sidecar. If line 1 is written but
 # not yet verified, a failure removes the sidecar and leaves the lock
 # ancestry-only. After line 1 verifies as this session's anchor, a later

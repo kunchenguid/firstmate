@@ -218,8 +218,8 @@
 #             and a session that owns the lock is exactly the session that must
 #             handle and acknowledge them. Lock acquisition still runs, because
 #             ownership must be re-verified rather than assumed: fm-lock.sh
-#             already treats a lock owned through shared ancestry or a trusted
-#             same-session Claude id as its own, so the re-emit proceeds, while
+#             already treats a lock owned under the shared verdict in
+#             fm-session-lock-lib.sh as its own, so the re-emit proceeds, while
 #             a lock another live session took meanwhile still produces the
 #             ordinary read-only path. A re-emit prints a short RE-EMIT CUE
 #             first, so a harness that spills a large output and shows only its

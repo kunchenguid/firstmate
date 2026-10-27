@@ -1842,10 +1842,10 @@ fm_failure_episode_reset() {
 #     a rewake) or its recorded owner_session_id matches the trusted session id
 #     beside that lock (state/.lock-session) WHILE the recorded pid-identity of
 #     the lock holder it claimed under (entry line 3) still recomputes from the
-#     lock's current holder pid. The id signal is the second one
-#     the claiming hook's own admission accepts (fm_session_lock_owned_by_self),
-#     so a background session whose bridge is recycled mid-cycle keeps its live
-#     claim; pinning it to the recorded lock-holder identity is what keeps a
+#     lock's current holder pid. This is claim reachability after the separate
+#     admission verdict in fm_session_lock_owned_by_self, not proof of lock
+#     ownership. A recycled bridge can keep its admitted claim; pinning it to
+#     the recorded lock-holder identity is what keeps a
 #     resumed session - same conversation id, new process - from reading its own
 #     dead predecessor's orphan as open, even when that new process reuses the
 #     dead holder's pid number - and it is not STUCK - stuck meaning both the

@@ -99,14 +99,8 @@ The guard cooperates with that arm rather than trusting a beacon left by the cyc
 When an active home instead has a live session lock held by a verified harness that the current session does not own, the Claude guard emits a read-only ownership diagnostic and allows the turn to end safely.
 
 Ownership is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
-The current session owns the lock when either of these holds:
-
-- The recorded pid is a member of the current session's contiguous harness ancestry.
-- The trusted Claude session id recorded beside the lock in `state/.lock-session` matches this hook's own environment while the recorded pid is still a live harness.
-
-That second signal keeps a background Claude session owning its own lock after the transient helper chain between its hooks and its recorded owner is recycled.
-The library's header owns the trust gate (`CLAUDE_PID` must be a Claude-shaped member of the current run).
-`bin/fm-lock.sh` owns the sidecar and the line-1 anchor it records for such a session.
+The library owns both the ancestry test and the trusted Claude identity test, including the publisher evidence that distinguishes a detached owner from another live process resuming the same conversation.
+`bin/fm-lock.sh` owns sidecar publication and legacy-sidecar upgrades.
 
 A Claude session that does not own the lock cannot arm or repair the home without stealing the live owner's lock, so blocking it would create an unbounded loop.
 The lock-owning session remains responsible for restoring supervision.
@@ -114,7 +108,7 @@ The lock-owning session remains responsible for restoring supervision.
 The exception has these limits:
 
 - Malformed, absent, dead, or ancestry-uncertain lock records do not satisfy this Claude-specific exception and retain the ordinary guard behavior.
-- A missing or mismatched sidecar or an untrusted id adds nothing to the verdict, so a live owner outside the ancestry still takes this exit exactly as before.
+- Sidecar evidence that fails `fm_session_lock_same_session` adds nothing to the verdict, so a live owner outside the ancestry takes this exit.
 
 ### Pull-warning verdict by supervision model
 
@@ -323,6 +317,18 @@ It allows the stop when any of these holds:
 - The auto-arm's generation claim is open.
 - `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
 
+#### Claude lock upgrade and restart
+
+An attached Claude session upgrades a legacy id-only lock sidecar at SessionStart or its next owned Stop.
+An already-detached session whose sidecar contains only the conversation id cannot prove ownership after updating.
+It sees the foreign-owner diagnostic, its Stop is read-only, and its auto-arm stays inert.
+Restarting the main session clears this condition by acquiring the lock with a current publisher record.
+The same restart is required if the recorded model-loop publisher exits while the lock's frontend remains alive and the replacement cannot prove ancestry to that frontend.
+The publisher is recorded with its process identity, so a later process given the same pid number does not match it.
+A publisher whose identity cannot be computed, such as a tagged Windows pid, is not recorded, and that session owns its lock through ancestry only.
+When a refused session carries the lock's own conversation id, acquisition and the Stop guard print one remedy line after the ownership diagnostic: if this is a second process resuming the owner conversation, exit it; otherwise restart the main session.
+`bin/fm-session-lock-lib.sh` owns the admission rule.
+
 #### Auto-arm generation claim
 
 The claim is the ledger entry itself.
@@ -340,14 +346,15 @@ A claim is open while all of these hold:
 - Its outcome is `arming`.
 - Its owner pid is alive.
 - Its recorded identity successfully recomputes and matches that pid.
-- Its owner is still reachable by its session: it descends from the numeric pid in `state/.lock`, or its recorded `owner_session_id` matches the trusted session id in `state/.lock-session` while the lock-holder pid-identity recorded on entry line 3 still recomputes from that lock's holder pid.
+- Its owner is still reachable by its session under the claim-reachability rule in `fm_autoarm_claim_open` in `bin/fm-wake-lib.sh`.
 - It is not stuck.
 
 Stuck means the entry and the watcher beacon are both older than the guard grace, which proves the owner hung mid-arm.
 A healthy hours-long foregrounded cycle keeps the beacon beating, and every arming phase with no watcher is bounded in seconds.
 A missing or malformed lock means no session can receive a rewake, so such a claim is never open.
 The reachability test is what makes an open claim deliverable: a hook whose session exited mid-cycle stays alive with no parent to receive its exit 2, so deferring to it would leave the replacement session deaf until a captain turn.
-The session-id signal is the second one the claiming hook's own admission accepts, so a background session whose bridge is recycled mid-cycle - breaking the ancestry to its still-live lock owner - keeps its live claim instead of being double-armed.
+This reachability check applies after the separate lock-ownership admission in `bin/fm-session-lock-lib.sh`; it does not grant ownership to a matching conversation id.
+A background session whose bridge is recycled mid-cycle keeps its already-admitted live claim instead of being double-armed.
 Pinning that signal to the lock holder's pid-identity recorded at claim time is what keeps a resumed session, which carries the same conversation id in a new process, from reading its own dead predecessor's orphan as open - a reused pid number is a different identity, so it does not match.
 An orphan fails both signals: it no longer descends from the replacement's lock pid, and its recorded lock-holder identity is the dead session's.
 An entry from a build before these fields existed records neither and falls back to descent alone.

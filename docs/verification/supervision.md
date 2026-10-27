@@ -341,12 +341,20 @@ That inertness result is scoped to the builds it exercised: it did not establish
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
 Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: a pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
-A background Claude session whose transient helper chain is recycled loses that contiguity while its recorded owner stays alive, so the library also accepts a trusted same-session id: `CLAUDE_CODE_SESSION_ID` counts only when `CLAUDE_PID` is a Claude-shaped member of the current run, it must equal the id `bin/fm-lock.sh` recorded in `state/.lock-session`, and the recorded pid must still be a live harness, while every weaker combination (no id, no sidecar, an untrusted id, a different id, a dead recorded pid) leaves the ancestry verdict unchanged.
-For such a session `bin/fm-lock.sh` records `CLAUDE_PID` on lock line 1 instead of the outermost chain pid, so a shared daemon or front-end that outlives the session never keeps a dead session's lock alive, and a same-session confirmation over a live line 1 outside the current ancestry rewrites line 1 to `CLAUDE_PID` and moves task leases and a Claude auto-arm rewake recorded against the old pid with it, so a later `/clear` re-key in the same process is still proven by ancestry, a held lease stays live, and the mid-turn guard still accepts that rewake.
-Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
-`tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
-The same suite drives the ancestry and session-id signals apart in that table, asserting the divergence itself so no case is vacuous, and runs a real orphaned front-end, daemon, pty-host, and bg-spare tree whose daemon is ended mid-run: before the spare proves anything, a different id, an untrusted id, and no id each keep the live-owner refusal naming the recorded id; the same id then keeps arming through the real `bin/fm-lock.sh`, `bin/fm-claude-stop-autoarm.sh`, and `bin/fm-turnend-guard.sh --claude` with the sidecar untouched and lock line 1 moved off the live front-end onto the spare's pid rather than the outermost pty-host; and a new id from that same spare, with the front-end still alive, stays owned and re-keys the sidecar.
-`tests/fm-turnend-foreign-owner-repro.py` keeps the genuinely foreign live owner as the negative control, and its same-id positive control is a live process outside the owner's ancestry that re-anchors line 1 onto its own `CLAUDE_PID` while a different id stays refused against the re-anchored pid.
+`bin/fm-session-lock-lib.sh` owns the trusted Claude identity and publisher test; `bin/fm-lock.sh` owns its sidecar format, ancestry-confirmed legacy upgrade, and re-anchor transaction.
+`tests/fm-session-lock-ancestry.test.sh` drives ancestry and publisher evidence apart, preserves the detached frontend re-anchor and same-process re-key, and checks lease and rewake movement.
+Its Stop-only phase upgrades a legacy publisher before bridge recycling, and the post-recycle Stop is admitted before SessionStart re-anchors the lock.
+A current-publisher Stop leaves bytes and mtime unchanged without calling the lock writer; a failed refresh leaves a still-owned Stop free to arm, with its warning reaching the session only when that Stop rewakes.
+A trust probe that fails on its second call under the real writer's claim lock makes the refresh fail with the sidecar bytes and mtime unchanged, and the owned Stop still arms.
+Alternating shared-ancestor Stops preserve the recorded id, lock anchor and mtime; a failed publisher write restores the sidecar mtime.
+It also covers Windows pid tags, publication failures, missing, malformed or identity-less publisher evidence, refusal of an exited or unverified publisher over a live lock, and refusal of a reused publisher pid number in a new same-id chain.
+`tests/fm-turnend-foreign-owner-repro.py` exercises two live harness-shaped processes sharing one conversation id: acquisition stays refused, Stop ends read-only, auto-arm stays inert, and ownership and leases stay unchanged.
+It repeats those checks with an exited publisher and with a new same-id process whose pid number is recorded beside an exited publisher's identity, and checks that only same-id refusals print the remedy line.
+These portable tests use synthetic harness processes; the real Claude resume test and its limits are recorded in [runtime backend verification](runtime-backends.md#claude-conversation-resume-ownership).
+
+The following dated records are retained for the platform and re-anchor evidence.
+Their id-only ownership control was superseded by the publisher restriction verified below; the earlier same-id acquisition output is not the current ownership guarantee.
+
 The unit cases ran on 2026-09-18 on macOS with bash 3.2.57 as the fake harness interpreter:
 
 ```sh
@@ -375,6 +383,36 @@ ok - session-lock: a re-anchor keeps both supervision actors' task leases live
 same-session acquisition rc=0 pid=3116951 output='lock acquired: harness pid 3116951\n'
 other-session acquisition rc=0 stdout='lock_rc=1\n' stderr='error: another live firstmate session holds the lock (pid 3116951, session synthetic-same); operate read-only until resolved\n'
 FIXED same-session id re-anchors the lock onto its own process; a different id is still foreign
+COMPLETE
+```
+
+Verified on 2026-10-26 on Linux with GNU bash 5.3.9 and Python 3.14.4 using the focused commands below.
+These are synthetic process tests; the separate Claude Code 2.1.310 live result is recorded in [runtime backend verification](runtime-backends.md#claude-conversation-resume-ownership).
+
+```sh
+bash tests/fm-session-lock-ancestry.test.sh
+bash tests/fm-turnend-foreign-owner-arm-fix.test.sh
+```
+
+Observed output, bounded to the affected guarantees:
+The refresh-failure line below came from a Stop that rewoke; it does not establish warning delivery on exit-0 Stops.
+The reused-pid and refresh trust-probe lines came from later runs on the same date with the same tool versions.
+Those runs executed the repro from a copy outside the validation checkout, because the watcher refuses to arm from a disposable checkout.
+Their ancestry-suite runs accepted a user-session subreaper in place of pid 1 for the pty-host reparent check.
+
+```text
+ok - session-lock e2e: Stop-only legacy upgrade preserves the session-id mtime
+ok - session-lock e2e: post-recycle Stop owns through the publisher before SessionStart
+ok - session-lock e2e: current-sidecar Stop calls no writer and preserves bytes and mtime
+ok - session-lock e2e: a failed publisher refresh reports its status and still rewakes
+ok - session-lock e2e: a trust probe failing inside a publisher refresh leaves the sidecar unchanged and the Stop still arms
+ok - session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain and a same-process session-id change
+ok - session-lock: alternating shared-ancestor Stops preserve the recorded id, anchor and mtime
+ok - session-lock: a failed lock write restores the previous sidecar and mtime
+ok - session-lock: a re-anchor keeps both supervision actors' task leases live
+FIXED a second live model loop remains foreign after resuming the owner's conversation
+FIXED an exited publisher cannot transfer a live frontend's lock, leases, or rewake
+FIXED a reused publisher pid number cannot transfer a live frontend's lock, leases, or rewake
 COMPLETE
 ```
 

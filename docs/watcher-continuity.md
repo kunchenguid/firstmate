@@ -101,11 +101,16 @@ Whether the session owns that lock is the shared `fm_session_lock_owned_by_self`
 That verdict accepts either of two cases:
 
 - A recorded pid inside the current harness ancestry.
-- A live lock recorded under this same trusted Claude session id.
+- A live lock whose trusted Claude identity passes `fm_session_lock_same_session` in `bin/fm-session-lock-lib.sh`.
 
+An owned Stop delegates a stale publisher refresh to `bin/fm-lock.sh` before the away and need exits so an attached session can upgrade before its helper chain detaches.
+The refresh keeps the recorded id and lock anchor unchanged; a current sidecar needs no claim lock.
+The refresh publishes only the id and `CLAUDE_PID` anchor it re-verifies under the claim lock; if either cannot be re-verified, it fails and leaves the sidecar unchanged.
+A failed refresh leaves a still-owned Stop free to arm and retries at the next Stop; its warning reaches the session only when that Stop rewakes.
 With that verdict, a background session keeps arming after its transient helper chain is recycled.
+[Claude lock upgrade and restart](turnend-guard.md#claude-lock-upgrade-and-restart) describes the restart cases and their visible symptoms.
 [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns the Claude guard's behavior when that live owner is genuinely another session.
-The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
+Only stale-lock reclamation waits for the existing AFK and supervision-need gates.
 
 ### Claude arm failures
 
