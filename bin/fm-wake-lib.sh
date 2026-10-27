@@ -901,13 +901,14 @@ _fm_recovery_marker_write_locked() {
 # Apply the downtime republication states owned by docs/watcher-continuity.md
 # while preserving an outstanding generation-bound acknowledgement. A handback
 # source republishes the current episode as already announced: the close it
-# hands to main is that episode's delivery.
+# hands to main is that episode's delivery. A close source leaves an
+# acknowledged episode unchanged.
 _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} bound=${3:-} source=${4:-watcher}
-  local lock saved_token generation='' status=pending previous_append_token='' guard=${5:-}
+  local lock saved_token generation='' status=pending previous_append_token='' guard=${5:-} leave_closed=0
   if [ "$#" -ge 5 ]; then shift 5; else set --; fi
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
-  case "$source" in watcher|append|handback) ;; *) return 1 ;; esac
+  case "$source" in watcher|append|handback|close) ;; *) return 1 ;; esac
   if [ "$source" = append ]; then
     FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
     FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
@@ -952,10 +953,19 @@ _fm_recovery_marker_publish() {
             status=announced
           fi
           ;;
+        acked:*)
+          # docs/watcher-continuity.md: a planned close must not open a fresh
+          # episode over a retired one. Appends and outage publication still do.
+          [ "$source" != close ] || leave_closed=1
+          ;;
       esac
     fi
     FM_RECOVERY_MARKER_TOKEN=$saved_token
     [ "$source" != handback ] || status=announced
+  fi
+  if [ "$leave_closed" -eq 1 ]; then
+    fm_lock_release "$lock"
+    return 0
   fi
   if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"; then
     fm_lock_release "$lock"
@@ -1291,7 +1301,7 @@ _fm_recovery_marker_handover_restore() {
 }
 
 fm_recovery_transition() {
-  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-}
+  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-} source=${6:-}
   case "$action" in
     handover-restore)
       _fm_recovery_marker_handover_restore "$marker" "$target" "$value"
@@ -1316,7 +1326,7 @@ fm_recovery_transition() {
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" "${source:-watcher}" || return 1
       fm_lock_release "$target"
       ;;
     release-lock-existing)
