@@ -2919,11 +2919,11 @@ case "$ARG3" in
   done
   # A named adapter template embeds the launch-brief arg itself; a raw command
   # has no such placeholder and would start the agent at an empty prompt.
-  # Append it after the caller's own argv. Kimi rejects a positional prompt and
-  # gets its brief pointer after its readiness gate, and a command that already
-  # names __BRIEF__ is left alone.
+  # Append it after the caller's own argv. Kimi and rovo reject a positional
+  # prompt and get their brief pointer after their readiness gate, and a command
+  # that already names __BRIEF__ is left alone.
   case "$HARNESS" in
-  kimi*) : ;;
+  kimi* | rovo*) : ;;
   *)
     # shellcheck disable=SC2016 # literal text, expanded by the launched shell
     case "$LAUNCH" in

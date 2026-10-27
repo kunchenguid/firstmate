@@ -604,6 +604,23 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+test_raw_rovo_launch_gets_no_positional_brief() {
+  local rec id out status launch
+  id=raw-rovo-nobrief-z15
+  rec=$(make_spawn_case raw-rovo-nobrief claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "rovo run --yolo")
+  status=$?
+  expect_code 1 "$status" "raw rovo launch should reach rovo's readiness gate, which the fake pane never satisfies"
+  assert_contains "$out" "rovo did not show a verified ready signal" "raw rovo launch did not take the rovo readiness path"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "rovo run --yolo" "raw rovo launch command was not emitted"
+  assert_not_contains "$launch" "launch-brief" "raw rovo launch got a positional brief argument"
+  pass "a raw rovo launch is not given the positional launch-brief argument"
+}
+
 test_chained_raw_launch_strips_ai_trailer_in_every_step() {
   local rec id out status launch body
   id=chained-raw-z15
@@ -2730,6 +2747,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_rovo_launch_gets_no_positional_brief
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
