@@ -530,6 +530,14 @@ turn_crosses_boundary() {
   [ $((PARK_ELAPSED + TURN_TIMEOUT + ENGINE_GRACE)) -ge "$PARK_LIMIT" ]
 }
 
+record_planned_watcher_stop() {
+  local lock_pid
+  lock_pid=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
+  fm_pid_alive "$lock_pid" || return 0
+  fm_watcher_lock_matches_pid "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$lock_pid" "$FM_HOME" || return 0
+  fm_watcher_planned_stop_record "$STATE" "$lock_pid" "$FM_WATCHER_MATCHED_IDENTITY" || true
+}
+
 # End the park at the boundary: stop the current and successor arms and this
 # home's watcher, print any close already read so main drains it, then the
 # boundary line.
@@ -537,13 +545,15 @@ boundary_exit() {
   park_elapsed
   log_line "boundary	after ${PARK_ELAPSED}s"
   acknowledged_handback 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn'
-  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  record_planned_watcher_stop
   retire_arm "$ARM_PID" "$ARM_OUT"
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   ARM_PID=
   ARM_OUT=
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  hand_back_acknowledged_episode
   emit 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
   exit 0
 }
@@ -684,14 +694,23 @@ emit() {  # [line...]
   [ -z "$text" ] || printf '%s\n' "$text"
 }
 
+hand_back_acknowledged_episode() {
+  fm_recovery_marker_read "$STATE/.watcher-down" || return 0
+  case "$FM_RECOVERY_MARKER_TOKEN" in
+    acked:*) fm_recovery_marker_handback "$STATE/.watcher-down" >/dev/null 2>&1 || true ;;
+  esac
+}
+
 # Stop the successor cycle: the state main's own turn end starts from without
 # the host.
 retire_successor() {
   [ -n "$SUCCESSOR_PID" ] || return 0
-  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  record_planned_watcher_stop
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  hand_back_acknowledged_episode
 }
 
 # Hand the close to main: stop the successor cycle, print the close, why, and
