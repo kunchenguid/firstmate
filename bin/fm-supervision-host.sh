@@ -530,17 +530,6 @@ turn_crosses_boundary() {
   [ $((PARK_ELAPSED + TURN_TIMEOUT + ENGINE_GRACE)) -ge "$PARK_LIMIT" ]
 }
 
-# Record the stop, then signal the arms: an arm whose watcher dies before the
-# arm is signalled starts a replacement watcher, so `fm-watch-arm.sh --stop`
-# cannot run first.
-record_planned_watcher_stop() {
-  local lock_pid
-  lock_pid=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
-  fm_pid_alive "$lock_pid" || return 0
-  fm_watcher_lock_matches_pid "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$lock_pid" "$FM_HOME" || return 0
-  fm_watcher_planned_stop_record "$STATE" "$lock_pid" "$FM_WATCHER_MATCHED_IDENTITY" || true
-}
-
 # End the park at the boundary: stop the current and successor arms and this
 # home's watcher, print any close already read so main drains it, then the
 # boundary line.
@@ -548,14 +537,13 @@ boundary_exit() {
   park_elapsed
   log_line "boundary	after ${PARK_ELAPSED}s"
   acknowledged_handback 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn'
-  record_planned_watcher_stop
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   retire_arm "$ARM_PID" "$ARM_OUT"
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   ARM_PID=
   ARM_OUT=
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   hand_back_acknowledged_episode
   emit 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
   exit 0
@@ -708,11 +696,10 @@ hand_back_acknowledged_episode() {
 # the host.
 retire_successor() {
   [ -n "$SUCCESSOR_PID" ] || return 0
-  record_planned_watcher_stop
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   hand_back_acknowledged_episode
 }
 
