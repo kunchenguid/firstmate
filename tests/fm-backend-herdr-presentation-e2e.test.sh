@@ -186,6 +186,20 @@ if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE
     break
   done
 fi
+# An abort pane holds only its idle shell in the worktree, so cleanup may end
+# that shell and let Herdr remove the pane with no pane close call. Record the
+# first read that finds the pane gone as its removal.
+if [ "$status" -ne 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+    [ -d "$task_dir" ] || continue
+    [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
+    if [ ! -e "$task_dir/gone" ]; then
+      : > "$task_dir/gone"
+      printf 'pane-gone\t-\t-\t%s\n' "$3" >> "$FOCUS_AUDIT_LOG"
+    fi
+    break
+  done
+fi
 if [ -n "$mutation" ]; then
   after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "$mutation_target" >> "$FOCUS_AUDIT_LOG"
@@ -210,9 +224,6 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
-fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under
 # test. Serialize its calls so simultaneous recovery spawns cannot race for
 # one pool slot before reaching the Herdr session lock exercised below.
@@ -582,6 +593,10 @@ OFF_HERDR_CALLS=$(sed -n "$((OFF_HERDR_START + 1)),${OFF_HERDR_END}p" "$HERDR_CA
 if printf '%s\n' "$OFF_HERDR_CALLS" | grep -E $'^(api\tschema|session\tlist)' >/dev/null 2>&1; then
   fail "opted-out spawn added presentation-ordering capability or socket calls"
 fi
+printf '%s\n' "$OFF_HERDR_CALLS" | awk -F '\t' -v wt="$OFF_WT" '
+  $1 == "tab" && $2 == "create" { for (i = 3; i < NF; i++) if ($i == "--cwd" && $(i + 1) == wt) found = 1 }
+  END { exit !found }
+' || fail "opted-out spawn did not open its task tab in its leased worktree $OFF_WT"
 pass "real Herdr lab: an opted-out spawn retains the Stage 1 Herdr command sequence with zero ordering calls"
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/off-teardown.out" 2> "$TMP_ROOT/off-teardown.err" \
   || fail "opted-out teardown failed: $(cat "$TMP_ROOT/off-teardown.err")"
@@ -863,6 +878,7 @@ pass "real Herdr lab: forced workspace.move failure leaves a successful worker i
 
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
 ABORT_START=$(log_line_count)
+ABORT_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')
 ABORT_FOCUS_START=$(focus_audit_line_count)
 spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
 ABORT_A_PID=$!
@@ -872,20 +888,19 @@ if wait "$ABORT_A_PID"; then ABORT_A_STATUS=0; else ABORT_A_STATUS=$?; fi
 if wait "$ABORT_B_PID"; then ABORT_B_STATUS=0; else ABORT_B_STATUS=$?; fi
 finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
 finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
-# The forced foreground_cwd is a plain non-git directory, which the discovery
-# poll now screens out on every read rather than adopting, so the armed failure
-# arrives as the poll's own deadline refusal naming that path.
-grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
+# The forced foreground_cwd is a plain non-git directory, so the pre-launch
+# check that the pane sits in its leased worktree refuses, naming that path.
+grep -F "not-a-worktree', not its recorded worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture A did not reach the armed validation failure"
-grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
+grep -F "not-a-worktree', not its recorded worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture B did not reach the armed validation failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  ($1 == "pane-close" || $1 == "pane-gone") && $4 == a && !closed[a]++ { print "close-a" }
+  ($1 == "pane-close" || $1 == "pane-gone") && $4 == b && !closed[b]++ { print "close-b" }
 ')
 case "$ABORT_SEQUENCE" in
   $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
@@ -907,6 +922,12 @@ for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
 done
 [ ! -e "$HOME_DIR/state/abort-a.meta" ] && [ ! -e "$HOME_DIR/state/abort-b.meta" ] \
   || fail "post-create abort fixtures published task metadata before launch"
+# Each abort leased its slot before opening its pane, so once the cleanup above
+# confirmed the pane closed, every lease it took must have been handed back.
+ABORT_LEASES=$(sed -n "$((ABORT_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" | awk -F '\t' '$1 == "get" && $2 == "--lease" { n += 1 } END { print n + 0 }')
+ABORT_RETURNS=$(sed -n "$((ABORT_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" | awk -F '\t' '$1 == "return" && $2 == "--force" { n += 1 } END { print n + 0 }')
+[ "$ABORT_LEASES" -ge 2 ] && [ "$ABORT_RETURNS" = "$ABORT_LEASES" ] \
+  || fail "post-create abort cleanup kept leased slots (leases=$ABORT_LEASES returns=$ABORT_RETURNS)"
 rm -rf "$POST_CREATE_ABORT_CONTROL"
 rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
 pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
@@ -1226,8 +1247,12 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   # shell remains useful as the durable layout anchor, but its task record no
   # longer represents a live slot owner and must not poison later slot reuse.
   rm -f "$ANCHOR_META"
-  lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
+  RESTORED_CWD=$(lab pane get "$OLD_RESTART_PANE" 2>/dev/null | jq -r '.result.pane.cwd // empty') \
     || fail "$RESTART_ID restart did not preserve the projected pane structurally"
+  # Herdr restores a pane, and resumes its agent, in the pane's saved cwd, so
+  # that must be the task's own worktree, never the spawning project.
+  [ -n "$RESTORED_CWD" ] && [ "$(cd "$RESTORED_CWD" && pwd -P)" = "$(cd "$OLD_RESTART_WT" && pwd -P)" ] \
+    || fail "$RESTART_ID restart restored its pane in '$RESTORED_CWD', not its worktree '$OLD_RESTART_WT'"
   if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
     fail "$RESTART_ID restart fixture unexpectedly retained a registered agent"
   fi
