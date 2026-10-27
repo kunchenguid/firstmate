@@ -525,6 +525,8 @@ A process-event source takes these steps:
 - It does not carry blank separators.
 
 The listener holds its claim across an empty wait and across a delta it re-arms, so a line appended during either is collected without waiting for the next supervision cycle.
+After a failed transport leg, including SSH exit 255, or remote output that is not a delta result, the listener also relistens under the same claim.
+It does not move the cursor, mirror those bytes, or count the leg as proof of channel freshness.
 The [`fm-remote-delta-read.sh` header](../bin/fm-remote-delta-read.sh) owns snapshot sampling and its line-visibility and wait-window latency contract.
 It stops when that registration is retired, the registered command changes, or the home's owner lease lapses.
 `bin/fm-procevent.sh` owns the generic relisten rule, and `bin/fm-procevent-remote-reply.sh` owns this adapter's answer.
