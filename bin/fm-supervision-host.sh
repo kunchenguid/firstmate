@@ -530,6 +530,9 @@ turn_crosses_boundary() {
   [ $((PARK_ELAPSED + TURN_TIMEOUT + ENGINE_GRACE)) -ge "$PARK_LIMIT" ]
 }
 
+# Record the stop, then signal the arms: an arm whose watcher dies before the
+# arm is signalled starts a replacement watcher, so `fm-watch-arm.sh --stop`
+# cannot run first.
 record_planned_watcher_stop() {
   local lock_pid
   lock_pid=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
