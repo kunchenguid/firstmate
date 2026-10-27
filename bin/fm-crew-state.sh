@@ -991,7 +991,7 @@ nm_run_head_matches_worktree() {
 # bin/fm-nm-run-lib.sh.
 nm_run_parked_on_task_pr() {
   fm_nm_run_is_parked "$RUN_OUT" || return 1
-  [ "$(status_line_verb "$(last_status_line "$LOG")")" = done ] \
+  [ "$(status_line_verb "$(last_status_line "$LOG")")" = "done" ] \
     || status_is_paused "$(status_declared_wait_line "$LOG")" || return 1
   fm_nm_run_manages_task_pr "$RUN_OUT" "$(meta_value pr)"
 }
