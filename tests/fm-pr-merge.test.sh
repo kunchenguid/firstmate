@@ -484,6 +484,14 @@ case "$endpoint" in
       printf '{"default_merge_style":"merge"}\n'
     fi
     ;;
+  */branch_protections)
+    [ ! -e "$log_dir/tea-protections-fails" ] || exit 1
+    if [ -e "$log_dir/tea-protections.json" ]; then
+      cat "$log_dir/tea-protections.json"
+    else
+      printf '[]\n'
+    fi
+    ;;
   */merge)
     if [ -e "$log_dir/tea-merge-fails" ]; then
       printf '{"message":"merge failed"}\n'
@@ -522,9 +530,11 @@ SH
 # write_forgejo_pr_json <file> [<field>=<value> ...]
 # A pull request payload that satisfies every pre-merge condition by default,
 # with named fields overridden so one case drives exactly one condition.
+# base=null renders the field missing, which the required-check read reports
+# as an unprovable base branch rather than a bare base ref.
 write_forgejo_pr_json() {
   local file=$1 kv key value
-  local state=open mergeable=true merged=false draft=false head=$FJ_HEAD
+  local state=open mergeable=true merged=false draft=false head=$FJ_HEAD base=main
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -535,11 +545,17 @@ write_forgejo_pr_json() {
       merged) merged=$value ;;
       draft) draft=$value ;;
       head) head=$value ;;
+      base) base=$value ;;
       *) fail "write_forgejo_pr_json: unknown field '$key'" ;;
     esac
   done
-  printf '{"state":"%s","mergeable":%s,"merged":%s,"draft":%s,"head":{"sha":"%s"}}\n' \
-    "$state" "$mergeable" "$merged" "$draft" "$head" > "$file"
+  if [ "$base" = null ]; then
+    printf '{"state":"%s","mergeable":%s,"merged":%s,"draft":%s,"head":{"sha":"%s"},"base":null}\n' \
+      "$state" "$mergeable" "$merged" "$draft" "$head" > "$file"
+  else
+    printf '{"state":"%s","mergeable":%s,"merged":%s,"draft":%s,"head":{"sha":"%s"},"base":{"ref":"%s"}}\n' \
+      "$state" "$mergeable" "$merged" "$draft" "$head" "$base" > "$file"
+  fi
 }
 
 # write_forgejo_status_json <file> [state=<value>] [total_count=<n>]
@@ -2307,7 +2323,6 @@ test_forgejo_each_condition_refuses_independently() {
   local case_dir rc name expected spec
   set -- \
     "state|state=closed|state is \"closed\", not open" \
-    "mergeable|mergeable=false|mergeable is \"false\", not true" \
     "draft|draft=true|the pull request is a draft"
   for spec in "$@"; do
     name=${spec%%|*}
@@ -2334,6 +2349,145 @@ test_forgejo_each_condition_refuses_independently() {
       "forgejo-refuse-$name: a refusal should still leave the merge poll armed"
   done
   pass "fm-pr-merge refuses on each Forgejo pre-merge condition independently"
+}
+
+# The pull request's mergeable field is documented unreliable upstream
+# (go-gitea/gitea#25849): it is computed lazily and reads stale or absent on
+# an open pull request the forge would merge, so it is not a pre-merge
+# condition. The merge POST's own head_commit_id binding is the check the
+# server enforces, and a refused merge is caught by the confirm read-back.
+test_forgejo_mergeable_field_is_not_a_gate() {
+  local case_dir rc merge_line
+  case_dir=$(make_forgejo_case forgejo-mergeable-false mergeable=false)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-mergeable-false: a stale mergeable reading should not refuse: $(cat "$case_dir/stderr")"
+  merge_line=$(tea_merge_line "$case_dir/tea.log")
+  case "$merge_line" in
+    *"pulls/9/merge -f Do=merge -f head_commit_id=$FJ_HEAD"*) : ;;
+    *) fail "forgejo-mergeable-false: the merge was not attempted against the unreliable field: '$merge_line'" ;;
+  esac
+  [ -e "$case_dir/tea-merged" ] || fail "forgejo-mergeable-false: the merge did not land"
+
+  # The field may be absent from the record entirely on instances that never
+  # computed it; that reading merges the same way.
+  case_dir=$(make_forgejo_case forgejo-mergeable-absent)
+  printf '{"state":"open","draft":false,"head":{"sha":"%s"},"base":{"ref":"main"}}\n' \
+    "$FJ_HEAD" > "$case_dir/pr.json"
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forgejo-mergeable-absent: a record with no mergeable field refused: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/tea-merged" ] || fail "forgejo-mergeable-absent: the merge did not land"
+  pass "fm-pr-merge does not gate a Forgejo merge on the unreliable mergeable field"
+}
+
+# A branch protection whose rule_name matches the pull request's base branch
+# and whose enable_status_check is set names contexts that must read success
+# at the verified head. A missing or failing required context refuses and is
+# named, a protection that does not match the base adds nothing, and an
+# unreadable protection list or base branch refuses rather than skipping the
+# proof.
+test_forgejo_required_status_contexts() {
+  local case_dir rc
+
+  # A matching protection requiring a context that never reported refuses.
+  case_dir=$(make_forgejo_case forgejo-required-missing)
+  printf '[{"rule_name":"main","enable_status_check":true,"status_check_contexts":["ci/required","ci/never-reports"]}]\n' \
+    > "$case_dir/tea-protections.json"
+  printf '{"state":"success","total_count":1,"statuses":[{"context":"ci/required","status":"success"}]}\n' \
+    > "$case_dir/tea-status.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-required-missing: a missing required context should refuse"
+  assert_grep 'the required check "ci/never-reports" reads "missing"' "$case_dir/stderr" \
+    "forgejo-required-missing: refusal did not name the missing required context"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-required-missing: a merge was attempted with a required context missing"
+
+  # A matching protection whose required context reported failure refuses.
+  case_dir=$(make_forgejo_case forgejo-required-red)
+  printf '[{"rule_name":"main","enable_status_check":true,"status_check_contexts":["ci/required"]}]\n' \
+    > "$case_dir/tea-protections.json"
+  printf '{"state":"failure","total_count":1,"statuses":[{"context":"ci/required","status":"failure"}]}\n' \
+    > "$case_dir/tea-status.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-required-red: a failing required context should refuse"
+  assert_grep 'the required check "ci/required" reads "failure"' "$case_dir/stderr" \
+    "forgejo-required-red: refusal did not name the failing required context"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-required-red: a merge was attempted with a required context red"
+
+  # Every required context green at the head merges, and a wildcard rule and
+  # a glob rule match their branches alike.
+  case_dir=$(make_forgejo_case forgejo-required-green)
+  printf '[{"rule_name":"*","enable_status_check":true,"status_check_contexts":["ci/required"]}]\n' \
+    > "$case_dir/tea-protections.json"
+  printf '{"state":"success","total_count":2,"statuses":[{"context":"ci/required","status":"success"},{"context":"ci/other","status":"success"}]}\n' \
+    > "$case_dir/tea-status.json"
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forgejo-required-green: green required contexts should merge: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/tea-merged" ] || fail "forgejo-required-green: the merge did not land"
+
+  # A protection that does not match the base branch adds no requirements.
+  case_dir=$(make_forgejo_case forgejo-required-other-branch)
+  printf '[{"rule_name":"release/*","enable_status_check":true,"status_check_contexts":["ci/required"]}]\n' \
+    > "$case_dir/tea-protections.json"
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forgejo-required-other-branch: a non-matching protection should not gate: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/tea-merged" ] || fail "forgejo-required-other-branch: the merge did not land"
+
+  # A matching protection without enable_status_check adds no requirements.
+  case_dir=$(make_forgejo_case forgejo-protection-no-status-check)
+  printf '[{"rule_name":"main","enable_status_check":false,"status_check_contexts":["ci/required"]}]\n' \
+    > "$case_dir/tea-protections.json"
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forgejo-protection-no-status-check: a disabled status check should not gate: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/tea-merged" ] || fail "forgejo-protection-no-status-check: the merge did not land"
+
+  # An unreadable protection list cannot prove what is required, so it
+  # refuses rather than skipping the check.
+  case_dir=$(make_forgejo_case forgejo-protections-unreadable)
+  : > "$case_dir/tea-protections-fails"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-protections-unreadable: an unreadable protection list should refuse"
+  assert_grep 'the branch protection list could not be read' "$case_dir/stderr" \
+    "forgejo-protections-unreadable: refusal did not name the unreadable protection list"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-protections-unreadable: a merge was attempted on an unproven required set"
+
+  # A pull request whose base branch cannot be read cannot prove its required
+  # set either.
+  case_dir=$(make_forgejo_case forgejo-base-unreadable base=null)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-base-unreadable: an unreadable base branch should refuse"
+  assert_grep 'the pull request'"'"'s base branch could not be read' "$case_dir/stderr" \
+    "forgejo-base-unreadable: refusal did not name the unreadable base branch"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-base-unreadable: a merge was attempted on an unproven required set"
+  pass "fm-pr-merge enforces a matching branch protection's required contexts and refuses an unproven set"
 }
 
 test_forgejo_unconfigured_ci_refuses_as_none() {
@@ -2980,6 +3134,8 @@ test_forgejo_url_resolves_and_merges
 test_forgejo_login_resolves_from_the_host
 test_forgejo_refuses_when_login_is_ambiguous
 test_forgejo_each_condition_refuses_independently
+test_forgejo_mergeable_field_is_not_a_gate
+test_forgejo_required_status_contexts
 test_forgejo_unconfigured_ci_refuses_as_none
 test_forgejo_combined_status_reads_every_page
 test_forgejo_stale_recorded_head_is_reported

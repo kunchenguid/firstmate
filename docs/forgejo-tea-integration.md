@@ -98,13 +98,17 @@ $ tea login list --output json
 ]
 ```
 
-Every Forgejo read parses this list as JSON with `jq`, matches the validated PR host against each login's bare hostname (stripping scheme, userinfo, port, and path), and refuses when zero or more than one login matches, rather than guessing.
+Every Forgejo read parses this list as JSON with `jq`, matches the validated PR host against each login's url, and refuses when zero or more than one login matches, rather than guessing.
+A PR host that carries a port matches only a login whose url has the same whole authority, because tea connects to the login's own url and the same name on another port is a different service; a bare PR host matches any login whose url's host it is, port stripped, which is the match this filter always made.
 It never splits the output line by line, because a login printed as one compact object would then read its name where the url belongs.
 `fm_pr_forgejo_login` in `bin/fm-pr-lib.sh` owns that match for every sourcing script; `bin/fm-pr-poll.sh` is a static, standalone watcher body with no sourced dependency, so it keeps its own copy and re-derives the match on every poll instead of trusting a name recorded anywhere durable.
 
 ## URL shape
 
-Forgejo (and Gitea) serve pull requests at `https://<host>/<owner>/<repo>/pulls/<number>` - plural "pulls", no `/-/` route separator, confirmed by the fixture's own PR-creation output:
+Forgejo (and Gitea) serve pull requests at `https://<host>[:<port>]/<owner>/<repo>/pulls/<number>` - plural "pulls", no `/-/` route separator, confirmed by the fixture's own PR-creation output.
+The port is optional and part of the recorded host identity: a self-hosted instance does not always sit on the default https port (Gitea's own default is 3000, and one production Gitea this tooling serves listens on 7990), so the parser accepts one explicit port, validated as a nonzero-leading-digit value that fits a TCP port.
+The GitHub, GitLab, and Gerrit URL shapes keep refusing ports.
+Confirmed live against a real Gitea instance on 2026-10-27: a `host:7990` pull request URL parses, arms, and reads back through the login registered for that exact authority.
 
 ```
 $ tea pulls create --login fm-fixture --repo fixture/fixture-repo --head merged-branch --base main --title "..."
@@ -138,7 +142,8 @@ $ state/task-f1.check.sh
 merged
 ```
 
-The `localhost:3980` login's actual port never appears in the canonical PR URL or the poll's host comparison - login matching only ever compares bare hostnames - so this reproduces correctly for an instance reachable on the standard port with no explicit port in its URL, which is the realistic self-hosted shape.
+The `localhost:3980` login's actual port never appears in the canonical PR URL or the poll's host comparison - a bare recorded host keeps the port-insensitive login match - so this reproduces correctly for an instance reachable on the standard port with no explicit port in its URL, which is the realistic self-hosted shape.
+When the instance only answers on a named port, the port is part of the canonical URL itself (see "URL shape" above), the recorded host is the whole `host:port` authority, and the login match then requires that exact authority.
 
 ## A missing tea produces no wake, never a false merge
 
@@ -176,7 +181,11 @@ This was the single most consequential finding of this verification pass: a naiv
 
 ## Pre-merge conditions
 
-Read live from `tea api ... /repos/{owner}/{repo}/pulls/{n}` (`state`, `mergeable`, `draft`, `head.sha`) and `tea api ... /repos/{owner}/{repo}/commits/{sha}/status?limit=50&page={p}` (the combined commit status).
+Read live from `tea api ... /repos/{owner}/{repo}/pulls/{n}` (`state`, `draft`, `head.sha`, `base.ref`), `tea api ... /repos/{owner}/{repo}/commits/{sha}/status?limit=50&page={p}` (the combined commit status, and each page's per-context statuses), and `tea api ... /repos/{owner}/{repo}/branch_protections` (the branch protection list).
+The pull request's `mergeable` field is deliberately not a condition: it is documented unreliable upstream (go-gitea/gitea#25849), computed lazily and read stale or absent, so the merge POST's `head_commit_id` binding is the mergeability check the server enforces, with a rejected merge caught by the confirm read-back.
+There is no Gitea analogue for GitHub's mergeable-recompute wait, so none is polled.
+A branch protection whose `rule_name` glob-matches the pull request's `base.ref` and whose `enable_status_check` is set names `status_check_contexts` that must read `success` at the verified head; an unreadable protection list or base branch refuses rather than skipping that proof.
+A real read on 2026-10-27 confirmed `/repos/{owner}/{repo}/branch_protections` answers an array carrying `rule_name`, `enable_status_check`, and `status_check_contexts` on a live Gitea.
 The combined-status endpoint computes its `state` from one page of the latest status per context, so every page is read until an empty one and the head is green only when each non-empty page reads `success`.
 A positive `draft` reading refuses; an instance too old to report the field still refuses a work-in-progress merge server side.
 `tea api` passes a query string through unchanged, because it builds the request URL by plain concatenation onto the login's `/api/v1` base.

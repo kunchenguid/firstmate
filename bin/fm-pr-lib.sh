@@ -99,6 +99,9 @@ FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_RECORD_STATE=
 FM_PR_RECORD_MERGED=
+FM_PR_RECORD_HEAD=
+FM_PR_RECORD_DRAFT=
+FM_PR_RECORD_MERGE_COMMIT_SHA=
 FM_PR_POLL_RETIREMENT_REJECTED=
 
 fm_task_id_path_safe() {
@@ -123,7 +126,10 @@ fm_task_id_creation_valid() {
 # GitLab, Gerrit, and Forgejo all serve self-hosted instances, so the host is part of the
 # identity rather than a constant. It is accepted only as a lowercase DNS name
 # with no userinfo, port, or trailing dot, which keeps one canonical spelling per
-# change. github.com is refused here even though its shape is otherwise valid:
+# change. Forgejo is the one provider whose pull request URL may carry an
+# explicit port, and fm_pr_url_parse splits and validates that port itself, so
+# this check still only ever sees a bare DNS name. github.com is refused here
+# even though its shape is otherwise valid:
 # it is GitHub's own host and never another forge's instance, so a URL like
 # https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
 # would otherwise be armed as a watch that can never succeed.
@@ -253,7 +259,7 @@ fm_pr_github_host_export() {  # <host>
 # FM_PR_PATH instead, so a change on any instance resolves without a hardcoded
 # host.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path port
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -317,23 +323,33 @@ fm_pr_url_parse() {
   fi
   # Forgejo/Gitea serve pulls at owner/repo/pulls/<n>: plural "pulls", no "/-/"
   # route separator and no "/+/" change separator, so this shape never collides
-  # with the GitLab or Gerrit patterns above.
-  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
+  # with the GitLab or Gerrit patterns above. A self-hosted instance does not
+  # always sit on the default https port (Gitea's own default is 3000), so this
+  # provider alone accepts an explicit port: the recorded host is the whole
+  # authority, host:port, and every consumer rebuilds the URL from it exactly.
+  # The port keeps one canonical spelling per pull request: a nonzero leading
+  # digit, at most five digits, and a value that fits a TCP port.
+  pattern='^https://([a-z0-9.-]{1,253})(:([1-9][0-9]{0,4}))?/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
+  port=${BASH_REMATCH[3]-}
   fm_pr_forge_host_valid "$host" || return 1
-  fm_pr_forgejo_segment_valid "${BASH_REMATCH[2]}" || return 1
-  fm_pr_forgejo_segment_valid "${BASH_REMATCH[3]}" || return 1
+  if [ -n "$port" ]; then
+    [ "$port" -le 65535 ] || return 1
+    host="$host:$port"
+  fi
+  fm_pr_forgejo_segment_valid "${BASH_REMATCH[4]}" || return 1
+  fm_pr_forgejo_segment_valid "${BASH_REMATCH[5]}" || return 1
   FM_PR_PROVIDER=forgejo
   FM_PR_URL=$raw
   FM_PR_HOST=$host
-  FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+  FM_PR_PATH="${BASH_REMATCH[4]}/${BASH_REMATCH[5]}"
   # Consumed by bin/fm-pr-merge.sh, which addresses Forgejo by owner/repository.
   # shellcheck disable=SC2034
-  FM_PR_OWNER=${BASH_REMATCH[2]}
+  FM_PR_OWNER=${BASH_REMATCH[4]}
   # shellcheck disable=SC2034
-  FM_PR_REPO=${BASH_REMATCH[3]}
-  FM_PR_NUMBER=${BASH_REMATCH[4]}
+  FM_PR_REPO=${BASH_REMATCH[5]}
+  FM_PR_NUMBER=${BASH_REMATCH[6]}
 }
 
 fm_pr_head_valid() {
@@ -1145,8 +1161,12 @@ FIELDS
 # than split on quotes per line, because tea's JSON is not guaranteed to put
 # each field on its own line: a login printed as one compact object would hand
 # a line-oriented split the name where it expects the url, and arming would
-# then refuse every host. A login matches when its url's host - scheme,
-# userinfo, port, and path stripped - is exactly <host>. bin/fm-pr-poll.sh keeps
+# then refuse every host. A <host> that carries a port matches only a login
+# url whose whole authority - host:port, scheme, userinfo, and path stripped -
+# is exactly it, because a login's own url is where tea actually connects and
+# the same name on a different port is a different service. A bare <host>
+# matches any login whose url's host it is, port stripped, keeping the
+# port-less spelling's earlier match unchanged. bin/fm-pr-poll.sh keeps
 # its own copy of this filter because the watcher body sources nothing.
 # shellcheck disable=SC2016 # $h is a jq variable bound by --arg, not a shell one.
 FM_PR_FORGEJO_LOGIN_JQ='
@@ -1154,11 +1174,13 @@ FM_PR_FORGEJO_LOGIN_JQ='
     [ .[]
       | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
                and (.url | type) == "string")
-      | select((.url
-                | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
-                | sub("[/?#].*$"; "")
-                | sub("^.*@"; "")
-                | sub(":[0-9]+$"; "")) == $h)
+      | (.url
+         | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+         | sub("[/?#].*$"; "")
+         | sub("^.*@"; "")) as $authority
+      | select(
+          if ($h | test(":")) then $authority == $h
+          else ($authority | sub(":[0-9]+$"; "")) == $h end)
       | .name ]
     | if length == 1 then .[0] else error("not exactly one matching login") end
   else
@@ -1174,13 +1196,20 @@ fm_pr_forgejo_login() {  # <host>
 # from the REST record through "tea api" so the credential never leaves tea.
 # "tea api" exits 0 on an HTTP error and prints the error body instead, so
 # only a record whose state, merged, and head.sha fields all have the expected
-# types is accepted; anything else returns 1 for an honest unknown.
+# types is accepted; anything else returns 1 for an honest unknown. The draft
+# flag and merge_commit_sha are reported when the record carries them and left
+# empty otherwise: draft is a boolean on current Forgejo and Gitea but absent
+# on instances too old to report it, and merge_commit_sha exists only on an
+# already-merged pull request, so neither is required for the record to count.
 fm_pr_forgejo_read_record() {  # <host> <path> <number>
   local host=$1 path=$2 number=$3 login json fields line
-  local total=0 named=0 state='' merged='' head=''
+  local state='' merged='' head='' draft='' merge_commit_sha=''
+  local state_seen=0 merged_seen=0 head_seen=0 draft_seen=0 merge_sha_seen=0
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
   FM_PR_RECORD_HEAD=
+  FM_PR_RECORD_DRAFT=
+  FM_PR_RECORD_MERGE_COMMIT_SHA=
   command -v jq >/dev/null 2>&1 || return 1
   case "$number" in
     ''|*[!0-9]*) return 1 ;;
@@ -1197,26 +1226,32 @@ fm_pr_forgejo_read_record() {  # <host> <path> <number>
       then
         "state=" + .state,
         "merged=" + (.merged | tostring),
-        "head=" + .head.sha
+        "head=" + .head.sha,
+        (if (.draft | type) == "boolean" then "draft=" + (.draft | tostring) else empty end),
+        (if (.merge_commit_sha | type) == "string" and (.merge_commit_sha | length) > 0
+         then "merge_commit_sha=" + .merge_commit_sha else empty end)
       else
         error("invalid pull request record")
       end' 2>/dev/null); then
     return 1
   fi
   while IFS= read -r line; do
-    total=$((total + 1))
     case "$line" in
-      state=*) state=${line#state=} ;;
-      merged=*) merged=${line#merged=} ;;
-      head=*) head=${line#head=} ;;
-      *) continue ;;
+      state=*) state=${line#state=}; state_seen=$((state_seen + 1)) ;;
+      merged=*) merged=${line#merged=}; merged_seen=$((merged_seen + 1)) ;;
+      head=*) head=${line#head=}; head_seen=$((head_seen + 1)) ;;
+      draft=*) draft=${line#draft=}; draft_seen=$((draft_seen + 1)) ;;
+      merge_commit_sha=*) merge_commit_sha=${line#merge_commit_sha=}
+        merge_sha_seen=$((merge_sha_seen + 1)) ;;
+      *) return 1 ;;
     esac
-    named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 3 ] || [ "$total" -ne 3 ] || [ -z "$state" ] \
-    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
+  if [ "$state_seen" -ne 1 ] || [ "$merged_seen" -ne 1 ] || [ "$head_seen" -ne 1 ] \
+    || [ "$draft_seen" -gt 1 ] || [ "$merge_sha_seen" -gt 1 ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; } \
+    || { [ -n "$draft" ] && [ "$draft" != true ] && [ "$draft" != false ]; }; then
     return 1
   fi
 
@@ -1226,9 +1261,16 @@ FIELDS
   # Consumed by bin/fm-crew-state.sh passed_pr_detail and bin/fm-teardown.sh.
   # shellcheck disable=SC2034
   FM_PR_RECORD_MERGED=$merged
-  # Consumed by bin/fm-teardown.sh pr_is_merged.
+  # Consumed by bin/fm-teardown.sh pr_is_merged and bin/fm-pr-check.sh's
+  # pr_head recording.
   # shellcheck disable=SC2034
   FM_PR_RECORD_HEAD=$head
+  # Consumed by bin/fm-pr-check.sh's draft refusal.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_DRAFT=$draft
+  # Consumed by readers of the landed commit an already-merged record names.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGE_COMMIT_SHA=$merge_commit_sha
 }
 
 # gerrit-axi resolves its server from the current directory's origin remote

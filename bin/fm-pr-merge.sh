@@ -111,11 +111,19 @@
 # absent stops the merge before any state is recorded.
 #
 # A Forgejo merge is refused unless every pre-merge condition holds, each read
-# live at merge time: the pull request is open, not a draft, mergeable is
-# true, and the combined commit status at the exact current head, read across
-# every status page, is success (an unconfigured status, reported as "none",
+# live at merge time: the pull request is open, not a draft, the combined
+# commit status at the exact current head, read across every status page, is
+# success (an unconfigured status, reported as "none",
 # refuses rather than being treated as nothing to check, the same reading
-# GitLab's null head_pipeline gets above). Every
+# GitLab's null head_pipeline gets above), and every context a matching branch
+# protection's enable_status_check/status_check_contexts requires has reported
+# success at that head, with the protection list itself refusing when it or the
+# base branch cannot be read. The pull request's mergeable field is not one of
+# the conditions: it is documented unreliable upstream (go-gitea/gitea#25849),
+# so the merge POST's own head_commit_id binding is the mergeability check the
+# server enforces rather than a pre-read that can read stale. There is no
+# Gitea analogue for GitHub's mergeable-recompute wait to poll: a merge the
+# server will not take is caught by the confirm read-back instead. Every
 # failing condition is reported, not just the first. tea exposes no head-
 # binding flag on its own merge subcommand, so the verified head is instead
 # passed as head_commit_id to a direct call against Forgejo/Gitea's REST API
@@ -686,9 +694,13 @@ FIELDS
 # GitHub and GitLab this never sets an async/queued signal: every accepted
 # Forgejo merge here is immediate. Shares FM_PR_MERGE_HEAD, declared above.
 forgejo_verify_mergeable() {
-  local pr_json status_json fields line
+  local pr_json status_json fields line bp_json bp_fields cur_rule
   local total=0 named=0 refusals=''
-  local state='' mergeable='' draft='' live_head='' ci_state='' page_state='' page_count='' page=1
+  local state='' draft='' live_head='' base_ref='' ci_state='' page_state='' page_count='' page=1
+  local ctx_line ctx_name req_ctx required_status
+  local -a required_contexts=()
+  local -A ctx_status=()
+  local -A required_seen=()
 
   if ! pr_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
       "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$pr_json" ]; then
@@ -698,9 +710,9 @@ forgejo_verify_mergeable() {
   if ! fields=$(printf '%s' "$pr_json" | jq -r '
       if type == "object" then
         "state=" + ((.state // "") | tostring),
-        "mergeable=" + (.mergeable | tostring),
         "draft=" + (.draft | tostring),
-        "head=" + ((.head.sha // "") | tostring)
+        "head=" + ((.head.sha // "") | tostring),
+        "base=" + ((.base.ref // "") | tostring)
       else
         error("pull request payload is not an object")
       end' 2>/dev/null); then
@@ -711,9 +723,9 @@ forgejo_verify_mergeable() {
     total=$((total + 1))
     case "$line" in
       state=*) state=${line#state=} ;;
-      mergeable=*) mergeable=${line#mergeable=} ;;
       draft=*) draft=${line#draft=} ;;
       head=*) live_head=${line#head=} ;;
+      base=*) base_ref=${line#base=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
@@ -734,13 +746,23 @@ FIELDS
       "$RECORDED_HEAD" "$live_head" >&2
   fi
 
+  # The pull request's mergeable field is deliberately not a condition: it is
+  # documented unreliable upstream (go-gitea/gitea#25849), computed lazily and
+  # reported stale or absent on readings that carry nothing to compute it from,
+  # so a gate on it would refuse pull requests the forge would merge. The merge
+  # POST below carries head_commit_id and is itself the mergeability check the
+  # server enforces, and a rejected one is caught by the confirm read-back.
+  #
   # An absent combined status (no statuses on any page, as a repo with no
   # configured Actions reports) is a real "none" here rather than nothing to
   # check, the same reading GitLab's null head_pipeline gets above. The
   # endpoint computes its combined state from one page of the latest status
   # per context, so every page is read until an empty one and the head is
   # green only when each non-empty page is; the first page that is not
-  # success, or that cannot be read, decides the refusal.
+  # success, or that cannot be read, decides the refusal. The same pages name
+  # each context's status for the required-check read below; the first
+  # sighting of a context wins, matching the endpoint's latest-per-context
+  # state.
   ci_state=none
   while :; do
     if ! status_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
@@ -748,7 +770,9 @@ FIELDS
       || ! fields=$(printf '%s' "$status_json" | jq -r '
           if type == "object" and ((.statuses // []) | type) == "array" then
             "count=" + ((.statuses // []) | length | tostring),
-            "state=" + ((.state // "") | tostring)
+            "state=" + ((.state // "") | tostring),
+            ((.statuses // [])[] | select(type == "object")
+              | "ctx=" + ((.status // "") | tostring) + ":" + ((.context // "") | tostring))
           else
             error("status payload is not a combined status")
           end' 2>/dev/null); then
@@ -760,6 +784,11 @@ FIELDS
       case "$line" in
         count=*) page_count=${line#count=} ;;
         state=*) page_state=${line#state=} ;;
+        ctx=*)
+          ctx_line=${line#ctx=}
+          ctx_name=${ctx_line#*:}
+          [ -n "${ctx_status[$ctx_name]+set}" ] || ctx_status[$ctx_name]=${ctx_line%%:*}
+          ;;
       esac
     done <<FIELDS
 $fields
@@ -779,11 +808,54 @@ FIELDS
     fi
   done
 
+  # Gitea/Forgejo branch protection carries enable_status_check with a
+  # status_check_contexts list: the contexts a pull request's base branch
+  # requires before a merge. A protection applies to the pull request when its
+  # rule_name glob-matches the base branch (the '*' pattern covers every
+  # branch, 'release/*' covers that namespace, and a plain name is an exact
+  # rule). The list is read live and refused when unreadable: a protection the
+  # read cannot see cannot be proven absent, so an unknown required set is a
+  # failed condition rather than a skipped one, matching the GitHub required-
+  # context read's posture.
+  if [ -z "$base_ref" ]; then
+    refusals="$refusals  - the pull request's base branch could not be read, so required status checks cannot be proven
+"
+  elif bp_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+      "/repos/{owner}/{repo}/branch_protections" 2>/dev/null) \
+    && bp_fields=$(printf '%s' "$bp_json" | jq -r '
+        if type == "array" then
+          .[]
+          | select(type == "object" and .enable_status_check == true
+                   and (.rule_name | type) == "string")
+          | "rule=" + .rule_name,
+            ((.status_check_contexts // [])[] | select(type == "string") | "ctx=" + .)
+        else
+          error("branch protections are not a list")
+        end' 2>/dev/null); then
+    cur_rule=
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        rule=*) cur_rule=${line#rule=} ;;
+        ctx=*)
+          # An unquoted rule name is matched as a glob, which covers the
+          # plain-name exact rule and the '*' and 'release/*' patterns alike.
+          # shellcheck disable=SC2254 # The protection's rule_name is a glob by design.
+          case "$base_ref" in
+            $cur_rule) required_contexts+=("${line#ctx=}") ;;
+          esac
+          ;;
+      esac
+    done <<BP
+$bp_fields
+BP
+  else
+    refusals="$refusals  - the branch protection list could not be read, so required status checks cannot be proven
+"
+  fi
+
   [ "$state" = open ] \
     || refusals="$refusals  - state is \"${state:-unreadable}\", not open
-"
-  [ "$mergeable" = true ] \
-    || refusals="$refusals  - mergeable is \"${mergeable:-unreadable}\", not true
 "
   # Only a positive draft reading refuses: an instance too old to report the
   # field still refuses a work-in-progress merge server side.
@@ -793,13 +865,21 @@ FIELDS
   [ "$ci_state" = success ] \
     || refusals="$refusals  - the combined commit status is \"$ci_state\", not success
 "
+  for req_ctx in ${required_contexts[@]+"${required_contexts[@]}"}; do
+    [ -z "${required_seen[$req_ctx]+set}" ] || continue
+    required_seen[$req_ctx]=1
+    required_status=${ctx_status[$req_ctx]-}
+    [ "$required_status" = success ] \
+      || refusals="$refusals  - the required check \"$req_ctx\" reads \"${required_status:-missing}\" at the merge head, not success
+"
+  done
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with a successful combined status at head %s\n' \
+  printf 'verified: %s is open, with a successful combined status at head %s\n' \
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
 }

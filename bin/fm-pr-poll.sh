@@ -180,6 +180,20 @@ case "$provider" in
     [ "$status" = MERGED ] && printf '%s\n' merged
     ;;
   forgejo)
+    # A Forgejo/Gitea instance may sit on a non-default port, which bin/fm-pr-lib.sh
+    # records inside the host as host:port, so the recorded authority is split
+    # for validation and kept whole for the URL reconstruction and login match.
+    # The port rule is the parser's: a nonzero leading digit, at most five
+    # digits, and a value that fits a TCP port.
+    authority=$host
+    host=${authority%:*}
+    if [ "$authority" != "$host" ]; then
+      port=${authority##*:}
+      case "$port" in
+        ''|*[!0-9]*|0*) exit 0 ;;
+      esac
+      [ "$port" -le 65535 ] || exit 0
+    fi
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
     [ "$host" != github.com ] || exit 0
     case "$host" in
@@ -197,28 +211,34 @@ case "$provider" in
         .|..|*.git|*[!A-Za-z0-9._-]*) exit 0 ;;
       esac
     done
-    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
+    [ "$url" = "https://$authority/$owner/$repo/pulls/$number" ] || exit 0
     command -v tea >/dev/null 2>&1 || exit 0
     command -v jq >/dev/null 2>&1 || exit 0
     # tea addresses a repo by slug only; the host comes from a named login
     # rather than a URL the way gh and glab take one, so the login registered
     # for this exact host is resolved fresh on every poll rather than trusted
     # from anywhere durable. Refuse to guess when zero or more than one
-    # registered login matches, rather than picking one arbitrarily.
+    # registered login matches, rather than picking one arbitrarily. An
+    # authority carrying a port matches only a login url whose whole authority
+    # is exactly it - tea connects to the login's own url, and the same name
+    # on another port is a different service - while a bare host keeps its
+    # port-insensitive match.
     # The list is parsed as JSON, never split on quotes per line, so a login
     # printed as one compact object still matches; this is the same filter
     # bin/fm-pr-lib.sh's fm_pr_forgejo_login applies.
     login=$(
-      tea login list --output json 2>/dev/null | jq -er --arg h "$host" '
+      tea login list --output json 2>/dev/null | jq -er --arg h "$authority" '
         if type == "array" then
           [ .[]
             | select(type == "object" and (.name | type) == "string" and (.name | length) > 0
                      and (.url | type) == "string")
-            | select((.url
-                      | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
-                      | sub("[/?#].*$"; "")
-                      | sub("^.*@"; "")
-                      | sub(":[0-9]+$"; "")) == $h)
+            | (.url
+               | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
+               | sub("[/?#].*$"; "")
+               | sub("^.*@"; "")) as $authority
+            | select(
+                if ($h | test(":")) then $authority == $h
+                else ($authority | sub(":[0-9]+$"; "")) == $h end)
             | .name ]
           | if length == 1 then .[0] else error("not exactly one matching login") end
         else

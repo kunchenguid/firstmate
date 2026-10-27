@@ -6,11 +6,13 @@
 # head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
-# are all accepted, including a merge request or change on a self-hosted
-# instance and a GitHub Enterprise pull request on a host this home names in
+# A GitHub pull request URL, a GitLab merge request URL, a Gerrit change URL,
+# and a Forgejo/Gitea pull request URL are all accepted, including a merge
+# request, pull request, or change on a self-hosted instance - on any port for
+# Forgejo - and a GitHub Enterprise pull request on a host this home names in
 # config/github-hosts.
-# A GitHub pull request the forge reports as a draft is refused, naming the draft
+# A GitHub or Forgejo pull request the forge reports as a draft is refused,
+# naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
 # Mark the pull request ready for review, then arm again; a lane that keeps a
@@ -128,6 +130,22 @@ if [ "$PROVIDER" = forgejo ]; then
   }
 fi
 
+# The one live Forgejo pull-request read this entrypoint makes: its draft flag
+# drives the same refusal the GitHub read below applies, and its head.sha is
+# recorded as pr_head= further down the way a GitHub headRefOid is. An
+# unreadable record refuses neither, matching the GitHub draft read's
+# tolerance, and bin/fm-pr-merge.sh's merge-time reads stay authoritative.
+FM_PR_FORGEJO_READ=0
+if [ "$PROVIDER" = forgejo ] \
+  && fm_pr_forgejo_read_record "$HOST" "$PROJECT_PATH" "$NUMBER"; then
+  FM_PR_FORGEJO_READ=1
+fi
+if [ "$PROVIDER" = forgejo ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] \
+  && [ "$FM_PR_FORGEJO_READ" = 1 ] && [ "$FM_PR_RECORD_DRAFT" = true ]; then
+  echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
+  exit 1
+fi
+
 # The draft state is read before anything is recorded or armed. Only a positive
 # draft reading refuses, because an unreadable one must not block arming.
 if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -142,12 +160,12 @@ fi
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, and
-# tea's single-PR view ignores field selection entirely, so neither a GitLab
-# nor a Forgejo task records a pr_head here, and neither does a Gerrit task: a
-# Gerrit revision names one patch set, every amend or rebase is a new patch set,
+# output, which would need a JSON processor firstmate does not require, so no
+# GitLab task records a pr_head here, and neither does a Gerrit task: a Gerrit
+# revision names one patch set, every amend or rebase is a new patch set,
 # and bin/fm-review-diff.sh has no Gerrit path to resolve a current head with,
-# so a recorded revision would silently become the reviewed content. Both
+# so a recorded revision would silently become the reviewed content. A Forgejo
+# task reuses the record already read above rather than asking again. Both
 # consumers already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
@@ -163,6 +181,10 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
+fi
+if [ "$PROVIDER" = forgejo ] && [ "$FM_PR_FORGEJO_READ" = 1 ] \
+  && fm_pr_head_valid "$FM_PR_RECORD_HEAD"; then
+  PR_HEAD=$FM_PR_RECORD_HEAD
 fi
 
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)

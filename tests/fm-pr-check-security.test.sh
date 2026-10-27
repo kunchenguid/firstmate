@@ -535,14 +535,26 @@ EOF
   done <<'EOF'
 https://git.example.com/fixture/fixture-repo/pulls/1|git.example.com|fixture|fixture-repo|1
 https://code.internal/my-org/repo.name_with-parts/pulls/123456|code.internal|my-org|repo.name_with-parts|123456
+https://git.example.com:3000/fixture/fixture-repo/pulls/1|git.example.com:3000|fixture|fixture-repo|1
+https://code.internal:7990/my-org/repo/pulls/123456|code.internal:7990|my-org|repo|123456
 EOF
   # A Forgejo-shaped URL on github.com is refused (anti-spoofing, mirroring
   # fm_pr_forge_host_valid's refusal of github.com), and neither GitHub's
   # singular "pull" nor GitLab's "/-/merge_requests/" is accepted as forgejo.
+  # A port is part of the Forgejo authority and is validated strictly: zero,
+  # a leading zero, a non-number, more than 65535, and a dangling colon are
+  # all refused, and a port does not turn a github.com URL into a forge's.
   for row in \
     'https://github.com/fixture/fixture-repo/pulls/1' \
+    'https://github.com:7990/fixture/fixture-repo/pulls/1' \
     'https://git.example.com/fixture/fixture-repo/pull/1' \
-    'https://git.example.com/group/sub/project/pulls/1'
+    'https://git.example.com/group/sub/project/pulls/1' \
+    'https://git.example.com:0/fixture/fixture-repo/pulls/1' \
+    'https://git.example.com:03000/fixture/fixture-repo/pulls/1' \
+    'https://git.example.com:65536/fixture/fixture-repo/pulls/1' \
+    'https://git.example.com:abc/fixture/fixture-repo/pulls/1' \
+    'https://git.example.com:/fixture/fixture-repo/pulls/1' \
+    'https://git.example.com:3000/group/sub/project/pulls/1'
   do
     ! fm_pr_url_parse "$row" || fail "parser accepted a URL that must not resolve as forgejo: $row"
   done
@@ -2207,6 +2219,37 @@ SH
     || fail "the poll did not read the one pull request by number on the host's login"
   ! grep -qF -- "pulls list" "$dir/tea.log" \
     || fail "the poll scanned a pull request list instead of reading by number"
+
+  # A self-hosted instance on a non-default port carries host:port in the
+  # recorded identity. The poll re-validates and reconstructs the exact URL
+  # from it, and the login resolves only against a login whose own url's
+  # whole authority is that same host:port.
+  url=https://forgejo.example:7990/o/r/pulls/7
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  printf '[\n'
+  printf '  {\n    "name": "ported",\n    "url": "https://forgejo.example:7990"\n  }'
+  printf ',\n  {\n    "name": "plain",\n    "url": "https://forgejo.example"\n  }'
+  printf '\n]\n'
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+case "${FM_TEST_TEA_PULL:-open}" in
+  merged) printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n' ;;
+  *) printf '{"state":"open","merged":false,"head":{"sha":"abc"}}\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tea"
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a forgejo "$url" forgejo.example:7990 o/r 7 "$POLL" \
+    || fail "could not prepare a port-qualified Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a port-qualified Forgejo poll"
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged run_poll "$dir")
+  [ "$out" = merged ] || fail "a port-qualified Forgejo poll did not emit exactly one merged line"
+  grep -qF -- "api --login ported --repo o/r /repos/{owner}/{repo}/pulls/7" "$dir/tea.log" \
+    || fail "a port-qualified host did not resolve the login on the exact authority"
   pass "Forgejo poll reads one pull request by number through tea api and wakes only on merged true"
 }
 
@@ -2288,7 +2331,93 @@ SH
     || fail "the login helper picked one of two logins for the same host"
   out=$(FM_TEST_TEA_LOGINS="$dir/tea-ambiguous.json" FM_TEST_TEA_LOG="$dir/tea.log" run_poll "$dir")
   [ -z "$out" ] || fail "the static poll read through an ambiguous login"
+
+  # A port-qualified host matches only the login whose url carries the same
+  # whole authority: the same name on another port is a different service, so
+  # code.internal:7990 matches no login here and code.internal:3000 matches
+  # only the ported one, while a bare host keeps its port-insensitive match.
+  out=$(FM_TEST_TEA_LOGINS="$dir/tea-multiline.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal:3000) \
+    || fail "the login helper refused a host:port with an exact-authority login"
+  [ "$out" = fixture-two ] || fail "the login helper resolved '$out' for code.internal:3000"
+  ! FM_TEST_TEA_LOGINS="$dir/tea-multiline.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal:7990 >/dev/null \
+    || fail "the login helper matched a login whose port differs from the pull request's"
   pass "Forgejo login match parses tea's JSON in every line shape, in the helper and the static poll"
+}
+
+# Arming a Forgejo pull request reads the record live once: a positive draft
+# reading refuses before anything is recorded or armed, the same refusal the
+# GitHub draft check applies, and a readable record's head.sha is recorded as
+# pr_head=, which in no-mistakes mode is the named head bin/fm-dod-lib.sh
+# accepts the done report on. An unreadable record arms without a pr_head,
+# the same tolerance the GitHub draft read gets, and a record with no draft
+# field at all is a ready pull request rather than a refused one.
+test_forgejo_arm_reads_the_record_once() {
+  local dir state url head
+  head=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  url=https://forgejo.example:7990/o/r/pulls/7
+
+  dir=$(make_case forgejo-arm-draft)
+  state="$dir/home/state"
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  cat "$FM_TEST_TEA_LOGINS"
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+[ -z "${FM_TEST_TEA_FAIL:-}" ] || exit 1
+cat "$FM_TEST_TEA_PR"
+SH
+  chmod +x "$dir/fakebin/tea"
+  ln -sf "$(command -v jq)" "$dir/fakebin/jq"
+  printf '[{"name":"ported","url":"https://forgejo.example:7990"}]\n' > "$dir/tea-logins.json"
+  : > "$dir/tea.log"
+  write_task_meta "$dir"
+
+  # A positive draft reading refuses before the guard and records nothing.
+  printf '{"state":"open","merged":false,"draft":true,"head":{"sha":"%s"}}\n' "$head" > "$dir/tea-pr.json"
+  set +e
+  FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_LOGINS="$dir/tea-logins.json" FM_TEST_TEA_PR="$dir/tea-pr.json" \
+    run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a Forgejo draft pull request"
+  grep -qi 'draft' "$dir/stderr" || fail "the Forgejo draft refusal did not name the draft state"
+  grep -qF "$url" "$dir/stderr" || fail "the Forgejo draft refusal did not name the pull request"
+  ! grep -q '^pr=' "$state/task-a.meta" || fail "a refused Forgejo draft recorded a PR reference"
+  [ ! -e "$state/task-a.check.sh" ] || fail "a refused Forgejo draft armed a poll"
+  [ ! -s "$dir/guard.log" ] || fail "a refused Forgejo draft reached the guard"
+
+  # A ready pull request arms and records the record's head.sha as pr_head=,
+  # which frees the named-head gate the way a GitHub headRefOid does.
+  printf '{"state":"open","merged":false,"draft":false,"head":{"sha":"%s"},"merge_commit_sha":null}\n' \
+    "$head" > "$dir/tea-pr.json"
+  FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_LOGINS="$dir/tea-logins.json" FM_TEST_TEA_PR="$dir/tea-pr.json" \
+    run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "arming refused a ready Forgejo pull request: $(cat "$dir/stderr")"
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "a Forgejo pull request was not recorded"
+  grep -qxF "pr_head=$head" "$state/task-a.meta" || fail "the Forgejo record's head was not recorded as pr_head="
+  [ -f "$state/task-a.check.sh" ] || fail "a ready Forgejo pull request was not armed"
+
+  # An unreadable record still arms - the merge poll's own read is what
+  # decides the watch - and records no head it could not verify.
+  dir=$(make_case forgejo-arm-unreadable)
+  state="$dir/home/state"
+  cp "$dir/../forgejo-arm-draft/fakebin/tea" "$dir/fakebin/tea"
+  chmod +x "$dir/fakebin/tea"
+  ln -sf "$(command -v jq)" "$dir/fakebin/jq"
+  printf '[{"name":"ported","url":"https://forgejo.example:7990"}]\n' > "$dir/tea-logins.json"
+  : > "$dir/tea.log"
+  write_task_meta "$dir"
+  printf '{"message":"boom"}\n' > "$dir/tea-pr.json"
+  FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_LOGINS="$dir/tea-logins.json" FM_TEST_TEA_PR="$dir/tea-pr.json" \
+    run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "an unreadable Forgejo record blocked arming: $(cat "$dir/stderr")"
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "an unreadable Forgejo record was not recorded"
+  ! grep -q '^pr_head=' "$state/task-a.meta" || fail "an unreadable Forgejo record recorded a head anyway"
+  [ -f "$state/task-a.check.sh" ] || fail "an unreadable Forgejo record was not armed"
+  pass "fm-pr-check reads the Forgejo record once: draft refuses, head.sha records as pr_head=, unreadable arms"
 }
 
 test_gitlab_merge_watch() {
@@ -3765,6 +3894,7 @@ test_github_enterprise_hosts
 test_gitlab_merge_watch
 test_forgejo_merge_watch
 test_forgejo_login_list_shapes
+test_forgejo_arm_reads_the_record_once
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree

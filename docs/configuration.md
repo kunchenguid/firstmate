@@ -1965,6 +1965,7 @@ Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way
 The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
 
 A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
+A pull request URL on a non-default port (`https://host:port/...`) is accepted, and the login must then be registered for that exact `host:port` authority; a bare-host pull request keeps matching any login on that hostname.
 A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
 
