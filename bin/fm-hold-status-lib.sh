@@ -273,8 +273,8 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-
   return 1
 }
 
-# Resolve the log's current declaration at one boundary for crew state and the
-# Herdr project-groups status.
+# Resolve the log's current declaration at one boundary for crew state, the
+# Herdr project-groups status, and the Rex attention marks.
 # Any decision the fold still holds open wins over unrelated events, and the
 # fold's most recently opened record supplies it; a standing declared wait, then
 # the worker's own latest event (last_worker_status_line), stands when nothing is open.
