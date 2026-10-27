@@ -2027,10 +2027,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       # per STALE_ESCALATE_SECS rather than one per poll for the whole TTL. The
       # operator line is not gated: each silenced poll writes it, so the silence
       # stays visible while the cadence defers the probe. An unreadable idle
-      # timer is repaired and probed at once, exactly as the uncapped ladder below repairs and absorbs it: a
-      # sentinel must never be the reason a silenced window stops learning
-      # whether its worker is alive, and the repair is what lets the gate bound
-      # that probe afterwards.
+      # timer is repaired and probed at once, exactly as the uncapped ladder
+      # below repairs and absorbs it: a sentinel must never be the reason a
+      # silenced window stops learning whether its worker is alive, and the
+      # repair is what lets the gate bound that probe afterwards.
       _wrb_gate=1
       _wrb_age=0
       _wrb_since=$(cat "$since_file" 2>/dev/null || true)
