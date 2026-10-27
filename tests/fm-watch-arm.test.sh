@@ -181,6 +181,61 @@ start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
   return 0
 }
 
+# Arms started here own a process group. A poll sleep survives the watcher, so
+# the group has to be signalled and waited or the suite's output pipe stays open.
+FM_WATCH_ARM_REAP=()
+start_grouped_arm() {  # <home> <state> <fakebin> <arm-out> [arm-args...]
+  local home=$1 state=$2 fakebin=$3 armout=$4 i
+  shift 4
+  set -m
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL="${FM_POLL:-1}" FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
+    "$WATCH_ARM" "$@" > "$armout" 2>&1 </dev/null &
+  ARM_PID=$!
+  set +m
+  FM_WATCH_ARM_REAP+=("$ARM_PID")
+  i=0
+  while [ "$i" -lt "$REARM_REPORT_POLLS" ]; do
+    grep -q '^watcher: started ' "$armout" 2>/dev/null && return 0
+    is_live_non_zombie "$ARM_PID" || return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 0
+}
+
+reap_started() {  # pid...
+  local pid i
+  for pid in "$@"; do
+    [ -n "${pid:-}" ] || continue
+    # The arm pid is the group leader. A poll sleep stays in that group after
+    # the leader exits, so the group signal has to use this pid.
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in "$@"; do
+    [ -n "${pid:-}" ] || continue
+    i=0
+    while kill -0 -- "-$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if kill -0 -- "-$pid" 2>/dev/null; then
+      kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
+}
+
+fm_watch_arm_cleanup() {
+  if [ "${#FM_WATCH_ARM_REAP[@]}" -gt 0 ]; then
+    reap_started "${FM_WATCH_ARM_REAP[@]}"
+  fi
+  fm_test_cleanup
+}
+trap fm_watch_arm_cleanup EXIT
+
 test_attached_arm_reports_the_delivered_wake() {
   local dir state fakebin out armout status
   dir=$(make_case attached-delivered-wake)
@@ -2077,7 +2132,7 @@ SH
 # A kill that skips cleanup is a real outage. The next arm must still resurface
 # it when the episode main last acknowledged is the one the dead watcher held.
 test_killed_watcher_outage_still_resurfaces() {
-  local dir home state fakebin armout watcher status
+  local dir home state fakebin armout watcher status owner_arm
   dir=$(make_case killed-watcher-outage)
   home="$dir/home"
   state="$dir/state"
@@ -2085,8 +2140,9 @@ test_killed_watcher_outage_still_resurfaces() {
   armout="$dir/recovery.out"
   mkdir -p "$home/data"
 
-  start_rearm_arm "$home" "$state" "$fakebin" "$dir/owner.out"
-  is_live_non_zombie "$ARM_PID" || fail "fixture: the outage watcher did not stay live"
+  start_grouped_arm "$home" "$state" "$fakebin" "$dir/owner.out" --restart
+  owner_arm=$ARM_PID
+  is_live_non_zombie "$owner_arm" || fail "fixture: the outage watcher did not stay live"
   watcher=$(cat "$state/.watch.lock/pid")
   append_wake "$state" signal outage "signal: fixture handled before the outage"
   ack_wakes "$state" >/dev/null || fail "fixture: the handled wake could not be acknowledged"
@@ -2096,13 +2152,9 @@ test_killed_watcher_outage_still_resurfaces() {
   esac
   is_live_non_zombie "$watcher" || fail "fixture: the watcher exited before the outage"
   kill -KILL "$watcher" 2>/dev/null || fail "fixture: the watcher could not be killed"
-  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" >/dev/null 2>&1 || true
+  wait_for_exit "$owner_arm" "$REARM_EXIT_POLLS" >/dev/null 2>&1 || true
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    "$WATCH_ARM" > "$armout" &
-  ARM_PID=$!
+  start_grouped_arm "$home" "$state" "$fakebin" "$armout"
   wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
   status=$?
   expect_code 0 "$status" "a killed watcher must resurface cleanly: $(cat "$armout")"
@@ -2112,25 +2164,23 @@ test_killed_watcher_outage_still_resurfaces() {
     pending:downtime:*|announced:downtime:*) ;;
     *) fail "a killed watcher left no downtime episode: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
   esac
+  reap_started "$owner_arm" "$ARM_PID" "$watcher"
   pass "watch-arm: a watcher killed without cleanup still resurfaces"
 }
 
 # Exit status 1 is not a planned close by itself. A planned-stop record for
 # that pid is. Removing the home makes the live watcher exit 1.
 test_nonzero_exit_with_a_planned_stop_record_stays_closed() {
-  local dir home state fakebin watcher acknowledged status
+  local dir home state fakebin watcher acknowledged status owner_arm
   dir=$(make_case nonzero-exit-planned-stop)
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    "$WATCH_ARM" > "$dir/owner.out" 2>&1 &
-  ARM_PID=$!
-  wait_for_file_text "$dir/owner.out" 'watcher: started pid=' \
+  start_grouped_arm "$home" "$state" "$fakebin" "$dir/owner.out"
+  owner_arm=$ARM_PID
+  is_live_non_zombie "$owner_arm" \
     || fail "fixture: the watcher did not start: $(cat "$dir/owner.out")"
   watcher=$(cat "$state/.watch.lock/pid")
   append_wake "$state" signal exit-one "signal: fixture handled before the non-zero exit"
@@ -2145,31 +2195,29 @@ test_nonzero_exit_with_a_planned_stop_record_stays_closed() {
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$watcher" \
     || fail "fixture: the planned-stop record could not be written"
   rm -rf "$home"
-  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
+  wait_for_exit "$owner_arm" "$REARM_EXIT_POLLS"
   status=$?
   expect_code 1 "$status" "the non-zero close must exit 1: $(cat "$dir/owner.out")"
   grep -q "watcher_pid=$watcher	.*exit_code=1	signal=none	" "$state/.watch-cycle-exits.log" \
     || fail "the non-zero close was not status 1: $(cat "$state/.watch-cycle-exits.log" 2>/dev/null)"
   [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "$acknowledged" ] \
     || fail "a planned-stop record reopened an acknowledged episode on status 1: $(cat "$state/.watcher-down" 2>/dev/null)"
+  reap_started "$owner_arm" "$watcher"
   pass "watch-arm: a non-zero exit with a planned-stop record stays closed"
 }
 
 # Status 143 with no planned-stop record is an unplanned close.
 test_term_status_143_without_a_planned_stop_record_resurfaces() {
-  local dir home state fakebin watcher status
+  local dir home state fakebin watcher status owner_arm
   dir=$(make_case term-status-143)
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    "$WATCH_ARM" > "$dir/owner.out" 2>&1 &
-  ARM_PID=$!
-  wait_for_file_text "$dir/owner.out" 'watcher: started pid=' \
+  start_grouped_arm "$home" "$state" "$fakebin" "$dir/owner.out"
+  owner_arm=$ARM_PID
+  is_live_non_zombie "$owner_arm" \
     || fail "fixture: the watcher did not start: $(cat "$dir/owner.out")"
   watcher=$(cat "$state/.watch.lock/pid")
   append_wake "$state" signal term-143 "signal: fixture handled before the term"
@@ -2181,7 +2229,7 @@ test_term_status_143_without_a_planned_stop_record_resurfaces() {
   is_live_non_zombie "$watcher" || fail "fixture: the watcher exited before the term"
   [ ! -e "$state/.watcher-planned-stop" ] || fail "fixture: a planned-stop record existed before the term"
   kill -TERM "$watcher" 2>/dev/null || fail "fixture: the watcher could not be stopped"
-  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
+  wait_for_exit "$owner_arm" "$REARM_EXIT_POLLS"
   status=$?
   expect_code 143 "$status" "the unplanned term must exit 143: $(cat "$dir/owner.out")"
   grep -q "watcher_pid=$watcher	.*exit_code=143	signal=TERM	" "$state/.watch-cycle-exits.log" \
@@ -2190,6 +2238,7 @@ test_term_status_143_without_a_planned_stop_record_resurfaces() {
     pending:downtime:*|announced:downtime:*) ;;
     *) fail "status 143 with no planned-stop record left the episode closed: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
   esac
+  reap_started "$owner_arm" "$watcher"
   pass "watch-arm: status 143 with no planned-stop record resurfaces"
 }
 
@@ -2197,7 +2246,7 @@ test_term_status_143_without_a_planned_stop_record_resurfaces() {
 # acknowledged episode must resurface. The holder is inside its event wait, so
 # its beacon stays old after one age.
 test_stall_eviction_of_an_acknowledged_episode_resurfaces() {
-  local dir home state fakebin armout watcher status i aged mtime now
+  local dir home state fakebin armout watcher status i aged mtime now owner_arm
   dir=$(make_case stall-eviction-acked)
   home="$dir/home"
   state="$dir/state"
@@ -2205,12 +2254,10 @@ test_stall_eviction_of_an_acknowledged_episode_resurfaces() {
   armout="$dir/recovery.out"
   mkdir -p "$home/data"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=999999 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    "$WATCH_ARM" > "$dir/owner.out" &
-  ARM_PID=$!
-  wait_for_file_text "$dir/owner.out" 'watcher: started pid=' \
+  FM_POLL=999999 start_grouped_arm "$home" "$state" "$fakebin" "$dir/owner.out"
+  unset FM_POLL
+  owner_arm=$ARM_PID
+  grep -q '^watcher: started ' "$dir/owner.out" \
     || fail "fixture: the stalled watcher did not start: $(cat "$dir/owner.out")"
   watcher=$(cat "$state/.watch.lock/pid")
   append_wake "$state" signal stall "signal: fixture handled before the stall eviction"
@@ -2235,12 +2282,9 @@ test_stall_eviction_of_an_acknowledged_episode_resurfaces() {
   [ "$aged" -eq 1 ] || fail "fixture: the watcher refreshed its beacon before the stall eviction"
   is_live_non_zombie "$watcher" || fail "fixture: the watcher exited before the stall eviction"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    FM_GUARD_GRACE=5 FM_WATCHER_STALL_BOUND=12 \
-    "$WATCH_ARM" > "$armout" &
-  ARM_PID=$!
+  export FM_GUARD_GRACE=5 FM_WATCHER_STALL_BOUND=12
+  start_grouped_arm "$home" "$state" "$fakebin" "$armout"
+  unset FM_GUARD_GRACE FM_WATCHER_STALL_BOUND
   wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
   status=$?
   expect_code 0 "$status" "a stall eviction must resurface cleanly: $(cat "$armout")"
@@ -2250,13 +2294,14 @@ test_stall_eviction_of_an_acknowledged_episode_resurfaces() {
     pending:downtime:*|announced:downtime:*) ;;
     *) fail "a stall eviction left no downtime episode: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
   esac
+  reap_started "$owner_arm" "$ARM_PID" "$watcher"
   pass "watch-arm: a stall eviction of an acknowledged episode resurfaces"
 }
 
 # HUP with no planned-stop record is not a planned close. The signal lands
 # wherever the watcher is, including its event wait.
 test_hup_without_a_planned_stop_record_resurfaces() {
-  local dir home state fakebin armout watcher status
+  local dir home state fakebin armout watcher status owner_arm
   dir=$(make_case hup-without-planned-stop)
   home="$dir/home"
   state="$dir/state"
@@ -2264,12 +2309,9 @@ test_hup_without_a_planned_stop_record_resurfaces() {
   armout="$dir/recovery.out"
   mkdir -p "$home/data"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    "$WATCH_ARM" > "$dir/owner.out" &
-  ARM_PID=$!
-  wait_for_file_text "$dir/owner.out" 'watcher: started pid=' \
+  start_grouped_arm "$home" "$state" "$fakebin" "$dir/owner.out"
+  owner_arm=$ARM_PID
+  grep -q '^watcher: started ' "$dir/owner.out" \
     || fail "fixture: the watcher did not start: $(cat "$dir/owner.out")"
   watcher=$(cat "$state/.watch.lock/pid")
   append_wake "$state" signal hup "signal: fixture handled before the hangup"
@@ -2281,13 +2323,9 @@ test_hup_without_a_planned_stop_record_resurfaces() {
   is_live_non_zombie "$watcher" || fail "fixture: the watcher exited before the hangup"
   [ ! -e "$state/.watcher-planned-stop" ] || fail "fixture: a planned-stop record existed before the hangup"
   kill -HUP "$watcher" 2>/dev/null || fail "fixture: the watcher could not be hung up"
-  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" >/dev/null 2>&1 || true
+  wait_for_exit "$owner_arm" "$REARM_EXIT_POLLS" >/dev/null 2>&1 || true
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    "$WATCH_ARM" > "$armout" &
-  ARM_PID=$!
+  start_grouped_arm "$home" "$state" "$fakebin" "$armout"
   wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
   status=$?
   expect_code 0 "$status" "a hangup must resurface cleanly: $(cat "$armout")"
@@ -2297,6 +2335,7 @@ test_hup_without_a_planned_stop_record_resurfaces() {
     pending:downtime:*|announced:downtime:*) ;;
     *) fail "a hangup left no downtime episode: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
   esac
+  reap_started "$owner_arm" "$ARM_PID" "$watcher"
   pass "watch-arm: a hangup without a planned-stop record resurfaces"
 }
 
