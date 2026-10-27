@@ -237,6 +237,11 @@ Its ordinary arm check still announces a never-announced generation, including o
 ### Generation reuse
 
 A planned watcher close publishes an open episode and leaves an acknowledged episode closed.
+A close is planned only when `state/.watcher-planned-stop` names that watcher's pid and its process identity.
+The arm writes that record before the signal for `--restart`, `--stop`, and `--take-over`.
+The supervision host's planned restart is that arm `--restart`.
+The watcher writes the same record before its own delivery exit.
+A stall eviction writes no record, and neither does a HUP or other signal that has none.
 A close that is not a planned stop, and every durable queue append, publishes downtime.
 A watcher closing to resurface the recovery it found at its start preserves the existing marker instead, while a handling successor resurfacing a later row publishes downtime like any close.
 If EXIT cleanup cannot acquire the downtime-marker lock within its bound, it retains the stale singleton for the next arm to publish the missing downtime before clearing that lock (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)).
@@ -494,7 +499,8 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The already-acknowledged confirmation no-op for a matching generation, with its mismatched-generation, dead-pid, and lock-mismatch rejections preserved.
 - The manual-restart generation churn that makes a confirmation for the churned generation report a mismatch, which an arm check without a reopen leaves in place.
 - A take-over that stays quiet after a confirmed TERM, including one that lands inside a herdr event wait, still surfaces queued work and self-exit downtime, and attaches without stopping a cycle the named arm does not own.
-- A planned host restart and an actionable-check hand-off over an acknowledged episode leave that episode closed, while a watcher killed without cleanup still resurfaces.
+- A planned restart whose stop lands in ordinary poll-loop code, and an actionable-check hand-off, leave an acknowledged episode closed.
+- A stall eviction, a HUP with no planned-stop record, and a watcher killed without cleanup still resurface.
 - The disposable-checkout arm refusal.
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.

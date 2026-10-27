@@ -627,6 +627,7 @@ stop_home_watcher() {
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   fm_pid_alive "$lock_pid" || return 0
   if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
+    fm_watcher_planned_stop_record "$STATE" "$lock_pid" || return 1
     kill -TERM "$lock_pid" 2>/dev/null || true
     i=0
     while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
@@ -667,6 +668,7 @@ take_over_cycle() {  # <watcher-pid> <identity>
   cycle_begin "$pid" attached "$2"
   fm_recovery_marker_handover_snapshot "$STATE/.watcher-down" || return 1
   if attached_holder_live "$pid"; then
+    fm_watcher_planned_stop_record "$STATE" "$pid" || return 1
     kill -TERM "$pid" 2>/dev/null || true
   fi
   i=0

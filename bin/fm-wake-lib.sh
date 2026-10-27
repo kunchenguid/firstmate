@@ -234,6 +234,35 @@ fm_watcher_lock_matches_pid() {
   FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
+# docs/watcher-continuity.md: a planned close is this record, not the EXIT
+# status. Line 1 is the target pid. Line 2 is its fm_pid_identity.
+fm_watcher_planned_stop_record() {  # <state> <pid>
+  local state=$1 pid=$2 identity tmp
+  identity=$(fm_pid_identity "$pid") || return 1
+  tmp=$(mktemp "$state/.watcher-planned-stop.tmp.XXXXXX") || return 1
+  if ! printf '%s\n%s\n' "$pid" "$identity" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! mv -f "$tmp" "$state/.watcher-planned-stop"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_watcher_planned_stop_matches() {  # <state> <pid>
+  local state=$1 pid=$2 record_pid record_identity current
+  [ -f "$state/.watcher-planned-stop" ] || return 1
+  record_pid=$(sed -n '1p' "$state/.watcher-planned-stop" 2>/dev/null || true)
+  record_identity=$(sed -n '2p' "$state/.watcher-planned-stop" 2>/dev/null || true)
+  [ "$record_pid" = "$pid" ] || return 1
+  [ -n "$record_identity" ] || return 1
+  current=$(fm_pid_identity "$pid") || return 1
+  [ "$record_identity" = "$current" ]
+}
+
+fm_watcher_planned_stop_clear() {  # <state>
+  rm -f -- "$1/.watcher-planned-stop"
+}
+
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
