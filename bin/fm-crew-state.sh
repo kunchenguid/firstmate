@@ -70,6 +70,8 @@
 #      bin/fm-nm-run-lib.sh): a ci-monitoring rebase moves the run head off the
 #      task's history after the task reported done, and the gate the run then
 #      opens is still this task's, so it outranks a done or paused status line.
+#      It applies only while the newest status is done or a declared paused
+#      wait; a task that reports working keeps the strict head rule.
 #      A parked run head whose commit object the task copy never fetched cannot
 #      be verified locally; that row is recognized only as a provable
 #      pipeline-owned continuation - the branch's ACTIVE newest ledger row,
@@ -988,7 +990,10 @@ nm_run_head_matches_worktree() {
 # recorded as delivered. Rule owned by fm_nm_run_manages_task_pr in
 # bin/fm-nm-run-lib.sh.
 nm_run_parked_on_task_pr() {
-  fm_nm_run_is_parked "$RUN_OUT" && fm_nm_run_manages_task_pr "$RUN_OUT" "$(meta_value pr)"
+  fm_nm_run_is_parked "$RUN_OUT" || return 1
+  [ "$(status_line_verb "$(last_status_line "$LOG")")" = done ] \
+    || status_is_paused "$(status_declared_wait_line "$LOG")" || return 1
+  fm_nm_run_manages_task_pr "$RUN_OUT" "$(meta_value pr)"
 }
 
 HAVE_RUN=0

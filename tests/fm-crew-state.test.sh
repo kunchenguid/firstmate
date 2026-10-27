@@ -5023,6 +5023,12 @@ test_gate_on_another_pr_run_keeps_the_strict_head_rule() {
     assert_not_contains "$out" "source: run-step" "pr='$recorded': a run on another PR does not bind by branch name"
     assert_not_contains "$out" "state: parked" "pr='$recorded': its gate is not reported as this task's"
   done
+  make_delivered_pr_gate_case dlv-working rebased https://github.com/o/r/pull/7
+  d=$DLV_CASE
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\nworking: addressing review feedback\n' > "$d/state/dlv.status"
+  out=$(run_crew_state "$d" dlv)
+  assert_not_contains "$out" "source: run-step" "a working task is not answered by a parked run on its delivered PR"
+  assert_not_contains "$out" "state: parked" "a working task is not reported parked"
   make_delivered_pr_gate_case dlv-terminal rebased https://github.com/o/r/pull/7
   d=$DLV_CASE
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-dlv | sed 's|pr: ""|pr: "https://github.com/o/r/pull/7"|')"
