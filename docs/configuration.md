@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
@@ -362,6 +362,46 @@ The flag is off when absent, is not inherited, and has no effect on other primar
 The host reads its presence at each hand-back, so enabling it needs no session restart.
 Removing it stops further retries and leaves the current watcher for the ordinary next park.
 [Supervision host](supervision-host.md#acknowledged-hand-back) owns the acknowledgement, retry transport, and limits.
+
+## Warm-cache compaction (config/warm-compact)
+
+Create the home-local `config/warm-compact` file to compact an idle Claude primary and the supervision host's engine conversation before their prompt cache expires.
+A session that sits idle past the cache lifetime re-writes its whole context at the cache-write price on its next turn.
+Compacting while the cache is still warm reads the old context at the read price, so the next turn writes only the summary.
+
+The feature is off when the file is absent.
+The file is local to each home and is not inherited.
+The host reads it at every check, so creating or removing it needs no restart.
+It acts only on a home that runs the [supervision host](#supervision-host-configsupervision-host) beside a Claude primary, because the host's park is the primary's idle episode.
+
+The file may be empty or hold these lines, each optional:
+
+- `idle-seconds=<n>` is the idle time before a session is due (default 2700).
+- `min-context-tokens=<n>` is the context size below which a session is never due (default 80000).
+
+Blank lines and lines that start with `#` are ignored, and an unusable value keeps its default.
+Context size is the last request's `input + cache_read + cache_creation` usage in the session's transcript.
+
+A session is compacted when all of these hold:
+
+- The home opted in.
+- The session has been idle for `idle-seconds`: the primary since its turn ended, the engine conversation since its last handled turn.
+- Its context is at least `min-context-tokens`.
+- It was not already compacted in this idle episode.
+  The host remembers a primary compaction for one park.
+  It records an engine compaction in the engine record, so a later host does not repeat it.
+- For the engine conversation, the next turn would resume it: the same engine, model, and prompt key, and below the rotation limit.
+  An abandoned compaction is not recorded, so a later check retries it.
+- For the primary, the agent reads idle and the composer reads provably empty.
+  A busy agent, a non-empty composer, or an unproven state defers the compaction; nothing is typed.
+
+The primary receives `/compact` through the backend's verified submit primitive (`fm_backend_send_text_submit`), the one the away-mode daemon injects through.
+The engine conversation receives `/compact` as one resumed, bounded headless turn.
+A compaction is housekeeping: it adds no wake, outcome, or close line, and it is recorded only in the host's log.
+A compacted primary still picks up pending wakes and decisions from disk, because a wake is a record the next drain reads, not conversation state.
+
+This feature does not set `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` or any other autocompact setting.
+`bin/fm-warm-compact-lib.sh` owns the guards, with coverage in [`tests/fm-warm-compact.test.sh`](../tests/fm-warm-compact.test.sh) and the opt-in live guard [`tests/fm-warm-compact-herdr-live-e2e.test.sh`](../tests/fm-warm-compact-herdr-live-e2e.test.sh).
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

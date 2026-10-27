@@ -2647,6 +2647,95 @@ SH
   pass "host: parked child-exit sampling uses ordinary half-second sleeps"
 }
 
+compacted_once() { [ "$(compact_calls "$1")" = 1 ]; }
+compact_calls() { grep -l '^arg=/compact$' "$1"/engine-call.* 2>/dev/null | wc -l | tr -d ' '; }
+
+# Seed the engine record the way a handled turn leaves it, keyed to the live
+# fake main session, with a transcript large enough to be due.
+seed_idle_engine_record() {  # <home> <ended-age-seconds>
+  local home=$1 key model state="$1/state" ended compacted
+  key=$(FM_HOME="$home" bash -c '. "$1"; . "$2"; fm_supervision_host_main_key "$3"' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-supervision-engine-lib.sh" "$state") \
+    || fail "warm-compact: no main-session key"
+  model=$(bash -c '. "$1"; fm_supervision_host_config "$2" claude; printf "%s" "$FM_SUPERVISION_ENGINE_MODEL"' _ "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/config")
+  ended=$(sed -n 's/^ended=//p' "$state/.supervision-host-engine" 2>/dev/null | head -n 1)
+  [ -n "$ended" ] || ended=$(( $(date +%s) - $2 ))
+  compacted=$(sed -n 's/^compacted=//p' "$state/.supervision-host-engine" 2>/dev/null | head -n 1)
+  printf 'engine=claude\nmodel=%s\nsession=warm-sess\nkey=%s\nturns=1\nconversation_cost=0\nended=%s\n' "$model" "$key" "$ended" > "$state/.supervision-host-engine"
+  [ -z "$compacted" ] || printf 'compacted=%s\n' "$compacted" >> "$state/.supervision-host-engine"
+  printf 'prompt\n' > "$state/.supervision-host-prompt"
+}
+
+test_idle_engine_conversation_is_compacted_once_across_hosts() {
+  local home run ended
+  home=$(make_home warm-compact attended claude)
+  echo noreport > "$home/stub-mode"
+  printf 'idle-seconds=60\nmin-context-tokens=1000\n' > "$home/config/warm-compact"
+  mkdir -p "$home/claude/projects/p"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":90000,"cache_creation_input_tokens":0}}}\n' \
+    > "$home/claude/projects/p/warm-sess.jsonl"
+  for run in 1 2; do
+    rm -f "$home/host.rc" "$home/park-clock"
+    CLAUDE_CONFIG_DIR="$home/claude" FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=3000 \
+      FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+    wait_until 150 watcher_live "$home" || fail "warm-compact: run $run never started a watcher"
+    seed_idle_engine_record "$home" 600
+    ended=$(sed -n 's/^ended=//p' "$home/state/.supervision-host-engine")
+    echo 10 > "$home/park-clock"
+    if [ "$run" = 1 ]; then
+      wait_until 150 compacted_once "$home" || fail "warm-compact: the idle engine conversation was not compacted"
+      wait_until 100 grep -qx "compacted=$ended" "$home/state/.supervision-host-engine" || fail "warm-compact: the episode marker was not recorded with the engine record"
+    else
+      echo 20 > "$home/park-clock"
+      sleep 3
+    fi
+    [ "$(compact_calls "$home")" = 1 ] || fail "warm-compact: run $run compacted the same idle episode again"
+    stop_home_processes "$home"
+    wait_until 100 host_exited "$home" || true
+  done
+  pass "host: an idle engine conversation is compacted once across hosts"
+}
+
+test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted() {
+  local home
+  home=$(make_home warm-compact-stale attended claude)
+  echo noreport > "$home/stub-mode"
+  printf 'idle-seconds=60\nmin-context-tokens=1000\n' > "$home/config/warm-compact"
+  mkdir -p "$home/claude/projects/p"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":90000,"cache_creation_input_tokens":0}}}\n' \
+    > "$home/claude/projects/p/warm-sess.jsonl"
+  CLAUDE_CONFIG_DIR="$home/claude" FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=3000 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "warm-compact-stale: no watcher started"
+  seed_idle_engine_record "$home" 600
+  sed -i 's/^model=.*/model=another-model/' "$home/state/.supervision-host-engine"
+  echo 10 > "$home/park-clock"
+  sleep 3
+  [ "$(compact_calls "$home")" = 0 ] || fail "warm-compact-stale: compacted a conversation the next turn would not resume"
+  stop_home_processes "$home"
+  pass "host: a conversation the next turn would not resume is not compacted"
+}
+
+test_compaction_abandoned_at_the_park_boundary_is_not_marked_done() {
+  local home
+  home=$(make_home warm-compact-abandon attended claude)
+  echo hang > "$home/stub-mode"
+  printf 'idle-seconds=60\nmin-context-tokens=1000\n' > "$home/config/warm-compact"
+  mkdir -p "$home/claude/projects/p"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":90000,"cache_creation_input_tokens":0}}}\n' \
+    > "$home/claude/projects/p/warm-sess.jsonl"
+  CLAUDE_CONFIG_DIR="$home/claude" FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=3000 FM_SUPERVISION_ENGINE_GRACE=1 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "warm-compact-abandon: no watcher started"
+  seed_idle_engine_record "$home" 600
+  echo 10 > "$home/park-clock"
+  wait_until 150 test -e "$home/engine-call.1" || fail "warm-compact-abandon: the compaction never started"
+  echo 3000 > "$home/park-clock"
+  wait_until 300 host_exited "$home" || fail "warm-compact-abandon: the host did not end its park"
+  ! grep -q '^compacted=' "$home/state/.supervision-host-engine" || fail "warm-compact-abandon: an abandoned compaction was marked done"
+  stop_home_processes "$home"
+  pass "host: a compaction abandoned at the park boundary is not marked done"
+}
+
 test_park_boundary_ends_the_park_before_the_hook_timeout() {
   local home token
   home=$(make_home boundary attended)
@@ -3460,6 +3549,9 @@ test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes
 test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main
 test_engine_turn_is_bounded_and_its_descendants_reaped
 test_restarted_host_stops_what_a_killed_predecessor_left
+test_idle_engine_conversation_is_compacted_once_across_hosts
+test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted
+test_compaction_abandoned_at_the_park_boundary_is_not_marked_done
 test_park_boundary_ends_the_park_before_the_hook_timeout
 test_park_boundary_holds_under_back_to_back_closes
 test_park_boundary_rechecked_just_before_the_engine_turn

@@ -2216,6 +2216,9 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   fm_backend_runtime_check "$BACKEND" || exit 1
+  if [ "$BACKEND" = rex ]; then
+    fm_backend_rex_local_server_ensure || exit 1
+  fi
   if [ "$BACKEND" = orca ]; then
     ORCA_LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-tmux-session") || exit 1
     if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then

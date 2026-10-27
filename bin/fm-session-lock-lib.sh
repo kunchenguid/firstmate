@@ -372,6 +372,34 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# Liveness and identity of a session-lock pid for readers outside this file:
+# the supervision host's main-session key and the Claude auto-arm. A tagged
+# Windows pid is answered from the Windows process table, as above; any other
+# value goes to the generic fm_pid_alive and fm_pid_identity in
+# bin/fm-wake-lib.sh, which those readers already have sourced.
+fm_session_pid_alive() {  # <value>
+  local winpid
+  if winpid=$(fm_win_untag_pid "$1"); then
+    fm_win_command "$winpid" >/dev/null
+    return
+  fi
+  fm_pid_alive "$1"
+}
+
+# A tagged pid's identity is its Windows pid and executable path rather than a
+# start time. Every reader pairs it with the session sidecar id, which a new
+# session always changes, so a reused Windows pid still reads as a different
+# session.
+fm_session_pid_identity() {  # <value>
+  local winpid comm
+  if winpid=$(fm_win_untag_pid "$1"); then
+    comm=$(fm_win_command "$winpid") || return 1
+    printf 'win-pid=%s command=%s\n' "$winpid" "$comm"
+    return 0
+  fi
+  fm_pid_identity "$1"
+}
+
 # --- trusted same-session identity -------------------------------------------
 # Claude Code hands every hook and tool shell CLAUDE_CODE_SESSION_ID (the
 # session's conversation id) and CLAUDE_PID (the pid of the process running the
