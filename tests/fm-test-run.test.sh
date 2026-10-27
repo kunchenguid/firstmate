@@ -25,8 +25,8 @@ test_list_all_exact_suite_coverage() {
     done | LC_ALL=C sort
   )
   [ -n "$listed" ] || fail "--list --all printed nothing"
-  missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
-  extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  missing=$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
+  extra=$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$listed") || true)
   [ -z "$missing" ] || fail "--list --all missing scripts: $missing"
   [ -z "$extra" ] || fail "--list --all unexpected scripts: $extra"
   # No duplicates.
@@ -92,6 +92,7 @@ init_changed_fixture_repo() {
   local repo=$1 script
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -128,7 +129,6 @@ init_changed_fixture_repo() {
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-control-lib.sh"
-  : >"$repo/bin/fm-timeout-lib.sh"
   : >"$repo/bin/fm-procevent-quota.sh"
   : >"$repo/bin/fm-quota-axi-lib.sh"
   : >"$repo/bin/fm-quota-choose.sh"
@@ -187,6 +187,7 @@ init_primary_and_linked_worktree() {
   for tree in "$repo" "$linked"; do
     mkdir -p "$tree/bin" "$tree/tests"
     cp "$RUNNER" "$tree/bin/fm-test-run.sh"
+    cp "$ROOT/bin/fm-timeout-lib.sh" "$tree/bin/fm-timeout-lib.sh"
     cp "$ROOT/tests/git-config-helpers.sh" "$tree/tests/"
     chmod +x "$tree/bin/fm-test-run.sh"
     cat >"$tree/tests/probe.test.sh" <<PROBE
@@ -513,9 +514,12 @@ PY
   mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
   cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$timeout_repo/tests/"
-  cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
+  # The real helper supplies the whole-run bound; the stub below replaces only
+  # the per-script call it records.
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$timeout_repo/bin/fm-timeout-lib.sh"
+  cat >>"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
-  [ "$1" -eq 1500 ] || return 99
+  [ "$1" -eq 3600 ] || return 99
   return 124
 }
 SH
@@ -597,7 +601,6 @@ test_script_list_uses_bounded_automatic_concurrency() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-script-list.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
-  rm -f "$repo/bin/fm-timeout-lib.sh"
   # fm-cd-pretool-check and fm-pr-merge are individually proven isolated;
   # fm-backend-orca is not, so it must still land in the serial tail.
   for script in fm-cd-pretool-check.test.sh fm-pr-merge.test.sh fm-backend-orca.test.sh; do
@@ -1032,6 +1035,7 @@ test_list_scheduled_non_lane_selections_use_serial_weights() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   for script in "${scripts[@]}"; do
     printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
     chmod +x "$repo/$script"
@@ -1073,7 +1077,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -1219,6 +1223,7 @@ test_portable_serial_packing_budget_boundary() {
 
   for weight in 1200000 1200001; do
     cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+    cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
     python3 - "$repo/bin/fm-test-run.sh" "$weight" <<'PY' \
       || fail "could not seed the fixture's measured timing input"
 from pathlib import Path
@@ -1376,6 +1381,7 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   chmod +x "$repo/bin/fm-test-run.sh"
   # Two members of the proven residual family, plus a test basename the family
@@ -1568,7 +1574,7 @@ SH
     fail "the timed-out script left grandchild $grandchild running"
   fi
 
-  # 0 keeps the historical unbounded behavior, so no existing caller changes.
+  # A malformed bound is refused rather than silently run unbounded.
   set +e
   "$runner" --per-script-timeout-secs nope "$hang" >"$tmp/o2" 2>"$tmp/e2"
   rc=$?
@@ -1577,6 +1583,207 @@ SH
 
   rm -rf "$tmp"
   pass "--per-script-timeout-secs turns a hung script into a bounded failure"
+}
+
+# Seed <repo> with the runner, its real helpers, and <script>, whose body is
+# read from stdin.
+init_bound_fixture_repo() {  # <repo> <script>
+  local repo=$1 script=$2
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/$script"
+  chmod +x "$repo/bin/fm-test-run.sh" "$repo/$script"
+}
+
+# The body of a fixture that wedges after starting a helper in a session of
+# its own - the shape of a private tmux server or a vendor CLI's tool command -
+# which a process-group signal cannot reach. The helper records its pid.
+escaped_helper_hang_fixture() {
+  cat <<'SH'
+#!/usr/bin/env bash
+perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!"; open my $f, ">", $ARGV[0] or die; print $f "$$\n"; close $f; exec "sleep", "600"' "$ESCAPED_PID" &
+echo "ok - fixture is about to wedge"
+sleep 600
+SH
+}
+
+# Wait up to five seconds for the pid recorded in <file> to exit; fail, after
+# killing it, if it is still running.
+assert_recorded_pid_gone() {  # <file> <what>
+  local file=$1 what=$2 pid waited=0
+  [ -s "$file" ] || fail "$what never recorded its pid"
+  pid=$(cat "$file")
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "$what (pid $pid) was left running"
+  fi
+}
+
+# Only --changed used to get a per-script bound, so a hang under any other
+# selection ran forever. Every mode must hand the helper the same default, and
+# an explicit 0 must still opt out. The stub records the bound it is handed.
+test_default_per_script_bound_applies_in_every_mode() {
+  local tmp repo script mode
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-default-bound.XXXXXX")
+  repo="$tmp/repo"
+  script=tests/fm-default-bound-fixture.test.sh
+  printf '#!/usr/bin/env bash\necho "ok - default bound fixture"\n' \
+    | init_bound_fixture_repo "$repo" "$script"
+  cat >>"$repo/bin/fm-timeout-lib.sh" <<'SH'
+fm_run_timed() {
+  printf '%s\n' "$1" >>bound-secs
+  shift
+  "$@"
+}
+SH
+  for mode in "$script" --all; do
+    rm -f "$repo/bound-secs"
+    (cd "$repo" && bin/fm-test-run.sh "$mode") >"$tmp/out" 2>"$tmp/err" \
+      || fail "a healthy script must pass under $mode: $(cat "$tmp/out" "$tmp/err")"
+    [ "$(cat "$repo/bound-secs" 2>/dev/null)" = 3600 ] \
+      || fail "$mode did not run its script under the 3600s default bound: $(cat "$repo/bound-secs" 2>/dev/null)"
+  done
+  rm -f "$repo/bound-secs"
+  (cd "$repo" && bin/fm-test-run.sh --per-script-timeout-secs 0 "$script") >"$tmp/out" 2>"$tmp/err" \
+    || fail "an explicitly unbounded run must still pass: $(cat "$tmp/err")"
+  [ ! -e "$repo/bound-secs" ] || fail "--per-script-timeout-secs 0 still bounded the script"
+  rm -rf "$tmp"
+  pass "every selection mode bounds each script by default, and 0 opts out"
+}
+
+# A process-group signal misses a descendant in a session of its own, which is
+# what left a wedged run's fixture processes holding their /tmp directories for
+# days. A tripped per-script bound must sweep it and say so.
+test_tripped_bound_sweeps_escaped_descendants() {
+  local tmp repo script rc
+  command -v perl >/dev/null 2>&1 || fail "perl is required to start the escaped helper"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-sweep.XXXXXX")
+  repo="$tmp/repo"
+  script=tests/fm-sweep-fixture.test.sh
+  escaped_helper_hang_fixture | init_bound_fixture_repo "$repo" "$script"
+  set +e
+  (cd "$repo" && ESCAPED_PID="$tmp/escaped.pid" bin/fm-test-run.sh --per-script-timeout-secs 3 "$script") \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "a tripped per-script bound must fail the run, got $rc: $(cat "$tmp/out" "$tmp/err")"
+  grep -Fq "not ok - $script exceeded the per-script bound of 3s (--per-script-timeout-secs) and was terminated; swept 1 leftover process(es) outside its process group" "$tmp/out" \
+    || fail "the tripped bound did not name the script, flag, and sweep: $(cat "$tmp/out")"
+  grep -Fq "fm-test-run: FAIL: per-script bound tripped: $script exceeded --per-script-timeout-secs 3s and was terminated" "$tmp/err" \
+    || fail "the tripped bound was not repeated after the summary: $(cat "$tmp/err")"
+  assert_recorded_pid_gone "$tmp/escaped.pid" "the escaped helper of a timed-out script"
+  rm -rf "$tmp"
+  pass "a tripped per-script bound sweeps descendants that left its process group"
+}
+
+# --max-wall-ms is judged after the run, so on its own nothing stopped an
+# invocation that never finished. The whole-run bound must stop it wherever it
+# is - inside a script or in the runner's own selection work - name where, and
+# exit 124.
+test_run_timeout_bounds_the_whole_invocation() {
+  local tmp repo script rc began ended fake_bin
+  command -v perl >/dev/null 2>&1 || fail "perl is required to start the escaped helper"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-whole.XXXXXX")
+  repo="$tmp/repo"
+  script=tests/fm-whole-run-fixture.test.sh
+  escaped_helper_hang_fixture | init_bound_fixture_repo "$repo" "$script"
+
+  began=$(date +%s)
+  set +e
+  (cd "$repo" && ESCAPED_PID="$tmp/escaped.pid" \
+    bin/fm-test-run.sh --per-script-timeout-secs 0 --run-timeout-secs 3 "$script") \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  ended=$(date +%s)
+  [ "$rc" -eq 124 ] || fail "a tripped whole-run bound must exit 124, got $rc: $(cat "$tmp/out" "$tmp/err")"
+  [ "$((ended - began))" -lt 60 ] || fail "the whole-run bound did not stop a 600s hang (took $((ended - began))s)"
+  grep -Fq "fm-test-run: FAIL: whole-run bound tripped: this run exceeded --run-timeout-secs 3s while running $script and was terminated; swept 1 leftover fixture process(es)" "$tmp/err" \
+    || fail "the whole-run bound did not name the flag, script, and sweep: $(cat "$tmp/err")"
+  assert_recorded_pid_gone "$tmp/escaped.pid" "the escaped helper of a run past its whole-run bound"
+
+  # The runner's own work is inside the bound too: a selection step that never
+  # returns is named as such.
+  fake_bin="$tmp/fake-bin"
+  mkdir -p "$fake_bin"
+  printf '#!/usr/bin/env bash\nexec sleep 600\n' >"$fake_bin/git"
+  chmod +x "$fake_bin/git"
+  set +e
+  (cd "$repo" && PATH="$fake_bin:$PATH" bin/fm-test-run.sh --changed --base HEAD --run-timeout-secs 2) \
+    >"$tmp/sel.out" 2>"$tmp/sel.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "a hung selection must trip the whole-run bound, got $rc: $(cat "$tmp/sel.err")"
+  grep -Fq "this run exceeded --run-timeout-secs 2s during the selection phase" "$tmp/sel.err" \
+    || fail "the whole-run bound did not name the selection phase: $(cat "$tmp/sel.err")"
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --run-timeout-secs nope "$script") >"$tmp/bad.out" 2>"$tmp/bad.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--run-timeout-secs with a non-number must be refused, got $rc"
+  rm -rf "$tmp"
+  pass "--run-timeout-secs bounds the whole invocation, scripts and selection alike"
+}
+
+# A bound runs each script in a process group of its own, which a terminal's
+# Ctrl-C never reaches, so an interrupted run must still end the script it was
+# running and every helper that script moved out of its group. The runner is
+# started in a process group of its own and interrupted the two ways a caller
+# does it: an INT to that whole group, as a terminal sends it, and a TERM to
+# the runner's pid alone, as a supervisor sends it.
+test_interrupted_run_leaves_no_fixture_process() {
+  local tmp repo script how parts flags sig status runner_pid rc waited
+  command -v perl >/dev/null 2>&1 || fail "perl is required to start the escaped helper"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-interrupt.XXXXXX")
+  repo="$tmp/repo"
+  script=tests/fm-interrupt-fixture.test.sh
+  {
+    cat <<'SH'
+#!/usr/bin/env bash
+echo "$$" >"$FIXTURE_PID"
+SH
+    escaped_helper_hang_fixture | sed 1d
+  } | init_bound_fixture_repo "$repo" "$script"
+  for how in "group INT" "pid TERM --run-timeout-secs 0"; do
+    read -r -a parts <<<"$how"
+    sig=${parts[1]}
+    flags=("${parts[@]:2}")
+    rm -f "$tmp/fixture.pid" "$tmp/escaped.pid"
+    set -m
+    (cd "$repo" && FIXTURE_PID="$tmp/fixture.pid" ESCAPED_PID="$tmp/escaped.pid" \
+      exec bin/fm-test-run.sh "${flags[@]+"${flags[@]}"}" "$script") >"$tmp/out" 2>"$tmp/err" &
+    runner_pid=$!
+    set +m
+    waited=0
+    while { [ ! -s "$tmp/fixture.pid" ] || [ ! -s "$tmp/escaped.pid" ]; } && [ "$waited" -lt 100 ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if [ "${parts[0]}" = group ]; then
+      kill -s "$sig" -- "-$runner_pid"
+    else
+      kill -s "$sig" "$runner_pid"
+    fi
+    set +e
+    wait "$runner_pid"
+    rc=$?
+    set -e
+    status=$((128 + $(kill -l "$sig")))
+    [ "$rc" -eq "$status" ] || fail "a run interrupted by $how must exit $status, got $rc: $(cat "$tmp/out" "$tmp/err")"
+    grep -Fq "fm-test-run: FAIL: run interrupted by SIG$sig while running $script; swept" "$tmp/err" \
+      || fail "a run interrupted by $how did not name the signal, script, and sweep: $(cat "$tmp/err")"
+    assert_recorded_pid_gone "$tmp/fixture.pid" "the script of a run interrupted by $how"
+    assert_recorded_pid_gone "$tmp/escaped.pid" "the escaped helper of a run interrupted by $how"
+  done
+  rm -rf "$tmp"
+  pass "an interrupted run leaves none of its script's processes running"
 }
 
 # The duration regression this guard exists for: a suite whose scripts are all
@@ -1595,7 +1802,10 @@ test_changed_bound_gives_slow_watcher_suites_headroom() {
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
-  cat >"$repo/bin/fm-timeout-lib.sh" <<'SH'
+  # The real helper supplies the whole-run bound; the stub below replaces only
+  # the per-script call it records.
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  cat >>"$repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
   printf '%s\n' "$1" >bound-secs
   shift
@@ -1618,10 +1828,10 @@ SH
   [ "$rc" -eq 0 ] || fail "healthy changed watcher script must pass, got $rc: $(cat "$tmp/out" "$tmp/err")"
   [ -s "$repo/bound-secs" ] || fail "changed watcher script did not run under the automatic bound: $(cat "$tmp/out")"
   bound=$(cat "$repo/bound-secs")
-  [ "$bound" -ge 1500 ] \
-    || fail "automatic --changed bound for $script must be at least 1500s, got ${bound}s"
+  [ "$bound" -ge 3600 ] \
+    || fail "automatic --changed bound for $script must be at least 3600s, got ${bound}s"
   rm -rf "$tmp"
-  pass "the automatic --changed bound gives the slow watcher suite at least 1500s"
+  pass "the automatic --changed bound gives the slow watcher suite at least 3600s"
 }
 
 test_max_wall_ms_is_a_result_not_advice() {
@@ -1632,6 +1842,7 @@ test_max_wall_ms_is_a_result_not_advice() {
   fast=tests/fm-budget-fixture.test.sh
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   cat >"$repo/$fast" <<'SH'
 #!/usr/bin/env bash
@@ -1697,6 +1908,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
@@ -1932,6 +2144,10 @@ test_changed_shared_fixture_selects_its_readers
 test_changed_t3_sources_select_their_readers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
+test_default_per_script_bound_applies_in_every_mode
+test_tripped_bound_sweeps_escaped_descendants
+test_run_timeout_bounds_the_whole_invocation
+test_interrupted_run_leaves_no_fixture_process
 test_changed_bound_gives_slow_watcher_suites_headroom
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
