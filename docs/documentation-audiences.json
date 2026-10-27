@@ -389,6 +389,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/cloud-runs.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/fleet-ledger.md",
       "audience": "operator-current"
     },
