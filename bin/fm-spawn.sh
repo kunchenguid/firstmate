@@ -330,6 +330,10 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   The same check refuses a worktree (or home) that another task of this home
+#   still records with a positively alive agent endpoint, naming the owning task;
+#   only a positively alive endpoint vetoes, and the calling task's own record
+#   (relaunch) never counts.
 #   That placement is proven only at launch. Every ship or scout therefore
 #   receives `FM_TASK_ID=<task-id>` before launch, on the same backend-specific
 #   environment channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
