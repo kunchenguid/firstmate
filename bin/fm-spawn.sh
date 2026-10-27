@@ -1558,6 +1558,7 @@ T3CODE_LAUNCH_UNCONFIRMED=0
 T3CODE_PROJECT_ID=
 T3CODE_MODEL_SELECTION=
 HERDR_WT_LEASED=0
+HERDR_WT_REUSED=0
 HERDR_TASK_PANE_ATTEMPTED=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
@@ -1842,7 +1843,7 @@ spawn_abort_cleanup() {
   # no record naming the slot and no launch delivered, the lease is returned here
   # once no pane is left holding a shell in the slot - none was asked for, or the
   # presentation cleanup above confirmed closing it; otherwise it stays for the
-  # operator. A slot a recovery reused is named by its record, so it is kept.
+  # operator. A slot a recovery reused is never this spawn's to return.
   if [ "$HERDR_WT_LEASED" = 1 ] && [ -n "${WT:-}" ] && [ ! -L "$STATE/$ID.meta" ] &&
     ! grep -qxF "worktree=$WT" "$STATE/$ID.meta" 2>/dev/null; then
     HERDR_WT_LEASED=0
@@ -4749,7 +4750,7 @@ else
       if { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; } &&
         WT=$(herdr_task_own_leased_worktree "$STATE/$ID.meta"); then
         validate_spawn_worktree "the recorded leased worktree" "$WT (still leased to $ID with its work)"
-        HERDR_WT_LEASED=1
+        HERDR_WT_REUSED=1
       else
         WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
           echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS" >&2
@@ -5677,7 +5678,7 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A t3code or fresh Herdr slot was leased and validated in its endpoint branch above.
-  if [ "$BACKEND" != t3code ] && [ "$HERDR_WT_LEASED" != 1 ]; then
+  if [ "$BACKEND" != t3code ] && [ "$HERDR_WT_LEASED" != 1 ] && [ "$HERDR_WT_REUSED" != 1 ]; then
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -5761,10 +5762,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; $(spawn_endpoint_hint)" >&2
       exit 1
     fi
-    SPAWN_SLOT_CLAIMED=1
+    [ "$HERDR_WT_REUSED" = 1 ] || SPAWN_SLOT_CLAIMED=1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ] && [ "$HERDR_WT_LEASED" != 1 ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ] && [ "$HERDR_WT_LEASED" != 1 ] && [ "$HERDR_WT_REUSED" != 1 ]; then
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
 fi
 
