@@ -4417,14 +4417,16 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
 
 # A fresh Herdr task's slot stays durably leased to its task id until teardown
 # returns it. A same-id spawn over that task's existing record (a restart
-# recovery) prints the recorded worktree when its recorded Herdr pane holds no
-# agent, Treehouse still reports the slot leased to this id, and the slot claim
-# names this task, so the recovery reuses it instead of stranding it behind a
-# second lease. Anything else leases a new slot as before.
+# recovery) ensures the recorded Herdr session is running, then prints the
+# recorded worktree when its recorded Herdr pane holds no agent, Treehouse
+# still reports the slot leased to this id, and the slot claim names this
+# task, so the recovery reuses it instead of stranding it behind a second
+# lease. Anything else leases a new slot as before.
 herdr_task_own_leased_worktree() { # <meta>
   local meta=$1 recorded slot
   [ "$(fm_backend_of_meta "$meta")" = herdr ] &&
-    fm_backend_herdr_parse_target "$(fm_backend_target_of_meta "$meta")" || return 1
+    fm_backend_herdr_parse_target "$(fm_backend_target_of_meta "$meta")" &&
+    fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null)" in
     dead | no-agent) ;;
     *) return 1 ;;
