@@ -241,12 +241,14 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 case " $* " in
   *" -F json "*)
+    [ -z "${FM_TEST_GLAB_STATE_AFTER:-}" ] || [ ! -e "$FM_TEST_GLAB_LOG.train" ] || FM_TEST_GLAB_STATE=$FM_TEST_GLAB_STATE_AFTER
     printf '%s\n' "{\"state\":\"${FM_TEST_GLAB_STATE:-opened}\",\"detailed_merge_status\":\"${FM_TEST_GLAB_DETAIL:-mergeable}\",\"sha\":\"11568153bd75a30fd956da9ba7c1172ae556ada7\",\"head_pipeline\":{\"id\":${FM_TEST_GLAB_PIPELINE_ID:-941},\"status\":\"${FM_TEST_GLAB_PIPELINE:-success}\",\"sha\":\"37cf1cd139d2810616986b103feb45fead258fe4\"}}"
     ;;
   *" api "*)
     [ "${FM_TEST_GLAB_API_FAIL:-0}" = 0 ] || exit 1
     case "$*" in
       *merge_trains/merge_requests/*)
+        : > "$FM_TEST_GLAB_LOG.train"
         case "${FM_TEST_GLAB_TRAIN:-}" in
           car) printf '%s\n' '{"id":5,"status":"idle"}' ;;
           gone) printf '%s\n' '{"message":"404 Not found"}'; printf '%s\n' 'glab: 404 Not Found (HTTP 404)' >&2; exit 1 ;;
@@ -2598,6 +2600,10 @@ group/subgroup/project
     run_poll "$dir")
   [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure,e2e test:script_failure" ] \
     || fail "GitLab train drop did not name the failed jobs including the child pipeline: $out"
+  rm -f "$dir/glab.log.train"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=merged FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll read a just-merged merge request as a train drop: $out"
+  rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=fail run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a failed merge-train read"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=neterr run_poll "$dir")

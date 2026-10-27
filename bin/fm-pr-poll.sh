@@ -180,7 +180,8 @@ case "$provider" in
     # a merge train drops a merge request when its pipeline does not succeed.
     # Any other open merge request has its merge-train car read: a present car
     # emits "ontrain", an absent one (HTTP 404) emits a degraded train=dropped
-    # line naming the merge request's detailed merge status, its head pipeline URL
+    # line, but only if a re-read still finds the merge request open (a train
+    # that just merged it also leaves no car), naming the merge request's detailed merge status, its head pipeline URL
     # and that pipeline's failed jobs, and the watcher
     # wakes only when it last saw the car on the train. Every error, a closed
     # merge request, a pending or green head pipeline, and an unreadable record
@@ -284,6 +285,8 @@ case "$provider" in
         else
           case $car in
             *'(HTTP 404)'*)
+              GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null \
+                | jq -e '(.state == "opened" or .state == "locked")' >/dev/null 2>&1 || exit 0
               detail=
               line="degraded train=dropped url=$url"
               [ -z "$reason" ] || line="$line reason=$reason"
