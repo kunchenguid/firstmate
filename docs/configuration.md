@@ -1653,6 +1653,17 @@ This section is the single owner of the canonical schema and its per-field seman
 | `use` and optional top-level `default` | Accept one profile object or a non-empty array of profile objects; the single-object form remains fully backward-compatible. |
 | Profile `harness` | Required in every profile. |
 | Profile `model` and `effort`; rule `why` | Optional. |
+| Top-level `preferred_provider` | Optional provider-family preference, applied after eligibility checks under `quota-array-dispatch`. |
+
+**Preferred provider**
+
+`preferred_provider` accepts a provider ID matching `^[a-z0-9]+(-[a-z0-9]+)*\z`, using the same vocabulary as profile `provider`.
+For example, `"preferred_provider": "codex"` prefers the OpenAI subscription family across its eligible accounts, not one account or harness.
+Both bootstrap and the enabled resolver reject malformed values, including null, empty strings, uppercase letters, and whitespace.
+Bootstrap validates this field even without a resolver key because the agent-owned intake also honors it.
+An absent field preserves the existing routing behavior.
+The [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#rank-by-spendpriority) owns family preference, uncertainty, and fallback after the existing gates.
+An optional `policy_why` is explanatory text, not a routing field, and never reaches the rule matcher.
 
 **Fields applied only by typed resolution**
 
@@ -1784,7 +1795,12 @@ After the answer, code applies all remaining checks and ranking:
 - The confidence floor and the matched rule's `approval` and `floor`.
 - Each candidate's `provider` and `floor`.
 - Every applicable account-wide and model/product row from one `quota-axi --json` snapshot.
-- The numeric `spendPriority` argmax over candidates, using each candidate's limiting row.
+- The optional `preferred_provider` restriction under the [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#rank-by-spendpriority).
+- The numeric `spendPriority` argmax within that candidate pool, using each candidate's limiting row.
+
+The resolver prints its preferred-family decision while retaining evidence for every candidate.
+If preferred candidates remain eligible but none is rankable, it escalates instead of selecting another family.
+It never introduces candidates outside the matched rule or its existing default fallback.
 
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
 
@@ -1828,6 +1844,8 @@ Every result above exits 0.
 
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
+Firstmate still applies those gates before dispatch, including when `preferred_provider` is present.
+Explicit captain overrides retain precedence over the resolver's suggestion.
 
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
