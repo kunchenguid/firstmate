@@ -5,6 +5,7 @@
 # fake tmux pane and a real isolated git worktree. The fake tmux captures the
 # literal launch command sent with `tmux send-keys -l`, so assertions pin the
 # command firstmate would run without starting any real harness.
+# Set FM_SPAWN_CODEX_HOOK_TESTS_ONLY=1 for just the Codex hook launch cases.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -728,6 +729,7 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   rec=$(make_spawn_case profile-codex-secondmate-hooks codex "$id")
   read_case_record "$rec"
   printf 'approve-for-me\n' > "$HOME_DIR/config/codex-approval-mode"
+  printf 'invalid-on-purpose\n' > "$HOME_DIR/config/codex-herdr-hooks.json"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
 
@@ -742,6 +744,50 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   assert_not_contains "$launch" "--dangerously-bypass-approvals-and-sandbox" \
     "codex secondmate launch retained the managed-settings-fragile complete-bypass posture"
   pass "a codex secondmate keeps its project hooks and uses automatic approval review"
+}
+
+test_codex_herdr_optin_does_not_change_tmux() {
+  local rec id out status launch
+  id=profile-codex-herdr-ignored
+  rec=$(make_spawn_case profile-codex-herdr-ignored codex "$id")
+  read_case_record "$rec"
+  printf 'invalid-on-purpose\n' > "$HOME_DIR/config/codex-herdr-hooks.json"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend tmux)
+  status=$?
+  expect_code 0 "$status" "Herdr-only opt-in must not affect tmux"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" '--disable hooks' "tmux lost ordinary Codex hook posture"
+  assert_not_contains "$launch" 'fm-codex-herdr-hooks.sh' "Herdr selector leaked onto tmux"
+  pass "the Herdr-only Codex setting does not affect tmux tasks"
+}
+
+test_codex_herdr_preflight_refuses_before_endpoint_and_metadata() {
+  local rec id out status
+  id=profile-codex-herdr-refused
+  rec=$(make_spawn_case profile-codex-herdr-refused codex "$id")
+  read_case_record "$rec"
+  printf '{}\n' > "$HOME_DIR/config/codex-herdr-hooks.json"
+  cat > "$FAKEBIN_DIR/codex" <<'SHIM'
+#!/usr/bin/env bash
+printf 'codex-cli 0.165.0\n'
+SHIM
+  cat > "$FAKEBIN_DIR/herdr" <<'SHIM'
+#!/usr/bin/env bash
+if [ "$1 ${2:-}" = 'status --json' ]; then
+  printf '{"client":{"version":"0.9.5","protocol":22},"server":{"running":true,"protocol":22}}\n'
+else
+  printf 'unexpected Herdr call: %s\n' "$*" >&2
+  exit 99
+fi
+SHIM
+  chmod +x "$FAKEBIN_DIR/codex" "$FAKEBIN_DIR/herdr"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --backend herdr 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unsupported Codex opt-in unexpectedly spawned"
+  assert_contains "$out" 'unsupported Codex version' "Herdr opt-in did not fail at its preflight"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused hook opt-in published metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "refused hook opt-in sent a launch"
+  pass "Herdr Codex opt-in validates before endpoint creation or task publication"
 }
 
 test_codex_approval_mode_contract() {
@@ -2314,6 +2360,15 @@ SH
   done
 }
 
+if [ "${FM_SPAWN_CODEX_HOOK_TESTS_ONLY:-0}" = 1 ]; then
+  test_codex_crewmate_launch_disables_the_hook_layer
+  test_codex_herdr_optin_does_not_change_tmux
+  test_codex_herdr_preflight_refuses_before_endpoint_and_metadata
+  test_codex_secondmate_launch_keeps_the_hook_layer
+  echo "# all focused Codex hook launch tests passed"
+  exit 0
+fi
+
 test_launch_environment_allowlist
 test_launch_environment_invalid_config_refuses
 test_launch_environment_inaccessible_config_refuses
@@ -2733,6 +2788,8 @@ test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort
 test_codex_omits_max_effort_for_unsupported_model
 test_codex_crewmate_launch_disables_the_hook_layer
+test_codex_herdr_optin_does_not_change_tmux
+test_codex_herdr_preflight_refuses_before_endpoint_and_metadata
 test_codex_secondmate_launch_keeps_the_hook_layer
 test_codex_approval_mode_contract
 test_grok_threads_model_and_reasoning_effort

@@ -540,6 +540,8 @@ Legacy tmux metadata remains cleanup-compatible when its exact window name is `f
 
 ### Herdr homes and presentation
 
+The optional `config/codex-herdr-hooks.json` review document selects the official Herdr identity hook for this home's Codex task workers; [Codex session identity](herdr-backend.md#codex-session-identity) owns its behavior and supported limits.
+
 `FM_HOME` determines Herdr's home label: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
 [`herdr-backend.md`](herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, collision handling, and recovery behavior.
 

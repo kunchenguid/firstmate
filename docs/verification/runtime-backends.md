@@ -802,6 +802,40 @@ It captures the launch `bin/fm-spawn.sh` actually builds and confirms that the i
 It does not claim that a managed policy cannot re-enable hooks after launch.
 The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the requested hook-disablement flag for crewmates and its omission for secondmates, which run primary sessions on this repository's own project hooks.
 
+## Codex Herdr hook selection
+
+Verified 2026-10-27 on Ubuntu WSL with codex-cli 0.164.0 and the installed Herdr Codex integration v10.
+The native inventory reported the Herdr hook already trusted, seven unrelated user/project hooks, no discovery errors, and no managed hook requirements.
+The thread-free selector check returned:
+
+```text
+checked: codex-cli 0.164.0; only /home/tntn/.codex/hooks.json:session_start:3:0 enabled; 7 unrelated hooks disabled for this session
+```
+
+Refresh the installed parser and inventory proof with:
+
+```sh
+FM_CODEX_HERDR_HOOKS_LIVE=1 bash bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+bash bin/fm-test-run.sh tests/fm-codex-herdr-hooks.test.sh
+FM_SPAWN_CODEX_HOOK_TESTS_ONLY=1 bash bin/fm-test-run.sh tests/fm-spawn-dispatch-profile.test.sh
+```
+
+`hooks/list.enabled` represents selection metadata, while runnable handlers also require acceptable `trustStatus`; neither field proves a hook executed.
+The selector requires both exclusive selection and pre-existing Herdr trust, and separately checks that the hook feature is enabled.
+The guard starts no thread, invokes no hook, and never saves its candidate as an operator setting.
+The portable regression covers exact keys containing dots, notify preservation, inherited parent identity, stale review, policy, and discovery failures.
+
+The installed schema was generated with `codex app-server generate-json-schema --experimental --out <temporary-directory>`.
+Version-matched [config rules](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/hooks/src/config_rules.rs) restrict hook-state overrides to user and SessionFlags layers and merge enabled/trust fields independently.
+The [discovery implementation](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/hooks/src/engine/discovery.rs) separately computes enablement, trust, and runnable handlers.
+Native hook keys must be keys inside the TOML `hooks.state` value; embedding a quoted native key into the CLI dotted path splits it at its dots and does not select that hook.
+The live guard detects that failure rather than accepting valid CLI syntax as proof of isolation.
+
+The launcher condition was inspected for every supported harness and runtime backend: only non-primary Codex task launches on Herdr consume this opt-in.
+Primary/secondmate hook files and notify construction are unchanged.
+This record proves startup selection only; official SessionStart registration and Zoetrope opening the exact normal-dispatch worker session require a separate end-to-end demonstration and are not established by this check.
+The [Herdr backend guide](../herdr-backend.md#codex-session-identity) owns operator behavior and startup-source limitations.
+
 ## Codex automatic approval review
 
 Verified 2026-10-06 with codex-cli 0.160.1.

@@ -26,6 +26,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
 | How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
 | Where the away daemon runs and how it stops | [Away-mode supervisor support](#away-mode-supervisor-support) |
+| Registering Codex session identity for Zoetrope | [Codex session identity](#codex-session-identity) |
 | Stopping or deleting Herdr sessions during verification | [Destructive lab safety](#destructive-lab-safety) |
 | Known limits and the test suite | [Active limits](#active-limits) and [Regression entry points](#regression-entry-points) |
 
@@ -38,7 +39,7 @@ Prerequisites:
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 presentation-space ordering, native event subscription, and opt-in [project groups](#project-groups) agent-view transport.
+- `python3` only for optional protocol-16 presentation-space ordering, native event subscription, [Codex session identity](#codex-session-identity), and opt-in [project groups](#project-groups) agent-view transport.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -65,6 +66,28 @@ No separate first-run provisioning is required.
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
 Those script headers own release assets, checksums, download bounds, and post-install gates.
 Real harness credential tests remain opt-in rather than part of default CI.
+
+## Codex session identity
+
+Ordinary Codex workers disable lifecycle hooks by default and retain Firstmate's independent turn-end notification.
+An operator can opt this home's Codex workers and scouts on Herdr into the installed official Herdr SessionStart identity hook with the local `config/codex-herdr-hooks.json` review document.
+This lets consumers such as Zoetrope resolve the pane's exact native Codex session instead of guessing from its working directory.
+The hook reports identity only; it does not establish semantic busy or idle state.
+
+[`bin/fm-codex-herdr-hooks.sh`](../bin/fm-codex-herdr-hooks.sh)'s header and `--help` own the review, enable, disable, and selection mechanics.
+Review the installed integration script and the exact definition in Codex `/hooks` before saving its candidate document as the opt-in.
+If Codex requires trust, the operator must grant it through Codex; Firstmate never writes trust or bypasses review.
+The selected definition and installed script digest are pinned so an integration change requires review again.
+
+The selector currently supports Codex 0.164.0 and Herdr's installed Codex integration v10.
+It inventories the actual task's sources through Codex, disables unrelated keys with session flags, and refuses unsupported versions, managed hooks or hook policy, incomplete discovery, stale review, untrusted Herdr, or selection that Codex cannot apply exclusively.
+It leaves global settings, other harnesses, other runtime backends, and secondmate or primary hooks unchanged.
+The worker retains its existing `notify` program and uses a private Codex process.
+
+Selection is checked at startup, not a rule for future sources: do not change hook, config, or plugin sources while these workers run.
+A source change requires a fresh worker launch and inventory.
+An inventory check proves selection and recorded trust, while exact pane registration and a Zoetrope view still require a normal-dispatch live check.
+[`Runtime verification`](verification/runtime-backends.md#codex-herdr-hook-selection) distinguishes these guarantees.
 
 ## Client selection
 
