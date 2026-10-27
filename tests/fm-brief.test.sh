@@ -1114,8 +1114,8 @@ test_scout_completion_write_exception_is_task_scoped() {
       || fail "scout completion scaffold failed"
     brief="$home/data/$id/brief.md"
     command="FM_HOME='$home' bash '$ROOT/bin/fm-captain-hold.sh' complete '$id' --none"
-    assert_grep 'except for the completion command authorized under Definition of done' "$brief" \
-      "scout outside-write rule did not authorize its completion exception"
+    assert_grep "except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done." "$brief" \
+      "scout outside-write rule did not name its exact completion gate"
     assert_grep "Only when the reviewed inventory is empty, run \`$command\`." "$brief" \
       "scout did not receive the empty-inventory command for its own task and home"
     assert_grep 'This exception permits only that command, not direct metadata edits, another task, or any backlog write.' "$brief" \
