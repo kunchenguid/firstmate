@@ -30,7 +30,7 @@ If the primary harness runs outside tmux, Firstmate creates or reuses a detached
 tmux attach -t firstmate
 ```
 
-Each task window is named `fm-<id>`.
+Each task window is named `fm-<id>`, with any `.` in the id replaced by `-` because tmux reads `.` in a target as the window/pane separator.
 
 ```sh
 tmux list-windows -t <session-name>

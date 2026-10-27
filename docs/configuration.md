@@ -651,7 +651,7 @@ Backend guides and other documents refer here instead of restating the resolutio
 Missing, empty, duplicate, malformed, backend-inconsistent, or task-mismatched endpoint records are preserved and refused.
 When the worktree identity is missing, empty, or ambiguous, the refusal also explains how to identify the held copy and restore exactly one `worktree=` line without changing the record automatically.
 
-Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>`; opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
+Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>` (dots in the id replaced by `-`); opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
 
 ### Herdr homes and presentation
 
