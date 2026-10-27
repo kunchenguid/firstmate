@@ -306,21 +306,21 @@ WINDOW_CLOSED_EMPTY=75
 JOB_PREEMPTED=76
 
 cmd_source() {
-  local id=${1:-} started rc=0 output class
+  local id=${1:-} started rc=0 class
   validate_id "$id"
   read_cursor "$id"
   started=$(fm_pending_reply_now)
   output=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-reply-source.XXXXXX") \
     || die "cannot stage remote reply source output"
+  trap 'rm -f -- "$output"' EXIT
+  trap 'exit 143' HUP INT TERM
   "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
     "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" \
     < /dev/null > "$output" || rc=$?
   if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
-    rm -f -- "$output"
     fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
     return "$WINDOW_CLOSED_EMPTY"
   elif [ "$rc" -eq "$JOB_PREEMPTED" ]; then
-    rm -f -- "$output"
     return "$WINDOW_CLOSED_EMPTY"
   fi
   # A remote transport failure can leave diagnostic bytes on stdout, especially
@@ -330,13 +330,9 @@ cmd_source() {
   # claim and relistens without advancing the cursor.
   class=$(classify_result "$output")
   if [ "$rc" -ne 0 ] || [ "$class" = malformed ]; then
-    rm -f -- "$output"
     return "$WINDOW_CLOSED_EMPTY"
   fi
   cat "$output"
-  rc=$?
-  rm -f -- "$output"
-  return "$rc"
 }
 
 safe_doc_path() {

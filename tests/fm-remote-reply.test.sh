@@ -57,6 +57,7 @@ fi
   exit 255
 }
 [ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
+[ "${FM_REMOTE_REPLY_HANG:-}" != 1 ] || { sleep 30; exit 255; }
 host=$1
 entry=$2
 shift 2
@@ -175,6 +176,31 @@ set -e
 [ "$ssh_255_rc" -eq 75 ] || fail "ssh exit 255 returned $ssh_255_rc instead of an empty-window status"
 [ ! -s "$TMP_ROOT/ssh-255.result" ] || fail "ssh exit 255 emitted a result"
 pass "transport failures and non-schema diagnostics become transient empty windows"
+
+# Listener stop and retire terminate the runner's process group while the
+# source blocks on its read; that must not leave the staged output behind.
+SOURCE_TMP="$TMP_ROOT/source-tmp"
+mkdir -p "$SOURCE_TMP"
+set -m
+FM_REMOTE_REPLY_HANG=1 TMPDIR="$SOURCE_TMP" remote_env "$ADAPTER" source ios >/dev/null 2>&1 &
+hung_source=$!
+set +m
+staged=''
+for _ in $(seq 1 100); do
+  staged=$(find "$SOURCE_TMP" -name 'fm-remote-reply-source.*' 2>/dev/null)
+  [ -z "$staged" ] || break
+  sleep 0.05
+done
+[ -n "$staged" ] || fail "the blocking source never staged its output"
+kill -TERM -- -"$hung_source" 2>/dev/null || true
+wait "$hung_source" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  staged=$(find "$SOURCE_TMP" -name 'fm-remote-reply-source.*')
+  [ -n "$staged" ] || break
+  sleep 0.05
+done
+[ -z "$staged" ] || fail "a terminated source left its staged output behind"
+pass "a terminated source removes its staged output"
 
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"
