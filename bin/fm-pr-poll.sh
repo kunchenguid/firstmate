@@ -230,7 +230,7 @@ case "$provider" in
             && printf '%s\n' ontrain
         else
           case $car in
-            *404*)
+            *'(HTTP 404)'*)
               line="degraded train=dropped url=$url"
               [ -z "$reason" ] || line="$line reason=$reason"
               printf '%s\n' "$line"

@@ -251,6 +251,7 @@ case " $* " in
           car) printf '%s\n' '{"id":5,"status":"idle"}' ;;
           gone) printf '%s\n' '{"message":"404 Not found"}'; printf '%s\n' 'glab: 404 Not Found (HTTP 404)' >&2; exit 1 ;;
           fail) printf '%s\n' 'glab: 500 (HTTP 500)' >&2; exit 1 ;;
+          neterr) printf '%s\n' 'glab: Get "https://gitlab.example/api/v4/projects/group%2Fproj404/merge_trains/merge_requests/1404": i/o timeout' >&2; exit 1 ;;
           *) printf '%s\n' '[]' ;;
         esac
         ;;
@@ -2568,6 +2569,8 @@ group/subgroup/project
   [ "$out" = "degraded train=dropped url=$url reason=need_rebase" ] || fail "GitLab poll did not report a train drop with a non-failed pipeline: $out"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=fail run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a failed merge-train read"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=neterr run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll read a transport error mentioning 404 as a train drop: $out"
   out=$(FM_TEST_GLAB_STATE=closed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll reported a train drop for a closed merge request"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
