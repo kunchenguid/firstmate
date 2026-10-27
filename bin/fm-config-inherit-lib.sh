@@ -27,6 +27,8 @@
 # Secondmate; see docs/trace-context.md.
 # Primary approval-mode settings follow the same inheritance rules as other
 # declared configuration.
+# Primary config/t3code-instances selects the T3 provider account for each
+# harness, so secondmates inherit it rather than falling back to a default.
 # Primary config/keep-ai-trailers is a home-wide commit-attribution choice, so
 # a secondmate's own crewmates keep AI co-author trailers too.
 # Primary config/supervision-host-off is the fleet's supervision-host opt-out,
@@ -72,7 +74,10 @@
 # so a new inheritable item cannot be accepted by one side and refused by the
 # other. A local and remote code root that disagree about this list must be
 # reconciled by the ordinary remote sync/update path before the transfer
-# succeeds; there is no separate allowlist version negotiation.
+# succeeds; there is no separate allowlist version negotiation. The one
+# exception is an item the primary does not have: an older receiver that does
+# not declare it refuses its absent record, and the sender counts that refusal
+# as unchanged, since that code root cannot read the item anyway.
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
@@ -88,7 +93,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces herdr-project-groups startup-memory-budget trace-context launch-env-allowlist claude-permission-mode codex-approval-mode lavish-axi-host keep-ai-trailers supervision-host-off firstmate-role}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces herdr-project-groups startup-memory-budget trace-context launch-env-allowlist claude-permission-mode codex-approval-mode lavish-axi-host t3code-instances keep-ai-trailers supervision-host-off firstmate-role}"
 
 # firstmate-role additionally carries a proof-of-state receipt: a scoped role
 # grant (or its recorded absence) authorizes a secondmate home only while

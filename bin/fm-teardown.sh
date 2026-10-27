@@ -330,6 +330,9 @@
 # logs and orphaned staging files older than 30 completed days by mtime.
 # Pruning failures warn, never abort teardown, and leave other task data and
 # symlinks alone.
+# Opt-in config/record-export-root delegates the record archive transaction to
+# bin/fm-record-export.sh immediately before status, metadata, or inbox records
+# for the retiring task are removed. A failed commit retains those sources.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -357,6 +360,14 @@ teardown_require_backend_prerequisites() {  # <backend> <task-id>
     echo "error: teardown refused: required $backend source is missing or unreadable for $task_id; nothing was changed" >&2
     return 1
   fi
+}
+
+# Retiring a T3 secondmate home needs lsof to prove its provider processes
+# have left it (t3code_secondmate_home_shutdown_barrier).
+t3code_secondmate_lsof_check() {  # <task-id> <home>
+  command -v lsof >/dev/null 2>&1 && return 0
+  echo "REFUSED: cannot prove T3 secondmate $1's provider processes have left ${2:-its home} (lsof is unavailable); preserving the home and its records for retry" >&2
+  return 1
 }
 for _teardown_source in \
   fm-tasks-axi-lib.sh \
@@ -391,14 +402,14 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
-# shellcheck source=bin/fm-backend.sh
-. "$SCRIPT_DIR/fm-backend.sh"
+# Pending replies load the shared backend dispatcher and status classifier.
+# Import those graphs once rather than initializing and analyzing them twice.
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
-# shellcheck source=bin/fm-classify-lib.sh
-. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -409,8 +420,6 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
-# shellcheck source=bin/fm-pending-reply-lib.sh
-. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # Archive paths live only in teardown; presentation/wake readers stay unaware.
@@ -484,6 +493,26 @@ teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
   for entry in "$DATA"/*; do
     teardown_prune_status_archives "$entry"
   done
+}
+
+teardown_export_records() {  # <state> <task-id>
+  local state=$1 task=$2
+  if [ ! -e "$CONFIG/record-export-root" ] && [ ! -L "$CONFIG/record-export-root" ]; then
+    return 0
+  fi
+  if [ -e "$CONFIG" ] || [ -L "$CONFIG" ]; then
+    if [ ! -d "$CONFIG" ] || [ -L "$CONFIG" ] || [ ! -r "$CONFIG" ] || [ ! -x "$CONFIG" ]; then
+      echo "error: record export config directory is inaccessible or unsafe: $CONFIG" >&2
+      echo "error: record export archive failed for $task; retaining task records for retry" >&2
+      return 1
+    fi
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_RECORD_EXPORT_META_LOCK_HELD=1 \
+    "$SCRIPT_DIR/fm-record-export.sh" archive-task "$task" || {
+      echo "error: record export archive failed for $task; retaining task records for retry" >&2
+      return 1
+    }
 }
 
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
@@ -1160,6 +1189,7 @@ remote_secondmate_teardown() {
   if [ "$rc" -eq "$TEARDOWN_LOST_SLOT_EXIT" ]; then
     printf '%s\n' "$out" | grep -E '^(warning: treehouse return left pool slot |  )' >&2 || true
   fi
+  teardown_export_records "$STATE" "$ID" || return 1
   remote_recovery_paths_validate recheck || {
     echo "error: remote home retired but local recovery paths changed; preserving the local route for retry" >&2
     return 1
@@ -1241,6 +1271,12 @@ fi
 # be readable before the first destructive step. --force does not override
 # this. A forced descendant is proved in validate_firstmate_home_children_removal.
 teardown_require_backend_prerequisites "$BACKEND" "$ID" || exit 1
+# The T3 capability and identity gate must pass before local teardown mutation,
+# even under --force.
+if [ "$BACKEND" = t3code ]; then
+  fm_backend_runtime_check t3code || exit 1
+  [ "$TEARDOWN_META_KIND" != secondmate ] || t3code_secondmate_lsof_check "$ID" "$(fm_meta_get "$META" home)" || exit 1
+fi
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
@@ -2801,14 +2837,36 @@ EOF
   printf '%s\n' "$abs_home_path"
 }
 
-remove_firstmate_home() {
-  local home=$1 label=$2 expected_id=${3:-} abs_home_path process_event_backup
+# t3code_secondmate_home_shutdown_barrier: T3 detaches a provider session as a
+# separate effect after its thread's archive reads back, so the secondmate's
+# Claude or Codex process, and anything it started, can still be running in
+# the home after the proven archive. Worker teardown's worktree reaper never
+# runs for a secondmate, so the same structural reaper runs here, over the
+# home, before it is returned or removed; without lsof nothing can prove the
+# home is quiet, and the home and its records are kept.
+t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
+  t3code_secondmate_lsof_check "$2" "$1" || return 1
+  reap_task_worktree_processes "secondmate home" "$1"
+}
+
+remove_firstmate_home() {  # <home> <label> <task-id> <backend>
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
+  # A T3 secondmate's home carries the environment its spawn wrote there.
+  # Remove it after home validation and before returning its pooled Git index.
+  if [ "$backend" = t3code ]; then
+    { fm_backend_source t3code && fm_backend_t3code_home_env_cleanup "$abs_home_path"; } || return 1
+  fi
   process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
+    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+    return 1
+  fi
+  if [ "$backend" = t3code ] \
+    && ! t3code_secondmate_home_shutdown_barrier "$abs_home_path" "$expected_id"; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
@@ -3165,6 +3223,7 @@ validate_firstmate_home_children_removal() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
+      [ "$child_backend" != t3code ] || t3code_secondmate_lsof_check "$child_id" "$child_home" || return 1
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
@@ -3324,7 +3383,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # about its own close is bin/fm-backend.sh's fm_backend_kill contract.
 #
 # Returns 0 when the caller must continue anyway and 1 when it must stop.
-# <honors-force> is 1 at exactly one site, the generic non-Herdr/non-Orca
+# <honors-force> is 1 at exactly one site, the generic non-Herdr/non-Orca/non-T3
 # close, where --force is the operator's existing authority to discard this
 # task's records deliberately AND continuing is actually reachable: the
 # worktree is already returned by then and nothing after it needs the backend
@@ -3333,6 +3392,8 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # the step immediately after it removes the Orca worktree through the same CLI
 # whose absence is the only thing that arm ever reports, so a forced continue
 # would die there having removed nothing while this message claimed otherwise.
+# The T3 site refuses under --force because stop and archive must succeed before
+# its worktree or home can be released (see the native cleanup site below).
 # The two forced secondmate child sites refuse because that path is only ever
 # reached under --force, so honoring force would delete the refusal rather
 # than override it, and would contradict the adjacent Herdr child gate that
@@ -3411,12 +3472,13 @@ cleanup_firstmate_home_children() {
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
+    teardown_export_records "$sub_state" "$child_id" || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" "$archive_parent/children/$child_id" || return $?
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_backend" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -3443,6 +3505,11 @@ cleanup_firstmate_home_children() {
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        if [ "$child_backend" = t3code ]; then
+          "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$child_wt" || return 1
+          git -C "$child_wt" ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1 \
+            || rm -f "$child_wt/CLAUDE.local.md"
+        fi
         if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
           teardown_scrub_scratch_copy "$child_wt" || return 1
           child_pool_slot=0
@@ -3484,6 +3551,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/.$child_id.branch-outcome-index"
     chmod u+w "$sub_state/$child_id.git-hooks" 2>/dev/null || true
     rm -rf "$sub_state/$child_id.git-hooks" "$sub_state/$child_id.push-guard" \
+      "$sub_state/$child_id.cortex-plugin" \
       "$sub_state/$child_id.polytoken-config" \
       "$sub_state/$child_id.polytoken-sessions" \
       "$sub_state/$child_id.polytoken-sessions-v1"
@@ -3747,6 +3815,22 @@ fi
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
+# A t3code thread is stopped and archived BEFORE its slot goes back to the pool
+# or, for a secondmate, before its home is removed: a live thread whose
+# worktreePath disappears re-creates it on the next turn, so returning the slot
+# first would hand T3 a path another task may take, and the archived transcript
+# is the only record of a secondmate once its home is gone. The kill is
+# idempotent (an archived or deleted thread is already the end state), so a
+# re-run after a failed return converges; an unreachable server refuses rather
+# than returning a slot a live thread still points at. The secondmate's fm-
+# T3 project is deliberately left in place: project.delete refuses while the
+# archived thread exists and would take that transcript with it under force.
+if [ "$BACKEND" = t3code ]; then
+  fm_backend_kill t3code "$T" || {
+    echo "error: could not stop and archive T3 thread $T for $ID; start T3 Code (or archive the thread there) and re-run teardown" >&2
+    endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
+  }
+fi
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -3779,10 +3863,16 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
       git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
     fi
   fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+  # Remove our hook and environment files so a reused pool worktree cannot fire
+  # signals for a dead task or hand a t3code env block or channel statement to
+  # its next holder.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   remove_harness_worktree_wiring "$WT"
+  if [ "$BACKEND" = t3code ]; then
+    "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$WT" || exit 1
+    git -C "$WT" ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1 || rm -f "$WT/CLAUDE.local.md"
+  fi
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -3872,7 +3962,13 @@ elif [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
     fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
-elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+  # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
+  # (bin/fm-rex-marks.sh), so a pane the close cannot reach is not left showing
+  # a stale request. A task with no cached record costs nothing.
+  if [ "$BACKEND" = rex ] && { [ -e "$STATE/.rex-mark-$ID" ] || [ -e "$STATE/.rex-progress-$ID" ] || [ -e "$STATE/.rex-tint-$ID" ]; }; then
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" clear "$ID" >/dev/null 2>&1 || true
+  fi
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi
@@ -3910,13 +4006,14 @@ if [ "$KIND" != secondmate ]; then
     exit 1
   fi
 fi
+teardown_export_records "$STATE" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
     || { echo "error: local pending-reply recovery paths changed; preserving the secondmate home and route" >&2; exit 1; }
-  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"; then
+  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND"; then
     :
   else
     rc=$?
@@ -3989,7 +4086,10 @@ chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 # mirrored worker config and the versioned session tree the launch wrote
 # beside its sessions root), so they are removed recursively with the inbox
 # and the git-hooks dir rather than the flat file list above.
+# state/<id>.cortex-plugin is the per-task Cortex Code plugin directory
+# (bin/fm-cortex-plugin.sh) carrying the busy-state hooks.
 rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" "$STATE/$ID.push-guard" \
+  "$STATE/$ID.cortex-plugin" \
   "$STATE/$ID.polytoken-config" \
   "$STATE/$ID.polytoken-sessions" "$STATE/$ID.polytoken-sessions-v1"
 # A presentation journal the close path left behind is orphaned once the

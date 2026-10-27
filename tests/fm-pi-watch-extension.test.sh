@@ -2991,6 +2991,88 @@ EOF
   pass "Pi watcher arm distinguishes all session lock ownership states"
 }
 
+# On Windows the session lock may hold a tagged win:<pid> (bin/fm-session-lock-lib.sh),
+# and native Node sees that Windows pid directly, so the arm reads a tagged holder
+# by its digits. A malformed tag, and any tag off Windows, stays no identity. The
+# platform is set per call so every host exercises both sides.
+test_pi_arm_reads_a_windows_tagged_session_lock() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-tagged-lock-root"
+  home="$TMP_ROOT/pi-tagged-lock-home"
+  log="$TMP_ROOT/pi-tagged-lock.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!tool) throw new Error("Pi watch tool was not registered");
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const platform = Object.getOwnPropertyDescriptor(process, "platform");
+async function armOn(name, value) {
+  writeFileSync(lock, `${value}\n`);
+  Object.defineProperty(process, "platform", { ...platform, value: name });
+  try {
+    return await tool.execute("tool-call-tagged-lock", {}, undefined, undefined, {});
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+}
+const otherHolder = "watcher: read-only - session lock is held by another firstmate session";
+const expectRefused = (result, label, message) => {
+  if (result.details?.ok !== false) throw new Error(`${label} unexpectedly armed: ${JSON.stringify(result.details)}`);
+  if (!result.details.message.includes(message)) throw new Error(`${label} gave the wrong refusal: ${result.details.message}`);
+};
+
+const dead = spawnSync(process.execPath, ["-e", "0"], { stdio: "ignore" }).pid;
+expectRefused(await armOn("win32", `win:${dead}`), "a dead tagged holder", "no live session holds the lock");
+const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  expectRefused(await armOn("win32", `win:${other.pid}`), "a live other tagged holder", otherHolder);
+} finally {
+  other.kill("SIGTERM");
+}
+for (const value of ["win:", `win:${process.pid}x`, `WIN:${process.pid}`, "win:1"]) {
+  expectRefused(await armOn("win32", value), `the malformed tagged lock ${value}`, otherHolder);
+}
+expectRefused(await armOn("linux", `win:${process.pid}`), "a tagged lock off Windows", otherHolder);
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("watcher arm ran without owning the tagged lock");
+
+const owned = await armOn("win32", `win:${process.pid}`);
+if (owned.details?.ok !== true || !owned.details.message.includes("started Pi extension arm child")) {
+  throw new Error(`an owned tagged lock did not arm: ${JSON.stringify(owned.details)}`);
+}
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("an owned tagged lock did not run the watcher arm");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi watcher arm must read a Windows-tagged session lock only on Windows"
+  [ -z "$out" ] || fail "Pi tagged-lock arm test printed output: $out"
+  pass "Pi watcher arm reads a Windows-tagged session lock only on Windows"
+}
+
 # A Pi command started from inside the live session, such as the `pi --help`
 # capability probe, auto-loads this extension too and passes the ancestor walk
 # in lockOwnership. Its pid dies at once, so the marker must stay on the live
@@ -5712,6 +5794,7 @@ test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
+test_pi_arm_reads_a_windows_tagged_session_lock
 test_pi_extension_keeps_marker_of_live_ancestor_session
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close

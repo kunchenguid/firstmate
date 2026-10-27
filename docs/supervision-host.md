@@ -50,6 +50,7 @@ Until they land, their current behavior stays as described in their own owners.
 | The arm owners | Each primary's existing arm owner | Runs the host for a home that runs it and delivers a handed-back wake to main; see [Arm owners](#arm-owners). |
 | The engine | `bin/fm-supervision-engine-lib.sh` | Owns the home gate, including the default on Claude and the opt-out, the verified-engine list, and one bounded engine turn, including the reap of engine tool processes that outlive it. |
 | Row eligibility and the offer rule | `bin/fm-branch-dispatch.mjs` | The command entry to `.pi/extensions/lib/fm-branch-dispatch.ts`, so the host and the Pi extension compute branch-claimable rows, their task scope, and whether the branch may take a close (`branchOfferForWake`) from one owner; it also renders the wake message with the same away-posture tail, or the dialog mirror at its head. |
+| Warm-cache compaction | `bin/fm-warm-compact-lib.sh` | While parked, the host compacts the idle primary and its idle engine conversation once per idle episode when the home opted in; [configuration.md](configuration.md#warm-cache-compaction-configwarm-compact) owns the gate and guards. |
 | The grant and the drain | `bin/fm-wake-grant.sh` | Publishes the branch's rows bound to the host's own process; [watcher-continuity.md](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor drain and acknowledgement the engine runs. |
 | The prompt | `bin/fm-branch-prompt.sh` | Emits the same byte-stable prompt the Pi branch runs; each wake names its host's report surface. |
 | The report surface | `bin/fm-branch-report.sh` | The command twin of the Pi branch's `fm_branch_report` tool, with the same task scoping; see [The report surface](#the-report-surface). |
@@ -111,6 +112,8 @@ On that main-only pass-through the host starts the successor watcher cycle and l
 That successor, like one a turn hands back at its start (see [Away](#away)), runs in a process group of its own, so the harness tearing down the hook's group after the rewake does not stop it.
 The host confirms no handling handoff and republishes the watcher's recovery marker as downtime, even when an earlier engine turn left it reading handling, because the re-arm owner delivers a close to main only while that marker reads downtime.
 If that publish fails, the host prints a `watcher: FAILED` line instead of the close and exits nonzero, so the arm owner reports a failure rather than a hand-back it could not deliver.
+The default successor is one-shot, so a lost main continuation can still leave supervision down after that successor's next close.
+The opt-in [acknowledged hand-back](#acknowledged-hand-back) keeps replacing those closed cycles until main acknowledges.
 The session's next park without `--restart` requests a take-over to restore a single host-owned arm; the [host header](../bin/fm-supervision-host.sh) owns successor persistence and cleanup, and the [arm header](../bin/fm-watch-arm.sh) owns take-over eligibility and fallback.
 OpenCode and omp still launch the host with `--restart`, which takes precedence over recorded take-over and lacks its acknowledgement-preserving handover; changing that first-cycle path remains a follow-up.
 The host-off Claude Stop hook's detached handling successor is also unchanged; see [Claude handling successor](watcher-continuity.md#claude-handling-successor).
@@ -228,9 +231,36 @@ Anything main must act on while attended to move the work forward, such as a loc
 One limit: if the captain goes away and returns while an attended engine turn runs, and the host is terminated before that turn's `branch-outcome` wake is delivered, no immediate wake reaches main.
 The captain row is still durable, and the next drain presents it until it is acknowledged.
 
+## Acknowledged hand-back
+
+On Claude, the home-local [configuration flag](configuration.md#acknowledged-hand-back-configsupervision-handoff-ack) replaces the default hand-back with an acknowledged transfer.
+It covers park boundaries, attended pass-throughs, and other host exits that hand work to main, without changing branch eligibility or the park bound.
+Before emitting the close, the host queues a token-bound check and verifies a detached successor against the home's watcher identity and fresh beacon.
+`bin/fm-supervision-handoff.sh` keeps replacing each closed one-shot cycle while that check remains unacknowledged.
+Only main's sequence-bound `bin/fm-wake-drain.sh` acknowledgement of that specific check confirms receipt, not a drain, hook exit, or successful terminal submission.
+The acknowledgement leaves a verified watcher running.
+The next park stops the retry owner before taking over its recorded arm, retaining exactly one watcher.
+The helper's header owns the records, retry interval, process cleanup, and transport guards.
+
+### Reaching a lost Claude continuation
+
+The first delivery remains the Stop hook's exit-2 feedback.
+A later retry does not depend on that hook or on another Stop firing.
+The detached owner writes a durable operational-input record and submits its watcher doorbell through the existing tmux submit primitive.
+It uses only the inherited pane, proves that pane's process contains the pinned session owner, and requires an idle agent with an empty composer.
+Busy, unreadable, foreign, and partially typed panes defer delivery without changing the queued check.
+The default retry interval is five minutes, and successful submission still does not acknowledge the hand-back.
+
+Automatic retries currently reach Claude only through that verified tmux pane.
+A primary outside tmux, an unavailable pane, or a blocked composer keeps its watcher and queued work but needs another normal turn or a human message.
+A failed watcher restart or a terminated retry owner is not a guarantee of continued supervision.
+The portable tests prove the process hand-off and transport guards, not a real Claude session accepting the retried input.
+No new live-harness verification is claimed.
+All other primaries and the host-off Stop path retain their existing behavior.
+
 ## Failure direction
 
-Every path that cannot finish a wake the engine took hands that wake to main, with one `supervision-host: <why>` line after the close.
+With acknowledged hand-back disabled, every path that cannot finish a wake the engine took hands that wake to main, with one `supervision-host: <why>` line after the close.
 Before handing it back, the host stops its successor cycle, and whenever a successor generation was recorded (confirmed or not), it explicitly republishes downtime for that generation.
 That publication is required even when the successor already exited, because no watcher cleanup remains to make the close deliverable to the arm owner.
 If that publication fails, the hand-back adds a `supervision-host: watcher downtime could not be restored` line and the host exits nonzero.
@@ -296,7 +326,8 @@ The OpenCode, omp, and Grok owners have no hook timeout and keep the same defaul
 
 ### At the boundary
 
-At the boundary the host stops the home's watcher and exits with one `supervision-host: cycle boundary` line.
+By default, at the boundary the host stops the home's watcher and exits with one `supervision-host: cycle boundary` line.
+With [acknowledged hand-back](#acknowledged-hand-back) enabled, it verifies a successor before returning that line and retains supervision until main acknowledges.
 Main drains and acknowledges, and the owner starts the next park:
 
 | Primary | When the next park starts |
@@ -309,7 +340,8 @@ The host checks the boundary on every loop pass, so closes that are already wait
 It also starts no engine turn that could still be running at the boundary (the turn bound plus the engine grace).
 It judges this when the close arrives and again just before the turn starts.
 When it declines such a turn, that close reaches main ahead of the boundary line instead, and its wake stays durable in the queue.
-One short main turn per boundary is the cost of never losing the park silently.
+The default path depends on main receiving that continuation.
+Acknowledged hand-back protects the boundary when the continuation is lost.
 
 ### Codex checkpoint bound
 
@@ -411,7 +443,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 
 | Test | What it covers |
 |---|---|
-| `tests/fm-supervision-host.test.sh` | Drives the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule and the drain's `BRANCH OUTCOMES` section. |
+| `tests/fm-supervision-host.test.sh` | Drives the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule, the drain's `BRANCH OUTCOMES` section, lost hand-back continuations, and guarded retry submission. |
 | `tests/fm-claude-stop-autoarm.test.sh` | The Claude arm owner's host mode against a stub host. |
 | `tests/fm-cursor-primary.test.sh` | The Cursor arm owner's host mode against a stub host. |
 | `tests/fm-pi-watch-extension.test.sh` | The OpenCode plugin's host mode against a stub host. |

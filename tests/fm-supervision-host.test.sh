@@ -63,12 +63,15 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   hold-marker the same as handle, but before the result a helper takes the
 #               recovery-marker lock for a few seconds, so the host's handled-
 #               turn settle is still waiting for it (holding the queue lock)
+# A $FM_HOME/stub-tz file sets the engine's TZ, as a wrapper launching the
+# real engine binary may, independent of the host's own TZ.
 STUB="$TMP_ROOT/engine-stub"
 cat > "$STUB" <<'SH'
 #!/usr/bin/env bash
 set -u
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 mode=$(cat "$FM_HOME/stub-mode" 2>/dev/null || echo handle)
+[ ! -s "$FM_HOME/stub-tz" ] || { TZ=$(cat "$FM_HOME/stub-tz"); export TZ; }
 n=$(( $(ls "$FM_HOME"/engine-call.* 2>/dev/null | wc -l) + 1 ))
 {
   printf 'mode=%s\nactor=%s\nholder=%s\nprimary=%s\nturn=%s\n' "$mode" "${FM_SUPERVISION_ACTOR:-}" \
@@ -182,6 +185,8 @@ HOMES_FILE="$TMP_ROOT/homes"
 # Stop whatever a case left running, by the exact pids its home recorded.
 stop_home_processes() {  # <home>
   local home=$1 pid arms='' i=0
+  pid=$(cut -f1 "$home/state/.supervision-handoff-owner" 2>/dev/null || true)
+  [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
   if [ -f "$home/state/.supervision-host" ]; then
     arms=$(awk -F '\t' '$1 == "arm" { print $2 }' "$home/state/.supervision-host")
     pid=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
@@ -948,6 +953,31 @@ test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue() {
   pass "host: a host stopped right after a handled wake exits and leaves the wake queue usable"
 }
 
+# A wrapper may launch the engine in another time zone than the host's (one
+# observed wrapper exports a TZ the main session's hooks never see). The
+# process-table identity that ties the branch grant to the host must read the
+# same from both, or the engine's drain discards the grant as stale, refuses,
+# and leaves every granted row for main. The proc root is hidden so Linux takes
+# the same process-table path as macOS.
+test_engine_in_another_time_zone_handles_its_granted_rows() {
+  local home no_proc
+  home=$(make_home engine-tz attended)
+  no_proc="$TMP_ROOT/engine-tz-no-proc"
+  [ "$(TZ=UTC0 LC_ALL=C ps -p $$ -o lstart=)" != "$(TZ=ENG-9 LC_ALL=C ps -p $$ -o lstart=)" ] \
+    || fail "fixture: ps renders the same start time in both time zones, so the case would prove nothing"
+  printf 'ENG-9\n' > "$home/stub-tz"
+  TZ=UTC0 FM_PROC_ROOT_OVERRIDE="$no_proc" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "engine tz: the host never started a watcher cycle: $(cat "$home/host.out")"
+  append_status "$home" 'step one'
+  wait_until 250 handled_at_least "$home" 1 \
+    || fail "engine tz: the turn did not end handled: $(cat "$home/state/.supervision-host.log"; cat "$home"/engine-drain.* 2>/dev/null)"
+  assert_no_re '	failed	' "$home/state/.supervision-host.log" "engine tz: a turn that reported for its granted rows must not fail"
+  assert_no_grep 'no branch-eligible row snapshot' "$home/engine-drain.1" "engine tz: the engine's drain discarded the host's grant"
+  assert_no_grep 'demo.status' "$home/state/.wake-queue" "engine tz: the engine's acknowledgement did not consume the wake"
+  [ ! -s "$home/host.rc" ] || fail "engine tz: the handled wake reached main: $(cat "$home/host.out")"
+  pass "host: an engine in another time zone than the host drains, reports, and acknowledges its granted rows"
+}
+
 test_attended_captain_outcome_reaches_main_through_branch_outcomes() {
   local home drained
   home=$(make_home attended-captain attended)
@@ -1697,6 +1727,8 @@ test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end() {
   main_drain "$home" >/dev/null
   append_status "$home" 'which region?' needs-decision
   wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$successor" || fail "fixture: the successor did not close on the later decision"
+  watcher_live "$home" && fail "the absent opt-in changed the default one-shot successor"
+  [ ! -e "$home/state/.supervision-handoff-pending" ] || fail "the absent opt-in queued a hand-back receipt"
   # shellcheck disable=SC2086 # the printed acknowledgement arguments
   [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
     || fail "successor close: main's acknowledgement failed: $MAIN_ACK"
@@ -2615,6 +2647,95 @@ SH
   pass "host: parked child-exit sampling uses ordinary half-second sleeps"
 }
 
+compacted_once() { [ "$(compact_calls "$1")" = 1 ]; }
+compact_calls() { grep -l '^arg=/compact$' "$1"/engine-call.* 2>/dev/null | wc -l | tr -d ' '; }
+
+# Seed the engine record the way a handled turn leaves it, keyed to the live
+# fake main session, with a transcript large enough to be due.
+seed_idle_engine_record() {  # <home> <ended-age-seconds>
+  local home=$1 key model state="$1/state" ended compacted
+  key=$(FM_HOME="$home" bash -c '. "$1"; . "$2"; fm_supervision_host_main_key "$3"' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-supervision-engine-lib.sh" "$state") \
+    || fail "warm-compact: no main-session key"
+  model=$(bash -c '. "$1"; fm_supervision_host_config "$2" claude; printf "%s" "$FM_SUPERVISION_ENGINE_MODEL"' _ "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/config")
+  ended=$(sed -n 's/^ended=//p' "$state/.supervision-host-engine" 2>/dev/null | head -n 1)
+  [ -n "$ended" ] || ended=$(( $(date +%s) - $2 ))
+  compacted=$(sed -n 's/^compacted=//p' "$state/.supervision-host-engine" 2>/dev/null | head -n 1)
+  printf 'engine=claude\nmodel=%s\nsession=warm-sess\nkey=%s\nturns=1\nconversation_cost=0\nended=%s\n' "$model" "$key" "$ended" > "$state/.supervision-host-engine"
+  [ -z "$compacted" ] || printf 'compacted=%s\n' "$compacted" >> "$state/.supervision-host-engine"
+  printf 'prompt\n' > "$state/.supervision-host-prompt"
+}
+
+test_idle_engine_conversation_is_compacted_once_across_hosts() {
+  local home run ended
+  home=$(make_home warm-compact attended claude)
+  echo noreport > "$home/stub-mode"
+  printf 'idle-seconds=60\nmin-context-tokens=1000\n' > "$home/config/warm-compact"
+  mkdir -p "$home/claude/projects/p"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":90000,"cache_creation_input_tokens":0}}}\n' \
+    > "$home/claude/projects/p/warm-sess.jsonl"
+  for run in 1 2; do
+    rm -f "$home/host.rc" "$home/park-clock"
+    CLAUDE_CONFIG_DIR="$home/claude" FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=3000 \
+      FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+    wait_until 150 watcher_live "$home" || fail "warm-compact: run $run never started a watcher"
+    seed_idle_engine_record "$home" 600
+    ended=$(sed -n 's/^ended=//p' "$home/state/.supervision-host-engine")
+    echo 10 > "$home/park-clock"
+    if [ "$run" = 1 ]; then
+      wait_until 150 compacted_once "$home" || fail "warm-compact: the idle engine conversation was not compacted"
+      wait_until 100 grep -qx "compacted=$ended" "$home/state/.supervision-host-engine" || fail "warm-compact: the episode marker was not recorded with the engine record"
+    else
+      echo 20 > "$home/park-clock"
+      sleep 3
+    fi
+    [ "$(compact_calls "$home")" = 1 ] || fail "warm-compact: run $run compacted the same idle episode again"
+    stop_home_processes "$home"
+    wait_until 100 host_exited "$home" || true
+  done
+  pass "host: an idle engine conversation is compacted once across hosts"
+}
+
+test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted() {
+  local home
+  home=$(make_home warm-compact-stale attended claude)
+  echo noreport > "$home/stub-mode"
+  printf 'idle-seconds=60\nmin-context-tokens=1000\n' > "$home/config/warm-compact"
+  mkdir -p "$home/claude/projects/p"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":90000,"cache_creation_input_tokens":0}}}\n' \
+    > "$home/claude/projects/p/warm-sess.jsonl"
+  CLAUDE_CONFIG_DIR="$home/claude" FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=3000 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "warm-compact-stale: no watcher started"
+  seed_idle_engine_record "$home" 600
+  sed -i 's/^model=.*/model=another-model/' "$home/state/.supervision-host-engine"
+  echo 10 > "$home/park-clock"
+  sleep 3
+  [ "$(compact_calls "$home")" = 0 ] || fail "warm-compact-stale: compacted a conversation the next turn would not resume"
+  stop_home_processes "$home"
+  pass "host: a conversation the next turn would not resume is not compacted"
+}
+
+test_compaction_abandoned_at_the_park_boundary_is_not_marked_done() {
+  local home
+  home=$(make_home warm-compact-abandon attended claude)
+  echo hang > "$home/stub-mode"
+  printf 'idle-seconds=60\nmin-context-tokens=1000\n' > "$home/config/warm-compact"
+  mkdir -p "$home/claude/projects/p"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":90000,"cache_creation_input_tokens":0}}}\n' \
+    > "$home/claude/projects/p/warm-sess.jsonl"
+  CLAUDE_CONFIG_DIR="$home/claude" FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=3000 FM_SUPERVISION_ENGINE_GRACE=1 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "warm-compact-abandon: no watcher started"
+  seed_idle_engine_record "$home" 600
+  echo 10 > "$home/park-clock"
+  wait_until 150 test -e "$home/engine-call.1" || fail "warm-compact-abandon: the compaction never started"
+  echo 3000 > "$home/park-clock"
+  wait_until 300 host_exited "$home" || fail "warm-compact-abandon: the host did not end its park"
+  ! grep -q '^compacted=' "$home/state/.supervision-host-engine" || fail "warm-compact-abandon: an abandoned compaction was marked done"
+  stop_home_processes "$home"
+  pass "host: a compaction abandoned at the park boundary is not marked done"
+}
+
 test_park_boundary_ends_the_park_before_the_hook_timeout() {
   local home token
   home=$(make_home boundary attended)
@@ -2627,6 +2748,7 @@ test_park_boundary_ends_the_park_before_the_hook_timeout() {
   wait_until 150 host_exited "$home" || fail "boundary: the host did not end its park"
   assert_re '^supervision-host: cycle boundary - ' "$home/host.out" "the park boundary must reach main as a host line"
   watcher_live "$home" && fail "the park boundary left the watcher running"
+  [ ! -e "$home/state/.supervision-handoff-pending" ] || fail "the absent opt-in changed the default boundary"
   token=$(cat "$home/state/.watcher-down")
   case "$token" in
     pending:downtime:*|announced:downtime:*) ;;
@@ -3205,10 +3327,161 @@ test_superseded_host_leaves_the_owner_untouched() {
   pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
 }
 
+assert_lost_handoff_keeps_watching() {  # <boundary|pass-through>
+  local mode=$1 home watcher
+  home=$(make_primary_home "lost-handoff-$mode")
+  : > "$home/config/supervision-handoff-ack"
+  : > "$home/hook.own-group"
+  printf 'project=demo\nwindow=fm-other\nharness=claude\n' > "$home/state/other.meta"
+  FM_SUPERVISION_HANDOFF_RETRY_SECONDS=3 FM_SUPERVISION_HOST_PARK_SECONDS=3600 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "$mode: no initial watcher"
+  if [ "$mode" = boundary ]; then
+    echo 3600 > "$home/park-clock"
+  else
+    append_status "$home" 'which export format?' needs-decision
+  fi
+  wait_until 250 hook_exited "$home" || fail "$mode: no hand-back"
+  assert_rewoke_main "$home" "$mode"
+  # The hand-back keeps the row the default path writes: it is what the
+  # diagnosis of an unsupervised home reads first.
+  if [ "$mode" = boundary ]; then
+    assert_re '	boundary	after [0-9]+s$' "$home/state/.supervision-host.log" "$mode: the hand-back dropped the boundary row"
+  else
+    assert_re '	pass-through	attended	main-only	' "$home/state/.supervision-host.log" "$mode: the hand-back dropped the pass-through row"
+  fi
+  kill -TERM -- "-$(cat "$home/hook.pgid")" 2>/dev/null || true
+  # Drop the continuation entirely: no drain, acknowledgement, or Stop follows.
+  watcher_live "$home" || fail "$mode: lost continuation left no verified watcher"
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  printf 'working [at=%s]: another event\n' "$(date +%s)" >> "$home/state/other.status"
+  wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$watcher" \
+    || fail "$mode: the successor did not observe the later event"
+  wait_until 150 watcher_live "$home" || fail "$mode: a successor close left supervision down"
+  wait_until 150 grep -q 'retry' "$home/state/.supervision-handoff.log" \
+    || fail "$mode: the unacknowledged hand-back was not raised again"
+  assert_grep 'other.status' "$home/state/.wake-queue" "the later event must stay durable"
+  assert_grep 'supervision-handoff' "$home/state/.wake-queue" "the hand-back must remain acknowledgeable"
+  main_drain "$home" > "$home/main-drain.out"
+  assert_grep 'supervision-handoff' "$home/main-drain.out" "main must receive the hand-back again"
+  [ -n "$MAIN_ACK" ] || fail "$mode: no main acknowledgement"
+  [ -f "$home/state/.supervision-handoff-pending" ] || fail "$mode: presentation incorrectly confirmed ownership"
+  FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@"' "$ROOT/bin/fm-wake-drain.sh" \
+    --ack-through 0 --recovery-generation "${MAIN_ACK##* }" > "$home/stale-ack.out" 2>&1 \
+    || fail "$mode: the stale acknowledgement could not be checked"
+  [ -f "$home/state/.supervision-handoff-pending" ] || fail "$mode: a stale acknowledgement confirmed unseen work"
+  # shellcheck disable=SC2086 # The drain's printed arguments.
+  FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@"' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || fail "$mode: main could not acknowledge"
+  wait_until 150 bash -c '[ ! -e "$1/state/.supervision-handoff-pending" ]' _ "$home" \
+    || fail "$mode: acknowledgement did not confirm ownership"
+  watcher_live "$home" || fail "$mode: acknowledgement stopped supervision"
+  echo 0 > "$home/park-clock"
+  turn_end "$home"
+  wait_until 250 host_owns_the_only_cycle "$home" || fail "$mode: the next park did not take over exactly one watcher"
+  stop_home_processes "$home"
+  pass "host+hook: $mode survives a lost continuation, retries, and transfers one watcher after acknowledgement"
+}
+
+test_lost_boundary_handoff() { assert_lost_handoff_keeps_watching boundary; }
+test_lost_pass_through_handoff() { assert_lost_handoff_keeps_watching pass-through; }
+
+# A close that turns main-only at its turn hands back through the same opt-in
+# path and must keep its pass-through row too. The hand-back stops the successor
+# this turn confirmed, and the owner replaces that stopped arm within its poll,
+# so the live-watcher check waits for it.
+test_acknowledged_handoff_at_the_turn_keeps_the_pass_through_row() {
+  local home
+  home=$(make_primary_home hook-turns-main-only-ack)
+  : > "$home/config/supervision-handoff-ack"
+  turn_main_only_at_second_offer "$home"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "ack turns-main-only: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'step one'
+  wait_until 250 hook_exited "$home" || fail "ack turns-main-only: the Stop hook never closed: $(cat "$home/state/.supervision-host.log")"
+  [ "$(cat "$home/offer-count" 2>/dev/null)" -ge 2 ] || fail "fixture: the close was not accepted before it turned main-only"
+  assert_rewoke_main "$home" "ack turns-main-only"
+  [ -f "$home/state/.supervision-handoff-pending" ] || fail "ack turns-main-only: the close was not handed back for acknowledgement"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "ack turns-main-only: the hand-back dropped the pass-through row"
+  wait_until 150 watcher_live "$home" || fail "ack turns-main-only: the hand-back left no watcher: $(cat "$home/state/.watch-cycle-exits.log")"
+  stop_home_processes "$home"
+  pass "host+hook: an acknowledged hand-back at the turn keeps its pass-through row"
+}
+
+# The transport fixture exercises the existing busy/composer/submit readers,
+# not a Claude run: live continuation acceptance remains a documented limit.
+test_handoff_retry_respects_the_receiving_pane() {
+  local home doorbell record real_ps
+  home=$(make_primary_home handoff-doorbell)
+  real_ps=$(command -v ps)
+  cat > "$home/fakebin/ps" <<SH
+#!/usr/bin/env bash
+if [ "\$1:\$2" = '-o:pgid=,tpgid=' ]; then
+  if [ -f "\$FM_HOME/background-session" ]; then printf '77 88\\n'; else printf '77 77\\n'; fi
+  exit 0
+fi
+exec "$real_ps" "\$@"
+SH
+  chmod +x "$home/fakebin/ps"
+  : > "$home/config/supervision-handoff-ack"
+  printf '❯ human draft\n' > "$home/screen"
+  cat > "$home/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *'%77'*) ;; *) exit 1 ;; esac
+case "$1:$*" in
+  display-message:*'#{pane_pid}'*)
+    if [ -f "$FM_HOME/foreign-pane" ]; then printf '999999\n'; else cat "$FM_HOME/state/.lock"; fi ;;
+  display-message:*'#{cursor_y}'*) printf '0\n' ;;
+  capture-pane:*) cat "$FM_HOME/screen" ;;
+  send-keys:*) printf '%s\n' "$*" >> "$FM_HOME/submits" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$home/fakebin/tmux"
+  TMUX_PANE=%77 FM_SUPERVISION_HANDOFF_RETRY_SECONDS=3 start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "doorbell: no initial watcher"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until 250 hook_exited "$home" || fail "doorbell: no hand-back"
+  wait_until 150 grep -q 'retry' "$home/state/.supervision-handoff.log" || fail "doorbell: no retry"
+  [ ! -s "$home/submits" ] || fail "doorbell: retry overwrote human input"
+  printf '❯ \n' > "$home/screen"
+  : > "$home/foreign-pane"
+  # Observe a complete new retry while the pane does not own this session.
+  cp "$home/state/.supervision-handoff.log" "$home/retries-before"
+  wait_until 150 bash -c '! cmp -s "$1/retries-before" "$1/state/.supervision-handoff.log"' _ "$home" \
+    || fail "doorbell: no foreign-pane retry"
+  [ ! -s "$home/submits" ] || fail "doorbell: retry reached another session's pane"
+  rm "$home/foreign-pane"
+  : > "$home/background-session"
+  cp "$home/state/.supervision-handoff.log" "$home/retries-before"
+  wait_until 150 bash -c '! cmp -s "$1/retries-before" "$1/state/.supervision-handoff.log"' _ "$home" \
+    || fail "doorbell: no background-session retry"
+  [ ! -s "$home/submits" ] || fail "doorbell: retry reached a different foreground conversation"
+  rm "$home/background-session"
+  wait_until 150 grep -q $'\tretry\t.*\tempty$' "$home/state/.supervision-handoff.log" \
+    || fail "doorbell: the submit helper did not confirm the idle owning pane's retry"
+  [ -s "$home/submits" ] || fail "doorbell: idle owning pane received no retry"
+  assert_grep 'Enter' "$home/submits" "the retry must submit, not merely type"
+  doorbell=$(grep -- '-l ' "$home/submits" | head -1)
+  record=$(printf '%s\n' "$doorbell" | grep -o '/[^ ]*/operational-inbox/[^ ]*\.msg')
+  [ -n "$record" ] && [ -f "$record" ] || fail "doorbell: no durable operational record"
+  assert_grep 'watcher: check: supervision-handoff' "$record" "the retry must be operational watcher input"
+  [ -f "$home/state/.supervision-handoff-pending" ] || fail "doorbell: submission was mistaken for acknowledgement"
+  stop_home_processes "$home"
+  pass "host+hook: hand-back retry submits only to the idle owning pane without replacing human input"
+}
+
 test_main_only_close_after_handled_turn_restores_inherited_handling
 test_main_only_close_after_handled_turn_delivers_restore_failure
 test_returned_driver_is_caught_attended
 test_returned_driver_is_caught_away
+test_lost_boundary_handoff
+test_lost_pass_through_handoff
+test_acknowledged_handoff_at_the_turn_keeps_the_pass_through_row
+test_handoff_retry_respects_the_receiving_pane
 test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
 test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
@@ -3233,6 +3506,7 @@ test_branch_outcomes_keep_a_drain_presented_outcome_across_a_switch_to_pi
 test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
 test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue
+test_engine_in_another_time_zone_handles_its_granted_rows
 test_attended_captain_outcome_reaches_main_through_branch_outcomes
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return
 test_quiet_record_without_its_daemon_is_a_present_captain
@@ -3275,6 +3549,9 @@ test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes
 test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main
 test_engine_turn_is_bounded_and_its_descendants_reaped
 test_restarted_host_stops_what_a_killed_predecessor_left
+test_idle_engine_conversation_is_compacted_once_across_hosts
+test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted
+test_compaction_abandoned_at_the_park_boundary_is_not_marked_done
 test_park_boundary_ends_the_park_before_the_hook_timeout
 test_park_boundary_holds_under_back_to_back_closes
 test_park_boundary_rechecked_just_before_the_engine_turn
