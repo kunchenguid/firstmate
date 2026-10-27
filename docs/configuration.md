@@ -1663,7 +1663,6 @@ Both bootstrap and the enabled resolver reject malformed values, including null,
 Bootstrap validates this field even without a resolver key because the agent-owned intake also honors it.
 An absent field preserves the existing routing behavior.
 The [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#rank-by-spendpriority) owns family preference, uncertainty, and fallback after the existing gates.
-An optional `policy_why` is explanatory text, not a routing field, and never reaches the rule matcher.
 
 **Fields applied only by typed resolution**
 

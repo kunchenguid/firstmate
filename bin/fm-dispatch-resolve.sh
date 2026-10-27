@@ -31,7 +31,7 @@
 #   An eligible but wholly unrankable preferred family escalates rather than
 #   authorizing another family.
 #   The model never sees quota, catalogs, approvals, preferred_provider,
-#   confidence floors, `policy_why`, `why`, or `use`. With no rules, it returns a non-clear
+#   confidence floors, `why`, or `use`. With no rules, it returns a non-clear
 #   result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.

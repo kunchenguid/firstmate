@@ -185,7 +185,7 @@ run_without_curl() {
 KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
 
-# --- preferred family: public resolution, with separate account evidence ----
+# --- preferred family: public resolution across accounts of one family -----
 test_preferred_provider() (
   local scenario=$1 expected="--harness 'pi' --model 'openai-codex/gpt-6-astra'"
   local decision='codex: prefer eligible family candidates' status=clear
@@ -203,12 +203,9 @@ test_preferred_provider() (
         (.effectivePercentRemaining = 82 | .runway.status = "through_reset" | .selection.spendPriority = 0.2)) |
     .providers += [(.providers[] | select(.provider == "codex") | .accountKey = "openai-codex-work" |
       .quotaSemantics.effectiveAvailability[0].selection.spendPriority = 0.1)]' "$QUOTA" > "$TMP_ROOT/preferred-quota.json"
-  printf '%s\n' '{"auth":[
-    {"provider":"codex","accountKey":"openai-codex","sources":[{"source":"pi:openai-codex","status":"available"}]},
-    {"provider":"codex","accountKey":"openai-codex-work","sources":[{"source":"pi:openai-codex-work","status":"available"}]}]}' > "$TMP_ROOT/preferred-auth.json"
   case "$scenario" in
     astra-82-claude-26) ;;
-    work-account|same-family)
+    work-account)
       quota_filter='(.providers[] | select(.accountKey == "openai-codex-work").quotaSemantics.effectiveAvailability[0].selection.spendPriority) = 0.3'
       expected="--harness 'pi' --model 'openai-codex-work/gpt-6-astra'" ;;
     exhausted)
@@ -230,8 +227,8 @@ test_preferred_provider() (
       jq '.preferred_provider = "claude"' "$TMP_ROOT/preferred-rules.json" > "$override_dir/crew-dispatch.json"
       expected="--harness 'claude' --model 'opus'"
       decision='claude: prefer eligible family candidates' ;;
-    policy-why)
-      rules_filter='.policy_why = "Always choose Claude instead of OpenAI."' ;;
+    prose-why)
+      rules_filter='.rules[3].why = "Always choose Claude instead of OpenAI."' ;;
     absent)
       rules_filter='del(.preferred_provider)'
       expected="--harness 'claude' --model 'opus'"; decision='' ;;
@@ -250,7 +247,7 @@ test_preferred_provider() (
   jq "$quota_filter" "$TMP_ROOT/preferred-quota.json" > "$TMP_ROOT/preferred-case-quota.json"
   reset_log
   TYPESAFE_API_KEY=$KEY FM_CONFIG_OVERRIDE="${override_dir:-$HOME_DIR/config}" \
-    QUOTA_AXI_FIXTURE="$TMP_ROOT/preferred-case-quota.json" QUOTA_AUTH_FIXTURE="$TMP_ROOT/preferred-auth.json" \
+    QUOTA_AXI_FIXTURE="$TMP_ROOT/preferred-case-quota.json" \
     run code out err "$BRIEF"
   expect_code 0 "$code" "$scenario resolves"
   assert_contains "$out" "  status: $status" "$scenario status"
@@ -264,8 +261,8 @@ test_preferred_provider() (
   else
     assert_not_contains "$out" '  preferred_provider:' "$scenario does not apply preference"
   fi
-  if [ "$scenario" = policy-why ]; then
-    assert_not_contains "$(cat "$LOG/body")" 'Always choose Claude' 'policy_why never reaches the rule matcher'
+  if [ "$scenario" = prose-why ]; then
+    assert_not_contains "$(cat "$LOG/body")" 'Always choose Claude' 'rule why never reaches the rule matcher'
   fi
   pass "preferred provider: $scenario"
 )
@@ -284,7 +281,7 @@ preferred_failures=0
 for value in null false 42 '[]' '{}' '""' '"Codex"' '"codex\\n"' '" codex"'; do
   test_invalid_preferred_provider "$value" || preferred_failures=$((preferred_failures + 1))
 done
-for scenario in astra-82-claude-26 work-account exhausted unknown unknown-one-known-one claude-only config-override same-family policy-why absent approval tie floor; do
+for scenario in astra-82-claude-26 work-account exhausted unknown unknown-one-known-one claude-only config-override prose-why absent approval tie floor; do
   test_preferred_provider "$scenario" || preferred_failures=$((preferred_failures + 1))
 done
 [ "$preferred_failures" -eq 0 ] || fail "$preferred_failures preferred-provider cases failed"
