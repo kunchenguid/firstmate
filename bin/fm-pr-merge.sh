@@ -117,8 +117,9 @@
 # refuses rather than being treated as nothing to check, the same reading
 # GitLab's null head_pipeline gets above), and every context a matching branch
 # protection's enable_status_check/status_check_contexts requires has reported
-# success at that head, with the protection list itself refusing when it or the
-# base branch cannot be read. The pull request's mergeable field is not one of
+# success at that head (context entries may be globs), with an unreadable base
+# branch refusing and an unreadable protection list only warning, since the
+# server enforces required checks on the merge itself. The pull request's mergeable field is not one of
 # the conditions: it is documented unreliable upstream (go-gitea/gitea#25849),
 # so the merge POST's own head_commit_id binding is the mergeability check the
 # server enforces rather than a pre-read that can read stale. There is no
@@ -693,6 +694,32 @@ FIELDS
 # Forgejo has no merge-queue or scheduled-merge concept to detect, so unlike
 # GitHub and GitLab this never sets an async/queued signal: every accepted
 # Forgejo merge here is immediate. Shares FM_PR_MERGE_HEAD, declared above.
+forgejo_glob_match() {
+  local pattern=$1 text=$2 stop_at_slash=$3 re='' ch i=0 star='.*' one='.'
+  if [ "$stop_at_slash" = true ]; then
+    star='[^/]*'
+    one='[^/]'
+  fi
+  while [ "$i" -lt "${#pattern}" ]; do
+    ch=${pattern:i:1}
+    case "$ch" in
+      '*')
+        if [ "${pattern:i+1:1}" = '*' ]; then
+          re+='.*'
+          i=$((i + 1))
+        else
+          re+=$star
+        fi
+        ;;
+      '?') re+=$one ;;
+      [a-zA-Z0-9_/-]) re+=$ch ;;
+      *) re+="\\$ch" ;;
+    esac
+    i=$((i + 1))
+  done
+  [[ $text =~ ^${re}$ ]]
+}
+
 forgejo_verify_mergeable() {
   local pr_json status_json fields line bp_json bp_fields cur_rule
   local total=0 named=0 refusals=''
@@ -813,10 +840,9 @@ FIELDS
   # requires before a merge. A protection applies to the pull request when its
   # rule_name glob-matches the base branch (the '*' pattern covers every
   # branch, 'release/*' covers that namespace, and a plain name is an exact
-  # rule). The list is read live and refused when unreadable: a protection the
-  # read cannot see cannot be proven absent, so an unknown required set is a
-  # failed condition rather than a skipped one, matching the GitHub required-
-  # context read's posture.
+  # rule; '*' does not cross '/'). The list is read live; when it cannot be read
+  # (a merge token without admin rights gets 403) the merge proceeds, because
+  # the server enforces required checks on the merge POST itself.
   if [ -z "$base_ref" ]; then
     refusals="$refusals  - the pull request's base branch could not be read, so required status checks cannot be proven
 "
@@ -838,20 +864,16 @@ FIELDS
       case "$line" in
         rule=*) cur_rule=${line#rule=} ;;
         ctx=*)
-          # An unquoted rule name is matched as a glob, which covers the
-          # plain-name exact rule and the '*' and 'release/*' patterns alike.
-          # shellcheck disable=SC2254 # The protection's rule_name is a glob by design.
-          case "$base_ref" in
-            $cur_rule) required_contexts+=("${line#ctx=}") ;;
-          esac
+          if forgejo_glob_match "$cur_rule" "$base_ref" true; then
+            required_contexts+=("${line#ctx=}")
+          fi
           ;;
       esac
     done <<BP
 $bp_fields
 BP
   else
-    refusals="$refusals  - the branch protection list could not be read, so required status checks cannot be proven
-"
+    echo "warning: the branch protection list could not be read; the server enforces required status checks on the merge itself" >&2
   fi
 
   [ "$state" = open ] \
@@ -868,7 +890,12 @@ BP
   for req_ctx in ${required_contexts[@]+"${required_contexts[@]}"}; do
     [ -z "${required_seen[$req_ctx]+set}" ] || continue
     required_seen[$req_ctx]=1
-    required_status=${ctx_status[$req_ctx]-}
+    required_status=
+    for ctx_name in "${!ctx_status[@]}"; do
+      forgejo_glob_match "$req_ctx" "$ctx_name" false || continue
+      required_status=${ctx_status[$ctx_name]}
+      [ "$required_status" != success ] || break
+    done
     [ "$required_status" = success ] \
       || refusals="$refusals  - the required check \"$req_ctx\" reads \"${required_status:-missing}\" at the merge head, not success
 "

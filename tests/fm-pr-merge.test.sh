@@ -2459,20 +2459,22 @@ test_forgejo_required_status_contexts() {
     || fail "forgejo-protection-no-status-check: a disabled status check should not gate: $(cat "$case_dir/stderr")"
   [ -e "$case_dir/tea-merged" ] || fail "forgejo-protection-no-status-check: the merge did not land"
 
-  # An unreadable protection list cannot prove what is required, so it
-  # refuses rather than skipping the check.
+  # An unreadable protection list is advisory: the server enforces required
+  # checks on the merge POST, so the merge proceeds.
   case_dir=$(make_forgejo_case forgejo-protections-unreadable)
   : > "$case_dir/tea-protections-fails"
-  set +e
   run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" "forgejo-protections-unreadable: an unreadable protection list should refuse"
-  assert_grep 'the branch protection list could not be read' "$case_dir/stderr" \
-    "forgejo-protections-unreadable: refusal did not name the unreadable protection list"
-  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
-    || fail "forgejo-protections-unreadable: a merge was attempted on an unproven required set"
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forgejo-protections-unreadable: an unreadable protection list should not refuse: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/tea-merged" ] || fail "forgejo-protections-unreadable: the merge did not land"
+
+  # A '*' rule does not cross '/', so it does not gate a feature/x base.
+  case_dir=$(make_forgejo_case forgejo-rule-star-slash base=feature/x)
+  printf '[{"rule_name":"*","enable_status_check":true,"status_check_contexts":["ci/required"]}]\n' \
+    > "$case_dir/tea-protections.json"
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forgejo-rule-star-slash: '*' should not match across '/': $(cat "$case_dir/stderr")"
 
   # A pull request whose base branch cannot be read cannot prove its required
   # set either.
