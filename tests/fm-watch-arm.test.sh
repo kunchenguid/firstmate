@@ -2077,11 +2077,26 @@ SH
   chmod 0700 "$check_file"
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
     || fail "fixture: could not register the hand-off check"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/touch" <<SH
+#!/usr/bin/env bash
+case "\${!#}" in
+  */.last-check)
+    n=0
+    while grep -q "$(printf '\tcheck\t')" "$state/.wake-queue" 2>/dev/null \\
+      && [ ! -e "$dir/release-cleanup" ] && [ "\$n" -lt 600 ]; do
+      sleep 0.05
+      n=\$((n + 1))
+    done
+    ;;
+esac
+exec "$(command -v touch)" "\$@"
+SH
+  chmod 0755 "$fakebin/touch"
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
     FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    FM_WATCH_CLEANUP_HOLD="$dir/release-cleanup" \
     "$WATCH_ARM" > "$armout" &
   owner=$!
   i=0
