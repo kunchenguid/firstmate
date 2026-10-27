@@ -116,7 +116,7 @@ Shape already exists on GitHub, it predates Gerrit entirely, and it is load-bear
 
 - `bin/fm-pr-merge.sh` defaults a GitHub merge to `--squash` when the caller selects no method.
 - `bin/fm-fleet-sync.sh`'s branch pruning reasons about it explicitly, dropping the ancestry check on the grounds that pull requests in this fleet are squash-merged, so a merged branch is never an ancestor and such a check would prune nothing.
-- `bin/fm-teardown.sh`'s landed-work test accepts content present in the default branch precisely because a squash collapses the branch's commits and per-commit patch identities stop matching.
+- `bin/fm-teardown.sh`'s retention proof accepts content present in the default branch precisely because a squash collapses the branch's commits and per-commit patch identities stop matching.
 - `bin/fm-ff-lib.sh` reconciles a clean secondmate divergence through a three-way tree proof, as happens after an upstream squash merge.
 
 It appears nowhere in the registry.
@@ -215,7 +215,7 @@ This is a property of Gerrit and no amount of tooling changes it.
 
 **There is no branch on the remote.**
 `refs/for/<branch>` is a magic ref rather than a destination: the push creates or updates a change and leaves behind no ref a later fetch can see.
-Every mechanism that reasons about a remote branch therefore has no counterpart here - the gone-upstream prune in `bin/fm-fleet-sync.sh`, the remote-reachability leg of `bin/fm-teardown.sh`'s landed-work test, and the `refs/pull/<n>/head` fetch in `bin/fm-review-diff.sh`.
+Every mechanism that reasons about a remote branch therefore has no counterpart here - the gone-upstream prune in `bin/fm-fleet-sync.sh`, the remote-reachability leg of `bin/fm-teardown.sh`'s retention proof, and the `refs/pull/<n>/head` fetch in `bin/fm-review-diff.sh`.
 There is no separate namespace either, because there are no forks, so the change is the only remote artifact the work ever has.
 The teardown test and the review diff each already have a fallback that reasons about content or about the local branch, and on Gerrit the fallback is not a fallback, it is the only path.
 The prune has no fallback at all: a `refs/for/<branch>` push creates no upstream tracking ref, so nothing ever reads `[gone]`, the prune never fires, and ship branches accumulate locally after teardown.
