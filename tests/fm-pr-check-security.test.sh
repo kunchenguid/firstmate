@@ -1088,7 +1088,7 @@ test_github_enterprise_hosts() {
   grep -qxF 'pr=https://github.com/my-org/repo/pull/37' "$dir/home/state/task-a.meta" \
     || fail "github.com pr metadata changed"
   [ -s "$dir/gh.log" ] || fail "github.com registration made no forge read"
-  ! grep -qE '^host=.+' "$dir/gh.log" \
+  ! grep -E '^host=.+' "$dir/gh.log" | grep -qvxF 'host=github.com' \
     || fail "github.com registration exported a host it never needed"
   pass "GitHub Enterprise hosts are accepted only when the home names them and their host reaches every forge call"
 }
@@ -1376,6 +1376,30 @@ injected'; do
     || fail "watcher did not wake for a second drop after a re-queue"
   pass "a degraded ready PR wakes once per head/pipeline transition and stays silent on a repeat"
 }
+test_arming_baselines_an_already_degraded_change() {
+  local dir state url
+  dir=$(make_case degraded-baseline)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
+  write_task_meta "$dir" task-a
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "arming a GitLab watch with a failed head pipeline failed"
+  [ -f "$state/task-a.pr-poll-degraded" ] || fail "arming did not baseline the already failing pipeline"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err" || true
+  [ "$(grep -c 'degraded after ready' "$dir/watch-1.out")" -eq 0 ] \
+    || fail "watcher woke for a pipeline that was already failing at the ready report"
+  ack_watcher_cycle "$state" || fail "baseline cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_PIPELINE_ID=942 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err" || true
+  [ "$(grep -c 'degraded after ready: degraded pipeline=942' "$dir/watch-2.out")" -eq 1 ] \
+    || fail "watcher did not wake for a pipeline that failed after the ready report"
+  pass "arming baselines an already degraded change so only a later failure wakes"
+}
+
 test_atomic_interruption_leaves_no_partial_artifact() {
   local dir rc
   dir=$(make_case interrupted-write)
@@ -2566,7 +2590,14 @@ group/subgroup/project
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car run_poll "$dir")
   [ "$out" = ontrain ] || fail "GitLab poll did not report a merge request on its train: $out"
   out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=canceled FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_DETAIL=need_rebase run_poll "$dir")
-  [ "$out" = "degraded train=dropped url=$url reason=need_rebase" ] || fail "GitLab poll did not report a train drop with a non-failed pipeline: $out"
+  [ "$out" = "degraded train=dropped url=$url reason=need_rebase pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941" ] || fail "GitLab poll did not report a train drop with a non-failed pipeline: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone \
+    FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure"}]' \
+    FM_TEST_GLAB_BRIDGES='[{"name":"child","status":"failed","downstream_pipeline":{"id":77}}]' \
+    FM_TEST_GLAB_CHILD_JOBS='[{"name":"e2e test","status":"failed","failure_reason":"script_failure"}]' \
+    run_poll "$dir")
+  [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure,e2e test:script_failure" ] \
+    || fail "GitLab train drop did not name the failed jobs including the child pipeline: $out"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=fail run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a failed merge-train read"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=neterr run_poll "$dir")
@@ -4061,6 +4092,7 @@ test_parser_matrix
 test_github_enterprise_config_resolution
 test_github_enterprise_hosts
 test_gitlab_merge_watch
+test_arming_baselines_an_already_degraded_change
 test_forgejo_merge_watch
 test_forgejo_login_list_shapes
 test_gerrit_merge_watch

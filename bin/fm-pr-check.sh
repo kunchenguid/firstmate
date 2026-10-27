@@ -271,6 +271,17 @@ fi
 # belongs to the watch this registration replaces, and its identity binding
 # would otherwise suppress the new watch's first degraded wake.
 rm -f -- "$STATE/$ID.pr-poll-degraded"
+# A change already degraded at the ready report is the baseline, not news: the
+# poll's own reading is recorded as already notified, so only a head or
+# pipeline that degrades afterwards wakes.
+if BASELINE=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null); then
+  case $BASELINE in
+    'degraded head='*|'degraded pipeline='*)
+      BASELINE=${BASELINE#degraded }
+      fm_pr_poll_degraded_mark_notified "$STATE" "$ID" "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "${BASELINE%% *}" || true
+      ;;
+  esac
+fi
 # The contribution observer uses the same authenticated check mechanism and
 # owns verdict freshness, required actors and external feedback separately from
 # the exact merged-state poll. Registration is local and performs no forge read.

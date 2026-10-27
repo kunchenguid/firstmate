@@ -180,83 +180,14 @@ case "$provider" in
     # a merge train drops a merge request when its pipeline does not succeed.
     # Any other open merge request has its merge-train car read: a present car
     # emits "ontrain", an absent one (HTTP 404) emits a degraded train=dropped
-    # line naming the merge request's detailed merge status, and the watcher
+    # line naming the merge request's detailed merge status, its head pipeline URL
+    # and that pipeline's failed jobs, and the watcher
     # wakes only when it last saw the car on the train. Every error, a closed
     # merge request, a pending or green head pipeline, and an unreadable record
     # stay silent. Without jq the poll falls back to the plain state field,
     # which keeps the merged wake for a watch armed before jq was required.
     enc=${path//\//%2F}
-    if ! command -v jq >/dev/null 2>&1; then
-      raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
-      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
-      [ "$state" = merged ] && printf '%s\n' merged
-      exit 0
-    fi
-    raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || exit 0
-    [ -n "$raw" ] || exit 0
-    result=$(printf '%s' "$raw" | jq -r '
-      if type == "object"
-         and (.state | type) == "string"
-         and ((.head_pipeline | type) == "object" or .head_pipeline == null)
-      then
-        if .state == "merged" then
-          "merged"
-        elif (.state == "opened" or .state == "locked")
-             and (.head_pipeline | type) == "object"
-             and (.head_pipeline.status | type) == "string"
-             and .head_pipeline.status == "failed"
-             and (.head_pipeline.id | type) == "number"
-             and .head_pipeline.id > 0
-        then
-          "degraded pipeline=\(.head_pipeline.id)"
-        elif .state == "opened" or .state == "locked" then
-          "open \(.detailed_merge_status // "" | if type == "string" then . else "" end)"
-        else
-          ""
-        end
-      else
-        error("invalid merge request record")
-      end' 2>/dev/null) || exit 0
-    case $result in
-      open\ *)
-        reason=${result#open }
-        case $reason in
-          *[!a-z_]*) reason= ;;
-        esac
-        car=$(GITLAB_HOST=$host glab api "projects/$enc/merge_trains/merge_requests/$number" 2>&1)
-        car_rc=$?
-        if [ "$car_rc" -eq 0 ]; then
-          printf '%s' "$car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1 \
-            && printf '%s\n' ontrain
-        else
-          case $car in
-            *'(HTTP 404)'*)
-              line="degraded train=dropped url=$url"
-              [ -z "$reason" ] || line="$line reason=$reason"
-              printf '%s\n' "$line"
-              ;;
-          esac
-        fi
-        exit 0
-        ;;
-    esac
-    case $result in
-      merged)
-        printf '%s\n' merged
-        ;;
-      'degraded pipeline='*)
-        case $result in
-          *$'\n'*) exit 0 ;;
-        esac
-        pipeline=${result#'degraded pipeline='}
-        case $pipeline in
-          [1-9]*) ;;
-          *) exit 0 ;;
-        esac
-        case $pipeline in
-          *[!0-9]*) exit 0 ;;
-        esac
-        [ "${#pipeline}" -le 18 ] || exit 0
+    gitlab_failure_detail() {  # <pipeline>; sets detail
         # The degraded line names the failed jobs with their forge failure
         # reasons, following a failed bridge into its child pipeline so the
         # wake says which test broke without a job-log dig. Bounded depth and
@@ -265,7 +196,7 @@ case "$provider" in
         # failure can never be read as a change of state.
         detail=
         seen=
-        frontier=$pipeline
+        frontier=$1
         depth=0
         while [ -n "$frontier" ] && [ "$depth" -lt 3 ]; do
           next=
@@ -301,6 +232,96 @@ case "$provider" in
           frontier=$next
           depth=$((depth + 1))
         done
+    }
+    if ! command -v jq >/dev/null 2>&1; then
+      raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
+      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
+      [ "$state" = merged ] && printf '%s\n' merged
+      exit 0
+    fi
+    raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || exit 0
+    [ -n "$raw" ] || exit 0
+    result=$(printf '%s' "$raw" | jq -r '
+      if type == "object"
+         and (.state | type) == "string"
+         and ((.head_pipeline | type) == "object" or .head_pipeline == null)
+      then
+        if .state == "merged" then
+          "merged"
+        elif (.state == "opened" or .state == "locked")
+             and (.head_pipeline | type) == "object"
+             and (.head_pipeline.status | type) == "string"
+             and .head_pipeline.status == "failed"
+             and (.head_pipeline.id | type) == "number"
+             and .head_pipeline.id > 0
+        then
+          "degraded pipeline=\(.head_pipeline.id)"
+        elif .state == "opened" or .state == "locked" then
+          "open \(if (.head_pipeline | type) == "object" and (.head_pipeline.id | type) == "number" then .head_pipeline.id else 0 end) \(.detailed_merge_status // "" | if type == "string" then . else "" end)"
+        else
+          ""
+        end
+      else
+        error("invalid merge request record")
+      end' 2>/dev/null) || exit 0
+    case $result in
+      open\ *)
+        reason=${result#open }
+        pipeline=${reason%% *}
+        reason=${reason#* }
+        case $reason in
+          *[!a-z_]*) reason= ;;
+        esac
+        case $pipeline in
+          ''|0*|*[!0-9]*) pipeline= ;;
+        esac
+        [ "${#pipeline}" -le 18 ] || pipeline=
+        car=$(GITLAB_HOST=$host glab api "projects/$enc/merge_trains/merge_requests/$number" 2>&1)
+        car_rc=$?
+        if [ "$car_rc" -eq 0 ]; then
+          printf '%s' "$car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1 \
+            && printf '%s\n' ontrain
+        else
+          case $car in
+            *'(HTTP 404)'*)
+              detail=
+              line="degraded train=dropped url=$url"
+              [ -z "$reason" ] || line="$line reason=$reason"
+              if [ -n "$pipeline" ]; then
+                gitlab_failure_detail "$pipeline"
+                detail=$(printf '%s' "$detail" | head -c 300)
+                case $detail in
+                  *$'\n'*) detail= ;;
+                esac
+                line="$line pipeline_url=https://$host/$path/-/pipelines/$pipeline"
+                [ -z "$detail" ] || line="$line jobs=$detail"
+              fi
+              [ "${#line}" -le 2000 ] || exit 0
+              printf '%s\n' "$line"
+              ;;
+          esac
+        fi
+        exit 0
+        ;;
+    esac
+    case $result in
+      merged)
+        printf '%s\n' merged
+        ;;
+      'degraded pipeline='*)
+        case $result in
+          *$'\n'*) exit 0 ;;
+        esac
+        pipeline=${result#'degraded pipeline='}
+        case $pipeline in
+          [1-9]*) ;;
+          *) exit 0 ;;
+        esac
+        case $pipeline in
+          *[!0-9]*) exit 0 ;;
+        esac
+        [ "${#pipeline}" -le 18 ] || exit 0
+        gitlab_failure_detail "$pipeline"
         detail=$(printf '%s' "$detail" | head -c 300)
         case $detail in
           *$'\n'*) detail= ;;
