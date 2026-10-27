@@ -3897,14 +3897,6 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
-  # Tests hold here, in ordinary poll-loop code, outside the event wait.
-  if [ -n "${FM_WATCH_POLL_HOLD:-}" ]; then
-    : > "$FM_WATCH_POLL_HOLD.waiting"
-    while [ ! -e "$FM_WATCH_POLL_HOLD" ]; do
-      false
-      sleep 0.05
-    done
-  fi
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.

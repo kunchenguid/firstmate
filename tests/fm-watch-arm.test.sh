@@ -2115,61 +2115,89 @@ test_killed_watcher_outage_still_resurfaces() {
   pass "watch-arm: a watcher killed without cleanup still resurfaces"
 }
 
-# --restart while the watcher is in ordinary poll-loop code, not the event wait.
-# The stop record is what keeps the acknowledged episode closed.
-test_planned_restart_in_poll_loop_leaves_an_acknowledged_episode_closed() {
-  local dir home state fakebin armout acknowledged watcher i
-  dir=$(make_case planned-restart-poll-loop)
+# Exit status 1 is not a planned close by itself. A planned-stop record for
+# that pid is. Removing the home makes the live watcher exit 1.
+test_nonzero_exit_with_a_planned_stop_record_stays_closed() {
+  local dir home state fakebin watcher acknowledged status
+  dir=$(make_case nonzero-exit-planned-stop)
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
-  armout="$dir/restart.out"
   mkdir -p "$home/data"
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    FM_WATCH_POLL_HOLD="$dir/release-poll" \
-    "$WATCH_ARM" > "$dir/owner.out" &
+    "$WATCH_ARM" > "$dir/owner.out" 2>&1 &
   ARM_PID=$!
-  i=0
-  while [ "$i" -lt "$REARM_REPORT_POLLS" ] && [ ! -e "$dir/release-poll.waiting" ]; do
-    is_live_non_zombie "$ARM_PID" || break
-    sleep 0.05
-    i=$((i + 1))
-  done
-  [ -e "$dir/release-poll.waiting" ] \
-    || fail "fixture: the watcher never reached the poll loop: $(cat "$dir/owner.out")"
+  wait_for_file_text "$dir/owner.out" 'watcher: started pid=' \
+    || fail "fixture: the watcher did not start: $(cat "$dir/owner.out")"
   watcher=$(cat "$state/.watch.lock/pid")
-  append_wake "$state" signal poll-restart "signal: fixture handled before the poll-loop restart"
+  append_wake "$state" signal exit-one "signal: fixture handled before the non-zero exit"
   ack_wakes "$state" >/dev/null || fail "fixture: the handled wake could not be acknowledged"
   acknowledged=$(cat "$state/.watcher-down" 2>/dev/null || true)
   case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
-  is_live_non_zombie "$watcher" || fail "fixture: the watcher left the poll loop before the restart"
+  is_live_non_zombie "$watcher" || fail "fixture: the watcher exited before the planned-stop record"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    # shellcheck disable=SC1090
+    . "$1"
+    fm_watcher_planned_stop_record "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$watcher" \
+    || fail "fixture: the planned-stop record could not be written"
+  rm -rf "$home"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
+  status=$?
+  expect_code 1 "$status" "the non-zero close must exit 1: $(cat "$dir/owner.out")"
+  grep -q "watcher_pid=$watcher	.*exit_code=1	signal=none	" "$state/.watch-cycle-exits.log" \
+    || fail "the non-zero close was not status 1: $(cat "$state/.watch-cycle-exits.log" 2>/dev/null)"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "$acknowledged" ] \
+    || fail "a planned-stop record reopened an acknowledged episode on status 1: $(cat "$state/.watcher-down" 2>/dev/null)"
+  pass "watch-arm: a non-zero exit with a planned-stop record stays closed"
+}
+
+# Status 143 with no planned-stop record is an unplanned close.
+test_term_status_143_without_a_planned_stop_record_resurfaces() {
+  local dir home state fakebin watcher status
+  dir=$(make_case term-status-143)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    "$WATCH_ARM" --restart > "$armout" &
+    "$WATCH_ARM" > "$dir/owner.out" 2>&1 &
   ARM_PID=$!
-  wait_for_file_text "$armout" 'watcher: started pid=' \
-    || fail "the poll-loop restart did not start a replacement watcher: $(cat "$armout")"
-  sleep 2
-  is_live_non_zombie "$ARM_PID" \
-    || fail "the poll-loop restart resurfaced an empty recovery: $(cat "$armout")"
-  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "$acknowledged" ] \
-    || fail "the poll-loop restart reopened an acknowledged episode: $(cat "$state/.watcher-down" 2>/dev/null)"
-  ! grep -q '^check: rearm-resurface' "$armout" \
-    || fail "the poll-loop restart delivered an empty recovery wake: $(cat "$armout")"
-  kill -TERM "$ARM_PID" 2>/dev/null || true
-  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
-  pass "watch-arm: a planned restart in the poll loop leaves an acknowledged episode closed"
+  wait_for_file_text "$dir/owner.out" 'watcher: started pid=' \
+    || fail "fixture: the watcher did not start: $(cat "$dir/owner.out")"
+  watcher=$(cat "$state/.watch.lock/pid")
+  append_wake "$state" signal term-143 "signal: fixture handled before the term"
+  ack_wakes "$state" >/dev/null || fail "fixture: the handled wake could not be acknowledged"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    acked:*) ;;
+    *) fail "fixture: the episode was not acknowledged: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  is_live_non_zombie "$watcher" || fail "fixture: the watcher exited before the term"
+  [ ! -e "$state/.watcher-planned-stop" ] || fail "fixture: a planned-stop record existed before the term"
+  kill -TERM "$watcher" 2>/dev/null || fail "fixture: the watcher could not be stopped"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
+  status=$?
+  expect_code 143 "$status" "the unplanned term must exit 143: $(cat "$dir/owner.out")"
+  grep -q "watcher_pid=$watcher	.*exit_code=143	signal=TERM	" "$state/.watch-cycle-exits.log" \
+    || fail "the unplanned term was not status 143: $(cat "$state/.watch-cycle-exits.log" 2>/dev/null)"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    pending:downtime:*|announced:downtime:*) ;;
+    *) fail "status 143 with no planned-stop record left the episode closed: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  pass "watch-arm: status 143 with no planned-stop record resurfaces"
 }
 
 # A stall eviction TERMs the holder and writes no planned-stop record, so the
-# acknowledged episode must resurface.
+# acknowledged episode must resurface. The holder is inside its event wait, so
+# its beacon stays old after one age.
 test_stall_eviction_of_an_acknowledged_episode_resurfaces() {
-  local dir home state fakebin armout watcher status i
+  local dir home state fakebin armout watcher status i aged mtime now
   dir=$(make_case stall-eviction-acked)
   home="$dir/home"
   state="$dir/state"
@@ -2178,19 +2206,12 @@ test_stall_eviction_of_an_acknowledged_episode_resurfaces() {
   mkdir -p "$home/data"
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_POLL=999999 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    FM_WATCH_POLL_HOLD="$dir/release-poll" \
     "$WATCH_ARM" > "$dir/owner.out" &
   ARM_PID=$!
-  i=0
-  while [ "$i" -lt "$REARM_REPORT_POLLS" ] && [ ! -e "$dir/release-poll.waiting" ]; do
-    is_live_non_zombie "$ARM_PID" || break
-    sleep 0.05
-    i=$((i + 1))
-  done
-  [ -e "$dir/release-poll.waiting" ] \
-    || fail "fixture: the stalled watcher never reached the poll loop: $(cat "$dir/owner.out")"
+  wait_for_file_text "$dir/owner.out" 'watcher: started pid=' \
+    || fail "fixture: the stalled watcher did not start: $(cat "$dir/owner.out")"
   watcher=$(cat "$state/.watch.lock/pid")
   append_wake "$state" signal stall "signal: fixture handled before the stall eviction"
   ack_wakes "$state" >/dev/null || fail "fixture: the handled wake could not be acknowledged"
@@ -2198,8 +2219,21 @@ test_stall_eviction_of_an_acknowledged_episode_resurfaces() {
     acked:*) ;;
     *) fail "fixture: the episode was not acknowledged: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
   esac
+  aged=0
+  i=0
+  while [ "$i" -lt 40 ]; do
+    touch -t 200001010000 "$state/.last-watcher-beat"
+    sleep 0.4
+    mtime=$(stat -c %Y "$state/.last-watcher-beat")
+    now=$(date +%s)
+    if [ $((now - mtime)) -gt 1000 ]; then
+      aged=1
+      break
+    fi
+    i=$((i + 1))
+  done
+  [ "$aged" -eq 1 ] || fail "fixture: the watcher refreshed its beacon before the stall eviction"
   is_live_non_zombie "$watcher" || fail "fixture: the watcher exited before the stall eviction"
-  touch -t 200001010000 "$state/.last-watcher-beat"
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
@@ -2219,9 +2253,10 @@ test_stall_eviction_of_an_acknowledged_episode_resurfaces() {
   pass "watch-arm: a stall eviction of an acknowledged episode resurfaces"
 }
 
-# HUP with no planned-stop record is not a planned close.
+# HUP with no planned-stop record is not a planned close. The signal lands
+# wherever the watcher is, including its event wait.
 test_hup_without_a_planned_stop_record_resurfaces() {
-  local dir home state fakebin armout watcher status i
+  local dir home state fakebin armout watcher status
   dir=$(make_case hup-without-planned-stop)
   home="$dir/home"
   state="$dir/state"
@@ -2232,17 +2267,10 @@ test_hup_without_a_planned_stop_record_resurfaces() {
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
-    FM_WATCH_POLL_HOLD="$dir/release-poll" \
     "$WATCH_ARM" > "$dir/owner.out" &
   ARM_PID=$!
-  i=0
-  while [ "$i" -lt "$REARM_REPORT_POLLS" ] && [ ! -e "$dir/release-poll.waiting" ]; do
-    is_live_non_zombie "$ARM_PID" || break
-    sleep 0.05
-    i=$((i + 1))
-  done
-  [ -e "$dir/release-poll.waiting" ] \
-    || fail "fixture: the watcher never reached the poll loop: $(cat "$dir/owner.out")"
+  wait_for_file_text "$dir/owner.out" 'watcher: started pid=' \
+    || fail "fixture: the watcher did not start: $(cat "$dir/owner.out")"
   watcher=$(cat "$state/.watch.lock/pid")
   append_wake "$state" signal hup "signal: fixture handled before the hangup"
   ack_wakes "$state" >/dev/null || fail "fixture: the handled wake could not be acknowledged"
@@ -2314,8 +2342,9 @@ test_take_over_preserves_downtime_from_watcher_self_exit
 test_take_over_confirms_a_watcher_stopped_inside_its_event_wait
 test_opencode_arm_plugin_decides_with_the_shared_predicate
 test_planned_host_restart_leaves_an_acknowledged_episode_closed
-test_planned_restart_in_poll_loop_leaves_an_acknowledged_episode_closed
 test_actionable_check_handoff_leaves_an_acknowledged_episode_closed
+test_nonzero_exit_with_a_planned_stop_record_stays_closed
+test_term_status_143_without_a_planned_stop_record_resurfaces
 test_stall_eviction_of_an_acknowledged_episode_resurfaces
 test_hup_without_a_planned_stop_record_resurfaces
 test_killed_watcher_outage_still_resurfaces

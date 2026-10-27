@@ -499,8 +499,8 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The already-acknowledged confirmation no-op for a matching generation, with its mismatched-generation, dead-pid, and lock-mismatch rejections preserved.
 - The manual-restart generation churn that makes a confirmation for the churned generation report a mismatch, which an arm check without a reopen leaves in place.
 - A take-over that stays quiet after a confirmed TERM, including one that lands inside a herdr event wait, still surfaces queued work and self-exit downtime, and attaches without stopping a cycle the named arm does not own.
-- A planned restart whose stop lands in ordinary poll-loop code, and an actionable-check hand-off, leave an acknowledged episode closed.
-- A stall eviction, a HUP with no planned-stop record, and a watcher killed without cleanup still resurface.
+- A planned host restart, an actionable-check hand-off, and a non-zero watcher exit that has a planned-stop record leave an acknowledged episode closed.
+- A stall eviction, a HUP with no planned-stop record, a TERM whose status is 143 with no planned-stop record, and a watcher killed without cleanup still resurface.
 - The disposable-checkout arm refusal.
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.
