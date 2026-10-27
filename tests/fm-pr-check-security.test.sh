@@ -1237,18 +1237,14 @@ test_github_degraded_poll() {
 
   # A failing check after the ready report emits exactly one degraded line
   # naming the head; the same line for every failing conclusion shape.
-  # A failing check after the ready report emits exactly one degraded line
-  # naming the head; the same line for every failing conclusion shape.
   for shape in \
-    'CheckRun|FAILURE|conclusion' \
-    'CheckRun|TIMED_OUT|conclusion' \
-    'CheckRun|STARTUP_FAILURE|conclusion' \
-    'StatusContext|FAILURE|state' \
-    'StatusContext|ERROR|state'; do
+    'CheckRun|FAILURE' \
+    'CheckRun|TIMED_OUT' \
+    'CheckRun|STARTUP_FAILURE' \
+    'StatusContext|FAILURE' \
+    'StatusContext|ERROR'; do
     typename=${shape%%|*}
-    rest=${shape#*|}
-    verdict=${rest%%|*}
-    field=${rest#*|}
+    verdict=${shape#*|}
     if [ "$typename" = CheckRun ]; then
       rollup="[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"$verdict\"}]"
     else
