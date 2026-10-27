@@ -236,9 +236,9 @@ fm_watcher_lock_matches_pid() {
 
 # docs/watcher-continuity.md: a planned close is this record, not the EXIT
 # status. Line 1 is the target pid. Line 2 is its fm_pid_identity.
-fm_watcher_planned_stop_record() {  # <state> <pid>
-  local state=$1 pid=$2 identity tmp
-  identity=$(fm_pid_identity "$pid") || return 1
+fm_watcher_planned_stop_record() {  # <state> <pid> [<identity>]
+  local state=$1 pid=$2 identity=${3:-} tmp
+  [ -n "$identity" ] || identity=$(fm_pid_identity "$pid") || return 1
   tmp=$(mktemp "$state/.watcher-planned-stop.tmp.XXXXXX") || return 1
   if ! printf '%s\n%s\n' "$pid" "$identity" > "$tmp" \
     || ! chmod 0600 "$tmp" \
