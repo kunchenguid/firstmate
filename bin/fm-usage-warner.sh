@@ -106,7 +106,7 @@ Usage:
 
 Thresholds are read from config/usage-warner (local, gitignored), whose schema
 is owned by docs/configuration.md ("Local Claude usage warner").
-Add sound:off to that file for silent banners (sound:on restores the default).
+Add sound:off to that file for silent banners.
 See docs/usage-warner.md for the behaviour reference and
 docs/examples/usage-warner for a starting point.
 EOF
@@ -231,9 +231,9 @@ usage_warner_read() {
 # sound:off explicitly supplies an empty sound name; otherwise preserve the
 # existing Notification Center default by omitting the sound clause.
 usage_warner_notify() {  # <summary>
-  local summary=$1 script='display notification (item 1 of argv) with title "Firstmate: Claude usage"' sound
-  sound=$(awk '{gsub(/^[[:space:]]+|[[:space:]]+$/, "")} $0=="sound:off" || $0=="sound:on" {value=$0} END {print value}' "$CONFIG" 2>/dev/null)
-  [ "$sound" != sound:off ] || script="$script sound name \"\""
+  local summary=$1 script='display notification (item 1 of argv) with title "Firstmate: Claude usage"'
+  awk '{gsub(/^[[:space:]]+|[[:space:]]+$/, "")} $0=="sound:off" {found=1} END {exit !found}' "$CONFIG" 2>/dev/null &&
+    script="$script sound name \"\""
   command -v osascript >/dev/null 2>&1 || {
     printf 'fm-usage-warner: osascript not found; cannot post a notification\n' >&2
     return 1

@@ -16,8 +16,7 @@
 #   command:<cmd>    run <cmd> via `sh -c`; the alarm summary is passed as $1 and
 #                    on stdin, so it can reach a phone/pager while you are away
 #
-# Optional: sound:off keeps macOS banners silent; sound:on restores the default.
-# The last sound directive wins.
+# Optional: sound:off keeps macOS banners silent; delete it to restore sound.
 #
 # An ABSENT config/wedge-alarm behaves as `auto` (default-on on macOS): the
 # alarm exists precisely so a wedged away-mode primary stays visible.
