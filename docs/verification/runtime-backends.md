@@ -307,7 +307,7 @@ Both recorded runtime identities now classify the exact `pi-launcher` foreground
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
 Herdr uses native registered-agent state and needs no process-name branch.
-Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
+Zellij has no verified recovery-grade agent process probe, while Orca, cmux, and tern do not support secondmate spawns, so those backends retain their existing generic ordinary-launch semantics without a new secondmate liveness matcher.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
@@ -316,6 +316,7 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 ### Cleanup endpoint identity
 
 The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every backend supported at that time.
+The portable suite now also carries a tern metadata fixture with full 64-bit session/tab/block ids (including values above 2^53) so validation cannot round them; re-run the commands below after integration for current output rather than treating the 2026-07-28 transcript as tern-era evidence.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -324,9 +325,10 @@ tests/fm-backend-herdr.test.sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend-cmux.test.sh
+tests/fm-backend-tern.test.sh
 ```
 
-Bounded output from the incident regression:
+Bounded output from the 2026-07-28 incident regression (pre-tern):
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
@@ -338,7 +340,8 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex before backend dispatch; `tests/fm-backend-t3code.test.sh` covers T3 thread bindings.
+The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex before backend dispatch, and now covers tern as well once the parent records a green portable run; do not treat the pre-tern transcript above as proof of the tern fixture.
+`tests/fm-backend-t3code.test.sh` covers T3 thread bindings.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ### Endpoint close
@@ -371,6 +374,7 @@ The refusal is reached only through a close that could not do its job, and each 
 | orca | 0, silent | 1 when a missing CLI means no close was attempted; 0 for a close command that failed after the CLI accepted it |
 | zellij | 0, silent | 0, not yet distinguishable |
 | cmux | 0, silent | 0, not yet distinguishable |
+| tern | 0, silent | 1 when its inventory re-read cannot run, the block moved to another session, its tab no longer carries the task's scoped title, or it is still listed after the close; portable fixtures only (`tests/fm-backend-tern.test.sh`), contract in [tern-backend.md](../tern-backend.md) |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
 The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
@@ -2319,6 +2323,7 @@ Current active CLI findings:
 | Session create | `rex new <label> --window <label> --cwd <dir> --json` | Returned `session_id` and `initial_windows[0].{window_id,block_ids}`. |
 | Resize | `rex block call -s <sid> -b <bid> resize '{"columns":200,"rows":50}'` | Applied to an unviewed block (`size` then read `{"columns":200,"rows":50,...,"owner":null}`). |
 | Process view | `rex block call -s <sid> -b <bid> process` | `foreground{pid,name,path,argv0,cwd}`, `ancestors[]`, and `last_exit`; `foreground.cwd` followed a nested shell started with `cd <dir> && exec /bin/sh`, and a Claude Code 2.1.308 block read `{"pid":46775,"name":"2.1.308","argv0":"claude"}` with ancestors `zsh`, `login`. |
+| Shell foreground over a harness | `rex block call -s <sid> -b <bid> process` on rex 0.0.1792787366-g623b2d, 2026-10-24 | A pane whose fish login shell started Claude Code 2.1.310 through a fish function and a bash shim read `{"foreground":{"pid":68540,"name":"fish",...},"ancestors":[treehouse, fish, login]}`, while `ps -o pid=,ppid=,pgid=,tpgid=,comm=` showed `82205 68540 68540 68540 bash` and `82263 82205 68540 68540 .../2.1.310/claude`: the harness shares the shell's foreground process group and appears only among the foreground's descendants. |
 | Plain capture | `rex capture -s <sid> -b <bid>` | A 100x10 block holding `a`, `b`, a prompt, and six blank rows returned `a\nb\n/tmp \n❯ \n`: trailing blank rows are dropped. |
 | Styled capture | `rex capture -s <sid> -b <bid> --format=vt` | The same block returned all ten rows joined by CRLF and ending in `\r\n`, so the empty bottom row is implicit. |
 | Styled read with cursor | `rex block call -s <sid> -b <bid> format '{"format":"vt","extra_cursor":true}'` | `.content` held the same CRLF-joined grid without the capture's final line feed, followed by the cursor as `ESC[<row>;<col>H` with a 1-based screen row; the adapter restores the implicit bottom row, derives the viewport as the last `size.rows` rows, and anchors the composer on that row. An idle OpenCode 1.19.3 at 200x50 ended `ESC[45;6H`, inside its composer, with its status line drawn below it (`tests/fixtures/rex-opencode-1.19.3/`). |
@@ -2677,6 +2682,56 @@ FM_TASK_ID=[lab10] FM_TASK_INBOX=[<lab>/home/state/lab10.inbox] GIT_CONFIG_VALUE
 
 Codex's own `config/read` on a leased worktree, through `codex app-server` with an isolated `CODEX_HOME`, gives the same split: the project layer is listed either way, but its values apply only when the worktree, or the main checkout it belongs to, is trusted; a trusted parent directory does not count.
 Write order is not the cause: T3 starts a thread's Codex session with `thread/start` at the thread's first turn (`apps/server/src/orchestration-v2/ProviderTurnStartService.ts:656` calling `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts:6571` at tag v0.1.0), after spawn has written the file.
+
+## tern
+
+The compatibility floor documented with this adapter is Tern 0.9.4.
+This host measured `tern 0.9.4 (b9ef74c)` on 2026-10-19 inside a remote Tern block (`TERM_PROGRAM=tern`, `TERN_PANE` set).
+
+### Host boundary measured here
+
+Read-only CLI probes on this host (no create/close against the captain's live Default session), including TernAdapter's own-block measurements:
+
+| Probe | Result |
+| --- | --- |
+| `tern --version` | `tern 0.9.4 (b9ef74c)` |
+| `tern ls --json` | Succeeded; listed the live Default session and its blocks (ids are integers; do not touch captain blocks). |
+| `tern process <block> --json` | Succeeded; returned `{pane,child,group,foreground}` with pid/name/argv/cwd. |
+| `tern whoami --json` | Succeeded; returned remote identity hops. |
+| `tern capture <block>` / `--ansi` on an omp TSP block | Empty (no transcript text). |
+| `tern capture <block> --surfaces` | Succeeded; JSON `{"block","text"}` main-region transcript without omp's composer; byte-identical with or without `--scrollback` on this host. |
+| `tern ctl state` and `tern ctl carly lua ...` | Failed immediately with `{"ok":false,"error":"no Tern window on this machine shows this pane"}` (exit 1). |
+
+Therefore:
+
+- Session-daemon scripting (`ls` / `process` / `capture --surfaces`) can work on a remote-host block without a local Tern window.
+- Native agent-state via `tern ctl` is unavailable on this host and must degrade to `unknown` rather than fail hard (`FM_BACKEND_TERN_CTL_TIMEOUT` bounds each call; default 5s).
+- Composer caps are deliberately conservative (`styled=0 cursor=0 identity=0`) with no native identity or styled-classifier proof; on omp TSP surfaces observed here, composer-only submit proof is `unknown` and native state is the submit path when `ctl` works.
+- Real-binary smoke (`tests/fm-backend-tern-smoke.test.sh`) requires `tern`, `jq`, a successful `tern ls --json`, **and** a successful `tern ctl state`; it capability-skips (exit 0) when the control endpoint is absent even if `ls` works, and only ever creates sessions named `fm-test-smoke-*` cleaned through `tests/tern-test-safety.sh`.
+- This record does **not** claim a live spawn/steer/teardown proof or a desktop-window native-agent proof on this host.
+- Not live-verified here: key chord names against a desktop window, `send text` with flag-looking text, `tern run` semantics, rename pinning, focus behaviour of new session/tab, and successful `ctl` agent entries.
+
+### Portable and smoke entry points
+
+```sh
+env -u TERM_PROGRAM -u TERN_PANE -u TERN_PANE_SOCKET -u TERN_WINDOW_KEY -u TERN_WINDOW_SOCKET -u TERN_IDENTITY \
+  bash bin/fm-test-run.sh --family tern
+```
+
+Recorded on 2026-10-19 against this worktree (ambient Tern markers unset so the suite does not inherit the captain block):
+
+```text
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=1 duration_ms=22983
+tests/fm-backend-tern.test.sh exit=0 duration_ms=22502
+tests/fm-backend-tern-smoke.test.sh exit=0 duration_ms=29 gate_skip=true
+skip: no Tern window control endpoint (tern ctl state failed) - native agent state cannot be exercised here
+```
+
+The fake-CLI unit suite reported 70 ok cases and exit 0, including full-spawn environment and metadata coverage through `fm-spawn.sh`.
+The real-binary smoke capability-skipped on the absent control endpoint exactly as designed; it did not create or close any session.
+This still does not claim a desktop-window native-agent or live spawn/steer/teardown proof.
+
+Safety: real tests may touch only sessions named `fm-test-*` through `tests/tern-test-safety.sh`, and must never close the captain's live remote Default blocks observed on this host.
 
 ## Codex App host tools
 
@@ -3200,6 +3255,23 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+### Profile flag
+
+Verified on 2026-10-24 against omp 18.4.3 (`~/.bun/bin/omp`, a Bun package install) on macOS 15 arm64, for the [per-secondmate omp profile](../configuration.md#per-secondmate-omp-profile) pin.
+omp extracts `--profile` from anywhere in its arguments, so the flag Firstmate places right after the executable and before `--config` is honored, and it applies to subcommands such as the catalog check's `models --json`:
+
+```text
+$ OMP_SKIP_SETUP=1 omp --profile speak4 --config .omp/fm-worker-overlay.yml --version
+18.4.3
+$ OMP_SKIP_SETUP=1 omp --profile speak4 models --json | jq -r '[.models[].provider]|unique|join(" ")'
+amazon-bedrock anthropic bedrock-mantle ollama openai-codex
+$ OMP_SKIP_SETUP=1 omp --profile BAD models --json
+Error: Invalid OMP profile "BAD". Profile names must match ^[a-z0-9][a-z0-9._-]{0,63}$, cannot be "." or "..", cannot end with ".", and cannot be a Windows reserved device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, or any of those with an extension).
+```
+
+`bin/fm-omp-profile-lib.sh` enforces the same name rule before launch, and `tests/fm-omp-harness.test.sh` pins the flag position, the profile-scoped catalog check, and the unpinned launch through a fake omp.
+Repeat these commands after an omp upgrade to refresh this record.
 
 ## Busy inbox escalation
 

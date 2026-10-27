@@ -1339,7 +1339,8 @@ if ! pane_readable "$BACKEND_TARGET"; then
   #             contradicted themselves, which is unknown, never death.
   # t3code answers from the server's own session status through the same
   # contract. Backends with no classifier (orca, zellij, cmux, and paseo all
-  # report unverified) keep their historical capture-failure-means-gone reading.
+  # report unverified, and tern's classifier is not promoted to recovery grade)
+  # keep their historical capture-failure-means-gone reading.
   case "$TASK_BACKEND" in
     tmux|herdr|rex|t3code) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
     *) AGENT_STATE=none ;;

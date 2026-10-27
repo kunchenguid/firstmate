@@ -63,12 +63,15 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   hold-marker the same as handle, but before the result a helper takes the
 #               recovery-marker lock for a few seconds, so the host's handled-
 #               turn settle is still waiting for it (holding the queue lock)
+# A $FM_HOME/stub-tz file sets the engine's TZ, as a wrapper launching the
+# real engine binary may, independent of the host's own TZ.
 STUB="$TMP_ROOT/engine-stub"
 cat > "$STUB" <<'SH'
 #!/usr/bin/env bash
 set -u
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 mode=$(cat "$FM_HOME/stub-mode" 2>/dev/null || echo handle)
+[ ! -s "$FM_HOME/stub-tz" ] || { TZ=$(cat "$FM_HOME/stub-tz"); export TZ; }
 n=$(( $(ls "$FM_HOME"/engine-call.* 2>/dev/null | wc -l) + 1 ))
 {
   printf 'mode=%s\nactor=%s\nholder=%s\nprimary=%s\nturn=%s\n' "$mode" "${FM_SUPERVISION_ACTOR:-}" \
@@ -948,6 +951,31 @@ test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue() {
     || fail "handled then TERM: the stopped host left the wake queue lock held"
   stop_home_processes "$home"
   pass "host: a host stopped right after a handled wake exits and leaves the wake queue usable"
+}
+
+# A wrapper may launch the engine in another time zone than the host's (one
+# observed wrapper exports a TZ the main session's hooks never see). The
+# process-table identity that ties the branch grant to the host must read the
+# same from both, or the engine's drain discards the grant as stale, refuses,
+# and leaves every granted row for main. The proc root is hidden so Linux takes
+# the same process-table path as macOS.
+test_engine_in_another_time_zone_handles_its_granted_rows() {
+  local home no_proc
+  home=$(make_home engine-tz attended)
+  no_proc="$TMP_ROOT/engine-tz-no-proc"
+  [ "$(TZ=UTC0 LC_ALL=C ps -p $$ -o lstart=)" != "$(TZ=ENG-9 LC_ALL=C ps -p $$ -o lstart=)" ] \
+    || fail "fixture: ps renders the same start time in both time zones, so the case would prove nothing"
+  printf 'ENG-9\n' > "$home/stub-tz"
+  TZ=UTC0 FM_PROC_ROOT_OVERRIDE="$no_proc" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "engine tz: the host never started a watcher cycle: $(cat "$home/host.out")"
+  append_status "$home" 'step one'
+  wait_until 250 handled_at_least "$home" 1 \
+    || fail "engine tz: the turn did not end handled: $(cat "$home/state/.supervision-host.log"; cat "$home"/engine-drain.* 2>/dev/null)"
+  assert_no_re '	failed	' "$home/state/.supervision-host.log" "engine tz: a turn that reported for its granted rows must not fail"
+  assert_no_grep 'no branch-eligible row snapshot' "$home/engine-drain.1" "engine tz: the engine's drain discarded the host's grant"
+  assert_no_grep 'demo.status' "$home/state/.wake-queue" "engine tz: the engine's acknowledgement did not consume the wake"
+  [ ! -s "$home/host.rc" ] || fail "engine tz: the handled wake reached main: $(cat "$home/host.out")"
+  pass "host: an engine in another time zone than the host drains, reports, and acknowledges its granted rows"
 }
 
 test_attended_captain_outcome_reaches_main_through_branch_outcomes() {
@@ -2619,6 +2647,95 @@ SH
   pass "host: parked child-exit sampling uses ordinary half-second sleeps"
 }
 
+compacted_once() { [ "$(compact_calls "$1")" = 1 ]; }
+compact_calls() { grep -l '^arg=/compact$' "$1"/engine-call.* 2>/dev/null | wc -l | tr -d ' '; }
+
+# Seed the engine record the way a handled turn leaves it, keyed to the live
+# fake main session, with a transcript large enough to be due.
+seed_idle_engine_record() {  # <home> <ended-age-seconds>
+  local home=$1 key model state="$1/state" ended compacted
+  key=$(FM_HOME="$home" bash -c '. "$1"; . "$2"; fm_supervision_host_main_key "$3"' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-supervision-engine-lib.sh" "$state") \
+    || fail "warm-compact: no main-session key"
+  model=$(bash -c '. "$1"; fm_supervision_host_config "$2" claude; printf "%s" "$FM_SUPERVISION_ENGINE_MODEL"' _ "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/config")
+  ended=$(sed -n 's/^ended=//p' "$state/.supervision-host-engine" 2>/dev/null | head -n 1)
+  [ -n "$ended" ] || ended=$(( $(date +%s) - $2 ))
+  compacted=$(sed -n 's/^compacted=//p' "$state/.supervision-host-engine" 2>/dev/null | head -n 1)
+  printf 'engine=claude\nmodel=%s\nsession=warm-sess\nkey=%s\nturns=1\nconversation_cost=0\nended=%s\n' "$model" "$key" "$ended" > "$state/.supervision-host-engine"
+  [ -z "$compacted" ] || printf 'compacted=%s\n' "$compacted" >> "$state/.supervision-host-engine"
+  printf 'prompt\n' > "$state/.supervision-host-prompt"
+}
+
+test_idle_engine_conversation_is_compacted_once_across_hosts() {
+  local home run ended
+  home=$(make_home warm-compact attended claude)
+  echo noreport > "$home/stub-mode"
+  printf 'idle-seconds=60\nmin-context-tokens=1000\n' > "$home/config/warm-compact"
+  mkdir -p "$home/claude/projects/p"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":90000,"cache_creation_input_tokens":0}}}\n' \
+    > "$home/claude/projects/p/warm-sess.jsonl"
+  for run in 1 2; do
+    rm -f "$home/host.rc" "$home/park-clock"
+    CLAUDE_CONFIG_DIR="$home/claude" FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=3000 \
+      FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+    wait_until 150 watcher_live "$home" || fail "warm-compact: run $run never started a watcher"
+    seed_idle_engine_record "$home" 600
+    ended=$(sed -n 's/^ended=//p' "$home/state/.supervision-host-engine")
+    echo 10 > "$home/park-clock"
+    if [ "$run" = 1 ]; then
+      wait_until 150 compacted_once "$home" || fail "warm-compact: the idle engine conversation was not compacted"
+      wait_until 100 grep -qx "compacted=$ended" "$home/state/.supervision-host-engine" || fail "warm-compact: the episode marker was not recorded with the engine record"
+    else
+      echo 20 > "$home/park-clock"
+      sleep 3
+    fi
+    [ "$(compact_calls "$home")" = 1 ] || fail "warm-compact: run $run compacted the same idle episode again"
+    stop_home_processes "$home"
+    wait_until 100 host_exited "$home" || true
+  done
+  pass "host: an idle engine conversation is compacted once across hosts"
+}
+
+test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted() {
+  local home
+  home=$(make_home warm-compact-stale attended claude)
+  echo noreport > "$home/stub-mode"
+  printf 'idle-seconds=60\nmin-context-tokens=1000\n' > "$home/config/warm-compact"
+  mkdir -p "$home/claude/projects/p"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":90000,"cache_creation_input_tokens":0}}}\n' \
+    > "$home/claude/projects/p/warm-sess.jsonl"
+  CLAUDE_CONFIG_DIR="$home/claude" FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=3000 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "warm-compact-stale: no watcher started"
+  seed_idle_engine_record "$home" 600
+  sed -i 's/^model=.*/model=another-model/' "$home/state/.supervision-host-engine"
+  echo 10 > "$home/park-clock"
+  sleep 3
+  [ "$(compact_calls "$home")" = 0 ] || fail "warm-compact-stale: compacted a conversation the next turn would not resume"
+  stop_home_processes "$home"
+  pass "host: a conversation the next turn would not resume is not compacted"
+}
+
+test_compaction_abandoned_at_the_park_boundary_is_not_marked_done() {
+  local home
+  home=$(make_home warm-compact-abandon attended claude)
+  echo hang > "$home/stub-mode"
+  printf 'idle-seconds=60\nmin-context-tokens=1000\n' > "$home/config/warm-compact"
+  mkdir -p "$home/claude/projects/p"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":90000,"cache_creation_input_tokens":0}}}\n' \
+    > "$home/claude/projects/p/warm-sess.jsonl"
+  CLAUDE_CONFIG_DIR="$home/claude" FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=3000 FM_SUPERVISION_ENGINE_GRACE=1 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "warm-compact-abandon: no watcher started"
+  seed_idle_engine_record "$home" 600
+  echo 10 > "$home/park-clock"
+  wait_until 150 test -e "$home/engine-call.1" || fail "warm-compact-abandon: the compaction never started"
+  echo 3000 > "$home/park-clock"
+  wait_until 300 host_exited "$home" || fail "warm-compact-abandon: the host did not end its park"
+  ! grep -q '^compacted=' "$home/state/.supervision-host-engine" || fail "warm-compact-abandon: an abandoned compaction was marked done"
+  stop_home_processes "$home"
+  pass "host: a compaction abandoned at the park boundary is not marked done"
+}
+
 test_park_boundary_ends_the_park_before_the_hook_timeout() {
   local home token
   home=$(make_home boundary attended)
@@ -3389,6 +3506,7 @@ test_branch_outcomes_keep_a_drain_presented_outcome_across_a_switch_to_pi
 test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
 test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue
+test_engine_in_another_time_zone_handles_its_granted_rows
 test_attended_captain_outcome_reaches_main_through_branch_outcomes
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return
 test_quiet_record_without_its_daemon_is_a_present_captain
@@ -3431,6 +3549,9 @@ test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes
 test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main
 test_engine_turn_is_bounded_and_its_descendants_reaped
 test_restarted_host_stops_what_a_killed_predecessor_left
+test_idle_engine_conversation_is_compacted_once_across_hosts
+test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted
+test_compaction_abandoned_at_the_park_boundary_is_not_marked_done
 test_park_boundary_ends_the_park_before_the_hook_timeout
 test_park_boundary_holds_under_back_to_back_closes
 test_park_boundary_rechecked_just_before_the_engine_turn

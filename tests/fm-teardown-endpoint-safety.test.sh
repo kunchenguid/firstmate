@@ -328,14 +328,21 @@ test_supported_backend_endpoint_records_validate() {
     fail "a rex record with no rex_server must refuse"
   fi
 
-  for backend in tmux herdr zellij orca cmux paseo rex; do
+  id=tern-task
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=9007199254740993:9223372036854775807" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=tern" "tern_session_id=9007199254740993" "tern_tab_id=9007199254740995" "tern_block_id=9223372036854775807"
+  fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" || fail "valid tern endpoint refused"
+  [ "$FM_BACKEND_VALIDATED_TARGET" = "9007199254740993:9223372036854775807" ] || fail "tern endpoint validation changed the 64-bit ids"
+
+  for backend in tmux herdr zellij orca cmux paseo rex tern; do
     set +e
     fm_backend_kill "$backend" "" >/dev/null 2>&1
     target=$?
     set -e
     [ "$target" -ne 0 ] || fail "$backend generic kill accepted an empty target"
   done
-  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex records validate, inconsistent Rex records refuse, and every empty backend target refuses"
+  pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, Paseo, Rex, and tern records validate, inconsistent Rex records refuse, and every empty backend target refuses"
 }
 
 test_orca_composite_worktree_id_validates() {

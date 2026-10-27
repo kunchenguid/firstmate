@@ -97,7 +97,7 @@
 #                                   TERM_PROGRAM=rex selects rex, then T3
 #                                   discovery behind its explicit-selection gate
 #                                   - falling back to tmux).
-#                                   zellij, orca, cmux, and paseo are not yet
+#                                   zellij, orca, cmux, paseo, and tern are not yet
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
 #                                   tmux primitives against an unsupported endpoint.
@@ -210,9 +210,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. rex goes
 # through the same dispatcher primitives as herdr (bin/backends/rex.sh). zellij,
-# orca, cmux, and paseo are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
-# daemon has no verified composer/busy primitives wired up for them yet - see
-# docs/herdr-backend.md and AGENTS.md section 4's
+# orca, cmux, paseo, and tern are real backends elsewhere in firstmate
+# (bin/fm-backend.sh) but this daemon has no verified composer/busy primitives
+# wired up for them yet - see docs/herdr-backend.md and AGENTS.md section 4's
 # harness-verification discipline. Selecting one refuses loudly at startup
 # instead of silently running tmux primitives against a pane that is not a tmux
 # pane. t3code injects through the adapter's t3_thread_send, with its
@@ -849,7 +849,7 @@ _utf8_prefix() {  # <text> <max-bytes> <out-var>
 # The injected digest is bounded so it always fits one transport argument:
 # tmux refuses an oversized `send-keys -l` command, and Linux refuses to exec
 # any single argument above 131,071 bytes (MAX_ARG_STRLEN), which is how the
-# herdr, zellij, orca, and cmux adapters pass text. Each item is cut to
+# herdr, zellij, orca, cmux, and tern adapters pass text. Each item is cut to
 # ESCALATE_ITEM_BYTES at a UTF-8 boundary with an omitted-bytes marker, the
 # joined items stop at ESCALATE_DIGEST_BYTES with a "+K more event(s)" tail,
 # and a bounded digest names a full-text file under ESCALATE_FULL_DIR that
@@ -2033,11 +2033,11 @@ fm_super_main() {
   local BACKEND="$FM_SUPERVISOR_BACKEND"
 
   # --- refuse an unsupported supervisor backend loudly, before ever trying a
-  # tmux/herdr-specific call against it (zellij, orca, cmux, and paseo have no
-  # verified composer/busy primitives wired up for this daemon yet - AGENTS.md
-  # section 4 harness-verification discipline). This is the clear refusal the
-  # task calls for, instead of a confusing "does not resolve to a tmux pane"
-  # error.
+  # tmux/herdr-specific call against it (zellij, orca, cmux, paseo, and tern
+  # have no verified composer/busy primitives wired up for this daemon yet -
+  # AGENTS.md section 4 harness-verification discipline). This is the clear
+  # refusal the task calls for, instead of a confusing "does not resolve to a
+  # tmux pane" error.
   if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
     echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr|rex|t3code and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
     log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"

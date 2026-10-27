@@ -555,6 +555,56 @@ test_backend_rex_autodetect() {
   pass "fm_backend_detect/fm_backend_name: TERM_PROGRAM=rex + REX_BLOCK -> rex (silent); nested tmux/herdr win; REX_BLOCK alone never selects rex; explicit config wins"
 }
 
+# Tern is explicit-only (docs/tern-backend.md "Selection is explicit"): the
+# TERM_PROGRAM=tern and TERN_PANE markers reach every descendant process of a
+# Tern block, including a tmux server or Herdr client started inside it, so they
+# must never select it. Only FM_BACKEND, config/backend, or --backend reach tern.
+test_backend_tern_is_never_autodetected() {
+  local dir cfg cfg_tern out errfile
+
+  dir="$TMP_ROOT/tern-explicit-only"; cfg="$dir/config-empty"; cfg_tern="$dir/config-tern"
+  mkdir -p "$cfg" "$cfg_tern"; printf 'tern\n' > "$cfg_tern/backend"
+  errfile="$dir/err.txt"
+
+  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" TERM_PROGRAM=tern TERN_PANE=9223372036854775807 fm_backend_detect); then
+    fail "fm_backend_detect must not report a backend from the Tern block markers, got '$out'"
+  fi
+  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" TERM_PROGRAM=tern TERN_PANE=7 TERN_PANE_SOCKET=/run/tern/pane.sock TERN_WINDOW_KEY=win-key TERN_WINDOW_SOCKET=/run/tern/window.sock TERN_IDENTITY=ident fm_backend_detect); then
+    fail "fm_backend_detect must not report a backend from any combination of Tern markers, got '$out'"
+  fi
+
+  : > "$errfile"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" TERM_PROGRAM=tern TERN_PANE=7 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "fm_backend_name inside a Tern block with nothing configured must default to tmux, got '$out'"
+  [ -s "$errfile" ] && fail "the tmux default inside a Tern block must stay silent"$'\n'"$(cat "$errfile")"
+
+  # A multiplexer started inside a Tern block still detects itself.
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" TMUX='fake,1,0' TERM_PROGRAM=tern TERN_PANE=7 fm_backend_detect)
+  [ "$out" = tmux ] || fail "tmux started inside a Tern block still detects tmux, got '$out'"
+  out=$(unset TMUX CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" HERDR_ENV=1 TERM_PROGRAM=tern TERN_PANE=7 fm_backend_detect)
+  [ "$out" = herdr ] || fail "herdr started inside a Tern block still detects herdr, got '$out'"
+
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; FM_BACKEND=tern FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
+  [ "$out" = tern ] || fail "FM_BACKEND=tern must select tern, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg_tern" fm_backend_name)
+  [ "$out" = tern ] || fail "config/backend=tern must select tern, got '$out'"
+
+  # An explicit choice of another backend beats the ambient Tern markers.
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" TERM_PROGRAM=tern TERN_PANE=7 FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
+  [ "$out" = tmux ] || fail "FM_BACKEND=tmux should win over ambient Tern markers, got '$out'"
+
+  pass "fm_backend_detect/fm_backend_name: tern is never auto-detected from TERM_PROGRAM/TERN_PANE (tmux default stays silent, a nested tmux or herdr still detects itself); only FM_BACKEND or config/backend select it"
+}
+
+test_backend_dispatch_tables_include_tern() {
+  local tools
+  tools=$(fm_backend_required_tools tern) || fail "fm_backend_required_tools should know tern"
+  [ "$tools" = 'tern jq treehouse' ] || fail "tern should require exactly its CLI, jq and treehouse, got '$tools'"
+  fm_backend_visible_capture_supported tern || fail "tern should advertise a viewport-only capture (capture without --scrollback)"
+  fm_backend_has_push tern && fail "tern must not claim a native push stream (tern events has no verified agent-transition kinds)"
+  pass "fm_backend dispatch tables: tern requires tern+jq+treehouse, has visible capture, declares no push stream"
+}
+
 # Explicit configuration (FM_BACKEND env or config/backend) always wins over
 # runtime auto-detection, even when a detection marker points the other way.
 test_backend_name_explicit_beats_detection() {
@@ -589,6 +639,7 @@ test_backend_name_explicit_beats_detection() {
 test_backend_validate_refuses_unknown() {
   fm_backend_validate tmux 2>/dev/null || fail "fm_backend_validate should accept tmux"
   fm_backend_validate orca 2>/dev/null || fail "fm_backend_validate should accept orca"
+  fm_backend_validate tern 2>/dev/null || fail "fm_backend_validate should accept tern"
   local out
   # bogus names a backend with no adapter at all; tmux, herdr, zellij, orca,
   # and cmux are all known adapters and spawn-supported.
@@ -641,40 +692,49 @@ test_backend_source_shell_portable() {
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
 
-test_backend_source_requires_adapter_file() {
+# One adapter-precheck condition. Each case is its own TAP test so the
+# stock-bash completeness check counts both without a hard-coded 2 in CI.
+_backend_source_adapter_condition() {  # missing|unreadable
   local dir adapter exit_status continuation out rc condition test_bash
+  condition=$1
   dir="$TMP_ROOT/adapter-precheck"
   adapter="$dir/backends/tmux.sh"
   test_bash=${FM_TEST_BASH:-${BASH:-bash}}
   mkdir -p "$dir/backends"
 
-  for condition in missing unreadable; do
-    if [ "$condition" = unreadable ]; then
-      printf ':\n' > "$adapter"
-      chmod 000 "$adapter"
-      if [ -r "$adapter" ]; then
-        pass "fm_backend_source: unreadable adapter case skipped (this user can read mode-000 files)"
-        continue
-      fi
+  if [ "$condition" = unreadable ]; then
+    printf ':\n' > "$adapter"
+    chmod 000 "$adapter"
+    if [ -r "$adapter" ]; then
+      pass "fm_backend_source: unreadable adapter case skipped (this user can read mode-000 files)"
+      return 0
     fi
-    exit_status="$dir/$condition.exit"
-    continuation="$dir/$condition.continued"
-    # shellcheck disable=SC2016 # The child Bash expands $1..$4 and $? at runtime.
-    out=$("$test_bash" -c '
-      . "$1"
-      FM_BACKEND_LIB_DIR=$2
-      trap '\''printf "%s\n" "$?" > "$3"'\'' EXIT
-      set -e
-      fm_backend_source tmux
-      : > "$4"
-    ' _ "$ROOT/bin/fm-backend.sh" "$dir" "$exit_status" "$continuation" 2>&1)
-    rc=$?
-    [ "$rc" -ne 0 ] || fail "fm_backend_source returned success for a $condition adapter: $out"
-    [ -f "$exit_status" ] || fail "fm_backend_source did not record the $condition adapter exit status"
-    [ "$(cat "$exit_status")" -ne 0 ] || fail "fm_backend_source lost the $condition adapter failure at EXIT"
-    [ ! -e "$continuation" ] || fail "fm_backend_source continued the lifecycle after a $condition adapter"
-    pass "fm_backend_source: $condition adapter fails before lifecycle continuation"
-  done
+  fi
+  exit_status="$dir/$condition.exit"
+  continuation="$dir/$condition.continued"
+  # shellcheck disable=SC2016 # The child Bash expands $1..$4 and $? at runtime.
+  out=$("$test_bash" -c '
+    . "$1"
+    FM_BACKEND_LIB_DIR=$2
+    trap '\''printf "%s\n" "$?" > "$3"'\'' EXIT
+    set -e
+    fm_backend_source tmux
+    : > "$4"
+  ' _ "$ROOT/bin/fm-backend.sh" "$dir" "$exit_status" "$continuation" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "fm_backend_source returned success for a $condition adapter: $out"
+  [ -f "$exit_status" ] || fail "fm_backend_source did not record the $condition adapter exit status"
+  [ "$(cat "$exit_status")" -ne 0 ] || fail "fm_backend_source lost the $condition adapter failure at EXIT"
+  [ ! -e "$continuation" ] || fail "fm_backend_source continued the lifecycle after a $condition adapter"
+  pass "fm_backend_source: $condition adapter fails before lifecycle continuation"
+}
+
+test_backend_source_requires_missing_adapter_file() {
+  _backend_source_adapter_condition missing
+}
+
+test_backend_source_requires_unreadable_adapter_file() {
+  _backend_source_adapter_condition unreadable
 }
 
 test_backend_validate_spawn_accepts_orca() {
@@ -686,6 +746,7 @@ test_backend_validate_spawn_accepts_orca() {
   fm_backend_validate_spawn cmux 2>/dev/null || fail "fm_backend_validate_spawn should accept cmux"
   fm_backend_validate_spawn t3code 2>/dev/null || fail "fm_backend_validate_spawn should accept t3code"
   [ "$(fm_backend_required_tools t3code)" = 'node treehouse' ] || fail "t3code should require node and treehouse"
+  fm_backend_validate_spawn tern 2>/dev/null || fail "fm_backend_validate_spawn should accept tern"
   out=$(fm_backend_validate_spawn bogus 2>&1) && fail "fm_backend_validate_spawn should still refuse unknown backends"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate_spawn did not preserve unknown-backend validation"
   out=$(fm_backend_validate_spawn codex-app 2>&1) && fail "fm_backend_validate_spawn should refuse codex-app"
@@ -1337,6 +1398,15 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+# CI's stock macOS Bash lane sets FM_TEST_STOCK_BASH=1 to run just the adapter
+# precheck pair. Adding another stock-bash case means adding it to this list,
+# not to ci.yml.
+if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
+  fm_test_run \
+    test_backend_source_requires_missing_adapter_file \
+    test_backend_source_requires_unreadable_adapter_file
+  exit 0
+fi
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -1357,10 +1427,13 @@ test_backend_name_cmux_fallback_notice
 test_backend_name_autodetect_notice
 test_backend_paseo_is_never_autodetected
 test_backend_rex_autodetect
+test_backend_tern_is_never_autodetected
+test_backend_dispatch_tables_include_tern
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
-test_backend_source_requires_adapter_file
+test_backend_source_requires_missing_adapter_file
+test_backend_source_requires_unreadable_adapter_file
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
