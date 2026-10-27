@@ -1717,6 +1717,14 @@ printf 'signal: fixture.status\n'
 printf 'supervision-host: branch-outcome: fixture\n'
 SH
         ;;
+      outcome-empties-fleet)
+        cat <<'SH'
+rm -f "$FM_HOME/state/task.meta"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'supervision-host: branch-outcome: fixture\n'
+SH
+        ;;
       handed-back-many)
         cat <<'SH'
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
@@ -1874,6 +1882,23 @@ test_host_stand_down_is_silent() {
   [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 1 ] || fail "a host stand-down was retried"
   [ "$(epoch_outcome "$dir")" = clean ] || fail "a host stand-down must record outcome=clean, got: $(epoch_outcome "$dir")"
   pass "auto-arm: a host that stood down closes silently without a retry"
+}
+
+# The branch's own turn tore down the only task, so the fleet is empty by the
+# time the host hands back the captain outcome it recorded.
+test_host_outcome_after_fleet_emptied_rewakes() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-outcome-empties-fleet")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" outcome-empties-fleet
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  [ ! -e "$dir/state/task.meta" ] || fail "fixture: the host turn did not empty the fleet"
+  expect_code 2 "$status" "a captain outcome the host hands back must rewake main even after the fleet emptied"
+  assert_contains "$out" "supervision-host: branch-outcome: fixture" "the rewake must carry the branch-outcome line"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "a handed-back outcome must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: a host branch outcome rewakes main even when its turn emptied the fleet"
 }
 
 # Main already drained and acknowledged the wake, so the rewake is refused on a
@@ -2052,6 +2077,7 @@ test_host_handback_beside_a_quiet_record_carries_no_away_note
 test_plain_arm_banner_keeps_its_wake_line_cap
 test_host_handback_carries_every_host_line
 test_host_stand_down_is_silent
+test_host_outcome_after_fleet_emptied_rewakes
 test_host_benign_rewake_refusal_opens_no_failure_episode
 test_host_lost_handback_notifies_once_per_episode
 test_host_lost_announced_handback_notifies_once_per_episode

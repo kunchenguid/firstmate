@@ -492,6 +492,10 @@ write_host_fixture() {  # <dir> <kind>
       stood-down)
         printf 'printf "supervision-host stood down: this session no longer owns supervision\\n"\n'
         ;;
+      outcome-empties-fleet)
+        printf 'rm -f "$FM_HOME/state/task1.meta"\n'
+        printf 'printf "supervision-host: branch-outcome: fixture\\n"\n'
+        ;;
       dies-once)
         printf '[ "$(wc -l < "$FM_HOME/state/host-ran")" -gt 1 ] || kill -KILL $$\n'
         printf 'printf "stale: fixture-win after a retry\\n"\n'
@@ -586,6 +590,21 @@ test_park_host_boundary_stand_down_and_death() {
   [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 2 ] || fail "a host that died without a close must be retried: $(cat "$dir/state/host-ran")"
   case "$(followup_of "$out")" in *'stale: fixture-win after a retry'*) ;; *) fail "the retried host's wake was not delivered: $out" ;; esac
   pass "cursor park: the host's boundary wakes, its stand-down is silent, and a host that died is retried"
+}
+
+# The branch's own turn tore down the only task, so the fleet is empty by the
+# time the host hands back the captain outcome it recorded.
+test_park_host_outcome_after_fleet_emptied() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-outcome-empties-fleet")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  write_host_fixture "$dir" outcome-empties-fleet
+  out=$(run_park "$dir")
+  [ ! -e "$dir/state/task1.meta" ] || fail "fixture: the host turn did not empty the fleet"
+  case "$(followup_of "$out")" in *'supervision-host: branch-outcome: fixture'*) ;; *) fail "a captain outcome must reach the session even after the fleet emptied: $out" ;; esac
+  pass "cursor park: a host branch outcome wakes the session even when its turn emptied the fleet"
 }
 
 test_park_inert_under_pi_coding_agent() {
@@ -912,6 +931,7 @@ test_superseded_park_does_not_consume_nag_budget
 test_park_inert_when_afk
 test_park_runs_the_supervision_host_only_when_opted_in
 test_park_host_boundary_stand_down_and_death
+test_park_host_outcome_after_fleet_emptied
 test_park_inert_under_pi_coding_agent
 test_park_still_parks_with_pi_leak_and_cursor_identity
 test_park_stands_down_when_away_mode_activates_before_commit

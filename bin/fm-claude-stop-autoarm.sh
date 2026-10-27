@@ -76,8 +76,10 @@
 #     retried instead of being judged by the healthy-watcher predicate
 #     (docs/supervision-host.md). On a home that opted out nothing below
 #     changes.
-#   - Translation: while supervision is still needed and AFK remains inactive,
-#     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
+#   - Translation: while AFK remains inactive, an actionable plain arm close
+#     (signal:/stale:/check:/heartbeat) requires supervision still to be needed;
+#     host closes follow bin/fm-supervision-host.sh's OUTPUT contract instead.
+#     A deliverable close prints one
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
 #     ("Stop hook feedback"). The irrevocable commit point is the EXIT STATUS:
 #     the harness delivers the collected stderr only on exit 2, so an owned
@@ -473,8 +475,9 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
 done
 
 # The need may have vanished mid-cycle (fleet torn down, X opted out): nothing
-# left to supervise, so close quietly instead of waking the model.
-if ! need_supervision; then
+# left to supervise, so close quietly instead of waking the model. An actionable
+# host close still carries what the turn that emptied the fleet left for main.
+if { [ "$HOST_MODE" -eq 0 ] || [ "$ACTIONABLE" -eq 0 ]; } && ! need_supervision; then
   autoarm_record clean
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0

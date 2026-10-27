@@ -63,7 +63,7 @@ Until they land, their current behavior stays as described in their own owners.
 
 On a home that runs the host, each primary's existing arm owner runs it in place of its watcher command.
 The arm owner delivers a handed-back wake through the wake path that harness already trusts.
-The host's header owns the output contract they read.
+The [host header's OUTPUT contract](../bin/fm-supervision-host.sh) owns close delivery, including after a turn empties the fleet.
 
 | Primary | Arm owner | A handed-back wake reaches main as |
 |---|---|---|
@@ -227,6 +227,7 @@ A home already switched to the host can re-present its unacknowledged outcomes a
 Main's reply to the captain covers only the outcomes still open, as if an already-settled one had never been listed.
 Main runs the printed acknowledgement for every presented outcome, settled and handled open ones alike.
 Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
+The [report command's header](../bin/fm-branch-report.sh) owns automatic promotion of finished scout reports, including its posture checks and cleanup-safe snapshot.
 
 One limit: if the captain goes away and returns while an attended engine turn runs, and the host is terminated before that turn's `branch-outcome` wake is delivered, no immediate wake reaches main.
 The captain row is still durable, and the next drain presents it until it is acknowledged.
@@ -443,9 +444,9 @@ Each arm owner's own suite covers its host mode against a stub host.
 
 | Test | What it covers |
 |---|---|
-| `tests/fm-supervision-host.test.sh` | Drives the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule, the drain's `BRANCH OUTCOMES` section, lost hand-back continuations, and guarded retry submission. |
-| `tests/fm-claude-stop-autoarm.test.sh` | The Claude arm owner's host mode against a stub host. |
-| `tests/fm-cursor-primary.test.sh` | The Cursor arm owner's host mode against a stub host. |
+| `tests/fm-supervision-host.test.sh` | Drives the real host, auto-arm, grant, drain, report, and lease scripts against a stub engine, in both postures, including the shared offer rule, the drain's `BRANCH OUTCOMES` section, lost hand-back continuations, guarded retry submission, and finished-scout promotion after cleanup removes its records. |
+| `tests/fm-claude-stop-autoarm.test.sh` | The Claude arm owner's host mode against a stub host, including delivery of a branch outcome after the host turn empties the fleet. |
+| `tests/fm-cursor-primary.test.sh` | The Cursor arm owner's host mode against a stub host, including delivery of a branch outcome after the host turn empties the fleet. |
 | `tests/fm-pi-watch-extension.test.sh` | The OpenCode plugin's host mode against a stub host. |
 | `tests/fm-omp-harness.test.sh` | The omp arm owner's host mode against a stub host. |
 | `tests/fm-watch-checkpoint.test.sh` | The Codex checkpoint's host mode against a stub host. |

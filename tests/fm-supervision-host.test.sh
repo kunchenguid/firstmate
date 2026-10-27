@@ -53,6 +53,8 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #               ends
 #   captain-held the same, but record a captain outcome before the turn ends
 #   emptyresult the same as handle, but print {} as its result
+#   cleanup     the same as handle, but first remove the task's records, as
+#               the cleanup of a finished scout does before its report
 #   noreport    drain and exit cleanly without a report
 #   go-away     the captain goes away (the record is written) mid-turn, then
 #               the turn reports verdict captain
@@ -99,8 +101,9 @@ verdict=routine
 [ "$mode" != go-away ] || verdict=captain
 case "$mode" in
   fail) exit 3 ;;
-  handle|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away)
+  handle|captain|captain-close-before-return|held|captain-held|hold-lease|hold-marker|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|emptyresult|go-away|cleanup)
     case "$mode" in held|captain-held) read -r _ < "$FM_HOME/stub-release" ;; esac
+    [ "$mode" != cleanup ] || rm -f "$STATE/$task.meta" "$STATE/$task.status"
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
@@ -1007,6 +1010,24 @@ test_attended_captain_outcome_reaches_main_through_branch_outcomes() {
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
   assert_not_contains "$drained" "BRANCH OUTCOMES" "an acknowledged captain outcome must not be presented again"
   pass "host: an attended captain outcome wakes main once and stays in its drain until main acknowledges it"
+}
+
+test_attended_finished_scout_reaches_main_as_captain() {
+  local home
+  home=$(make_home attended-scout attended)
+  printf 'kind=scout\n' >> "$home/state/demo.meta"
+  echo cleanup > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "scout: the host never started a watcher cycle"
+  append_status "$home" 'report written; next round is yours' 'done'
+  wait_until 250 host_exited "$home" \
+    || fail "scout: a finished scout reported routine never woke main: $(cat "$home/state/branch-outcomes.jsonl" "$home/state/.supervision-host.log" 2>/dev/null)"
+  assert_grep '"task":"demo"' "$home/state/branch-outcomes.jsonl" "the scout's outcome did not reach the store"
+  assert_grep '"verdict":"captain","summary":"stub handled demo","silent":false' "$home/state/branch-outcomes.jsonl" \
+    "a finished scout's routine report must be recorded as captain"
+  assert_grep 'MAIN processes it from its next drain' "$home/engine-report.log" "the promoted report must say main processes it"
+  assert_re '^supervision-host: branch-outcome: .*\(store rows 1\)' "$home/host.out" "the promoted outcome must wake main"
+  pass "host: attended, a finished scout's report reaches main as captain even when the branch reports it routine"
 }
 
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return() {
@@ -3508,6 +3529,7 @@ test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
 test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue
 test_engine_in_another_time_zone_handles_its_granted_rows
 test_attended_captain_outcome_reaches_main_through_branch_outcomes
+test_attended_finished_scout_reaches_main_as_captain
 test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return
 test_quiet_record_without_its_daemon_is_a_present_captain
 test_attended_main_only_close_passes_straight_to_main
