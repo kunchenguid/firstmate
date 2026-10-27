@@ -694,7 +694,7 @@ $current_row"
   [ "$status" -eq 0 ] || fail "fm-lock.sh refused a reused tagged pid naming a non-harness: $out"
   [ "$(cat "$home/state/.lock")" = 'win:7300' ] || fail "a reused non-harness pid was not reclaimed"
 
-  for record in '' '   ' not-a-pid 0 win: win:7abc; do
+  for record in '' '   ' not-a-pid 0 00 000 0000 win: win:7abc; do
     printf '%s\n' "$record" > "$home/state/.lock"
     printf 'S1\n' > "$home/state/.lock-session"
     if out=$(attempt_lock 7300 S2 "$dead_table" 0 '' 2>&1); then status=0; else status=$?; fi

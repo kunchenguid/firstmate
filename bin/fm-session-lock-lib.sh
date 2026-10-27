@@ -418,8 +418,10 @@ _fm_ps_exec_denied() {
 # ps stays primary everywhere it runs: while it executes, its output is
 # used verbatim, so behavior is byte-identical to every session that ever
 # worked. Only a ps that cannot execute at all - bash exits 126 for a
-# refused exec, 127 for a missing binary, while a pid merely being gone
-# exits ps 1 - routes one read to the OS provider. This exists because an
+# refused exec, 127 for a missing binary - routes one read to the OS provider.
+# Status 1 is platform-specific: Linux/macOS mean ps ran and named nothing;
+# on Cygwin-family hosts it means ps refused the unsupported -o option and the
+# fixed-column readers below are used instead. This exists because an
 # EDR-style policy can deny the ps binary's exec itself (observed:
 # /bin/ps refused even for `ps -V`, while kill, head, sysctl, pgrep, and
 # lsof all ran) while every fact the identity walk needs remains readable
@@ -434,6 +436,8 @@ fm_proc_info() {  # <pid>
   case $rc in
     0) ;;
     1)
+      # Linux/macOS: ps ran and named nothing. Cygwin-family: ps refused
+      # -o, so use its fixed-column readers only on that platform route.
       fm_win_boundary_applies || return 1
       comm=$(fm_ps_comm "$pid") || return 1
       args=$(fm_ps_args "$pid") || return 1
@@ -490,8 +494,8 @@ fm_proc_info() {  # <pid>
       ;;
     *)
       # 126/127 above are the statuses that prove "ps could not
-      # execute at all". Anything else - a dead pid's 1, a
-      # signal-killed 137 - means ps gave no answer, and callers read
+      # execute at all". Anything else, including signal-killed 137,
+      # means ps gave no answer, and callers read
       # a non-zero exactly as "this pid cannot be verified".
       return 1
       ;;
@@ -690,7 +694,11 @@ fm_session_pid_identity() {  # <value>
 # rather than guessed at, and only a dead process frees the lock.
 fm_session_lock_pid_blocks_reclaim() {
   fm_session_pid_valid "$1" || return 1
-  [ "$1" != 0 ] || return 1
+  case "$1" in
+    "$FM_WIN_PID_PREFIX"*) ;;
+    *[1-9]*) ;;
+    *) return 1 ;;
+  esac
   fm_session_lock_pid_verdict "$1"
   case "$FM_SESSION_LOCK_PID_VERDICT" in
     dead) return 1 ;;

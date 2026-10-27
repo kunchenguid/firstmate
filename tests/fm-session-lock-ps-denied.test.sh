@@ -172,9 +172,11 @@ ROWS
 }
 
 test_ps_failure_statuses_route_correctly() {
-  # ps exit 1 is "ps ran and this pid gives no answer" - a refusal that
-  # must pass through as a stop WITHOUT consulting the OS provider.
-  # Only a ps that cannot execute at all (126/127) may route to it.
+  # On Linux/macOS, ps exit 1 means it ran and named nothing. On a
+  # Cygwin-family host, status 1 means ps refused its unsupported -o option,
+  # so fm_proc_info tries the fixed-column readers behind the platform gate.
+  # Neither path consults the OS provider; only 126/127 after a denied ps -V
+  # can route to it.
   local dir fakebin calls rc
   dir="$TMP_ROOT/rc-contract"
   fakebin=$(fm_fakebin "$dir")
