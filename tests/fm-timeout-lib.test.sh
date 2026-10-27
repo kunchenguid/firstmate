@@ -394,10 +394,33 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
   pass 'fm_run_timed passes a natural exit through when the bound fired after completion'
 }
 
+# An omp shell defines timeout as a builtin, and a function of that name is
+# ahead of both the builtin and the executable. command -v reports the name
+# and a bare call runs the shadow, which drops the command's stdout and
+# replaces its status. gtimeout is shadowed the same way, so a host whose
+# external runner is gtimeout is covered without installing one.
+test_run_timed_keeps_stdout_and_nonzero_status_when_a_function_shadows_timeout() {
+  local out rc=0
+  # The functions live in this subshell so they cannot leak into later cases.
+  out=$(
+    unset FM_TIMEOUT_MECHANISM_OVERRIDE
+    # shellcheck disable=SC2329 # Steal a bare timeout invocation; the runner must not call it.
+    timeout() { echo shadowed-timeout; return 0; }
+    # shellcheck disable=SC2329 # Steal a bare gtimeout invocation; the runner must not call it.
+    gtimeout() { echo shadowed-gtimeout; return 0; }
+    . "$ROOT/bin/fm-timeout-lib.sh"
+    fm_run_timed 5 bash -c 'echo hello-stdout; exit 7'
+  ) || rc=$?
+  [ "$rc" -eq 7 ] || fail "a function shadowing timeout changed the command status (rc=$rc out=$out)"
+  [ "$out" = hello-stdout ] || fail "a function shadowing timeout changed the command stdout (rc=$rc out=$out)"
+  pass "fm_run_timed keeps stdout and nonzero status when a function shadows timeout"
+}
+
 test_passes_the_command_status_and_output_through
 test_system_bash_preserves_completion_and_signal_statuses
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
+test_run_timed_keeps_stdout_and_nonzero_status_when_a_function_shadows_timeout
 test_term_ends_a_cooperative_command_at_the_bound
 test_kill_ends_a_term_ignoring_command_after_the_grace
 test_the_bound_replaces_the_calling_shell

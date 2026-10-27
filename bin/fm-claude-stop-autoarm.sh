@@ -198,17 +198,17 @@ fi
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
-# A prior session may have died after leaving its numeric harness pid in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case.
+# A prior session may have died after leaving its harness identity in .lock.
+# Use the shared liveness predicate to recognize only that stale-owner case; it
+# resolves a tagged identity too, so a dead Windows session is still recoverable
+# rather than being read as a malformed lock nobody may ever clear.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$LOCK_PID" in
-    ''|*[!0-9]*) exit 0 ;;
-  esac
+  fm_session_pid_valid "$LOCK_PID" || exit 0
   fm_harness_pid_alive "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
 fi
@@ -420,6 +420,7 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     HOST_RC=0
     FM_SUPERVISION_HOST_AUTOARM_GEN=$MY_GEN FM_SUPERVISION_HOST_OWNER_PID=$$ \
       FM_SUPERVISION_HOST_PRIMARY=claude FM_GUARD_GRACE="$GRACE" \
+      FM_WARM_COMPACT_TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty' 2>/dev/null) \
       "$SCRIPT_DIR/fm-supervision-host.sh" park >"${OUT:-/dev/null}" 2>&1 || HOST_RC=$?
   else
     run_arm "$OUT"
