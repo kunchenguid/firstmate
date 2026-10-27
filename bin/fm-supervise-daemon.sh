@@ -1026,7 +1026,7 @@ escalate_flush() {  # <state>
 #                    (marker + flash remain)
 #   auto | default   platform default: macOS -> osascript; otherwise none
 #   osascript        macOS Notification Center banner (backend-independent)
-#   sound:off | sound:on  silence macOS banners or restore their default sound
+#   sound:off        silence macOS banners (default sound otherwise)
 #   herdr            herdr UI notification (herdr notification show)
 #   command:<cmd>    run <cmd> via `sh -c`, summary on $1 and on stdin
 # An absent config means auto, i.e. default-ON on macOS: the alarm's whole
@@ -1050,7 +1050,7 @@ wedge_alarm_configured_channels() {
       [ -n "$line" ] || continue
       case "$line" in '#'*) continue ;; esac
       printf '%s\n' "$line"
-      case "$line" in sound:off|sound:on) ;; *) found=1 ;; esac
+      [ "$line" = sound:off ] || found=1
     done < "$cfg"
   fi
   [ -n "$found" ] || printf 'auto\n'
@@ -1262,12 +1262,12 @@ wedge_alarm_notify() {  # <summary> <marker>
   done < <(wedge_alarm_configured_channels)
   for ch in "${channels[@]}"; do
     [ "$ch" = off ] && return 0
-    case "$ch" in sound:off) WEDGE_ALARM_SOUND=off ;; sound:on) WEDGE_ALARM_SOUND=Basso ;; esac
+    [ "$ch" = sound:off ] && WEDGE_ALARM_SOUND=off
   done
   for ch in "${channels[@]}"; do
     case "$ch" in auto|default) ch=$(wedge_alarm_platform_default) ;; esac
     case "$ch" in
-      sound:off|sound:on) ;;
+      sound:off) ;;
       '') log "wedge alarm: no OS-level alert channel on $(uname); durable marker $marker is the only signal - set config/wedge-alarm (e.g. a command: directive)" ;;
       osascript|herdr|rex) wedge_alarm_emit "$ch" "$summary" || true ;;
       command:*) wedge_alarm_emit command "$summary" "${ch#command:}" || true ;;

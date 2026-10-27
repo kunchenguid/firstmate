@@ -2807,7 +2807,7 @@ test_wedge_alarm_banner_sound_preference() {
 #!/usr/bin/env bash
 printf '<%s>\n' "$@" >> "$FM_WEDGE_ALARM_REAL_LOG"
 SH
-  for mode in default off on; do
+  for mode in default off; do
     rm -f "$cfgdir/wedge-alarm"
     [ "$mode" = default ] || printf '  sound:%s  \n' "$mode" > "$cfgdir/wedge-alarm"
     : > "$dir/real.log"

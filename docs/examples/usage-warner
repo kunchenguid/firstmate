@@ -12,8 +12,7 @@
 # A configured window id the account does not return is silently never
 # compared.
 #
-# Optional: sound:off keeps macOS banners silent; sound:on restores the default.
-# The last sound directive wins.
+# Optional: sound:off keeps macOS banners silent; delete it to restore sound.
 #
 # An ABSENT config/usage-warner means the feature is off: `check` stays
 # completely silent and `arm` refuses. This file's mere presence is the

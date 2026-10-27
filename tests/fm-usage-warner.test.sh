@@ -118,7 +118,7 @@ test_notification_sound_preference() {
   notify_log="$home/notify.log"
   fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":85}'
   fake_osascript_recorder "$fakebin" "$notify_log"
-  for mode in default off on; do
+  for mode in default off; do
     printf 'five_hour:80\n' > "$home/config/usage-warner"
     [ "$mode" = default ] || printf '  sound:%s  \n' "$mode" >> "$home/config/usage-warner"
     rm -f "$home/state/.usage-warner"
