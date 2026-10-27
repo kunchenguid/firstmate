@@ -2986,7 +2986,7 @@ test_restore_winner_disposition_absent_record_unattributed() {
     || fail "restore-absent: could not write the plain merge marker"
   rm -f "$state/.wake-queue" "$state/task-a.meta" "$state/task-a.status"
   fm_merge_outcome_restore_winner_disposition "$state" task-a "$url"
-  [ "$FM_MERGE_OUTCOME_CLEANUP" = skipped ] \
+  [ "$FM_MERGE_OUTCOME_CLEANUP" = absent ] \
     || fail "restore-absent: an absent record without disposition was reported as $FM_MERGE_OUTCOME_CLEANUP"
   case "$FM_MERGE_OUTCOME_CLEANUP_DETAIL" in
     *absent*) ;;
@@ -2996,8 +2996,10 @@ test_restore_winner_disposition_absent_record_unattributed() {
   case "$notice" in
     *'automatically cleaned up'*) fail "restore-absent: unattributed absent record claimed automatic cleanup: $notice" ;;
   esac
-  [ "$notice" = "check: merge landed: task-a $url" ] \
-    || fail "restore-absent: unattributed notice was not plain: $notice"
+  case "$notice" in
+    *'task record absent'*'cleanup unattributed'*) ;;
+    *) fail "restore-absent: unattributed absence wording missing: $notice" ;;
+  esac
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_append check "$2" "$3"' _ \
     "$ROOT/bin/fm-wake-lib.sh" "merged-task-a-$url" "check: merge landed: task-a $url; lane automatically cleaned up" \
     || fail "restore-absent: could not seed the explicit success wake row"

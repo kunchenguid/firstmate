@@ -148,6 +148,9 @@ fm_merge_outcome_cleanup_notice() {  # <original-notice>
     failed)
       printf '%s; automatic cleanup did not complete: %s' "$1" "$FM_MERGE_OUTCOME_CLEANUP_DETAIL"
       ;;
+    absent)
+      printf '%s; %s, cleanup unattributed' "$1" "$FM_MERGE_OUTCOME_CLEANUP_DETAIL"
+      ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -207,6 +210,7 @@ fm_merge_outcome_restore_winner_disposition() {  # <state> <task-id> <pr-url>
     esac
   fi
   if [ ! -f "$state/$id.meta" ] && [ ! -L "$state/$id.meta" ]; then
+    FM_MERGE_OUTCOME_CLEANUP=absent
     FM_MERGE_OUTCOME_CLEANUP_DETAIL='task record absent'
   fi
   return 0
