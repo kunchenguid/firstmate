@@ -91,21 +91,28 @@ fm_tmux_composer_caps() {
 
 # fm_tmux_composer_identity: the tmux agent-identity probe backing the
 # separated (pi) composer shape, tmux's analogue of herdr's native
-# `agent get`. It answers only for pi, from two live signals:
+# `agent get`. It answers only for the verified owners of that shape, from
+# two live signals:
 #   - identity: the pane tty's FOREGROUND process group (pgid = tpgid, the
-#     same scoping as fm_backend_tmux_foreground_comms) contains a pi-family
-#     process (pi, pi-signed, pi-launcher - docs/verification/
-#     runtime-backends.md "Agent liveness name sources"), falling back to
-#     tmux's own foreground-derived #{pane_current_command}. A pane whose
-#     agent died to a shell has no pi foreground process and gets NO identity,
-#     which is exactly what keeps the strict blank-row rule honest: a blank
-#     row between two stale rules stays unknown.
-#   - status: pi's verified busy footer via fm_pane_is_busy, mapped onto the
-#     idle/working vocabulary herdr's probe reports natively.
-# Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
-# live pi.
+#     same scoping as fm_backend_tmux_foreground_comms) contains a
+#     shape-owner process (pi, pi-signed, pi-launcher - docs/verification/
+#     runtime-backends.md "Agent liveness name sources"; polytoken, whose
+#     TUI pane foreground is comm `polytoken`, verified live on 0.8.19),
+#     falling back to tmux's own foreground-derived #{pane_current_command}.
+#     A pane whose agent died to a shell has no shape-owner foreground
+#     process and gets NO identity, which is exactly what keeps the strict
+#     blank-row rule honest: a blank row between two stale rules stays
+#     unknown.
+#   - status: the shape owner's verified busy footer via fm_pane_is_busy,
+#     mapped onto the idle/working vocabulary herdr's probe reports natively.
+# It answers Command Code the same way, from its anchored `command-code`
+# foreground process name and its own verified busy footer: its composer is a
+# bare `❯` row between the same two rules, and its placeholder needs the
+# identity-scoped ghost ceiling in bin/fm-composer-lib.sh.
+# Prints "<owner><TAB>idle" or "<owner><TAB>working" for owner pi,
+# polytoken, or commandcode; exits 1 when the pane is not a live shape owner.
 fm_tmux_composer_identity() {  # <target>
-  local target=$1 tty pgid tpgid comm found=0 status
+  local target=$1 tty pgid tpgid comm owner='' status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
@@ -113,24 +120,32 @@ fm_tmux_composer_identity() {  # <target>
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
         case "${comm##*/}" in
-          pi|pi-signed|pi-launcher|Pi) found=1 ;;
+          pi|pi-signed|pi-launcher|Pi) owner=pi ;;
+          polytoken) owner=polytoken ;;
+          command-code) owner=commandcode ;;
         esac
+        [ -n "$owner" ] && break
       done <<EOF
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF
       ;;
   esac
-  if [ "$found" -ne 1 ]; then
+  if [ -z "$owner" ]; then
     comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
     case "${comm##*/}" in
-      pi|pi-signed|pi-launcher) found=1 ;;
+      pi|pi-signed|pi-launcher) owner=pi ;;
+      polytoken) owner=polytoken ;;
     esac
   fi
-  [ "$found" -eq 1 ] || return 1
-  status=$(fm_pane_busy_state "$target" pi)
+  [ -n "$owner" ] || return 1
+  # The busy footer read is scoped to the matched owner's own harness
+  # signature (pi for the pi family, polytoken's `Running for` row, Command
+  # Code's own footer) so one owner's ordinary output can never acknowledge
+  # another's pane.
+  status=$(fm_pane_busy_state "$target" "$owner")
   case "$status" in
-    busy) printf 'pi\tworking' ;;
-    idle) printf 'pi\tidle' ;;
+    busy) printf '%s\tworking' "$owner" ;;
+    idle) printf '%s\tidle' "$owner" ;;
     *) return 1 ;;
   esac
 }
@@ -140,8 +155,9 @@ EOF
 # pending-unproven | unknown, positive proof required for empty, unrecognized
 # future verdicts failing safe) is owned by bin/fm-composer-lib.sh. Identity
 # is fetched lazily, only when the classifier reports the verdict depends on
-# it (a pi separator pair under the cursor), so the common read never pays
-# for the process probe.
+# it (a pi separator pair under the cursor) or the cursor-anchored read is
+# `unknown` (the Command Code check below), so an `unknown` read pays one
+# process probe and a definite read never does.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cy pane verdict identity
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
@@ -160,14 +176,51 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # a composer locator and the cursor-anchored read can only ever answer
   # `unknown`. Reclassify that pane the way every cursorless backend already
   # classifies it, letting the bottom-most shape win, which is the same rule
-  # herdr, zellij, cmux, and orca use for every harness including this one.
+  # herdr, zellij, cmux, orca, and tern use for every harness including this one.
   # Gated on Cursor's own structural process identity, never on the verdict
   # alone, so the strict blank-row posture that owns `unknown` for every other
   # harness is untouched.
   if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
   fi
+  # Cortex Code parks its terminal cursor in the first column of the blank row
+  # under its footer, before and after typing (verified cortex 1.1.104 in
+  # tmux), so the cursor row names no composer and the same cursorless read
+  # applies, gated on its anchored foreground process name rather than on the
+  # verdict alone. That proven identity is also what lets the classifier
+  # accept Cortex's titled top rule (the cortex=1 capability).
+  if [ "$verdict" = unknown ] && fm_tmux_pane_is_cortex "$target"; then
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)"$'\ncortex=1' "$pane" '')
+  fi
+  # Command Code parks its terminal cursor below its footer too, drawing its
+  # own reverse-video cursor cell in the composer (verified live, Command Code
+  # 1.74.1), so it takes the same cursorless reclassification, gated on its own
+  # process identity and read with that identity.
+  if [ "$verdict" = unknown ] && identity=$(fm_tmux_composer_identity "$target") \
+     && [ "${identity%%$'\t'*}" = commandcode ]; then
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '' "$identity")
+    [ "$verdict" != need-identity ] || verdict=unknown
+  fi
   printf '%s' "$verdict"
+}
+
+# fm_tmux_pane_is_cortex: true when the pane's FOREGROUND process group contains
+# a process named exactly `cortex` (Cortex Code is a compiled single binary, so
+# its comm is that anchored word). The foreground scoping (pgid = tpgid)
+# matches fm_tmux_pane_is_cursor, so a pane whose agent exited to a shell gets
+# no reclassification.
+fm_tmux_pane_is_cortex() {  # <target>
+  local target=$1 tty pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r _ pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    [ "${comm##*/}" = cortex ] && return 0
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
 }
 
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
@@ -244,8 +297,11 @@ fm_pane_is_busy() {  # <target> [harness]
 # fm_tmux_submit_enter_core caller, or a pane already busy before typing) an
 # `unknown` verdict is preserved untouched: busy conversion without the
 # transition evidence could mark an undelivered message delivered.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle]
-  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} i=0 j state busy_state
+# [busy-harness] scopes every busy read to one harness signature; the submit
+# core passes polytoken for a pane whose composer identity is polytoken (its
+# `Running for` row is outside the harness-less union) and nothing otherwise.
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [busy-harness]
+  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} busy_harness=${5:-} i=0 j state busy_state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
@@ -261,7 +317,7 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
         if [ "$baseline_idle" = 1 ]; then
           j=0
           while [ "$j" -lt "$retries" ]; do
-            if fm_pane_is_busy "$target"; then
+            if fm_pane_is_busy "$target" "$busy_harness"; then
               printf 'empty'
               return 0
             fi
@@ -284,16 +340,26 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   # Retries exhausted, composer still shows proven pending.
   # Busy conversion is owned by fm_composer_queued_enter_verdict.
   busy_state=idle
-  fm_pane_is_busy "$target" && busy_state=busy
+  fm_pane_is_busy "$target" "$busy_harness" && busy_state=busy
   fm_composer_queued_enter_verdict "$state" "$busy_state"
 }
 
+# fm_tmux_submit_busy_harness: the busy-footer harness for a submit on
+# <target> - polytoken when the pane's composer identity is polytoken, empty
+# (the harness-less union) for every other pane.
+fm_tmux_submit_busy_harness() {  # <target>
+  local identity
+  identity=$(fm_tmux_composer_identity "$1") || return 0
+  [ "${identity%%$'\t'*}" != polytoken ] || printf 'polytoken'
+}
+
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err busy_harness
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
-  baseline_state=$(fm_pane_busy_state "$target")
+  busy_harness=$(fm_tmux_submit_busy_harness "$target")
+  baseline_state=$(fm_pane_busy_state "$target" "$busy_harness")
   [ "$baseline_state" = idle ] && baseline_idle=1
   # A failed literal send replays tmux's stderr (for example "command too
   # long") so the caller can log why nothing was typed.
@@ -303,5 +369,5 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
     return 0
   fi
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle" "$busy_harness"
 }

@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -72,10 +72,12 @@
 # registry binding, read from data/projects.md at intake and passed here; this
 # script never infers a forge and never looks the binding up, and bin/fm-spawn.sh
 # refuses a brief whose forge disagrees with the registry. bin/fm-project-mode.sh's
-# header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`
-# and `forgejo` change in the Definition of done. On `forgejo` this script also
-# names tea instead of gh-axi in the ship brief's forge-CLI rule. A forge on
-# --mode local-only is refused, because that mode publishes nothing.
+# header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`,
+# `forgejo`, and `external` change in the Definition of done. On `forgejo` this
+# script also names tea instead of gh-axi in the ship brief's forge-CLI rule, and
+# on `external` that rule names no forge CLI, because the home's review tool is
+# the only publishing tool. A forge on --mode local-only is refused, because that
+# mode publishes nothing, and `external` also refuses no-mistakes.
 # --shape names how a forge=gerrit task is published, and only `squash` - one
 # change - is accepted: `stack` is refused until a stack can be watched by its
 # membership pinned when its watch is armed, because the merge watch follows one
@@ -96,7 +98,8 @@
 # bin/fm-spawn.sh repeats the check at launch regardless.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
-# on Gerrit or " forge=forgejo" on Forgejo. bin/fm-spawn.sh reads that line and
+# on Gerrit, " forge=forgejo" on Forgejo, or " forge=external" on an external
+# review tool. bin/fm-spawn.sh reads that line and
 # refuses to launch a ship task whose explicit --mode or registered forge
 # disagrees, so an adjusted brief and the recorded task metadata cannot drift
 # apart.
@@ -174,7 +177,7 @@ IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Name what you are waiting for and what will let you resume; do not repeat the declaration on every poll.
    Do not declare active implementation or reasoning as a wait.
    Firstmate may still raise one first-sight alert; the declared wait then uses the existing long recheck cadence instead of repeated possible-wedge alarms.
-   When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time.
+   When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time; for your own background job or command with a timeout, that time is its start plus its timeout, rounded up to the minute.
    Follow the resolution rule below when the wait clears, then resume the task.
    Use \`blocked:\` when you are stuck and need help.
 EOF
@@ -317,9 +320,12 @@ if [ "$KIND" = ship ]; then
     exit 1
   fi
   # A Forgejo project's pull requests are handled with tea, so the ship brief's
-  # forge-CLI rule names it instead of gh-axi; every other forge keeps gh-axi.
+  # forge-CLI rule names it instead of gh-axi; an external review tool has no
+  # forge CLI at all; every other forge keeps gh-axi.
   if [ "$FORGE" = forgejo ]; then
     FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations."
+  elif [ "$FORGE" = external ]; then
+    FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations."
   else
     FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
   fi
@@ -453,7 +459,8 @@ INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 IFS= read -r -d '' INBOX_SECTION <<EOF || true
 # Firstmate instruction inbox
 Firstmate steers you through durable message files in $INBOX_DIR.
-When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list $INBOX_DIR/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
+When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list them with \`find $INBOX_DIR -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V\`, read the complete contents of each record (including its final line even when it is not newline-terminated) and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
+Prefer the format-aware \`fm_task_inbox_body\` reader from \`bin/fm-task-inbox-lib.sh\` when it is available. If you read manually, a header line \`body-terminator=1\` means the writer added exactly one synthetic final newline to terminate the record file; that marked newline is not part of the logical message body, so remove only it and preserve any intentional trailing newlines. Legacy records without that marker may end without a newline; read them through the file end.
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 if [ -e "$CONFIG/wait-no-turns" ]; then
@@ -469,7 +476,7 @@ IFS= read -r -d '' WAIT_SECTION <<'EOF' || true
 # Waiting
 Every turn you take resends your whole context, so a wait must cost no turns.
 After you append `needs-decision:` or `blocked:`, end your turn at once: do not check the inbox, the status file, or anything else, because the answer arrives as a terminal message that starts your next turn.
-Wait on anything external - a pipeline gate, PR checks, a heavy-test slot - with ONE blocking shell command that returns when the state changes: `no-mistakes axi run` or `respond` with `--wait`, `gh pr checks <pr> --watch`, or `until <condition>; do sleep 30; done` for anything else.
+Wait on anything external - a pipeline gate, PR checks - with ONE blocking shell command that returns when the state changes: `no-mistakes axi run` or `respond` with `--wait`, `gh pr checks <pr> --watch`, or `until <condition>; do sleep 30; done` for anything else.
 Never spend turns on `sleep` followed by a status check, and never background a command in order to poll it.
 In Claude Code that `until` loop in a single Bash call is the sanctioned foreground wait: when the harness refuses a sleep-then-check command and points you at backgrounding instead, reissue the wait as the loop rather than accepting the background.
 Bound that command by what your harness lets one command run: in Pi pass the bash tool a `timeout` of at most 2700 seconds, because Pi sets none by default; in Claude Code pass the Bash tool its maximum `timeout` of 600000 ms, because its default is 2 minutes; in Codex keep waiting on a still-running command with empty `write_stdin` polls of up to 300000 ms; elsewhere pass your shell tool its largest timeout and assume at most 10 minutes.
@@ -660,6 +667,14 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+# One shared string keeps the ship and scout shell-path rule identical.
+IFS= read -r -d '' SHARED_NO_CD_RULE <<'EOF' || true
+8. Never start a shell command with `cd`, and never run a search whose path depends on the current directory.
+   Use absolute paths, `git -C <abs>`, or a `( cd <abs> && ... )` subshell.
+   Pass this rule to every sub-agent you launch.
+EOF
+SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -707,6 +722,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$SHARED_NO_CD_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -787,6 +803,7 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$SHARED_NO_CD_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 

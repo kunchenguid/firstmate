@@ -977,6 +977,32 @@ EOF
   return 1
 }
 
+# 0, printing `blocked` or `needs-decision`, when the task's newest status event
+# is a line of that verb that the worker wrote and that is still open: its key
+# must hold that verb in status_own_open_decisions, so a supervisor-reserved key
+# never counts. Only the newest event is read, so any later line ends it - a
+# resolved line for any key included - and so does a steering-inbox record the
+# worker acknowledged that was written after it (bin/fm-task-inbox-lib.sh owns
+# that handled/ layout), which is an answer that arrived without a closing
+# resolved line.
+status_worker_wait_verb() {  # <status-file>
+  local f=$1 last verb key own rec
+  last=$(last_status_line "$f")
+  [ -n "$last" ] || return 1
+  status_line_verb "$last" verb
+  case "$verb" in blocked|needs-decision) ;; *) return 1 ;; esac
+  key=$(_fm_decision_key "$last") || return 1
+  own=$(status_own_open_decisions "$f")
+  case "$own" in
+    "$key"$'\t'"$verb"$'\t'*|*$'\n'"$key"$'\t'"$verb"$'\t'*) ;;
+    *) return 1 ;;
+  esac
+  for rec in "${f%.status}.inbox/handled"/*.msg; do
+    [ "$rec" -nt "$f" ] && return 1
+  done
+  printf '%s' "$verb"
+}
+
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
 _fm_open_set_has() {  # <open-set> <key>
   case "$1" in
@@ -1705,9 +1731,12 @@ status_presentation_marker_commit() {
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }
 
-status_retire_presentation_task() {  # <state> <task-id>
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
-  local signal_marker heartbeat_marker daemon_marker home_appends home_appends_lock
+# An optional archive filename is supplied only by teardown. The caller owns
+# path selection and retention; publication also checks for unsafe collisions.
+# No status consumer reads that archive.
+status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0 archive_published=0
+  local signal_marker heartbeat_marker daemon_marker home_appends home_appends_lock archive=${3:-} archive_tmp=
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
   tmp="$manifest.tmp.$$"
@@ -1750,7 +1779,25 @@ EOF
   fi
 
   fm_lock_acquire_wait "$lock" || return 1
-  if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+  # Publish before changing live records so a failed archive leaves the cursor
+  # and watcher signatures intact. The existing removal below retires the log
+  # only after its presentation row, and before its watcher markers disappear.
+  if [ -n "$archive" ] && { [ -e "$state/$task.status" ] || [ -L "$state/$task.status" ]; }; then
+    if [ -L "$state/$task.status" ] || [ ! -f "$state/$task.status" ] \
+      || [ -e "$archive" ] || [ -L "$archive" ]; then
+      rc=1
+    # A fresh copy starts retention without touching the watched live inode.
+    # A same-directory hard link publishes atomically without overwriting.
+    elif ! archive_tmp=$(mktemp "${archive%/*}/.status-archive.XXXXXX") \
+      || ! cp -- "$state/$task.status" "$archive_tmp" \
+      || ! ln -n -- "$archive_tmp" "$archive" \
+      || [ -L "$archive" ] || [ ! "$archive_tmp" -ef "$archive" ]; then
+      rc=1
+    else
+      archive_published=1
+    fi
+  fi
+  if [ "$rc" -eq 0 ] && { [ -e "$manifest" ] || [ -L "$manifest" ]; }; then
     if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
       rc=1
     elif ! data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
@@ -1779,6 +1826,12 @@ EOF
       "$home_appends" "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
     fm_lock_remove_path "$home_appends_lock" 2>/dev/null || true
   fi
+  if [ "$archive_published" -eq 1 ] && [ "$rc" -ne 0 ] \
+    && { [ -e "$state/$task.status" ] || [ -L "$state/$task.status" ]; } \
+    && [ -n "$archive_tmp" ] && [ "$archive_tmp" -ef "$archive" ]; then
+    rm -f -- "$archive"
+  fi
+  [ -z "$archive_tmp" ] || rm -f -- "$archive_tmp"
   fm_lock_release "$lock" || rc=1
   return "$rc"
 }
@@ -2135,23 +2188,25 @@ status_open_activities() {  # <status-file-or-dash>
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {
-  local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t line
+  local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t3_thread t line
   if [ -n "$state" ]; then
     for meta in "$state"/*.meta; do
       [ -e "$meta" ] || continue
-      # The last window= and terminal= values, read in one pass without the
+      # The last endpoint values, read in one pass without the
       # grep | tail -1 | cut -d= -f2- pipelines this once forked per key.
       mw=
       mt=
+      t3_thread=
       {
         while IFS= read -r line || [ -n "$line" ]; do
           case "$line" in
             window=*) mw=${line#window=} ;;
             terminal=*) mt=${line#terminal=} ;;
+            t3_thread_id=*) t3_thread=${line#t3_thread_id=} ;;
           esac
         done < "$meta"
       } 2>/dev/null
-      [ "$mw" = "$w" ] || [ "$mt" = "$w" ] || continue
+      [ "$mw" = "$w" ] || [ "$mt" = "$w" ] || [ "$t3_thread" = "$w" ] || continue
       t=${meta##*/}
       t=${t%.meta}
       printf '%s' "$t"
@@ -2568,6 +2623,40 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   [ -n "$human" ] && [ -n "$run" ] || return 1
   case "$run" in *[[:space:]]*) return 1 ;; esac
   printf '%s\n' "$run"
+}
+
+# 0 if crew <id>'s authoritative current state is an attributed no-mistakes run
+# whose step is running or fixing: the pipeline itself is executing a round, and
+# the worker is correctly idle behind its own drive call.
+# Only the whole `validating (running)` or `validating (fixing)` component that
+# bin/fm-crew-state.sh mints for an id-addressed run step counts, together with
+# its whole `run: <id>` component. A parked, terminal, ci-monitoring, coarse
+# `validating (background run)`, runless or unreadable verdict is not this
+# evidence, because none of them proves a round is executing for a named run.
+# On success it prints `<run-id> <running|fixing>`.
+# Same cost and caveat as crew_absorb_class: one fm-crew-state.sh read.
+crew_run_is_validating() {  # <id> -> "<run-id> <step>" on stdout
+  local id=$1 line state src rest part step='' run=''
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  rest="$line · "
+  while [ -n "$rest" ]; do
+    part=${rest%% · *}
+    rest=${rest#* · }
+    case "$part" in
+      'validating (running)') step=running ;;
+      'validating (fixing)') step=fixing ;;
+      "run: "?*) run=${part#run: } ;;
+    esac
+  done
+  [ -n "$step" ] && [ -n "$run" ] || return 1
+  case "$run" in *[[:space:]]*) return 1 ;; esac
+  printf '%s %s\n' "$run" "$step"
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.

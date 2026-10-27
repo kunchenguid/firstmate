@@ -158,7 +158,7 @@ run_guard_lib_home() {
 }
 
 test_helper_lab_home_admits() {
-  local lab plain out rc
+  local lab plain out rc value name dir
   lab=$("$LABHOME" create "$TMP/lab-home") || fail "lab-home create failed"
   plain="$TMP/plain-home"; mkdir -p "$plain"
 
@@ -173,16 +173,48 @@ test_helper_lab_home_admits() {
   expect_code 3 "$rc" "helper: gate + unmarked home must still refuse"
   assert_contains "$out" "$ENV_MSG" "helper: unmarked-home refusal message"
 
-  # gate + marked lab + an FM_*_OVERRIDE -> refused: the allowance requires
-  # the stock layout so an override cannot split state onto the real fleet.
-  out=$(run_guard_lib_home "$NORMAL_CWD" "$lab" NO_MISTAKES_GATE=1 FM_STATE_OVERRIDE="$lab/state"); rc=$?
-  expect_code 3 "$rc" "helper: lab home driven through FM_STATE_OVERRIDE must refuse"
-  assert_contains "$out" "$ENV_MSG" "helper: override refusal message"
+  # Production Pi supplies the tracked root and the stock state/config paths.
+  out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$lab/state" FM_CONFIG_OVERRIDE="$lab/config"); rc=$?
+  expect_code 0 "$rc" "helper: production branch paths in a marked lab must be permitted"
+
+  for name in FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE; do
+    for value in "$plain" "$lab/../plain-home" "$lab/state/.."; do
+      out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1 "$name=$value"); rc=$?
+      expect_code 3 "$rc" "helper: relocated or noncanonical $name must refuse"
+    done
+  done
+  for name in FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_UNKNOWN_OVERRIDE; do
+    out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1 "$name=$lab/data"); rc=$?
+    expect_code 3 "$rc" "helper: unsupported $name must refuse"
+  done
+  ln -s "$lab" "$TMP/lab-alias"
+  for value in "$TMP/lab-alias" "$lab/."; do
+    out=$(run_guard_lib_home "$GATE_WT" "$value" NO_MISTAKES_GATE=1 FM_ROOT_OVERRIDE="$ROOT"); rc=$?
+    expect_code 3 "$rc" "helper: noncanonical home must refuse"
+  done
+  for dir in state config data projects; do
+    mv "$lab/$dir" "$lab/$dir.saved"
+    ln -s "$plain" "$lab/$dir"
+    out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1 FM_ROOT_OVERRIDE="$ROOT"); rc=$?
+    expect_code 3 "$rc" "helper: symlinked stock $dir must refuse"
+    rm "$lab/$dir"
+    mv "$lab/$dir.saved" "$lab/$dir"
+  done
+  mv "$lab/.fm-lab-home" "$lab/marker.saved"
+  ln -s "$lab/marker.saved" "$lab/.fm-lab-home"
+  out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1); rc=$?
+  expect_code 3 "$rc" "helper: symlinked lab identity must refuse"
+  rm "$lab/.fm-lab-home"
+  printf 'invalid lab identity\n' > "$lab/.fm-lab-home"
+  out=$(run_guard_lib_home "$GATE_WT" "$lab" NO_MISTAKES_GATE=1); rc=$?
+  expect_code 3 "$rc" "helper: invalid lab identity must refuse"
+  mv "$lab/marker.saved" "$lab/.fm-lab-home"
 
   # no gate signal + lab home -> still a normal no-op.
   out=$(run_guard_lib_home "$NORMAL_CWD" "$lab"); rc=$?
   expect_code 0 "$rc" "helper: lab home outside a gate must not refuse"
-  pass "fm-gate-refuse-lib: marked lab home permitted in a gate; unmarked home or an override stay refused"
+  pass "fm-gate-refuse-lib: production lab paths permitted; relocated paths and invalid identities refused"
 }
 
 test_lab_home_private_tmux_socket_survives_deep_paths() {

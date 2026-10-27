@@ -116,6 +116,7 @@ forge_home() {
   printf '[]\n' > "$home/forge/comments.json"
   printf '[]\n' > "$home/forge/reviews.json"
   printf '[]\n' > "$home/forge/inline.json"
+  printf '[]\n' > "$home/forge/threads.json"
   printf '[]\n' > "$home/forge/labels.json"
   printf '[]\n' > "$home/forge/events.json"
   cat > "$home/fakebin/gh" <<'SH'
@@ -137,6 +138,8 @@ case "$*" in
   'api repos/o/r/issues/'*'/comments?'*) jq -s . "$FORGE/comments.json" ;;
   'api repos/o/r/pulls/'*'/reviews?'*) jq -s . "$FORGE/reviews.json" ;;
   'api repos/o/r/pulls/'*'/comments?'*) jq -s . "$FORGE/inline.json" ;;
+  'api graphql '*)
+    jq '[{data:{repository:{pullRequest:{reviewThreads:{nodes:.,pageInfo:{hasNextPage:false,endCursor:null}}}}}}]' "$FORGE/threads.json" ;;
   'api repos/o/r/commits/'*'/check-runs?'*)
     printf '[{"check_runs":[{"name":"test","id":1,"status":"completed","conclusion":"success","started_at":"2026-09-16T08:00:00Z"}]}]\n' ;;
   'api repos/o/r/commits/'*'/statuses?'*) printf '[[]]\n' ;;
@@ -230,6 +233,97 @@ test_fresh_issue_requires_maintainer() {
 test_comment_wake() { test_incoming_signal comment; }
 test_review_wake() { test_incoming_signal review; }
 test_inline_wake() { test_incoming_signal inline; }
+
+test_review_bot_inline_wake() {
+  local home out token
+  home=$(new_home review-bot)
+  forge_home "$home"
+  mkdir -p "$home/config"
+  printf 'greptile-apps[bot]\n' > "$home/config/contribution-review-bots"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register the owned delivery'
+  registered_checks "$home" >/dev/null
+  jq -n --arg head "$HEAD_A" '[
+    {id:21,user:{login:"greptile-apps[bot]"},author_association:"COLLABORATOR",commit_id:$head,
+      body:"P1: unchecked error",html_url:"https://github.com/o/r/pull/8#discussion_r21",
+      created_at:"2026-09-16T08:01:00Z",updated_at:"2026-09-16T08:01:00Z"},
+    {id:22,user:{login:"passerby"},author_association:"NONE",commit_id:$head,
+      body:"drive-by",html_url:"https://github.com/o/r/pull/8#discussion_r22",updated_at:"2026-09-16T08:02:00Z"}]' \
+    > "$home/forge/inline.json"
+  registered_checks "$home" >/dev/null
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+  printf '%s' "$out" | jq -e 'length == 1 and .[0].author == "greptile-apps[bot]" and .[0].review_bot == true' >/dev/null \
+    || fail "a Greptile inline comment must be the only pending signal: $out"
+  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = 1 ] || fail 'a review-bot finding must enqueue exactly one wake'
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    || fail 'could not collect review-bot contribution input'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all \
+    | jq -e '.rows[0].actor == "fleet" and .rows[0].reason == "incoming review-bot finding needs triage"' >/dev/null \
+    || fail 'a review-bot finding must route to the fleet'
+  token=$(printf '%s' "$out" | jq -er '.[0].token') || fail 'the review-bot signal had no token'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" >/dev/null \
+    || fail 'the review-bot signal could not be acknowledged'
+  poll_at "$home" 2026-09-17T09:01:00Z >/dev/null || fail 'the unanswered review-bot thread was not polled again'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+  printf '%s' "$out" | jq -e 'length == 1 and .[0].type == "unanswered" and .[0].review_bot == true' >/dev/null \
+    || fail "the re-raised review-bot finding lost its classification: $out"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-17T09:01:00Z \
+    "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all \
+    | jq -e '.rows[0].reason == "incoming review-bot finding needs triage"' >/dev/null \
+    || fail 'a re-raised review-bot finding must still route as review-bot triage'
+  pass 'a listed collaborator bot and its re-raise remain review-bot fleet signals'
+}
+
+test_review_bot_watching_is_opt_in() {
+  local home out
+  home=$(new_home review-bot-off)
+  forge_home "$home"
+  rm -f "$home/config/contribution-review-bots"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register the owned delivery'
+  registered_checks "$home" >/dev/null
+  jq -n '[{id:41,user:{login:"greptile-apps[bot]"},author_association:"NONE",body:"P1: finding",
+    html_url:"https://github.com/o/r/pull/8#issuecomment-41",updated_at:"2026-09-16T08:01:00Z"}]' > "$home/forge/comments.json"
+  registered_checks "$home" >/dev/null
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+  printf '%s' "$out" | jq -e 'length == 0' >/dev/null \
+    || fail "a home with no review-bot file must admit no bot: $out"
+  pass 'review-bot watching is off until a home lists a bot'
+}
+
+test_review_bot_allowlist_is_configurable() {
+  local home config out token
+  home=$(new_home review-bot-config)
+  config=review-config
+  forge_home "$home"
+  mkdir -p "$home/$config"
+  printf 'custom-review[bot]\n' > "$home/$config/contribution-review-bots"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register the owned delivery'
+  (cd "$home" && with_home "$home" env FM_CONFIG_OVERRIDE="$config" "$ROOT/bin/fm-contributions.sh" arm >/dev/null) \
+    || fail 'could not arm the contribution check with its relative review-bot config'
+  registered_checks "$home" >/dev/null
+  jq -n '[
+    {id:31,user:{login:"custom-review[bot]"},author_association:"NONE",body:"configured",
+      html_url:"https://github.com/o/r/pull/8#issuecomment-31",updated_at:"2026-09-16T08:01:00Z"},
+    {id:32,user:{login:"greptile-apps[bot]"},author_association:"NONE",body:"not configured",
+      html_url:"https://github.com/o/r/pull/8#issuecomment-32",updated_at:"2026-09-16T08:02:00Z"}]' > "$home/forge/comments.json"
+  registered_checks "$home" >/dev/null
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+  printf '%s' "$out" | jq -e 'length == 1 and .[0].author == "custom-review[bot]"' >/dev/null \
+    || fail "the armed check did not retain its configured review-bot allowlist: $out"
+  token=$(printf '%s' "$out" | jq -er '.[0].token') || fail 'the configured review-bot signal had no token'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" >/dev/null \
+    || fail 'the configured review-bot signal could not be acknowledged'
+  : > "$home/$config/contribution-review-bots"
+  registered_checks "$home" >/dev/null
+  printf 'custom-review[bot]\n' > "$home/$config/contribution-review-bots"
+  registered_checks "$home" >/dev/null
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+  printf '%s' "$out" | jq -e 'length == 0' >/dev/null \
+    || fail "an acknowledged review-bot signal returned after an allowlist toggle: $out"
+  pass 'the armed allowlist is stable across working directories and policy toggles'
+}
 
 test_missing_lane_remains_missing() {
   local home
@@ -499,7 +593,8 @@ test_legacy_cleanup_preserves_supported_failure() {
     || fail "mixed legacy-error poll failed: $out"
   [ -z "$out" ] || fail "an existing GitHub failure episode re-alerted: $out"
   grep -Fxq 'api repos/o/r/pulls/8' "$home/forge/calls" || fail 'supported ownership was not retried'
-  [ "$(wc -l < "$home/forge/calls")" -eq 1 ] || fail 'unsupported mixed records triggered forge reads'
+  # The transient 502 core read is retried once; unsupported records add no reads.
+  [ "$(wc -l < "$home/forge/calls")" -eq 2 ] || fail 'unsupported mixed records triggered forge reads'
   [ ! -s "$home/state/.wake-queue" ] || fail 'mixed legacy cleanup enqueued a wake'
   jq -e --slurpfile expected "$home/unsupported.expected.json" '.records | length == 4
     and all(.[]; .observation == null)
@@ -752,10 +847,29 @@ case "$fault:$*" in
   slow-wave:'api repos/o/r/pulls/8') sleep 3 ;;
   slow-wave:'api repos/o/r/pulls/8/reviews?'*) sleep 6 ;;
   exhaust:'api repos/o/r/issues/8/comments?'*) clock_bump 100 ;;
-  fail-late:'api repos/o/r/pulls/8/reviews?'*) clock_bump 100; printf 'HTTP 502\n' >&2; exit 1 ;;
-  fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
-  down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
-  not-found:'api repos/o/r/'*) printf 'HTTP 404\n' >&2; exit 1 ;;
+  fail-late:'api repos/o/r/pulls/8/reviews?'*) clock_bump 100; printf 'gh: Bad Gateway (HTTP 502)\n' >&2; exit 1 ;;
+  fail:'api repos/o/r/pulls/8/reviews?'*) printf 'gh: Internal Server Error (HTTP 500)\n' >&2; exit 1 ;;
+  fail-once:'api repos/o/r/pulls/8/reviews?'*)
+    if [ ! -e "$FORGE/fail-once-spent" ]; then
+      : > "$FORGE/fail-once-spent"
+      printf 'gh: Internal Server Error (HTTP 500)\n' >&2
+      exit 1
+    fi
+    ;;
+  real-reviews:'api repos/o/r/pulls/8/reviews?'*)
+    printf '%s\n' "$FORGE_ERROR_TEXT" >&2
+    exit "${FORGE_ERROR_RC:-1}"
+    ;;
+  real-core:'api repos/o/r/pulls/8')
+    printf '%s\n' "$FORGE_ERROR_TEXT" >&2
+    exit "${FORGE_ERROR_RC:-1}"
+    ;;
+  real-closing:'pr view '*)
+    printf '%s\n' "$FORGE_ERROR_TEXT" >&2
+    exit "${FORGE_ERROR_RC:-1}"
+    ;;
+  down:*) printf 'gh: Bad Gateway (HTTP 502)\n' >&2; exit 1 ;;
+  not-found:'api repos/o/r/'*) printf 'gh: Not Found (HTTP 404)\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
   headless:'pr view '*) printf '{"headRefOid":null,"reviewDecision":"APPROVED"}\n'; exit 0 ;;
@@ -804,12 +918,266 @@ test_genuine_failure_near_deadline_is_unavailable() {
   /bin/date +%s > "$home/forge/clock"
   printf 'fail-late\n' > "$home/forge/fault"
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed on a genuine forge failure'
-  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 - reviews read exited 1 with -80s of budget left: HTTP 502' ] \
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 - reviews read exited 1 with -80s of budget left: gh: Bad Gateway (HTTP 502)' ] \
     || fail "a genuine forge failure past the deadline was swallowed or lost its cause: $out"
   jq -e --arg now "$NOW" '.records[0].checked_at == $now
-    and .records[0].error == "forge observation unavailable: reviews read exited 1 with -80s of budget left: HTTP 502"' \
+    and .records[0].error == "forge observation unavailable: reviews read exited 1 with -80s of budget left: gh: Bad Gateway (HTTP 502)"' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a genuine forge failure left no error evidence'
   pass 'a genuine forge failure inside the budget still records the error, its cause and wakes'
+}
+
+test_http_500_once_retries_without_waking() {
+  local home out calls
+  home=$(new_home retry-http-500-once)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'fail-once\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed after one transient HTTP 500'
+  [ -z "$out" ] || fail "a recovered HTTP 500 printed an unavailable line: $out"
+  calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+  [ "$calls" = 2 ] || fail "one HTTP 500 made $calls review reads, expected 2"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a recovered HTTP 500 left an error in the contribution record'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'a recovered HTTP 500 enqueued a wake'
+  pass 'one HTTP 500 is retried once and a successful retry stays healthy'
+}
+
+test_http_500_twice_records_the_failed_read() {
+  local home out calls why='reviews read exited 1 with Ns of budget left: gh: Internal Server Error (HTTP 500)'
+  home=$(new_home retry-http-500-twice)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'fail\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed after two HTTP 500 responses'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "two HTTP 500 responses did not print one unavailable line: $out"
+  calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+  [ "$calls" = 2 ] || fail "two HTTP 500 responses made $calls review reads, expected 2"
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'a failed retry did not name the reviews read and its error'
+  pass 'two transient failures wake once and name the failed read in the record'
+}
+
+test_http_404_is_not_retried() {
+  local home out calls why='core read exited 1 with Ns of budget left: gh: Not Found (HTTP 404)'
+  home=$(new_home no-retry-http-404)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'not-found\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed after an HTTP 404'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "an HTTP 404 did not print one unavailable line: $out"
+  calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+  [ "$calls" = 1 ] || fail "an HTTP 404 made $calls core reads, expected 1"
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'an HTTP 404 did not name the core read and its error'
+  pass 'an HTTP 404 is reported without retrying'
+}
+
+test_real_gh_errors_drive_retry_and_summary() {
+  local home out calls status message row repo error summary why
+  message=$'error connecting to no-such-host-f67.invalid\ncheck your internet connection or https://githubstatus.com'
+  home=$(new_home real-gh-dns)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-reviews\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on a real gh DNS error shape'
+  why='reviews read exited 1 with Ns of budget left: error connecting to no-such-host-f67.invalid'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "a persistent DNS error did not print one unavailable line: $out"
+  calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+  [ "$calls" = 2 ] || fail "a gh DNS error made $calls review reads, expected 2"
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'a gh DNS error did not retain its error'
+
+  for row in \
+    'kunchenguid/firstmate|proxyconnect tcp: dial tcp 127.0.0.1:1: connect: connection refused|connection error' \
+    'coredns/coredns|dial tcp 140.82.112.6:443: connect: connection refused|connection error' \
+    'openssl/openssl|read tcp 10.0.0.2:50000->140.82.112.6:443: read: connection reset by peer|connection error' \
+    'rustls/rustls|unexpected EOF|connection error' \
+    'coredns/coredns|net/http: TLS handshake timeout|TLS error' \
+    'openssl/openssl|dial tcp: lookup api.github.com: no such host|DNS error'; do
+    IFS='|' read -r repo error summary <<< "$row"
+    message="Get \"https://api.github.com/repos/$repo/pulls/7262/reviews?per_page=100\": $error"
+    home=$(new_home "real-gh-network-$(printf '%s' "$row" | shasum | cut -c1-8)")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-reviews\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed on a real gh $summary shape"
+    why="reviews read exited 1 with Ns of budget left: $message"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "a persistent $summary did not print one unavailable line: $out"
+    calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+    [ "$calls" = 2 ] || fail "a gh $summary made $calls review reads, expected 2"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail "a gh $summary from $repo did not retain its error"
+  done
+
+  for message in \
+    'GraphQL: Could not resolve to a PullRequest with the number of 99999999. (repository.pullRequest)' \
+    "GraphQL: Could not resolve to a Repository with the name 'missing'. (repository)" \
+    "GraphQL: Could not resolve to a Repository with the name 'openssl/openssl'. (repository)" \
+    "GraphQL: Could not resolve to a Repository with the name 'o/dnsmasq'. (repository)"; do
+    home=$(new_home "real-gh-graphql-$(printf '%s' "$message" | shasum | cut -c1-8)")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-closing\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail 'poll failed on a real gh GraphQL not-found shape'
+    why="head read exited 1 with Ns of budget left: $message"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "a GraphQL not-found did not print one unavailable line: $out"
+    calls=$(grep -cF 'pr view https://github.com/o/r/pull/8' "$home/forge/calls")
+    [ "$calls" = 1 ] || fail "a GraphQL not-found made $calls closing reads, expected 1"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail 'a GraphQL not-found did not retain its error'
+  done
+
+  for status in 404 401; do
+    case "$status" in 404) message='gh: Not Found (HTTP 404)' ;; 401) message='gh: Bad credentials (HTTP 401)' ;; esac
+    home=$(new_home "real-gh-http-$status")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-core\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed on a real gh HTTP $status shape"
+    why="core read exited 1 with Ns of budget left: $message"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "HTTP $status did not print one unavailable line: $out"
+    calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+    [ "$calls" = 1 ] || fail "HTTP $status made $calls core reads, expected 1"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail "HTTP $status lost its error"
+  done
+
+  # Only GitHub's secondary rate limit makes a 403 transient.
+  for row in \
+    'secondary|2|gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)' \
+    'forbidden|1|gh: Resource not accessible by integration (HTTP 403)'; do
+    IFS='|' read -r status calls message <<< "$row"
+    home=$(new_home "real-gh-http-403-$status")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-core\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed on a real gh $status HTTP 403 shape"
+    why="core read exited 1 with Ns of budget left: $message"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "a persistent $status HTTP 403 did not print one unavailable line: $out"
+    [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = "$calls" ] \
+      || fail "a $status HTTP 403 did not make exactly $calls core read(s)"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail "a $status HTTP 403 lost its error"
+  done
+
+  for status in 500 502 503 429; do
+    home=$(new_home "real-gh-bare-http-$status")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-core\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="gh: HTTP $status" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed on bare gh HTTP $status"
+    why="core read exited 1 with Ns of budget left: gh: HTTP $status"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "bare gh HTTP $status did not print one unavailable line: $out"
+    calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+    [ "$calls" = 2 ] || fail "bare gh HTTP $status made $calls core reads, expected 2"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail "bare gh HTTP $status lost its error"
+  done
+
+  home=$(new_home real-gh-bare-http-404)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-core\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT='gh: HTTP 404' "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on bare gh HTTP 404'
+  why='core read exited 1 with Ns of budget left: gh: HTTP 404'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "bare gh HTTP 404 did not print one unavailable line: $out"
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 1 ] \
+    || fail 'bare gh HTTP 404 was retried'
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'bare gh HTTP 404 lost its error'
+
+  home=$(new_home real-gh-http-line)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-core\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT='HTTP 503: Service Unavailable' "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on a line-leading HTTP status'
+  why='core read exited 1 with Ns of budget left: HTTP 503: Service Unavailable'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "a line-leading HTTP 503 did not print one unavailable line: $out"
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] \
+    || fail 'a line-leading HTTP 503 was not retried exactly once'
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'a line-leading HTTP status was not retained'
+
+  home=$(new_home real-gh-graphql-bare-http)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-closing\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT='HTTP 503 (https://api.github.com/graphql)' "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on a message-less GraphQL HTTP status'
+  why='head read exited 1 with Ns of budget left: HTTP 503 (https://api.github.com/graphql)'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "a message-less GraphQL HTTP 503 did not print one unavailable line: $out"
+  [ "$(grep -cF 'pr view https://github.com/o/r/pull/8' "$home/forge/calls")" = 2 ] \
+    || fail 'a message-less GraphQL HTTP 503 was not retried exactly once'
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'a message-less GraphQL HTTP status was not retained'
+
+  home=$(new_home real-gh-exit-137)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-core\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT='process killed outside the read bound' FORGE_ERROR_RC=137 \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed after an external exit 137'
+  why='core read exited 137 with Ns of budget left: process killed outside the read bound'
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "an external exit 137 was treated as budget refusal: $out"
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 1 ] \
+    || fail 'an external exit 137 was retried'
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'an external exit 137 left no error evidence'
+  pass 'real gh error shapes drive the intended retry decision and keep their error'
+}
+
+test_next_url_does_not_inherit_a_forge_diagnostic() {
+  local home out pull_line issue_line why='reviews read exited 1 with Ns of budget left: gh: Internal Server Error (HTTP 500)'
+  home=$(new_home next-url-no-stale-diagnostic)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf -- '- [ ] filed - Filed https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  # Malformed comment pages fail the issue after its reads succeed; the PR
+  # fails on its reviews read before it checks comments.
+  printf '{}\n' > "$home/forge/comments.json"
+  printf 'fail\n' > "$home/forge/fault"
+  # This rotation bucket reads the failing PR before the issue.
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:05:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed while a GitHub issue followed a failed PR read'
+  pull_line=$(grep -nF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls" | head -n 1 | cut -d: -f1)
+  issue_line=$(grep -nFx 'api repos/o/r/issues/9' "$home/forge/calls" | head -n 1 | cut -d: -f1)
+  [ -n "$pull_line" ] && [ -n "$issue_line" ] && [ "$pull_line" -lt "$issue_line" ] \
+    || fail 'the seeded PR read failure did not run before the issue'
+  printf '%s\n' "$out" | mask_budget | grep -Fxq "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" \
+    || fail 'the seeded PR failure did not wake'
+  printf '%s\n' "$out" | grep -Fxq 'contributions: observation unavailable for https://github.com/o/r/issues/9 - comment pages returned an unexpected shape' \
+    || fail 'the malformed issue observation did not wake'
+  [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+    || fail 'the PR record lost its failed read diagnostic'
+  jq -e '.records[0].error == "forge observation unavailable: comment pages returned an unexpected shape"' \
+    "$home/data/filed/contributions.json" >/dev/null \
+    || fail 'the issue inherited the preceding PR read diagnostic'
+  pass 'a URL never inherits the previous URL read diagnostic'
 }
 
 test_shared_url_observed_once() {
@@ -825,7 +1193,7 @@ test_shared_url_observed_once() {
     [ "$calls" = 1 ] || fail "a URL owned by two tasks was observed $calls times in one poll ($mode)"
     case "$mode" in
       ok) why= ;;
-      fail) why='reviews read exited 1 with Ns of budget left: HTTP 502' ;;
+      fail) why='reviews read exited 1 with Ns of budget left: gh: Internal Server Error (HTTP 500)' ;;
       head) why='head changed during observation' ;;
       headless) why='head read named no head commit' ;;
     esac
@@ -1158,7 +1526,7 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
 }
 
 test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage, two consecutive cycles
-  local why='core read exited 1 with Ns of budget left: HTTP 502'
+  local why='core read exited 1 with Ns of budget left: gh: Bad Gateway (HTTP 502)'
   local home out line="contributions: observation unavailable for https://github.com/o/r/pull/8 - $why"
   home=$(new_home failure-episode)
   forge_home "$home"
@@ -1176,7 +1544,7 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
   jq -e '.records[0].checked_at == "2026-09-16T10:00:00Z"' "$home/data/delivery/contributions.json" >/dev/null \
     && [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
     || fail 'a repeated read failure stopped recording its error and cause'
-  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] || fail 'a failing open PR stopped being observed'
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 4 ] || fail 'a failing open PR stopped being observed'
   bearings "$home" | jq -e '.contributions | .known == 1 and .checked == 0
     and .unmeasured == 0 and .counts.fleet == 1 and .complete == false' >/dev/null \
     || fail 'a supported GitHub failure became unmeasured or successful coverage'
@@ -1192,7 +1560,7 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
 }
 
 test_late_owner_keeps_failure_episode_suppressed() {
-  local why='core read exited 1 with Ns of budget left: HTTP 502' home out task
+  local why='core read exited 1 with Ns of budget left: gh: Bad Gateway (HTTP 502)' home out task
   local line="contributions: observation unavailable for https://github.com/o/r/pull/8 - $why"
   home=$(new_home late-owner-failure-episode)
   forge_home "$home"
@@ -1226,7 +1594,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 
 test_retire_ends_observation_of_a_gone_contribution() {
   local home out url=https://github.com/o/r/pull/8
-  local line='contributions: observation unavailable for https://github.com/o/r/pull/8 - core read exited 1 with Ns of budget left: HTTP 404'
+  local line='contributions: observation unavailable for https://github.com/o/r/pull/8 - core read exited 1 with Ns of budget left: gh: Not Found (HTTP 404)'
   home=$(new_home retire-gone)
   forge_home "$home"
   wrap_forge "$home"
@@ -1302,8 +1670,277 @@ test_retire_is_idempotent_and_refuses_unknown_pairs() {
   pass 'retire is idempotent and refuses non-captain, unknown, malformed and signal-bearing pairs'
 }
 
+# GitHub returns every review with its full body, user object and links; a
+# long-lived PR's history must still leave a record every reader accepts.
+test_many_reviews_stay_readable() {
+  local home size out wakes token
+  home=$(new_home many-reviews)
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register the many-review delivery'
+  # 300 reviews: a non-member bot comments on every head, while the maintainer
+  # and a collaborator leave formal states on the observed and a replaced head.
+  jq -n --arg a "$HEAD_A" --arg b "$HEAD_B" '
+    ("x" * 4000) as $body
+    | def person($login; $id): {login:$login,id:$id,node_id:"MDQ6VXNlcjE=",type:"User",site_admin:false,
+        avatar_url:"https://avatars.githubusercontent.com/u/1?v=4",gravatar_id:"",
+        url:("https://api.github.com/users/" + $login),html_url:("https://github.com/" + $login),
+        followers_url:("https://api.github.com/users/" + $login + "/followers"),
+        following_url:("https://api.github.com/users/" + $login + "/following{/other_user}"),
+        gists_url:("https://api.github.com/users/" + $login + "/gists{/gist_id}"),
+        starred_url:("https://api.github.com/users/" + $login + "/starred{/owner}{/repo}"),
+        subscriptions_url:("https://api.github.com/users/" + $login + "/subscriptions"),
+        organizations_url:("https://api.github.com/users/" + $login + "/orgs"),
+        repos_url:("https://api.github.com/users/" + $login + "/repos"),
+        events_url:("https://api.github.com/users/" + $login + "/events{/privacy}"),
+        received_events_url:("https://api.github.com/users/" + $login + "/received_events")};
+    [range(1; 301) as $i
+     | (if $i % 10 == 0 then ["maintainer","OWNER",(if $i == 300 then "COMMENTED" elif $i == 290 then "CHANGES_REQUESTED" else "APPROVED" end),$a]
+        elif $i % 10 == 5 then ["helper","COLLABORATOR",(if $i == 295 then "APPROVED" else "COMMENTED" end),(if $i == 295 then $b else $a end)]
+        else ["review-bot","NONE","COMMENTED",$a] end) as [$login,$association,$state,$commit]
+     | {id:(1000 + $i),node_id:"PRR_kwDOAAAA",user:person($login; $i),body:$body,state:$state,
+        html_url:("https://github.com/o/r/pull/8#pullrequestreview-" + ((1000 + $i) | tostring)),
+        pull_request_url:"https://api.github.com/repos/o/r/pulls/8",author_association:$association,
+        _links:{html:{href:"https://github.com/o/r/pull/8"},pull_request:{href:"https://api.github.com/repos/o/r/pulls/8"}},
+        submitted_at:(1789538400 + $i * 10 | todate),commit_id:$commit}]' > "$home/forge/reviews.json"
+  [ "$(wc -c < "$home/forge/reviews.json")" -gt 1048576 ] || fail 'the many-review fixture no longer exceeds the record cap'
+  registered_checks "$home" >/dev/null
+  size=$(wc -c < "$home/data/delivery/contributions.json" | tr -d " ")
+  [ "$size" -lt 524288 ] || fail "a many-review observation wrote a $size-byte record"
+  jq -e '.records[0].observation.reviews | length == 300
+    and all(.[]; keys == ["commit_id","id","state","submitted_at","user"] and .user == {login:.user.login})' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'stored reviews carry more than the classified fields'
+  wakes=$(awk 'END { print NR }' "$home/state/.wake-queue")
+  registered_checks "$home" >/dev/null
+  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$wakes" ] || fail 'already notified review signals woke again'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending) || fail 'a many-review record made pending unreadable'
+  printf '%s' "$out" | jq -e 'length == 60 and all(.[]; .type == "review")' >/dev/null \
+    || fail "pending lost the maintainer review signals: $out"
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    || fail 'could not collect many-review contribution input'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all) \
+    || fail 'could not project the many-review record'
+  printf '%s' "$out" | jq -e --arg a "$HEAD_A" --arg b "$HEAD_B" '
+    .unreadable_records == 0 and .rows[0].stale_verdicts == 1
+    and .rows[0].reviews == [
+      {id:1295,state:"APPROVED",submitted_at:"2026-09-16T06:49:10Z",commit_id:$b,user:{login:"helper"},freshness:"STALE"},
+      {id:1290,state:"CHANGES_REQUESTED",submitted_at:"2026-09-16T06:48:20Z",commit_id:$a,user:{login:"maintainer"},freshness:"current"}]' \
+    >/dev/null || fail "the stored review projection changed the classified reviews: $out"
+  token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er '.[0].token') || fail 'no review token to acknowledge'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" \
+    || fail 'a many-review record refused an exact acknowledgement'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" verdict delivery https://github.com/o/r/pull/8 "$HEAD_A" \
+    https://github.com/o/r/pull/8#pullrequestreview-1290 fleet 'address requested changes' \
+    || fail 'a many-review record refused a verdict'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 59' >/dev/null \
+    || fail 'the acknowledgement did not persist in the many-review record'
+  pass 'a many-review PR stores only classified review fields and stays readable'
+}
+
+# The 19-hour incident: a reviewer's inline comment was acknowledged while the
+# delivery sat on a captain hold, and nothing raised the thread again.
+unanswered_home() { # name: delivery on a captain hold with one unanswered inline comment
+  local home
+  home=$(new_home "$1")
+  forge_home "$home"
+  sed -i.bak '/ delivery /s/$/ (hold: wait for the scope decision) (hold-kind: captain)/' "$home/data/backlog.md" \
+    && rm -f "$home/data/backlog.md.bak"
+  jq -n --arg head "$HEAD_A" '[{id:31,user:{login:"maintainer"},author_association:"OWNER",
+    body:"Why is this retried?",html_url:"https://github.com/o/r/pull/8#discussion_r31",
+    created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z",commit_id:$head}]' > "$home/forge/inline.json"
+  printf '%s\n' "$home"
+}
+
+poll_at() { with_home "$1" env FM_CONTRIBUTIONS_REPLY_AGE=86400 FM_CONTRIBUTIONS_NOW="$2" "$ROOT/bin/fm-contributions.sh" poll; }
+
+ack_pending() { # home: acknowledge the one pending signal
+  local home=$1 token
+  token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er 'first | .token') || fail 'no pending signal to acknowledge'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" || fail 'ack failed'
+}
+
+test_unanswered_thread_is_raised_again_under_hold() {
+  local home out
+  home=$(unanswered_home unanswered-hold)
+  out=$(poll_at "$home" 2026-09-16T08:01:00Z) || fail 'first poll failed'
+  printf '%s\n' "$out" | grep -Eq '^contribution-wake: check: contributions delivery [0-9a-f]{64}$' \
+    || fail "the arriving comment did not raise its ordinary wake: $out"
+  ack_pending "$home"
+  out=$(poll_at "$home" 2026-09-17T03:00:00Z) || fail 'poll 19 hours after the comment failed'
+  [ -z "$out" ] || fail "a thread 19 hours old was raised again before the bound: $out"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 0' >/dev/null \
+    || fail 'an acknowledged signal came back before the bound'
+  out=$(poll_at "$home" 2026-09-17T09:00:00Z) || fail 'poll 25 hours after the comment failed'
+  printf '%s\n' "$out" | grep -Eq '^contribution-wake: check: contributions delivery [0-9a-f]{64} unanswered https://github.com/o/r/pull/8#discussion_r31 25h$' \
+    || fail "an unanswered thread under a hold was not raised with its URL and age: $out"
+  grep -Fq 'unanswered https://github.com/o/r/pull/8#discussion_r31 25h' "$home/state/.wake-queue" \
+    || fail 'the re-raise never reached the durable wake queue'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending \
+    | jq -e 'length == 1 and .[0].type == "unanswered" and .[0].source == "https://github.com/o/r/pull/8#discussion_r31"
+      and .[0].age == "25h" and .[0].author == "maintainer"' >/dev/null \
+    || fail 'the re-raise is not one pending signal naming the thread'
+  jq -e '.records[0].threads | length == 1 and .[0].raised == "2026-09-17T09:00:00Z"' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'the re-raise did not record when the thread was raised'
+  # An acknowledged re-raise is raised again one reply age later, not at every poll.
+  ack_pending "$home"
+  out=$(poll_at "$home" 2026-09-18T08:00:00Z) || fail 'poll 24 hours after the re-raise failed'
+  [ -z "$out" ] || fail "the thread was raised again before a day passed: $out"
+  out=$(poll_at "$home" 2026-09-18T09:00:00Z) || fail 'poll a day after the re-raise failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 49h$' \
+    || fail "the thread was not raised again a day later: $out"
+  jq -e '[.records[0].notified[] | select(startswith("unanswered:"))] | length == 1' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'acknowledged re-raises stayed in the notified list'
+  # A reply from the contribution author in the thread ends the tracking and
+  # withdraws the signal nobody had acknowledged yet.
+  jq -n --arg head "$HEAD_A" '[{id:31,user:{login:"maintainer"},author_association:"OWNER",
+      body:"Why is this retried?",html_url:"https://github.com/o/r/pull/8#discussion_r31",
+      created_at:"2026-09-16T08:00:00Z",updated_at:"2026-09-16T08:00:00Z",commit_id:$head},
+    {id:32,in_reply_to_id:31,user:{login:"author"},author_association:"NONE",body:"Fixed in the next push",
+      html_url:"https://github.com/o/r/pull/8#discussion_r32",created_at:"2026-09-18T10:00:00Z",updated_at:"2026-09-18T10:00:00Z",commit_id:$head}]' \
+    > "$home/forge/inline.json"
+  for at in 2026-09-18T10:05:00Z 2026-09-20T10:00:00Z; do
+    out=$(poll_at "$home" "$at") || fail "poll at $at failed"
+    [ -z "$out" ] || fail "an answered thread was raised at $at: $out"
+  done
+  jq -e '.records[0] | (.threads | length) == 0 and (.pending | length) == 0' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'an author reply did not clear the tracked thread and its signal'
+  pass 'an acknowledged unanswered thread under a hold is raised again after a day, daily, until the author replies'
+}
+
+test_resolved_thread_is_answered() {
+  local home out
+  home=$(unanswered_home resolved-thread)
+  printf '[{"isResolved":false,"comments":{"nodes":[{"databaseId":40}]}},{"isResolved":true,"comments":{"nodes":[{"databaseId":31}]}}]\n' \
+    > "$home/forge/threads.json"
+  poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
+  ack_pending "$home"
+  out=$(poll_at "$home" 2026-09-18T08:00:00Z) || fail 'poll two days later failed'
+  [ -z "$out" ] || fail "a resolved thread was raised as unanswered: $out"
+  jq -e '.records[0].threads | length == 0' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a resolved thread stayed tracked'
+  pass 'a resolved thread with no reply counts as answered'
+}
+
+test_reply_rules() {
+  local home out
+  home=$(new_home reply-rules)
+  forge_home "$home"
+  jq -n --arg head "$HEAD_A" '[
+    {id:50,user:{login:"maintainer"},author_association:"OWNER",body:"Please explain",html_url:"https://github.com/o/r/pull/8#issuecomment-50",created_at:"2026-09-16T06:00:00Z",updated_at:"2026-09-16T06:00:00Z"},
+    {id:51,user:{login:"maintainer"},author_association:"OWNER",body:"Thanks, merging soon",html_url:"https://github.com/o/r/pull/8#issuecomment-51",created_at:"2026-09-16T07:00:00Z",updated_at:"2026-09-16T07:00:00Z"},
+    {id:52,user:{login:"author"},author_association:"NONE",body:"Explained above",html_url:"https://github.com/o/r/pull/8#issuecomment-52",created_at:"2026-09-16T06:30:00Z",updated_at:"2026-09-16T06:30:00Z"}]' \
+    > "$home/forge/comments.json"
+  jq -n --arg head "$HEAD_A" '[
+    {id:60,user:{login:"maintainer"},author_association:"MEMBER",state:"APPROVED",body:"LGTM",html_url:"https://github.com/o/r/pull/8#pullrequestreview-60",submitted_at:"2026-09-16T05:00:00Z",commit_id:$head},
+    {id:61,user:{login:"maintainer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"",html_url:"https://github.com/o/r/pull/8#pullrequestreview-61",submitted_at:"2026-09-16T05:00:00Z",commit_id:$head},
+    {id:62,user:{login:"maintainer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"Needs a test",html_url:"https://github.com/o/r/pull/8#pullrequestreview-62",submitted_at:"2026-09-16T06:45:00Z",commit_id:$head},
+    {id:63,user:{login:"maintainer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"",html_url:"https://github.com/o/r/pull/8#pullrequestreview-63",submitted_at:"2026-09-16T07:30:00Z",commit_id:$head},
+    {id:64,user:{login:"reviewer"},author_association:"MEMBER",state:"CHANGES_REQUESTED",body:"Rename this",html_url:"https://github.com/o/r/pull/8#pullrequestreview-64",submitted_at:"2026-09-16T07:00:00Z",commit_id:$head},
+    {id:65,user:{login:"reviewer"},author_association:"MEMBER",state:"APPROVED",body:"",html_url:"https://github.com/o/r/pull/8#pullrequestreview-65",submitted_at:"2026-09-16T07:40:00Z",commit_id:$head}]' \
+    > "$home/forge/reviews.json"
+  jq -n --arg head "$HEAD_A" '[
+    {id:70,user:{login:"maintainer"},author_association:"OWNER",body:"Root",html_url:"https://github.com/o/r/pull/8#discussion_r70",created_at:"2026-09-16T04:00:00Z",updated_at:"2026-09-16T04:00:00Z",commit_id:$head},
+    {id:71,in_reply_to_id:70,user:{login:"stranger"},author_association:"NONE",body:"Same here",html_url:"https://github.com/o/r/pull/8#discussion_r71",created_at:"2026-09-16T04:30:00Z",updated_at:"2026-09-16T04:30:00Z",commit_id:$head},
+    {id:72,user:{login:"maintainer"},author_association:"OWNER",body:"Other thread",html_url:"https://github.com/o/r/pull/8#discussion_r72",created_at:"2026-09-16T04:00:00Z",updated_at:"2026-09-16T04:00:00Z",commit_id:$head},
+    {id:73,in_reply_to_id:72,user:{login:"author"},author_association:"NONE",body:"Done",html_url:"https://github.com/o/r/pull/8#discussion_r73",created_at:"2026-09-16T04:30:00Z",updated_at:"2026-09-16T04:30:00Z",commit_id:$head},
+    {id:74,in_reply_to_id:72,user:{login:"maintainer"},author_association:"OWNER",body:"Still wrong",html_url:"https://github.com/o/r/pull/8#discussion_r74",created_at:"2026-09-16T05:00:00Z",updated_at:"2026-09-16T05:00:00Z",commit_id:$head}]' \
+    > "$home/forge/inline.json"
+  poll_at "$home" 2026-09-16T08:00:00Z >/dev/null || fail 'poll failed'
+  jq -e '[.records[0].threads[].key] | sort == ["review-comment:70","review-comment:74","review:62"]' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "wrong threads tracked: $(jq -c '[.records[0].threads[].key]' "$home/data/delivery/contributions.json")"
+  out=$(poll_at "$home" 2026-09-18T08:00:00Z) || fail 'poll two days later failed'
+  [ "$(printf '%s\n' "$out" | grep -o 'unanswered https://[^ ]*' | sort)" = "$(printf '%s\n' \
+    'unanswered https://github.com/o/r/pull/8#discussion_r70' 'unanswered https://github.com/o/r/pull/8#discussion_r74' \
+    'unanswered https://github.com/o/r/pull/8#pullrequestreview-62')" ] \
+    || fail "a plain comment was raised again, or a tracked thread was not: $out"
+  pass 'only inline threads and reviews requesting changes with text, no author reply, resolution or later verdict are tracked as unanswered'
+}
+
+test_reply_age_is_configurable_and_validated() {
+  local home out bad
+  home=$(unanswered_home reply-age)
+  poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
+  ack_pending "$home"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:30:00Z FM_CONTRIBUTIONS_REPLY_AGE=3600 \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll with a one-hour reply age failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 1h$' \
+    || fail "a one-hour reply age did not raise the thread: $out"
+  for bad in soon -5 1.5 0 00 000; do
+    with_home "$home" env FM_CONTRIBUTIONS_REPLY_AGE="$bad" "$ROOT/bin/fm-contributions.sh" poll >/dev/null 2>&1 \
+      && fail "the reply age '$bad' was accepted"
+  done
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:30:00Z FM_CONTRIBUTIONS_REPLY_AGE=03600 \
+    "$ROOT/bin/fm-contributions.sh" poll >/dev/null 2>&1 || fail 'a zero-padded positive reply age was refused'
+  pass 'the reply age is a validated seconds setting'
+}
+
+test_closed_pull_request_drops_its_threads() {
+  local home
+  home=$(unanswered_home closed-threads)
+  poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
+  printf 'merged\n' > "$home/forge/state"
+  poll_at "$home" 2026-09-18T08:00:00Z >/dev/null || fail 'poll after the merge failed'
+  jq -e '.records[0] | .observation.state == "merged" and (.threads | length) == 0
+    and all(.pending[]; .type != "unanswered")' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a merged pull request kept unanswered threads'
+  pass 'a closed pull request stops raising its threads'
+}
+
+test_unanswered_reraise_is_off_unless_configured() {
+  local home out at
+  home=$(unanswered_home reraise-off)
+  wrap_forge "$home"
+  poll_off() { with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll; }
+  out=$(poll_off 2026-09-16T08:01:00Z) || fail 'first poll without a reply age failed'
+  printf '%s\n' "$out" | grep -Eq '^contribution-wake: check: contributions delivery [0-9a-f]{64}$' \
+    || fail "the arriving comment lost its ordinary wake: $out"
+  ack_pending "$home"
+  for at in 2026-09-17T09:00:00Z 2026-09-18T09:00:00Z 2026-09-25T09:00:00Z; do
+    out=$(poll_off "$at") || fail "poll at $at without a reply age failed"
+    [ -z "$out" ] || fail "an unconfigured install raised a thread at $at: $out"
+  done
+  ! grep -Fq 'api graphql' "$home/forge/calls" || fail 'an unconfigured install read review threads'
+  jq -e '.records[0] | has("threads") == false and (.pending | length) == 0
+    and all(.observation.events[]; has("unanswered") == false and has("at") == false)' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'an unconfigured install recorded thread tracking'
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_REPLY_AGE= FM_CONTRIBUTIONS_NOW=2026-09-26T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll with an empty reply age failed'
+  [ -z "$out" ] || fail "an empty reply age raised a thread: $out"
+  # Turning the setting on tracks the thread, and turning it off again withdraws it.
+  out=$(poll_at "$home" 2026-09-27T09:00:00Z) || fail 'poll with the setting on failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 ' \
+    || fail "a configured install did not raise the thread: $out"
+  grep -Fq 'api graphql' "$home/forge/calls" || fail 'a configured install never read review threads'
+  out=$(poll_off 2026-09-27T10:00:00Z) || fail 'poll with the setting off again failed'
+  [ -z "$out" ] || fail "switching the setting off printed a wake: $out"
+  jq -e '.records[0] | has("threads") == false and all(.pending[]; .type != "unanswered")
+    and all(.notified[]; startswith("unanswered:") | not)' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'switching the setting off left thread tracking behind'
+  pass 'the unanswered re-raise and the review-thread read stay off unless a reply age is configured'
+}
+
+test_arm_plumbs_the_reply_age_into_the_check_shim() {
+  local home out
+  home=$(unanswered_home arm-reply-age)
+  poll_at "$home" 2026-09-16T08:01:00Z >/dev/null || fail 'first poll failed'
+  ack_pending "$home"
+  with_home "$home" env FM_CONTRIBUTIONS_REPLY_AGE=3600 "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
+    || fail 'arm with a reply age failed'
+  out=$(with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE FM_CONTRIBUTIONS_NOW=2026-09-16T09:30:00Z bash "$home/state/contributions.check.sh") \
+    || fail 'configured check shim failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 1h$' \
+    || fail "the generated check ignored the configured reply age: $out"
+  with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
+    || fail 'arm without a reply age failed'
+  out=$(with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE FM_CONTRIBUTIONS_NOW=2026-09-18T09:30:00Z bash "$home/state/contributions.check.sh") \
+    || fail 'unconfigured check shim failed'
+  [ -z "$out" ] || fail "a check armed without a reply age raised a thread: $out"
+  pass 'arm copies a configured reply age into the generated check'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

@@ -9,9 +9,14 @@
 # three-tier timeout policy that docs/fm-test-portable-shards.md "Timeouts"
 # owns (fast, normal, heavy), so no job drifts back to a one-off number.
 #
-# The workflow is parsed as YAML and its concurrency expressions are resolved
-# against simulated pull_request and push contexts, so the assertions describe
-# what GitHub would do, not how the file happens to be spelled.
+# They also hold the fork opt-out: the repository variables FM_CI_SKIP_PUSH and
+# FM_CI_SKIP_MACOS let a fork skip the push run and the macOS job through a
+# job-level condition, while with neither set every job runs exactly as before.
+#
+# The workflow is parsed as YAML and its concurrency and job-level `if`
+# expressions are resolved against simulated pull_request and push contexts,
+# so the assertions describe what GitHub would do, not how the file happens
+# to be spelled.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -23,12 +28,134 @@ assert_present "$CI_WORKFLOW" ".github/workflows/ci.yml is missing"
 command -v ruby >/dev/null 2>&1 \
   || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
 
+# Evaluate the subset of GitHub's expression language that ci.yml uses -
+# string literals, context lookups, the status functions, !, ==, !=, &&,
+# ||, and parentheses - against a simulated context hash, following the
+# documented operator precedence, the case-insensitive string comparison, and
+# the `a || b` fallback that returns the first truthy operand rather than a
+# boolean. The status functions read the simulated outcome of the needed jobs
+# from the context key "needs.status" (success, failure, or cancelled), which
+# defaults to success. Each ruby -e below prepends this so every resolver shares one
+# evaluator.
+# shellcheck disable=SC2016  # the ${{ }} below is Ruby text, not a shell expansion
+EXPRESSION_RUBY='
+require "strscan"
+class Expression
+  def self.evaluate(source, context)
+    new(source, context).parse
+  end
+
+  STATUS_FUNCTIONS = %w[always() success() failure() cancelled()].freeze
+
+  # A job or step `if` is a bare expression or one wrapped in ${{ }}, an
+  # absent condition means the job runs, and a condition that calls no status
+  # function gets the implicit success() check GitHub documents.
+  def self.condition(raw, context)
+    source = raw.to_s.strip
+    source = Regexp.last_match(1) if source =~ /\A\$\{\{(.*)\}\}\z/m
+    source = "success()" if source.empty?
+    source = "success() && (#{source})" unless new(source, context).status_check?
+    truthy?(evaluate(source, context))
+  end
+
+  # A result is truthy unless it is false, nil, or the empty string.
+  def self.truthy?(value)
+    value != false && !value.nil? && value != ""
+  end
+
+  def initialize(source, context)
+    @context = context
+    @tokens = []
+    scanner = StringScanner.new(source)
+    until scanner.eos?
+      next if scanner.skip(/\s+/)
+      if scanner.scan(/\x27([^\x27]*)\x27/) then @tokens << [:string, scanner[1]]
+      elsif scanner.scan(/\|\||&&|==|!=|[()!]/) then @tokens << [:operator, scanner.matched]
+      elsif scanner.scan(/[A-Za-z_][\w.\-]*(?:\(\))?/) then @tokens << [:name, scanner.matched]
+      else raise "unsupported expression syntax at: #{scanner.rest}"
+      end
+    end
+  end
+
+  def status_check?
+    @tokens.any? { |kind, value| kind == :name && STATUS_FUNCTIONS.include?(value) }
+  end
+
+  def parse
+    result = parse_or
+    raise "unexpected trailing token: #{@tokens.first.inspect}" unless @tokens.empty?
+    result
+  end
+
+  private
+
+  def take?(operator)
+    return false unless @tokens.first == [:operator, operator]
+    @tokens.shift
+    true
+  end
+
+  def parse_or
+    left = parse_and
+    while take?("||")
+      right = parse_and
+      left = Expression.truthy?(left) ? left : right
+    end
+    left
+  end
+
+  def parse_and
+    left = parse_comparison
+    while take?("&&")
+      right = parse_comparison
+      left = Expression.truthy?(left) ? right : left
+    end
+    left
+  end
+
+  def parse_comparison
+    left = parse_unary
+    loop do
+      operator = ["==", "!="].find { |candidate| take?(candidate) } or break
+      right = parse_unary
+      unless left.class == right.class
+        raise "the resolver only compares operands of one type: #{left.inspect} #{operator} #{right.inspect}"
+      end
+      equal = left.is_a?(String) ? left.casecmp?(right) : left == right
+      left = operator == "==" ? equal : !equal
+    end
+    left
+  end
+
+  def parse_unary
+    return !Expression.truthy?(parse_unary) if take?("!")
+    parse_primary
+  end
+
+  def parse_primary
+    if take?("(")
+      inner = parse_or
+      raise "missing closing parenthesis" unless take?(")")
+      return inner
+    end
+    kind, value = @tokens.shift
+    raise "expected an operand, got #{kind.inspect}" unless kind == :string || kind == :name
+    return value if kind == :string
+    if STATUS_FUNCTIONS.include?(value)
+      status = @context.fetch("needs.status", "success")
+      return value == "always()" || value == "#{status}()"
+    end
+    raise "unresolvable context reference: #{value}" unless @context.key?(value)
+    @context.fetch(value)
+  end
+end
+'
+
 # Resolve the workflow's concurrency contract under one simulated event and
-# print "<group><TAB><cancel-in-progress>". Only the two expression constructs
-# this workflow uses are resolved: an `a || b` fallback and an `==` comparison.
+# print "<group><TAB><cancel-in-progress>".
 resolve_concurrency() {
   local event=$1 pr_number=$2 run_id=$3
-  ruby -ryaml -e '
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e '
 doc = YAML.load_file(ARGV[0])
 concurrency = doc.fetch("concurrency")
 context = {
@@ -38,30 +165,29 @@ context = {
   "github.run_id" => ARGV[3],
 }
 
-value = lambda do |token|
-  token = token.strip
-  next token[1..-2] if token.start_with?("\x27") && token.end_with?("\x27")
-  raise "unresolvable context reference: #{token}" unless context.key?(token)
-  context.fetch(token)
-end
-
-evaluate = lambda do |expression|
-  expression = expression.strip
-  if expression.include?("==")
-    left, right = expression.split("==", 2)
-    next value.call(left) == value.call(right) ? "true" : "false"
-  end
-  resolved = expression.split("||").map { |token| value.call(token) }.find { |v| !v.empty? }
-  resolved.to_s
-end
-
 interpolate = lambda do |raw|
-  raw.to_s.gsub(/\$\{\{(.+?)\}\}/) { evaluate.call(Regexp.last_match(1)) }
+  raw.to_s.gsub(/\$\{\{(.+?)\}\}/) { Expression.evaluate(Regexp.last_match(1), context).to_s }
 end
 
 puts [interpolate.call(concurrency.fetch("group")),
       interpolate.call(concurrency.fetch("cancel-in-progress"))].join("\t")
 ' "$CI_WORKFLOW" "$event" "$pr_number" "$run_id"
+}
+
+# Print, one per line in workflow order, the jobs whose job-level `if`
+# resolves true under one simulated event and fork variable setting; an unset
+# repository variable reads as the empty string, as GitHub documents.
+jobs_running_under() {  # <event> <FM_CI_SKIP_PUSH> <FM_CI_SKIP_MACOS>
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e '
+context = {
+  "github.event_name" => ARGV[1],
+  "vars.FM_CI_SKIP_PUSH" => ARGV[2],
+  "vars.FM_CI_SKIP_MACOS" => ARGV[3],
+}
+YAML.load_file(ARGV[0]).fetch("jobs").each do |name, job|
+  puts name if Expression.condition(job["if"], context)
+end
+' "$CI_WORKFLOW" "$1" "$2" "$3"
 }
 
 job_timeout() {
@@ -219,6 +345,70 @@ puts steps[index].fetch("timeout-minutes", "none")
   pass "Herdr keeps a $step minute step tripwire under a $heavy minute job backstop"
 }
 
+# The fork opt-out is opt-in: with neither variable set every job runs on both
+# events, FM_CI_SKIP_PUSH=1 empties only the push run, and FM_CI_SKIP_MACOS=1
+# removes only the macOS job. A "-" in the table means the variable is unset.
+test_fork_skip_variables_are_opt_in() {
+  local all event skip_push skip_macos expected want actual
+  all=$(workflow_jobs) || fail "could not list ci.yml jobs"
+  printf '%s\n' "$all" | grep -qx macos-stock-bash \
+    || fail "the macOS job is missing from ci.yml, so the table below would prove nothing"
+  while read -r event skip_push skip_macos expected; do
+    [ "$skip_push" != - ] || skip_push=
+    [ "$skip_macos" != - ] || skip_macos=
+    case $expected in
+      all) want=$all ;;
+      none) want= ;;
+      all-but-macos) want=$(printf '%s\n' "$all" | grep -vx macos-stock-bash) ;;
+      *) fail "unknown expectation $expected" ;;
+    esac
+    actual=$(jobs_running_under "$event" "$skip_push" "$skip_macos") \
+      || fail "could not resolve the job conditions for $event FM_CI_SKIP_PUSH=$skip_push FM_CI_SKIP_MACOS=$skip_macos"
+    [ "$actual" = "$want" ] \
+      || fail "$event with FM_CI_SKIP_PUSH=$skip_push FM_CI_SKIP_MACOS=$skip_macos must run $expected jobs"$'\n'"ran: $(printf '%s' "$actual" | tr '\n' ' ')"$'\n'"wanted: $(printf '%s' "$want" | tr '\n' ' ')"
+  done <<'TABLE'
+push         - - all
+pull_request - - all
+push         1 - none
+pull_request 1 - all
+pull_request - 1 all-but-macos
+push         - 1 all-but-macos
+TABLE
+  pass "the fork skip variables change nothing unless set, and each skips only its own run or job"
+}
+
+# Print true or false: whether one job's job-level `if` resolves true under
+# one simulated event, fork variable setting, and outcome of its needed jobs.
+job_runs_under() {  # <job> <event> <FM_CI_SKIP_PUSH> <FM_CI_SKIP_MACOS> <needs status>
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e '
+context = {
+  "github.event_name" => ARGV[2],
+  "vars.FM_CI_SKIP_PUSH" => ARGV[3],
+  "vars.FM_CI_SKIP_MACOS" => ARGV[4],
+  "needs.status" => ARGV[5],
+}
+puts Expression.condition(YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1])["if"], context)
+' "$CI_WORKFLOW" "$@"
+}
+
+# The aggregate must keep running after a failed lane so its timing summary
+# still lands, while the push skip still removes it from a skipped push run.
+test_timing_aggregate_still_runs_after_a_failed_lane() {
+  local event skip_push expected actual
+  while read -r event skip_push expected; do
+    [ "$skip_push" != - ] || skip_push=
+    actual=$(job_runs_under tests-timing-aggregate "$event" "$skip_push" '' failure) \
+      || fail "could not resolve the aggregate condition for $event FM_CI_SKIP_PUSH=$skip_push"
+    [ "$actual" = "$expected" ] \
+      || fail "after a failed lane, the aggregate on $event with FM_CI_SKIP_PUSH=$skip_push must resolve $expected, got $actual"
+  done <<'TABLE'
+pull_request - true
+push         - true
+push         1 false
+TABLE
+  pass "the timing aggregate still runs after a failed lane unless the push run is skipped"
+}
+
 test_ci_matrices_match_executable_partitions() {
   ruby -ryaml -ropen3 - "$CI_WORKFLOW" "$ROOT" <<'RUBY' || fail "CI partition contract"
 jobs = YAML.load_file(ARGV[0]).fetch("jobs")
@@ -253,6 +443,8 @@ test_ci_matrices_match_executable_partitions
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_are_never_cancelled
+test_fork_skip_variables_are_opt_in
+test_timing_aggregate_still_runs_after_a_failed_lane
 test_every_job_has_a_finite_timeout
 test_every_job_belongs_to_exactly_one_timeout_tier
 test_fast_tier_shares_one_short_tripwire

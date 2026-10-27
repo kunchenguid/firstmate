@@ -6,9 +6,9 @@
 #   . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # It provides the boilerplate every test file used to re-roll: ok/not-ok
-# reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
-# git identity and fixture builders, state/<id>.meta writers, and the common
-# string/exit-code/file assertions. Shared fake-toolchain and spawn-world
+# reporters, TAP plan and completion (fm_test_run), a self-cleaning temp root,
+# fakebin/PATH-shim helpers, deterministic git identity and fixture builders,
+# state/<id>.meta writers, and the common string/exit-code/file assertions. Shared fake-toolchain and spawn-world
 # builders live in tests/fixtures.sh; wake-queue mocks in wake-helpers.sh;
 # secondmate-lifecycle mocks in secondmate-helpers.sh. Suite-specific fakes
 # that encode a single test's terminal or lifecycle assumptions still belong
@@ -68,6 +68,13 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Clear the Rex block identity an operator's terminal exports. Run directly
+# inside a Rex block, the suite would otherwise auto-detect the rex backend
+# (bin/fm-backend.sh's fm_backend_detect) and place fixture tasks into the
+# operator's live Rex session. REX_BIN_DIR stays so the real-server smoke test
+# can find the CLI; a case that verifies detection sets these itself.
+unset REX_SESSION REX_BLOCK
+
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
 # there (for example a beads backend at its live backlog), so a copy points the
@@ -98,6 +105,27 @@ fail() {
 
 pass() {
   printf 'ok - %s\n' "$1"
+}
+
+# fm_test_run <test-function>...
+# Print a TAP plan 1..N derived from the function names (N is $#), run each
+# function (each must emit exactly one `ok - ` line via pass), then print
+# FM_TEST_COMPLETE. Adding a test is adding a name to this call; N is not a
+# separately maintained numeral. The names given are the names run.
+# bin/fm-test-tap-verify.sh is the completeness checker the stock macOS Bash
+# job uses against that plan and marker.
+fm_test_run() {
+  local name kind
+  [ "$#" -gt 0 ] || fail "fm_test_run: no tests registered"
+  printf '1..%s\n' "$#"
+  while [ "$#" -gt 0 ]; do
+    name=$1
+    shift
+    kind=$(type -t "$name" 2>/dev/null || true)
+    [ "$kind" = function ] || fail "fm_test_run: $name is not a function"
+    "$name"
+  done
+  printf 'FM_TEST_COMPLETE\n'
 }
 
 # Harness argument assertions reuse the emitted prefix rather than duplicating
@@ -282,6 +310,11 @@ fm_test_reap_watchers() {
 # its owner's guard reaps it.
 FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
 export FM_TEST_STUB_MAX_BLOCK_SECONDS
+# The suite's own pid, for a polling fixture to stop once its suite is gone
+# (`kill -0 "$FM_TEST_SUITE_PID"` in its loop condition), which bounds it to one
+# poll past a runner killed too hard for any cleanup to run.
+FM_TEST_SUITE_PID=$$
+export FM_TEST_SUITE_PID
 
 # Remove a fixture tree even when it holds a read-only directory, such as the
 # spawn-owned state/<id>.git-hooks strip directory.
@@ -293,6 +326,40 @@ fm_test_remove_tree() {
   rm -rf "$dir"
 }
 
+# --- fixture-root process reaping -------------------------------------------
+#
+# A fixture process whose command line names a fixture root - a stub, a script
+# run from a fixture checkout whose bin links back here, or a fake harness
+# session - can reparent to init and keep polling after its test ends, and
+# removing the root only turns its wait into one that can never finish. Before a
+# root is removed, every process naming that exact mktemp root is signalled,
+# TERM and then KILL, each followed by a bounded 2s wait. The match is the
+# unique per-run root path, never a script or process name, so it cannot reach
+# another home's processes; this shell and its ancestors are never signalled.
+fm_test_reap_root_processes() {  # <root>
+  local root=${1%/} chain pid pids signal i
+  [ -n "$root" ] && [ "$root" != / ] || return 0
+  chain=" "
+  pid=$$
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+    chain="$chain$pid "
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  done
+  for signal in TERM KILL; do
+    i=0
+    while [ "$i" -lt 20 ]; do
+      pids=$(ps -ww -eo pid=,args= 2>/dev/null \
+        | FM_TEST_REAP_ROOT="$root/" awk -v chain="$chain" \
+          'index($0, ENVIRON["FM_TEST_REAP_ROOT"]) && index(chain, " " $1 " ") == 0 { print $1 }')
+      [ -n "$pids" ] || return 0
+      # shellcheck disable=SC2086 # one argument per pid
+      [ "$i" -gt 0 ] || kill -s "$signal" $pids 2>/dev/null
+      sleep 0.1
+      i=$((i + 1))
+    done
+  done
+}
+
 fm_test_cleanup() {
   local d
   fm_test_reap_watchers
@@ -302,7 +369,9 @@ fm_test_cleanup() {
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && fm_test_remove_tree "$d"
+      [ -n "$d" ] || continue
+      fm_test_reap_root_processes "$d"
+      fm_test_remove_tree "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
@@ -356,6 +425,7 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
+    fm_test_reap_root_processes "$dir"
     fm_test_remove_tree "$dir"
   done
 }
