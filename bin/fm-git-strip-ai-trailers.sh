@@ -23,7 +23,10 @@
 #       would find this directory again and never run the repository's own
 #       hook - a skipped pre-push guard. An empty core.hooksPath means no
 #       repository hook, as in plain git; any other failed lookup exits
-#       nonzero rather than skipping the repository's hook. Does not touch the
+#       nonzero rather than skipping the repository's hook. A lookup that finds
+#       a copy of the wrapper itself exits zero instead of exec-ing that copy,
+#       since beads preserves the pane's hooks into .beads/hooks on init and
+#       that exec would re-enter the wrapper forever. Does not touch the
 #       project's git config; the caller prefixes the pane with env-file below.
 #       --no-strip writes a commit-msg wrapper that only chains, for a home that
 #       keeps trailers but still needs the directory for the push guard.
@@ -187,6 +190,16 @@ write_executable() {
 # core.hooksPath makes that lookup fail, but plain git reads it as "no hooks",
 # so the wrapper runs none; any other failure reruns the lookup to show git's
 # error and refuses.
+# Refuse as well when the lookup names a directory holding a copy of this
+# very file, so the wrapper cannot exec itself: beads preserves the pane's
+# hooks into .beads/hooks on init and then points core.hooksPath there. Every
+# wrapper also carries a re-entrancy sentinel first: when FM_GIT_HOOK_ACTIVE is
+# already set the hook exits zero at once, else it sets and exports it.
+# Path comparisons miss mixed fresh/stale cycles - installed copies outlive
+# the task that wrote them, beads preserves pane hooks by copy (new inode),
+# and a section injected above the chain still runs - so the sentinel, which
+# depends on no path being what is expected, is what stops a hook that
+# re-enters itself through bd -> git from recursing.
 runtime_chain_body() {
   local ours=$1
   cat <<EOF
@@ -216,6 +229,19 @@ orig=\$(unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-
   exit 1
 }
 if [ "\$orig" = "\$ours" ]; then
+  exit 0
+fi
+# A copy of this wrapper can live inside the repository's own hooks directory:
+# beads preserves the pane's hooks into .beads/hooks on init and then points
+# core.hooksPath there, so the lookup above names the directory holding this
+# very file. Then \$orig/\$name IS this file, and exec would re-enter this
+# wrapper forever while git waits for a hook exit that never comes (every
+# bd init in a pane carrying this hooks path hung this way, orphaning one git
+# commit per attempt). Refuse that exec; commit-msg already stripped above,
+# and every other name has nothing left to do here. -ef follows symlinks, and
+# a relative \$0 still resolves against this process's cwd, so the comparison
+# holds however git invoked the hook.
+if [ "\$orig/\$name" -ef "\$0" ] 2>/dev/null; then
   exit 0
 fi
 if [ -x "\$orig/\$name" ]; then
@@ -281,6 +307,25 @@ write_env_file() {
   fi
 }
 
+# First lines of every generated wrapper, before the strip and before the
+# chain lookup. A hook that re-enters itself through bd -> git, or through any
+# chain of preserved hook copies, must not recurse: the first entry exports the
+# marker, and every entry below it on the same stack exits at once. This check
+# is first so a section injected above the chain (the beads integration block)
+# cannot run twice on one stack either. A re-entrant commit-msg exits before
+# the strip; the outer message was already stripped on the first entry, and a
+# nested commit inside a hook is the integrator's business, not a typed message.
+sentinel_body() {
+  cat <<'SENTINEL_EOF'
+# Re-entrancy sentinel: exit at once when a hook is already running above us
+# on this stack. Installed copies outlive their task, so no path check here.
+if [ -n "${FM_GIT_HOOK_ACTIVE:-}" ]; then
+  exit 0
+fi
+export FM_GIT_HOOK_ACTIVE=1
+SENTINEL_EOF
+}
+
 install_hooks() {
   local hooks_dir=$1 wt=$2 strip=${3:-1} guard_src=${4:-} name strip_line guard_file guard_cmd
   [ -n "$hooks_dir" ] && [ -n "$wt" ] || usage
@@ -307,6 +352,7 @@ install_hooks() {
   write_executable "$hooks_dir/commit-msg" <<EOF
 #!/usr/bin/env bash
 set -u
+$(sentinel_body)
 $strip_line
 $(runtime_chain_body "$hooks_dir")
 EOF
@@ -320,6 +366,7 @@ EOF
     write_executable "$hooks_dir/pre-push" <<EOF
 #!/usr/bin/env bash
 set -u
+$(sentinel_body)
 refs=\$(cat)
 if [ -n "\$refs" ]; then
   printf '%s\\n' "\$refs" | $guard_cmd "\$@" || exit 1
@@ -337,6 +384,7 @@ EOF
     write_executable "$hooks_dir/$name" <<EOF
 #!/usr/bin/env bash
 set -u
+$(sentinel_body)
 $(runtime_chain_body "$hooks_dir")
 EOF
   done

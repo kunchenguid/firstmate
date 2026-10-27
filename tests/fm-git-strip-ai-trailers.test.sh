@@ -455,6 +455,106 @@ test_cortex_attribution_does_not_reach_the_commit_object() {
   pass "Cortex Code's Generated with line and co-author trailer are stripped; a human at its vendor domain is kept"
 }
 
+test_reentrant_hook_cycle_exits_at_first_reentry() {
+  local repo hooks stubbin depthlog bound maxdepth body outer
+  repo="$TMP_ROOT/reentry"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-reentry"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  # A repository hook that fires git the way an integration block does:
+  # hook -> bd -> git -> hook. The pane wrappers deliberately scrub the
+  # GIT_CONFIG environment before chaining, so a bare nested git resolves the
+  # repository hooks directly and never re-enters a wrapper. The fake bd below
+  # instead carries the pane hooks override on its own command line, the way a
+  # child process inherits a git -c override - the channel the wrapper header
+  # names as live. That nested entry reaches a pane wrapper a second time on
+  # the same stack with a different hooks resolution, which no path comparison
+  # can recognize. Without the re-entrancy sentinel this recursed until
+  # something external killed it; the depth cap stands in for that kill so the
+  # failure is fast instead of hanging the suite, and the assertion reads the
+  # cap it never should reach.
+  stubbin="$TMP_ROOT/reentry-bin"
+  mkdir -p "$stubbin"
+  depthlog="$TMP_ROOT/reentry.depth"
+  rm -f "$depthlog"
+  cat >"$stubbin/bd" <<SH
+#!/usr/bin/env bash
+# Fake bd: the nested commit carries the pane hooks override the way a child
+# process inherits a git -c override, so the nested entry reaches a pane
+# wrapper a second time on the same stack.
+exec git -c core.hooksPath="$hooks" -C "$repo" commit --allow-empty -q -m "nested"
+SH
+  chmod 700 "$stubbin/bd"
+  cat >"$repo/.git/hooks/post-commit" <<SH
+#!/usr/bin/env bash
+depth=\${REENTRY_DEPTH:-0}
+printf '%s\\n' "\$depth" >> "$depthlog"
+if [ "\$depth" -ge 3 ]; then
+  exit 0
+fi
+export REENTRY_DEPTH=\$((depth + 1))
+PATH="$stubbin:\$PATH" bd hooks run post-commit || true
+exit 0
+SH
+  chmod 700 "$repo/.git/hooks/post-commit"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  if command -v timeout >/dev/null 2>&1; then bound="timeout 60";
+  elif command -v gtimeout >/dev/null 2>&1; then bound="gtimeout 60";
+  else fail "neither timeout nor gtimeout is installed to bound the recursion check"; fi
+  # shellcheck disable=SC2086 # bound is a chosen command name plus its seconds
+  with_hooks_env "$hooks" $bound git -C "$repo" commit -q \
+    --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: reentrant cycle' ||
+    fail "commit through a re-entered wrapper hung or failed"
+  [ -f "$depthlog" ] || fail "the repository post-commit hook never ran, so the chain is broken"
+  maxdepth=$(sort -rn "$depthlog" | head -1)
+  [ "$maxdepth" = "0" ] ||
+    fail "the hook re-entered to depth $maxdepth; without the depth cap this hangs"
+  [ "$(wc -l < "$depthlog" | tr -d ' ')" = "1" ] ||
+    fail "the repository hook ran more than once; the re-entrant entry must exit at once"
+  # The nested commit lands on the branch: re-entrant git proceeds, only the
+  # hooks are shed. So HEAD is the nested commit and HEAD~1 is the outer one.
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_contains "$body" "nested" "the nested commit did not land; re-entrant git must proceed"
+  outer=$(git -C "$repo" log -1 --format=%B HEAD~1)
+  assert_not_contains "$outer" "cursoragent@cursor.com" "Cursor trailer survived a commit through the re-entered wrapper"
+  assert_contains "$outer" "fix: reentrant cycle" "subject was rewritten"
+  pass "a hook re-entered through bd-style nesting exits at once instead of recursing"
+}
+
+test_wrapper_copy_inside_repository_hookspath_completes() {
+  local repo hooks copyland body bound
+  repo="$TMP_ROOT/self-copy"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-self-copy"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  # Beads preserves the pane's hooks into .beads/hooks on init and then points
+  # core.hooksPath there, so the repository's own hooks directory ends up
+  # holding a copy of this wrapper. That copy's chain lookup names its own
+  # directory, which used to exec the copy again forever while git waited for
+  # a hook exit that never came. No pane override here: bd scrubs the fleet
+  # environment before running git, so the lookup resolves the repository's
+  # own config only.
+  copyland="$repo/.beads-hooks"
+  mkdir -p "$copyland"
+  cp "$hooks/prepare-commit-msg" "$copyland/prepare-commit-msg"
+  cp "$hooks/commit-msg" "$copyland/commit-msg"
+  chmod 700 "$copyland/prepare-commit-msg" "$copyland/commit-msg"
+  git -C "$repo" config core.hooksPath "$copyland"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  if command -v timeout >/dev/null 2>&1; then bound="timeout 60";
+  elif command -v gtimeout >/dev/null 2>&1; then bound="gtimeout 60";
+  else fail "neither timeout nor gtimeout is installed to bound the recursion check"; fi
+  # shellcheck disable=SC2086 # bound is a chosen command name plus its seconds
+  $bound git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: self-contained wrapper' ||
+    fail "commit through a wrapper copy inside the repository hooks hung or failed"
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_not_contains "$body" "cursoragent@cursor.com" "Cursor trailer survived a commit through the copied wrapper"
+  assert_contains "$body" "fix: self-contained wrapper" "subject was rewritten"
+  pass "a wrapper copy inside the repository hooks completes instead of re-entering itself"
+}
+
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   local msg
   msg="$TMP_ROOT/msg.txt"
@@ -538,6 +638,8 @@ test_git_c_override_still_strips_and_chains_commit_hooks
 test_repository_hook_keeps_inherited_git_config
 test_env_file_canonicalizes_hooks_dir
 test_cortex_attribution_does_not_reach_the_commit_object
+test_reentrant_hook_cycle_exits_at_first_reentry
+test_wrapper_copy_inside_repository_hookspath_completes
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 test_no_strip_keeps_the_message_and_still_chains
 test_push_guard_install_runs_the_guard_before_chaining
