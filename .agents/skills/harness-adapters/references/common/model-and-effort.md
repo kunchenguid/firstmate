@@ -5,7 +5,7 @@ Add `references/common/dispatch.md` for configured profile precedence.
 
 ## Axes and precedence
 
-`../../../bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values selected at intake; scripts never parse natural-language dispatch rules.
+`../../../bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values selected at intake.
 The tool reference records verified flags, accepted values, omission behavior, and discovery for pane-backed launches.
 For T3 Code, resolve both axes through the [provider catalog contract](../../../../../docs/t3code-backend.md#provider-instances-and-models) before selecting a profile.
 
@@ -40,4 +40,4 @@ For an unfamiliar namespace, establish support and provider identity from that h
 An account-reaching listing that omits a model is concrete unsupported evidence; block the candidate and quote it.
 An unreachable surface establishes nothing; report uncertainty instead of a verdict.
 
-For a matched profile array, return to `quota-array-dispatch` only after establishing every candidate's harness support, provider relationship, and uncertainty.
+The [dispatch intake contract](../../../../../AGENTS.md#4-harness-and-runtime-dispatch) owns profile-array selection.
