@@ -2043,8 +2043,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           [ "$_wrb_age" -ge "$STALE_ESCALATE_SECS" ] || _wrb_gate=0
           ;;
       esac
+      triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); escalations silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
       if [ "$_wrb_gate" -eq 1 ]; then
-        triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); escalations silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
         wedge_dead_record "$win" "$since_file" "$label" "$_wrb_age" "$hash" "$task" \
           || { fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
       fi
