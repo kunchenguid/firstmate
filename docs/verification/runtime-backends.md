@@ -307,7 +307,7 @@ Both recorded runtime identities now classify the exact `pi-launcher` foreground
 Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
 Herdr uses native registered-agent state and needs no process-name branch.
-Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
+Zellij has no verified recovery-grade agent process probe, while Orca, cmux, and tern do not support secondmate spawns, so those backends retain their existing generic ordinary-launch semantics without a new secondmate liveness matcher.
 
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
@@ -315,7 +315,8 @@ Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-he
 
 ### Cleanup endpoint identity
 
-The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every backend supported at that time.
+The portable suite now also carries a tern metadata fixture with full 64-bit session/tab/block ids (including values above 2^53) so validation cannot round them; re-run the commands below after integration for current output rather than treating the 2026-07-28 transcript as tern-era evidence.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -324,9 +325,10 @@ tests/fm-backend-herdr.test.sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend-cmux.test.sh
+tests/fm-backend-tern.test.sh
 ```
 
-Bounded output from the incident regression:
+Bounded output from the 2026-07-28 incident regression (pre-tern):
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
@@ -338,7 +340,8 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex before backend dispatch.
+The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, Paseo, and Rex before backend dispatch, and now covers tern as well once the parent records a green portable run; do not treat the pre-tern transcript above as proof of the tern fixture.
+`tests/fm-backend-t3code.test.sh` covers T3 thread bindings.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ### Endpoint close
@@ -362,7 +365,7 @@ ok - fm-teardown: an already-exited endpoint, and a server that is already gone,
 ok - fm_backend_orca_kill: a close its missing CLI never attempted reports the failure instead of a success
 ```
 
-An endpoint that is already legitimately gone returns 0 silently on every arm, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited.
+An endpoint that is already legitimately gone returns 0 silently on every arm covered by this entry, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited.
 The refusal is reached only through a close that could not do its job, and each arm reports only what it can prove:
 
 | Backend | already gone | a close that failed |
@@ -371,6 +374,7 @@ The refusal is reached only through a close that could not do its job, and each 
 | orca | 0, silent | 1 when a missing CLI means no close was attempted; 0 for a close command that failed after the CLI accepted it |
 | zellij | 0, silent | 0, not yet distinguishable |
 | cmux | 0, silent | 0, not yet distinguishable |
+| tern | 0, silent | 1 when its inventory re-read cannot run, the block moved to another session, its tab no longer carries the task's scoped title, or it is still listed after the close; portable fixtures only (`tests/fm-backend-tern.test.sh`), contract in [tern-backend.md](../tern-backend.md) |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
 The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
@@ -381,10 +385,11 @@ Any other read failure - a momentarily unresponsive server, or a teardown PATH w
 
 Two bounds of the refusal are known and deliberately not closed here.
 
-`--force` overrides it at exactly one site, the generic non-Herdr/non-Orca close.
+`--force` overrides it at exactly one site, the generic close for backends other than Herdr, Orca, and T3 Code.
 That is the only close where continuing is actually reachable: the worktree is already returned by then and nothing after it needs the backend that could not close, so `--force` - the operator's existing authority to discard a task's records - can mean something there.
 A forced run still prints the full diagnosis naming the backend, the target, and that the close failed, so what may survive is never silent.
 It states what `--force` authorizes rather than what will have happened, because a later refusal in the same run - the Herdr confirmed-gone gate, or the inactive-reconcile delivery gate - can still stop it with every record retained.
+T3 Code uses the [native cleanup path](../t3code-backend.md#current-lifecycle-and-safety) instead.
 
 The Orca close refuses under `--force` too.
 The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
@@ -402,6 +407,39 @@ Letting an unreadable inventory pass for absence makes the unreadable case compl
 Removing the `--force` arm makes the forced generic case refuse; honoring `--force` at the child sites makes forced secondmate cleanup continue past a child endpoint it could not close, and honoring it at the Orca site makes that forced cleanup abort on the missing CLI after announcing that it was continuing.
 Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
 Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
+
+## Kimi folder prompt
+
+Verified on 2026-10-23 on Linux with tmux 3.6 against Kimi Code CLI 2.3.0 and 2.3.1, each installed into an isolated prefix and launched with a disposable home and its updater off.
+Kimi 2.3.0 reworded its folder prompt: the options read `Trust and continue` and `Exit`, a directory with no project MCP servers reads `No project integrations or instructions to activate.`, and a directory that declares project MCP servers announces them as `Start N MCP server(s) automatically` over `Config: <file>`.
+It also reads a root `.mcp.json` at the git worktree root as a project declaration, which its documentation does not name; the prompt's `Config:` line names whichever file declared the servers.
+Pressing Enter on an announcing prompt started the declared stdio command before any login, so `bin/fm-spawn.sh` never answers one.
+In a pane too short for the prompt Kimi shows only the title and `Enlarge terminal to review sources. Esc exit.`, and in a pane a few rows taller it keeps the complete dialog and pages the lines between the directory and the options, marked `←→ page · N / M`, which can hide the announcement.
+`bin/fm-kimi-trust-lib.sh` owns the predicates and `tests/captures/kimi-code-2.3.0/README.md` the recorded panes.
+The default-on live guard launches the installed Kimi bare in a private tmux server, spends no tokens, needs no login, and refreshes this evidence:
+
+```sh
+FM_KIMI_TRUST_PROMPT_LIVE=1 bin/fm-test-run.sh tests/fm-kimi-trust-prompt-live-e2e.test.sh
+```
+
+Observed output against 2.3.0; 2.3.1 printed the same lines with its own version:
+
+```text
+# kimi 2.3.0: plain prompt options read 'Trust and continue' / 'Exit'
+ok - kimi 2.3.0: a plain directory's folder prompt is the complete dialog, and Enter clears it into a ready pane
+# kimi 2.3.0: root-mcp-json prompt announces: Start 1 MCP server automatically;Config: .mcp.json;
+ok - kimi 2.3.0: a root-mcp-json declaration is announced on the folder prompt, which receives no answer, and its command never ran
+# kimi 2.3.0: kimi-code-mcp-json prompt announces: Start 1 MCP server automatically;Config: .kimi-code/mcp.json;
+ok - kimi 2.3.0: a kimi-code-mcp-json declaration is announced on the folder prompt, which receives no answer, and its command never ran
+# kimi 2.3.0: 100x7 pane shows: Trust this folder?;Enlarge terminal to review sources. Esc exit.;
+# kimi 2.3.0: 100x12 pane: the announcement is on a hidden page, so only the page marker refuses this prompt
+ok - kimi 2.3.0: a short pane collapses the prompt below the complete dialog, and a slightly taller one pages it with the page marker on screen
+ok - kimi 2.3.0: folder-prompt predicates agree with the installed Kimi on every recorded wording
+```
+
+The portable regression `tests/fm-kimi-harness.test.sh` replays the recorded panes through its fake pane: the plain prompt is answered once and the brief delivered, each announcing wording and the paged prompt receive no key and report why, and the collapsed prompt reports that it is not ready.
+Each case is non-vacuous: dropping the 2.3.0 option pair from the complete-dialog test fails the plain case, making the announcement test never fire fails the root `.mcp.json` case, and making the page test never fire fails the paged case.
+The 2.0.0 wording keeps its existing cases in the same suite.
 
 ## Claude workspace trust
 
@@ -777,7 +815,7 @@ This confirms unattended progress through the reviewer, not unrestricted network
 
 `tests/fm-spawn-dispatch-profile.test.sh` pins unchanged bypass defaults and explicit `approve-for-me` launches for ships and scouts, plus hook and secondmate launch wiring.
 `tests/fm-approval-failover.test.sh` exercises the firstmate-invoked command through real filesystem publication and the existing lease owner, substituting lifecycle control to avoid touching real workers.
-It covers writing once, preserving explicit and concurrent settings, invoking guarded relaunch, retaining the remedy on recovery failure, and local/remote inheritance precedence.
+It covers writing once, preserving explicit and concurrent settings, invoking guarded relaunch, retaining the remedy on recovery failure, refusing a `backend=t3code` task before any change, and local/remote inheritance precedence.
 These behavior tests do not verify an actual vendor-refusal recovery or live relaunch; the prior live automatic-review probe verifies the fallback's capabilities, not that complete recovery path.
 There is no automatic detector or harness-output classifier to verify, and a generic login error does not establish a defeated bypass.
 
@@ -2285,6 +2323,7 @@ Current active CLI findings:
 | Session create | `rex new <label> --window <label> --cwd <dir> --json` | Returned `session_id` and `initial_windows[0].{window_id,block_ids}`. |
 | Resize | `rex block call -s <sid> -b <bid> resize '{"columns":200,"rows":50}'` | Applied to an unviewed block (`size` then read `{"columns":200,"rows":50,...,"owner":null}`). |
 | Process view | `rex block call -s <sid> -b <bid> process` | `foreground{pid,name,path,argv0,cwd}`, `ancestors[]`, and `last_exit`; `foreground.cwd` followed a nested shell started with `cd <dir> && exec /bin/sh`, and a Claude Code 2.1.308 block read `{"pid":46775,"name":"2.1.308","argv0":"claude"}` with ancestors `zsh`, `login`. |
+| Shell foreground over a harness | `rex block call -s <sid> -b <bid> process` on rex 0.0.1792787366-g623b2d, 2026-10-24 | A pane whose fish login shell started Claude Code 2.1.310 through a fish function and a bash shim read `{"foreground":{"pid":68540,"name":"fish",...},"ancestors":[treehouse, fish, login]}`, while `ps -o pid=,ppid=,pgid=,tpgid=,comm=` showed `82205 68540 68540 68540 bash` and `82263 82205 68540 68540 .../2.1.310/claude`: the harness shares the shell's foreground process group and appears only among the foreground's descendants. |
 | Plain capture | `rex capture -s <sid> -b <bid>` | A 100x10 block holding `a`, `b`, a prompt, and six blank rows returned `a\nb\n/tmp \n❯ \n`: trailing blank rows are dropped. |
 | Styled capture | `rex capture -s <sid> -b <bid> --format=vt` | The same block returned all ten rows joined by CRLF and ending in `\r\n`, so the empty bottom row is implicit. |
 | Styled read with cursor | `rex block call -s <sid> -b <bid> format '{"format":"vt","extra_cursor":true}'` | `.content` held the same CRLF-joined grid without the capture's final line feed, followed by the cursor as `ESC[<row>;<col>H` with a 1-based screen row; the adapter restores the implicit bottom row, derives the viewport as the last `size.rows` rows, and anchors the composer on that row. An idle OpenCode 1.19.3 at 200x50 ended `ESC[45;6H`, inside its composer, with its status line drawn below it (`tests/fixtures/rex-opencode-1.19.3/`). |
@@ -2351,6 +2390,18 @@ Real harness edges on that build, each captured by `fm_backend_wait_transition r
 - Grok 1.0.67's workspace-trust dialog reported `blocked` with kind `permission`, and the wait returned `...|blocked|grok-build|permission: Trust this folder?`.
 - Codex 0.163.0's workspace-trust dialog reported no program status, so it reached no push edge.
 
+### Attention marks
+
+Checked on 2026-10-23 on `rex 0.0.1792607779-g171246`, macOS, and jq.
+Rex attributes a record written to a pane's terminal to that pane's foreground process, so without the `app=firstmate` exclusion an opt-in attention mark would read as the worker's own blocked state.
+
+```text
+$ bash tests/fm-backend-rex-eventwait-smoke.test.sh
+ok - real rex: an opt-in attention mark is one app=firstmate record on the task's pane, titled with its tab label
+ok - real rex: a Firstmate mark rewritten during a wait never escalates, through the real event reader
+ok - real rex: the pane's own blocked report still escalates beside a mark, and clear removes only Firstmate's record
+```
+
 ### Worker tools on Rex
 
 Rechecked on 2026-10-22 on the same Rex build.
@@ -2398,6 +2449,289 @@ ok - real rex: no state-changing call left the test sessions and every other ses
 ```
 
 Use the [Rex regression entry points](../rex-backend.md#regression-entry-points) to refresh this record after a Rex upgrade, and the opt-in live composer guard after any tool upgrade.
+
+## T3 Code
+
+### Orchestrator V2 transport
+
+The `/mcp` transport was verified live on 2026-10-08 against `t3 v0.0.46-nightly.20261008.2833` (npm launcher plus native `@t3code/t3-darwin-arm64`), run as a loopback lab server with `T3CODE_TELEMETRY_ENABLED=false`, with Claude Code 2.1.295, codex-cli 0.160.1, node 26.8.2, and treehouse 2.3.0 on macOS arm64.
+That run drove `bin/fm-t3-mcp.mjs` through an earlier standalone wiring of the same helper in a scratch Firstmate home, scratch project, and private Treehouse pool root.
+T3 stable 0.0.45 lacks the `t3_thread_*` tools, and 0.0.46 nightly answers 404 for the pre-V2 `POST /api/orchestration/dispatch` route.
+
+```sh
+bin/fm-t3-mcp.mjs login --url http://127.0.0.1:<port> --access full-access --t3 <t3> --base-dir <t3-base-dir>
+bin/fm-t3-mcp.mjs status
+t3 auth session revoke <id> --base-dir <t3-base-dir>
+```
+
+```text
+{"ok":true,...,"environmentId":"<id>","serverVersion":"0.0.46-nightly.20261008.2833",...,"telemetry":"off"}
+{"ok":true,...,"exists":true,"archived":true,"status":"interrupted","activeRunId":null,...}
+{"ok":false,"error":{"code":"unauthorized",...}}
+```
+
+Measured on that run:
+
+| Step | Result |
+| --- | --- |
+| Spawn, including the Treehouse lease and idle-thread launch | 18.3 s |
+| Spawn return to a Claude scout's `done` line, report, and captain-hold gate | 20.7 s |
+| Inbox steer send to the worker's `handled/` acknowledgement | 8.2 s |
+| Interrupt of a running `python3` tool call, confirmed by `t3_thread_wait` | 3.2 s; the child was gone 2 s later |
+| Teardown, including the archive read-back and slot return | 12.5 s; the slot read `available` afterwards |
+| A Codex `gpt-5.6-luna` scout from spawn to `done` | 43 s; teardown completed |
+
+Live facts the backend relies on:
+
+- `t3_thread_launch` without a message creates an idle thread whose `worktreePath`, `providerInstanceId`, and `runtimeMode` read back exactly as requested, under a T3-assigned `mcp:<uuid>` id.
+- A launch on a path that is not one of the project's git worktrees is refused with `invalid_request`, and no thread is created.
+- `t3_thread_send` with a repeated `clientRequestId` returns the same run instead of a second turn.
+- `t3_thread_interrupt` on an idle thread returns `no_active_run`; on a running turn, `t3_thread_wait` then reports `interrupted`.
+- `t3_thread_organize archive` reads back `archived:true` with `activeRunId:null`, and a later send is refused with `thread_not_sendable`.
+- T3's Claude reads the worktree's `.claude/settings.local.json`: Firstmate's busy and turn-end hooks fired, and a lab commit carried no agent co-author trailer.
+- The listening server's process environment showed `T3CODE_TELEMETRY_ENABLED=false`, so status reported `telemetry: off`.
+- After `t3 auth session revoke`, `t3 auth session list` reported no active sessions and the next helper call was refused as unauthorized.
+- The 0.0.46 nightly binary's schemas offer the `root`, `existing_worktree`, and `worktree` launch workspace strategies, `t3_thread_list` filtered by status per project, and no session-stop tool, which is why a secondmate launches at `root` and `fm-control.sh exit` refuses.
+
+### Adapter wiring on Linux
+
+This backend's own wiring was verified live on 2026-10-10 against `t3 v0.0.46-nightly.20261010.2935` running as the service-managed server on Linux x86_64 (kernel 7.0.0), with Claude Code 2.1.296, codex-cli 0.162.1, node v24.21.0, and treehouse 2.1.0.
+The server ran with telemetry on, so every verb printed the telemetry warning.
+The run used a scratch Firstmate home (`config/backend` `t3code`, a fresh `login` credential, and `config/t3code-instances`), a scratch project with a bare origin, and the default Treehouse pool root.
+
+```sh
+bin/fm-t3-mcp.mjs login --access full-access
+bin/fm-brief.sh lab-scout-1 lab --scout
+bin/fm-spawn.sh lab-scout-1 <home>/projects/lab --scout --model claude-haiku-5-5 --effort low
+bin/fm-send.sh lab-scout-1 "<steer>"
+bin/fm-control.sh lab-scout-3 interrupt
+bin/fm-teardown.sh lab-scout-1
+bin/fm-spawn.sh lab-scout-2 <home>/projects/lab --scout --harness codex --model gpt-6-luna --effort low
+```
+
+| Step | Result |
+| --- | --- |
+| Spawn of a Claude scout, including the Treehouse lease and the launch turn | 2.2 s |
+| Claude scout from spawn to its report | under 30 s |
+| Inbox steer during a running turn | delivered as `steered`; the worker moved `001.msg` to `handled/` and applied it before its `done` line |
+| `fm-control.sh interrupt` during a running `python3` tool call | `interrupt-delivered lab-scout-3 harness=claude backend=t3code verified=agent-alive cancel=confirmed`; the child process was gone 2 s later |
+| Teardown | 2.1 s; the thread read `archived:true` with no active run and the slot read `available` |
+| Codex `gpt-6-luna` scout from spawn to `done` | about 30 s; teardown completed |
+
+Live facts this run added:
+
+- Threads created before the V2 switch keep their plain UUID ids and read through `t3_thread_read` as ordinary idle threads, so a task recorded before the switch keeps a readable endpoint.
+- `t3_thread_read` pages the activity view oldest first from `afterPosition`, and `thread.itemCount` is the visible item count, which is how `capture` reads the tail.
+- `thread-for-root` on the Firstmate home resolved the captain's own T3 thread, whose id is a plain UUID.
+- On Linux the listener's environment is NUL-separated `/proc/<pid>/environ`, which the telemetry probe parses.
+- T3 detaches the provider session after the archive asynchronously, so its Claude or Codex process can still be running in the slot when the archive reads back; teardown's worktree-process reaper ended it for both harnesses before the slot returned.
+
+### Run identity, pending requests, and secondmate retirement
+
+The behavior added after the Orchestrator V2 review was verified live on 2026-10-10 against the same `t3 v0.0.46-nightly.20261010.2935` service-managed server on Linux x86_64, with Claude Code 2.1.296, node v24.21.0, and treehouse 2.1.0.
+It used a fresh scratch `login` credential, a scratch Firstmate home with `config/backend` `t3code`, a scratch project with a bare origin, and a scratch standalone secondmate home; every scratch thread was archived afterwards.
+
+```sh
+bin/fm-t3-mcp.mjs login --access full-access --label fm-review-fixes-scratch
+bin/fm-spawn.sh lab-v2-scout-1 <home>/projects/lab --scout --harness claude --model claude-haiku-5-5 --effort low
+bin/fm-t3-answer.sh lab-v2-scout-1
+bin/fm-t3-answer.sh lab-v2-scout-1 <request-id> '{"Which label should the report use?":"beta"}'
+bin/fm-send.sh lab-v2-scout-1 "<steer starting a 240 s python3 tool call>"
+bin/fm-control.sh lab-v2-scout-1 interrupt
+bin/fm-teardown.sh lab-v2-scout-1
+bin/fm-spawn.sh lab-v2-sm <sm-home> claude --model claude-haiku-5-5 --effort low --backend t3code --secondmate
+bin/fm-teardown.sh lab-v2-sm
+```
+
+The watcher's event wait ran from a scratch script that sources the real watcher for the scratch home and calls `event_wait_or_sleep` with a 10 s interval.
+
+| Step | Result |
+| --- | --- |
+| Spawn of a Claude scout, including the catalog-resolved selection and the `t3_thread_configuration` read-back | 5.6 s; the worktree's `CLAUDE.local.md` carried no pull-request-tool clause |
+| The scout's question through Claude's question tool | the first event-wait cycle returned in 1 s with `stale: <thread> (t3code: agent blocked - waiting on human: T3 question <request-id> pending - read and answer with bin/fm-t3-answer.sh, ...)` |
+| `fm-t3-answer.sh` list, then answer | `pendingRequestCount:1`, `approvals:0`, the question and its `alpha`/`beta` options; the answer landed, the escalation marker cleared, and the next cycle raised no wake |
+| The scout's report | `Report label chosen: beta.` and `done` |
+| Inbox steer starting a 240 s `python3` tool call | sent in 3.7 s; the tool call started |
+| `fm-control.sh interrupt` | `interrupt-delivered lab-v2-scout-1 harness=claude backend=t3code verified=agent-alive cancel=confirmed` in 3.8 s, confirmed on the interrupted run itself; the child was gone 2 s later |
+| Scout teardown | 13.4 s; the reaper ended the late-detaching provider process, the thread read `archived:true` with no active run, and the slot read `available` |
+| Secondmate spawn in a standalone home, charter turn | 4.8 s; the charter turn completed, and an idle Claude provider process stayed rooted in the home |
+| Secondmate retirement | 8.2 s; `teardown: reaping leaked secondmate home process(es) for lab-v2-sm: <pid>` ran after the proven archive and before the home was removed; the provider process was gone and the thread read `archived:true` |
+
+Live facts this run added:
+
+- Claude's question tool in a T3 thread is a `user_input` runtime request: it raises `pendingRequestCount` and is listed, read, and answered through the `t3_pending_request_*` tools, keyed by question text.
+- Every tool in the capability gate, including `orchestrator_capabilities`, `t3_thread_configuration`, and the pending-request tools, is offered to an OAuth `mcp-client`, and the catalog reports `driverKind` per instance (`claudeAgent`, `codex`).
+- A launch's `t3_thread_configuration` reads back the requested instance, model, and options.
+- The provider process of an idle secondmate thread stays running in its home until after the archive reads back.
+
+### Stable 0.1.0
+
+The backend was verified live on 2026-10-17 against stable `t3 v0.1.0` (npm launcher plus native `@t3code/t3-darwin-arm64`), run as a loopback lab server with `T3CODE_TELEMETRY_ENABLED=false`, with Claude Code 2.1.302, node v26.8.2, and treehouse v2.3.0 on macOS 26.3 arm64.
+It used a scratch Firstmate home with `config/backend` `t3code`, a scratch project with a bare origin, and a private Treehouse pool root; the lab credential was revoked and the server stopped afterwards.
+T3 0.1.0 grants a full-access `mcp-client` `orchestration:read`, `orchestration:operate`, `settings:write`, and `source-control:write`, and its OAuth decision refuses a pairing code that does not cover all four, which the 0.0.46 nightlies did not require.
+
+```sh
+bin/fm-t3-mcp.mjs login --url http://127.0.0.1:<port> --access full-access --t3 <t3> --base-dir <t3-base-dir>
+bin/fm-spawn.sh lab1 projects/labproj --scout --harness claude --model claude-haiku-5-5 --effort low
+bin/fm-send.sh lab1 "<steer>"
+bin/fm-control.sh lab1 interrupt
+bin/fm-control.sh lab1 exit
+bin/fm-teardown.sh lab1
+```
+
+```text
+{"ok":false,"error":{"code":"oauth_failed","message":"/oauth/mcp/decision failed: That pairing code cannot grant this access, and it is now used up. Create one with the standard scopes, or choose Read only with a new code."}}
+{"ok":true,...,"access":"full-access","scope":"orchestration:read orchestration:operate settings:write source-control:write",...,"serverVersion":"0.1.0"}
+interrupt-delivered lab1 harness=claude backend=t3code verified=agent-alive cancel=confirmed
+{"ok":true,...,"exists":true,"archived":true,"status":"interrupted","activeRunId":null,...}
+```
+
+The first line is the sign-in with only the read and operate scopes; the second is the sign-in with all four.
+
+| Step | Result |
+| --- | --- |
+| Spawn of a Claude scout, including the Treehouse lease and the launch turn | 9.3 s |
+| Claude scout from spawn to its `done` line and report | 28.3 s |
+| Inbox steer send to the worker's `handled/` acknowledgement | 7.8 s |
+| `fm-control.sh interrupt` during a running `python3` tool call | 2.0 s, `cancel=confirmed`; the child was gone 2 s later and the thread read `interrupted` |
+| `fm-control.sh exit` | refused before anything was sent |
+| Teardown, including the archive read-back and slot return | 23.5 s; the thread read `archived:true` with no active run, the record was removed, and the slot read `available` |
+
+### Permission approvals in the activity view
+
+The approval part of the pending-request signature was checked against the stable `t3 v0.1.0` source (tag `v0.1.0`, commit `81493efb`); no permission approval was triggered on the live lab server.
+Paths are in the T3 Code repository at that tag.
+
+- `t3_pending_request_list` returns only `user_input` requests (`apps/server/src/mcp/toolkits/thread/handlers.ts:203-208`), while `pendingRequestCount` counts every pending runtime request (`apps/server/src/mcp/OrchestratorMcpService.ts:771`), so the question tools cannot list an approval.
+- `t3_thread_read` with `view: "activity"` returns every visible turn item, while the default `messages` view keeps only messages and plans (`apps/server/src/orchestration-v2/ProjectionStore.ts:5196`); `itemCount` is the length of the whole visible timeline in either view (`ProjectionStore.ts:5237`), so a tail read can start from it.
+- Each activity item carries its turn-item id as `itemId` and its status as `status` (`packages/contracts/src/orchestratorMcp.ts:412-423`, built at `OrchestratorMcpService.ts:889` and `:896`), and an `approval_request` item is rendered in that view (`OrchestratorMcpService.ts:838`); T3 Code's own mobile activity list handles the same type (`apps/mobile/src/lib/threadActivity.ts:451`).
+- Both drivers Firstmate runs create the item with `type: "approval_request"` and `status: "waiting"`: Claude at `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts:5763-5779` and Codex at `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts:4190-4204`; every other adapter at that tag uses `waiting` too.
+- The item id is derived from the runtime request id as `turn-item:runtime-request:<requestId>` (`packages/provider-core/src/server/IdAllocator.ts:293-294`), so each approval has its own stable id.
+- Answering the request moves the item to `completed`, or `cancelled` on a decline or cancel (`apps/server/src/orchestration-v2/Orchestrator.ts:7407-7410` and `:7477`), so only an unanswered approval reads `waiting`.
+- `maxCharsPerItem` accepts 1 to 50000 (`packages/contracts/src/orchestratorMcp.ts:363`); the helper reads the activity view at 600, the value `capture` already uses live.
+
+### Claude pull-request tools
+
+T3's `link_pull_request`, `list_thread_pull_requests`, and `unlink_pull_request` tools crashed a Claude session on a pre-V2 T3 build, so Claude workers were told not to call them.
+On 2026-10-10, against `t3 v0.0.46-nightly.20261010.2935` with Claude Code 2.1.296, a scratch Claude thread (`claudeAgent`, `claude-haiku-5-5`) called all three, linking and unlinking the merged `https://github.com/kunchenguid/firstmate/pull/1`, and its run completed with every call answered.
+That build is `FM_BACKEND_T3CODE_PR_TOOLS_VERIFIED_FROM` in `bin/backends/t3code.sh`; Claude workers on an older or unreadable server keep the clause.
+The opt-in guard repeats the check and fails naming both versions:
+
+```sh
+FM_T3CODE_PR_TOOLS_LIVE=1 FM_CONFIG_OVERRIDE=<home>/config bin/fm-test-run.sh tests/fm-backend-t3code-pr-tools-live-e2e.test.sh
+```
+
+```text
+ok - t3code live: T3 0.0.46-nightly.20261010.2935 with 2.1.296 (Claude Code) (claudeAgent claude-haiku-5-5) ran link_pull_request, list_thread_pull_requests, and unlink_pull_request in a Claude thread without a crash
+```
+
+### Live transport guard
+
+The token-free guard checks the gate, the project catalog, a typed missing-thread read, and the supervisor lookup against the server the configured credential names, and changes nothing there.
+
+```sh
+FM_CONFIG_OVERRIDE=<home>/config bin/fm-test-run.sh tests/fm-backend-t3code-live-e2e.test.sh
+```
+
+```text
+ok - t3code live transport: T3 0.1.0 environment <id> passes the gate (telemetry=off)
+```
+
+That result is from the 2026-10-17 stable 0.1.0 lab run; refresh it with the command above after signing in.
+
+### Portable regression coverage
+
+```sh
+tests/fm-t3-mcp.test.sh
+tests/fm-backend-t3code.test.sh
+tests/fm-backend.test.sh
+tests/fm-daemon.test.sh
+```
+
+The fake models the T3 protocol facts that hide defects when simplified: cursor paging, the read cap of 100, a wait on the exact run or else the latest by ordinal, an interrupt and an archive whose run ends asynchronously, a send committed before a reply that can be lost, and a pending-request count that includes approvals the question tools cannot see.
+`tests/fm-t3-mcp.test.sh` drives the helper against `tests/t3-fake-server.mjs`: the PKCE sign-in, origin defaults, every gate and credential refusal, real-path project matching, catalog-resolved selection, launch binding and configuration read-back with their uncertain and refused outcomes, send idempotency and the unconfirmed verdict for a lost reply, a JSON-RPC server error, T3's catch-all `orchestration_error`, or a tool error without a code (each of which also leaves a launch uncertain), capture and its 500-line bound, exact-run interrupt claims, pending questions and the per-approval signature, the bounded event wait and its re-armed slices, session close, the proven archive, and paged supervisor lookup.
+`tests/fm-backend-t3code.test.sh` drives the adapter, spawn, control, watcher, away daemon, and teardown against the same fake: model selection, the status table, kill ordering, per-directory environment and the Codex trust warning, the Claude pull-request-tool version boundary, worker and secondmate spawn, the secondmate credential link, launch-setting refusals, abort, including a secondmate home's environment removal, slot freshening before launch, isolation-rejected, dirty-slot, and uncertain-launch lease retention, tracked Codex configuration and tracked `CLAUDE.local.md` preservation, the exit and relaunch refusals, lost-reply resends through `fm-send.sh`, the push escalation of pending questions, including under a fractional poll interval, and `bin/fm-t3-answer.sh`, failed-run secondmate resume, the secondmate home shutdown barrier for pooled, standalone, and nested homes and its `lsof` refusal before any archive, the wedge and dead-agent paths, and stale-alert retention and re-arming under unknown busy state.
+`tests/fm-backend-t3code.test.sh` also covers the refusal to replace a T3 secondmate whose thread cannot be proven closed, and `tests/fm-secondmate-liveness.test.sh` pins the unchanged best-effort close on tmux.
+`tests/fm-daemon.test.sh` covers discovery precedence and native busy state.
+
+The tracked Codex configuration guard is independent of the transport and passed on 2026-09-15 with `codex-cli 0.154.0` and Python 3.14.7.
+It proves the project model survives, `FM_TASK_ID` reaches `command/exec`, ordinary staging and commits retain the original configuration blob, and teardown restores the original CRLF bytes and Git flag.
+It capability-skips when Codex is absent and fails on absence when explicitly requested:
+
+```sh
+FM_T3_CODEX_CONFIG_LIVE=1 bin/fm-test-run.sh tests/fm-backend-t3code.test.sh
+```
+
+```text
+ok - codex-cli 0.154.0: project config retained; shell FM_TASK_ID=t3codextrk2
+```
+
+### Per-directory environment evidence
+
+Adapter smokes on 2026-09-15, through the pre-V2 transport, established the transport-independent facts this backend still relies on.
+Claude and Codex both received per-directory environment through their native project configuration.
+Claude required the task-worker statement in the worktree's git-excluded `CLAUDE.local.md` to accept the encoded launch brief.
+A Codex mid-turn steer joined the running turn.
+
+On 2026-10-22, on T3 0.1.0 with codex-cli 0.163.0, a Codex scout spawned on a loopback lab server into a project its Codex configuration did not trust ran without `FM_TASK_ID`, `FM_TASK_INBOX`, `GOTMPDIR`, or the hook entry, although its leased worktree's `.codex/config.toml` held them.
+The same spawn, from the same code, into a project whose main checkout that configuration trusts printed all four from its leased worktree:
+
+```text
+FM_TASK_ID=[lab10] FM_TASK_INBOX=[<lab>/home/state/lab10.inbox] GIT_CONFIG_VALUE_0=[<lab>/home/state/lab10.git-hooks] GOTMPDIR=[/tmp/fm-lab10/gotmp]
+```
+
+Codex's own `config/read` on a leased worktree, through `codex app-server` with an isolated `CODEX_HOME`, gives the same split: the project layer is listed either way, but its values apply only when the worktree, or the main checkout it belongs to, is trusted; a trusted parent directory does not count.
+Write order is not the cause: T3 starts a thread's Codex session with `thread/start` at the thread's first turn (`apps/server/src/orchestration-v2/ProviderTurnStartService.ts:656` calling `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts:6571` at tag v0.1.0), after spawn has written the file.
+
+## tern
+
+The compatibility floor documented with this adapter is Tern 0.9.4.
+This host measured `tern 0.9.4 (b9ef74c)` on 2026-10-19 inside a remote Tern block (`TERM_PROGRAM=tern`, `TERN_PANE` set).
+
+### Host boundary measured here
+
+Read-only CLI probes on this host (no create/close against the captain's live Default session), including TernAdapter's own-block measurements:
+
+| Probe | Result |
+| --- | --- |
+| `tern --version` | `tern 0.9.4 (b9ef74c)` |
+| `tern ls --json` | Succeeded; listed the live Default session and its blocks (ids are integers; do not touch captain blocks). |
+| `tern process <block> --json` | Succeeded; returned `{pane,child,group,foreground}` with pid/name/argv/cwd. |
+| `tern whoami --json` | Succeeded; returned remote identity hops. |
+| `tern capture <block>` / `--ansi` on an omp TSP block | Empty (no transcript text). |
+| `tern capture <block> --surfaces` | Succeeded; JSON `{"block","text"}` main-region transcript without omp's composer; byte-identical with or without `--scrollback` on this host. |
+| `tern ctl state` and `tern ctl carly lua ...` | Failed immediately with `{"ok":false,"error":"no Tern window on this machine shows this pane"}` (exit 1). |
+
+Therefore:
+
+- Session-daemon scripting (`ls` / `process` / `capture --surfaces`) can work on a remote-host block without a local Tern window.
+- Native agent-state via `tern ctl` is unavailable on this host and must degrade to `unknown` rather than fail hard (`FM_BACKEND_TERN_CTL_TIMEOUT` bounds each call; default 5s).
+- Composer caps are deliberately conservative (`styled=0 cursor=0 identity=0`) with no native identity or styled-classifier proof; on omp TSP surfaces observed here, composer-only submit proof is `unknown` and native state is the submit path when `ctl` works.
+- Real-binary smoke (`tests/fm-backend-tern-smoke.test.sh`) requires `tern`, `jq`, a successful `tern ls --json`, **and** a successful `tern ctl state`; it capability-skips (exit 0) when the control endpoint is absent even if `ls` works, and only ever creates sessions named `fm-test-smoke-*` cleaned through `tests/tern-test-safety.sh`.
+- This record does **not** claim a live spawn/steer/teardown proof or a desktop-window native-agent proof on this host.
+- Not live-verified here: key chord names against a desktop window, `send text` with flag-looking text, `tern run` semantics, rename pinning, focus behaviour of new session/tab, and successful `ctl` agent entries.
+
+### Portable and smoke entry points
+
+```sh
+env -u TERM_PROGRAM -u TERN_PANE -u TERN_PANE_SOCKET -u TERN_WINDOW_KEY -u TERN_WINDOW_SOCKET -u TERN_IDENTITY \
+  bash bin/fm-test-run.sh --family tern
+```
+
+Recorded on 2026-10-19 against this worktree (ambient Tern markers unset so the suite does not inherit the captain block):
+
+```text
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=1 duration_ms=22983
+tests/fm-backend-tern.test.sh exit=0 duration_ms=22502
+tests/fm-backend-tern-smoke.test.sh exit=0 duration_ms=29 gate_skip=true
+skip: no Tern window control endpoint (tern ctl state failed) - native agent state cannot be exercised here
+```
+
+The fake-CLI unit suite reported 70 ok cases and exit 0, including full-spawn environment and metadata coverage through `fm-spawn.sh`.
+The real-binary smoke capability-skipped on the absent control endpoint exactly as designed; it did not create or close any session.
+This still does not claim a desktop-window native-agent or live spawn/steer/teardown proof.
+
+Safety: real tests may touch only sessions named `fm-test-*` through `tests/tern-test-safety.sh`, and must never close the captain's live remote Default blocks observed on this host.
 
 ## Codex App host tools
 
@@ -2921,6 +3255,23 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+### Profile flag
+
+Verified on 2026-10-24 against omp 18.4.3 (`~/.bun/bin/omp`, a Bun package install) on macOS 15 arm64, for the [per-secondmate omp profile](../configuration.md#per-secondmate-omp-profile) pin.
+omp extracts `--profile` from anywhere in its arguments, so the flag Firstmate places right after the executable and before `--config` is honored, and it applies to subcommands such as the catalog check's `models --json`:
+
+```text
+$ OMP_SKIP_SETUP=1 omp --profile speak4 --config .omp/fm-worker-overlay.yml --version
+18.4.3
+$ OMP_SKIP_SETUP=1 omp --profile speak4 models --json | jq -r '[.models[].provider]|unique|join(" ")'
+amazon-bedrock anthropic bedrock-mantle ollama openai-codex
+$ OMP_SKIP_SETUP=1 omp --profile BAD models --json
+Error: Invalid OMP profile "BAD". Profile names must match ^[a-z0-9][a-z0-9._-]{0,63}$, cannot be "." or "..", cannot end with ".", and cannot be a Windows reserved device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, or any of those with an extension).
+```
+
+`bin/fm-omp-profile-lib.sh` enforces the same name rule before launch, and `tests/fm-omp-harness.test.sh` pins the flag position, the profile-scoped catalog check, and the unpinned launch through a fake omp.
+Repeat these commands after an omp upgrade to refresh this record.
 
 ## Busy inbox escalation
 

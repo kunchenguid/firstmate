@@ -914,6 +914,14 @@ if [ -n "$ACK_THROUGH" ]; then
       exit 1
     }
   fi
+  HANDOFF_ACK=
+  if [ "$ACTOR" = main ] && [ -f "$STATE/.supervision-handoff-pending" ]; then
+    HANDOFF_TOKEN=$(cat "$STATE/.supervision-handoff-pending") || exit 1
+    if awk -F '\t' -v key="supervision-handoff:$HANDOFF_TOKEN" '$3 == "check" && $4 == key { found=1 } END { exit !found }' "$FM_WAKE_QUEUE" \
+      && ! awk -F '\t' -v key="supervision-handoff:$HANDOFF_TOKEN" '$3 == "check" && $4 == key { found=1 } END { exit !found }' "$DRAIN_TMP"; then
+      HANDOFF_ACK=$HANDOFF_TOKEN
+    fi
+  fi
   ACK_REMOVED=$(( $(awk 'END { print NR }' "$FM_WAKE_QUEUE") - $(awk 'END { print NR }' "$DRAIN_TMP") ))
   if [ ! -s "$DRAIN_TMP" ]; then
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
@@ -938,6 +946,9 @@ if [ -n "$ACK_THROUGH" ]; then
     exit 1
   fi
   DRAIN_TMP=
+  if [ -n "$HANDOFF_ACK" ] && [ "$(cat "$STATE/.supervision-handoff-pending" 2>/dev/null)" = "$HANDOFF_ACK" ]; then
+    rm -f "$STATE/.supervision-handoff-pending" || exit 1
+  fi
   if [ "$ACTOR" = branch ]; then
     consume_actor_rows_locked "$ELIGIBLE_ROWS_FILE" "$ACK_THROUGH" || exit 1
   else

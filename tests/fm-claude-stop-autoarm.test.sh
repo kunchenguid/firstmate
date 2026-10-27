@@ -737,9 +737,19 @@ test_owner_mutex_contention_preserves_failure_episode_reset() {
   out="$dir/state/hook.out"
   run_autoarm_bg "$dir" "$out"
   hook_pid=$RUN_AUTOARM_BG_PID
+  # Reaching the boundary is hook startup, which slows with host contention:
+  # stop on the arm handshake or the hook's own exit, and keep the generous
+  # finite bound for a hook that stalls before the boundary.
   i=0
   while [ ! -e "$dir/state/arm-waiting" ]; do
-    [ "$i" -lt 50 ] || fail "healthy owner never reached the reset boundary"
+    case "$(ps -p "$hook_pid" -o stat= 2>/dev/null || true)" in
+      ''|Z*)
+        [ ! -e "$dir/state/arm-waiting" ] || break
+        wait "$hook_pid"; status=$?
+        fail "healthy owner exited with status $status before the reset boundary: $(cat "$out")"
+        ;;
+    esac
+    [ "$i" -lt 600 ] || fail "healthy owner never reached the reset boundary"
     sleep 0.05
     i=$((i + 1))
   done

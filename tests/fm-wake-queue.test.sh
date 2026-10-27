@@ -55,7 +55,7 @@ test_concurrent_append_and_drain() {
 }
 
 test_signal_catchup_without_running_watcher() {
-  local dir state fakebin out drain_out drain_err status_file sequence generation
+  local dir state fakebin out drain_out drain_err status_file sequence generation watcher
   dir=$(make_case signal)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -68,8 +68,14 @@ test_signal_catchup_without_running_watcher() {
   # Use a captain-relevant verb so the wake is surfaced and the catch-up path is
   # tested.
   printf 'blocked: first\n' > "$status_file"
+  # Each run's deadline starts once the watcher holds its lock. The run is one
+  # poll cycle plus the fixed one-second signal grace, measured near 9s under
+  # heavy fork contention; with heartbeat and checks disabled, a watcher that
+  # misses the catch-up never exits, so the finite bound still fails it.
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
+  watcher=$!
+  wait_for_watcher_lock "$watcher" "$state" || fail "watcher never started for first signal"
+  wait_for_exit "$watcher" 150 || fail "watcher did not exit for first signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" || fail "drain after first signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first signal was not queued"
@@ -81,7 +87,9 @@ test_signal_catchup_without_running_watcher() {
   printf 'done: second\n' >> "$status_file"
   : > "$out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not exit for second signal"
+  watcher=$!
+  wait_for_watcher_lock "$watcher" "$state" || fail "watcher never started for second signal"
+  wait_for_exit "$watcher" 150 || fail "watcher did not exit for second signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "signal written with no watcher was not caught"
   pass "signal written while no watcher runs is caught on next run"
 }
