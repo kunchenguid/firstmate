@@ -27,6 +27,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-startup-progress-lib.sh
+. "$SCRIPT_DIR/fm-startup-progress-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-operational-input.sh
@@ -68,6 +70,7 @@ cleanup() {
       wait "$ARM" 2>/dev/null || true
     fi
   fi
+  fm_startup_progress_clear
   [ -z "$OUT" ] || rm -f "$OUT"
   [ "$(cut -f1 "$OWNER" 2>/dev/null)" != "$$" ] || rm -f "$OWNER"
 }
@@ -112,6 +115,12 @@ retry_delivery() {
 
 NEXT_RETRY=$((SECONDS + RETRY))
 while session_owned && [ -e "$CONFIG/supervision-handoff-ack" ] && [ ! -e "$STATE/.afk" ]; do
+  inherited_progress=0
+  if [ -n "${FM_STARTUP_PROGRESS_JOURNAL:-}" ]; then
+    inherited_progress=1
+  else
+    fm_startup_progress_create || exit 1
+  fi
   OUT=$(mktemp "$STATE/.supervision-handoff-arm.XXXXXX") || exit 1
   # The arm must survive both this owner and the original hook's process group.
   set -m
@@ -119,22 +128,23 @@ while session_owned && [ -e "$CONFIG/supervision-handoff-ack" ] && [ ! -e "$STAT
   ARM=$!
   ARM_RECORDED=0
   set +m
-  deadline=$((SECONDS + ${FM_SUPERVISION_HOST_READY_TIMEOUT:-25}))
-  while ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME" \
-    || ! grep -Eq '^watcher: (started|attached) pid=[0-9]+' "$OUT"; do
-    if ! fm_pid_alive "$ARM" || [ "$SECONDS" -ge "$deadline" ]; then
+  if ! fm_startup_progress_wait "$ARM" "$OUT" 1 session_owned; then
       kill -TERM "$ARM" 2>/dev/null || true
       wait "$ARM" 2>/dev/null || true
       exit 1
-    fi
-    sleep 0.2
-  done
+  fi
   identity=$(fm_pid_identity "$ARM") || exit 1
   tmp=$(mktemp "$LEFT.XXXXXX") || exit 1
   printf '%s\t%s\n' "$ARM" "$identity" > "$tmp" && mv -f "$tmp" "$LEFT" || exit 1
   [ -f "$LEFT" ] && [ ! -L "$LEFT" ] \
     && [ "$(cat "$LEFT")" = "$ARM"$'\t'"$identity" ] || exit 1
   ARM_RECORDED=1
+  if [ "$inherited_progress" -eq 0 ]; then
+    fm_startup_progress_clear
+  else
+    unset FM_STARTUP_PROGRESS_JOURNAL FM_STARTUP_PROGRESS_NONCE FM_STARTUP_PROGRESS_BEGIN FM_STARTUP_PROGRESS_CAP
+    unset FM_STARTUP_PROGRESS_EXPLICIT
+  fi
   if [ "$READY_PRINTED" -eq 0 ]; then
     grep -E -m1 '^watcher: (started|attached) pid=[0-9]+' "$OUT"
     READY_PRINTED=1

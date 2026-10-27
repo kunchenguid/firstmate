@@ -132,6 +132,8 @@ if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
 fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-startup-progress-lib.sh
+. "$SCRIPT_DIR/fm-startup-progress-lib.sh"
 
 # Home-local watcher tuning is independent of Relay's generated cadence
 # artifact. Relay, when active, is sourced second so its required 30s cadence
@@ -336,8 +338,10 @@ healthy_watcher() {
 
 report_attached() {
   local age
+  fm_startup_progress_append 2
   age=$(fm_path_age "$BEAT")
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+  fm_startup_progress_forget
 }
 
 # Header, "arm ground removed". Sets ARM_GROUND_MISSING to the first missing
@@ -375,6 +379,7 @@ wait_for_healthy_successor() {
   # date(1) exposes whole seconds. Add one rounding second so a timeout of one
   # second cannot collapse to a few milliseconds when called near a boundary.
   deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+  fm_startup_progress_deadline deadline
   while :; do
     healthy_watcher && return 0
     arm_ground_gone && return 1
@@ -527,6 +532,7 @@ print_watch_output() {
 handling_successor_generation() {
   [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] || return 0
   fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
+  fm_startup_progress_append 3
   case "$FM_RECOVERY_MARKER_TOKEN" in
     pending:downtime:*|pending:handling:*|announced:downtime:*|announced:handling:*) printf '%s' "${FM_RECOVERY_MARKER_TOKEN##*:}" ;;
     acked:*|'') ;;
@@ -560,6 +566,10 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart | --stop | --take-over ARM_PID | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
 esac
 
+case "$mode" in
+  arm|restart|take-over) fm_startup_progress_append 1 ;;
+  *) fm_startup_progress_forget ;;
+esac
 if [ "$mode" = handling-delivered ]; then
   fm_pid_alive "$handling_watcher_pid" \
     && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
@@ -697,17 +707,18 @@ cleanup_child() {
 
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_arm_signal() {
-  local signal=$1 rc=$2
+  local signal=$1 rc=$2 cancel_deadline=$((SECONDS + 5))
   trap - HUP TERM INT
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     # The watcher installs its own cleanup traps only after acquiring and
     # publishing the home-bound lock identity. Do not TERM it in the middle of
     # stale-lock acquisition: that can abandon the steal mutex. Let startup
-    # reach that cleanup-ready point (or exit naturally) before forwarding TERM,
-    # but never past the startup confirmation deadline.
+    # reach that cleanup-ready point (or exit naturally) before forwarding TERM.
+    # This cancellation clock is separate from the startup allowance and stays
+    # below the host's ten-second arm-retirement grace, even before lock publication.
     while fm_pid_alive "$child"; do
       if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$child" "$FM_HOME" \
-        || [ "$(date +%s)" -ge "$deadline" ]; then
+        || [ "$SECONDS" -ge "$cancel_deadline" ]; then
         kill -TERM "$child" 2>/dev/null || true
         break
       fi
@@ -731,6 +742,7 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
 # date(1) exposes whole seconds. Keep the configured confirmation budget from
 # collapsing when startup begins just before the next second boundary.
 deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+fm_startup_progress_deadline deadline
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
@@ -826,6 +838,7 @@ while :; do
       else
         echo "watcher: started pid=$child (beacon fresh)"
       fi
+      fm_startup_progress_forget
       wait "$child"
       rc=$?
       owned_child_finished "$rc"

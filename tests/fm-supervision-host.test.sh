@@ -2637,7 +2637,7 @@ exec /bin/sleep "$@"
 SH
   chmod +x "$home/fakebin/sleep"
   start_host "$home"
-  wait_until 150 watcher_live "$home" || fail "park-cadence: no watcher started"
+  wait_until 150 grep -q '^watcher: started' "$home/host.out" || fail "park-cadence: no watcher started"
   host_pid=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
   [ -n "$host_pid" ] || fail "park-cadence: no recorded host"
   printf '%s\n' "$host_pid" > "$home/probe-host"
@@ -3474,6 +3474,326 @@ SH
   pass "host+hook: hand-back retry submits only to the idle owning pane without replacing human input"
 }
 
+
+# Progress-journal cases use the real host, arm and watcher. A successor's
+# configuration barrier holds it before admission, without claiming readiness.
+journal_begin() {  # <name> <direct|ack> [explicit total cap]
+  ST_HOME=$(make_home "journal-$1-$2" attended)
+  local home=$ST_HOME
+  [ "$2" != ack ] || : > "$home/config/supervision-handoff-ack"
+  : > "$home/startup-hold"
+  ST_BEGIN=$(date +%s)
+  printf '%s\n' "$ST_BEGIN" > "$home/startup-clock"
+  cat > "$home/config/watch.env" <<'ENV'
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf '%s\n' "$FM_STARTUP_PROGRESS_JOURNAL" > "$FM_HOME/startup-journal"
+  printf '%s\n' "$FM_STARTUP_PROGRESS_CAP" > "$FM_HOME/startup-cap"
+  printf '%s\n' "$$" > "$FM_HOME/startup-arm"
+  : > "$FM_HOME/startup-entered"
+  while [ -e "$FM_HOME/startup-hold" ]; do sleep 0.1; done
+fi
+ENV
+  FM_TEST_STARTUP_CLOCK="$home/startup-clock" FM_SUPERVISION_HOST_READY_TIMEOUT="${3:-}" start_host "$home"
+  wait_until 300 grep -q 'watcher: started' "$home/host.out" || fail "journal: no initial watcher"
+  append_status "$home" 'choose an export format' needs-decision
+  wait_until 300 test -e "$home/startup-entered" || fail "journal: successor did not enter configuration"
+  IFS= read -r ST_JOURNAL < "$home/startup-journal"
+}
+
+journal_tick() { printf '%s\n' "$((ST_BEGIN + $1))" > "$ST_HOME/startup-clock"; }
+journal_stage() { printf '%s\n' "stage $1 ${ST_JOURNAL##*/}" >> "$ST_JOURNAL"; }
+journal_pending() { [ ! -s "$ST_HOME/host.rc" ] || fail "journal: successor was accepted or retired before the bound"; }
+
+journal_failed() {
+  wait_until 400 host_exited "$ST_HOME" || fail "journal: failure did not return to main"
+  assert_grep 'signal:' "$ST_HOME/host.out" "journal: failure lost the wake"
+  if [ -e "$ST_HOME/config/supervision-handoff-ack" ]; then
+    assert_grep 'acknowledged hand-back successor could not be verified' "$ST_HOME/host.out" "journal: unverified hand-back was accepted"
+  else
+    assert_grep 'successor-unverified' "$ST_HOME/state/.supervision-host.log" "journal: unverified successor was accepted"
+  fi
+  [ ! -e "$ST_JOURNAL" ] || fail "journal: completed attempt was not removed"
+  stop_home_processes "$ST_HOME"
+}
+
+test_startup_journal_bound() {  # <direct|ack> <stall|unchanged|total|explicit|dead|forged>
+  local mode=$1 failure=$2 n pid
+  journal_begin "$failure" "$mode" "$([ "$failure" != explicit ] || printf 30)"
+  case "$failure" in
+    stall)
+      journal_tick 24; sleep 0.5; journal_pending
+      journal_tick 25
+      ;;
+    unchanged)
+      journal_stage 1; sleep 0.5
+      for n in 10 20 24; do
+        journal_tick "$n"; journal_stage 1; touch "$ST_JOURNAL"
+        sleep 0.5; journal_pending
+      done
+      journal_tick 25
+      ;;
+    total)
+      [ "$(cat "$ST_HOME/startup-cap")" = 100 ] || fail "journal: default total cap is not 100"
+      for n in 1 2 3; do journal_tick "$((n * 20))"; journal_stage "$n"; sleep 0.5; journal_pending; done
+      journal_tick 80; sleep 0.5; journal_pending
+      journal_tick 100
+      ;;
+    explicit)
+      journal_tick 10; journal_stage 1; sleep 0.5; journal_pending
+      journal_tick 20; journal_stage 2; sleep 0.5; journal_pending
+      journal_tick 29; sleep 0.5; journal_pending
+      journal_tick 30
+      ;;
+    dead)
+      IFS= read -r pid < "$ST_HOME/startup-arm"
+      kill -TERM "$pid"
+      ;;
+    forged)
+      journal_stage 1; journal_stage 2; journal_stage 3
+      printf 'stage 99 stray-nonce\nstage invalid %s\n' "${ST_JOURNAL##*/}" >> "$ST_JOURNAL"
+      sleep 1
+      journal_pending
+      [ ! -e "$ST_HOME/state/.supervision-host-left" ] || fail "journal: progress alone supplied readiness"
+      journal_tick 25
+      ;;
+  esac
+  journal_failed
+  pass "startup: $mode journal $failure preserves bounded fail-safe hand-back"
+}
+
+test_startup_journal_cancellation() {
+  local host
+  journal_begin cancellation direct
+  host=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$ST_HOME/state/.supervision-host")
+  kill -TERM "$host"
+  wait_until 300 host_exited "$ST_HOME" || fail "journal: canceled host did not exit"
+  [ ! -e "$ST_JOURNAL" ] || fail "journal: canceled attempt survived cleanup"
+  stop_home_processes "$ST_HOME"
+  pass "startup: cancellation removes its progress journal"
+}
+
+test_startup_real_elapsed_progress() {
+  local home holder mode=${1:-direct}
+  home=$(make_home "startup-elapsed-$mode" attended)
+  [ "$mode" != ack ] || : > "$home/config/supervision-handoff-ack"
+  : > "$home/config-hold"
+  cat > "$home/config/watch.env" <<'ENV'
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  : > "$FM_HOME/config-entered"
+  while [ -e "$FM_HOME/config-hold" ]; do sleep 0.1; done
+fi
+ENV
+  start_host "$home"
+  wait_until 300 grep -q 'watcher: started' "$home/host.out" || fail "elapsed: no initial watcher"
+  append_status "$home" 'choose an export format' needs-decision
+  wait_until 200 test -e "$home/config-entered" || fail "elapsed: no successor configuration entry"
+  FM_HOME="$home" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$STATE/.watcher-down.lock" || exit 1
+    : > "$FM_HOME/recovery-held"
+    while [ ! -e "$FM_HOME/recovery-release" ]; do sleep 0.1; done
+    fm_lock_release "$STATE/.watcher-down.lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" > "$home/holder.out" 2>&1 &
+  holder=$!
+  wait_until 100 test -e "$home/recovery-held" || fail "elapsed: recovery lock was not held"
+  sleep 14
+  rm -f "$home/config-hold"
+  wait_until 150 watcher_live "$home" || fail "elapsed: successor did not acquire its singleton"
+  sleep 14
+  : > "$home/recovery-release"
+  wait "$holder" || fail "elapsed: recovery holder failed"
+  wait_until 300 host_exited "$home" || fail "elapsed: successor did not finish"
+  assert_no_re 'successor-unverified' "$home/state/.supervision-host.log" "elapsed: live progressing successor expired at the old deadline"
+  watcher_live "$home" || fail "elapsed: no verified successor survived"
+  stop_home_processes "$home"
+  pass "startup: $mode real initialization and recovery contention beyond 25s complete honestly"
+}
+
+test_initial_real_elapsed_progress() {
+  local home holder real_bash initial_hold=${1:-20} recovery_hold=${2:-20}
+  home=$(make_home "initial-startup-elapsed-$initial_hold-$recovery_hold" attended)
+  : > "$home/config/supervision-host-off"
+  : > "$home/initial-hold"
+  real_bash=$(command -v bash)
+  cat > "$home/fakebin/bash" <<SH
+#!/bin/bash
+case "\$1" in */fm-watch.sh)
+  : > "\$FM_HOME/initial-entered"
+  while [ -e "\$FM_HOME/initial-hold" ]; do sleep 0.1; done ;;
+esac
+exec "$real_bash" "\$@"
+SH
+  chmod +x "$home/fakebin/bash"
+  start_host "$home"
+  wait_until 200 test -e "$home/initial-entered" || fail "initial elapsed: watcher did not reach its exec barrier: $(cat "$home/host.out")"
+  FM_HOME="$home" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$STATE/.watcher-down.lock" || exit 1
+    : > "$FM_HOME/recovery-held"
+    while [ ! -e "$FM_HOME/recovery-release" ]; do sleep 0.1; done
+    fm_lock_release "$STATE/.watcher-down.lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" > "$home/holder.out" 2>&1 &
+  holder=$!
+  printf '%s\n' "$holder" >> "$home/orphan-pid"
+  wait_until 100 test -e "$home/recovery-held" || fail "initial elapsed: recovery lock was not held"
+  sleep "$initial_hold"
+  rm -f "$home/initial-hold"
+  wait_until 150 watcher_live "$home" || fail "initial elapsed: watcher did not establish its singleton"
+  sleep "$recovery_hold"
+  : > "$home/recovery-release"
+  wait "$holder" || fail "initial elapsed: recovery holder failed"
+  wait_until 300 grep -q 'watcher: started' "$home/host.out" || fail "initial elapsed: progressing initial confirmation expired"
+  assert_no_re '^watcher: FAILED' "$home/host.out" "initial elapsed: initial confirmation failed despite real progress"
+  watcher_live "$home" || fail "initial elapsed: confirmed watcher did not survive"
+  append_status "$home" 'initial ready'
+  wait_until 250 host_exited "$home" || fail "initial elapsed: confirmed arm did not deliver its close"
+  assert_re '^signal: .*demo.status' "$home/host.out" "initial elapsed: confirmation did not preserve the real close"
+  stop_home_processes "$home"
+  pass "startup: initial confirmation completes after real progress beyond its former 30s budget"
+}
+
+test_initial_explicit_long_stage() {
+  FM_SUPERVISION_HOST_READY_TIMEOUT=45 test_initial_real_elapsed_progress 30 0
+}
+
+test_nonstartup_invocation_preserves_journal() {
+  local home journal nonce
+  home=$(make_home nonstartup-journal attended)
+  journal=$(mktemp "$home/state/.watch-startup.XXXXXX")
+  nonce=${journal##*/}
+  printf 'stage 2 %s\n' "$nonce" > "$journal"
+  cp "$journal" "$home/journal-before"
+  FM_HOME="$home" FM_STARTUP_PROGRESS_JOURNAL="$journal" FM_STARTUP_PROGRESS_NONCE="$nonce" \
+    FM_STARTUP_PROGRESS_BEGIN=1 FM_STARTUP_PROGRESS_CAP=100 \
+    bash "$ROOT/bin/fm-watch-arm.sh" --stop > "$home/stop.out" 2>&1 \
+    || fail "nonstartup: stop failed: $(cat "$home/stop.out")"
+  cmp -s "$home/journal-before" "$journal" || fail "nonstartup: stop published startup progress"
+  FM_HOME="$home" FM_STARTUP_PROGRESS_JOURNAL="$journal" FM_STARTUP_PROGRESS_NONCE="$nonce" \
+    FM_STARTUP_PROGRESS_BEGIN=1 FM_STARTUP_PROGRESS_CAP=100 \
+    bash "$ROOT/bin/fm-watch-arm.sh" --handling-delivered fixture --watcher-pid 999999 \
+    > "$home/delivered.out" 2>&1 && fail "nonstartup: absent watcher was accepted"
+  cmp -s "$home/journal-before" "$journal" || fail "nonstartup: delivery confirmation published startup progress"
+  pass "startup: non-startup arm invocations leave the inherited journal unchanged"
+}
+
+test_initial_journal_bound() {  # <stall|explicit|dead|cancel>
+  local home journal host mode=$1
+  home=$(make_home "initial-journal-$mode" attended)
+  printf '10000000\n' > "$home/startup-clock"
+  cat > "$home/config/watch.env" <<'ENV'
+printf '%s\n' "${FM_STARTUP_PROGRESS_JOURNAL:-}" > "$FM_HOME/initial-journal"
+printf '%s\n' "$$" > "$FM_HOME/initial-arm"
+: > "$FM_HOME/initial-entered"
+while :; do sleep 0.1; done
+ENV
+  FM_TEST_STARTUP_CLOCK="$home/startup-clock" FM_SUPERVISION_HOST_READY_TIMEOUT="$([ "$mode" != explicit ] || printf 12)" start_host "$home"
+  wait_until 200 test -e "$home/initial-entered" || fail "initial journal: arm did not enter configuration"
+  IFS= read -r journal < "$home/initial-journal"
+  [ -f "$journal" ] || fail "initial journal: no launch journal"
+  case "$mode" in
+    stall)
+      printf '10000024\n' > "$home/startup-clock"
+      sleep 0.5
+      [ ! -s "$home/host.rc" ] || fail "initial journal: expired before the 25s stall allowance"
+      printf '10000025\n' > "$home/startup-clock" ;;
+    explicit) printf '10000012\n' > "$home/startup-clock" ;;
+    dead) kill -TERM "$(cat "$home/initial-arm")" ;;
+    cancel)
+      host=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
+      kill -TERM "$host" ;;
+  esac
+  wait_until 300 host_exited "$home" || fail "initial journal: failed startup did not return to main"
+  [ ! -e "$journal" ] || fail "initial journal: failed attempt survived cleanup"
+  if [ "$mode" != cancel ]; then
+    assert_grep 'watcher: FAILED' "$home/host.out" "initial journal: unverified startup was accepted"
+  fi
+  assert_no_re '^watcher: (started|attached)' "$home/host.out" "initial journal: progress supplied confirmation"
+  stop_home_processes "$home"
+  pass "startup: initial $mode preserves its bounded failure and cleanup"
+}
+
+test_startup_prelock_retirement() {
+  local mode=$1 home real_bash begin watcher owner journal posture=attended
+  [ "$mode" != failed-ack ] || posture=away
+  home=$(make_home "startup-prelock-$mode" "$posture")
+  case "$mode" in ack|failed-ack) : > "$home/config/supervision-handoff-ack" ;; esac
+  real_bash=$(command -v bash)
+  cat > "$home/fakebin/bash" <<SH
+#!/bin/bash
+case "\$1" in */fm-watch.sh)
+  if [ -e "\$FM_HOME/prelock-hold" ] && [ ! -e "\$FM_HOME/prelock-entered" ]; then
+    printf '%s\\n' "\$\$" > "\$FM_HOME/prelock-watcher"
+    printf '%s\\n' "\$\$" >> "\$FM_HOME/orphan-pid"
+    printf '%s\\n' "\$FM_STARTUP_PROGRESS_JOURNAL" > "\$FM_HOME/prelock-journal"
+    : > "\$FM_HOME/prelock-entered"
+    while [ -e "\$FM_HOME/prelock-hold" ]; do sleep 0.1; done
+  fi ;;
+esac
+exec "$real_bash" "\$@"
+SH
+  chmod +x "$home/fakebin/bash"
+  begin=$(date +%s)
+  printf '%s\n' "$begin" > "$home/startup-clock"
+  [ "$mode" != initial ] || : > "$home/prelock-hold"
+  FM_TEST_STARTUP_CLOCK="$home/startup-clock" start_host "$home"
+  if [ "$mode" != initial ]; then
+    wait_until 300 grep -q '^watcher: started' "$home/host.out" || fail "$mode prelock: no initial readiness"
+    : > "$home/prelock-hold"
+    append_status "$home" 'choose an export format' needs-decision
+  fi
+  wait_until 300 test -e "$home/prelock-entered" || fail "$mode prelock: watcher did not enter exec barrier"
+  IFS= read -r watcher < "$home/prelock-watcher"
+  IFS= read -r journal < "$home/prelock-journal"
+  kill -0 "$watcher" 2>/dev/null || fail "$mode prelock: initializing watcher is absent"
+  [ ! -e "$home/state/.watch.lock/pid" ] || fail "$mode prelock: barrier already owns the watcher lock"
+  sleep 1
+  printf '%s\n' "$((begin + 25))" > "$home/startup-clock"
+  wait_until 300 host_exited "$home" || fail "$mode prelock: host did not return to main"
+  if [ "$mode" = ack ]; then
+    owner=$(cut -f1 "$home/state/.supervision-handoff-owner" 2>/dev/null || true)
+    if [ -n "$owner" ]; then
+      wait_until 100 bash -c '! kill -0 "$1" 2>/dev/null' _ "$owner" || fail "ack prelock: handoff cleanup exceeded retirement grace"
+    fi
+  fi
+  ! kill -0 "$watcher" 2>/dev/null || fail "$mode prelock: retired arm left its initializing watcher alive"
+  [ ! -e "$journal" ] || fail "$mode prelock: superseded startup journal survived"
+  if [ "$mode" = failed-ack ]; then
+    assert_grep 'successor watcher cycle could not be verified' "$home/host.out" "failed-ack: direct successor did not fail"
+    assert_no_re 'acknowledged hand-back successor could not be verified' "$home/host.out" "failed-ack: replacement hand-back failed"
+    watcher_live "$home" || fail "failed-ack: no acknowledged replacement watcher"
+  else
+    case "$mode" in
+      initial) assert_grep 'watcher: FAILED' "$home/host.out" "initial prelock: unverified startup was accepted" ;;
+      direct) assert_grep 'successor-unverified' "$home/state/.supervision-host.log" "direct prelock: unverified successor was accepted" ;;
+      ack) assert_grep 'acknowledged hand-back successor could not be verified' "$home/host.out" "ack prelock: unverified hand-back was accepted" ;;
+    esac
+    [ ! -e "$home/state/.watch.lock/pid" ] || fail "$mode prelock: retired watcher acquired the lock"
+  fi
+  [ "$mode" = initial ] || assert_grep 'signal:' "$home/host.out" "$mode prelock: hand-back lost the wake"
+  for journal in "$home/state"/.watch-startup.*; do
+    [ ! -e "$journal" ] || fail "$mode prelock: stale startup journal $journal"
+  done
+  rm -f "$home/prelock-hold"
+  stop_home_processes "$home"
+  pass "startup: $mode retires the initializing owned watcher and its journal"
+}
+
+run_startup_tests() {
+  local mode failure
+  for mode in initial direct ack failed-ack; do test_startup_prelock_retirement "$mode"; done
+  test_initial_explicit_long_stage
+  test_nonstartup_invocation_preserves_journal
+  test_initial_real_elapsed_progress
+  for failure in stall explicit dead cancel; do test_initial_journal_bound "$failure"; done
+  for mode in direct ack; do
+    test_startup_real_elapsed_progress "$mode"
+    for failure in stall unchanged total explicit dead forged; do test_startup_journal_bound "$mode" "$failure"; done
+  done
+  test_startup_journal_cancellation
+}
+test_startup_journal_regressions() { run_startup_tests; }
+
+test_startup_journal_regressions
 test_main_only_close_after_handled_turn_restores_inherited_handling
 test_main_only_close_after_handled_turn_delivers_restore_failure
 test_returned_driver_is_caught_attended

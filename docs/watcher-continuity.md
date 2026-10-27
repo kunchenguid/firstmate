@@ -156,6 +156,7 @@ A failed confirmation is never swallowed.
 ### Readiness timeout and retry
 
 The adapter waits at most one readiness timeout per attempt.
+For OpenCode host mode, [configuration.md](configuration.md#watcher-startup-allowance) describes the enclosing host allowance used instead of the ordinary arm budget.
 If the successor is not ready in that time, the adapter sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
 
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.

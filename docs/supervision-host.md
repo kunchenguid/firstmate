@@ -47,6 +47,7 @@ Until they land, their current behavior stays as described in their own owners.
 | Component | Owner | Role |
 |---|---|---|
 | The loop | `bin/fm-supervision-host.sh` | Its header owns the per-close order, the park boundary and elapsed clock, arm-exit sampling and signal-observation latency, ownership checks, predecessor cleanup, state files, and tunables. |
+| The startup allowance | `bin/fm-startup-progress-lib.sh` | Owns the progress journal and shared bounded wait for initial arms and direct and acknowledged hand-backs; [configuration.md](configuration.md#watcher-startup-allowance) owns the configuration reference. |
 | The arm owners | Each primary's existing arm owner | Runs the host for a home that runs it and delivers a handed-back wake to main; see [Arm owners](#arm-owners). |
 | The engine | `bin/fm-supervision-engine-lib.sh` | Owns the home gate, including the default on Claude and the opt-out, the verified-engine list, and one bounded engine turn, including the reap of engine tool processes that outlive it. |
 | Row eligibility and the offer rule | `bin/fm-branch-dispatch.mjs` | The command entry to `.pi/extensions/lib/fm-branch-dispatch.ts`, so the host and the Pi extension compute branch-claimable rows, their task scope, and whether the branch may take a close (`branchOfferForWake`) from one owner; it also renders the wake message with the same away-posture tail, or the dialog mirror at its head. |
@@ -174,6 +175,11 @@ On each actionable close the engine takes, the host runs these steps:
 5. For a handled wake, it settles the handling-successor recovery transition and then parks on that successor.
    If settlement fails, it logs `handling-settle-failed` and still parks, leaving a later main-only pass-through to restore the handoff or deliver the restore failure to main.
    A main-only pass-through is not a park: the host exits after leaving that cycle running, as [Attended](#attended) describes.
+
+Startup progress allows more time to finish real work and never establishes readiness.
+The arm retains its existing live-watcher, fresh-beacon, and recovery-generation checks before reporting readiness.
+A dead, stuck, or unverified successor still hands the wake to main.
+The initial arm uses the same [startup allowance](configuration.md#watcher-startup-allowance), starting before its launch.
 
 The host counts the wake handled only when all three hold:
 
