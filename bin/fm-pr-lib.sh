@@ -1614,6 +1614,7 @@ fm_pr_poll_degraded_identity_valid() {  # <identity>
       esac
       [ "${#value}" -le 18 ] || return 1
       ;;
+    train=on|train=dropped) ;;
     *) return 1 ;;
   esac
 }

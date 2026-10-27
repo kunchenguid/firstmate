@@ -4089,6 +4089,19 @@ EOF
             continue
           fi
           wake "$reason"
+        elif [ "$is_pr_poll" -eq 1 ] && [ "$out" = ontrain ]; then
+          # A ready MR still on its merge train: remember it so a later drop
+          # (the car gone while the MR is still open) is a transition worth a
+          # wake. The marker is the same identity store the degraded wake
+          # dedupes on, so a drop wakes once and a re-queue arms the next one.
+          if ! fm_pr_poll_degraded_already_notified "$STATE" "$id" \
+              "$provider" "$host" "$path" "$number" train=on; then
+            fm_pr_poll_degraded_mark_notified "$STATE" "$id" \
+              "$provider" "$host" "$path" "$number" train=on || exit 1
+          fi
+          pr_poll_control_release || exit 1
+          touch "$STATE/.last-check"
+          continue
         elif [ "$is_pr_poll" -eq 1 ] && [ "${out%% *}" = degraded ]; then
           # A ready PR/MR that degraded after its ready report - a failing
           # check on GitHub, a failed head pipeline on GitLab, the readable
@@ -4113,6 +4126,14 @@ EOF
             pr_poll_control_release || exit 1
             touch "$STATE/.last-check"
             triage_log "absorbed duplicate degraded PR poll result for $id"
+            continue
+          fi
+          if [ "$degraded_identity" = train=dropped ] \
+              && ! fm_pr_poll_degraded_already_notified "$STATE" "$id" \
+                "$provider" "$host" "$path" "$number" train=on; then
+            pr_poll_control_release || exit 1
+            touch "$STATE/.last-check"
+            triage_log "PR poll for $id reported a train drop it never saw on the train; staying silent"
             continue
           fi
           fm_pr_poll_degraded_mark_notified "$STATE" "$id" \

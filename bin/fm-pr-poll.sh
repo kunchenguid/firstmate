@@ -13,10 +13,13 @@
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The GitLab, Gerrit, and
-# Forgejo branches additionally need jq - GitLab's rendered view carries no
-# head pipeline state, so its record is read as JSON like the merge path
-# reads it - which bin/fm-pr-check.sh refuses to arm those watches without.
+# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
+# branches additionally need jq, and so does the GitLab degraded read (its
+# rendered view carries no head pipeline state); without jq a GitLab poll
+# still wakes on a merge from the plain state field. A GitLab poll also emits
+# "ontrain" while the merge request has a merge-train car, and a degraded
+# train=dropped line once the car is gone from a still-open merge request; the
+# watcher wakes on a drop only after it saw the car on the train.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -171,15 +174,24 @@ case "$provider" in
     # take a merge request URL the way gh does: that form shells out to git
     # for the current repository, and the watcher runs in no repository.
     # The record is read as JSON through glab's own -F json, the same read the
-    # merge path makes, because the rendered view carries no head pipeline or
-    # merge-train state and firstmate requires jq for GitLab arming for exactly
-    # this reason. Only an exact "merged" wakes as a merge, and only a failing
-    # head pipeline on a still-open merge request emits the degraded line: a
-    # merge train drops a merge request when its pipeline does not succeed, so
-    # the failed head pipeline is the readable trace of the drop. Every error,
-    # a closed merge request, a pending or green head pipeline, and an
-    # unreadable record all stay silent instead of reporting anything.
-    command -v jq >/dev/null 2>&1 || exit 0
+    # merge path makes, because the rendered view carries no head pipeline
+    # state. Only an exact "merged" wakes as a merge. A failing head pipeline
+    # on a still-open merge request emits the degraded pipeline line, because
+    # a merge train drops a merge request when its pipeline does not succeed.
+    # Any other open merge request has its merge-train car read: a present car
+    # emits "ontrain", an absent one (HTTP 404) emits a degraded train=dropped
+    # line naming the merge request's detailed merge status, and the watcher
+    # wakes only when it last saw the car on the train. Every error, a closed
+    # merge request, a pending or green head pipeline, and an unreadable record
+    # stay silent. Without jq the poll falls back to the plain state field,
+    # which keeps the merged wake for a watch armed before jq was required.
+    enc=${path//\//%2F}
+    if ! command -v jq >/dev/null 2>&1; then
+      raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
+      state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
+      [ "$state" = merged ] && printf '%s\n' merged
+      exit 0
+    fi
     raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || exit 0
     [ -n "$raw" ] || exit 0
     result=$(printf '%s' "$raw" | jq -r '
@@ -197,12 +209,37 @@ case "$provider" in
              and .head_pipeline.id > 0
         then
           "degraded pipeline=\(.head_pipeline.id)"
+        elif .state == "opened" or .state == "locked" then
+          "open \(.detailed_merge_status // "" | if type == "string" then . else "" end)"
         else
           ""
         end
       else
         error("invalid merge request record")
       end' 2>/dev/null) || exit 0
+    case $result in
+      open\ *)
+        reason=${result#open }
+        case $reason in
+          *[!a-z_]*) reason= ;;
+        esac
+        car=$(GITLAB_HOST=$host glab api "projects/$enc/merge_trains/merge_requests/$number" 2>&1)
+        car_rc=$?
+        if [ "$car_rc" -eq 0 ]; then
+          printf '%s' "$car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1 \
+            && printf '%s\n' ontrain
+        else
+          case $car in
+            *404*)
+              line="degraded train=dropped url=$url"
+              [ -z "$reason" ] || line="$line reason=$reason"
+              printf '%s\n' "$line"
+              ;;
+          esac
+        fi
+        exit 0
+        ;;
+    esac
     case $result in
       merged)
         printf '%s\n' merged
@@ -226,7 +263,6 @@ case "$provider" in
         # seen-list keep one misbehaving pipeline graph from looping the
         # read, and every read failure simply shortens the detail: a fetch
         # failure can never be read as a change of state.
-        enc=${path//\//%2F}
         detail=
         seen=
         frontier=$pipeline

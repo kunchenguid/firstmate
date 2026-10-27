@@ -241,11 +241,19 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 case " $* " in
   *" -F json "*)
-    printf '%s\n' "{\"state\":\"${FM_TEST_GLAB_STATE:-opened}\",\"sha\":\"11568153bd75a30fd956da9ba7c1172ae556ada7\",\"head_pipeline\":{\"id\":${FM_TEST_GLAB_PIPELINE_ID:-941},\"status\":\"${FM_TEST_GLAB_PIPELINE:-success}\",\"sha\":\"37cf1cd139d2810616986b103feb45fead258fe4\"}}"
+    printf '%s\n' "{\"state\":\"${FM_TEST_GLAB_STATE:-opened}\",\"detailed_merge_status\":\"${FM_TEST_GLAB_DETAIL:-mergeable}\",\"sha\":\"11568153bd75a30fd956da9ba7c1172ae556ada7\",\"head_pipeline\":{\"id\":${FM_TEST_GLAB_PIPELINE_ID:-941},\"status\":\"${FM_TEST_GLAB_PIPELINE:-success}\",\"sha\":\"37cf1cd139d2810616986b103feb45fead258fe4\"}}"
     ;;
   *" api "*)
     [ "${FM_TEST_GLAB_API_FAIL:-0}" = 0 ] || exit 1
     case "$*" in
+      *merge_trains/merge_requests/*)
+        case "${FM_TEST_GLAB_TRAIN:-}" in
+          car) printf '%s\n' '{"id":5,"status":"idle"}' ;;
+          gone) printf '%s\n' '{"message":"404 Not found"}'; printf '%s\n' 'glab: 404 Not Found (HTTP 404)' >&2; exit 1 ;;
+          fail) printf '%s\n' 'glab: 500 (HTTP 500)' >&2; exit 1 ;;
+          *) printf '%s\n' '[]' ;;
+        esac
+        ;;
       *pipelines/77/jobs*) printf '%s\n' "${FM_TEST_GLAB_CHILD_JOBS:-[]}" ;;
       *pipelines/*bridges*) printf '%s\n' "${FM_TEST_GLAB_BRIDGES:-[]}" ;;
       *pipelines/*jobs*) printf '%s\n' "${FM_TEST_GLAB_JOBS:-[]}" ;;
@@ -1328,6 +1336,43 @@ injected'; do
   [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through a changed degraded poll"
   [ "$(grep -c 'degraded after ready: degraded pipeline=942' "$dir/watch-3.out")" -eq 1 ] \
     || fail "watcher did not wake again for a changed degraded pipeline"
+
+  # A merge-train drop wakes only after the car was seen on the train, once
+  # per drop, and a re-queue arms the next drop.
+  rm -f "$state/task-a.pr-poll-degraded"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-4.out" 2> "$dir/watch-4.err"
+  [ "$(grep -c 'degraded after ready' "$dir/watch-4.out")" -eq 0 ] \
+    || fail "watcher woke for a drop it never saw on the train"
+  ack_watcher_cycle "$state" || fail "unseen drop cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=car \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-5.out" 2> "$dir/watch-5.err"
+  [ "$(grep -c 'degraded after ready' "$dir/watch-5.out")" -eq 0 ] \
+    || fail "watcher woke for a merge request that is on its train"
+  ack_watcher_cycle "$state" || fail "on-train cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_DETAIL=need_rebase \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-6.out" 2> "$dir/watch-6.err"
+  [ "$(grep -c 'degraded after ready: degraded train=dropped url=.* reason=need_rebase' "$dir/watch-6.out")" -eq 1 ] \
+    || fail "watcher did not wake once for a train drop"
+  ack_watcher_cycle "$state" || fail "drop cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-7.out" 2> "$dir/watch-7.err"
+  [ "$(grep -c 'degraded after ready' "$dir/watch-7.out")" -eq 0 ] \
+    || fail "watcher woke again for the same train drop"
+  ack_watcher_cycle "$state" || fail "repeat drop cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=car \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-8.out" 2> "$dir/watch-8.err"
+  ack_watcher_cycle "$state" || fail "re-queue cycle acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-9.out" 2> "$dir/watch-9.err"
+  [ "$(grep -c 'degraded after ready: degraded train=dropped' "$dir/watch-9.out")" -eq 1 ] \
+    || fail "watcher did not wake for a second drop after a re-queue"
   pass "a degraded ready PR wakes once per head/pipeline transition and stays silent on a repeat"
 }
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -2514,6 +2559,23 @@ group/subgroup/project
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_PIPELINE_ID=0 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted a degraded line for a pipeline without a readable id"
 
+  # A still-open merge request with a green head pipeline reads its merge-train
+  # car: present is "ontrain", an absent car (404) is a train drop naming the
+  # merge status, and a failed or unknown car read stays silent.
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car run_poll "$dir")
+  [ "$out" = ontrain ] || fail "GitLab poll did not report a merge request on its train: $out"
+  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=canceled FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_DETAIL=need_rebase run_poll "$dir")
+  [ "$out" = "degraded train=dropped url=$url reason=need_rebase" ] || fail "GitLab poll did not report a train drop with a non-failed pipeline: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=fail run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll emitted after a failed merge-train read"
+  out=$(FM_TEST_GLAB_STATE=closed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll reported a train drop for a closed merge request"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  case $out in
+    'degraded pipeline=941 '*) ;;
+    *) fail "a failed head pipeline did not take precedence over a train drop: $out" ;;
+  esac
+
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git
   # repository the watcher does not have.
@@ -2590,6 +2652,16 @@ $(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
 EOF
   ! PATH="$nojq" command -v jq >/dev/null 2>&1 \
     || fail "the jq-free search path still resolved jq"
+  # A poll armed before jq was required keeps its merged wake from the plain
+  # state field and stays silent on everything else.
+  printf '%s\n%s\n%s\n%s\n%s\n' gitlab "$url" gitlab.example group/subgroup/project 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$nojq" \
+    bash "$state/task-a.check.sh")
+  [ "$out" = merged ] || fail "GitLab poll lost its merged wake without jq: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$nojq" \
+    bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "GitLab poll emitted a non-merged line without jq: $out"
   set +e
   out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$nojq" \
