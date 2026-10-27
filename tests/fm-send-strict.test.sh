@@ -60,8 +60,16 @@ case "${1:-}" in
     printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;
   list-windows)
-    printf 'foreign:%s\nfm-mpf-lane-m8\nfm-lane-key\nfm-lane-ok\n' \
-      "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
+    case " $*" in
+      *window_id*)
+        printf '@1|0|foreign:%s\n@2|1|fm-mpf-lane-m8\n@3|2|fm-lane-key\n@4|3|fm-lane-ok\n' \
+          "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
+        ;;
+      *)
+        printf 'foreign:%s\nfm-mpf-lane-m8\nfm-lane-key\nfm-lane-ok\n' \
+          "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
+        ;;
+    esac
     exit 0 ;;
 esac
 exit 0

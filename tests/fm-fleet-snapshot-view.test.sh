@@ -30,9 +30,18 @@ for arg in "$@"; do
 done
 case "${1:-}" in
   list-windows)
-    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
-    ;;
+    _fm_fake_names() {
+      sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
+    }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
   display-message)
+    case "$target" in
+      @*) target=$(sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta | sed -n "${target#@}p") ;;
+    esac
     case "$*" in
       *pane_current_command*)
         case "$target" in

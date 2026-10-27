@@ -198,7 +198,10 @@ case "${1:-}" in
     if [ -f "$D/devin" ]; then devin_screen "$(cat "$D/devin")"; elif [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
     exit 0 ;;
   list-windows)
-    if [ -f "$D/windows" ]; then cat "$D/windows"; fi
+    case " $*" in
+      *window_id*) [ ! -f "$D/windows" ] || awk '{ printf "@%d|%d|%s\n", NR, NR - 1, $0 }' "$D/windows" ;;
+      *) [ -f "$D/windows" ] && cat "$D/windows" ;;
+    esac
     exit 0 ;;
 esac
 exit 0

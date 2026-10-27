@@ -1624,7 +1624,13 @@ test_dirty_return_warns_even_when_a_later_step_refuses() {
 #!/usr/bin/env bash
 case "${1:-}" in
   kill-window) exit 1 ;;
-  list-windows) printf '%s\n' fm-task-x1 ;;
+  list-windows)
+    _fm_fake_names() { printf '%s\n' fm-task-x1; }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH

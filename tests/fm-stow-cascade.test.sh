@@ -56,7 +56,11 @@ cat > "$FAKEBIN/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *list-windows*) printf '%s\n' "${FM_FAKE_TMUX_WINDOW:-}" ;;
+  *list-windows*)
+    case "$*" in
+      *window_id*) [ -z "${FM_FAKE_TMUX_WINDOW:-}" ] || printf '@1|0|%s\n' "$FM_FAKE_TMUX_WINDOW" ;;
+      *) printf '%s\n' "${FM_FAKE_TMUX_WINDOW:-}" ;;
+    esac ;;
   *list-panes*) printf '%s\n' "${FM_FAKE_TMUX_PANE:-}" ;;
   *display-message*'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}" ;;
   *display-message*'#{pane_pid}'*) printf '%s\n' "$$" ;;

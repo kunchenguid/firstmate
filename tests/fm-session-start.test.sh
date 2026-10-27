@@ -314,9 +314,15 @@ case "\${1:-}" in
     exit 1
     ;;
   list-windows)
-    printf '%s\n' "$live_window"
-    exit 0
-    ;;
+    _fm_fake_names() {
+      printf '%s\n' "$live_window"
+      exit 0
+    }
+    case " \$*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, \$0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
 esac
 exit 1
 SH
@@ -384,13 +390,19 @@ case "${1:-}" in
     if [ "$mode" = unreadable ] && [ ! -e "$spawned" ] && [ ! -e "$killed" ]; then
       exit 1
     fi
-    if [ -e "$spawned" ]; then
-      printf '%s\n' "$mate_window"
-    elif [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; }; then
-      printf '%s\n' "$mate_window"
-    else
-      printf '%s\n' main
-    fi
+    _fm_fake_names() {
+      if [ -e "$spawned" ]; then
+        printf '%s\n' "$mate_window"
+      elif [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; }; then
+        printf '%s\n' "$mate_window"
+      else
+        printf '%s\n' main
+      fi
+    }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
     exit 0
     ;;
   has-session) exit 0 ;;

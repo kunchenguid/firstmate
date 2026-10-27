@@ -792,8 +792,14 @@ case "$cmd" in
     esac
     ;;
   list-windows)
-    for f in "$world"/*.id; do [ -e "$f" ] || continue; f=${f##*/}; printf '%s\n' "${f%.id}"; done
-    ;;
+    _fm_fake_names() {
+      for f in "$world"/*.id; do [ -e "$f" ] || continue; f=${f##*/}; printf '%s\n' "${f%.id}"; done
+    }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
   new-window)
     n=$(( $(cat "$world/.next" 2>/dev/null || echo 0) + 1 ))
     printf '%s\n' "$n" > "$world/.next"

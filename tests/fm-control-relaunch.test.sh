@@ -139,7 +139,11 @@ case "${1:-}" in
       echo 'lost server' >&2
       exit 1
     fi
-    [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+    case " $*" in
+      *window_id*) [ ! -f "$D/windows" ] || awk '{ printf "@%d|%d|%s\n", NR, NR - 1, $0 }' "$D/windows" ;;
+      *) [ -f "$D/windows" ] && cat "$D/windows" ;;
+    esac
+    exit 0 ;;
   new-session)
     # Nothing in the relaunch path may ever create a session; recording the
     # call is how a refusal test proves that.

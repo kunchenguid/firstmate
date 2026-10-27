@@ -108,7 +108,14 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] || printf 'fm-t1\n'; exit 0 ;;
+  list-windows)
+    if [ "${FM_FAKE_TMUX_MISSING:-0}" != 1 ]; then
+      case " $*" in
+        *window_id*) printf '@1|0|fm-t1\n' ;;
+        *) printf 'fm-t1\n' ;;
+      esac
+    fi
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -354,7 +361,12 @@ case "${1:-}" in
     fi
     printf '%s\n  ? for shortcuts\n' "$rule"
     exit 0 ;;
-  list-windows) printf 'fm-t1\n'; exit 0 ;;
+  list-windows)
+    case " $*" in
+      *window_id*) printf '@1|0|fm-t1\n' ;;
+      *) printf 'fm-t1\n' ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH

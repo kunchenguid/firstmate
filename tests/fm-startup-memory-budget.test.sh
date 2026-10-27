@@ -62,7 +62,11 @@ case "$*" in
   *display-message*'#{pane_current_command}'*) printf '%s\n' codex ;;
   *display-message*'#{pane_id}'*) printf '%s\n' '%1' ;;
   *display-message*'#{cursor_y}'*) printf '%s\n' 0 ;;
-  *list-windows*) printf '%s\n' fm-sm ;;
+  *list-windows*)
+    case "$*" in
+      *window_id*) printf '@1|0|fm-sm\n' ;;
+      *) printf '%s\n' fm-sm ;;
+    esac ;;
   *capture-pane*) printf '❯\n' ;;
 esac
 exit 0

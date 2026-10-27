@@ -114,6 +114,15 @@ case "${1:-}" in
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*)
+          if [ ! -f "$D/command.$target" ]; then
+            case "$target" in
+              @*)
+                n=$(sed -n "${target#@}p" "$D/windows")
+                for cand in "fmses:$n" "firstmate:$n" "$n"; do
+                  [ ! -f "$D/command.$cand" ] || { target=$cand; break; }
+                done ;;
+            esac
+          fi
           if [ -f "$D/command.$target" ]; then cat "$D/command.$target"; else cat "$D/command"; fi
           printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
@@ -122,7 +131,13 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  list-windows)
+    _fm_fake_names() { [ -f "$D/windows" ] && cat "$D/windows"; }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH

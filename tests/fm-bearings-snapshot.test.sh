@@ -43,8 +43,14 @@ SH
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   list-windows)
-    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta 2>/dev/null \
-      | grep -v 'dead-' || true
+    _fm_fake_names() {
+      sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta 2>/dev/null \
+        | grep -v 'dead-' || true
+    }
+    case " $*" in
+      *window_id*) _fm_fake_names | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }' ;;
+      *) _fm_fake_names ;;
+    esac
     exit 0 ;;
   capture-pane)
     case "$*" in

@@ -63,11 +63,13 @@ make_case() {
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = "list-windows" ]; then
-  if [ -n "${FM_FAKE_TMUX_WINDOWS:-}" ]; then
-    printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
-  elif [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
-    printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
-  fi
+  fake_names=${FM_FAKE_TMUX_WINDOWS:-${FM_FAKE_TMUX_WINDOW#*:}}
+  case " $*" in
+    *window_id*)
+      printf '%s\n' "$fake_names" | awk 'NF { printf "@%d|%d|%s\n", NR, NR - 1, $0 }'
+      ;;
+    *) [ -z "$fake_names" ] || printf '%s\n' "$fake_names" ;;
+  esac
   exit 0
 fi
 if [ "${1:-}" = "capture-pane" ]; then
