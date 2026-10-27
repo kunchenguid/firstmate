@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# The poll also wakes when a ready pull request or merge request degrades
+# after its ready report - a failing check on GitHub, a failed head pipeline
+# on GitLab (the readable trace of a merge train dropping the merge request) -
+# one wake per head/pipeline transition naming the failed jobs, the forge's
+# failure reasons, and the pipeline or check URL, so the worker can be steered
+# to fix it; the merged wake itself is unchanged.
 # Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
 # outside the worker's disposable copy; in no-mistakes mode a forge-reported
 # head is that named head and is already stored on the forge.
@@ -95,6 +101,15 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
 # a change's subject before its status, and a subject is free text.
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
+  exit 1
+fi
+# The GitLab poll reads the merge request as JSON (glab -F json), the same
+# read the merge path makes, because its head pipeline state - the readable
+# trace of a merge train dropping the merge request - exists only there. A
+# missing jq would leave the poll silent on every read, so arming refuses for
+# the same reason it refuses without glab.
+if [ "$PROVIDER" = gitlab ] && ! command -v jq >/dev/null 2>&1; then
+  echo "error: watching a GitLab merge request requires jq on PATH" >&2
   exit 1
 fi
 if [ "$PROVIDER" = gerrit ]; then
@@ -252,6 +267,10 @@ fi
 # The merge-time re-record is not a new review-ready PR, so it writes nothing.
 [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/fleet-ledger" ] || [ "${FM_PR_CHECK_MERGE:-}" = 1 ] \
   || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-fleet-ledger.sh" pr_ready "$ID" "$URL" || true
+# A re-armed watch starts its degraded dedupe from a clean slate: the marker
+# belongs to the watch this registration replaces, and its identity binding
+# would otherwise suppress the new watch's first degraded wake.
+rm -f -- "$STATE/$ID.pr-poll-degraded"
 # The contribution observer uses the same authenticated check mechanism and
 # owns verdict freshness, required actors and external feedback separately from
 # the exact merged-state poll. Registration is local and performs no forge read.

@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated pull request, merge request, or Gerrit
 # change poll sidecar.
-# It emits exactly one merged line for a merged change and stays silent
+# It emits exactly one merged line for a merged change, exactly one degraded
+# line for a ready change that degraded after its ready report (a failing
+# check on GitHub, a failing head pipeline on GitLab), and stays silent
 # otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# a merge. A degraded line names the head or pipeline that degraded, the
+# failed jobs with the forge's failure reasons, and the pipeline or check
+# URL, so the wake says which test broke without a job-log dig; the watcher
+# dedupes one wake per transition on that head/pipeline (bin/fm-watch.sh).
+# The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
-# branches additionally need jq, which bin/fm-pr-check.sh refuses to arm those
-# watches without.
+# needs no extra tooling to follow GitHub or GitLab. The GitLab, Gerrit, and
+# Forgejo branches additionally need jq - GitLab's rendered view carries no
+# head pipeline state, so its record is read as JSON like the merge path
+# reads it - which bin/fm-pr-check.sh refuses to arm those watches without.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -73,8 +80,62 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
-    state=$(GH_HOST=$host gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    # One read answers both questions this poll owns: the merged wake it has
+    # always owned, and the degraded state firstmate now watches for. The
+    # parse runs through gh's own --jq, so no JSON processor is needed here.
+    # Any failing check on the rollup counts as degraded because gh's rollup
+    # cannot say which checks are required: at the ready report the required
+    # checks were green, so a failing one here is a change worth waking for.
+    # The degraded line names every failing check with its conclusion and the
+    # first one's URL, so the wake says which test broke without a job-log
+    # dig. Every error, a non-open state, a pending or green rollup, and an
+    # unreadable head all stay silent; only the exact line shape below leaves
+    # this branch, and the head is validated here so the watcher's dedupe
+    # marker never sees another byte.
+    # shellcheck disable=SC2016  # The filter's $f and $r are jq variables, expanded by jq, not the shell.
+    result=$(GH_HOST=$host gh pr view "$url" --json state,headRefOid,statusCheckRollup --jq '
+      if .state == "MERGED" then
+        "merged"
+      elif .state == "OPEN"
+        and ([.statusCheckRollup[]?
+                | select((.conclusion // .state // "") as $r
+                         | $r == "FAILURE" or $r == "TIMED_OUT"
+                           or $r == "STARTUP_FAILURE" or $r == "ERROR")]
+             | length) > 0
+      then
+        ([.statusCheckRollup[]?
+            | select((.conclusion // .state // "") as $r
+                     | $r == "FAILURE" or $r == "TIMED_OUT"
+                       or $r == "STARTUP_FAILURE" or $r == "ERROR")]) as $f
+        | ([$f[] | .detailsUrl // .targetUrl // ""] | .[0] // "") as $u
+        | "degraded head=" + (.headRefOid // "")
+          + " jobs=" + ([($f[]
+              | ((.name // .context // "check") | gsub("[\\n\\r\\t]"; " "))
+                + ":" + (((.conclusion // .state // "FAILURE"))
+                          | gsub("[\\n\\r\\t]"; " ")))]
+            | join(",") | .[:300])
+          + (if $u == "" then "" else " url=" + ($u | gsub("[\\n\\r\\t]"; " ")) end)
+      else
+        ""
+      end' 2>/dev/null) || exit 0
+    case $result in
+      merged)
+        printf '%s\n' merged
+        ;;
+      'degraded head='*)
+        case $result in
+          *$'\n'*) exit 0 ;;
+        esac
+        head=${result#'degraded head='}
+        head=${head%% *}
+        case $head in
+          ''|*[!0-9a-f]*) exit 0 ;;
+        esac
+        [ "${#head}" -eq 40 ] || exit 0
+        [ "${#result}" -le 2000 ] || exit 0
+        printf '%s\n' "$result"
+        ;;
+    esac
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
@@ -105,16 +166,115 @@ case "$provider" in
     [ "$segments" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
     # glab resolves the instance from the project URL passed to -R, so the host
-    # comes from the validated record rather than glab's configured default.
-    # It cannot take a merge request URL the way gh does: that form shells out
-    # to git for the current repository, and the watcher runs in no repository.
-    # The state is read from glab's own field output rather than its JSON,
-    # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
-    raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
-    state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
-    [ "$state" = merged ] && printf '%s\n' merged
+    # comes from the validated record rather than glab's configured default,
+    # and GITLAB_HOST pins it the same way the merge path pins it. It cannot
+    # take a merge request URL the way gh does: that form shells out to git
+    # for the current repository, and the watcher runs in no repository.
+    # The record is read as JSON through glab's own -F json, the same read the
+    # merge path makes, because the rendered view carries no head pipeline or
+    # merge-train state and firstmate requires jq for GitLab arming for exactly
+    # this reason. Only an exact "merged" wakes as a merge, and only a failing
+    # head pipeline on a still-open merge request emits the degraded line: a
+    # merge train drops a merge request when its pipeline does not succeed, so
+    # the failed head pipeline is the readable trace of the drop. Every error,
+    # a closed merge request, a pending or green head pipeline, and an
+    # unreadable record all stay silent instead of reporting anything.
+    command -v jq >/dev/null 2>&1 || exit 0
+    raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || exit 0
+    [ -n "$raw" ] || exit 0
+    result=$(printf '%s' "$raw" | jq -r '
+      if type == "object"
+         and (.state | type) == "string"
+         and ((.head_pipeline | type) == "object" or .head_pipeline == null)
+      then
+        if .state == "merged" then
+          "merged"
+        elif (.state == "opened" or .state == "locked")
+             and (.head_pipeline | type) == "object"
+             and (.head_pipeline.status | type) == "string"
+             and .head_pipeline.status == "failed"
+             and (.head_pipeline.id | type) == "number"
+             and .head_pipeline.id > 0
+        then
+          "degraded pipeline=\(.head_pipeline.id)"
+        else
+          ""
+        end
+      else
+        error("invalid merge request record")
+      end' 2>/dev/null) || exit 0
+    case $result in
+      merged)
+        printf '%s\n' merged
+        ;;
+      'degraded pipeline='*)
+        case $result in
+          *$'\n'*) exit 0 ;;
+        esac
+        pipeline=${result#'degraded pipeline='}
+        case $pipeline in
+          [1-9]*) ;;
+          *) exit 0 ;;
+        esac
+        case $pipeline in
+          *[!0-9]*) exit 0 ;;
+        esac
+        [ "${#pipeline}" -le 18 ] || exit 0
+        # The degraded line names the failed jobs with their forge failure
+        # reasons, following a failed bridge into its child pipeline so the
+        # wake says which test broke without a job-log dig. Bounded depth and
+        # seen-list keep one misbehaving pipeline graph from looping the
+        # read, and every read failure simply shortens the detail: a fetch
+        # failure can never be read as a change of state.
+        enc=${path//\//%2F}
+        detail=
+        seen=
+        frontier=$pipeline
+        depth=0
+        while [ -n "$frontier" ] && [ "$depth" -lt 3 ]; do
+          next=
+          for current in $frontier; do
+            case " $seen " in *" $current "*) continue ;; esac
+            seen="$seen $current "
+            names=$(GITLAB_HOST=$host glab api "projects/$enc/pipelines/$current/jobs?per_page=100" 2>/dev/null \
+              | jq -r 'if type == "array" then
+                  [.[]
+                    | select((.status // "") == "failed")
+                    | ((.name // "job") | gsub("[\\n\\r\\t]"; " "))
+                      + (if (.failure_reason // "") != ""
+                         then ":" + ((.failure_reason // "") | gsub("[\\n\\r\\t]"; " "))
+                         else ""
+                         end)]
+                  | join(",")
+                else
+                  ""
+                end' 2>/dev/null) || names=
+            [ -n "$names" ] && detail="$detail${detail:+,}$names"
+            children=$(GITLAB_HOST=$host glab api "projects/$enc/pipelines/$current/bridges?per_page=100" 2>/dev/null \
+              | jq -r 'if type == "array" then
+                  [.[]
+                    | select((.status // "") == "failed")
+                    | select((.downstream_pipeline.id // 0) > 0)
+                    | .downstream_pipeline.id | tostring]
+                  | join(" ")
+                else
+                  ""
+                end' 2>/dev/null) || children=
+            [ -n "$children" ] && next="$next${next:+ }$children"
+          done
+          frontier=$next
+          depth=$((depth + 1))
+        done
+        detail=$(printf '%s' "$detail" | head -c 300)
+        case $detail in
+          *$'\n'*) detail= ;;
+        esac
+        line="degraded pipeline=$pipeline url=https://$host/$path/-/pipelines/$pipeline"
+        [ -z "$detail" ] || line="$line jobs=$detail"
+        [ "${#line}" -le 2000 ] || exit 0
+        printf '%s\n' "$line"
+        ;;
+    esac
     ;;
   gerrit)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0

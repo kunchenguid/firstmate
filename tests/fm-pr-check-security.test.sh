@@ -152,7 +152,23 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *statusCheckRollup*)
-        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+        case " $* " in
+          *" --jq "*)
+            # The static PR poll's combined read: it applies its own filter
+            # with the real jq, so the fixture's state and rollup are what a
+            # case controls and the filter's verdict is what the poll sees.
+            [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+            [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
+            [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+            [ -n "${FM_TEST_JQ:-}" ] || exit 1
+            rollup=${FM_TEST_GH_ROLLUP:-'[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]'}
+            printf '%s' "{\"state\":\"${FM_TEST_GH_POLL_STATE:-${FM_TEST_GH_STATE:-OPEN}}\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"statusCheckRollup\":$rollup}" \
+              | "$FM_TEST_JQ" -r "${@: -1}"
+            ;;
+          *)
+            printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+            ;;
+        esac
         exit 0
         ;;
       *" --json isDraft "*)
@@ -214,14 +230,32 @@ case "${1:-} ${2:-}" in
 esac
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
-  # Plain glab, reproducing the real CLI's contract: its field output on stdout
-  # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  # The poll and the merge path both read the merge request as JSON
+  # (-F json), so that form serves one JSON record whose state and head
+  # pipeline a case controls; the degraded detail fetch reads the failed
+  # jobs of a pipeline and its failed bridges through the same CLI.
   cat > "$fakebin/glab" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
-printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+case " $* " in
+  *" -F json "*)
+    printf '%s\n' "{\"state\":\"${FM_TEST_GLAB_STATE:-opened}\",\"sha\":\"11568153bd75a30fd956da9ba7c1172ae556ada7\",\"head_pipeline\":{\"id\":${FM_TEST_GLAB_PIPELINE_ID:-941},\"status\":\"${FM_TEST_GLAB_PIPELINE:-success}\",\"sha\":\"37cf1cd139d2810616986b103feb45fead258fe4\"}}"
+    ;;
+  *" api "*)
+    [ "${FM_TEST_GLAB_API_FAIL:-0}" = 0 ] || exit 1
+    case "$*" in
+      *pipelines/77/jobs*) printf '%s\n' "${FM_TEST_GLAB_CHILD_JOBS:-[]}" ;;
+      *pipelines/*bridges*) printf '%s\n' "${FM_TEST_GLAB_BRIDGES:-[]}" ;;
+      *pipelines/*jobs*) printf '%s\n' "${FM_TEST_GLAB_JOBS:-[]}" ;;
+      *) printf '%s\n' '[]' ;;
+    esac
+    ;;
+  *)
+    printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
+    ;;
+esac
 SH
   # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
@@ -1067,7 +1101,7 @@ run_watcher_bounded() {
   perl -MPOSIX=WNOHANG -MTime::HiRes=time,sleep -e 'my $pause=shift; my $left=60; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } my $last=time; while (waitpid($pid, WNOHANG) == 0) { my $now=time; $left -= $now - $last unless length $pause && -e $pause; $last=$now; if ($left <= 0) { kill "TERM", $pid; waitpid $pid, 0; exit 124 } sleep 0.02 } exit($? >> 8)' \
     "${FM_TEST_WATCH_BOUND_PAUSE:-}" env "${check_timeout_env[@]}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" \
-      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 FM_TEST_JQ="$REAL_JQ" PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -1126,7 +1160,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" FM_TEST_JQ="$REAL_JQ" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -1185,6 +1219,117 @@ test_static_poll_contract() {
   pass "static poll is silent except for one merged line and remains watcher-bounded"
 }
 
+test_github_degraded_poll() {
+  local dir out
+  dir=$(make_case github-degraded-poll)
+  make_poll_fixture "$dir"
+
+  # A failing check after the ready report emits exactly one degraded line
+  # naming the head; the same line for every failing conclusion shape.
+  # A failing check after the ready report emits exactly one degraded line
+  # naming the head; the same line for every failing conclusion shape.
+  for shape in \
+    'CheckRun|FAILURE|conclusion' \
+    'CheckRun|TIMED_OUT|conclusion' \
+    'CheckRun|STARTUP_FAILURE|conclusion' \
+    'StatusContext|FAILURE|state' \
+    'StatusContext|ERROR|state'; do
+    typename=${shape%%|*}
+    rest=${shape#*|}
+    verdict=${rest%%|*}
+    field=${rest#*|}
+    if [ "$typename" = CheckRun ]; then
+      rollup="[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"$verdict\"}]"
+    else
+      rollup="[{\"__typename\":\"StatusContext\",\"context\":\"ci\",\"state\":\"$verdict\"}]"
+    fi
+    out=$(FM_TEST_GH_ROLLUP="$rollup" run_poll "$dir")
+    [ "$out" = "degraded head=0123456789abcdef0123456789abcdef01234567 jobs=ci:$verdict" ] \
+      || fail "GitHub poll did not emit exactly one degraded line for rollup $rollup: $out"
+  done
+  out=$(FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' run_poll "$dir")
+  [ "$out" = 'degraded head=0123456789abcdef0123456789abcdef01234567 jobs=ci:FAILURE' ] \
+    || fail "GitHub poll did not skip a green check beside a failing one: $out"
+  out=$(FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://ci.example/run/1"},{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"TIMED_OUT"}]' run_poll "$dir")
+  [ "$out" = 'degraded head=0123456789abcdef0123456789abcdef01234567 jobs=ci:FAILURE,lint:TIMED_OUT url=https://ci.example/run/1' ] \
+    || fail "GitHub poll did not name every failing check and the first check's URL: $out"
+
+  # A merged, pending, skipped, or green rollup, a non-open pull request, an
+  # unreadable head, and a gh failure all stay silent.
+  for rollup in \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"IN_PROGRESS","conclusion":null}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SKIPPED"}]' \
+    '[]'; do
+    out=$(FM_TEST_GH_ROLLUP="$rollup" run_poll "$dir")
+    [ -z "$out" ] || fail "GitHub poll emitted for a non-failing rollup $rollup"
+  done
+  out=$(FM_TEST_GH_POLL_STATE=MERGED FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' run_poll "$dir")
+  [ "$out" = merged ] || fail "GitHub poll did not keep the merged wake unchanged"
+  out=$(FM_TEST_GH_POLL_STATE=CLOSED FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' run_poll "$dir")
+  [ -z "$out" ] || fail "GitHub poll emitted a degraded line for a closed pull request"
+  out=$(FM_TEST_GH_HEAD=not-a-head FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' run_poll "$dir")
+  [ -z "$out" ] || fail "GitHub poll emitted a degraded line for an unreadable head"
+  out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "GitHub poll emitted after a gh failure"
+  pass "GitHub poll emits one degraded line per failing rollup and stays silent otherwise"
+}
+
+test_degraded_poll_wakes_once_per_transition() {
+  local dir state out rc url
+  dir=$(make_case degraded-dedupe)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
+
+  # The identity the poll emits is the only thing the dedupe marker may hold.
+  fm_pr_poll_degraded_identity_valid 'head=0123456789abcdef0123456789abcdef01234567' \
+    || fail "the identity validator rejected a GitHub head"
+  fm_pr_poll_degraded_identity_valid 'pipeline=941' \
+    || fail "the identity validator rejected a GitLab pipeline"
+  for identity in 'head=0123456789abcdef0123456789abcdef0123456' 'head=0123456789ABCDEF0123456789abcdef01234567' \
+    'head=' 'pipeline=0' 'pipeline=00941' 'pipeline=941x' 'pipeline=' 'merged' 'degraded' \
+    'head=0123456789abcdef0123456789abcdef01234567
+injected'; do
+    fm_pr_poll_degraded_identity_valid "$identity" 2>/dev/null \
+      && fail "the identity validator accepted $identity"
+  done
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitlab "$url" gitlab.example group/subgroup/project 7 "$POLL" \
+    || fail "could not prepare the degraded dedupe poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the degraded dedupe poll"
+
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through the degraded poll"
+  [ "$(grep -c 'degraded after ready: degraded pipeline=941' "$dir/watch-1.out")" -eq 1 ] \
+    || fail "watcher did not convert the degraded poll into exactly one wake"
+  [ -f "$state/task-a.pr-poll-degraded" ] || fail "degraded dedupe marker missing after the wake"
+  ack_watcher_cycle "$state" || fail "degraded wake acknowledgement failed"
+
+  # The same degraded head/pipeline on a later poll stays silent.
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through a duplicate degraded poll"
+  [ "$(grep -c 'degraded after ready' "$dir/watch-2.out")" -eq 0 ] \
+    || fail "watcher woke again for the same degraded transition"
+  ack_watcher_cycle "$state" || fail "duplicate cycle acknowledgement failed"
+
+  # A new failing pipeline is a new transition and wakes again.
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_PIPELINE_ID=942 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-3.out" 2> "$dir/watch-3.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through a changed degraded poll"
+  [ "$(grep -c 'degraded after ready: degraded pipeline=942' "$dir/watch-3.out")" -eq 1 ] \
+    || fail "watcher did not wake again for a changed degraded pipeline"
+  pass "a degraded ready PR wakes once per head/pipeline transition and stays silent on a repeat"
+}
 test_atomic_interruption_leaves_no_partial_artifact() {
   local dir rc
   dir=$(make_case interrupted-write)
@@ -1640,6 +1785,7 @@ test_teardown_removes_poll_artifacts() {
   printf 'check\n' > "$dir/home/state/task-a.check.sh"
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
+  printf 'degraded\n' > "$dir/home/state/task-a.pr-poll-degraded"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -1654,6 +1800,7 @@ SH
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
+  [ ! -e "$dir/home/state/task-a.pr-poll-degraded" ] || fail "teardown left the degraded dedupe marker"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
 
   dir=$(make_case teardown-retirement-receipt)
@@ -2293,9 +2440,12 @@ SH
 }
 
 test_gitlab_merge_watch() {
-  local dir state out rc url value noglab entry bindir name
+  local dir state out rc url value noglab nojq entry bindir name
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
+  # The poll reads the merge request as JSON, so the fixture's search path
+  # carries the real jq the way arming requires it.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
 
   write_poll_meta "$state" task-a "$url"
@@ -2320,6 +2470,49 @@ group/subgroup/project
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
+
+  # A still-open merge request whose head pipeline failed is the readable
+  # trace of a merge train dropping it, and emits exactly one degraded line
+  # naming the pipeline and its URL. A green or pending head pipeline, a
+  # closed merge request, and a pipeline without a readable id all stay
+  # silent.
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941' ] || fail "GitLab poll did not emit exactly one degraded line for a failed head pipeline: $out"
+  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=failed run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941' ] || fail "GitLab poll did not treat a locked merge request as still open"
+
+  # The degraded line names the failed jobs with their forge failure reasons,
+  # following a failed bridge into its child pipeline, and a failed detail
+  # fetch only shortens the line.
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure"},{"name":"lint","status":"success"}]' \
+    run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure' ] \
+    || fail "GitLab poll did not name the failed job and its reason: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure"}]' \
+    FM_TEST_GLAB_BRIDGES='[{"name":"child","status":"failed","downstream_pipeline":{"id":77}}]' \
+    FM_TEST_GLAB_CHILD_JOBS='[{"name":"e2e test","status":"failed","failure_reason":"script_failure"}]' \
+    run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure,e2e test:script_failure' ] \
+    || fail "GitLab poll did not follow a failed bridge into its child pipeline: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure\nnewline"}]' \
+    run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure newline' ] \
+    || fail "GitLab poll did not flatten a newline inside a job name: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    FM_TEST_GLAB_API_FAIL=1 run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941' ] \
+    || fail "GitLab poll lost the degraded wake when only the detail fetch failed: $out"
+  for pipeline in success running pending canceled ''; do
+    out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE="$pipeline" run_poll "$dir")
+    [ -z "$out" ] || fail "GitLab poll emitted for a non-failed head pipeline"
+  done
+  out=$(FM_TEST_GLAB_STATE=closed FM_TEST_GLAB_PIPELINE=failed run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll emitted a degraded line for a closed merge request"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_PIPELINE_ID=0 run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab poll emitted a degraded line for a pipeline without a readable id"
 
   # glab is addressed by project URL and merge request number, never by the
   # merge request URL, which the real CLI resolves through the current git
@@ -2379,18 +2572,46 @@ EOF
   esac
   [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
 
+  # The poll reads JSON, so arming refuses without jq the same way, naming the
+  # missing tool rather than arming a watch that can only stay silent.
+  nojq="$dir/nojq"
+  mkdir -p "$nojq"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = jq ] && continue
+      [ -e "$nojq/$name" ] || ln -s "$entry" "$nojq/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$nojq" command -v jq >/dev/null 2>&1 \
+    || fail "the jq-free search path still resolved jq"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$nojq" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a GitLab watch succeeded with jq absent"
+  case "$out" in
+    *"requires jq on PATH"*) ;;
+    *) fail "arming a GitLab watch with jq absent did not report the missing tool" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused GitLab arming left a poll armed"
+
   # The merge path addresses the forge the URL names, and never the other one.
-  # This fixture's glab answers with the field output the poll reads, so the
-  # merge's JSON read cannot be parsed, which must refuse rather than merge on a
-  # state it could not read.
+  # The fixture's glab read fails, so the merge's JSON read cannot parse the
+  # state, which must refuse rather than merge on a state it could not read.
   write_task_meta "$dir" task-c
   : > "$dir/glab.log"
-  # The merge path needs jq before it reads anything, so this case supplies it
-  # and the refusal below is the unreadable state rather than a missing tool.
-  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   set +e
-  run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
+  FM_TEST_GLAB_FAIL=1 run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
   rc=$?
+  set -e
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
   grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
@@ -3797,6 +4018,8 @@ test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_github_degraded_poll
+test_degraded_poll_wakes_once_per_transition
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
