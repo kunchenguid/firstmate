@@ -240,7 +240,7 @@ A planned watcher close publishes an open episode and leaves an acknowledged epi
 A close is planned only when `state/.watcher-planned-stop` names that watcher's pid and its process identity.
 The arm writes that record before the signal for `--restart`, `--stop`, and `--take-over`.
 The supervision host stops the watcher with `--stop` before it signals any arm, at its park boundary and when it retires a successor cycle.
-It then hands an acknowledged episode back as announced, so the owner rewake commits and a later arm delivers no empty `rearm-resurface`.
+After it retires the arm, it hands an acknowledged episode back as announced, so the owner rewake commits and a later arm delivers no empty `rearm-resurface`.
 The watcher writes the same record before its own delivery exit.
 A stall eviction writes no record, and neither does a HUP or other signal that has none.
 A close that is not a planned stop, and every durable queue append, publishes downtime.
