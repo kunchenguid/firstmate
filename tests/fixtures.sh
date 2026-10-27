@@ -437,7 +437,7 @@ fm_test_run_spawn() {
   # the id to the secondmate home, so bind the first positional (the id) to the
   # second positional when that is a directory, else to the pane path. A suite
   # that already registered the id keeps its own line.
-  local arg sm_id= sm_home= is_secondmate=0 positional=0
+  local arg sm_id='' sm_home='' is_secondmate=0 positional=0
   for arg in "$@"; do
     case "$arg" in
     --secondmate) is_secondmate=1 ;;
