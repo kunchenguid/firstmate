@@ -106,6 +106,7 @@ Usage:
 
 Thresholds are read from config/usage-warner (local, gitignored), whose schema
 is owned by docs/configuration.md ("Local Claude usage warner").
+Add sound:off to that file for silent banners (sound:on restores the default).
 See docs/usage-warner.md for the behaviour reference and
 docs/examples/usage-warner for a starting point.
 EOF
@@ -227,14 +228,18 @@ usage_warner_read() {
 # independent of any terminal pane. The summary is passed as an argv item
 # (never interpolated into the AppleScript source) so its text can never break
 # the script, matching bin/fm-supervise-daemon.sh's own osascript notifier.
+# sound:off explicitly supplies an empty sound name; otherwise preserve the
+# existing Notification Center default by omitting the sound clause.
 usage_warner_notify() {  # <summary>
-  local summary=$1
+  local summary=$1 script='display notification (item 1 of argv) with title "Firstmate: Claude usage"' sound
+  sound=$(awk '{gsub(/^[[:space:]]+|[[:space:]]+$/, "")} $0=="sound:off" || $0=="sound:on" {value=$0} END {print value}' "$CONFIG" 2>/dev/null)
+  [ "$sound" != sound:off ] || script="$script sound name \"\""
   command -v osascript >/dev/null 2>&1 || {
     printf 'fm-usage-warner: osascript not found; cannot post a notification\n' >&2
     return 1
   }
   osascript -e 'on run argv' \
-    -e 'display notification (item 1 of argv) with title "Firstmate: Claude usage"' \
+    -e "$script" \
     -e 'end run' "$summary" >/dev/null 2>&1
 }
 
