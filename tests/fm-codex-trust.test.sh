@@ -8,6 +8,14 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRUST="$ROOT/bin/fm-codex-trust.sh"
 TMP_ROOT=$(fm_test_tmproot fm-codex-trust)
+PYTHON=
+for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import tomllib' >/dev/null 2>&1; then
+    PYTHON=$(command -v "$candidate")
+    break
+  fi
+done
+[ -n "$PYTHON" ] || fail "Python 3.11+ with tomllib is required to read Codex config.toml"
 
 make_case() {
   local dir="$TMP_ROOT/$1" project="$TMP_ROOT/$1/project" worktree="$TMP_ROOT/$1/worktree"
@@ -30,7 +38,7 @@ EOF
 }
 
 trust_value() {
-  python3 - "$1/config.toml" "$2" <<'PY'
+  "$PYTHON" - "$1/config.toml" "$2" <<'PY'
 import sys
 import tomllib
 with open(sys.argv[1], "rb") as handle:
@@ -39,7 +47,7 @@ PY
 }
 
 project_field() {
-  python3 - "$1/config.toml" "$2" "$3" <<'PY'
+  "$PYTHON" - "$1/config.toml" "$2" "$3" <<'PY'
 import sys
 import tomllib
 with open(sys.argv[1], "rb") as handle:
@@ -48,7 +56,7 @@ PY
 }
 
 config_value() {
-  python3 - "$1/config.toml" "$2" <<'PY'
+  "$PYTHON" - "$1/config.toml" "$2" <<'PY'
 import sys
 import tomllib
 with open(sys.argv[1], "rb") as handle:
@@ -149,6 +157,93 @@ EOF
   pass "fm-codex-trust: ignores table-like text inside multiline strings"
 }
 
+test_ignores_escaped_delimiter_in_multiline_basic_string() {
+  local rec note
+  rec=$(make_case escaped)
+  read_case "$rec"
+  cat > "$CODEX_HOME_DIR/config.toml" <<EOF
+[projects.'$WORKTREE']
+note = """
+An escaped \""" delimiter keeps this string open.
+[projects.'$WORKTREE']
+trust_level = "untrusted"
+"""
+trust_level = "untrusted"
+EOF
+  CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$WORKTREE" "$PROJECT" >/dev/null \
+    || fail "escaped multiline delimiter trust update failed"
+  [ "$(trust_value "$CODEX_HOME_DIR" "$WORKTREE")" = trusted ] \
+    || fail "escaped multiline delimiter hid the real trust value"
+  note=$(project_field "$CODEX_HOME_DIR" "$WORKTREE" note)
+  assert_contains "$note" "trust_level = \"untrusted\"" \
+    "text after an escaped multiline delimiter was modified"
+  pass "fm-codex-trust: keeps a multiline basic string open across an escaped delimiter"
+}
+
+test_ignores_multiline_literal_string_structure() {
+  local rec note
+  rec=$(make_case literal)
+  read_case "$rec"
+  cat > "$CODEX_HOME_DIR/config.toml" <<EOF
+[projects.'$WORKTREE']
+note = '''
+[projects.'$WORKTREE']
+trust_level = "untrusted"
+'''
+trust_level = "untrusted"
+EOF
+  CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$WORKTREE" "$PROJECT" >/dev/null \
+    || fail "multiline literal string trust update failed"
+  [ "$(trust_value "$CODEX_HOME_DIR" "$WORKTREE")" = trusted ] \
+    || fail "multiline literal string hid the real trust value"
+  note=$(project_field "$CODEX_HOME_DIR" "$WORKTREE" note)
+  assert_contains "$note" "trust_level = \"untrusted\"" \
+    "multiline literal text was modified instead of preserved"
+  pass "fm-codex-trust: ignores table-like text inside a multiline literal string opened mid-line"
+}
+
+test_inserts_after_final_header_without_newline() {
+  local rec
+  rec=$(make_case final-header)
+  read_case "$rec"
+  printf 'model = "gpt-5"\n[projects.\x27%s\x27]' "$WORKTREE" > "$CODEX_HOME_DIR/config.toml"
+  CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$WORKTREE" "$PROJECT" >/dev/null \
+    || fail "final header without a newline could not be registered"
+  [ "$(trust_value "$CODEX_HOME_DIR" "$WORKTREE")" = trusted ] \
+    || fail "trust was not added under a final header without a newline"
+  [ "$(config_value "$CODEX_HOME_DIR" model)" = "gpt-5" ] \
+    || fail "unrelated configuration was not preserved"
+  pass "fm-codex-trust: adds trust under a final header that has no newline"
+}
+
+test_selects_python_with_tomllib() {
+  local rec fakebin
+  rec=$(make_case python)
+  read_case "$rec"
+  fakebin="$CASE_DIR/bin"
+  mkdir -p "$fakebin"
+  printf '#!/bin/sh\necho "ModuleNotFoundError: No module named tomllib" >&2\nexit 1\n' > "$fakebin/python3"
+  chmod +x "$fakebin/python3"
+  ln -s "$PYTHON" "$fakebin/python3.11"
+  PATH="$fakebin:$PATH" CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$WORKTREE" "$PROJECT" >/dev/null \
+    || fail "trust registration did not fall back to a Python with tomllib"
+  [ "$(trust_value "$CODEX_HOME_DIR" "$WORKTREE")" = trusted ] \
+    || fail "fallback Python did not register the worktree"
+  pass "fm-codex-trust: selects a Python with tomllib when python3 lacks it"
+}
+
+test_refuses_without_codex_home_or_home() {
+  local rec out status=0
+  rec=$(make_case no-home)
+  read_case "$rec"
+  out=$(cd "$CASE_DIR" && env -u CODEX_HOME -u HOME "$TRUST" "$WORKTREE" "$PROJECT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "trust registration without CODEX_HOME or HOME was accepted"
+  assert_contains "$out" "neither CODEX_HOME nor HOME is set" \
+    "missing config context was not named in the refusal"
+  [ ! -e "$CASE_DIR/.codex" ] || fail "missing config context created a relative Codex store"
+  pass "fm-codex-trust: refuses when neither CODEX_HOME nor HOME is set"
+}
+
 test_refuses_invalid_config_without_replacement() {
   local rec before after status=0
   rec=$(make_case invalid)
@@ -175,6 +270,11 @@ test_registers_exact_worktree
 test_preserves_existing_config_and_updates_entry
 test_inserts_before_following_table
 test_ignores_multiline_string_structure
+test_ignores_escaped_delimiter_in_multiline_basic_string
+test_ignores_multiline_literal_string_structure
+test_inserts_after_final_header_without_newline
+test_selects_python_with_tomllib
+test_refuses_without_codex_home_or_home
 test_refuses_invalid_config_without_replacement
 test_rejects_primary_checkout
 

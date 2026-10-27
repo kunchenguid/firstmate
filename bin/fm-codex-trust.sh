@@ -75,10 +75,25 @@ else
     || refuse "target '$TARGET_REAL' is not a complete seeded secondmate home"
 fi
 
-command -v python3 >/dev/null 2>&1 || refuse "python3 is required to validate Codex config.toml"
+PYTHON=
+for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import tomllib' >/dev/null 2>&1; then
+    PYTHON=$(command -v "$candidate")
+    break
+  fi
+done
+[ -n "$PYTHON" ] || refuse "Python 3.11+ with tomllib is required to validate Codex config.toml"
 
-CONFIG_ROOT=${CODEX_HOME:-${HOME:-}/.codex}
-[ -n "$CONFIG_ROOT" ] || refuse "neither CODEX_HOME nor HOME is set"
+if [ -n "${CODEX_HOME:-}" ]; then
+  CONFIG_ROOT=$CODEX_HOME
+elif [ -n "${HOME:-}" ]; then
+  case "$HOME" in
+    /*) CONFIG_ROOT=$HOME/.codex ;;
+    *) refuse "HOME must be an absolute path" ;;
+  esac
+else
+  refuse "neither CODEX_HOME nor HOME is set"
+fi
 case "$CONFIG_ROOT" in
   /*) ;;
   *) refuse "CODEX_HOME must be an absolute path" ;;
@@ -87,7 +102,7 @@ mkdir -p "$CONFIG_ROOT" || refuse "could not create Codex config directory '$CON
 CONFIG_ROOT=$(real_dir "$CONFIG_ROOT") || refuse "Codex config directory '$CONFIG_ROOT' could not be resolved"
 STORE="$CONFIG_ROOT/config.toml"
 if [ -L "$STORE" ]; then
-  STORE=$(python3 - "$STORE" <<'PY'
+  STORE=$("$PYTHON" - "$STORE" <<'PY'
 import os, sys
 try:
     print(os.path.realpath(sys.argv[1]))
@@ -102,7 +117,7 @@ if [ -e "$STORE" ]; then
   [ -w "$STORE" ] || refuse "Codex config '$STORE' is not writable"
 fi
 
-if ! python3 - "$STORE" "$TARGET_REAL" <<'PY'
+if ! "$PYTHON" - "$STORE" "$TARGET_REAL" <<'PY'
 import hashlib
 import os
 import pathlib
@@ -139,13 +154,15 @@ def next_string_state(line, state):
     index = 0
     while index < len(line):
         if state:
-            if line.startswith(state, index):
+            if state == '"""' and line[index] == '\\':
+                index += 2
+            elif line.startswith(state, index):
                 index += 3
                 state = None
             else:
                 index += 1
             continue
-        if line.startswith('"""', index) or line.startswith("'''"):
+        if line.startswith('"""', index) or line.startswith("'''", index):
             state = line[index:index + 3]
             index += 3
         elif line[index] == '"':
@@ -170,7 +187,7 @@ def next_string_state(line, state):
             index += 1
     return state
 
-lines = text.splitlines(keepends=True)
+lines = re.findall(r'[^\n]*\n|[^\n]+\Z', text)
 starts = []
 offset = 0
 state = None
@@ -217,7 +234,8 @@ else:
         text = text[:start] + replacement + text[stop:]
     else:
         insertion = starts[match_index][0] + len(lines[match_index])
-        text = text[:insertion] + 'trust_level = "trusted"\n' + text[insertion:]
+        separator = "" if lines[match_index].endswith("\n") else "\n"
+        text = text[:insertion] + separator + 'trust_level = "trusted"\n' + text[insertion:]
 
 try:
     tomllib.loads(text)

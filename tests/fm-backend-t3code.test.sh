@@ -1610,6 +1610,31 @@ test_spawn_codex_scout_writes_toml_env_with_traceparent() {
   pass "fm-spawn.sh --backend t3code codex: writes .codex/config.toml with GOTMPDIR, FM_TASK_ID, and TRACEPARENT"
 }
 
+# The T3 provider owns its Codex store, so a relative CODEX_HOME in
+# firstmate's environment is neither rewritten nor refused by a T3 launch.
+test_spawn_codex_t3code_accepts_relative_codex_home() {
+  local proj wt data state id out fb
+  t3_require_tomllib test_spawn_codex_t3code_accepts_relative_codex_home || return 0
+  id=$(t3_uid t3codexrel)
+  t3_task_id "$id"
+  t3_case spawn-codex-relative-home
+  proj="$CASE_DIR/spawn-project"; wt="$CASE_DIR/spawn-wt"; data="$CASE_DIR/data"; state="$CASE_DIR/state"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$CASE_DIR/home/state"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  FM_T3_PROJ="$proj" t3_world_set 'w.projects[0].workspaceRoot = process.env.FM_T3_PROJ'
+  fb=$(make_treehouse_fakebin "$CASE_DIR")
+  out=$( cd "$CASE_DIR" && HOME="$SPAWN_HOME" CODEX_HOME=relative-codex-home PATH="$fb:$PATH" FM_T3_TREEHOUSE_LOG="$LOG" FM_T3_TREEHOUSE_WT="$wt" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_PROJECTS_OVERRIDE="$CASE_DIR/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --scout --model gpt-5.6-sol --backend t3code 2>&1 )
+  expect_code 0 $? "a codex scout on t3code with a relative CODEX_HOME should still spawn"$'\n'"$out"
+  assert_absent "$CASE_DIR/relative-codex-home/config.toml" "a t3code launch must not register trust in firstmate's local Codex store"
+  [ "$(t3_dispatch_types)" = "t3_thread_launch t3_thread_send" ] || fail "spawn must launch then send the brief, got '$(t3_dispatch_types)'"
+  pass "fm-spawn.sh --backend t3code codex: a relative CODEX_HOME neither blocks the launch nor receives local trust"
+}
+
 # Codex applies the worktree's .codex/config.toml only when its main checkout
 # is trusted, so spawn warns once, and still launches, unless the Codex
 # configuration shows that trust. Trust resolves from the thread's launch
@@ -2780,6 +2805,7 @@ test_untracked_codex_config_is_preserved
 test_codex_cleanup_without_journal_needs_no_python
 test_codex_worker_ignores_untracked_config_in_main_checkout
 test_spawn_codex_scout_writes_toml_env_with_traceparent
+test_spawn_codex_t3code_accepts_relative_codex_home
 test_spawn_codex_warns_unless_codex_trusts_the_project
 test_spawn_secondmate_runs_thread_in_home_with_env
 test_spawn_codex_secondmate_writes_toml_env
