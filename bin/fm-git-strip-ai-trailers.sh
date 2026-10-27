@@ -106,7 +106,15 @@ fm_is_ai_attribution_line() {
   raw=$(trim_space "$raw")
   [ -n "$raw" ] || return 1
   lowered=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+  # Cortex Code (verified live, cortex 1.1.104) writes a `Generated with` line
+  # beside its Co-authored-by trailer, and its built-in /commit command writes
+  # the same line naming `Cortex Code`. Only these two exact link shapes are
+  # attribution; any other `Generated with` text is the author's own.
   case "$lowered" in
+  'generated with [snowflake coco](https://docs.snowflake.com/'*')' | \
+    'generated with [cortex code](https://docs.snowflake.com/'*')')
+    return 0
+    ;;
   co-authored-by:*) ;;
   *) return 1 ;;
   esac
@@ -123,12 +131,12 @@ fm_is_ai_attribution_line() {
   esac
   name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
   case "$email" in
-  noreply@anthropic.com | cursoragent@* | noreply@openai.com | copilot@github.com | noreply@commandcode.ai)
+  noreply@anthropic.com | cursoragent@* | noreply@openai.com | copilot@github.com | noreply@commandcode.ai | noreply@snowflake.com)
     return 0
     ;;
   esac
   case "$name" in
-  cursor | 'cursor agent' | claude | 'claude code' | 'github copilot' | copilot | codex | chatgpt | gemini | 'google gemini' | grok | openai | commandcodebot)
+  cursor | 'cursor agent' | claude | 'claude code' | 'github copilot' | copilot | codex | chatgpt | gemini | 'google gemini' | grok | openai | commandcodebot | 'snowflake coco' | 'cortex code')
     return 0
     ;;
   esac

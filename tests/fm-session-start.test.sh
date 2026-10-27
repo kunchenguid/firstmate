@@ -940,6 +940,23 @@ EOF
   pass "locked session start freezes trace context and lock refusal leaves it unchanged"
 }
 
+# Wait until <dir> holds <count> entries. Forty workers poll this at once, so
+# the count is a builtin glob rather than a find pipeline (no process per
+# poll), and the wait ends early once the directory is gone, the suite has
+# died, or FM_TEST_STUB_MAX_BLOCK_SECONDS has passed, so an interrupted run
+# cannot leave forty pollers spinning under init.
+lock_concurrency_barrier() {  # <dir> <count>
+  local dir=$1 want=$2 start=$SECONDS entries
+  while [ -d "$dir" ] && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null \
+    && [ $((SECONDS - start)) -lt "$FM_TEST_STUB_MAX_BLOCK_SECONDS" ]; do
+    entries=("$dir"/*)
+    [ -e "${entries[0]}" ] || entries=()
+    [ "${#entries[@]}" -lt "$want" ] || return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 test_session_lock_concurrent_single_winner() {
   local rec root home fakebin ready completed winners pids i pid count
   rec=$(new_world lock-concurrency)
@@ -988,18 +1005,14 @@ SH
       harness_pid=$(sh -c 'printf "%s\n" "$PPID"')
       : > "$home/state/harness-$harness_pid"
       : > "$ready/$i"
-      while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
-        sleep 0.01
-      done
+      lock_concurrency_barrier "$ready" 40
       if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
         FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
         "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
         printf '%s\n' "$harness_pid" >> "$winners"
       fi
       : > "$completed/$i"
-      while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
-        sleep 0.01
-      done
+      lock_concurrency_barrier "$completed" 40
     ) &
     pids="$pids $!"
     i=$((i + 1))
@@ -2962,10 +2975,48 @@ EOF
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" "omp supervision block missing"
   assert_contains "$out" "Mode: omp (Oh My Pi) extension background wake." "omp snippet missing from session start"
   assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "omp extension load diagnostic missing"
-  assert_contains "$out" "so $root/.omp/extensions/fm-primary-turnend-guard.ts and $root/.omp/extensions/fm-primary-omp-watch.ts auto-load" "omp diagnostic omits the two tracked extension paths"
+  assert_contains "$out" "$root/.omp/extensions/fm-primary-turnend-guard.ts and $root/.omp/extensions/fm-primary-omp-watch.ts auto-load" "omp diagnostic omits the two tracked extension paths"
+  # shellcheck disable=SC2016  # backticks are literal text
+  assert_contains "$out" 'exit omp and relaunch through `fm <project>` (the launcher sets FM_HOME and --cwd)' "omp diagnostic for a non-checkout home must direct to the fm launcher"
+  assert_contains "$out" "a bare omp or /resume from the firstmate checkout does not register the extensions for this home" "omp diagnostic omits the bare omp warning"
+  assert_not_contains "$out" "restart omp with this home as its working directory" "omp diagnostic still tells a non-checkout home to restart omp inside it"
   assert_not_contains "$out" "PI_WATCH_EXTENSION" "omp primary must not receive the Pi diagnostic"
   assert_not_contains "$out" "project trust" "omp diagnostic must not carry Pi's trust prerequisite"
   pass "session start emits the omp block and reports omp extension load state"
+}
+
+test_omp_diagnostic_checkout_home_keeps_restart_wording_and_names_cause() {
+  local rec root home fakebin out
+  rec=$(new_world omp-checkout-home)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" omp
+  mkdir -p "$root/state" "$root/data" "$root/config"
+
+  # Home is the checkout, FM_HOME exported, no marker: today's wording, no cause line.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT FM_FAKE_HARNESS=omp \
+    FM_HOME="$root" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory" "omp diagnostic lost today's wording for the checkout home"
+  assert_not_contains "$out" "fm <project>" "omp diagnostic named the launcher for the checkout home"
+  assert_not_contains "$out" "OMP_WATCH_CAUSE" "omp diagnostic named a cause that no fact establishes"
+
+  # FM_HOME unset in the process environment.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u FM_HOME FM_FAKE_HARNESS=omp \
+    FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory" "omp diagnostic lost the checkout wording with FM_HOME unset"
+  assert_not_contains "$out" "OMP_WATCH_CAUSE" "omp diagnostic named a cause for the checkout home with FM_HOME unset"
+
+  # Marker names a pid that is not this session.
+  install_omp_extension_fixtures "$root"
+  write_omp_loaded_markers "$root" "$root" 424242
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT FM_FAKE_HARNESS=omp \
+    FM_HOME="$root" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "stale-pid marker must still report not loaded"
+  assert_contains "$out" "OMP_WATCH_CAUSE: the extension marker $root/state/.omp-watch-extension-loaded names pid 424242, which is not this session" "omp diagnostic did not name the foreign marker pid"
+  assert_not_contains "$out" "FM_HOME is unset" "omp diagnostic named an unset FM_HOME cause"
+  pass "omp diagnostic keeps today's wording for the checkout home and names the establishable cause"
 }
 
 test_omp_diagnostic_accepts_prelock_loaded_marker() {
@@ -3092,6 +3143,7 @@ test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_rejects_handoff_generation_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_omp_supervision_block_and_diagnostic
+test_omp_diagnostic_checkout_home_keeps_restart_wording_and_names_cause
 test_omp_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker

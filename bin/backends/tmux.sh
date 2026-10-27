@@ -65,13 +65,34 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# fm_backend_tmux_own_session: print the name of the tmux session this process
+# was started in. An untargeted display-message picks the most recently used
+# member of a session group, and so does a pane target, so an external client
+# attached through a grouped session (`new-session -t <session>`) would be
+# named instead. The third field of $TMUX is the id of the session the pane was
+# created in, which stays unambiguous across the group; fall back to the
+# untargeted lookup when it is absent, malformed, or stale (tmux answers a
+# killed session's id with empty output and exit 0).
+fm_backend_tmux_own_session() {
+  local sid=${TMUX##*,} name=
+  case "$sid" in
+  ''|*[!0-9]*) ;;
+  *) name=$(tmux display-message -p -t "\$$sid" '#S' 2>/dev/null) ;;
+  esac
+  if [ -n "$name" ]; then
+    printf '%s\n' "$name"
+  else
+    tmux display-message -p '#S'
+  fi
+}
+
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
 # prints the resolved session name.
 fm_backend_tmux_container_ensure() {
   if [ -n "${TMUX:-}" ]; then
-    tmux display-message -p '#S'
+    fm_backend_tmux_own_session
   else
     tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
     printf 'firstmate'

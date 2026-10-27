@@ -944,6 +944,85 @@ test_append_wakes_live_announced_watcher() {
   pass "watch-arm: appending work reopens an announced empty recovery"
 }
 
+test_append_wakes_handling_successor() {
+  local phase=$1 seq_state=${2:-intact} repeat=${3:-fresh}
+  local dir home state fakebin predecessor successor generation watcher_pid pair sequence
+  local new_key=inbox:second new_payload='check: captain inbox note second' datebin real_date inherited_row
+  dir=$(make_case "append-handling-$phase-$seq_state-$repeat")
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  append_wake "$state" check inbox:zeroth 'check: captain inbox note zeroth'
+  append_wake "$state" check inbox:first 'check: captain inbox note first'
+  inherited_row=$(head -n 1 "$state/.wake-queue")
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" || fail "first inbox wake did not surface"
+  predecessor=$ARM_PID
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/successor.out" "$predecessor"
+  successor=$ARM_PID
+  generation=$(recovery_marker_generation "$state/.watcher-down")
+  watcher_pid=$(cat "$state/.watch.lock/pid")
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
+    --watcher-pid "$watcher_pid" || fail "could not confirm first notification delivery"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err"
+  pair=$(drain_ack_pair "$dir/drain.err") || fail "first drain supplied no acknowledgement"
+  sequence=${pair%%$'\t'*}
+  generation=${pair#*$'\t'}
+  # Outlast two real polls: the inherited row alone must not loop.
+  sleep 3
+  is_live_non_zombie "$successor" || fail "successor repeated the inherited notification"
+  if [ "$phase" = after-ack ]; then
+    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation"
+    [ ! -s "$state/.wake-queue" ] || fail "inherited rows were not acknowledged"
+  fi
+  # A lost or unreadable counter must not let a new row look inherited.
+  case "$seq_state" in
+    missing) rm -f "$state/.wake-queue.seq" ;;
+    malformed) printf 'not-a-sequence\n' > "$state/.wake-queue.seq" ;;
+  esac
+  datebin=
+  if [ "$repeat" = identical ]; then
+    # Re-append the first inherited row's kind, key, and payload inside its
+    # epoch second, so the reused sequence makes the new row byte-identical.
+    new_key=inbox:zeroth
+    new_payload='check: captain inbox note zeroth'
+    datebin="$dir/datebin"
+    mkdir -p "$datebin"
+    real_date=$(command -v date)
+    cat > "$datebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  printf '%s\n' "${inherited_row%%$'\t'*}"
+else
+  exec "$real_date" "\$@"
+fi
+SH
+    chmod +x "$datebin/date"
+  fi
+  PATH="${datebin:+$datebin:}$PATH" append_wake "$state" check "$new_key" "$new_payload"
+  if [ "$repeat" = identical ]; then
+    [ "$(head -n 1 "$state/.wake-queue")" = "$inherited_row" ] \
+      || fail "re-append was not byte-identical to the inherited row"
+  fi
+  if [ "$phase" = before-ack ]; then
+    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation"
+  fi
+  wait_for_exit "$successor" 100 || fail "handling successor stranded the second inbox wake ($phase)"
+  grep -F 'check: rearm-resurface' "$dir/successor.out" >/dev/null \
+    || fail "successor did not notify about new work"
+  grep "$(printf '\tcheck\t%s\t' "$new_key")" "$state/.wake-queue" >/dev/null \
+    || fail "notification or old acknowledgement consumed the second message"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/next.out" "$successor"
+  ack_wakes "$state" || fail "could not acknowledge the second message"
+  sleep 3
+  is_live_non_zombie "$ARM_PID" || fail "next successor repeated already-handled work"
+  [ ! -s "$state/.wake-queue" ] || fail "handled queue was not drained"
+  kill -TERM "$ARM_PID"
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: handling successor delivers $repeat new inbox work $phase ($seq_state counter) without consuming or looping"
+}
+
 # Exercise the handling-window recovery invariant owned by
 # docs/watcher-continuity.md through real watcher processes.
 test_handling_window_close_keeps_the_acknowledgement_valid() {
@@ -1194,6 +1273,123 @@ test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing() {
     || fail "work queued for main did not resurface after the takeover: $(cat "$armout")"
   ! is_live_non_zombie "$SEED_PID" || fail "--take-over left the second watcher running"
   pass "watch-arm: --take-over owns a fresh cycle without a recovery wake and still surfaces queued work"
+}
+
+# A fake herdr for one live, busy crew pane, plus an event reader that behaves
+# like herdr-eventwait.py on a quiet fleet: it subscribes, then blocks for its
+# whole timeout budget. Nothing here reaches a real herdr server.
+make_event_wait_herdr() {  # <case-dir>
+  local dir=$1
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:-/dev/null}"
+args=()
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --session ]; then shift 2; continue; fi
+  args+=("$1"); shift
+done
+set -- "${args[@]}"
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.7.3","protocol":16},"server":{"running":true}}\n' ;;
+  "session list") printf '{"sessions":[{"name":"evt","running":true,"socket_path":"/nonexistent/evt.sock"}]}\n' ;;
+  "agent get") printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
+  "pane process-info")
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"claude","argv":["claude"]}]}}}\n' \
+      "${4:-}" "$PPID" "$PPID" ;;
+  "pane read") printf 'fixture pane\n> \n' ;;
+esac
+exit 0
+SH
+  cat > "$dir/quiet-reader" <<'SH'
+#!/usr/bin/env bash
+printf '@subscribed\n'
+sleep "$2"
+SH
+  chmod +x "$dir/fakebin/herdr" "$dir/quiet-reader"
+}
+
+# The watcher of a home with a herdr crew pane spends each idle poll inside its
+# event wait, which blocks up to POLL. A take-over that lands there must still
+# confirm its stop inside the arm's stop bound, put back the acknowledgement
+# main already made, and leave the fresh cycle quiet. Run as a $(...) on bash
+# 3.2, that wait held the TERM for the rest of the POLL, the stop went
+# unconfirmed, and the fresh cycle resurfaced an episode main had acknowledged,
+# which the supervision host passes straight back to main: a loop. The stopped
+# wait's reader scratch must not be left behind either.
+test_take_over_confirms_a_watcher_stopped_inside_its_event_wait() {
+  local dir state armout owner watcher fresh acknowledged before i leftover
+  dir=$(make_case take-over-event-wait)
+  state="$dir/state"
+  armout="$dir/arm.out"
+  mkdir -p "$dir/tmp"
+  make_event_wait_herdr "$dir"
+  printf 'window=evt:wG:pQ\nbackend=herdr\nkind=ship\n' > "$state/demo.meta"
+  event_arm() {  # <predecessor-or-empty> [arm-args...]
+    local pred=$1
+    shift
+    exec env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+      -u HERDR_SOCKET_PATH -u HERDR_SESSION -u FM_BACKEND_HERDR_BIN \
+      PATH="$dir/fakebin:$PATH" TMPDIR="$dir/tmp" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_POLL=40 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      FM_BUSY_TURN_MAX_SECS=999999 FM_STALE_ESCALATE_SECS=999999 \
+      FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_BACKEND_HERDR_EVENT_READER="$dir/quiet-reader" \
+      FM_FAKE_HERDR_LOG="$dir/herdr.log" FM_WATCH_PREDECESSOR_ARM_PID="$pred" \
+      "$WATCH_ARM" "$@"
+  }
+  # The successor a pass-through leaves running for main; main acknowledges.
+  event_arm "$$" > "$dir/owner.out" &
+  owner=$!
+  wait_for_file_text "$dir/owner.out" 'watcher: started pid=' \
+    || fail "fixture: the successor did not start: $(cat "$dir/owner.out")"
+  watcher=$(cat "$state/.watch.lock/pid")
+  append_wake "$state" signal take-over "signal: fixture handled by main"
+  ack_wakes "$state" >/dev/null || fail "fixture: main could not acknowledge the handled wake"
+  acknowledged=$(cat "$state/.watcher-down")
+  case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
+  # Land the take-over a second into a fresh event wait (each begins with the
+  # socket lookup), well inside its 40s budget. The budget must outlast the
+  # arm's stop bound even when a loaded host stretches that bound, or a held
+  # TERM is released in time and the case cannot catch the bug.
+  before=$(grep -c '^session list' "$dir/herdr.log" 2>/dev/null) || before=0
+  i=0
+  while [ "$i" -lt 1000 ]; do
+    [ "$(grep -c '^session list' "$dir/herdr.log" 2>/dev/null)" -gt "$before" ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$i" -lt 1000 ] || fail "fixture: the successor never entered its event wait: $(cat "$dir/herdr.log" 2>/dev/null)"
+  sleep 1
+  event_arm "" --take-over "$owner" > "$armout" &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 400 ] && ! grep -q '^watcher: started pid=' "$armout" 2>/dev/null; do
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -q '^watcher: started pid=' "$armout" \
+    || fail "the take-over did not own a fresh cycle within 20s of a stop during the event wait: $(cat "$armout")"
+  ! is_live_non_zombie "$watcher" || fail "the take-over left the watcher it stopped running"
+  grep -q "^arm_pid=$ARM_PID	watcher_pid=$watcher	.*reason=taken-over	" "$state/.watch-cycle-exits.log" \
+    || fail "the take-over did not confirm its stop: $(cat "$state/.watch-cycle-exits.log")"
+  [ "$(cat "$state/.watcher-down")" = "$acknowledged" ] \
+    || fail "the take-over reopened an acknowledged episode: $(cat "$state/.watcher-down")"
+  fresh=$(cat "$state/.watch.lock/pid")
+  sleep 3
+  is_live_non_zombie "$ARM_PID" || fail "the fresh cycle closed with no new work: $(cat "$armout")"
+  ! grep -q '^check: rearm-resurface' "$armout" || fail "the fresh cycle resurfaced an acknowledged episode"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+  wait_for_exit "$owner" 50 >/dev/null 2>&1 || true
+  i=0
+  while [ "$i" -lt 50 ] && is_live_non_zombie "$fresh"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  leftover=$(find "$dir/tmp" \( -name 'fm-herdr-eventwait.*' -o -name 'fm-watch-wait.*' \) -print 2>/dev/null)
+  [ -z "$leftover" ] || fail "a stopped event wait left its scratch behind: $leftover"
+  pass "watch-arm: --take-over of a watcher inside its herdr event wait confirms the stop and resurfaces nothing"
 }
 
 # Pause just after handover releases its snapshot locks, then fail the old
@@ -1448,6 +1644,44 @@ test_watcher_exits_when_its_home_is_removed() {
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$WATCH_PID" ] \
     || fail "the exited watcher left its lock in place"
   pass "watch-arm: a watcher exits when its home is removed"
+}
+
+# An arm whose repository root is deleted mid-flight - the temporary root of a
+# torn-down test fixture - must exit within its stated bound with the typed
+# ground-removed line instead of polling for a successor that cannot come. The
+# owning arm first proves a state directory that does not exist yet is created,
+# not mistaken for a removed one. The root's bin is a symlink to this checkout's
+# bin, so removing the root removes the arm's script path too.
+test_attached_arm_exits_when_its_root_is_removed() {
+  local dir repo state fakebin ownerout armout owner attached status
+  dir=$(make_case root-removed)
+  repo="$dir/repo"
+  state="$repo/state"
+  fakebin="$dir/fakebin"
+  ownerout="$dir/owner.out"
+  armout="$dir/arm.out"
+  mkdir -p "$repo/data"
+  ln -s "$ROOT/bin" "$repo/bin"
+  fm_test_track_watcher_state "$state"
+  WATCH_ARM="$repo/bin/fm-watch-arm.sh" start_owned_watcher "$repo" "$state" "$fakebin" "$ownerout"
+  owner=$ARM_PID
+  [ -d "$state" ] || fail "the owning arm did not create the not-yet-existing state directory"
+  PATH="$fakebin:$PATH" FM_HOME="$repo" FM_STATE_OVERRIDE="$state" FM_POLL=1 \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=60 "$repo/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  attached=$!
+  wait_for_file_text "$armout" "watcher: attached pid=$WATCH_PID" \
+    || fail "second arm did not attach to the live watcher: $(cat "$armout")"
+
+  rm -rf "$repo"
+  # One 0.1s attach poll plus the 0.2s recheck, with headroom for a busy host;
+  # far short of the 60s successor window the arm used to poll through.
+  wait_for_exit "$attached" 50
+  status=$?
+  wait_for_exit "$owner" 400 >/dev/null 2>&1 || true
+  expect_code 1 "$status" "an arm whose root was removed must exit 1: $(cat "$armout")"
+  grep -qF "watcher: FAILED - arm ground removed: $repo/bin/fm-watch-arm.sh no longer exists" "$armout" \
+    || fail "arm did not report its removed ground: $(cat "$armout")"
+  pass "watch-arm: an attached arm exits within its bound when its root is removed"
 }
 
 # tests/lib.sh's exit-time reaper must stop a watcher a suite armed for a
@@ -1713,12 +1947,21 @@ EOF
   pass "watch-arm: the OpenCode arm plugin decides with the shared supervision predicate"
 }
 
+test_append_wakes_handling_successor after-ack
+test_append_wakes_handling_successor before-ack
+test_append_wakes_handling_successor after-ack missing
+test_append_wakes_handling_successor before-ack missing
+test_append_wakes_handling_successor after-ack malformed
+test_append_wakes_handling_successor before-ack malformed
+test_append_wakes_handling_successor after-ack missing identical
+test_append_wakes_handling_successor after-ack malformed identical
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
 test_arm_refuses_a_disposable_validation_checkout
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
+test_attached_arm_exits_when_its_root_is_removed
 test_reaper_stops_a_tracked_watcher
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_attached_arm_follows_a_slow_live_holder
@@ -1743,4 +1986,5 @@ test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
+test_take_over_confirms_a_watcher_stopped_inside_its_event_wait
 test_opencode_arm_plugin_decides_with_the_shared_predicate

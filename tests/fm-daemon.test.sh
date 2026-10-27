@@ -69,6 +69,22 @@ test_afk_start_ignores_stale_pidfile_without_lock() {
   pass "fm-afk-start.sh ignores stale pidfile-only live pids"
 }
 
+test_afk_start_refuses_tern_supervisor_backend() {
+  local dir state out status
+  dir=$(make_supercase afk-start-tern-unsupported)
+  state="$dir/state"
+
+  out=$(FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=tern "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should refuse a tern supervisor backend (away mode supports only tmux, herdr, and rex)"
+  case "$out" in
+    *"does not support supervisor backend 'tern'"*|*"no non-visible daemon-launch primitive for backend 'tern'"*) : ;;
+    *) fail "away mode did not name tern as an unsupported supervisor backend: $out" ;;
+  esac
+  pass "fm-afk-start.sh refuses tern as an away-mode supervisor backend (unsupported; documented in docs/tern-backend.md)"
+}
+
 test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   local dir state out status lock
   dir=$(make_supercase afk-start-stale-lock-reused-pid)
@@ -939,6 +955,41 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
   [ ! -e "$state/.subsuper-paused-$key" ] \
     || fail "pause tracking survived a status append that no longer declares the wait"
   pass "an enriched wedge under a declared wait uses the pause cadence and restores wedge detection on resume"
+}
+
+# Upstream kunchenguid/firstmate#6899, away-daemon half. In a home that armed
+# config/wedge-defer-worker-wait, a worker's own open newest `blocked:` line is a
+# declaration too, so an enriched wedge for its pane is not escalated on top of
+# the blocker the daemon already escalated; unarmed, the wedge escalates as before.
+test_enriched_wedge_under_worker_blocker_follows_its_flag() {
+  local dir state task win reason armed
+  for armed in 1 0; do
+    dir=$(make_supercase "enriched-wedge-worker-blocker-$armed")
+    state="$dir/state"
+    task=blocked-wedge-w$armed; win="sess:fm-$task"
+    fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+    printf 'working: wiring the client\nblocked: need the API key for the staging account\n' \
+      > "$state/$task.status"
+    mkdir -p "$dir/config"
+    [ "$armed" -eq 0 ] || : > "$dir/config/wedge-defer-worker-wait"
+    # The blocker's own signal is escalated first, as it is when it lands.
+    FM_CONFIG_OVERRIDE="$dir/config" LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" \
+      FM_ESCALATE_BATCH_SECS=999 handle_wake "stale: $win" "$state"
+    grep -F 'need the API key' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the fixture's blocker was never escalated, so this case pins nothing"
+    : > "$state/.subsuper-escalations"
+    reason="stale: $win (idle 250s, possible wedge, escalation 2)"
+    FM_CONFIG_OVERRIDE="$dir/config" LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" \
+      FM_ESCALATE_BATCH_SECS=999 handle_wake "$reason" "$state"
+    if [ "$armed" -eq 1 ]; then
+      [ ! -s "$state/.subsuper-escalations" ] \
+        || fail "an armed home escalated a wedge on top of a worker blocker: $(cat "$state/.subsuper-escalations")"
+    else
+      grep -F "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+        || fail "an unarmed home stopped escalating a wedge under a worker blocker"
+    fi
+  done
+  pass "an enriched wedge under a worker blocker is not escalated only where config/wedge-defer-worker-wait arms it"
 }
 
 test_stale_terminal_escalates() {
@@ -2416,6 +2467,35 @@ test_max_defer_pending_composer_alarms_without_typing() {
   pass "max-defer on a pending composer alarms without typing"
 }
 
+test_composer_deferral_names_pending_text_or_unrecognized_shape() {
+  # A deferral must say WHICH refusal it was: real unsubmitted text is a
+  # human's draft, while an unproven composer points at the classifier, the
+  # pane, a dead shell, or a busy harness - the case a titled claude rule once
+  # hid for hours.
+  local dir state fakebin sent log
+  dir=$(make_bordered_case composer-deferral-reason)
+  state="$dir/state"; fakebin="$dir/fakebin"; log="$dir/daemon.log"
+  sent="$dir/sent.log"; : > "$sent"
+  afk_enter "$state"
+  printf '╭─────────────────╮\n│ > human draft   │\n╰─────────────────╯\n' > "$dir/composer"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    inject_msg "needs-decision: pick B" "$state"; then
+    fail "inject_msg typed into a pending composer"
+  fi
+  grep -F 'inject deferred: supervisor composer not confirmed-empty (state=pending: unsubmitted text in the composer)' "$log" >/dev/null \
+    || fail "a pending composer deferral does not name the unsubmitted text: $(cat "$log")"
+  : > "$log"
+  printf 'build output\nplain transcript line\n' > "$dir/composer"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    inject_msg "needs-decision: pick B" "$state"; then
+    fail "inject_msg typed into a screen with no recognized composer"
+  fi
+  grep -F 'inject deferred: supervisor composer not confirmed-empty (state=unknown: composer not proven empty or pending (unrecognized screen, or harness not idle))' "$log" >/dev/null \
+    || fail "an unrecognized screen deferral does not say the composer was not proven empty or pending: $(cat "$log")"
+  [ ! -s "$sent" ] || fail "a deferred inject typed text"
+  pass "a composer deferral names pending text apart from an unproven composer"
+}
+
 test_normal_flush_clears_stale_wedge_marker() {
   local dir state fakebin sent
   dir=$(make_bordered_case normal-clears-wedge)
@@ -2740,6 +2820,27 @@ test_wedge_alarm_herdr_channel_selected() {
   pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
 }
 
+test_wedge_alarm_rex_channel_selected() {
+  local dir log
+  dir=$(make_wedge_case wedge-rex); log="$dir/alert.log"
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=rex FM_SUPERVISOR_BACKEND=rex \
+    wedge_alarm_notify "away-mode escalations WEDGED 700s undelivered - see /s/.marker" "/s/.marker"
+  grep -F 'rex' "$log" >/dev/null || fail "rex channel not routed through the notifier seam: $(cat "$log")"
+  grep -F 'WEDGED 700s undelivered' "$log" >/dev/null || fail "rex channel did not carry the summary"
+  grep -F 'osascript' "$log" >/dev/null && fail "rex-only config also selected osascript"
+  pass "rex channel routes through the notifier seam with the summary (never a real pane write)"
+}
+
+test_wedge_alarm_auto_never_selects_rex() {
+  local dir log
+  dir=$(make_wedge_case wedge-auto-rex); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Darwin FM_WEDGE_ALARM_CHANNEL=auto \
+    FM_SUPERVISOR_BACKEND=rex wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  grep -F 'osascript' "$log" >/dev/null || fail "auto on Darwin did not select osascript: $(cat "$log")"
+  grep -E '^rex' "$log" >/dev/null && fail "auto selected the opt-in rex channel on a Rex supervisor: $(cat "$log")"
+  pass "auto never adds the opt-in rex channel, even on a Rex supervisor pane"
+}
+
 test_wedge_alarm_command_channel_receives_summary() {
   local dir out_argv out_stdin chan
   dir=$(make_wedge_case wedge-command)
@@ -3033,8 +3134,11 @@ test_discover_supervisor_backend_precedence() {
   out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
   [ "$out" = herdr ] || fail "HERDR_ENV=1 with HERDR_PANE_ID present should resolve to herdr: $out"
 
-  if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
-    fail "bare fallback (no override, no TMUX_PANE, no HERDR_ENV) should return non-zero"
+  # The adapter reads its bearer from FM_BACKEND_CONFIG_DIR (pinned when
+  # fm-backend.sh was sourced); pointing it at no bearer keeps the t3code rule
+  # closed whatever T3 state this dev box carries.
+  if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_backend); then
+    fail "bare fallback (no override, no TMUX_PANE, no HERDR_ENV, no T3 bearer) should return non-zero"
   fi
   [ "$out" = tmux ] || fail "bare fallback should still print tmux: $out"
 
@@ -3055,12 +3159,127 @@ test_discover_supervisor_target_herdr() {
   out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=iso1 discover_supervisor_target)
   [ "$out" = "iso1:w1:p9" ] || fail "herdr target should use an explicit HERDR_SESSION: $out"
 
-  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_target); then
     fail "bare fallback should return non-zero"
   fi
   [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
 
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+}
+
+# --- t3code supervisor discovery and busy verdict --------------------------
+# The real adapter is sourced once so fm_backend_source's sourced flag keeps it
+# from re-sourcing over the stub; the stub records every home it is asked about
+# and answers from FM_FAKE_T3_THREAD (empty: no live thread, `ambiguous`: the
+# adapter's two-threads error, anything else: that thread id).
+t3_discovery_stub() {
+  fm_backend_source t3code || fail "could not source the t3code adapter"
+  fm_backend_t3code_thread_for_home() {
+    printf '%s\n' "$1" >> "${FM_FAKE_T3_CALLS:?}"
+    case "${FM_FAKE_T3_THREAD:-}" in
+      '') return 1 ;;
+      ambiguous) echo "error: 2 live T3 threads run in $1 (t-a, t-b); set FM_SUPERVISOR_TARGET to the captain thread id" >&2; return 2 ;;
+      *) printf '%s' "$FM_FAKE_T3_THREAD" ;;
+    esac
+  }
+}
+
+test_discover_supervisor_t3code_after_env_tmux_and_herdr() {
+  local dir
+  dir=$(make_supercase discover-t3code)
+  mkdir -p "$dir/config"
+  printf 'tok\n' > "$dir/config/t3code-token"
+  (
+    t3_discovery_stub
+    export FM_FAKE_T3_CALLS="$dir/calls" FM_FAKE_T3_THREAD=thread-captain
+    export FM_HOME="$dir" FM_BACKEND_CONFIG_DIR="$dir/config" FM_T3CODE_ORIGIN=http://127.0.0.1:9 FM_BACKEND=
+    local out
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+      fail "T3 supervisor discovery must require explicit backend selection"
+    fi
+    [ "$out" = firstmate:0 ] || fail "without explicit T3 selection the tmux fallback must stand"
+    [ ! -s "$dir/calls" ] || fail "without explicit T3 selection the adapter must not be consulted"
+    printf '\n t3code \n' > "$dir/config/backend"
+    [ "$(fm_backend_name)" = t3code ] || fail "spawns must read the padded config/backend as t3code"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target) \
+      || fail "one live T3 thread in the home must resolve the target cleanly"
+    [ "$out" = thread-captain ] || fail "the target should be the live thread id, got '$out'"
+    if out=$(FM_BACKEND=tmux FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+      fail "FM_BACKEND=tmux must override config/backend for T3 supervisor discovery"
+    fi
+    [ "$out" = firstmate:0 ] || fail "FM_BACKEND=tmux must leave the tmux fallback, got '$out'"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend) \
+      || fail "one live T3 thread in the home must resolve the backend cleanly"
+    [ "$out" = t3code ] || fail "the backend should be t3code, got '$out'"
+    [ "$(sort -u "$dir/calls")" = "$dir" ] || fail "the adapter must be asked about this home only, got '$(cat "$dir/calls")'"
+
+    : > "$dir/calls"
+    out=$(FM_SUPERVISOR_TARGET=explicit:target FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target)
+    [ "$out" = explicit:target ] || fail "explicit FM_SUPERVISOR_TARGET must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend)
+    [ "$out" = herdr ] || fail "explicit FM_SUPERVISOR_BACKEND must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target)
+    [ "$out" = '%3' ] || fail "TMUX_PANE must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend)
+    [ "$out" = tmux ] || fail "TMUX_PANE must resolve tmux ahead of t3code: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' discover_supervisor_target)
+    [ "$out" = default:w1:p9 ] || fail "herdr markers must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_supervisor_backend)
+    [ "$out" = herdr ] || fail "herdr markers must resolve herdr ahead of t3code: $out"
+    [ ! -s "$dir/calls" ] || fail "the explicit env, tmux, and herdr rules must win before the adapter is consulted"
+
+    export FM_FAKE_T3_THREAD=
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+      fail "no live T3 thread must fall through to the default with a non-zero status"
+    fi
+    [ "$out" = firstmate:0 ] || fail "no live T3 thread should still print the tmux default target: $out"
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
+      fail "no live T3 thread must fall through to the default backend with a non-zero status"
+    fi
+    [ "$out" = tmux ] || fail "no live T3 thread should still print the tmux default backend: $out"
+
+    export FM_FAKE_T3_THREAD=ambiguous
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target 2>"$dir/ambiguous.err"); then
+      fail "two live T3 threads must not resolve a target"
+    fi
+    [ "$out" = firstmate:0 ] || fail "an ambiguous home falls through to the default target: $out"
+    assert_contains "$(cat "$dir/ambiguous.err")" "error: 2 live T3 threads run in $dir (t-a, t-b)" "discovery must pass the adapter's ambiguity error through to stderr"
+
+    : > "$dir/calls"
+    export FM_FAKE_T3_THREAD=thread-captain
+    rm -f "$dir/config/t3code-token"
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+      fail "without a bearer the t3code rule must stay closed"
+    fi
+    [ "$out" = firstmate:0 ] || fail "without a bearer the default target stands: $out"
+    [ ! -s "$dir/calls" ] || fail "without a bearer the adapter must not be consulted"
+  ) || fail "t3code discovery subshell failed"
+  pass "discover_supervisor_*: t3code resolves from the home's live thread after env, TMUX_PANE, and herdr; zero, ambiguous, and no-bearer fall through"
+}
+
+test_pane_is_busy_t3code_trusts_native_verdict_without_capture() {
+  local dir row
+  dir=$(make_supercase primary-t3code-busy)
+  (
+    fm_backend_source t3code || fail "could not source the t3code adapter"
+    fm_backend_capture() { : > "$dir/capture-called"; }
+    fm_backend_t3code_probe() {
+      [ "$1" = thread-captain ] || : > "$dir/unexpected-probe"
+      printf '%s' "${FM_FAKE_T3_ROW:?}"
+    }
+    for row in running starting blocked error http-failure http-404 archived closing; do
+      FM_FAKE_T3_ROW=$row FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy thread-captain t3code \
+        || fail "a T3 supervisor thread reading $row must defer injection"
+    done
+    for row in idle ready interrupted; do
+      if FM_FAKE_T3_ROW=$row FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy thread-captain t3code; then
+        fail "a settled T3 supervisor thread reading $row must accept injection without a rendered-tail fallback"
+      fi
+    done
+  ) || fail "t3code pane_is_busy subshell failed"
+  [ ! -e "$dir/capture-called" ] || fail "capture must never be consulted for a t3code supervisor"
+  [ ! -e "$dir/unexpected-probe" ] || fail "pane_is_busy must probe the supervisor thread it was given"
+  pass "pane_is_busy: t3code accepts only a settled thread with no pending request and never reads a rendered tail"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {
@@ -3230,6 +3449,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
+test_afk_start_refuses_tern_supervisor_backend
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
@@ -3240,6 +3460,7 @@ test_unknown_wake_ack_failure_still_clears_delivered_digest
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
+test_enriched_wedge_under_worker_blocker_follows_its_flag
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence
 test_stale_paused_classifies_pause
@@ -3329,6 +3550,7 @@ test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
+test_composer_deferral_names_pending_text_or_unrecognized_shape
 test_normal_flush_clears_stale_wedge_marker
 test_oversized_digest_is_bounded_and_kept_durable
 test_digest_budget_counts_omitted_events
@@ -3343,6 +3565,8 @@ test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
 test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
+test_wedge_alarm_rex_channel_selected
+test_wedge_alarm_auto_never_selects_rex
 test_wedge_alarm_command_channel_receives_summary
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
@@ -3362,6 +3586,8 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_discover_supervisor_t3code_after_env_tmux_and_herdr
+test_pane_is_busy_t3code_trusts_native_verdict_without_capture
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted

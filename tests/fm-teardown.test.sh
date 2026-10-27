@@ -139,8 +139,14 @@ SH
   # runner's own PATH. Tests exercising the run-abort path override
   # FM_FAKE_AXI_STATUS/FM_FAKE_NM_ABORT_LOG/FM_FAKE_NM_RUNS_LIST before
   # run_teardown.
+  # When FM_FAKE_NM_EXPECT_HOME is set, the stub sees runs only from that
+  # NM_HOME, as a per-workspace daemon would: any other home answers no run
+  # and records no abort.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FM_FAKE_NM_EXPECT_HOME:-}" ] && [ "${NM_HOME:-}" != "$FM_FAKE_NM_EXPECT_HOME" ]; then
+  exit 0
+fi
 case "${1:-}" in
   axi)
     shift
@@ -2648,6 +2654,91 @@ test_secondmate_pr_registration_publishes_ready_line() {
   pass "fm-pr-check publishes the PR-ready line on a secondmate's parent channel once"
 }
 
+# With config/ready-after-green present, registering a no-mistakes PR in a
+# secondmate home withholds the ready line until the child's own status holds
+# the checks-green report for that exact PR; without the flag it publishes at
+# registration as before.
+test_secondmate_pr_ready_line_waits_for_green_when_opted_in() {
+  local case_dir channel url other pr_head
+  url=https://github.com/example/repo/pull/7
+  other=https://github.com/example/repo/pull/8
+  case_dir=$(make_case mate-pr-ready-green)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  mkdir -p "$case_dir/parent/state" "$case_dir/home/config"
+  channel="$case_dir/parent/state/mate-x.status"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  run() {
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+      PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" > "$case_dir/pr-check.out" 2> "$case_dir/pr-check.err" \
+      || fail "mate-pr-ready-green: fm-pr-check failed: $(cat "$case_dir/pr-check.err")"
+  }
+
+  : > "$case_dir/home/config/ready-after-green"
+  printf 'working [at=1]: waiting for CI on %s\n' "$url" > "$case_dir/state/task-x1.status"
+  run
+  grep -q '^armed:' "$case_dir/pr-check.out" || fail "mate-pr-ready-green: the poll was not armed while checks were pending"
+  [ ! -e "$channel" ] || ! grep -q 'child-pr-task-x1' "$channel" \
+    || fail "mate-pr-ready-green: the ready line was published before the checks-green report"
+  ! grep -q '^actionable:' "$case_dir/pr-check.err" \
+    || fail "mate-pr-ready-green: a withheld ready line was reported as a channel problem"
+
+  printf 'done [at=2]: PR %s checks green\n' "$other" >> "$case_dir/state/task-x1.status"
+  run
+  [ ! -e "$channel" ] || ! grep -q 'child-pr-task-x1' "$channel" \
+    || fail "mate-pr-ready-green: another PR's checks-green report released this PR's ready line"
+
+  printf 'done [at=3]: PR %s checks green\n' "$url" >> "$case_dir/state/task-x1.status"
+  run
+  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url mode=no-mistakes" <(sed -E 's/ \[at=[0-9]+\]//' "$channel") \
+    "mate-pr-ready-green: the ready line did not follow the checks-green report"
+
+  rm -f "$channel" "$case_dir/home/config/ready-after-green"
+  printf 'working [at=4]: waiting for CI on %s\n' "$url" > "$case_dir/state/task-x1.status"
+  run
+  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url mode=no-mistakes" <(sed -E 's/ \[at=[0-9]+\]//' "$channel") \
+    "mate-pr-ready-green: without the flag the ready line left its registration-time behavior"
+  pass "fm-pr-check withholds the PR-ready line until checks are green when config/ready-after-green is present"
+}
+
+# The checks-green report is read as bin/fm-crew-state.sh reads it: a note
+# that names this PR and reports checks green releases the ready line even
+# with text around the report, while one naming a PR whose number merely
+# starts with this PR's number does not.
+test_secondmate_pr_ready_line_follows_green_report_with_trailing_text() {
+  local case_dir channel url pr_head
+  url=https://github.com/example/repo/pull/7
+  case_dir=$(make_case mate-pr-ready-green-text)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  mkdir -p "$case_dir/parent/state" "$case_dir/home/config"
+  channel="$case_dir/parent/state/mate-x.status"
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  : > "$case_dir/home/config/ready-after-green"
+  run() {
+    FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+      PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" > "$case_dir/pr-check.out" 2> "$case_dir/pr-check.err" \
+      || fail "mate-pr-ready-green-text: fm-pr-check failed: $(cat "$case_dir/pr-check.err")"
+  }
+
+  printf 'done [at=1]: PR %s0 checks green, held for captain merge\n' "$url" > "$case_dir/state/task-x1.status"
+  run
+  [ ! -e "$channel" ] || ! grep -q 'child-pr-task-x1' "$channel" \
+    || fail "mate-pr-ready-green-text: a report naming PR 70 released PR 7's ready line"
+
+  printf 'done [at=2]: PR %s checks green, held for captain merge.\n' "$url" >> "$case_dir/state/task-x1.status"
+  run
+  assert_grep "done [key=child-pr-task-x1]: child task-x1 PR ready: $url mode=no-mistakes" <(sed -E 's/ \[at=[0-9]+\]//' "$channel") \
+    "mate-pr-ready-green-text: a checks-green report with trailing text did not release the ready line"
+  ! grep -q '^actionable:' "$case_dir/pr-check.err" \
+    || fail "mate-pr-ready-green-text: the released ready line was reported as a channel problem"
+  pass "fm-pr-check releases the PR-ready line on a checks-green report that carries surrounding text"
+}
+
 # Tearing a child down inside a secondmate home delivers the child's final
 # ledger line to the parent before the record goes, and refuses (retaining
 # every record) while the parent channel cannot be written; a rerun after the
@@ -4028,6 +4119,35 @@ test_parked_own_run_is_aborted_before_teardown() {
   pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
 }
 
+# A parked run that lives in a per-workspace no-mistakes home is found and
+# aborted through the home's configured resolver when NM_HOME is unset.
+test_parked_run_in_a_resolved_workspace_home_is_aborted() {
+  local case_dir head rc=0
+  case_dir=$(make_case parked-run-resolved-home)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  mkdir -p "$case_dir/workspace-nm"
+  cat > "$case_dir/resolver" <<SH
+#!/usr/bin/env bash
+[ "\$1" = '$case_dir/wt' ] && printf '%s\\n' '$case_dir/workspace-nm'
+SH
+  chmod +x "$case_dir/resolver"
+  printf '%s\n' "$case_dir/resolver" > "$case_dir/config/nm-home-resolver"
+
+  (
+    unset NM_HOME
+    FM_FAKE_NM_EXPECT_HOME="$case_dir/workspace-nm" \
+    FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+    FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+      run_teardown "$case_dir"
+  ) > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "parked-run-resolved-home: teardown should still succeed"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-run-resolved-home: the parked run in the resolved workspace home was not aborted"
+  pass "a parked run in a resolved workspace no-mistakes home is aborted before the worker is removed"
+}
+
 # An abort can race a concurrent gate response: the run finishes with a
 # passing-but-not-clean outcome (an explicitly approved Test/CI exception)
 # instead of landing on `cancelled`. That is still a terminal, finished run,
@@ -5179,6 +5299,482 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
 }
 
 test_teardown_preserves_opencode_busy_plugin_on_pool_return
+
+# Archive coverage uses the real teardown entry point over isolated homes.
+test_status_archive_opt_in() {
+  local case_dir rc mode
+  for mode in off on; do
+    case_dir=$(make_case "status-archive-$mode")
+    write_meta "$case_dir" local-only ship
+    printf 'working: started\nneeds-decision [key=choice]: choose\nresolved [key=choice]: chosen\ndone: complete\n' > "$case_dir/state/task-x1.status"
+    cp "$case_dir/state/task-x1.status" "$case_dir/expected"
+    mkdir -p "$case_dir/data/old"
+    printf 'old archive\n' > "$case_dir/data/old/status.log"
+    touch -t 200001010000 "$case_dir/data/old/status.log"
+    [ "$mode" = off ] || touch "$case_dir/config/status-archive"
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "status archive $mode teardown"
+    assert_absent "$case_dir/state/task-x1.status" "live status survived teardown"
+    if [ "$mode" = on ]; then
+      cmp -s "$case_dir/expected" "$case_dir/data/task-x1/status.log" || fail "opt-in archive lost history"
+    else
+      assert_absent "$case_dir/data/task-x1/status.log" "default-off teardown created an archive"
+      assert_present "$case_dir/data/old/status.log" "default-off teardown pruned an archive"
+    fi
+  done
+  pass "status archival is opt-in and preserves the complete log"
+}
+
+test_record_export_config_absent_never_reads_the_exporter() {
+  local case_dir rc=0
+  case_dir=$(make_case record-export-off)
+  write_meta "$case_dir" local-only ship
+  prepare_teardown_source_copy "$case_dir"
+  rm -f "$case_dir/test-root/bin/fm-record-export.sh"
+  mkdir -p "$case_dir/state/task-x1.inbox/handled"
+  printf 'pending\n' > "$case_dir/state/task-x1.inbox/001.msg"
+  run_copied_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "config-absent teardown without exporter: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "config-absent teardown retained metadata"
+  assert_absent "$case_dir/state/task-x1.status" "config-absent teardown retained status"
+  assert_absent "$case_dir/state/task-x1.inbox" "config-absent teardown retained inbox"
+  pass "config-absent teardown does not read or invoke record export"
+}
+
+test_record_export_unopted_symlinked_config_does_not_block_teardown() {
+  local case_dir rc=0
+  case_dir=$(make_case record-export-symlink-config-off)
+  write_meta "$case_dir" local-only ship
+  prepare_teardown_source_copy "$case_dir"
+  rm -f "$case_dir/test-root/bin/fm-record-export.sh"
+  mv "$case_dir/config" "$case_dir/config-target"
+  ln -s "$case_dir/config-target" "$case_dir/config"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "unopted symlinked config teardown: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "unopted symlinked config retained metadata"
+  assert_absent "$case_dir/state/task-x1.status" "unopted symlinked config retained status"
+  pass "unopted teardown ignores symlinked config when record export is absent"
+}
+
+test_record_export_archives_before_teardown_or_preserves_sources_on_failure() {
+  local case_dir export_root archive rc mode
+  for mode in success failure inaccessible-config; do
+    case_dir=$(make_case "record-export-$mode")
+    write_meta "$case_dir" local-only ship
+    export_root="$case_dir/export"
+    printf '%s\n' "$export_root" > "$case_dir/config/record-export-root"
+    mkdir -p "$case_dir/state/task-x1.inbox/handled"
+    printf 'working: export me\ndone: complete\n' > "$case_dir/state/task-x1.status"
+    printf 'pending captain text\n' > "$case_dir/state/task-x1.inbox/001.msg"
+    printf 'handled captain text\n' > "$case_dir/state/task-x1.inbox/handled/002.msg"
+    cp "$case_dir/state/task-x1.meta" "$case_dir/expected.meta"
+    cp "$case_dir/state/task-x1.status" "$case_dir/expected.status"
+    if [ "$mode" = failure ]; then
+      printf 'not an export directory\n' > "$export_root"
+    elif [ "$mode" = inaccessible-config ]; then
+      mv "$case_dir/config" "$case_dir/config-target"
+      ln -s "$case_dir/config-target" "$case_dir/config"
+    fi
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$mode" = success ]; then
+      expect_code 0 "$rc" "record export teardown: $(cat "$case_dir/stderr")"
+      archive="$export_root/archive/task-x1/teardown-test-task-x1"
+      cmp -s "$case_dir/expected.meta" "$archive/meta" || fail "teardown archive lost metadata"
+      cmp -s "$case_dir/expected.status" "$archive/status" || fail "teardown archive lost status"
+      assert_grep 'pending captain text' "$archive/inbox/001.msg" "teardown archive lost a pending steer"
+      assert_grep 'handled captain text' "$archive/inbox/handled/002.msg" "teardown archive lost a handled steer"
+      assert_present "$archive/manifest.v1.json" "teardown archive did not commit its manifest"
+      assert_absent "$case_dir/state/task-x1.meta" "successful export retained metadata"
+      assert_absent "$case_dir/state/task-x1.status" "successful export retained status"
+      assert_absent "$case_dir/state/task-x1.inbox" "successful export retained inbox"
+    else
+      [ "$rc" -ne 0 ] || fail "teardown ignored a record export failure in $mode mode: $(cat "$case_dir/stderr")"
+      assert_grep 'record export' "$case_dir/stderr" \
+        "teardown did not report the export failure reason"
+      assert_grep 'retaining task records for retry' "$case_dir/stderr" \
+        "teardown did not explain its record-preservation refusal"
+      assert_present "$case_dir/state/task-x1.meta" "failed export removed metadata"
+      assert_present "$case_dir/state/task-x1.status" "failed export removed status"
+      assert_present "$case_dir/state/task-x1.inbox/001.msg" "failed export removed a pending steer"
+      assert_present "$case_dir/state/task-x1.inbox/handled/002.msg" "failed export removed a handled steer"
+    fi
+  done
+  pass "teardown commits the record archive before deleting sources and fails closed when export cannot commit"
+}
+
+test_record_export_captures_forced_secondmate_sub_state() {
+  local case_dir home export_root archive rc=0
+  case_dir=$(make_case record-export-secondmate-child)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  export_root="$case_dir/export"
+  mkdir -p "$home/state/child.inbox/handled" "$home/data" "$home/config" "$home/projects"
+  printf 'task-x1\n' > "$home/.fm-secondmate-home"
+  printf 'home=%s\n' "$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/child.meta" \
+    "window=firstmate:fm-child" \
+    "kind=scout" \
+    "mode=local-only" \
+    "project=$case_dir/project" \
+    "worktree=$case_dir/wt" \
+    "spawn_gen=child-generation"
+  printf 'done: child complete\n' > "$home/state/child.status"
+  printf 'pending child steer\n' > "$home/state/child.inbox/001.msg"
+  printf 'handled child steer\n' > "$home/state/child.inbox/handled/002.msg"
+  printf '%s\n' "$export_root" > "$case_dir/config/record-export-root"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "forced secondmate record export: $(cat "$case_dir/stderr")"
+  archive="$export_root/archive/child/child-generation"
+  assert_present "$archive/meta" "secondmate child archive lost metadata"
+  assert_grep 'done: child complete' "$archive/status" "secondmate child archive lost status"
+  assert_grep 'pending child steer' "$archive/inbox/001.msg" "secondmate child archive lost pending inbox"
+  assert_grep 'handled child steer' "$archive/inbox/handled/002.msg" "secondmate child archive lost handled inbox"
+  assert_present "$archive/manifest.v1.json" "secondmate child archive did not commit"
+  assert_absent "$home" "forced secondmate teardown retained the child home"
+  pass "forced secondmate teardown exports task records from the child sub-state"
+}
+
+test_record_export_waits_for_endpoint_quiescence_before_archiving() {
+  local case_dir export_root archive rc=0
+  case_dir=$(make_case record-export-close-retry)
+  write_meta "$case_dir" local-only ship
+  export_root="$case_dir/export"
+  printf '%s\n' "$export_root" > "$case_dir/config/record-export-root"
+  mkdir -p "$case_dir/state/task-x1.inbox/handled"
+  printf 'done: before refusal\n' > "$case_dir/state/task-x1.status"
+  printf 'before refusal\n' > "$case_dir/state/task-x1.inbox/001.msg"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  kill-window) exit 1 ;;
+  list-windows) printf '%s\n' fm-task-x1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "record-export-close-retry: endpoint close should refuse"
+  assert_grep "could not be closed" "$case_dir/first.stderr" \
+    "record-export-close-retry: first attempt did not reach endpoint refusal"
+  assert_absent "$export_root/archive/task-x1/teardown-test-task-x1" \
+    "record-export-close-retry: archive published while the endpoint remained live"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "record-export-close-retry: endpoint refusal removed metadata"
+
+  printf 'done: after refusal\n' > "$case_dir/state/task-x1.status"
+  printf 'after refusal\n' > "$case_dir/state/task-x1.inbox/001.msg"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "record-export-close-retry: retry should complete"
+  archive="$export_root/archive/task-x1/teardown-test-task-x1"
+  assert_grep "done: after refusal" "$archive/status" \
+    "record-export-close-retry: retry archive contains status from before endpoint quiescence"
+  assert_grep "after refusal" "$archive/inbox/001.msg" \
+    "record-export-close-retry: retry archive contains inbox from before endpoint quiescence"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "record-export-close-retry: successful retry retained task metadata"
+  pass "record export waits for endpoint quiescence and retry captures records changed after refusal"
+}
+
+test_status_archive_reuse_and_retention() {
+  local case_dir rc archive
+  case_dir=$(make_case status-archive-reuse)
+  write_meta "$case_dir" local-only ship
+  touch "$case_dir/config/status-archive"
+  mkdir -p "$case_dir/data/task-x1" "$case_dir/data/old" "$case_dir/outside"
+  printf 'first generation\n' > "$case_dir/data/task-x1/status.log"
+  printf 'outside sentinel\n' > "$case_dir/outside/status.log"
+  ln -s "$case_dir/outside/status.log" "$case_dir/data/task-x1/status.1.log"
+  ln -s "$case_dir/outside" "$case_dir/data/symlink-task"
+  printf 'expired\n' > "$case_dir/data/old/status.log"
+  printf 'report survives\n' > "$case_dir/data/old/report.md"
+  printf 'unowned file survives\n' > "$case_dir/data/old/status.notes.log"
+  touch -t 200001010000 "$case_dir/data/old/"* "$case_dir/outside/status.log"
+  printf 'done: second generation\n' > "$case_dir/state/task-x1.status"
+  touch -t 200001010000 "$case_dir/state/task-x1.status"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "status archive reuse"
+  assert_grep 'first generation' "$case_dir/data/task-x1/status.log" "first archive overwritten"
+  archive="$case_dir/data/task-x1/status.2.log"
+  assert_grep 'second generation' "$archive" "reused ID did not select a fresh archive"
+  assert_grep 'outside sentinel' "$case_dir/outside/status.log" "archive or pruning followed a symlink"
+  [ -L "$case_dir/data/task-x1/status.1.log" ] || fail "archive replaced an existing symlink"
+  assert_absent "$case_dir/data/old/status.log" "expired status archive survived pruning"
+  assert_present "$case_dir/data/old/report.md" "pruning removed other task data"
+  assert_present "$case_dir/data/old/status.notes.log" "pruning removed an unowned filename"
+  pass "reused task IDs never overwrite archives and retention removes only old owned logs"
+}
+
+test_status_archive_unsafe_paths_refuse() {
+  local case_dir rc unsafe
+  for unsafe in source data task children; do
+    case_dir=$(make_case "status-archive-unsafe-$unsafe")
+    write_meta "$case_dir" local-only ship
+    touch "$case_dir/config/status-archive"
+    mkdir -p "$case_dir/outside"
+    printf 'untouched\n' > "$case_dir/outside/sentinel"
+    printf 'done: complete\n' > "$case_dir/state/task-x1.status"
+    case "$unsafe" in
+      source) rm "$case_dir/state/task-x1.status"; ln -s "$case_dir/outside/sentinel" "$case_dir/state/task-x1.status" ;;
+      data) rmdir "$case_dir/data"; ln -s "$case_dir/outside" "$case_dir/data" ;;
+      task) ln -s "$case_dir/outside" "$case_dir/data/task-x1" ;;
+      children) mkdir -p "$case_dir/data/task-x1"; ln -s "$case_dir/outside" "$case_dir/data/task-x1/children" ;;
+    esac
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$unsafe" = data ]; then
+      expect_code 0 "$rc" "configured symlinked data root"
+      assert_grep 'done: complete' "$case_dir/outside/task-x1/status.log" "archive did not use physical data root"
+    elif [ "$unsafe" = children ]; then
+      expect_code 0 "$rc" "pruning ignores symlinked children: $(cat "$case_dir/stderr")"
+    else
+      [ "$rc" -ne 0 ] || fail "unsafe $unsafe archive path accepted"
+      assert_present "$case_dir/state/task-x1.status" "refusal lost status"
+    fi
+    assert_grep 'untouched' "$case_dir/outside/sentinel" "unsafe path changed outside data"
+    assert_absent "$case_dir/outside/status.log" "archive escaped through symlink"
+  done
+  pass "archive sources and directories reject symlinks; pruning never follows children links"
+}
+
+# Intercept both the old move and atomic publication so the regressions also
+# exercise the failure and watcher window on the pre-fix implementation.
+prepare_status_archive_presentation() {
+  local case_dir=$1
+  write_meta "$case_dir" local-only ship
+  touch "$case_dir/config/status-archive" "$case_dir/config/supervision-host-off"
+  printf 'note: archived note\ndone: archived outcome\n' > "$case_dir/state/task-x1.status"
+  FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" FM_DATA_OVERRIDE="$case_dir/data" \
+    bash "$ROOT/bin/fm-wake-drain.sh" > "$case_dir/before" 2> "$case_dir/drain.err" || fail "initial presentation failed"
+  assert_grep 'archived note' "$case_dir/before" "fixture never presented the live note"
+  FM_STATE_OVERRIDE="$case_dir/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_wake_status_mark_current "$2" "$2/task-x1.status"
+  ' _ "$ROOT" "$case_dir/state" || fail "could not mark fixture status seen"
+  printf 'ledger\n' > "$case_dir/state/.task-x1.home-appends"
+  touch "$case_dir/state/.hb-surfaced-task-x1"
+}
+
+install_status_archive_publish_probe() {
+  local case_dir=$1 command
+  for command in ln mv; do
+    cat > "$case_dir/fakebin/$command" <<'SH'
+#!/usr/bin/env bash
+case "${*: -1}" in
+  */status.log)
+    touch "$FM_ARCHIVE_TEST_CASE/publish-entered"
+    if [ "$FM_ARCHIVE_TEST_MODE" = fail ]; then
+      echo 'simulated archive publication failure' >&2
+      exit 1
+    fi
+    bash -c '
+      . "$1/bin/fm-watch.sh"
+      scan_signals
+    ' _ "$FM_ROOT_OVERRIDE" > "$FM_ARCHIVE_TEST_CASE/publish-signals" || exit 1
+    ;;
+esac
+exec "/bin/${0##*/}" "$@"
+SH
+    chmod +x "$case_dir/fakebin/$command"
+  done
+}
+
+test_status_archive_failed_publish_preserves_presentation() {
+  local case_dir rc
+  case_dir=$(make_case status-archive-failed-publish)
+  prepare_status_archive_presentation "$case_dir"
+  cp "$case_dir/state/.status-presentation-cursor" "$case_dir/cursor.before"
+  cp "$case_dir/state/.seen-task-x1_status" "$case_dir/seen.before"
+  install_status_archive_publish_probe "$case_dir"
+  rc=0
+  FM_ARCHIVE_TEST_CASE="$case_dir" FM_ARCHIVE_TEST_MODE=fail \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "failed archive publication"
+  assert_present "$case_dir/publish-entered" "fixture never attempted publication"
+  cmp -s "$case_dir/cursor.before" "$case_dir/state/.status-presentation-cursor" || fail "failed archive retired presentation cursor"
+  cmp -s "$case_dir/seen.before" "$case_dir/state/.seen-task-x1_status" || fail "failed archive cleared seen marker"
+  assert_present "$case_dir/state/.task-x1.home-appends" "failed archive cleared home append ledger"
+  assert_present "$case_dir/state/task-x1.status" "failed archive lost live history"
+  assert_present "$case_dir/state/task-x1.meta" "failed archive removed task metadata"
+  FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" FM_DATA_OVERRIDE="$case_dir/data" \
+    bash "$ROOT/bin/fm-wake-drain.sh" > "$case_dir/after" 2>> "$case_dir/drain.err" || fail "retry presentation failed"
+  assert_no_grep 'archived note' "$case_dir/after" "failed archive re-presented note"
+  assert_no_grep 'archived outcome' "$case_dir/after" "failed archive re-presented outcome"
+  pass "failed archive publication preserves presentation and watcher bookkeeping"
+}
+
+test_status_archive_cursor_failure_retries_without_duplicate() {
+  local case_dir rc
+  case_dir=$(make_case status-archive-cursor-retry)
+  prepare_status_archive_presentation "$case_dir"
+  cp "$case_dir/state/task-x1.status" "$case_dir/expected"
+  cp "$case_dir/state/.status-presentation-cursor" "$case_dir/cursor.before"
+  printf 'broken\tidentity\tnot-an-offset\t0\n' >> "$case_dir/state/.status-presentation-cursor"
+  cp "$case_dir/state/.status-presentation-cursor" "$case_dir/cursor.malformed"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "malformed presentation cursor"
+  assert_present "$case_dir/state/task-x1.status" "cursor failure lost live history"
+  cmp -s "$case_dir/cursor.malformed" "$case_dir/state/.status-presentation-cursor" \
+    || fail "cursor failure changed presentation rows"
+  assert_absent "$case_dir/data/task-x1/status.log" "failed retirement left a duplicate archive"
+  assert_present "$case_dir/state/task-x1.meta" "cursor failure removed task metadata"
+  cp "$case_dir/cursor.before" "$case_dir/state/.status-presentation-cursor"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "retry after cursor repair"
+  cmp -s "$case_dir/expected" "$case_dir/data/task-x1/status.log" || fail "retry archive lost history"
+  assert_absent "$case_dir/state/task-x1.status" "successful retry retained live status"
+  assert_absent "$case_dir/data/task-x1/status.1.log" "retry wrote a duplicate archive"
+  pass "cursor retirement failure removes its archive so retry publishes one history"
+}
+
+test_status_archive_publish_and_cold_log_stay_inert() {
+  local case_dir rc text
+  case_dir=$(make_case status-archive-inert)
+  prepare_status_archive_presentation "$case_dir"
+  install_status_archive_publish_probe "$case_dir"
+  rc=0
+  FM_ARCHIVE_TEST_CASE="$case_dir" FM_ARCHIVE_TEST_MODE=scan \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "archive publication: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/publish-entered" "fixture never attempted publication"
+  [ ! -s "$case_dir/publish-signals" ] || fail "archival caused a spurious watcher wake"
+  assert_present "$case_dir/data/task-x1/status.log" "archive absent"
+  for text in task-x1.status .task-x1.home-appends .seen-task-x1_status .hb-surfaced-task-x1 .task-x1.open-decisions-cursor; do
+    assert_absent "$case_dir/state/$text" "retirement left live bookkeeping"
+  done
+  assert_no_grep 'task-x1' "$case_dir/state/.status-presentation-cursor" "retirement left presentation cursor"
+  printf 'blocked: archive must stay cold\n' >> "$case_dir/data/task-x1/status.log"
+  FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" FM_DATA_OVERRIDE="$case_dir/data" \
+    bash "$ROOT/bin/fm-wake-drain.sh" > "$case_dir/after" 2>> "$case_dir/drain.err" || fail "post-retirement presentation failed"
+  for text in task-x1 'archive must stay cold' 'archived note'; do
+    assert_no_grep "$text" "$case_dir/after" "archive re-presented"
+  done
+  FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" bash -c '
+    . "$1/bin/fm-watch.sh"
+    scan_signals
+    status_presentation_snapshot "$STATE"
+  ' _ "$ROOT" > "$case_dir/snapshot" || fail "cold archive snapshot failed"
+  [ ! -s "$case_dir/snapshot" ] || fail "watcher or snapshot consumed archive"
+  pass "archive publication and cold logs never re-wake or re-present"
+}
+
+test_status_archive_pruning_failure_warns_and_completes() {
+  local case_dir rc operation
+  for operation in rm find; do
+    case_dir=$(make_case "status-archive-prune-failure-$operation")
+    write_meta "$case_dir" local-only ship
+    touch "$case_dir/config/status-archive"
+    printf 'done: current history\n' > "$case_dir/state/task-x1.status"
+    mkdir -p "$case_dir/data/unrelated-old"
+    printf 'expired\n' > "$case_dir/data/unrelated-old/status.log"
+    touch -t 200001010000 "$case_dir/data/unrelated-old/status.log"
+    cat > "$case_dir/fakebin/$operation" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */unrelated-old|*/unrelated-old/status.log) exit 1 ;; esac
+done
+exec "${FM_ARCHIVE_TEST_COMMAND:?}" "$@"
+SH
+    chmod +x "$case_dir/fakebin/$operation"
+    rc=0
+    FM_ARCHIVE_TEST_COMMAND="$(command -v "$operation")" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "unrelated archive $operation failure aborted teardown"
+    grep -E 'warning:.*unrelated-old' "$case_dir/stderr" >/dev/null || fail "pruning failure did not name its path"
+    assert_grep 'current history' "$case_dir/data/task-x1/status.log" "pruning failure lost current archive"
+    assert_absent "$case_dir/state/task-x1.meta" "pruning failure retained current metadata"
+    assert_present "$case_dir/data/unrelated-old/status.log" "failure fixture did not preserve expired archive"
+  done
+  pass "retention failures warn without aborting unrelated teardown"
+}
+
+test_status_archive_missing_status_noop() {
+  local case_dir rc
+  case_dir=$(make_case status-archive-missing-status)
+  write_meta "$case_dir" local-only ship
+  touch "$case_dir/config/status-archive"
+  mkdir -p "$case_dir/state/.status-presentation-lock"
+  printf '%s\n' "$$" > "$case_dir/state/.status-presentation-lock/pid"
+  printf 'neighbor\tidentity\t0\t0\n' > "$case_dir/state/.status-presentation-cursor"
+  cp "$case_dir/state/.status-presentation-cursor" "$case_dir/cursor.before"
+  # A regression must fail within a bound, not wait forever on our live lock.
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  rc=0
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    fm_run_timed 20 "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "local missing-status retirement"
+  cmp -s "$case_dir/cursor.before" "$case_dir/state/.status-presentation-cursor" || fail "missing-status no-op rewrote neighboring cursor"
+  assert_present "$case_dir/state/.status-presentation-lock" "missing-status no-op contended with presentation lock"
+  assert_absent "$case_dir/data/task-x1" "missing-status no-op created empty archive"
+  pass "local missing-status retirement stays lock-free without creating an archive"
+}
+
+test_status_archive_nested_secondmate_children() {
+  local case_dir home nested_home rc unsafe
+  for unsafe in none children; do
+    case_dir=$(make_case "status-archive-nested-$unsafe")
+    write_meta "$case_dir" local-only secondmate
+    home="$case_dir/secondmate-home"
+    nested_home="$home/nested-home"
+    mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" \
+      "$nested_home/state" "$nested_home/data" "$nested_home/config" "$nested_home/projects"
+    printf 'task-x1\n' > "$home/.fm-secondmate-home"
+    printf 'nested-sm\n' > "$nested_home/.fm-secondmate-home"
+    printf 'home=%s\n' "$home" >> "$case_dir/state/task-x1.meta"
+    fm_write_meta "$home/state/nested-sm.meta" "window=firstmate:fm-nested-sm" \
+      "kind=secondmate" "mode=local-only" "home=$nested_home" "project=$case_dir/project" "worktree=$case_dir/wt"
+    fm_write_meta "$nested_home/state/grandchild.meta" "window=firstmate:fm-grandchild" \
+      "kind=scout" "mode=local-only" "project=$case_dir/project" "worktree=$case_dir/wt"
+    touch "$case_dir/config/status-archive"
+    printf 'done: parent history\n' > "$case_dir/state/task-x1.status"
+    printf 'done: child history\n' > "$home/state/nested-sm.status"
+    printf 'done: grandchild history\n' > "$nested_home/state/grandchild.status"
+    if [ "$unsafe" = children ]; then
+      mkdir -p "$case_dir/data/task-x1" "$case_dir/outside"
+      ln -s "$case_dir/outside" "$case_dir/data/task-x1/children"
+    fi
+    rc=0
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$unsafe" = children ]; then
+      expect_code 1 "$rc" "symlinked child archive directory"
+      assert_present "$nested_home/state/grandchild.status" "unsafe child archive lost history"
+      assert_absent "$case_dir/outside/nested-sm" "child archive escaped through symlink"
+    else
+      expect_code 0 "$rc" "nested secondmate status archive: $(cat "$case_dir/stderr")"
+      assert_grep 'parent history' "$case_dir/data/task-x1/status.log" "parent history missing"
+      assert_grep 'child history' "$case_dir/data/task-x1/children/nested-sm/status.log" "child history missing"
+      assert_grep 'grandchild history' "$case_dir/data/task-x1/children/nested-sm/children/grandchild/status.log" "grandchild history missing"
+      assert_absent "$home" "forced retirement retained secondmate home"
+    fi
+  done
+  pass "forced secondmate retirement preserves two descendant levels and refuses linked child directories"
+}
+
+test_status_archive_opt_in
+test_record_export_config_absent_never_reads_the_exporter
+test_record_export_unopted_symlinked_config_does_not_block_teardown
+test_record_export_archives_before_teardown_or_preserves_sources_on_failure
+test_record_export_captures_forced_secondmate_sub_state
+test_record_export_waits_for_endpoint_quiescence_before_archiving
+test_status_archive_nested_secondmate_children
+test_status_archive_missing_status_noop
+test_status_archive_reuse_and_retention
+test_status_archive_unsafe_paths_refuse
+test_status_archive_failed_publish_preserves_presentation
+test_status_archive_cursor_failure_retries_without_duplicate
+test_status_archive_publish_and_cold_log_stay_inert
+test_status_archive_pruning_failure_warns_and_completes
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
@@ -5196,6 +5792,8 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
+test_secondmate_pr_ready_line_waits_for_green_when_opted_in
+test_secondmate_pr_ready_line_follows_green_report_with_trailing_text
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_teardown_retires_polytoken_wiring_on_pool_return
@@ -5273,6 +5871,7 @@ test_teardown_records_the_task_pipeline_spend
 test_teardown_skips_pipeline_spend_when_disabled
 test_teardown_records_unavailable_spend_for_a_gone_worktree
 test_parked_own_run_is_aborted_before_teardown
+test_parked_run_in_a_resolved_workspace_home_is_aborted
 test_parked_own_run_concludes_on_passed_with_override_after_abort
 test_parked_own_run_concludes_on_passed_with_skips_after_abort
 test_parked_run_advanced_past_unfetched_head_is_still_aborted

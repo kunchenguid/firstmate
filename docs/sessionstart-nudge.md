@@ -210,6 +210,7 @@ It does this in its own separate, hard-coded loop, independent of two other owne
 - Pi's `lockOwnership()`.
 
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
+On Windows/Git Bash, a lock holding a tagged `win:<pid>` identity is outside this process table, so the wrapper instead asks the library's `fm_session_lock_owned_by_self`, whose Windows process-boundary bridge owns that identity.
 
 ### Exit codes
 
@@ -314,14 +315,14 @@ The `.opencode/plugins/fm-primary-sessionstart-nudge.js` plugin does three thing
 
 - It listens for `session.created`.
 - It runs once per session id.
-- It calls `client.session.promptAsync` only when the wrapper prints a nudge.
+- It calls `ctx.session.prompt` only when the wrapper prints a nudge.
 
 Interactive TUI delivery is supported.
 Headless `opencode run` is intentionally fail-open, because the process can exit before the queued turn.
 That early exit is also why OpenCode cannot use the run tier.
 
 The OpenCode nudge runs only on `session.created`.
-The watcher-arm and turn-end plugins run later, on `session.idle`.
+The watcher-arm and turn-end plugins run later, on the terminal `session.execution.succeeded`, `session.execution.failed`, and `session.execution.interrupted` events in OpenCode 2, or `session.idle` in OpenCode 1.
 The guard lets the watcher coordinator act first, so the plugins do not race for one lifecycle event.
 
 ### Grok
