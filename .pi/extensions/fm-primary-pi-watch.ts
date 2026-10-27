@@ -55,6 +55,7 @@ import {
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import { resolvePiHome, type PiHomeContext } from "./lib/fm-pi-home-binding.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -142,15 +143,15 @@ function refreshWatchToolShell(
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
-const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+let fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
-const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
-const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
-const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
-const marker = `${state}/.pi-watch-extension-loaded`;
-const handoffDir = `${state}/extensions/pi-primary-watch`;
-const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
-const extensionLog = `${state}/.watch-extension.log`;
+let state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+let config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
+let armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+let marker = `${state}/.pi-watch-extension-loaded`;
+let handoffDir = `${state}/extensions/pi-primary-watch`;
+let actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
+let extensionLog = `${state}/.watch-extension.log`;
 const extensionLogMaxLines = extensionLogKeepLines();
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
@@ -200,7 +201,32 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
   replacementCoordinators.set(handoff, created);
   return created;
 }
-const replacementCoordinator = replacementCoordinatorFor(actionableHandoff);
+let replacementCoordinator = replacementCoordinatorFor(actionableHandoff);
+
+function applyPiHome(home: string, boundState: string, boundConfig: string): void {
+  fmHome = home;
+  state = boundState;
+  config = boundConfig;
+  armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+  marker = `${state}/.pi-watch-extension-loaded`;
+  handoffDir = `${state}/extensions/pi-primary-watch`;
+  actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
+  extensionLog = `${state}/.watch-extension.log`;
+  replacementCoordinator = replacementCoordinatorFor(actionableHandoff);
+  process.env.FM_HOME = fmHome;
+  process.env.FM_STATE_OVERRIDE = state;
+  process.env.FM_CONFIG_OVERRIDE = config;
+}
+
+function bindPiHome(ctx: PiHomeContext | undefined, pi: ExtensionAPI, reason?: string): boolean {
+  const result = resolvePiHome(ctx, fmHome, reason, root, pi.appendEntry.bind(pi));
+  if (!result.ok) {
+    console.error(`firstmate: Pi home binding refused: ${result.reason}`);
+    return false;
+  }
+  applyPiHome(result.home, result.state, result.config);
+  return true;
+}
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const retiringGenerations = new Set<SessionGeneration>();
@@ -1246,9 +1272,11 @@ export default function (pi: ExtensionAPI) {
     consumeWake(generation, userMessageText(event.message.content));
   });
 
-  pi.on?.("session_start", async () => {
+  pi.on?.("session_start", async (event, ctx) => {
+    if (!bindPiHome(ctx, pi, String((event as { reason?: unknown }).reason ?? ""))) return;
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
+    publishGenerationOwner(generation, "active");
     if (lockOwnership() !== "owned") return;
     activateOwnedWatch(generation);
   });
@@ -1310,9 +1338,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // Pi loads project extensions before the first model turn can run the locked
-  // session-start command. Publish this generation while the lock is absent so
-  // that command can distinguish a loaded extension from a missing one; a
-  // foreign live lock still suppresses publication.
-  publishGenerationOwner(generation, "active");
+  // The session manager is the authority for the home on restored sessions.
+  // Do not publish a marker from ambient FM_HOME before session_start has
+  // resolved that identity.
 }
