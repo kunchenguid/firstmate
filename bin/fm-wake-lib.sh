@@ -896,7 +896,7 @@ _fm_recovery_marker_handling_settled() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
-  if [ -s "$FM_WAKE_QUEUE" ]; then
+  if _fm_wake_queue_has_new_work_locked; then
     if ! fm_recovery_marker_read "$marker"; then
       fm_lock_release "$lock"
       fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -955,7 +955,7 @@ _fm_recovery_marker_arm_check() {
     return 1
   fi
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
-    if [ -s "$FM_WAKE_QUEUE" ]; then
+    if _fm_wake_queue_has_new_work_locked; then
       if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
         fm_lock_release "$lock"
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -1004,7 +1004,7 @@ _fm_recovery_marker_arm_check() {
       FM_RECOVERY_MARKER_ACTION='recover'
       ;;
     acked:*)
-      if [ -s "$FM_WAKE_QUEUE" ]; then
+      if _fm_wake_queue_has_new_work_locked; then
         if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
           fm_lock_release "$lock"
           fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -1037,7 +1037,7 @@ _fm_recovery_marker_reopen_announced() {
   fi
   case "$FM_RECOVERY_MARKER_TOKEN" in
     announced:*)
-      if [ -s "$FM_WAKE_QUEUE" ] \
+      if _fm_wake_queue_has_new_work_locked \
         && ! _fm_recovery_marker_write_locked "$marker" downtime ""; then
         fm_lock_release "$lock"
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -2329,6 +2329,37 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+# fm_wake_procevent_surfaced_marker <queue-key>
+# The marker bin/fm-watch.sh writes once it has proactively surfaced a
+# process-event queue key. While a re-announced copy of that key is queued, the
+# marker holds that copy's sequence (fm_wake_append_locked).
+fm_wake_procevent_surfaced_marker() {
+  printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
+}
+
+# True when <kind> <key> names a process-event result the watcher already
+# surfaced, so a new row for it re-announces seen work rather than adding work.
+_fm_wake_is_reannouncement() {  # <kind> <clean-key>
+  [ "$1" = check ] || return 1
+  case "$2" in procevent:*) ;; *) return 1 ;; esac
+  [ -f "$(fm_wake_procevent_surfaced_marker "$2")" ]
+}
+
+# True when the queue holds a row that is not a queued re-announcement, which
+# is what makes recovery due (docs/watcher-continuity.md "Announcement").
+# Caller holds FM_WAKE_QUEUE_LOCK.
+_fm_wake_queue_has_new_work_locked() {
+  local epoch seq kind key rest
+  [ -s "$FM_WAKE_QUEUE" ] || return 1
+  while IFS=$'\t' read -r epoch seq kind key rest; do
+    _fm_wake_is_reannouncement "$kind" "$key" \
+      && [ "$(cat "$(fm_wake_procevent_surfaced_marker "$key")" 2>/dev/null)" = "$seq" ] \
+      && continue
+    return 0
+  done < "$FM_WAKE_QUEUE"
+  return 1
+}
+
 fm_wake_append() {
   local status=0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -2345,7 +2376,7 @@ fm_wake_append() {
 # their own write, then release.
 fm_wake_append_locked() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
-  local recovery_marker
+  local recovery_marker reannounce=0 surfaced tmp
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -2358,7 +2389,21 @@ fm_wake_append_locked() {
   recovery_marker="$STATE/.watcher-down"
   status=0
 
-  _fm_recovery_marker_publish "$recovery_marker" downtime "" append || status=$?
+  # An already-surfaced process-event result never opens a recovery episode on
+  # re-announcement: a queued copy of it is drained anyway, and otherwise one
+  # copy waits for the next drain (docs/watcher-continuity.md "Announcement").
+  if _fm_wake_is_reannouncement "$kind" "$clean_key"; then
+    awk -F '\t' -v key="$clean_key" 'NF >= 5 && $3 == "check" && $4 == key { found = 1; exit } END { exit !found }' \
+      "$FM_WAKE_QUEUE" 2>/dev/null && return 0
+    surfaced=$(fm_wake_procevent_surfaced_marker "$clean_key")
+    reannounce=1
+  fi
+  if [ "$reannounce" -eq 1 ]; then
+    FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
+    FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
+  else
+    _fm_recovery_marker_publish "$recovery_marker" downtime "" append || status=$?
+  fi
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
     case "$seq" in
@@ -2378,6 +2423,14 @@ fm_wake_append_locked() {
     ' "$FM_WAKE_QUEUE" 2>/dev/null || printf '%s\n' "$seq")
     seq=$((10#$seq + 1))
     printf '%s\n' "$seq" > "$seq_file" || status=$?
+  fi
+  if [ "$status" -eq 0 ] && [ "$reannounce" -eq 1 ]; then
+    tmp=$(umask 077; mktemp "$STATE/.seen-procevent.XXXXXX") || status=$?
+    if [ "$status" -eq 0 ] \
+      && { ! printf '%s\n' "$seq" > "$tmp" || ! _fm_atomic_replace "$tmp" "$surfaced"; }; then
+      rm -f -- "$tmp"
+      status=1
+    fi
   fi
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?

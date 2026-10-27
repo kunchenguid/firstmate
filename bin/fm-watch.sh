@@ -2803,16 +2803,13 @@ scan_signals() {
 # Dedup uses the same .seen-* discipline as scan_signals: the durable record is
 # always written before its marker, so nothing is suppressed before it is queued,
 # and re-announcement, drain-time deduplication, and the handled acknowledgement
-# keep their existing owners untouched.
-procevent_surfaced_marker() {  # <queue-key>
-  printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
-}
-
+# keep their existing owners untouched. bin/fm-wake-lib.sh owns the marker path
+# (fm_wake_procevent_surfaced_marker).
 procevent_surface_after_output() {
   local output_status=$1 key marker tmp status=0
   if [ "$output_status" -eq 0 ]; then
     for key in $PROCEVENT_SURFACED; do
-      marker=$(procevent_surfaced_marker "$key")
+      marker=$(fm_wake_procevent_surfaced_marker "$key")
       tmp=$(umask 077; mktemp "$STATE/.seen-procevent.XXXXXX") || { status=1; continue; }
       if ! mv -f -- "$tmp" "$marker"; then
         rm -f -- "$tmp"
@@ -2831,7 +2828,7 @@ procevent_surface_queued() {
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   while IFS= read -r key; do
     case "$key" in procevent:*) ;; *) continue ;; esac
-    [ -e "$(procevent_surfaced_marker "$key")" ] && continue
+    [ -e "$(fm_wake_procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
     # A stranded source or one whose launch never proved itself is the opposite
     # of a captured result: nothing is collecting for it. Headlining either as
@@ -3306,7 +3303,7 @@ fi
 handling_successor_has_queued_row() {
   local queued=1
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  [ ! -s "$FM_WAKE_QUEUE" ] || queued=0
+  ! _fm_wake_queue_has_new_work_locked || queued=0
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$queued"
 }

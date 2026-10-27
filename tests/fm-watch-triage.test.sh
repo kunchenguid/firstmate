@@ -6473,8 +6473,16 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   wait_for_exit "$pid" 100 || fail "the first proactive wake never happened: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain after the first process-event wake failed"
 
-  # An interrupted handler leaves the captured result durable. The successor
-  # must re-surface it through recovery, then its drain must print the same row.
+  # An interrupted handler leaves the captured result durable. Its re-announcement
+  # alone must not re-wake; the watcher downtime that follows must re-surface it
+  # through recovery, then the successor's drain must print the same row.
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  if ! { wait_poll_cycle "$state" "$pid" && wait_poll_cycle "$state" "$pid"; }; then
+    fail "a re-announced, unacknowledged process-event result re-woke the watcher: $(cat "$out")"
+  fi
+  reap "$pid"
   : > "$out"
   procevent_watch_bg "$dir" "$out"
   pid=$!
@@ -6507,6 +6515,60 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   after=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
   [ "$after" = "$before" ] || fail "a handled result was announced again ($before -> $after queued records)"
   pass "an unacknowledged process-event result re-drains until handling is acknowledged"
+}
+
+# A drain acknowledgement without `handled` leaves the result for reconcile to
+# re-announce. That queued copy waits for the next drain: it must not re-wake
+# every cycle as recovery, while a genuine downtime still resurfaces once. The
+# Claude Stop hook starts the handling successor before main handles the wake,
+# so its per-cycle reconcile re-announces the result between the drain and the
+# acknowledgement.
+test_procevent_acknowledged_unhandled_result_does_not_rewake() {
+  local dir state out drain_err pid before copies sequence generation
+  dir=$(make_case procevent-acked-unhandled); state="$dir/state"; out="$dir/watch.out"
+  drain_err="$dir/drain.err"
+  seed_captured_procevent_result "$dir" || fail "the fixture captured no process-event result"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the first proactive wake never happened: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$drain_err" \
+    || fail "main could not drain the first process-event wake"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "the first drain omitted its acknowledgement boundary"
+  before=$(grep -c 'procevent lavish delivery-src 1' "$state/.wake-queue" 2>/dev/null)
+  pe_case "$dir" reconcile >/dev/null || fail "the handling successor's first reconcile failed"
+  pe_case "$dir" reconcile >/dev/null || fail "the handling successor's second reconcile failed"
+  copies=$(grep -c 'procevent lavish delivery-src 1' "$state/.wake-queue" 2>/dev/null)
+  [ "$copies" = "$before" ] || fail "a re-announcement during handling queued a duplicate ($before -> $copies copies)"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" >/dev/null \
+    || fail "main could not acknowledge the first process-event wake"
+
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  if ! { wait_poll_cycle "$state" "$pid" && wait_poll_cycle "$state" "$pid"; }; then
+    fail "a re-announced, acknowledged process-event result re-woke the watcher: $(cat "$out")"
+  fi
+  copies=$(grep -c 'procevent lavish delivery-src 1' "$state/.wake-queue" 2>/dev/null)
+  [ "$copies" = 1 ] || fail "the unhandled result should stay queued once for the next drain, found $copies copies"
+  reap "$pid"
+
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a genuine watcher downtime did not resurface: $(cat "$out")"
+  grep -F 'check: rearm-resurface' "$out" >/dev/null \
+    || fail "the downtime did not resurface as recovery: $(cat "$out")"
+  ack_stopped_cycle "$state" >/dev/null || fail "main could not acknowledge the downtime recovery"
+  : > "$out"
+  procevent_watch_bg "$dir" "$out"
+  pid=$!
+  if ! { wait_poll_cycle "$state" "$pid" && wait_poll_cycle "$state" "$pid"; }; then
+    fail "an acknowledged downtime resurfaced again: $(cat "$out")"
+  fi
+  reap "$pid"
+  pass "an acknowledged but unhandled process-event result waits for the next drain without a recovery loop"
 }
 
 test_procevent_marker_keys_are_injective() {
@@ -7452,6 +7514,7 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
+test_procevent_acknowledged_unhandled_result_does_not_rewake
 test_procevent_marker_keys_are_injective
 test_procevent_headlines_classify_queue_keys
 test_procevent_launch_failed_episodes_are_each_delivered
