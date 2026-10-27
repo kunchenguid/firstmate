@@ -335,15 +335,12 @@ cmd_source() {
   fi
   # A remote transport failure can leave diagnostic bytes on stdout, especially
   # when the remote OpenSSH shell is a Windows WSL wrapper. Such bytes are not a
-  # delta and must never reach the runner as a malformed capture. Never pass a
-  # failed or non-schema leg to the runner. Returning a nonzero status with no
-  # output leaves the registration available for reconciliation without
-  # advancing the cursor or ingesting transport diagnostics.
+  # delta and must never reach the runner as a malformed capture. Treat every
+  # failed or non-schema leg as a transient empty window so the runner keeps its
+  # claim and relistens without advancing the cursor or ingesting diagnostics.
   class=$(classify_result "$output")
   if [ "$rc" -ne 0 ] || [ "$class" = malformed ]; then
     rm -f -- "$output"
-    # Failed remote legs and non-schema diagnostics are transient empty
-    # windows. Keep the runner claim and let it relisten at its launch floor.
     return "$WINDOW_CLOSED_EMPTY"
   fi
   cat "$output"
