@@ -3185,7 +3185,7 @@ fm_active_check_stop() {
 # its trap because bash ignores a direct SIGINT while a child runs.
 watcher_stop_signals() {
   trap - HUP TERM
-  trap 'exit 1' INT
+  trap 'FM_WATCH_PLANNED_CLOSE=1; exit 1' INT
 }
 
 run_check_capture() {
@@ -3205,7 +3205,10 @@ run_check_capture() {
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   watcher_stop_signals
-  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  if [ -n "$FM_CHECK_SIGNAL_PENDING" ]; then
+    FM_WATCH_PLANNED_CLOSE=1
+    exit 1
+  fi
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
@@ -3250,7 +3253,10 @@ watcher_waited() {  # <command...>
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   watcher_stop_signals
-  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  if [ -n "$FM_CHECK_SIGNAL_PENDING" ]; then
+    FM_WATCH_PLANNED_CLOSE=1
+    exit 1
+  fi
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
@@ -3639,7 +3645,8 @@ pr_poll_publish_release() {
 }
 
 watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock staged lock
+  local exit_status=$?
+  local cleanup_status=0 owns_lock=0 transition=release-lock publish_source=watcher staged lock hold_i
   # Join any interrupted owner creation/publication before the release sweep:
   # a child must not publish a lock or staging directory after we removed ours.
   fm_lock_wait_pending_mutation
@@ -3650,6 +3657,23 @@ watcher_cleanup() {
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
       && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
       transition=release-lock-existing
+    elif [ "${FM_WATCH_PLANNED_CLOSE:-0}" = 1 ]; then
+      publish_source=close
+    else
+      # HUP and TERM run this trap with status 0 on bash 3.2 and 5.3, then the
+      # process exits 129 or 143. A version that reports the signal status here
+      # is the same planned stop. exit 1 without the flag is an unplanned close.
+      case "$exit_status" in
+        0|129|143) publish_source=close ;;
+      esac
+    fi
+    # Tests set this path so they can acknowledge before the close publishes.
+    if [ -n "${FM_WATCH_CLEANUP_HOLD:-}" ]; then
+      hold_i=0
+      while [ ! -e "$FM_WATCH_CLEANUP_HOLD" ] && [ "$hold_i" -lt 600 ]; do
+        sleep 0.05
+        hold_i=$((hold_i + 1))
+      done
     fi
   fi
   # Quietly: a stop usually lands inside the waited event wait, and bash would
@@ -3675,7 +3699,7 @@ watcher_cleanup() {
   done
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
-      downtime "$CLEANUP_LOCK_BOUND"; then
+      downtime "$CLEANUP_LOCK_BOUND" "$publish_source"; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
   fi

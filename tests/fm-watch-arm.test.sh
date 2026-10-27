@@ -465,8 +465,15 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
 
   # A later down interval can have no new queue rows at all. The unchanged
   # remote decision must still trigger a recovery wake and be folded again.
-  kill "$ARM_PID" 2>/dev/null || true
+  # A planned stop leaves this acknowledged episode closed, so the interval is
+  # a watcher that dies without running cleanup.
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill -KILL "$watcher_pid" 2>/dev/null || fail "could not abruptly stop the decision successor"
   wait "$ARM_PID" 2>/dev/null || true
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    acked:*) ;;
+    *) fail "abrupt successor exit changed the acknowledged episode: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/decision-only-arm.out"
   wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" || fail "decision-only re-arm did not surface the open decision"
   decision_recovery_arm=$ARM_PID
@@ -1957,6 +1964,157 @@ EOF
   pass "watch-arm: the OpenCode arm plugin decides with the shared supervision predicate"
 }
 
+# A planned --restart is the supervision host's watcher replacement. Main has
+# already acknowledged the episode, so the replacement must stay quiet.
+test_planned_host_restart_leaves_an_acknowledged_episode_closed() {
+  local dir home state fakebin armout acknowledged
+  dir=$(make_case planned-host-restart)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/restart.out"
+  mkdir -p "$home/data"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/owner.out"
+  is_live_non_zombie "$ARM_PID" || fail "fixture: the restart watcher did not stay live"
+  SEED_PID=$(cat "$state/.watch.lock/pid")
+  append_wake "$state" signal restart "signal: fixture handled before the restart"
+  ack_wakes "$state" >/dev/null || fail "fixture: the handled wake could not be acknowledged"
+  acknowledged=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
+  is_live_non_zombie "$SEED_PID" || fail "fixture: the watcher exited before the planned restart"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
+    "$WATCH_ARM" --restart > "$armout" &
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "the planned restart did not start a replacement watcher: $(cat "$armout")"
+  sleep 2
+  is_live_non_zombie "$ARM_PID" \
+    || fail "the planned restart resurfaced an empty recovery: $(cat "$armout")"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "$acknowledged" ] \
+    || fail "the planned restart reopened an acknowledged episode: $(cat "$state/.watcher-down" 2>/dev/null)"
+  ! grep -q '^check: rearm-resurface' "$armout" \
+    || fail "the planned restart delivered an empty recovery wake: $(cat "$armout")"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+  pass "watch-arm: a planned host restart leaves an acknowledged episode closed"
+}
+
+# The delivering watcher exits 0 after an actionable check. Main acknowledges
+# that episode before the close publishes, and the successor arm must not
+# announce a new one.
+test_actionable_check_handoff_leaves_an_acknowledged_episode_closed() {
+  local dir home state fakebin armout check_file owner watcher acknowledged status i
+  dir=$(make_case actionable-check-handoff)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  check_file="$state/task.check.sh"
+  mkdir -p "$home/data"
+  cat > "$check_file" <<'SH'
+#!/usr/bin/env bash
+printf 'merged: https://example.test/pr/7761\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "fixture: could not register the hand-off check"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
+    FM_WATCH_CLEANUP_HOLD="$dir/release-cleanup" \
+    "$WATCH_ARM" > "$armout" &
+  owner=$!
+  i=0
+  while [ "$i" -lt "$REARM_REPORT_POLLS" ]; do
+    grep -q "$(printf '\tcheck\t%s\t' "$check_file")" "$state/.wake-queue" 2>/dev/null && break
+    is_live_non_zombie "$owner" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -q "$(printf '\tcheck\t%s\t' "$check_file")" "$state/.wake-queue" 2>/dev/null \
+    || fail "fixture: the actionable check was not queued: $(cat "$armout" 2>/dev/null)"
+  watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher" || fail "fixture: the delivering watcher exited before acknowledgement"
+  ack_wakes "$state" >/dev/null || fail "fixture: the actionable check could not be acknowledged"
+  acknowledged=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  case "$acknowledged" in acked:*) ;; *) fail "fixture: the check episode was not acknowledged: $acknowledged" ;; esac
+  is_live_non_zombie "$watcher" || fail "fixture: the delivering watcher exited before its close could see the acknowledgement"
+  touch "$dir/release-cleanup"
+  wait_for_exit "$owner" "$REARM_EXIT_POLLS"
+  status=$?
+  expect_code 0 "$status" "the actionable-check hand-off must exit cleanly: $(cat "$armout")"
+  grep -q "arm_pid=$owner	.*reason=actionable-check	" "$state/.watch-cycle-exits.log" \
+    || fail "the hand-off was not an actionable check: $(cat "$state/.watch-cycle-exits.log" 2>/dev/null)"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "$acknowledged" ] \
+    || fail "the actionable-check close reopened an acknowledged episode: $(cat "$state/.watcher-down" 2>/dev/null)"
+
+  rm -f "$check_file" "$state/task.check-trust"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
+    FM_WATCH_PREDECESSOR_ARM_PID="$owner" \
+    "$WATCH_ARM" > "$dir/successor.out" &
+  ARM_PID=$!
+  wait_for_file_text "$dir/successor.out" 'watcher: started pid=' \
+    || fail "the successor did not start after the actionable-check hand-off: $(cat "$dir/successor.out")"
+  sleep 2
+  is_live_non_zombie "$ARM_PID" \
+    || fail "the successor resurfaced an empty recovery: $(cat "$dir/successor.out")"
+  ! grep -q '^check: rearm-resurface' "$dir/successor.out" \
+    || fail "the successor delivered an empty recovery wake: $(cat "$dir/successor.out")"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "$acknowledged" ] \
+    || fail "the successor reopened an acknowledged episode: $(cat "$state/.watcher-down" 2>/dev/null)"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+  pass "watch-arm: an actionable-check hand-off leaves an acknowledged episode closed"
+}
+
+# A kill that skips cleanup is a real outage. The next arm must still resurface
+# it when the episode main last acknowledged is the one the dead watcher held.
+test_killed_watcher_outage_still_resurfaces() {
+  local dir home state fakebin armout watcher status
+  dir=$(make_case killed-watcher-outage)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/recovery.out"
+  mkdir -p "$home/data"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/owner.out"
+  is_live_non_zombie "$ARM_PID" || fail "fixture: the outage watcher did not stay live"
+  watcher=$(cat "$state/.watch.lock/pid")
+  append_wake "$state" signal outage "signal: fixture handled before the outage"
+  ack_wakes "$state" >/dev/null || fail "fixture: the handled wake could not be acknowledged"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    acked:*) ;;
+    *) fail "fixture: the episode was not acknowledged: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  is_live_non_zombie "$watcher" || fail "fixture: the watcher exited before the outage"
+  kill -KILL "$watcher" 2>/dev/null || fail "fixture: the watcher could not be killed"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" >/dev/null 2>&1 || true
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
+    "$WATCH_ARM" > "$armout" &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
+  status=$?
+  expect_code 0 "$status" "a killed watcher must resurface cleanly: $(cat "$armout")"
+  grep -q '^check: rearm-resurface' "$armout" \
+    || fail "a killed watcher did not resurface: $(cat "$armout")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    pending:downtime:*|announced:downtime:*) ;;
+    *) fail "a killed watcher left no downtime episode: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  pass "watch-arm: a watcher killed without cleanup still resurfaces"
+}
+
 test_append_wakes_handling_successor after-ack
 test_append_wakes_handling_successor before-ack
 test_append_wakes_handling_successor after-ack missing
@@ -1998,3 +2156,6 @@ test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
 test_take_over_confirms_a_watcher_stopped_inside_its_event_wait
 test_opencode_arm_plugin_decides_with_the_shared_predicate
+test_planned_host_restart_leaves_an_acknowledged_episode_closed
+test_actionable_check_handoff_leaves_an_acknowledged_episode_closed
+test_killed_watcher_outage_still_resurfaces
