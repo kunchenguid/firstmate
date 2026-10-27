@@ -1,7 +1,7 @@
 ---
 name: quota-array-dispatch
 description: >-
-  Load when a crew-dispatch rule or default resolves to more than one profile candidate.
+  Load when a crew-dispatch rule or default resolves to more than one profile candidate, or a Claude ship or scout is dispatched from a home that declares config/claude-accounts.
 user-invocable: false
 metadata:
   internal: true
@@ -32,6 +32,16 @@ It does not replace the reasoning-class, runway-feasibility, or authentication g
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
 The opt-in [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) has its own documented gates.
 It never removes this skill's authority, and its `ambiguous`, `escalate`, and `error` outcomes return here.
+
+## Claude account list
+
+When the home declares `config/claude-accounts`, each Claude candidate is one candidate per declared account, and the spawn needs the chosen account as `--account <entry>`.
+Measure them with `bin/fm-claude-account-quota.sh [--model <model>]` instead of the default TOON's single `claude` row, which reads only the ambient account; its header owns the per-account read and output.
+Apply the three gates below to each account's row, rank by its `spendPriority` exactly as for profiles, and pass the account line it prints only after the reasoning-class and runway gates agree.
+Its `escalate` (a genuine tie or nothing rankable) is the same terminal case as below: decide in the open from its candidate rows or ask the captain, never by file order.
+Account for every declared account in the rationale, including unmeasured ones.
+A typed-resolver `clear` profile for Claude still needs this step's `--account`.
+The account is chosen once, at intake: a relaunch keeps the recorded one, and only an explicit `--account` relaunch moves a task ([`docs/configuration.md`](../../../docs/configuration.md#several-claude-accounts-configclaude-accounts) owns the contract).
 
 ## Read the default TOON
 

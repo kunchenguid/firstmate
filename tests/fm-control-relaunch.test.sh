@@ -952,6 +952,88 @@ test_worker_account_pin_follows_the_relaunch() {
   pass "fm-control relaunch: the replacement follows the home's current worker account pin"
 }
 
+# add_listed_task <case-dir> <id> <recorded-account>: a live Claude ship
+# recorded on <recorded-account> in a home declaring two signed-in accounts,
+# first and second, plus a signed-out one.
+add_listed_task() {
+  local dir=$1 id=$2 recorded=$3
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/first" "$dir/second" "$dir/signed-out"
+  : > "$dir/first/.credentials.json"
+  : > "$dir/second/.credentials.json"
+  printf '%s\n' "$dir/first" "$dir/second" "$dir/signed-out" > "$dir/home/config/claude-accounts"
+  [ -z "$recorded" ] || echo "account=$recorded" >> "$dir/home/state/$id.meta"
+}
+
+test_account_list_relaunch_reuses_the_recorded_account() {
+  local dir out rc id=rl-list
+  dir=$(new_case list-reuse "$id")
+  add_listed_task "$dir" "$id" "$dir/first"
+  out=$(run_control "$dir" "$id" relaunch --note "same account"); rc=$?
+  expect_code 0 "$rc" "a relaunch under a list should reuse the recorded account"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/first" ] || fail "the relaunched record should keep the recorded account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/first'" \
+    "the replacement should launch under the recorded account"
+  : > "$dir/fake/literal"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" "$id" --relaunch); rc=$?
+  expect_code 0 "$rc" "a direct fm-spawn --relaunch under a list should reuse the recorded account"$'\n'"$out"
+  assert_contains "$out" "account=$dir/first" "the direct relaunch should report the recorded account"
+  pass "fm-control relaunch: a declared account list keeps the account the task records"
+}
+
+test_account_list_relaunch_moves_only_on_explicit_account() {
+  local dir out rc id=rl-list-move
+  dir=$(new_case list-move "$id")
+  add_listed_task "$dir" "$id" "$dir/first"
+  out=$(run_control "$dir" "$id" relaunch --account "$dir/second" --note "first is exhausted"); rc=$?
+  expect_code 0 "$rc" "an explicit --account relaunch should move the task"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/second" ] || fail "the relaunched record should name the new account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/second'" \
+    "the replacement should launch under the explicitly chosen account"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "stay"); rc=$?
+  expect_code 0 "$rc" "a later plain relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/second" ] || fail "a later relaunch should keep the moved account"
+  pass "fm-control relaunch: only an explicit --account moves a task to another declared account"
+}
+
+test_account_list_relaunch_refusals_happen_before_stop() {
+  local dir out rc id=rl-list-refuse case_name recorded flag needle
+  for case_name in undeclared signed-out unrecorded removed wrong-harness; do
+    dir=$(new_case "list-refuse-$case_name" "$id")
+    recorded="$dir/first"
+    flag=()
+    case "$case_name" in
+      undeclared)
+        flag=(--account "$dir/elsewhere")
+        needle="account '$dir/elsewhere' is not declared in config/claude-accounts" ;;
+      signed-out)
+        flag=(--account "$dir/signed-out")
+        needle="config/claude-accounts pins Claude workers to $dir/signed-out, which is not signed in" ;;
+      unrecorded)
+        recorded=
+        needle="must name one with --account" ;;
+      removed)
+        recorded="$dir/retired"
+        needle="account '$dir/retired' is not declared in config/claude-accounts" ;;
+      wrong-harness)
+        flag=(--harness codex --account "$dir/second")
+        needle="applies to Claude workers only, not codex" ;;
+    esac
+    add_listed_task "$dir" "$id" "$recorded"
+    cp "$dir/home/state/$id.meta" "$dir/meta-before"
+    out=$(run_control "$dir" "$id" relaunch ${flag[@]+"${flag[@]}"} --note "refuse $case_name"); rc=$?
+    expect_code 1 "$rc" "the $case_name relaunch must refuse"$'\n'"$out"
+    assert_contains "$out" "$needle" "the $case_name refusal should say why"
+    [ "$(cat "$dir/fake/command")" = claude ] || fail "the $case_name refusal must happen before the running agent stops"
+    [ ! -s "$dir/fake/literal" ] || fail "the $case_name refusal must send no lifecycle input"
+    cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "the $case_name refusal must leave the task record untouched"
+  done
+  pass "fm-control relaunch: undeclared, signed-out, unrecorded, retired, and wrong-runner accounts refuse before the old agent stops"
+}
+
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop() {
   local dir out rc id=rl-sm-acct harness file variable pin
   for harness in claude pi; do
@@ -2990,6 +3072,9 @@ test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
+test_account_list_relaunch_reuses_the_recorded_account
+test_account_list_relaunch_moves_only_on_explicit_account
+test_account_list_relaunch_refusals_happen_before_stop
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
