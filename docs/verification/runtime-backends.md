@@ -833,8 +833,34 @@ The live guard detects that failure rather than accepting valid CLI syntax as pr
 
 The launcher condition was inspected for every supported harness and runtime backend: only non-primary Codex task launches on Herdr consume this opt-in.
 Primary/secondmate hook files and notify construction are unchanged.
-This record proves startup selection only; official SessionStart registration and Zoetrope opening the exact normal-dispatch worker session require a separate end-to-end demonstration and are not established by this check.
+The thread-free guard proves startup selection; the separate normal-dispatch measurement below establishes one end-to-end run.
 The [Herdr backend guide](../herdr-backend.md#codex-session-identity) owns operator behavior and startup-source limitations.
+
+### Official SessionStart registration and Zoetrope
+
+Separately verified 2026-10-27 on Ubuntu WSL with Codex 0.164.0, Herdr 0.9.5, official installed Codex integration v10, and Zoetrope 0.2.0 / plugin 0.1.0.
+One read-only scout was dispatched on the normal default-base project path while invoking the committed implementation's launcher.
+Named-session routing followed the [destructive lab safety contract](../herdr-backend.md#destructive-lab-safety); an isolated FM_HOME alone does not isolate Herdr:
+
+```sh
+FM_HOME="$DEMO_HOME" bash "$CODE_ROOT/bin/fm-spawn.sh" "$TASK_ID" "$PROJECT" --scout --harness codex --effort low --backend herdr
+```
+
+Only the isolated demo home enabled the pinned, already trusted hook; primary settings and Codex global configuration were unchanged.
+The worker's independently observed native ID matched both its exact transcript's `session_meta.id` and the recorded worker pane's `agent_session` with `agent=codex`, `kind=id`, and `source=herdr:codex`.
+The transcript's metadata cwd matched the isolated task worktree.
+The actual Codex process had `--no-daemon --enable hooks`, the official Herdr key enabled, all seven unrelated keys disabled, the original notify command, and no hook-trust bypass.
+The turn-end marker appeared naturally after the completed model turn, without a manual touch.
+
+The installed selected-pane action `plugin action invoke open-split --plugin furkankly.zoetrope` reported the exact recorded worker as its focused pane.
+Its new graph pane ran `zoe --provider codex --follow <same-native-id>`, and the visible graph showed the launch-brief event and completed session timeline.
+No manual identity report, manually invoked hook, hook-trust write, newest-file selection, or cwd fallback supplied identity.
+Normal lifecycle exit returned `stopped` for the exact worker and preserved its report, endpoint record, and local copy.
+The helper's final named-lab teardown exited 0 and passed its unchanged-default fleet-state tripwire.
+
+This establishes the official startup identity hook, unchanged notify, and selected-pane Zoetrope path for one fresh normal-dispatch worker on those versions.
+Resume, compaction, stale-identity replacement, and hot-loaded source changes were not measured in this run; the startup inventory limits remain in force.
+Task-specific native IDs, transcript paths, raw argv/captures, and detailed cleanup results stay with the private demonstration evidence.
 
 ## Codex automatic approval review
 
