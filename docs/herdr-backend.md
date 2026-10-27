@@ -818,6 +818,7 @@ A restored same-labeled tab with a missing pane or no registered agent is a husk
 
 Herdr restores each pane's shell, and resumes any agent it restores there, in the cwd of that pane's top-level shell.
 So spawn leases a fresh crewmate or scout task's worktree before opening its pane and opens the pane in that worktree, never in the spawning project.
+That lease outlives the pane, so a same-identity recovery after a restart whose recorded pane holds no agent reuses the worktree its record still holds, untouched, rather than leasing a second one.
 
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.

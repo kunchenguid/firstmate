@@ -124,7 +124,9 @@
 #   spawns do not run treehouse get. A fresh herdr ship/scout leases its slot
 #   with `treehouse get --lease` and opens its pane there, because a Herdr
 #   restart restores a pane, and resumes its agent, in the pane's top-level shell
-#   cwd; a spawn that aborts before its record or launch returns that lease when
+#   cwd; a same-id spawn over the task's record reuses the slot that record
+#   still holds leased once the recorded pane holds no agent, and a spawn that
+#   aborts before a record names its new slot or launch returns that lease when
 #   no pane is left in the slot, and otherwise prints the return command. cmux,
 #   paseo, rex, and tern are session providers only, exactly like zellij, so
 #   they run treehouse get in the pane. Auto-detected herdr
@@ -1837,11 +1839,12 @@ spawn_abort_cleanup() {
   fi
   # A fresh Herdr task leases its slot before its pane exists (the herdr endpoint
   # branch says why), so closing that pane no longer hands the slot back. With
-  # no record and no launch delivered, the lease is returned here once no pane is
-  # left holding a shell in the slot - none was asked for, or the presentation
-  # cleanup above confirmed closing it; otherwise it stays for the operator.
-  if [ "$HERDR_WT_LEASED" = 1 ] && [ -n "${WT:-}" ] &&
-    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+  # no record naming the slot and no launch delivered, the lease is returned here
+  # once no pane is left holding a shell in the slot - none was asked for, or the
+  # presentation cleanup above confirmed closing it; otherwise it stays for the
+  # operator. A slot a recovery reused is named by its record, so it is kept.
+  if [ "$HERDR_WT_LEASED" = 1 ] && [ -n "${WT:-}" ] && [ ! -L "$STATE/$ID.meta" ] &&
+    ! grep -qxF "worktree=$WT" "$STATE/$ID.meta" 2>/dev/null; then
     HERDR_WT_LEASED=0
     if [ "$SPAWN_LAUNCH_SENT" = 0 ] && { [ "$HERDR_TASK_PANE_ATTEMPTED" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; }; then
       (cd "$PROJ_ABS" && treehouse return --force "$WT") >/dev/null 2>&1 \
@@ -4412,6 +4415,30 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
   fi
 }
 
+# A fresh Herdr task's slot stays durably leased to its task id until teardown
+# returns it. A same-id spawn over that task's existing record (a restart
+# recovery) prints the recorded worktree when its recorded Herdr pane holds no
+# agent, Treehouse still reports the slot leased to this id, and the slot claim
+# names this task, so the recovery reuses it instead of stranding it behind a
+# second lease. Anything else leases a new slot as before.
+herdr_task_own_leased_worktree() { # <meta>
+  local meta=$1 recorded slot
+  [ "$(fm_backend_of_meta "$meta")" = herdr ] &&
+    fm_backend_herdr_parse_target "$(fm_backend_target_of_meta "$meta")" || return 1
+  case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null)" in
+    dead | no-agent) ;;
+    *) return 1 ;;
+  esac
+  recorded=$(herdr_projection_meta_field_exact "$meta" worktree) || return 1
+  [ -n "$recorded" ] && fm_treehouse_pool_slot "$PROJ_ABS" "$recorded" || return 1
+  slot=$(cd "$recorded" && pwd -P) || return 1
+  fm_treehouse_slot_owner_state "$slot" "$ID"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 1
+  (cd "$PROJ_ABS" && treehouse status --json 2>/dev/null) | jq -e --arg path "$slot" --arg id "$ID" \
+    'any(.[]; .path == $path and .status == "leased" and .lease_holder == $id)' >/dev/null 2>&1 || return 1
+  printf '%s\n' "$recorded"
+}
+
 herdr_projection_meta_field_exact() { # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -4713,21 +4740,30 @@ else
       # into the pane leases the slot from a child shell, which would leave that
       # top-level shell - and every agent a restart resumes - in the primary
       # checkout. So the slot is durably leased first (as the T3 branch does)
-      # and the task pane is opened in the worktree itself.
-      WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
-        echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS" >&2
-        exit 1
-      }
-      [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
-      validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
-      HERDR_WT_LEASED=1
-      freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || {
-        if [ "$?" -eq 2 ]; then
-          HERDR_WT_LEASED=0
-          echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2
-        fi
-        exit 1
-      }
+      # and the task pane is opened in the worktree itself. A lease never lapses
+      # with its pane, so a same-id recovery whose recorded pane holds no agent
+      # reuses the slot its record already leased, untouched like a relaunch's,
+      # rather than leasing a second one.
+      if { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; } &&
+        WT=$(herdr_task_own_leased_worktree "$STATE/$ID.meta"); then
+        validate_spawn_worktree "the recorded leased worktree" "$WT (still leased to $ID with its work)"
+        HERDR_WT_LEASED=1
+      else
+        WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+          echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS" >&2
+          exit 1
+        }
+        [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
+        validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
+        HERDR_WT_LEASED=1
+        freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || {
+          if [ "$?" -eq 2 ]; then
+            HERDR_WT_LEASED=0
+            echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2
+          fi
+          exit 1
+        }
+      fi
       HERDR_TASK_CWD=$WT
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")

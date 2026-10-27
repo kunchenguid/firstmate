@@ -1262,6 +1262,10 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
   NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
+  # The slot stays durably leased to the task across the restart, so the
+  # recovery must reuse it rather than strand it behind a second lease.
+  [ "$NEW_RESTART_WT" = "$OLD_RESTART_WT" ] \
+    || fail "$RESTART_ID reclaim leased '$NEW_RESTART_WT' instead of reusing its leased worktree '$OLD_RESTART_WT'"
   [ "$NEW_RESTART_WSID" = "$OLD_RESTART_WSID" ] \
     || fail "$RESTART_ID reclaim flattened into a different workspace"
   [ "$NEW_RESTART_PANE" != "$OLD_RESTART_PANE" ] \
@@ -1291,6 +1295,8 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "$RESTART_ID repeated reclaim changed workspace identity"
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
+    [ "$NEW_RESTART_WT" = "$PRIOR_RESTART_WT" ] \
+      || fail "$RESTART_ID repeated reclaim leased '$NEW_RESTART_WT' instead of reusing '$PRIOR_RESTART_WT'"
     if [ "$PRIOR_RESTART_WT" != "$NEW_RESTART_WT" ]; then
       "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
     fi
@@ -1300,6 +1306,11 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
     || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
+  RESTART_HELD=$(cd "$RECOVERY_PROJECT_DIR" && "$REAL_TREEHOUSE" status --json \
+    | jq -r --arg id "$RESTART_ID" '[.[] | select(.lease_holder == $id) | .path] | join(" ")') \
+    || fail "could not read the recovery pool's leases after $RESTART_ID teardown"
+  [ -z "$RESTART_HELD" ] \
+    || fail "$RESTART_ID teardown after restart recovery left slots leased to it: $RESTART_HELD"
   "$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
   "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
 done

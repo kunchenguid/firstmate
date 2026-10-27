@@ -1627,6 +1627,7 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 ```
 
 Observed guarantee: after a lab restart, a fresh projected task's pane is restored with `cwd` in its recorded worktree, and an opted-out flat spawn creates its task tab with `--cwd` set to that worktree.
+A same-identity reclaim after the restart reuses the worktree still leased to that task, and teardown leaves no pool slot leased to it.
 
 ### Launcher workspace placement
 
