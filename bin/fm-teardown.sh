@@ -197,10 +197,12 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--expected-spawn-gen <gen> --expected-pr <url>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --expected-spawn-gen <gen> with --expected-pr <url> binds automatic post-merge cleanup to one inspected incarnation.
+#   Teardown refuses when the current spawn_gen or the recorded deliverable no longer matches, so a relaunched replacement is never removed, and a record with no spawn_gen fails closed.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
