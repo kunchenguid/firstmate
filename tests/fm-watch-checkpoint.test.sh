@@ -41,6 +41,41 @@ test_quiet_checkpoint_exits_124_cleanly() {
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
 
+test_linux_codex_checkpoint_publishes_namespace_evidence() {
+  local home out err checkpoint_pid watcher_pid watcher_env status
+  if [ "$(uname -s)" != Linux ]; then
+    pass "Linux/Codex watcher metadata regression skipped outside Linux"
+    return
+  fi
+  home=$(make_home linux-codex-metadata)
+  fm_test_track_watcher_state "$home/state"
+  out="$home/out.txt"
+  err="$home/err.txt"
+  env -u FM_HOME FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=codex \
+    FM_STATE_OVERRIDE="$home/state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    "$CHECKPOINT" --seconds 3 >"$out" 2>"$err" &
+  checkpoint_pid=$!
+  if ! wait_for_checkpoint_lock "$home"; then
+    wait "$checkpoint_pid" 2>/dev/null || true
+    fail "Linux/Codex checkpoint never published its watcher lock"
+  fi
+  watcher_pid=$(cat "$home/state/.watch.lock/pid")
+  [ -s "$home/state/.watch.lock/pid-namespace" ] \
+    || { wait "$checkpoint_pid" 2>/dev/null || true; fail "Linux/Codex watcher omitted its PID namespace"; }
+  [ "$(cat "$home/state/.watch.lock/pid-namespace")" = "$(readlink "/proc/$watcher_pid/ns/pid")" ] \
+    || { wait "$checkpoint_pid" 2>/dev/null || true; fail "Linux/Codex watcher recorded the wrong PID namespace"; }
+  [ "$(cat "$home/state/.watch.lock/boot-id")" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
+    || { wait "$checkpoint_pid" 2>/dev/null || true; fail "Linux/Codex watcher recorded the wrong boot ID"; }
+  watcher_env=$(tr '\0' '\n' < "/proc/$watcher_pid/environ") \
+    || { wait "$checkpoint_pid" 2>/dev/null || true; fail "could not read Linux/Codex watcher environment"; }
+  printf '%s\n' "$watcher_env" | grep -qx "FM_HOME=$FM_ROOT_OVERRIDE" \
+    || { wait "$checkpoint_pid" 2>/dev/null || true; fail "checkpoint did not export its resolved FM_HOME to the watcher"; }
+  status=0
+  wait "$checkpoint_pid" || status=$?
+  expect_code 124 "$status" "Linux/Codex metadata checkpoint exit"
+  pass "Linux/Codex checkpoint exports FM_HOME and records PID namespace and boot ID"
+}
+
 test_perl_timeout_fallback_honors_cleanup_bound_before_escalating() {
   local home fallback_bin tool tool_path status watcher_pid
   home=$(make_home perl-fallback)
@@ -345,6 +380,7 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
 }
 
 test_quiet_checkpoint_exits_124_cleanly
+test_linux_codex_checkpoint_publishes_namespace_evidence
 test_perl_timeout_fallback_honors_cleanup_bound_before_escalating
 test_announced_recovery_is_not_reannounced_by_next_checkpoint
 test_never_announced_recovery_is_announced_once

@@ -233,6 +233,13 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   allow_supervised_stop
 fi
 
+# Stop-only fallback: positively restricted to Codex on Linux, never lifecycle authority.
+if [ "$_FM_UNAME" = Linux ] \
+  && [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" = codex ] \
+  && fm_watcher_cross_namespace_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  allow_supervised_stop
+fi
+
 # Away mode transfers supervision ownership from the watcher to the away-mode
 # daemon, which runs the watcher one-shot and starts its replacement after every
 # wake (bin/fm-supervise-daemon.sh). A turn boundary regularly lands in that

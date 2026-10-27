@@ -3455,6 +3455,12 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+# Only Codex on Linux needs the read-only cross-namespace Stop proof.
+if [ "$(uname -s)" = Linux ] && [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" = codex ] \
+  && [ -r /proc/sys/kernel/random/boot_id ]; then
+  readlink /proc/self/ns/pid > "$WATCH_LOCK/pid-namespace" 2>/dev/null || true
+  cat /proc/sys/kernel/random/boot_id > "$WATCH_LOCK/boot-id" 2>/dev/null || true
+fi
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
