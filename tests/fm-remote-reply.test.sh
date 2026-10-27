@@ -52,6 +52,10 @@ done
 if [ -n "${FM_REMOTE_REPLY_POLL_LOG:-}" ]; then
   printf 'x\n' >> "$FM_REMOTE_REPLY_POLL_LOG"
 fi
+[ "${FM_REMOTE_REPLY_TRANSPORT_ERROR:-}" != 1 ] || {
+  printf 'A\000 connection attempt failed because the connected party did not properly respond\000 Error code: Bash/Service/WSAETIMEDOUT\000\n'
+  exit 255
+}
 [ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
 host=$1
 entry=$2
@@ -156,6 +160,21 @@ ADAPTER="$ROOT/bin/fm-procevent-remote-reply.sh"
 SID=$(remote_env "$ADAPTER" source-id ios)
 out=$(remote_env "$ADAPTER" arm ios)
 assert_contains "$out" "armed: $SID offset=0" "remote reply source was not armed at the empty cursor"
+
+# A dropped SSH leg can leave non-schema transport diagnostics on stdout, or
+# no stdout at all with ssh's transport status. Both are transient empty
+# windows, not captures that may end the listener.
+set +e
+FM_REMOTE_REPLY_TRANSPORT_ERROR=1 remote_env "$ADAPTER" source ios > "$TMP_ROOT/transport-error.result"
+transport_error_rc=$?
+FM_REMOTE_REPLY_FAIL_READ=1 remote_env "$ADAPTER" source ios > "$TMP_ROOT/ssh-255.result"
+ssh_255_rc=$?
+set -e
+[ "$transport_error_rc" -eq 75 ] || fail "a non-schema transport diagnostic returned $transport_error_rc instead of an empty-window status"
+[ ! -s "$TMP_ROOT/transport-error.result" ] || fail "a non-schema transport diagnostic was emitted as a result"
+[ "$ssh_255_rc" -eq 75 ] || fail "ssh exit 255 returned $ssh_255_rc instead of an empty-window status"
+[ ! -s "$TMP_ROOT/ssh-255.result" ] || fail "ssh exit 255 emitted a result"
+pass "transport failures and non-schema diagnostics become transient empty windows"
 
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"
@@ -836,18 +855,53 @@ fi
 stop_reply_listener || fail "the continuity listener did not stop"
 pass "a remote reply listener stays owned across empty waits and a delta"
 
-# A failed transport is not an empty wait: do not launch a second read under
-# the same owner, even when the launch floor is short.
+# A failed transport is a transient empty window: relisten under the same
+# owner, even when the launch floor is short, without producing a capture.
 : > "$TMP_ROOT/failed-polls"
 FM_REMOTE_REPLY_FAIL_READ=1 FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/failed-polls" \
   FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
   remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
 failed_reader=$!
-wait "$failed_reader" || fail "failed reader did not leave the runner"
-sleep 2
-[ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -eq 1 ] \
-  || fail "failed reader relaunched within the launch floor"
-pass "a failed remote read exits instead of relistening"
+wait_for "$CLAIMS/$SID.claim" || fail "failed reader never claimed the source"
+failed_polls=0
+for _ in $(seq 1 120); do
+  failed_polls=$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')
+  [ "$failed_polls" -ge 2 ] && break
+  sleep 0.25
+done
+[ "$failed_polls" -ge 2 ] || fail "failed reader did not relisten after transport failure"
+case "$(ps -p "$failed_reader" -o stat= 2>/dev/null)" in
+  ''|Z*) fail "failed transport ended the reply listener" ;;
+esac
+[ "$(reply_owner)" = live ] || fail "failed transport released the reply listener claim"
+stop_reply_listener || fail "the failed transport listener did not stop"
+wait "$failed_reader" 2>/dev/null || true
+pass "a failed remote read relistens without ending the listener"
+
+: > "$TMP_ROOT/transport-polls"
+transport_results_before=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" -type f -print 2>/dev/null | wc -l | tr -d ' ')
+FM_REMOTE_REPLY_TRANSPORT_ERROR=1 FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/transport-polls" \
+  FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
+  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+transport_reader=$!
+wait_for "$CLAIMS/$SID.claim" || fail "transport-diagnostic reader never claimed the source"
+transport_polls=0
+for _ in $(seq 1 120); do
+  transport_polls=$(wc -l < "$TMP_ROOT/transport-polls" | tr -d ' ')
+  [ "$transport_polls" -ge 2 ] && break
+  sleep 0.25
+done
+[ "$transport_polls" -ge 2 ] || fail "transport diagnostic did not relisten"
+case "$(ps -p "$transport_reader" -o stat= 2>/dev/null)" in
+  ''|Z*) fail "transport diagnostic ended the reply listener" ;;
+esac
+[ "$(reply_owner)" = live ] || fail "transport diagnostic released the reply listener claim"
+transport_results_after=$(find "$PARENT/state/procevent-inbox" -name "$SID.*.result" -type f -print 2>/dev/null | wc -l | tr -d ' ')
+[ "$transport_results_after" -eq "$transport_results_before" ] \
+  || fail "transport diagnostic was captured as a malformed result"
+stop_reply_listener || fail "the transport-diagnostic listener did not stop"
+wait "$transport_reader" 2>/dev/null || true
+pass "a non-schema transport diagnostic relistens without ending the listener"
 
 # Make local ingestion persistently fail after the delta has been captured.
 # Its durable generation must remain the only copy until reconciliation.
