@@ -11,7 +11,7 @@
 #      empty lsof result means the file was abandoned, not that no one held it;
 #   3. its mtime age is at least a caller-supplied threshold - a freshly created
 #      lock might belong to a process lsof has not yet reflected.
-# ANY uncertainty - lsof missing, an lsof error, an unreadable mtime - returns
+# ANY uncertainty - lsof missing, an lsof error or timeout, an unreadable mtime - returns
 # non-zero (NOT stale): fail safe, never remove a lock that cannot be proven dead.
 # Diagnostics print to stderr prefixed by ${FM_LOCK_LOG_PREFIX:-fm-lock} so each
 # caller's output stays recognizable.
@@ -30,17 +30,52 @@ fm_lock_path_mtime() {
   fi
 }
 
+# Seconds one `lsof -- <path>` call may run before it is treated as "cannot
+# tell". lsof's mount-table phase stat()s every mount point, and a
+# mounted-but-unresponsive network share blocks that phase for lsof's own guard
+# (15 s plus kill grace) up to four times per call, so an unbounded call can
+# hang a lock-staleness check for minutes. 60 s lets a normal call (0.2 s)
+# finish while bounding a stalled one. Overridable for tests.
+# Only a positive integer is accepted: fm_run_timed treats zero as no deadline,
+# and this library's contract requires a bound, so zero is not "unbounded" here
+# but an invalid value that falls back to the default like any other.
+case "${FM_LOCK_LSOF_TIMEOUT:-}" in
+  '') FM_LOCK_LSOF_TIMEOUT=60 ;;
+  0* | *[!0-9]*)
+    fm_lock_log "ignoring FM_LOCK_LSOF_TIMEOUT='$FM_LOCK_LSOF_TIMEOUT' (not a positive integer); using the 60s default"
+    FM_LOCK_LSOF_TIMEOUT=60
+    ;;
+esac
+
+# The bound itself is bin/fm-timeout-lib.sh's fm_run_timed, the repo's one
+# owner of bounded command execution; it reports exit 124 when the bound is hit
+# and falls back to a bash watchdog where no timeout tool exists.
+# Sourced here from this lib's own directory so leaf callers need no change, and
+# skipped when the caller already loaded it.
+if ! declare -F fm_run_timed >/dev/null 2>&1; then
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/fm-timeout-lib.sh"
+fi
+
 # fm_lock_lsof_holder <target>: 0 a process holds it, 1 provably none, 2 lsof
-# errored (cannot tell). Diagnostics print on the error path only.
+# errored or hit the wall-clock bound (cannot tell). Diagnostics print on the
+# error path only. Deliberately NOT `lsof -b`: with -b lsof's path-argument
+# matching fails for every path ("status error ... Resource temporarily
+# unavailable", exit 1 with output), which this contract would read as a
+# permanent "cannot tell" and so never recover a stale lock again.
 fm_lock_lsof_holder() {
   local target=$1 output status
-  if output=$(lsof -- "$target" 2>&1); then
+  if output=$(fm_run_timed "$FM_LOCK_LSOF_TIMEOUT" lsof -- "$target" 2>&1); then
     return 0
   else
     status=$?
   fi
   if [ "$status" -eq 1 ] && [ -z "$output" ]; then
     return 1
+  fi
+  if [ "$status" -eq 124 ]; then
+    fm_lock_log "lsof check timed out after ${FM_LOCK_LSOF_TIMEOUT}s for $target; cannot tell whether it is held"
+    return 2
   fi
   if [ -n "$output" ]; then
     while IFS= read -r line; do
