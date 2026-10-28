@@ -42,6 +42,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -269,7 +271,19 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
   CONTROL_LOCK_HELD=1
 fi
-BASELINE=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE=
+# The read runs under the control lock the watcher waits on, so it is bounded
+# by the watcher's own check bound; a stalled or failed read fails registration
+# (the EXIT cleanup releases the lock, and nothing is published yet).
+BASELINE_RC=0
+BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --validated "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
+if [ "$BASELINE_RC" != 0 ]; then
+  if [ "$BASELINE_RC" = 124 ]; then
+    echo "error: baseline read of the PR poll timed out" >&2
+  else
+    echo "error: baseline read of the PR poll failed" >&2
+  fi
+  exit 1
+fi
 case $BASELINE in
   'degraded head='*|'degraded pipeline='*)
     BASELINE=${BASELINE#degraded }

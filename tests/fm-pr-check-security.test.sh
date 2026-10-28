@@ -1467,6 +1467,20 @@ test_arming_baselines_an_already_degraded_change() {
   [ "$(grep -c 'degraded after ready: degraded train=dropped' "$dir/watch-1.out")" -eq 1 ] \
     || fail "watcher did not wake for a merge request dropped from the train it was on at arming"
   pass "arming records its baseline, including an on-train merge request, before publishing the poll"
+
+  # A stalled baseline read fails registration and leaves no lock or poll.
+  dir=$(make_case degraded-baseline-timeout)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  if FM_CHECK_TIMEOUT=1 FM_TEST_GLAB_SLEEP=3 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+      run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/timeout.err"; then
+    fail "arming succeeded although its baseline read timed out"
+  fi
+  grep -q 'baseline read.*timed out' "$dir/timeout.err" || fail "arming did not name the timed-out baseline read"
+  [ ! -e "$state/.control-task-a.lock" ] || fail "a timed-out baseline read left the control lock held"
+  [ ! -e "$state/task-a.check.sh" ] || fail "a timed-out baseline read published a poll"
+  pass "a stalled baseline read fails arming without a lock or poll"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
