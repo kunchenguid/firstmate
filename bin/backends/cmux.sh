@@ -335,6 +335,11 @@ fm_backend_cmux_workspace_id_for_label() {  # <label>
     | jq -r --arg want "$label" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null | head -1
 }
 
+fm_backend_cmux_workspace_ids() {
+  fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null \
+    | jq -r '.workspaces[]? | .id' 2>/dev/null
+}
+
 fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
   local wsid=$1
   fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null \
@@ -351,19 +356,46 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
 # <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title dup out wsid sfid before new tries
   title=$(fm_backend_cmux_scoped_title "$label")
-  dup=$(fm_backend_cmux_workspace_id_for_label "$title")
+  # One list call serves both the duplicate check and the pre-create id snapshot.
+  before=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null)
+  dup=$(printf '%s' "$before" | jq -r --arg want "$title" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null | head -1)
   if [ -n "$dup" ]; then
     echo "error: cmux workspace '$title' already exists" >&2
     return 1
   fi
+  before=$(printf '%s' "$before" | jq -r '.workspaces[]? | .id' 2>/dev/null)
   out=$(fm_backend_cmux_cli new-workspace --name "$title" --cwd "$cwd" --focus false --id-format uuids 2>&1) || {
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
+  # Prefer the id new-workspace itself reports; the title is applied
+  # asynchronously on some cmux versions (0.65.2) so a lookup right after
+  # creation can miss it. Fall back to a bounded title-lookup retry.
+  wsid=$(printf '%s\n' "$out" | grep -Eio '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+  if [ -n "$wsid" ] && ! fm_backend_cmux_workspace_ids | grep -Fqx "$wsid"; then
+    wsid=
+  fi
+  tries=${FM_CMUX_CREATE_LOOKUP_TRIES:-20}
+  while [ -z "$wsid" ]; do
+    wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
+    [ -n "$wsid" ] && break
+    tries=$((tries - 1))
+    [ "$tries" -gt 0 ] || break
+    sleep "${FM_CMUX_CREATE_LOOKUP_SLEEP:-0.25}"
+  done
+  if [ -z "$wsid" ]; then
+    # Close only what this call created: the single workspace id that
+    # appeared since the pre-create snapshot, so a retry is not blocked by an
+    # orphan. Ambiguous (zero or several new ids) closes nothing.
+    new=$(fm_backend_cmux_workspace_ids | grep -Fvx -f <(printf '%s\n' "$before") || true)
+    if [ -n "$new" ] && [ "$(printf '%s\n' "$new" | wc -l | tr -d ' ')" = 1 ]; then
+      fm_backend_cmux_cli close-workspace --workspace "$new" >/dev/null 2>&1 || true
+    fi
+    echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2
+    return 1
+  fi
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
   [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
   printf '%s %s' "$wsid" "$sfid"
