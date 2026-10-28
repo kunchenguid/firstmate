@@ -63,6 +63,10 @@
 #   (z3d) forced secondmate + child return leaves residue    -> warning, retirement completes, exit 4
 #   (z3e) return removes the copy                            -> cannot-verify warning, exit 4
 #   (z4) scout + ignored file                                -> ignored file survives
+#
+# Lane VMs: on a home with config/lane-vm-cleanup, a landed ship, reported
+# scout or --force discard deletes only the Lima VMs it recorded under its own
+# id; without the flag nothing is deleted, and an absent limactl is a no-op.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -186,7 +190,18 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  # Hermetic Lima stub: `list --quiet` prints FM_FAKE_LIMA_VMS (one name per
+  # line, none by default) and `delete` appends its arguments to
+  # FM_FAKE_LIMA_DELETE_LOG when set, so no case ever touches a real VM.
+  cat > "$fakebin/limactl" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list) [ -z "${FM_FAKE_LIMA_VMS:-}" ] || printf '%s\n' "$FM_FAKE_LIMA_VMS" ;;
+  delete) shift; [ -z "${FM_FAKE_LIMA_DELETE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_LIMA_DELETE_LOG" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes" "$fakebin/limactl"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -684,6 +699,138 @@ make_path_without_lsof() {  # <case-dir>
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
   printf '%s\n' "$path_dir"
+}
+
+# Lane VMs: an opted-in home (config/lane-vm-cleanup) deletes exactly the VMs
+# the task recorded with bin/fm-lane-vm-record.sh, skipping a recorded name
+# that does not belong to `task-x1`; a home without the flag deletes nothing.
+lane_vm_record_case() {  # <case-dir>
+  local meta="$1/state/task-x1.meta"
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-api
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-it
+  # A hand-edited foreign name the recorder would refuse.
+  sed -i.bak 's/^lane_vms=\(.*\)$/lane_vms=\1 pg-it/' "$meta" && rm -f "$meta.bak"
+}
+
+lane_vm_case() {  # <name> <kind>
+  local case_dir
+  case_dir=$(make_case "$1")
+  write_meta "$case_dir" no-mistakes "$2"
+  if [ "$2" = scout ]; then
+    prepare_scout_teardown "$case_dir"
+  else
+    wt_commit "$case_dir" "shippable work"
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+  fi
+  lane_vm_record_case "$case_dir"
+  touch "$case_dir/config/lane-vm-cleanup"
+  printf '%s\n' "$case_dir"
+}
+
+lane_vm_teardown() {  # <case-dir> [teardown args...]
+  local case_dir=$1; shift
+  FM_FAKE_LIMA_VMS=$'task-x1\npg-it\ntask-x1-api\ntask-x1-it\ntask-x10\nfm-task-x1\nother' \
+  FM_FAKE_LIMA_DELETE_LOG="$case_dir/lima-deletes" \
+    run_teardown "$case_dir" "$@" > "$case_dir/stdout" 2> "$case_dir/stderr"
+}
+
+LANE_VM_EXPECTED_DELETES=$'--force task-x1-api\n--force task-x1-it'
+
+test_landed_ship_teardown_deletes_only_its_own_lane_vms() {
+  local case_dir rc
+  case_dir=$(lane_vm_case lane-vm-ship ship)
+  set +e; lane_vm_teardown "$case_dir"; rc=$?; set -e
+  expect_code 0 "$rc" "lane-vm-ship: teardown should succeed"
+  assert_equals "$LANE_VM_EXPECTED_DELETES" "$(cat "$case_dir/lima-deletes")" \
+    "lane-vm-ship: deleted VMs"
+  assert_grep "skipping recorded Lima VM pg-it" "$case_dir/stderr" \
+    "lane-vm-ship: foreign recorded name was not reported as skipped"
+  pass "opted-in landed ship teardown deletes only its recorded, owned lane VMs"
+}
+
+test_scout_teardown_deletes_its_own_lane_vms() {
+  local case_dir rc
+  case_dir=$(lane_vm_case lane-vm-scout scout)
+  set +e; lane_vm_teardown "$case_dir"; rc=$?; set -e
+  expect_code 0 "$rc" "lane-vm-scout: teardown should succeed"
+  assert_equals "$LANE_VM_EXPECTED_DELETES" "$(cat "$case_dir/lima-deletes")" \
+    "lane-vm-scout: deleted VMs"
+  pass "opted-in scout teardown after its report deletes its recorded lane VMs"
+}
+
+test_forced_teardown_deletes_its_own_lane_vms() {
+  local case_dir rc
+  case_dir=$(make_case lane-vm-force)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "unlanded work"
+  lane_vm_record_case "$case_dir"
+  touch "$case_dir/config/lane-vm-cleanup"
+  set +e; lane_vm_teardown "$case_dir" --force; rc=$?; set -e
+  expect_code 0 "$rc" "lane-vm-force: forced teardown should succeed"
+  assert_equals "$LANE_VM_EXPECTED_DELETES" "$(cat "$case_dir/lima-deletes")" \
+    "lane-vm-force: deleted VMs"
+  pass "opted-in forced teardown of unlanded work deletes its recorded lane VMs"
+}
+
+test_teardown_without_the_flag_deletes_no_lane_vm() {
+  local case_dir rc
+  case_dir=$(lane_vm_case lane-vm-off ship)
+  rm "$case_dir/config/lane-vm-cleanup"
+  set +e; lane_vm_teardown "$case_dir"; rc=$?; set -e
+  expect_code 0 "$rc" "lane-vm-off: teardown should succeed"
+  assert_absent "$case_dir/lima-deletes" "lane-vm-off: a home without the flag deleted a VM"
+  pass "teardown without config/lane-vm-cleanup deletes no lane VM"
+}
+
+test_lane_vm_record_appends_each_name_once() {
+  local dir meta rc
+  dir="$TMP_ROOT/lane-vm-record"
+  mkdir -p "$dir"
+  meta="$dir/task-x1.meta"
+  printf '%s\n' "kind=ship" "lane_vms=task-x1-old" > "$meta"
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-it
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-it
+  assert_equals $'kind=ship\nlane_vms=task-x1-old task-x1 task-x1-it' "$(cat "$meta")" \
+    "lane-vm-record: meta lines"
+  for bad in 'bad name' pg-it task-x10 task-x1-; do
+    set +e; "$ROOT/bin/fm-lane-vm-record.sh" "$meta" "$bad" 2>/dev/null; rc=$?; set -e
+    expect_code 2 "$rc" "lane-vm-record: name '$bad' should be refused"
+  done
+  assert_equals $'kind=ship\nlane_vms=task-x1-old task-x1 task-x1-it' "$(cat "$meta")" \
+    "lane-vm-record: refused names changed the meta"
+  pass "lane VM record adds each owned name once and refuses names not owned by the task"
+}
+
+test_lane_vm_record_keeps_the_pr_record_last() {
+  local dir meta head
+  dir="$TMP_ROOT/lane-vm-record-pr"
+  mkdir -p "$dir"
+  meta="$dir/task-x1.meta"
+  head=$(printf 'a%.0s' $(seq 40))
+  printf '%s\n' "kind=ship" "pr=https://github.com/example/repo/pull/7" "pr_head=$head" > "$meta"
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-it
+  "$ROOT/bin/fm-lane-vm-record.sh" "$meta" task-x1-api
+  assert_equals "kind=ship"$'\n'"lane_vms=task-x1-it task-x1-api"$'\n'"pr=https://github.com/example/repo/pull/7"$'\n'"pr_head=$head" \
+    "$(cat "$meta")" "lane-vm-record-pr: meta lines"
+  # shellcheck disable=SC2016 # expanded by the child shell
+  /bin/bash -c '. "$1"; fm_pr_metadata_identity_parse "$2"' _ "$ROOT/bin/fm-pr-lib.sh" "$meta" \
+    || fail "lane-vm-record-pr: the PR record no longer parses after recording a VM"
+  pass "lane VM record keeps the PR record last and parseable"
+}
+
+test_lane_vm_cleanup_without_limactl_is_quiet() {
+  local out rc
+  set +e
+  # shellcheck disable=SC2016 # expanded by the child shell
+  out=$(env PATH=/nonexistent /bin/bash -c '. "$1"; fm_lane_vm_cleanup task-x1 "$2"' _ \
+    "$ROOT/bin/fm-lane-vm-lib.sh" "$TMP_ROOT/task-x1.meta" 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "lane-vm-absent: cleanup should succeed"
+  assert_equals "" "$out" "lane-vm-absent: cleanup output without limactl"
+  pass "lane VM cleanup skips quietly when limactl is absent"
 }
 
 test_local_only_fork_remote_allows() {
@@ -5903,3 +6050,10 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_landed_ship_teardown_deletes_only_its_own_lane_vms
+test_scout_teardown_deletes_its_own_lane_vms
+test_forced_teardown_deletes_its_own_lane_vms
+test_teardown_without_the_flag_deletes_no_lane_vm
+test_lane_vm_record_appends_each_name_once
+test_lane_vm_record_keeps_the_pr_record_last
+test_lane_vm_cleanup_without_limactl_is_quiet
