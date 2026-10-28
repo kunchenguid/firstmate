@@ -383,8 +383,14 @@ test_not_open_key_refuses_before_send() {
   # answer may still be owed.
   printf 'needs-decision [key=moved]: declare or drop\ncaptain-held [key=moved]: tracked by sample-origins-call\n' \
     >> "$home/state/t4.status"
+  # A readable ledger whose lookups report NOT_FOUND, so the search really
+  # establishes that neither id is held.
+  mkdir -p "$home/data" "$dir/bin"
+  printf '# Backlog\n' > "$home/data/backlog.md"
+  printf '#!/usr/bin/env bash\nprintf "code: NOT_FOUND\\n"\nexit 1\n' > "$dir/bin/tasks-axi"
+  chmod +x "$dir/bin/tasks-axi"
   : > "$err"
-  env PATH="$fb:$PATH" \
+  env PATH="$fb:$dir/bin:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" t4 --resolve-key moved "declare it" >/dev/null 2>"$err"; rc=$?
   [ "$rc" -ne 0 ] || fail "a transferred key should refuse"
@@ -996,9 +1002,12 @@ EOF
   [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
 
   # With tasks-axi reachable the lookup really does run and come back empty,
-  # and only then may the refusal say so.
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$nolookup/tasks-axi"
+  # and only then may the refusal say so. The stub answers the way tasks-axi
+  # reports a missing id: exit 1 with `code: NOT_FOUND`.
+  printf '#!/usr/bin/env bash\nprintf "code: NOT_FOUND\\n"\nexit 1\n' > "$nolookup/tasks-axi"
   chmod +x "$nolookup/tasks-axi"
+  mkdir -p "$home/data"
+  printf '# Backlog\n' > "$home/data/backlog.md"
   : > "$err"
   env PATH="$fb:$nolookup:$nopath" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
@@ -1010,6 +1019,60 @@ EOF
     "a readable ledger must not be reported as unreadable"
 
   pass "fm-send --resolve-key: an unread captain-hold ledger is reported as unread, never as empty"
+}
+
+# A ledger lookup that fails without tasks-axi's NOT_FOUND establishes nothing.
+# A symlinked backlog is refused by fm-tasks-axi.sh before tasks-axi ever reads
+# it, so the refusal must call the ledger unknown, never empty.
+test_failed_hold_lookup_is_not_reported_as_empty() {
+  local dir fb log home err rc bin
+  dir="$TMP_ROOT/hold-lookup-failed"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home hold-lookup-failed)
+  fm_write_meta "$home/state/t4.meta" "window=sess:fm-t4" "kind=ship"
+  printf 'needs-decision [key=real-key]: choose\n' > "$home/state/t4.status"
+  mkdir -p "$home/data"
+  printf '# Backlog\n' > "$dir/real-backlog.md"
+  ln -s "$dir/real-backlog.md" "$home/data/backlog.md"
+  # tasks-axi must be on PATH so the lookup really runs; the wrapper refuses
+  # the symlink before invoking it.
+  bin="$dir/bin"; mkdir -p "$bin"
+  printf '#!/usr/bin/env bash\nprintf "code: NOT_FOUND\\n"\nexit 1\n' > "$bin/tasks-axi"
+  chmod +x "$bin/tasks-axi"
+  : > "$log"
+  env PATH="$fb:$bin:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t4 --resolve-key mistyped "the answer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a not-open key should refuse"
+  assert_contains "$(cat "$err")" "UNKNOWN" \
+    "a failed captain-hold lookup must leave the ledger's contents unknown"
+  assert_not_contains "$(cat "$err")" "held neither open" \
+    "the refusal asserted an empty captain-hold ledger from a failed read"
+  [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
+  pass "fm-send --resolve-key: a failed captain-hold lookup is reported as unknown, never as empty"
+}
+
+# The fold reads nothing from a status log it refuses, so a refusal for a key
+# in a symlinked log must say the log was unread, not that no line named it.
+test_unread_status_log_is_not_reported_as_missing_key() {
+  local dir fb log home err rc
+  dir="$TMP_ROOT/status-unread"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home status-unread)
+  fm_write_meta "$home/state/t4.meta" "window=sess:fm-t4" "kind=ship"
+  printf 'needs-decision [key=real-key]: choose\n' > "$dir/real.status"
+  ln -s "$dir/real.status" "$home/state/t4.status"
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t4 --resolve-key real-key "the answer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a key in an unread status log should refuse"
+  assert_contains "$(cat "$err")" "could not be read" \
+    "an unread status log must be reported as unread"
+  assert_not_contains "$(cat "$err")" "ever opened or closed" \
+    "the refusal claimed knowledge of a status log it never read"
+  [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
+  pass "fm-send --resolve-key: an unread status log is reported as unread, never as a missing key"
 }
 
 # The fold and this lookup share _fm_decision_fold_line, so no non-racing input
@@ -1066,4 +1129,6 @@ test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
 test_decision_answer_partition_relocates_under_the_record
 test_unreadable_hold_ledger_is_not_reported_as_empty
+test_failed_hold_lookup_is_not_reported_as_empty
+test_unread_status_log_is_not_reported_as_missing_key
 test_open_key_answers_instead_of_reporting_a_reader_defect

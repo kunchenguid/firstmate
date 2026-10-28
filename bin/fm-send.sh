@@ -573,11 +573,14 @@ RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
 # identity - a captain call IS a task held for the captain), then the legacy
 # derived `<task>-decision-<key>` identity for pre-collapse rows. Answerable
 # means not closed and still carrying the captain-hold annotations tasks-axi
-# preserves even past a hold-until date.
+# preserves even past a hold-until date. Returns 1 only when every lookup
+# established its id absent or not answerable (tasks-axi's NOT_FOUND is the only
+# failed read that does), and 2 when any lookup failed without establishing it.
 # Whether the captain-hold lookup below can run at all, so a refusal can say
 # which it knows: `searched` means the ledger was read and held nothing for the
-# key, `unavailable` means it was never consulted and the ledger's contents are
-# simply unknown here. Asserting an empty ledger that was never read is the same
+# key, `unavailable` means it was never consulted, and `unreadable` means a
+# lookup ran but failed before establishing absence; in the last two the
+# ledger's contents are simply unknown here. Asserting an empty ledger that was never read is the same
 # false certainty these refusals exist to stop producing.
 #
 # Set once in the caller's own shell rather than inside the lookup, because the
@@ -595,10 +598,13 @@ fm_send_hold_lookup_state() {
 }
 
 fm_send_hold_resolved_id() { # <task-id> <decision-key>
-  local show id state hold_kind
+  local show id state hold_kind rc=1
   [ "$RESOLVE_HOLD_LOOKUP" = searched ] || return 1
   for id in "$2" "$1-decision-$2"; do
-    show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || continue
+    if ! show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null); then
+      case "$show" in *"code: NOT_FOUND"*) ;; *) rc=2 ;; esac
+      continue
+    fi
     state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
     hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
     [ "$state" != "done" ] || continue
@@ -606,7 +612,7 @@ fm_send_hold_resolved_id() { # <task-id> <decision-key>
     printf '%s\n' "$id"
     return 0
   done
-  return 1
+  return "$rc"
 }
 
 # One sentence about the captain-hold ledger that is true to whether it was
@@ -616,6 +622,8 @@ fm_send_hold_resolved_id() { # <task-id> <decision-key>
 fm_send_hold_clause() { # <decision-key> <task-id>
   if [ "$RESOLVE_HOLD_LOOKUP" = unavailable ]; then
     printf "the captain-hold ledger could not be read here (tasks-axi is not on PATH), so whether a captain-held task '%s' or '%s-decision-%s' is open is UNKNOWN" "$1" "$2" "$1"
+  elif [ "$RESOLVE_HOLD_LOOKUP" = unreadable ]; then
+    printf "the captain-hold ledger could not be read (a lookup of task ids '%s' or '%s-decision-%s' failed), so whether either is open is UNKNOWN" "$1" "$2" "$1"
   else
     printf "the captain-hold ledger was searched for task ids '%s' and '%s-decision-%s' and held neither open" "$1" "$2" "$1"
   fi
@@ -678,10 +686,13 @@ if [ -n "$RESOLVE_KEYS" ]; then
     # Not open in the status log. A decision already transferred to its durable
     # captain-held task is exactly this case, and it is answerable - just
     # through the other ledger - so check there before refusing.
-    if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
+    resolve_hold_rc=0
+    resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k") || resolve_hold_rc=$?
+    if [ "$resolve_hold_rc" -eq 0 ]; then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
+    [ "$resolve_hold_rc" -ne 2 ] || RESOLVE_HOLD_LOOKUP=unreadable
     # Report what the two lookups actually FOUND, not a guess about why. The
     # old wording asserted "already closed or mistyped" - a claim about the
     # record - when all this code knows is that its own lookups came back
@@ -723,6 +734,13 @@ if [ -n "$RESOLVE_KEYS" ]; then
       echo "error: --resolve-key '$k': this ledger can no longer answer that decision - $RESOLVE_STATUS_FILE carries a '$resolve_closing_verb' line for the key, which TRANSFERS the question to a durable captain-held task rather than settling it. $(fm_send_hold_clause "$k" "$RESOLVE_TASK_ID"); a transferred row is often keyed by neither, so the question may still be owed. Read that '$resolve_closing_verb' line for the task it names and answer it there; nothing was sent." >&2
       ;;
     *)
+      # The fold reads nothing from a log it refuses (a symlink, a non-regular
+      # file, an unreadable one), so an empty answer there establishes nothing.
+      if { [ -e "$RESOLVE_STATUS_FILE" ] || [ -L "$RESOLVE_STATUS_FILE" ]; } &&
+        ! { [ -f "$RESOLVE_STATUS_FILE" ] && [ -r "$RESOLVE_STATUS_FILE" ] && [ ! -L "$RESOLVE_STATUS_FILE" ]; }; then
+        echo "error: --resolve-key '$k': $RESOLVE_STATUS_FILE could not be read (it is a symlink, not a regular file, or not readable), so whether that key is open there is UNKNOWN, and $(fm_send_hold_clause "$k" "$RESOLVE_TASK_ID"). Make the log a readable regular file, then resend; nothing was sent." >&2
+        exit 1
+      fi
       echo "error: --resolve-key '$k': this lookup found nothing to answer - no line in $RESOLVE_STATUS_FILE ever opened or closed that key, and $(fm_send_hold_clause "$k" "$RESOLVE_TASK_ID"). That means the key is mistyped, belongs to a different task, or was never opened; it does NOT prove the decision was answered. Check the log itself before assuming it was, then resend with the right key; nothing was sent." >&2
       ;;
     esac
