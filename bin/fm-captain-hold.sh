@@ -296,11 +296,11 @@ status_declare_hold() {  # <task-id> <occurrence> <reason>
   status_file="$STATE/$id.status"
   status_is_captain_held "$(last_status_line "$status_file")" && return 0
   reason=${reason//[$'\r\n']/ }
-  line="captain-held [key=captain-hold-$id-$occurrence]: $reason"
-  cap=$((FM_LINE_CAP_DEFAULT - $(status_stamp_width)))
+  line="captain-held [key=captain-hold-$id-$occurrence]: "
+  cap=$((FM_LINE_CAP_DEFAULT - $(status_stamp_width) - ${#line}))
   [ "$cap" -ge 0 ] || cap=0
-  fm_cap_line_var "$line" "$cap"
-  fm_wake_status_append_self_announced "$STATE" "$status_file" "$FM_LINE_CAP_LINE" || rc=$?
+  fm_cap_line_var "$reason" "$cap"
+  fm_wake_status_append_self_announced "$STATE" "$status_file" "$line$FM_LINE_CAP_LINE" || rc=$?
   [ "$rc" -ne 2 ] \
     || printf 'actionable: task %s is held for the captain in this home but the hold declaration could not be written to %s\n' \
       "$id" "$status_file" >&2
@@ -350,8 +350,13 @@ status_retract_mirrors() {  # <task-id> <note>
   done <<< "$standing"
 }
 
+# The worker appends to its log with a bare `>>` under no lock, so nothing can
+# keep its line from landing between the last-event read and the retraction
+# append. The open-call checks are the long part of that gap, so the top event
+# is read again once they pass and the retraction is appended only while it is
+# still the transfer that was checked.
 status_retract_top_transfers() {  # <task-id> <status-file> <note>
-  local id=$1 f=$2 note=$3 last before key lane ids named rc
+  local id=$1 f=$2 note=$3 last checked key lane ids named rc
   local -a names
   lane=${f##*/}
   lane=${lane%.status}
@@ -366,19 +371,27 @@ status_retract_top_transfers() {  # <task-id> <status-file> <note>
       (command_open "$named") >/dev/null 2>&1 || rc=$?
       [ "$rc" -eq 1 ] || return 0
     done
-    status_append_retraction "$id" "$f" "$key" "$note"
-    before=$last
+    checked=$last
     last=$(last_status_line "$f")
-    [ "$last" != "$before" ] || return 0
+    [ "$last" = "$checked" ] || return 0
+    status_append_retraction "$id" "$f" "$key" "$note"
+    last=$(last_status_line "$f")
+    [ "$last" != "$checked" ] || return 0
   done
 }
 
+# Only the note takes the line cap: the key and the closing text are what
+# FM_HOLD_RETRACTION_ERE pairs with the declaration, and a worker key has no
+# length bound, so a retraction cut from the end would leave that declaration
+# standing forever.
 status_append_retraction() {  # <task-id> <status-file> <key> <note>
-  local rc=0 cap
-  cap=$((FM_LINE_CAP_DEFAULT - $(status_stamp_width)))
+  local rc=0 head tail cap
+  head="resolved [key=$3]: captain call "
+  tail=" by fm-captain-hold"
+  cap=$((FM_LINE_CAP_DEFAULT - $(status_stamp_width) - ${#head} - ${#tail}))
   [ "$cap" -ge 0 ] || cap=0
-  fm_cap_line_var "resolved [key=$3]: captain call $4 by fm-captain-hold" "$cap"
-  fm_wake_status_append_self_announced "$STATE" "$2" "$FM_LINE_CAP_LINE" || rc=$?
+  fm_cap_line_var "$4" "$cap"
+  fm_wake_status_append_self_announced "$STATE" "$2" "$head$FM_LINE_CAP_LINE$tail" || rc=$?
   [ "$rc" -ne 2 ] \
     || printf 'actionable: captain-held task %s is settled in this home but the hold retraction could not be written to %s\n' \
       "$1" "$2" >&2

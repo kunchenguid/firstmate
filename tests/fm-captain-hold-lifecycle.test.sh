@@ -1306,6 +1306,79 @@ test_settlement_keeps_a_reasked_transfer_key_open() {
   pass "settling a transferred call leaves a re-asked transfer key open"
 }
 
+# The worker appends under no lock, so its re-ask can land while settlement is
+# still checking the calls the transfer names. The tasks-axi wrapper plays that
+# worker: the first probe of the lane during the answer appends a fresh route
+# question, after status_retract_top_transfers read the transfer as the top
+# event and before it appends. The retraction must then not be written, or it
+# would close a question the captain never saw.
+test_settlement_skips_a_transfer_key_reasked_during_its_checks() {
+  local home lane open
+  home=$(make_home raced-transfer)
+  lane=sample-raced-lane
+  tasks_in "$home" add "$lane" "Scout the raced sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the raced lane"
+  write_origin_meta "$home" "$lane"
+  printf 'needs-decision [key=route]: choose route north or route south\n' > "$home/state/$lane.status"
+  run_captain "$home" hold sample-raced-choice --title "Choose the raced route" \
+    --reason "route choice pending" >/dev/null || fail "could not hold the route call"
+  run_captain "$home" complete "$lane" sample-raced-choice >/dev/null \
+    || fail "could not transfer the raced lane's decision"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = sample-raced-lane ] && [ ! -e "$FM_HOME/worker-reasked" ]; then
+  : > "$FM_HOME/worker-reasked"
+  printf 'needs-decision [key=route]: choose route east or route west\n' >> "$FM_HOME/state/sample-raced-lane.status"
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  printf 'Take route north.\n' > "$home/route.txt"
+  run_captain "$home" answer sample-raced-choice --decision-file "$home/route.txt" >/dev/null \
+    || fail "answer could not close the route call"
+  assert_present "$home/worker-reasked" "the worker's re-ask did not land during the settlement checks"
+  ! grep -q '^resolved \[key=route\]' "$home/state/$lane.status" \
+    || fail "settlement retracted a transfer the worker re-asked during its checks: $(cat "$home/state/$lane.status")"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  case "$open" in
+    route$'\t'needs-decision$'\t'*"east or route west"*) ;;
+    *) fail "the question re-asked during settlement did not stay open: '$open'" ;;
+  esac
+  pass "a transfer key re-asked while settlement checks its calls takes no retraction"
+}
+
+# A worker decision key has no length bound and command_complete transfers it
+# uncut, so the retraction that settles the transfer must keep the whole key
+# and its closing text however long the key is; only the note may be cut.
+test_retraction_keeps_a_long_key_and_its_closing_text() {
+  local home lane key last
+  home=$(make_home long-key-transfer)
+  lane=sample-long-key-lane
+  key=$(printf '%0160d' 0 | tr 0 k)
+  tasks_in "$home" add "$lane" "Scout the long-key sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the long-key lane"
+  write_origin_meta "$home" "$lane"
+  printf 'needs-decision [key=%s]: north or south\n' "$key" > "$home/state/$lane.status"
+  run_captain "$home" hold sample-long-key-choice --title "Choose the long-key route" \
+    --reason "route choice pending" >/dev/null || fail "could not hold the long-key call"
+  run_captain "$home" complete "$lane" sample-long-key-choice >/dev/null \
+    || fail "could not transfer the long-key lane's decision"
+  grep -qE "^captain-held \\[key=$key\\]( \\[at=[0-9]+\\])?: tracked by sample-long-key-choice$" \
+    "$home/state/$lane.status" || fail "complete did not transfer the long key whole: $(cat "$home/state/$lane.status")"
+  printf 'Take route north.\n' > "$home/route.txt"
+  run_captain "$home" answer sample-long-key-choice --decision-file "$home/route.txt" >/dev/null \
+    || fail "answer could not close the long-key call"
+  grep -qE "^resolved \\[key=$key\\]( \\[at=[0-9]+\\])?: captain call .+ by fm-captain-hold$" \
+    "$home/state/$lane.status" \
+    || fail "the retraction lost the long key or its closing text: $(tail -n 1 "$home/state/$lane.status")"
+  last=$(bash -c '. "$1"; . "$2"; last_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$lane.status")
+  [ "$last" = "needs-decision [key=$key]: north or south" ] \
+    || fail "a long-key transfer did not settle for the hold reader: $last"
+  pass "a retraction keeps a long transfer key and its closing text whole"
+}
+
 # The hold-set stamp must be durable before the captain hold becomes visible.
 # A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
 # failure proves the command never publishes the hold without its timestamp.
@@ -5112,6 +5185,8 @@ test_release_frees_held_work
 test_hold_and_release_reach_the_status_log
 test_settlement_retracts_a_buried_hold_mirror
 test_settlement_keeps_a_reasked_transfer_key_open
+test_settlement_skips_a_transfer_key_reasked_during_its_checks
+test_retraction_keeps_a_long_key_and_its_closing_text
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
