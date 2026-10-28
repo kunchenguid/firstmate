@@ -1113,7 +1113,7 @@ test_github_enterprise_hosts() {
 }
 
 # Runs one watcher under a hang guard that TERMs it and returns 124 once it has
-# used sixty seconds of its own time. The guard pauses while the file named by
+# used FM_TEST_WATCH_BOUND (default 60) seconds of its own time. The guard pauses while the file named by
 # FM_TEST_WATCH_BOUND_PAUSE exists, so a case that holds the watcher on work it
 # injects, or makes it wait on concurrent work it started, charges that work's
 # duration to itself instead of to the watcher.
@@ -1126,8 +1126,8 @@ run_watcher_bounded() {
   local check_timeout_env=(-u FM_CHECK_TIMEOUT)
   [ -z "${FM_TEST_CHECK_TIMEOUT:-}" ] || check_timeout_env=("FM_CHECK_TIMEOUT=$FM_TEST_CHECK_TIMEOUT")
   shift 2
-  perl -MPOSIX=WNOHANG -MTime::HiRes=time,sleep -e 'my $pause=shift; my $left=60; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } my $last=time; while (waitpid($pid, WNOHANG) == 0) { my $now=time; $left -= $now - $last unless length $pause && -e $pause; $last=$now; if ($left <= 0) { kill "TERM", $pid; waitpid $pid, 0; exit 124 } sleep 0.02 } exit($? >> 8)' \
-    "${FM_TEST_WATCH_BOUND_PAUSE:-}" env "${check_timeout_env[@]}" \
+  perl -MPOSIX=WNOHANG -MTime::HiRes=time,sleep -e 'my $pause=shift; my $left=shift; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } my $last=time; while (waitpid($pid, WNOHANG) == 0) { my $now=time; $left -= $now - $last unless length $pause && -e $pause; $last=$now; if ($left <= 0) { kill "TERM", $pid; waitpid $pid, 0; exit 124 } sleep 0.02 } exit($? >> 8)' \
+    "${FM_TEST_WATCH_BOUND_PAUSE:-}" "${FM_TEST_WATCH_BOUND:-60}" env "${check_timeout_env[@]}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 FM_TEST_JQ="$REAL_JQ" PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
@@ -1410,7 +1410,7 @@ test_degraded_wake_survives_an_unsaved_marker() {
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
   rc=$?
   [ "$rc" -ne 0 ] || fail "watcher reported success although the degraded marker could not be saved"
-  [ "$(grep -c 'degraded after ready: degraded pipeline=941' "$state/.wake-queue" 2>/dev/null)" -eq 1 ] \
+  [ "$(grep -c 'degraded after ready: degraded pipeline=941' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
     || fail "a degraded transition whose marker could not be saved was not queued as a wake"
   pass "a degraded wake is queued before its dedupe marker, so a failed marker save never silences it"
 }
