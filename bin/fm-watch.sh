@@ -4321,7 +4321,9 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
-    [ "$busy_now" -eq 0 ] || [ "$kind" != ship ] || wait_gate_check "$w" "$task"
+    if [ "$kind" = ship ]; then
+      if [ "$busy_now" -eq 0 ]; then rm -f "$STATE/.wait-gate-$key"; else wait_gate_check "$w" "$task"; fi
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
