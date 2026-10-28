@@ -309,7 +309,7 @@ wait_until() {  # <polls of 0.1s> <command...>
 # (wait_until 200|250 host_exited, ~20-25s) flake on a slow runner; this
 # helper polls at the same 0.1s interval until the deadline. On timeout of
 # host_exited it dumps the fixture host log, supervision-host log, health
-# file, and a process tree so a CI failure is diagnosable.
+# file so a CI failure is diagnosable.
 wait_until_deadline() {  # <seconds> <command...>
   local limit=$1 start
   shift
@@ -362,12 +362,6 @@ dump_host_handback_diagnostics() {  # <home> [wait-name]
     else
       printf '(missing)\n' >&2
     fi
-  fi
-  printf '--- process tree ---\n' >&2
-  if ps -axo pid,ppid,pgid,etime,command >/dev/null 2>&1; then
-    ps -axo pid,ppid,pgid,etime,command >&2
-  else
-    ps -ef >&2
   fi
 }
 
