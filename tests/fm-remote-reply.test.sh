@@ -56,6 +56,10 @@ fi
   printf 'A\000 connection attempt failed because the connected party did not properly respond\000 Error code: Bash/Service/WSAETIMEDOUT\000\n'
   exit 255
 }
+[ "${FM_REMOTE_REPLY_BANNER:-}" != 1 ] || {
+  printf 'Welcome to remote-mac\n'
+  exit 0
+}
 [ -n "${FM_REMOTE_REPLY_FAIL_READ_STATUS:-}" ] && exit "$FM_REMOTE_REPLY_FAIL_READ_STATUS"
 [ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
 host=$1
@@ -182,6 +186,18 @@ for failed_status in 1 2; do
   [ ! -s "$TMP_ROOT/ssh-$failed_status.result" ] || fail "remote exit $failed_status emitted a result"
 done
 pass "transport failures and remote read failures become transient empty windows"
+
+set +e
+FM_REMOTE_REPLY_FAIL_READ_STATUS=127 remote_env "$ADAPTER" source ios > "$TMP_ROOT/ssh-127.result"
+missing_reader_rc=$?
+FM_REMOTE_REPLY_BANNER=1 remote_env "$ADAPTER" source ios > "$TMP_ROOT/banner.result"
+banner_rc=$?
+set -e
+[ "$missing_reader_rc" -eq 127 ] || fail "remote exit 127 returned $missing_reader_rc instead of its own status"
+[ ! -s "$TMP_ROOT/ssh-127.result" ] || fail "remote exit 127 emitted a result"
+[ "$banner_rc" -eq 1 ] || fail "a successful non-schema leg returned $banner_rc instead of a failed read"
+[ ! -s "$TMP_ROOT/banner.result" ] || fail "a successful non-schema leg emitted a result"
+pass "other failed or non-schema remote legs stay failed reads"
 
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"

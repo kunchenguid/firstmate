@@ -326,15 +326,19 @@ cmd_source() {
   # A remote transport failure can leave diagnostic bytes on stdout, especially
   # when the remote OpenSSH shell is a Windows WSL wrapper. Such bytes are not a
   # delta and must never reach the runner as a malformed capture. Never pass a
-  # failed or non-schema leg to the runner. Returning a nonzero status with no
-  # output leaves the registration available for reconciliation without
-  # advancing the cursor or ingesting transport diagnostics.
+  # failed or non-schema leg to the runner. A failed SSH transport (255) or a
+  # remote reader exit 1 or 2 is a transient empty window: the runner keeps its
+  # claim and relistens at its launch floor, without advancing the cursor or
+  # ingesting diagnostics. There is no backoff, so a persistent failure of that
+  # kind retries once per launch floor (1 second by default) while the claim is
+  # held. Any other failed or non-schema leg returns a nonzero status with no
+  # output, which leaves the registration available for reconciliation.
   class=$(classify_result "$output")
   if [ "$rc" -ne 0 ] || [ "$class" = malformed ]; then
     rm -f -- "$output"
-    # Failed remote legs and non-schema diagnostics are transient empty
-    # windows. Keep the runner claim and let it relisten at its launch floor.
-    return "$WINDOW_CLOSED_EMPTY"
+    case "$rc" in 1|2|255) return "$WINDOW_CLOSED_EMPTY" ;; esac
+    [ "$rc" -ne 0 ] && return "$rc"
+    return 1
   fi
   cat "$output"
   rc=$?
