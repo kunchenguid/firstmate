@@ -2098,6 +2098,8 @@ async function releaseLifecycleLock() {
   const { lockPath, ownerPath } = activeLifecycleLock;
   await unlink(lockPath);
   await unlink(path.join(ownerPath, "pid"));
+  // The holder's start time, which fm_lock_prepare_owner records beside the pid.
+  await unlink(path.join(ownerPath, "pid-start")).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
   await rmdir(ownerPath);
   activeLifecycleLock = null;
 }
