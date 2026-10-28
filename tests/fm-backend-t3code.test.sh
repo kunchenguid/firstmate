@@ -173,7 +173,7 @@ t3_run() {  # <bash snippet run after sourcing fm-backend.sh with t3code loaded>
   local snippet=$1
   shift
   FM_CONFIG_OVERRIDE="$CONFIG" FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-$CASE_DIR/state}" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source t3code || exit 1; FM_T3CODE_TASK_SERVER=$(fm_backend_t3code_server_identity) || exit 1; '"$snippet" "$ROOT" "$@"
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source t3code || exit 1; FM_T3CODE_TASK_SERVER=$(fm_backend_t3code_server_identity 2>/dev/null) || FM_T3CODE_TASK_SERVER=; '"$snippet" "$ROOT" "$@"
 }
 
 t3_request() {  # <line-number> <js expression over `r`>
@@ -723,7 +723,7 @@ test_helper_through_symlinked_root_reaches_t3_and_kill_fails_closed() {
   link="$CASE_DIR/root-link"
   ln -s "$ROOT" "$link"
   FM_CONFIG_OVERRIDE="$CONFIG" FM_STATE_OVERRIDE="$CASE_DIR/state" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source t3code || exit 1; fm_backend_t3code_kill thread-live' "$link" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source t3code || exit 1; fm_backend_t3code_kill thread-live "$(fm_backend_t3code_server_identity)"' "$link" \
     || fail "a kill through a symlinked Firstmate root must close the thread"
   [ "$(t3_dispatch_types)" = "t3_thread_interrupt t3_thread_organize" ] \
     || fail "a kill through a symlinked root must interrupt, then archive, got '$(t3_dispatch_types)'"

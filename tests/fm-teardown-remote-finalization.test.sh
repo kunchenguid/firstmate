@@ -5,6 +5,7 @@ TMP_ROOT=$(fm_test_tmproot fm-remote-finalization)
 for shape in matching mismatched published publish-failure; do
   home="$TMP_ROOT/$shape"
   mkdir -p "$home/state" "$home/data" "$home/config"
+  touch "$home/config/fleet-ledger"
   printf 'manual\n' > "$home/config/backlog-backend"
   printf -- '- mate - Test mate. (host: remote; root: /remote/root; home: /remote/home; scope: tests; projects: ; added 2026-10-28)\n' > "$home/data/secondmates.md"
   [ "$shape" != published ] || : > "$home/data/secondmates.md"
@@ -35,6 +36,7 @@ MV
     assert_grep '- mate ' "$home/data/secondmates.md" "mismatched route was removed"
   else
     expect_code 0 "$rc" "metadata-free finalization: $(cat "$home/err")"
+    jq -se 'any(.[]; .event == "task.cleaned_up" or .type == "task.cleaned_up")' "$home/state/fleet-ledger.jsonl" >/dev/null || fail "metadata-free recovery missed its ledger cleanup"
     assert_absent "$home/state/.seat-retirement-mate.json" "finalization evidence was not retired"
     assert_no_grep '- mate ' "$home/data/secondmates.md" "finalization retained the route"
   fi
