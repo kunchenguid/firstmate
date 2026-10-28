@@ -3229,8 +3229,10 @@ fi
 fm_backend_validate_harness "$BACKEND" "$HARNESS" || exit 1
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
+# Codex checks its catalog where it runs: the launch command on pane backends,
+# T3's own selection resolver on backend=t3code.
 if [ "$EFFORT" = ultra ]; then
-  "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
+  [ "$HARNESS" = codex ] || "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
   [ "$RAW_LAUNCH" = 0 ] || {
     echo "error: --effort ultra requires a canonical --harness launch so its native flag cannot be omitted" >&2
     exit 1
@@ -3512,14 +3514,15 @@ effort_flag_for_harness() {
     esac
     ;;
   codex)
-    # The installed codex config schema uses model_reasoning_effort. Max is
-    # threaded only where Luna or the installed catalog supports it and is
-    # otherwise omitted; ultra already passed validate-native-effort.
+    # The installed codex config schema uses model_reasoning_effort. Max and
+    # ultra are checked in the pane against the Codex home the worker runs
+    # with: max is threaded only where Luna or that catalog supports it and is
+    # otherwise omitted, and ultra is refused by the launch guard below.
     case "$effort" in
     low | medium | high | xhigh | ultra) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
     max)
-      "$SCRIPT_DIR/fm-harness.sh" codex-supports "$model" max || return 0
-      printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+      # shellcheck disable=SC2016  # The destination pane runs the catalog lookup.
+      printf -- '$(%s codex-effort-args %s max) ' "$(shell_quote "$SCRIPT_DIR/fm-harness.sh")" "$(shell_quote "$model")"
       ;;
     esac
     ;;
@@ -7179,6 +7182,9 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "$OPENCODE_MAJOR")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL" "$OPENCODE_MAJOR") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+if [ "$HARNESS" = codex ] && [ "$EFFORT" = ultra ]; then
+  LAUNCH="$(shell_quote "$SCRIPT_DIR/fm-harness.sh") validate-native-effort codex $(shell_quote "$MODEL") ultra || return 1 2>/dev/null || exit 1; $LAUNCH"
+fi
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
 # placeholder; an empty value leaves every other launch byte-identical.

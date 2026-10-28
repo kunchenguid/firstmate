@@ -955,28 +955,23 @@ test_codex_catalog_effort_relaunch() {
     printf codex > "$dir/fake/becomes"
     mkdir -p "$dir/catalog"
     printf '%s\n' '{"models":[{"slug":"gpt-6.1-terra","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}]}]}' > "$dir/catalog/models_cache.json"
-    if [ "$effort" = ultra ]; then
-      out=$(CODEX_HOME="$dir/catalog" run_control "$dir" "$id" relaunch --harness codex --model unsupported --effort "$effort" --note "unsupported profile"); rc=$?
-      expect_code 1 "$rc" "unsupported Codex ultra relaunch must fail: $out"
-      [ "$(cat "$dir/fake/command")" = codex ] || fail "unsupported Codex relaunch stopped the agent"
-      [ ! -s "$dir/fake/literal" ] || fail "unsupported Codex relaunch sent lifecycle input"
-    fi
     out=$(CODEX_HOME="$dir/catalog" run_control "$dir" "$id" relaunch --harness codex --model gpt-6.1-terra --effort "$effort" --note "supported profile"); rc=$?
     expect_code 0 "$rc" "supported Codex relaunch failed: $out"
     [ "$(meta_field "$dir" "$id" model)" = gpt-6.1-terra ] || fail "Codex relaunch lost model"
     [ "$(meta_field "$dir" "$id" effort)" = "$effort" ] || fail "Codex relaunch lost effort"
-    assert_contains "$(cat "$dir/fake/literal")" "model_reasoning_effort=\"$effort\"" "Codex relaunch omitted effort"
+    assert_contains "$(cat "$dir/fake/literal")" "codex --model 'gpt-6.1-terra'" "Codex relaunch lost its launch"
   done
-  id=rl-codex-max-unsupported
-  dir=$(new_case "$id" "$id")
-  add_ship_task "$dir" "$id" codex
-  printf codex > "$dir/fake/command"
-  printf codex > "$dir/fake/becomes"
-  out=$(CODEX_HOME="$dir/missing" run_control "$dir" "$id" relaunch --harness codex --model gpt-5 --effort max --note "unsupported max"); rc=$?
-  expect_code 0 "$rc" "unsupported Codex max relaunch should omit the effort: $out"
-  [ "$(meta_field "$dir" "$id" effort)" = max ] || fail "Codex max relaunch lost recorded effort"
-  assert_not_contains "$(cat "$dir/fake/literal")" "model_reasoning_effort" "unsupported Codex max relaunch threaded the effort"
-  pass "Codex max and ultra relaunch preserve supported profiles, omit unsupported max, and reject unsupported ultra before stopping"
+  for effort in max ultra; do
+    id="rl-codex-$effort-no-local-catalog"
+    dir=$(new_case "$id" "$id")
+    add_ship_task "$dir" "$id" codex
+    printf codex > "$dir/fake/command"
+    printf codex > "$dir/fake/becomes"
+    out=$(CODEX_HOME="$dir/missing" run_control "$dir" "$id" relaunch --harness codex --model gpt-5 --effort "$effort" --note "no local catalog"); rc=$?
+    expect_code 0 "$rc" "Codex $effort relaunch must not depend on the caller's catalog: $out"
+    [ "$(meta_field "$dir" "$id" effort)" = "$effort" ] || fail "Codex $effort relaunch lost recorded effort"
+  done
+  pass "Codex max and ultra relaunch preserve their profiles and leave catalog checks to the relaunched worker"
 }
 
 # A fake claude that answers `claude auth status` the way the real runner

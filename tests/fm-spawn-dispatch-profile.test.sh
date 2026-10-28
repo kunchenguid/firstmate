@@ -662,40 +662,49 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
+# Run the captured launch the way the destination pane would, with its own
+# CODEX_HOME, and print the effort Codex received or "refused".
+codex_pane_effort() {  # <pane-codex-home>
+  local bin="$CASE_DIR/pane-bin"
+  mkdir -p "$bin"
+  # shellcheck disable=SC2016  # The fake codex expands its own arguments.
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" > "$(dirname "$0")/args"' > "$bin/codex"
+  chmod +x "$bin/codex"
+  rm -f "$bin/args"
+  (cd "$WT_DIR" && CODEX_HOME="$1" PATH="$bin:$PATH" bash -c "$(cat "$LAUNCH_LOG")") >/dev/null 2>&1 \
+    && [ -f "$bin/args" ] || { echo refused; return; }
+  sed -n 's/^model_reasoning_effort="\(.*\)"$/\1/p' "$bin/args"
+}
+
 test_codex_catalog_efforts() {
-  local rec id out launch effort model
-  for model in gpt-5.6-luna gpt-6.1-terra; do
-    for effort in max ultra; do
-      [ "$model:$effort" != gpt-5.6-luna:ultra ] || continue
-      id="codex-$model-$effort"
-      rec=$(make_spawn_case "$id" codex "$id")
-      read_case_record "$rec"
-      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model" --effort "$effort" 2>&1)
-      expect_code 0 "$?" "supported Codex profile failed: $out"
-      assert_meta_profile "$HOME_DIR/state/$id.meta" codex "$model" "$effort"
-      launch=$(cat "$LAUNCH_LOG")
-      assert_contains "$launch" "codex --model '$model' -c 'model_reasoning_effort=\"$effort\"'" "Codex effort did not reach launch"
-    done
-  done
-  for model in gpt-5 missing; do
-    id="codex-refused-$model-ultra"
+  local rec id out model effort pane got
+  pane="$TMP_ROOT/pane-codex"
+  mkdir -p "$pane"
+  printf '%s\n' '{"models":[{"slug":"gpt-5","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}]}]}' > "$pane/models_cache.json"
+  # Each case: model effort, the effort Codex receives with the spawning
+  # process's catalog, then with a divergent pane catalog that swaps support.
+  while read -r model effort same divergent; do
+    id="codex-$model-$effort"
     rec=$(make_spawn_case "$id" codex "$id")
     read_case_record "$rec"
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model" --effort ultra 2>&1)
-    expect_code 1 "$?" "unsupported Codex ultra profile must fail: $out"
-    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unsupported profile published metadata"
-    [ ! -s "$LAUNCH_LOG" ] || fail "unsupported profile launched"
-  done
-  id=codex-luna-max-no-catalog
-  rec=$(make_spawn_case "$id" codex "$id")
-  read_case_record "$rec"
-  out=$(CODEX_HOME="$TMP_ROOT/missing" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max 2>&1)
-  expect_code 0 "$?" "Luna max must not need the catalog: $out"
-  assert_contains "$(cat "$LAUNCH_LOG")" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"'" "Luna max did not reach launch without a catalog"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model" --effort "$effort" 2>&1)
+    expect_code 0 "$?" "Codex $model $effort spawn failed: $out"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" codex "$model" "$effort"
+    got=$(codex_pane_effort "$CODEX_HOME")
+    [ "$got" = "${same#-}" ] || fail "Codex $model $effort with the spawn catalog got '$got', want '${same#-}'"
+    got=$(codex_pane_effort "$pane")
+    [ "$got" = "${divergent#-}" ] || fail "Codex $model $effort with the pane catalog got '$got', want '${divergent#-}'"
+  done <<'CASES'
+gpt-6.1-terra ultra ultra refused
+gpt-6.1-terra max max -
+gpt-5 ultra refused ultra
+gpt-5 max - max
+gpt-5.6-luna max max max
+CASES
   out=$(CODEX_HOME="$TMP_ROOT/missing" "$ROOT/bin/fm-harness.sh" validate-native-effort codex gpt-6.1-terra ultra 2>&1) && fail "missing catalog must refuse ultra"
   assert_contains "$out" "catalog" "missing catalog refusal did not name the catalog"
   assert_contains "$out" "unavailable" "missing catalog refusal was not distinguished"
-  pass "Codex max and ultra follow the model catalog and reach launch"
+  pass "Codex max and ultra follow the catalog of the Codex home the launched worker runs with"
 }
 
 test_codex_omits_max_effort_for_unsupported_model() {
@@ -709,9 +718,9 @@ test_codex_omits_max_effort_for_unsupported_model() {
   expect_code 0 "$status" "codex spawn with an unsupported model max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag and Codex bypass flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported model max reasoning effort"
+  assert_contains "$launch" "codex --model 'gpt-5' " "codex launch did not preserve the model flag"
+  assert_contains "$launch" " --dangerously-bypass-approvals-and-sandbox" "codex launch did not preserve the Codex bypass flag"
+  [ -z "$(codex_pane_effort "$CODEX_HOME")" ] || fail "codex launch must omit unsupported model max reasoning effort"
   pass "codex omits max for models without the catalog capability"
 }
 
@@ -1264,7 +1273,7 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
       assert_not_contains "$launch" "'max'" "native Ultra was aliased to max"
     done
   done
-  for native_profile in 'claude:codex-native/gpt-6-astra' 'codex:codex-native/gpt-6-astra' 'pi:openai-codex/gpt-6-astra' 'pi:default' 'pi:codex-native/'; do
+  for native_profile in 'claude:codex-native/gpt-6-astra' 'pi:openai-codex/gpt-6-astra' 'pi:default' 'pi:codex-native/'; do
     harness=${native_profile%%:*}; model=${native_profile#*:}; id="ultra-refused-$RANDOM"
     rec=$(make_spawn_case "$id" "$harness" "$id")
     read_case_record "$rec"

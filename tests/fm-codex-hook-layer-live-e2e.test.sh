@@ -58,7 +58,7 @@ capture_codex_launch() {
 # and the positional brief, which is everything codex itself is configured by.
 codex_global_flags() {
   local launch=$1 flags
-  flags=${launch#*codex }
+  flags=${launch##* codex }
   flags=${flags%%\"\$(*}
   printf '%s' "$flags"
 }
@@ -113,20 +113,28 @@ test_catalog_efforts_reach_real_codex_thread() {
       continue
     fi
     launch=$(capture_codex_launch "effort-$effort" --mode no-mistakes --yolo off --model "$model" --effort "$effort") || fail "codex $CODEX_VERSION could not capture $model $effort"
-    flags=$(codex_global_flags "$launch")
+    # Expand the flags as the pane shell would, including the catalog lookup.
+    flags=$(eval "printf '%s\n' $(codex_global_flags "$launch")")
     FM_TEST_FLAGS="$flags" FM_TEST_MODEL="$model" FM_TEST_EFFORT="$effort" python3 - <<'PYCODE' || fail "codex $CODEX_VERSION did not retain $model $effort"
-import json, os, shlex, subprocess
-flags = shlex.split(os.environ['FM_TEST_FLAGS'])
+import json, os, queue, subprocess, threading, time
+flags = os.environ['FM_TEST_FLAGS'].split('\n')
 config = []
 for i, flag in enumerate(flags):
     if flag == '-c' and flags[i+1].startswith('model_reasoning_effort='):
         config += ['-c', flags[i+1]]
 assert config, 'captured launch omitted reasoning config'
 p = subprocess.Popen(['codex', 'app-server', *config], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-def request(i, method, params):
+lines = queue.Queue()
+def pump():
+    for line in p.stdout: lines.put(line)
+    lines.put('')
+threading.Thread(target=pump, daemon=True).start()
+def request(i, method, params, timeout=60):
     p.stdin.write(json.dumps({'id': i, 'method': method, 'params': params}) + '\n'); p.stdin.flush()
+    deadline = time.monotonic() + timeout
     while True:
-        line = p.stdout.readline()
+        try: line = lines.get(timeout=max(0, deadline - time.monotonic()))
+        except queue.Empty: raise TimeoutError(f'app-server did not answer {method} within {timeout}s')
         if not line: raise RuntimeError('app-server exited')
         reply = json.loads(line)
         if reply.get('id') == i: return reply
@@ -135,7 +143,9 @@ try:
     result = request(2, 'thread/start', {'model': os.environ['FM_TEST_MODEL'], 'ephemeral': True})['result']
     assert result['model'] == os.environ['FM_TEST_MODEL'] and result['reasoningEffort'] == os.environ['FM_TEST_EFFORT'], result
 finally:
-    p.terminate(); p.wait(timeout=5)
+    p.terminate()
+    try: p.wait(timeout=5)
+    except subprocess.TimeoutExpired: p.kill(); p.wait()
 PYCODE
     printf 'ok - codex %s thread retains %s %s from the captured launch\n' "$CODEX_VERSION" "$model" "$effort"
   done

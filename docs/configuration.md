@@ -1841,11 +1841,12 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 
 **Model, effort, and fallback behavior**
 
-- On pane backends, Codex `ultra` requires an explicit model advertising it in the installed Codex cache, and Pi native `ultra` requires a `codex-native/` model.
-  Codex `max` is threaded for `gpt-5.6-luna` or a model the installed cache advertises it for.
+- On pane backends, Codex `ultra` requires an explicit model advertising it in the Codex cache, and Pi native `ultra` requires a `codex-native/` model.
+  Codex `max` is threaded for `gpt-5.6-luna` or a model the Codex cache advertises it for.
+  The launch command checks the cache in the destination pane, so it reads the same `CODEX_HOME` the worker runs with; an unsupported `ultra` stops that launch before Codex starts.
   `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` own validation and launch mapping.
   A missing cache never blocks Luna `max`.
-  Dispatch and bootstrap validation only require Codex `max` and `ultra` to name an explicit model; the selected spawn or relaunch checks the cache, so a stale or missing entry never rejects the whole rules file.
+  Dispatch and bootstrap validation only require Codex `max` and `ultra` to name an explicit model; the launched worker checks the cache, so a stale or missing entry never rejects the whole rules file.
 - On pane backends, an omitted model or effort means the selected harness uses its own default for that axis; [T3 selection](t3code-backend.md#provider-instances-and-models) owns server-backed defaults.
 - OpenCode receives the effort as its default `build` agent's `variant`, keyed to the resolved model, inside the `OPENCODE_CONFIG_CONTENT` JSON its launch already writes (the per-model reasoning-effort field of the config schema, verified on opencode 1.18.32); with no model resolved, the effort is recorded in task metadata but omitted from the launch.
 - Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
