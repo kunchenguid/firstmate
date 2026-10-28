@@ -275,12 +275,13 @@ The extension maps Pi events onto wrapper sources:
 
 Setup-created entries such as `--name` are not restoration evidence.
 
-Each mapped session generation starts one native prerequisite.
+Each mapped `session_start` generation starts one native prerequisite.
 `before_agent_start` awaits its matching result and returns one persistent context message before the first provider call.
+Compaction uses the separate [Pi compaction delivery](#pi-compaction-delivery) path.
 
 #### Pi message delivery
 
-Pi is the only adapter that injects a message rather than hook stdout.
+Pi is the only adapter that injects a message or ephemeral context rather than hook stdout.
 So whatever it injects must carry operational provenance, or the Ahoy skill would have to guess whether it was captain-authored.
 
 For `session_start`, the extension does the following:
@@ -298,15 +299,38 @@ So native and manual startup never run concurrently.
 An intentional gate or non-primary stand-down returns no message.
 Context-preserving sources retain their existing silent result when the current process already holds the lock.
 
-Manual and automatic compaction retain the existing persistent delivery path, because an automatic retry may have no new `before_agent_start`.
-That path still shares the same generation cancellation and exactly-once claim.
-
 The extension encodes an unencoded digest or fallback as `session-start` operational input and leaves an already-encoded nudge alone.
 
 #### Pi delivery size limit
 
 The extension streams the hook to completion and retains at most 512 KiB for message delivery.
 Whenever the digest is incomplete, this approved containment keeps the prefix and appends a loud `PI SESSION-START DELIVERY TRUNCATED` marker with direct-inspection guidance.
+
+#### Pi compaction delivery
+
+Compaction shares that same generation ownership and cancellation - a stale or superseded compaction cannot deliver - but is deliberately different from startup delivery: a persistent full custom message would refill the context Pi just reduced and would itself enter a later summarization span, and an automatic retry may have no new `before_agent_start` to await.
+The extension captures the active compaction reserve from `session_before_compact`, runs the ordinary `compact` source through the same generation machinery, and stores its bounded output as a custom entry that does not participate in model context, never through an optionless `sendMessage`.
+An intentionally ineligible or cancelled result clears the refresh and writes no refresh entry; an eligible failed or empty digest retains a fallback pointer and emits a warning when the UI is available.
+Every later provider request receives that refresh ephemerally through Pi's `context` event, including an overflow retry, so delivery neither queues a continuation nor accumulates in session history.
+The selected model's context window and the active output reserve set the outer budget.
+The extension sizes each delivered refresh against a UTF-8 byte count, a valid upper bound on its token count since every token encodes at least one byte.
+Base context is estimated the same way: a UTF-8 byte sum of the rebuilt messages, effective system prompt, and active tool definitions.
+Those messages are rebuilt from persisted session entries on every `context` event, and the refresh is deliberately never persisted, so this estimate never needs to net a prior delivery back out of provider usage.
+Netting one back out would need a lower bound on that delivery's token count, and no fixed bytes-per-token divisor is safe across tokenizers, since a single token can encode arbitrarily many bytes.
+
+This bound is a deliberate conservative over-reservation, not an authoritative measurement, because Pi does not expose the measurement it would need.
+Verified against Pi 0.84.3 and again against Pi 1.4.0: there is no per-entry or per-content token count in the extension surface, the session format, or the documented API.
+The exported `estimateTokens` is a `chars / 4` heuristic rather than a tokenizer, and `ctx.getContextUsage()` is itself partly estimated, using the last assistant usage plus that same heuristic for trailing messages.
+Authoritative token figures exist only as per-request provider `Usage` totals, which cannot be attributed to one injected entry.
+Because base context is counted in bytes while the model's limit is counted in tokens, the reservation typically overshoots real token usage by several times, so the refresh is smaller than strictly necessary and can shrink as a session fills.
+That trade is accepted deliberately: over-reserving is safe, and under-reserving would put the session back over the model limit.
+
+A five-percent safety margin with a 2,048-token floor remains outside the refresh whenever headroom permits, but yields enough space for the concise current-instruction pointer rather than suppressing that pointer itself.
+Because that shrinkage is the accepted cost, it is never silent: every truncation or suppression of the refresh reports what was withheld and why, naming the delivered and available byte counts, the reserved base context, and where the omitted instructions remain readable.
+The report is keyed on those measured figures rather than on the kind of degradation, so a budget that keeps shrinking keeps reporting instead of falling silent after the first notice.
+If the digest does not fit, the retained prefix ends with model-readable omission accounting and directs the model to the current `AGENTS.md` plus the named durable sources instead of silently dropping current instructions.
+Reload, resume, and fork restore only an explicit valid non-context refresh entry after the branch's latest compaction, without making the digest summarizable user content.
+If no such entry exists, they inject no compaction refresh rather than synthesizing a fallback that could bypass an intentional stand-down.
 
 ### OpenCode
 
@@ -459,7 +483,9 @@ That mode proves both an immediate prompt and a completed-before-prompt control 
 
 Cursor uses the separate primary live guard named in [Cursor tests](#cursor-tests) because its source-free `sessionStart` and stop-hook park are validated together.
 
-`tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh` is the separate opt-in real-Pi guard for a post-start AGENTS.md update followed by compaction.
+`tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh` is the separate opt-in authenticated real-Pi guard for a post-start AGENTS.md update followed by compaction.
+
+`tests/fm-pi-compaction-context.test.sh` is the credential-free real-Pi/local-provider guard for near-limit automatic and manual compaction, bounded large-digest delivery, hard-limit controls, current-instruction refresh, and independence from guard or watcher activity.
 
 ### Guard, monitoring, and away-mode tests
 
