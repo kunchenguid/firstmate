@@ -42,27 +42,39 @@ PARENT_ROUTE_INBOX="$REMOTE_HOME/state/parent-route/ios.inbox"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 stop_fixture_watcher() {
-  local pid=$1 signal deadline member group own_group snapshot owned alive
+  local pid=$1 signal deadline member group status own_group snapshot owned alive
   local -a pids groups
-  snapshot=$(ps -eo pid=,ppid=,pgid=,stat=) || return 1
   own_group=$(ps -o pgid= -p "$$" | tr -d ' ') || return 1
-  owned=$(printf '%s\n' "$snapshot" | awk -v root="$pid" '
-    { parent[$1]=$2; group[$1]=$3 }
+  pids=("$pid"); groups=("$pid")
+  kill -STOP "$pid" 2>/dev/null || true
+  deadline=$((SECONDS + 2))
+  while :; do
+    snapshot=$(ps -eo pid=,ppid=,pgid=,stat=) || return 1
+    owned=$(printf '%s\n' "$snapshot" | awk -v root="$pid" '
+    { parent[$1]=$2; group[$1]=$3; state[$1]=$4 }
     END {
       owned[root]=1
       do {
         changed=0
         for (p in parent) if (!owned[p] && owned[parent[p]]) { owned[p]=1; changed=1 }
       } while (changed)
-      for (p in owned) if (owned[p]) print p, group[p]
+      for (p in owned) if (owned[p]) print p, group[p], state[p]
     }') || return 1
-  pids=(); groups=("$pid")
-  while read -r member group; do
-    pids+=("$member")
-    if [ -n "$group" ] && [ "$group" != "$own_group" ]; then
-      groups+=("$group")
-    fi
-  done <<<"$owned"
+    alive=''
+    while read -r member group status; do
+      case " ${pids[*]} " in
+        *" $member "*) ;;
+        *) pids+=("$member"); alive=1 ;;
+      esac
+      case "$status" in T*|Z*|'') ;; *) alive=1 ;; esac
+      kill -STOP "$member" 2>/dev/null || true
+      if [ -n "$group" ] && [ "$group" != "$own_group" ]; then
+        groups+=("$group")
+      fi
+    done <<<"$owned"
+    [ -n "$alive" ] || break
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+  done
   for signal in TERM KILL; do
     for group in "${groups[@]}"; do
       kill -s "$signal" -- "-$group" 2>/dev/null || true
@@ -153,6 +165,24 @@ if ps -eo pgid=,stat= | awk -v group="$recovery_group" '$1 == group && $2 !~ /^Z
   fail "orphan recovery group survived interrupt"
 fi
 pass "watcher cleanup stops a separate timeout recovery process group"
+set -m
+bash -c '
+  printf ready >"$2/recovery-launch.ready"
+  while [ ! -e "$2/recovery-launch.release" ]; do sleep 0.02; done
+  . "$1/bin/fm-timeout-lib.sh"
+  fm_run_timed 120 bash "$2/recovery.sh" "$2/recovery-late.pid"
+' _ "$ROOT" "$TMP_ROOT" &
+watch_pid=$!
+set +m
+deadline=$((SECONDS + 10))
+while [ ! -s "$TMP_ROOT/recovery-launch.ready" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.02; done
+[ -s "$TMP_ROOT/recovery-launch.ready" ] || fail "recovery launcher did not start"
+stop_fixture_watcher "$watch_pid" || fail "recovery launch escaped cleanup"
+watch_pid=''
+touch "$TMP_ROOT/recovery-launch.release"
+sleep 0.2
+assert_absent "$TMP_ROOT/recovery-late.pid" "interrupted launcher started recovery after cleanup"
+pass "watcher cleanup prevents a pending timeout recovery launch"
 [ "$CLEANUP_ONLY" -eq 0 ] || exit 0
 
 # Materialize the current branch as the remote host's tracked code root. The
@@ -2029,8 +2059,10 @@ assert_present "$PARENT/state/ios.meta" "failed archival lost the retry metadata
 assert_grep '^- ios ' "$PARENT/data/secondmates.md" "failed archival lost the retry registry route"
 rm "$PARENT/data/ios"
 mv "$TMP_ROOT/status-archive.saved" "$PARENT/data/ios"
+archive_retry_rc=0
 remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/archive-retry-ok.out" 2> "$TMP_ROOT/archive-retry-ok.err" \
-  || fail "retirement could not retry after archive repair: $(cat "$TMP_ROOT/archive-retry-ok.err")"
+  || archive_retry_rc=$?
+expect_code 4 "$archive_retry_rc" "archive repair retry must replay the retained retirement exit"
 assert_absent "$PARENT/state/ios.meta" "successful retirement retry retained metadata"
 assert_no_grep '^- ios ' "$PARENT/data/secondmates.md" "successful retry retained the registry route"
 pass "remote retirement retains its route through a failed local archive and succeeds on retry"
@@ -2050,7 +2082,7 @@ cp "$PARENT/state/.status-presentation-cursor" "$TMP_ROOT/remote-cursor.expected
 remote_noop_rc=0
 remote_env fm_run_timed 60 "$ROOT/bin/fm-teardown.sh" ios \
   > "$TMP_ROOT/remote-noop.out" 2> "$TMP_ROOT/remote-noop.err" || remote_noop_rc=$?
-[ "$remote_noop_rc" -eq 0 ] || fail "remote missing-status retirement failed or timed out ($remote_noop_rc): $(cat "$TMP_ROOT/remote-noop.err")"
+expect_code 4 "$remote_noop_rc" "missing-status retirement must replay the retained retirement exit"
 assert_grep 'teardown ios complete (remote ' "$TMP_ROOT/remote-noop.out" "no-op did not drive remote retirement"
 cmp -s "$TMP_ROOT/remote-cursor.expected" "$PARENT/state/.status-presentation-cursor" \
   || fail "remote no-op rewrote the neighboring cursor"
