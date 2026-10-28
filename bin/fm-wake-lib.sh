@@ -604,9 +604,9 @@ fm_lock_prepare_owner() {
 # longer renders - the fm_pid_identity UTC-pin residual - is replaced rather
 # than stranding every successor beside it. Only the watch lock gets that
 # check because only the watcher stands down on its own once a successor owns
-# its lock; other pid-identity writers (the supervise daemon, the afk launch
-# lock) never re-check ownership, so reclaiming theirs would run two live
-# holders at once. A missing record, or a live pid whose value cannot be read
+# its lock; the supervise daemon also records a pid-identity on its lock but
+# never re-checks ownership, so reclaiming its lock would run two live daemons
+# at once. A missing record, or a live pid whose value cannot be read
 # right now, keeps the pid-liveness answer, so only a proven mismatch frees a
 # lock.
 fm_lock_holder_alive() {
