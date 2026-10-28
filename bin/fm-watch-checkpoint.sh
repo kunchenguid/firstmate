@@ -113,6 +113,8 @@ run_with_perl_timeout() {  # <seconds> <signal> <kill-after-seconds> <command...
 
 TIMEOUT_COMMAND=''
 
+# Only GNU coreutils timeout is trusted with --signal/--kill-after; another
+# implementation named timeout (for example uutils) falls through to perl.
 find_gnu_timeout() {
   local candidate
   for candidate in timeout gtimeout; do
