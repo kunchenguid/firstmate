@@ -673,6 +673,168 @@ jq -e --arg home "$COST_HOME" '
   || fail "the accumulated home published a ledger missing its open decision"
 pass "publication completes on a home carrying accumulated status history"
 
+# --- collection under the whole-operation deadline ---------------------------
+#
+# A live home of twelve scouts repeatedly hit the 60-second deadline while the
+# producer was still collecting: after the bounded concurrent reads, every task
+# row - including its whole-history open-decision fold - was composed one task
+# at a time, so collection grew with task count times status history and a busy
+# host pushed it past the bound before validation or publication.
+
+# seed_fleet_home <home> <task-count>: a home of in-flight ship tasks whose
+# endpoints answer through the fixture tmux and whose status logs are written by
+# the caller.
+seed_fleet_home() {
+  local home=$1 count=$2 i id gen
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects/task"
+  printf '# Seeded Firstmate home\n' > "$home/AGENTS.md"
+  printf 'fleet\n' > "$home/.fm-secondmate-home"
+  fm_git_init_commit "$home/projects/task"
+  {
+    printf '## In flight\n'
+    i=1
+    while [ "$i" -le "$count" ]; do
+      printf -- '- [ ] fleet-%s - Fleet task %s (repo: firstmate) (kind: ship) (since 2026-08-28)\n' "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le "$count" ]; do
+    id="fleet-$i"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=fmtest:fm-$id" \
+      "worktree=$home/projects/task" \
+      "project=firstmate" \
+      "harness=claude" \
+      "kind=ship" \
+      "mode=no-mistakes" \
+      "spawn_gen=fm.fleet$i"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" "$id")
+    "$ROOT/bin/fm-busy-event.sh" apply "$home/state" "$id" idle \
+      --gen "$gen" --source claude-hook --event stop
+    printf 'needs-decision [key=gate-%s]: which base to rebuild from\n' "$i" \
+      > "$home/state/$id.status"
+    i=$((i + 1))
+  done
+}
+
+# Stand in for each task row's composition cost at the one jq call that
+# receives that task's current state: hang it, or hold every row until all of
+# them are being composed at once.
+COMPOSEBIN="$TMP_ROOT/composebin"
+mkdir -p "$COMPOSEBIN"
+cat > "$COMPOSEBIN/jq" <<'SH'
+#!/usr/bin/env bash
+prev=
+for arg in "$@"; do
+  if [ "$prev" = --argjson ] && [ "$arg" = current_state ]; then
+    case "${FM_TEST_COMPOSE_MODE:-}" in
+      hang) sleep 30 ;;
+      rendezvous)
+        : > "$FM_TEST_COMPOSE_DIR/composing-$$"
+        i=0
+        while [ ! -e "$FM_TEST_COMPOSE_DIR/overlap-proved" ] && [ "$i" -lt 600 ]; do
+          markers=("$FM_TEST_COMPOSE_DIR"/composing-*)
+          if [ "${#markers[@]}" -ge "$FM_TEST_COMPOSE_COUNT" ]; then
+            : > "$FM_TEST_COMPOSE_DIR/overlap-proved"
+          fi
+          sleep 0.05
+          i=$((i + 1))
+        done
+        printf '%s\n' "$$" >> "$FM_TEST_COMPOSE_DIR/composed"
+        ;;
+    esac
+    break
+  fi
+  prev=$arg
+done
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+chmod +x "$COMPOSEBIN/jq"
+
+FLEET_HOME="$TMP_ROOT/fleet-home"
+seed_fleet_home "$FLEET_HOME" 4
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FLEET_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "the fleet home could not publish its first complete summary"
+cp -p "$FLEET_HOME/state/home-summary.json" "$TMP_ROOT/fleet-last-good.json"
+
+# The operator's direct refresh: collection outlives the whole-operation
+# deadline, so the refresh reports the deadline and the last complete summary
+# stays exactly as it was.
+refresh_rc=0
+PATH="$COMPOSEBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" FM_TEST_COMPOSE_MODE=hang \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FLEET_HOME" FM_HOME_SUMMARY_TIMEOUT=3 \
+  FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
+  "$WRITER" >/dev/null 2>"$TMP_ROOT/fleet-deadline.err" || refresh_rc=$?
+[ "$refresh_rc" -eq 124 ] \
+  || fail "a refresh whose collection outlived its deadline exited $refresh_rc, not 124"
+grep -F 'refresh exceeded its 3-second deadline' "$TMP_ROOT/fleet-deadline.err" >/dev/null \
+  || fail "the direct refresh did not report its deadline: $(cat "$TMP_ROOT/fleet-deadline.err")"
+cmp -s "$TMP_ROOT/fleet-last-good.json" "$FLEET_HOME/state/home-summary.json" \
+  || fail "a refresh killed while collecting changed the last complete summary"
+pass "a refresh killed while collecting keeps the last complete summary"
+
+# Each task's row composition must run in its own concurrent observation worker.
+# Every row waits here until all four are being composed at once, so a producer
+# that composes rows one task at a time never proves the overlap and runs past
+# the refresh's own unchanged deadline instead of publishing.
+mkdir -p "$TMP_ROOT/compose"
+PATH="$COMPOSEBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+  FM_TEST_COMPOSE_MODE=rendezvous FM_TEST_COMPOSE_DIR="$TMP_ROOT/compose" \
+  FM_TEST_COMPOSE_COUNT=4 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FLEET_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
+  "$WRITER" 2>"$TMP_ROOT/fleet-overlap.err" \
+  || fail "per-task row composition did not overlap within the refresh deadline: $(cat "$TMP_ROOT/fleet-overlap.err")"
+[ -e "$TMP_ROOT/compose/overlap-proved" ] \
+  || fail "the four task rows were never composed at the same time"
+[ "$(grep -c . "$TMP_ROOT/compose/composed")" -eq 4 ] \
+  || fail "the composition stand-in did not see exactly one row per task"
+jq -e --arg now "$NOW_THREE" '
+  .generated == $now
+  and .counts.endpoints == 4
+  and ([.decisions_open[].key] | sort) == ["gate-1","gate-2","gate-3","gate-4"]
+' "$FLEET_HOME/state/home-summary.json" >/dev/null \
+  || fail "the overlapped refresh did not publish every task row and open decision"
+pass "task rows are composed concurrently and publish within the refresh deadline"
+
+# The incident's shape end to end: twelve tasks whose append-only histories
+# carry hundreds of decision transitions each must publish inside the default
+# whole-operation deadline with every still-open decision intact.
+INCIDENT_HOME="$TMP_ROOT/incident-home"
+seed_fleet_home "$INCIDENT_HOME" 12
+python3 - "$INCIDENT_HOME/state" 12 <<'PY'
+import sys
+state, count = sys.argv[1], int(sys.argv[2])
+note = "checked the rendered prototype against the reviewed evidence "
+for task in range(1, count + 1):
+    with open(f"{state}/fleet-{task}.status", "w") as handle:
+        for i in range(120):
+            stamp = 1791174638 + i * 60
+            handle.write(f"working [at={stamp}]: {note * 2}({i})\n")
+            handle.write(f"paused [at={stamp}]: waiting on review round {i}\n")
+            handle.write(f"blocked [at={stamp}] [key=wait-{i % 7}]: {note}\n")
+            handle.write(f"resolved [at={stamp}] [key=wait-{i % 7}]: cleared by the answer\n")
+            if i % 10 == 0:
+                handle.write(f"needs-decision [at={stamp}] [key=pick-{i}]: which variant to keep\n")
+                handle.write(f"captain-held [at={stamp}] [key=pick-{i}]: held for the captain\n")
+            if i % 40 == 0:
+                handle.write(f"done [at={stamp}]: interim deliverable {i}\n")
+        handle.write(f"needs-decision [key=gate-{task}]: which base to rebuild from\n")
+PY
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$INCIDENT_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" 2>"$TMP_ROOT/incident.err" \
+  || fail "the incident-shaped fleet did not publish within the default deadline: $(cat "$TMP_ROOT/incident.err")"
+jq -e '
+  .counts.endpoints == 12
+  and ([.decisions_open[].key] | sort)
+    == (["gate-1","gate-2","gate-3","gate-4","gate-5","gate-6","gate-7","gate-8","gate-9","gate-10","gate-11","gate-12"] | sort)
+' "$INCIDENT_HOME/state/home-summary.json" >/dev/null \
+  || fail "the incident-shaped fleet published without every task's open decision"
+pass "an incident-shaped fleet publishes inside the default deadline"
+
 # One unreachable home must not extend publication without limit. A remote
 # secondmate's current state is read over ssh, and ssh's own dead-peer detection
 # deliberately never kills a slow-but-alive remote command, so nothing under the
