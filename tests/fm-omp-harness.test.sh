@@ -75,9 +75,20 @@ test_detection_anchored_name_and_marker_precedence() {
   # blinded here too. Without that, a suite running inside an omp session
   # resolves its own ancestry to omp, the decoy inherits it, and the assertion
   # fails on the real parent rather than on the decoy's name - a Bun-hosted omp
-  # primary makes exactly that ancestry resolvable.
+  # primary makes exactly that ancestry resolvable. The stub below blinds only
+  # PPID queries: answering comm/args with `bash` would also hide the decoy's
+  # own real name (ompd/comp), making the assertion below true by construction.
+  # Blinding only the parent link keeps the decoy's own name visible while its
+  # ancestors resolve to nothing, so the walk genuinely tests the decoy's name.
   mkdir -p "$blind"
-  fm_fake_blind_ancestry "$blind"
+  cat > "$blind/ps" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  '-o ppid= -p '*) printf '%s\n' 1 ;;
+  *) exec /bin/ps "$@" ;;
+esac
+STUB
+  chmod +x "$blind/ps"
   for decoy in ompd comp; do
     # shellcheck disable=SC2016 # the quoted body expands inside the named shell
     out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS PATH="$blind:$PATH" \
