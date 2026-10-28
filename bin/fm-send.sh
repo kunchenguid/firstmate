@@ -125,7 +125,11 @@
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send_stdin) that writes the message as a
 # durable record into the remote home's steering inbox and rings the remote
-# doorbell, best-effort. The remote record is the delivery, exactly as it is
+# doorbell, best-effort. The message body travels on the leg's stdin, never as
+# an SSH exec argument, so its size is not bounded by remote argv limits; the
+# distinct send-stdin verb makes an older remote code root reject the call
+# with a usage error instead of misreading the mode word as the body.
+# The remote record is the delivery, exactly as it is
 # locally: leg exit 0 means durably recorded (fm-send then exits 0, marks the
 # pending-reply expectation delivered, and closes any --resolve-key
 # decisions), and any real remote failure fails loudly with the remote leg's
