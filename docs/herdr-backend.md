@@ -651,8 +651,11 @@ When the selected named server is not running, the adapter launches it without t
 - Firstmate home and directory overrides.
 - Harness identity markers.
 - The supervision-model override.
+- The one-task crew-state record overrides a fleet snapshot sets.
+- The Claude Code parent-session markers (`CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_SESSION_ATTENDED`, and `CLAUDE_CODE_BRIDGE_SESSION_ID`) a Claude tool shell carries.
 
-Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
+Herdr passes its server startup environment to every later pane, including the panes it restores from a saved session on start, so retaining those values could misroute panes for another Firstmate home or harness, or mark every restored Claude pane as a child of the session that happened to start the server.
+`CLAUDE_CONFIG_DIR` is kept, because it selects the Claude account rather than a session.
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 
