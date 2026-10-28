@@ -951,7 +951,8 @@ async function sleep(milliseconds) {
 
 async function capturedProcessOutput(command, args, maxBytes = 8192) {
   const child = spawn(command, args, {
-    env: { PATH: sanitizedPath(), LANG: "C", LC_ALL: "C" },
+    // TZ matches fm_pid_identity in bin/fm-wake-lib.sh, whose identities pidIdentity reads.
+    env: { PATH: sanitizedPath(), LANG: "C", LC_ALL: "C", TZ: "UTC0" },
     shell: false,
     stdio: ["ignore", "pipe", "ignore"],
   });
@@ -2097,6 +2098,8 @@ async function releaseLifecycleLock() {
   const { lockPath, ownerPath } = activeLifecycleLock;
   await unlink(lockPath);
   await unlink(path.join(ownerPath, "pid"));
+  // The holder's start time, which fm_lock_prepare_owner records beside the pid.
+  await unlink(path.join(ownerPath, "pid-start")).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
   await rmdir(ownerPath);
   activeLifecycleLock = null;
 }

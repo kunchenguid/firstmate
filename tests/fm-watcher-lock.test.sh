@@ -386,8 +386,10 @@ leave_dead_link_locks() {  # <state> <lock>...
     exec sleep 30
   ' _ "$LIB" "$@" >/dev/null 2>&1 &
   holder=$!
+  # A loaded serial shard can stall the holder's startup past a second; allow
+  # the same ~5s as this file's other child-startup waits.
   i=0
-  while [ "$i" -lt 50 ] && [ ! -s "$last/pid" ]; do
+  while [ "$i" -lt 250 ] && [ ! -s "$last/pid" ]; do
     sleep 0.02
     i=$((i + 1))
   done
@@ -681,6 +683,91 @@ test_lock_does_not_steal_live_lock() {
   lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$lockpid" = "$live" ] || fail "live holder's lock pid was clobbered (got '$lockpid')"
   pass "live-held lock is not stolen"
+}
+
+start_time_of() {  # <pid>
+  FM_STATE_OVERRIDE="$TMP_ROOT" bash -c '. "$1"; fm_pid_start_time "$2"' _ "$LIB" "$1"
+}
+
+# The recorded holder died and the kernel handed its pid to an unrelated live
+# process. Pid liveness alone reads that lock as held forever, so the record's
+# holder start time must expose the reuse and let the next acquirer take it over.
+test_lock_reclaims_reused_pid_lock() {
+  local dir state lockdir owner unrelated out lockpid holder_start
+  dir=$(make_case lock-reused-pid)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  owner="$lockdir.owner.fixture"
+  # The original holder's start time: pid 1 started long before the process
+  # that now occupies the recorded pid, so the two can never match.
+  holder_start=$(start_time_of 1) || fail "could not read a start time for the fixture holder"
+  sleep 300 &
+  unrelated=$!
+  mkdir "$owner"
+  printf '%s\n' "$unrelated" > "$owner/pid"
+  printf '%s\n' "$holder_start" > "$owner/pid-start"
+  ln -s "$owner" "$lockdir"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s recovered=%s self=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" \
+      "${FM_LOCK_RECOVERED_PID:-}" "${BASHPID:-$$}"
+    [ "$rc" -ne 0 ] || fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir")
+  is_live_non_zombie "$unrelated" || fail "reclaiming a reused-pid lock signalled the unrelated process"
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "lock whose live pid no longer answers to its recorded holder was refused: $out" ;;
+  esac
+  case "$out" in
+    *"recovered=$unrelated "*) ;;
+    *) fail "reused-pid takeover did not report the pid it took over: $out" ;;
+  esac
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ -z "$lockpid" ] || fail "reused-pid takeover left a lock behind after release (pid '$lockpid')"
+  pass "lock whose recorded holder pid was reused by a live process is reclaimed"
+}
+
+# A holder that took the lock through the library records its start time, and
+# while it stays alive a contender still reads that record as held.
+test_lock_respects_live_holder_matching_its_start_time() {
+  local dir state lockdir holder i out recorded expected
+  dir=$(make_case lock-live-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 10
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" "$dir/holder.ready" "$dir/release-holder" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/holder.ready" ] \
+    || { kill "$holder" 2>/dev/null || true; fail "identity fixture holder never acquired its lock"; }
+  recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
+  expected=$(start_time_of "$holder" 2>/dev/null || true)
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; fm_lock_release "$2"; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  : > "$dir/release-holder"
+  wait "$holder" || fail "identity fixture holder did not release cleanly"
+  [ -n "$expected" ] && [ "$recorded" = "$expected" ] \
+    || fail "lock record does not carry its live holder's start time (recorded '$recorded', expected '$expected')"
+  case "$out" in
+    *"rc=1 held=$holder"*) ;;
+    *) fail "lock held by a live holder matching its recorded start time was not refused: $out" ;;
+  esac
+  pass "live holder matching its recorded start time keeps its lock"
 }
 
 test_lock_empty_pid_uses_minimum_grace() {
@@ -1589,6 +1676,8 @@ test_lock_reclaims_self_held_steal_mutex
 test_lock_resumes_own_interrupted_steal_reap
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
+test_lock_reclaims_reused_pid_lock
+test_lock_respects_live_holder_matching_its_start_time
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
