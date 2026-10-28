@@ -246,6 +246,68 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
   pass "live watcher lock with a beacon past the hard bound is replaced, under it is still refused"
 }
 
+test_watch_replaces_live_holder_with_legacy_local_time_identity() {
+  # Issue #7801: on a /proc-less host outside UTC, a watcher started before
+  # fm_pid_identity pinned TZ=UTC0 recorded its lstart in local time, so after
+  # the update its own identity no longer recomputes. A fresh watcher must
+  # replace that live holder instead of standing down beside it, and the old
+  # watcher must stand down on its own without being signalled.
+  local dir state fakebin no_proc old new old_out new_out legacy current i lock_pid old_rc
+  dir=$(make_case watch-legacy-local-time-identity)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  no_proc="$dir/no-proc"
+  old_out="$dir/old-watch.out"
+  new_out="$dir/new-watch.out"
+  mkdir -p "$no_proc"
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$old_out" 2>&1 &
+  old=$!
+  i=0
+  lock_pid=
+  current=
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$old"; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    current=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+    [ "$lock_pid" = "$old" ] && [ -n "$current" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$lock_pid" = "$old" ] && [ -n "$current" ] || fail "first watcher did not claim the lock: $(cat "$old_out")"
+  legacy=$(COLUMNS=10000 LC_ALL=C TZ=America/Los_Angeles ps -p "$old" -o lstart= -o command= 2>/dev/null | sed 's/^[[:space:]]*//')
+  [ -n "$legacy" ] && [ "$legacy" != "$current" ] \
+    || fail "the legacy local-time identity does not differ from the UTC identity, so this case would pass vacuously ('$legacy')"
+  # A pre-pin build recorded no start time either, so drop it to leave only the
+  # legacy identity as the holder's record.
+  rm -f "$state/.watch.lock/pid-start"
+  printf '%s\n' "$legacy" > "$state/.watch.lock/pid-identity"
+  is_live_non_zombie "$old" || fail "the old holder exited before its successor started, so the replacement would not be exercised: $(cat "$old_out")"
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$new_out" 2>&1 &
+  new=$!
+  i=0
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$new"; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ "$lock_pid" = "$new" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$lock_pid" = "$new" ] || fail "a fresh watcher stood down beside a live holder whose legacy identity no longer recomputes: $(cat "$new_out")"
+  # The old holder may already have stood down by now, so its clean exit below,
+  # not its liveness here, proves it saw the successor's claim.
+  i=0
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$old"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$old" && fail "the replaced watcher kept running beside its successor"
+  wait "$old"
+  old_rc=$?
+  [ "$old_rc" -eq 0 ] || fail "the replaced watcher did not stand down on its own (exit $old_rc): $(cat "$old_out")"
+  ! grep -q 'watcher: exiting' "$old_out" || fail "the replaced watcher exited for another reason, not by standing down: $(cat "$old_out")"
+  kill "$new" 2>/dev/null || true
+  wait "$new" 2>/dev/null || true
+  pass "a fresh watcher replaces a live holder whose pre-UTC-pin identity no longer recomputes, and the old holder stands down unsignalled"
+}
+
 test_guard_warnings() {
   # The guard's two operator-visible states, with resilient substrings instead of
   # four copy-coupled tests:
@@ -768,6 +830,57 @@ test_lock_respects_live_holder_matching_its_start_time() {
     *) fail "lock held by a live holder matching its recorded start time was not refused: $out" ;;
   esac
   pass "live holder matching its recorded start time keeps its lock"
+}
+
+test_lock_reclaims_holder_whose_identity_no_longer_recomputes() {
+  # A lock that records a pid-identity but no start time (a pid-identity
+  # writer's claim made before start times were recorded) is held only while
+  # that identity still recomputes for its live pid. A mismatch is reclaimed
+  # without signalling the pid; a matching identity, or no recorded identity
+  # at all, still reads as live.
+  local dir state lockdir live identity out case_name recorded
+  dir=$(make_case lock-identity-mismatch)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 300 >/dev/null 2>&1 &
+  live=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not identify the fixture holder"
+  for case_name in mismatched matching unrecorded; do
+    rm -rf "$lockdir"
+    mkdir "$lockdir"
+    printf '%s\n' "$live" > "$lockdir/pid"
+    case "$case_name" in
+      mismatched) printf '%s\n' "identity no current rendering produces" > "$lockdir/pid-identity" ;;
+      matching) printf '%s\n' "$identity" > "$lockdir/pid-identity" ;;
+    esac
+    out=$(FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+      printf "rc=%s held=%s recovered=%s pid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "${FM_LOCK_RECOVERED_PID:-}" "$(cat "$2/pid" 2>/dev/null)"
+    ' _ "$LIB" "$lockdir")
+    is_live_non_zombie "$live" || fail "$case_name identity: the live pid was signalled"
+    recorded=$(cat "$lockdir/pid" 2>/dev/null || true)
+    case "$case_name" in
+      mismatched)
+        case "$out" in
+          *"rc=0 held= recovered=$live "*) ;;
+          *) fail "lock whose recorded identity no longer recomputes was not reclaimed: $out" ;;
+        esac
+        [ "$recorded" != "$live" ] || fail "reclaimed lock still records the mismatched pid"
+        ;;
+      *)
+        case "$out" in
+          *"rc=1 held=$live "*) ;;
+          *) fail "$case_name identity: live holder was not refused: $out" ;;
+        esac
+        [ "$recorded" = "$live" ] || fail "$case_name identity: live holder's lock pid was clobbered ('$recorded')"
+        ;;
+    esac
+  done
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "lock whose recorded identity no longer recomputes is reclaimed without signalling its pid; a matching or unrecorded identity stays held"
 }
 
 test_lock_empty_pid_uses_minimum_grace() {
@@ -1665,6 +1778,7 @@ test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_live_stalled_watch_lock_is_replaced_past_hard_bound
+test_watch_replaces_live_holder_with_legacy_local_time_identity
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
@@ -1678,6 +1792,7 @@ test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_reclaims_reused_pid_lock
 test_lock_respects_live_holder_matching_its_start_time
+test_lock_reclaims_holder_whose_identity_no_longer_recomputes
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
