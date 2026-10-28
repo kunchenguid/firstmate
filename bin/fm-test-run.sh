@@ -34,9 +34,11 @@
 #                   exit, duration, whether it gate-skipped, and the reason it
 #                   gave (empty when it ran), so a lane can say which harness or
 #                   tool this host could not exercise.
-#                   Registered suites also carry failed_invocation,
+#                   Every record also carries failed_invocation,
 #                   skipped_after_failure and unexecuted_invocations from the
-#                   tests/lib.sh FM_TEST_ABORT marker (empty/zero on completion).
+#                   tests/lib.sh FM_TEST_ABORT marker. Without that marker,
+#                   these are "", 0 and [], including for unregistered suites;
+#                   empty values alone do not prove suite completion.
 #   --list          print selected script paths (one per line) and exit 0
 #   --list-scheduled
 #                   print selected paths longest-hint-first and exit 0.
