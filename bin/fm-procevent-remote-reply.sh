@@ -332,8 +332,9 @@ cmd_source() {
   class=$(classify_result "$output")
   if [ "$rc" -ne 0 ] || [ "$class" = malformed ]; then
     rm -f -- "$output"
-    [ "$rc" -ne 0 ] && return "$rc"
-    return 1
+    # Failed remote legs and non-schema diagnostics are transient empty
+    # windows. Keep the runner claim and let it relisten at its launch floor.
+    return "$WINDOW_CLOSED_EMPTY"
   fi
   cat "$output"
   rc=$?
