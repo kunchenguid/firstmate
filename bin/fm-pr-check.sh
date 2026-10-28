@@ -200,12 +200,18 @@ META_LOCK=
 META_LOCK_HELD=0
 PR_POLL_PUBLISH_LOCK=
 PR_POLL_PUBLISH_LOCK_HELD=0
+CONTROL_LOCK=
+CONTROL_LOCK_HELD=0
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
   if [ "$PR_POLL_PUBLISH_LOCK_HELD" = 1 ]; then
     fm_lock_release "$PR_POLL_PUBLISH_LOCK" || true
     PR_POLL_PUBLISH_LOCK_HELD=0
+  fi
+  if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$CONTROL_LOCK" || true
+    CONTROL_LOCK_HELD=0
   fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
@@ -251,6 +257,32 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
+# The degraded dedupe baseline is the poll's own reading at the ready report:
+# a change already degraded is not news, and a merge request already on its
+# merge train arms the wake for its drop. It replaces the marker of any watch
+# this registration replaces, before the new poll is published and under the
+# task's control lock the watcher holds while it reads and dedupes, so no
+# watcher read falls between them. A merge-time re-record already runs under
+# that lock (bin/fm-pr-merge.sh).
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  CONTROL_LOCK="$STATE/.control-$ID.lock"
+  fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
+  CONTROL_LOCK_HELD=1
+fi
+BASELINE=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE=
+case $BASELINE in
+  'degraded head='*|'degraded pipeline='*)
+    BASELINE=${BASELINE#degraded }
+    BASELINE=${BASELINE%% *}
+    ;;
+  ontrain) BASELINE=train=on ;;
+  *) BASELINE= ;;
+esac
+if [ -z "$BASELINE" ] || ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+    "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE"; then
+  rm -f -- "$STATE/$ID.pr-poll-degraded"
+fi
+
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
 fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
 PR_POLL_PUBLISH_LOCK_HELD=1
@@ -263,25 +295,14 @@ else
   echo "error: could not publish PR poll" >&2
   exit 1
 fi
+if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$CONTROL_LOCK" || exit 1
+  CONTROL_LOCK_HELD=0
+fi
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 # The merge-time re-record is not a new review-ready PR, so it writes nothing.
 [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/fleet-ledger" ] || [ "${FM_PR_CHECK_MERGE:-}" = 1 ] \
   || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-fleet-ledger.sh" pr_ready "$ID" "$URL" || true
-# A re-armed watch starts its degraded dedupe from a clean slate: the marker
-# belongs to the watch this registration replaces, and its identity binding
-# would otherwise suppress the new watch's first degraded wake.
-rm -f -- "$STATE/$ID.pr-poll-degraded"
-# A change already degraded at the ready report is the baseline, not news: the
-# poll's own reading is recorded as already notified, so only a head or
-# pipeline that degrades afterwards wakes.
-if BASELINE=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null); then
-  case $BASELINE in
-    'degraded head='*|'degraded pipeline='*)
-      BASELINE=${BASELINE#degraded }
-      fm_pr_poll_degraded_mark_notified "$STATE" "$ID" "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "${BASELINE%% *}" || true
-      ;;
-  esac
-fi
 # The contribution observer uses the same authenticated check mechanism and
 # owns verdict freshness, required actors and external feedback separately from
 # the exact merged-state poll. Registration is local and performs no forge read.

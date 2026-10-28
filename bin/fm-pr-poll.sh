@@ -194,15 +194,23 @@ case "$provider" in
         # wake says which test broke without a job-log dig. Bounded depth and
         # seen-list keep one misbehaving pipeline graph from looping the
         # read, and every read failure simply shortens the detail: a fetch
-        # failure can never be read as a change of state.
+        # failure can never be read as a change of state. A read budget -
+        # at most four pipelines of two reads each, and none started once
+        # this poll has run ten seconds - keeps a large pipeline graph inside
+        # the watcher's check timeout, so the known failure is still emitted
+        # with whatever detail the budget allowed rather than killed before
+        # it prints.
         detail=
         seen=
         frontier=$1
         depth=0
+        detail_pipelines=0
         while [ -n "$frontier" ] && [ "$depth" -lt 3 ]; do
           next=
           for current in $frontier; do
             case " $seen " in *" $current "*) continue ;; esac
+            [ "$detail_pipelines" -lt 4 ] && [ "$SECONDS" -lt 10 ] || return 0
+            detail_pipelines=$((detail_pipelines + 1))
             seen="$seen $current "
             names=$(GITLAB_HOST=$host glab api "projects/$enc/pipelines/$current/jobs?per_page=100" 2>/dev/null \
               | jq -r 'if type == "array" then

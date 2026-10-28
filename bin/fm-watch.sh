@@ -4136,11 +4136,14 @@ EOF
             triage_log "PR poll for $id reported a train drop it never saw on the train; staying silent"
             continue
           fi
+          # The durable wake lands before the marker, both under the control
+          # lock, so a failure between them can only repeat this wake on the
+          # next poll, never record a transition nobody was woken for.
+          reason="check: PR $url degraded after ready: $out"
+          fm_wake_append check "$c" "$reason" || exit 1
           fm_pr_poll_degraded_mark_notified "$STATE" "$id" \
             "$provider" "$host" "$path" "$number" "$degraded_identity" || exit 1
-          reason="check: PR $url degraded after ready: $out"
           pr_poll_control_release || exit 1
-          fm_wake_append check "$c" "$reason" || exit 1
           touch "$STATE/.last-check"
           wake "$reason"
         fi
