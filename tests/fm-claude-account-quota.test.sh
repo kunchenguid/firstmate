@@ -25,6 +25,7 @@ new_case() {
 printf '%s %s %s\n' "\${CLAUDE_CONFIG_DIR-unset}" "\${QUOTA_AXI_SNAPSHOT-unset}" "\$*" >> '$CASE/reads'
 [ -f "\$CLAUDE_CONFIG_DIR/quota.json" ] || exit 1
 cat "\$CLAUDE_CONFIG_DIR/quota.json"
+[ ! -f "\$CLAUDE_CONFIG_DIR/exit-1" ] || exit 1
 SH
   chmod +x "$FAKEBIN/quota-axi"
 }
@@ -50,6 +51,21 @@ account() {
       }
     }]
   }' > "$dir/quota.json"
+}
+
+# rate_limited_account <dir>: a root whose read the vendor rate-limits, which
+# quota-axi reports with exit 1 and a snapshot naming that state.
+rate_limited_account() {
+  mkdir -p "$1"
+  jq -n '{
+    schemaVersion: 5,
+    providers: [{
+      provider: "claude",
+      state: {status: "rate_limited", error: "Claude quota endpoint rate limited"},
+      quotaSemantics: {status: "unknown", effectiveAvailability: []}
+    }]
+  }' > "$1/quota.json"
+  : > "$1/exit-1"
 }
 
 run_tool() {
@@ -102,6 +118,19 @@ test_exhausted_and_unmeasured_accounts_are_not_chosen() {
   pass "exhausted and 0% accounts are excluded and an unmeasured one stays unranked"
 }
 
+test_a_rate_limited_account_names_the_vendor_reason() {
+  local out
+  new_case rate-limited
+  rate_limited_account "$CASE/limited"
+  account "$CASE/ok" 40 0.1
+  printf '%s\n%s\n' "$CASE/limited" "$CASE/ok" > "$HOME_DIR/config/claude-accounts"
+  out=$(run_tool)
+  assert_contains "$out" "candidate: $CASE/limited  -> eligible, unranked: unmeasured (unknown: Claude quota endpoint rate limited)" \
+    "a rate-limited read should keep quota-axi's own reason, not report an unreadable account"
+  assert_contains "$out" "account: --account '$CASE/ok'" "the measured account should still be shown"
+  pass "a rate-limited account stays unranked and names the vendor's reason"
+}
+
 test_a_tie_or_nothing_rankable_escalates() {
   local out
   new_case tie
@@ -146,6 +175,7 @@ test_absent_or_malformed_lists_refuse() {
 test_the_higher_spend_priority_account_is_shown
 test_the_model_scope_bounds_the_choice
 test_exhausted_and_unmeasured_accounts_are_not_chosen
+test_a_rate_limited_account_names_the_vendor_reason
 test_a_tie_or_nothing_rankable_escalates
 test_ordinary_is_measured_from_the_default_root
 test_absent_or_malformed_lists_refuse

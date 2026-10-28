@@ -13,6 +13,10 @@
 # ambient account's; a root quota-axi cannot read there, such as an `ordinary`
 # login kept in the macOS Keychain, is reported unmeasured. QUOTA_AXI_SNAPSHOT
 # is removed from each read so a fixture for one account cannot answer for all.
+# quota-axi exits nonzero when it cannot measure a provider, for example when
+# the vendor rate-limits the quota endpoint, yet still prints a valid snapshot
+# naming that state; such a snapshot is kept, so the account is reported
+# unmeasured with the vendor's own reason rather than as an unreadable root.
 #
 # Each entry binds to its own snapshot's claude row and to the scopes that bound
 # --model: all_models/all_products plus model:<id> and product:<id> for the
@@ -101,11 +105,11 @@ while IFS= read -r entry; do
   root=$entry
   [ "$entry" != ordinary ] || root="${HOME:?HOME is required to measure the ordinary account}/.claude"
   error=
-  if ! fm_run_timed "$FM_CLAUDE_ACCOUNT_QUOTA_SECONDS" env -u QUOTA_AXI_SNAPSHOT CLAUDE_CONFIG_DIR="$root" \
+  if fm_run_timed "$FM_CLAUDE_ACCOUNT_QUOTA_SECONDS" env -u QUOTA_AXI_SNAPSHOT CLAUDE_CONFIG_DIR="$root" \
       quota-axi --provider claude --profile-only --json > "$WORK/snapshot.json" 2>/dev/null </dev/null; then
-    error="quota-axi could not read this account"
+    fm_quota_json_valid < "$WORK/snapshot.json" || error="quota-axi returned an invalid snapshot"
   elif ! fm_quota_json_valid < "$WORK/snapshot.json"; then
-    error="quota-axi returned an invalid snapshot"
+    error="quota-axi could not read this account"
   fi
   if [ -n "$error" ]; then
     jq -cn --arg account "$entry" --arg error "$error" '{account: $account, error: $error}'
@@ -139,7 +143,7 @@ jq -rs --arg model "$MODEL" '
           ($rows | map(select(.status == "known" and .effectivePercentRemaining <= 0)) | first) as $bad |
           {account: $a, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "0% remaining at \($bad.scope)"}
         elif (["known", "partial"] | index($row.quotaSemantics.status)) == null then
-          {account: $a, eligible: true, unranked: true, reason: "unmeasured (\($row.quotaSemantics.status))"}
+          {account: $a, eligible: true, unranked: true, reason: "unmeasured (\($row.quotaSemantics.status)\(if $row.state.status then ": " + ($row.state.error // $row.state.status) else "" end))"}
         elif ($rows | length) == 0 then
           {account: $a, eligible: true, unranked: true, reason: "no applicable quota scope"}
         elif any($rows[]; .status != "known") then
