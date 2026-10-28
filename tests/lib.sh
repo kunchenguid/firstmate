@@ -123,7 +123,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
-  fm_test_report_abort
   exit 1
 }
 
@@ -140,8 +139,12 @@ pass() {
 # bin/fm-test-tap-verify.sh is the completeness checker the stock macOS Bash
 # job uses against that plan and marker.
 fm_test_run() {
-  local name kind
+  local name kind exit_trap exit_handler
   [ "$#" -gt 0 ] || fail "fm_test_run: no tests registered"
+  exit_trap=$(trap -p EXIT)
+  exit_handler=${exit_trap#trap -- }
+  eval "exit_handler=${exit_handler% EXIT}"
+  trap "$exit_handler"$'\nfm_test_report_abort' EXIT
   FM_TEST_RUN_ACTIVE=1
   FM_TEST_RUN_SHELL=$$
   FM_TEST_RUN_SUBSHELL=$BASH_SUBSHELL
@@ -156,6 +159,7 @@ fm_test_run() {
     "$name"
   done
   FM_TEST_RUN_ACTIVE=0
+  eval "$exit_trap"
   printf 'FM_TEST_COMPLETE\n'
 }
 
@@ -465,7 +469,7 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
-trap 'fm_test_report_abort; fm_test_cleanup' EXIT
+trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
 trap 'fm_test_cleanup; exit 129' HUP
