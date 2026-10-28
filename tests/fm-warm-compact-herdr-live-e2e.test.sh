@@ -93,6 +93,7 @@ compact_boundaries() {
   [ -n "$t" ] || { echo 0; return; }
   jq -r 'select(.type == "system" and .subtype == "compact_boundary") | .uuid' "$t" 2>/dev/null | wc -l | tr -d ' '
 }
+primary_compacted() { [ "$(compact_boundaries)" -ge 1 ]; }
 host_log() { cut -f2- "$FM/state/.supervision-host.log" 2>/dev/null; }
 host_log_has() { host_log | grep -qE -- "$1"; }
 host_live() {
@@ -228,7 +229,7 @@ wait_until "$POLLS" host_log_has 'warm-compact	primary	sent' || fail "the idle p
 evidence "primary: $(host_log | grep 'warm-compact	primary')"
 wait_until "$POLLS" host_log_has 'warm-compact	engine	compacted' || fail "the idle engine conversation was never compacted"$'\n'"$(diagnose)"
 evidence "engine: $(host_log | grep 'warm-compact	engine')"
-wait_until 600 test "$(compact_boundaries)" -ge 1 || fail "the primary transcript has no compaction boundary"$'\n'"$(diagnose)"
+wait_until 600 primary_compacted || fail "the primary transcript has no compaction boundary"$'\n'"$(diagnose)"
 evidence "primary transcript compaction boundaries: $(compact_boundaries)"
 sleep 20
 [ "$(host_log | grep -c 'warm-compact	primary')" = 1 ] || fail "the primary was compacted more than once in one idle episode"

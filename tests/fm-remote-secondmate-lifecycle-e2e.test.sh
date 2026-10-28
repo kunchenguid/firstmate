@@ -1938,6 +1938,25 @@ assert_grep 'handled remote steer' "$remote_record_archive/inbox/handled/002.msg
 assert_present "$remote_record_archive/manifest.v1.json" "remote retirement did not commit the record export manifest"
 pass "remote retirement commits parent-side metadata, status, and inbox records before cleanup"
 
+cp "$TMP_ROOT/remote-meta.saved" "$PARENT/state/ios.meta"
+cat "$TMP_ROOT/remote-route.saved" >> "$PARENT/data/secondmates.md"
+cp "$TMP_ROOT/remote-status.expected" "$PARENT/state/ios.status"
+mv "$PARENT/data/ios" "$TMP_ROOT/status-archive.saved"
+ln -s "$TMP_ROOT/status-archive.saved" "$PARENT/data/ios"
+archive_retry_rc=0
+remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/archive-retry.out" 2> "$TMP_ROOT/archive-retry.err" || archive_retry_rc=$?
+expect_code 1 "$archive_retry_rc" "unsafe local archive must retain the remote route"
+assert_grep 'unsafe status archive directory' "$TMP_ROOT/archive-retry.err" "retirement did not reach status archival"
+assert_present "$PARENT/state/ios.meta" "failed archival lost the retry metadata"
+assert_grep '^- ios ' "$PARENT/data/secondmates.md" "failed archival lost the retry registry route"
+rm "$PARENT/data/ios"
+mv "$TMP_ROOT/status-archive.saved" "$PARENT/data/ios"
+remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/archive-retry-ok.out" 2> "$TMP_ROOT/archive-retry-ok.err" \
+  || fail "retirement could not retry after archive repair: $(cat "$TMP_ROOT/archive-retry-ok.err")"
+assert_absent "$PARENT/state/ios.meta" "successful retirement retry retained metadata"
+assert_no_grep '^- ios ' "$PARENT/data/secondmates.md" "successful retry retained the registry route"
+pass "remote retirement retains its route through a failed local archive and succeeds on retry"
+
 # Reconcile an already-retired remote home with no parent-side status. Holding
 # an unrelated presentation lock proves the no-op without risking an unbounded
 # hang if that fast path regresses.

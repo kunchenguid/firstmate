@@ -567,7 +567,7 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     FM_SM_LIVE_RC=1
     return 1
   fi
-  if [ -n "$probed_gen" ]; then
+  if [ "$FM_SM_LIVE_RESUME" != 1 ] && [ -n "$probed_gen" ]; then
     local seat_home=$FM_HOME seat_config=${CONFIG:-$FM_HOME/config} seat_data=${DATA:-$FM_HOME/data}
     seat_rc=0
     seat_out=$(FM_HOME="$seat_home" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
