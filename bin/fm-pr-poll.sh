@@ -200,14 +200,10 @@ case "$provider" in
         # limit is the same perl fork-and-kill bound the watcher falls back to
         # for its own checks: the read runs in its own process group, which
         # gets TERM then KILL at the deadline. A bare alarm is not enough,
-        # because glab's Go runtime ignores SIGALRM. Without perl the read is
-        # bounded only by that check timeout.
-        if command -v perl >/dev/null 2>&1; then
-          # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-          GITLAB_HOST=$host perl -e 'my $t = shift; my $pid = fork; exit 1 unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' 5 glab api "$1"
-        else
-          GITLAB_HOST=$host glab api "$1"
-        fi
+        # because glab's Go runtime ignores SIGALRM. Without perl no read can
+        # be bounded, so gitlab_failure_detail makes none.
+        # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
+        GITLAB_HOST=$host perl -e 'my $t = shift; my $pid = fork; exit 1 unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' 5 glab api "$1"
     }
     gitlab_failure_detail() {  # <pipeline>; sets detail
         # The degraded line names the failed jobs with their forge failure
@@ -220,8 +216,10 @@ case "$provider" in
         # started once this poll has run ten seconds - keeps a large or slow
         # pipeline graph inside the watcher's check timeout, so the known
         # failure is still emitted with whatever detail the budget allowed
-        # rather than killed before it prints.
+        # rather than killed before it prints. Without perl to bound a read,
+        # the failure is emitted with no detail rather than risk one.
         detail=
+        command -v perl >/dev/null 2>&1 || return 0
         seen=
         frontier="$1:0"
         depth=0

@@ -2684,7 +2684,7 @@ SH
 }
 
 test_gitlab_merge_watch() {
-  local dir state out rc url value noglab nojq entry bindir name wide train started elapsed
+  local dir state out rc url value noglab nojq noperl entry bindir name wide train started elapsed
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
   # The poll reads the merge request as JSON, so the fixture's search path
@@ -2784,6 +2784,42 @@ group/subgroup/project
       *) fail "GitLab poll lost the known failure under a hung detail read (train=$train): $out" ;;
     esac
     [ "$elapsed" -lt 25 ] || fail "a hung GitLab detail read held the poll ${elapsed}s (train=$train)"
+  done
+  # Without perl no detail read can be bounded, so none is made: both paths
+  # emit the known failure at once, with no job names, even when every detail
+  # read would hang.
+  noperl="$dir/noperl"
+  mkdir -p "$noperl"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      case $name in perl|perl5*) continue ;; esac
+      [ -e "$noperl/$name" ] || ln -s "$entry" "$noperl/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$noperl" command -v perl >/dev/null 2>&1 \
+    || fail "the perl-free search path still resolved perl"
+  for train in '' gone; do
+    rm -f "$dir/glab.log.train"
+    : > "$dir/glab.log"
+    started=$SECONDS
+    out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE="$([ -n "$train" ] && echo success || echo failed)" \
+      FM_TEST_GLAB_TRAIN="$train" FM_TEST_GLAB_DETAIL_HANG=1 FM_TEST_GLAB_LOG="$dir/glab.log" \
+      FM_TEST_JQ="$REAL_JQ" PATH="$noperl" bash "$dir/home/state/task-a.check.sh")
+    elapsed=$((SECONDS - started))
+    case $out in
+      'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941') [ -z "$train" ] || fail "GitLab train drop emitted a pipeline line without perl: $out" ;;
+      "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941") [ -n "$train" ] || fail "GitLab failed pipeline emitted a train line without perl: $out" ;;
+      *) fail "GitLab poll lost the known failure without perl (train=$train): $out" ;;
+    esac
+    ! grep -q 'api projects/.*/pipelines/' "$dir/glab.log" \
+      || fail "GitLab poll made an unbounded detail read without perl (train=$train)"
+    [ "$elapsed" -lt 10 ] || fail "GitLab poll without perl took ${elapsed}s (train=$train)"
   done
   rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
