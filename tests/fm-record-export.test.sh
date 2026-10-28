@@ -788,6 +788,37 @@ test_export_root_stays_cold_to_firstmate_readers() {
   pass "presentation, wake, classification, and snapshot readers leave the export root cold"
 }
 
+test_large_collection_uses_bounded_descriptors() {
+  local home export_root n
+  home=$(make_home bounded-descriptors)
+  export_root="$TMP_ROOT/export-bounded-descriptors"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  write_archive_fixture "$home" bounded-generation
+  for n in $(seq 1 180); do
+    printf 'pending %s\n' "$n" > "$home/state/task-a.inbox/$n.msg"
+    printf 'handled %s\n' "$n" > "$home/state/task-a.inbox/handled/$n.msg"
+  done
+  (ulimit -n 64; run_export "$home" sync && run_export "$home" archive-task task-a) > "$home/out" 2> "$home/err" \
+    || fail "bounded descriptor export failed: $(cat "$home/err")"
+  assert_present "$export_root/archive/task-a/bounded-generation/inbox/180.msg" "archive lost the tail record"
+  assert_present "$export_root/live/state/task-a.inbox/handled/180.msg" "live export lost handled records"
+  pass "live and archive export stay within a low descriptor limit"
+}
+
+test_archive_retry_preserves_its_required_capture() {
+  local home export_root manifest
+  home=$(make_home required-capture)
+  export_root="$TMP_ROOT/export-required-capture"
+  printf '%s\n' "$export_root" > "$home/config/record-export-root"
+  write_archive_fixture "$home" required-generation
+  run_export "$home" archive-task task-a || fail "initial required capture failed"
+  manifest="$export_root/archive/task-a/required-generation/manifest.v1.json"
+  fm_touch_epoch "$(( $(date +%s) - 40 * 86400 ))" "$manifest"
+  run_export "$home" archive-task task-a || fail "required capture retry failed"
+  assert_present "$manifest" "successful retry pruned its required capture"
+  pass "archive retry preserves the capture required for retirement"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -820,3 +851,6 @@ test_archive_retention_prunes_only_old_committed_generations
 test_export_root_stays_cold_to_firstmate_readers
 
 echo "ALL TESTS PASSED"
+
+test_large_collection_uses_bounded_descriptors
+test_archive_retry_preserves_its_required_capture

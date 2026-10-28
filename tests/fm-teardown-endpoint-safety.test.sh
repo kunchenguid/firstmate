@@ -1150,7 +1150,7 @@ test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3() {
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
-    backend=t3code "t3_thread_id=$thread" t3_project_id=proj-1 harness=codex
+    backend=t3code "t3_server=$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(JSON.stringify([c.origin,c.environment_id]))' "$dir/home/config/t3code-token")" "t3_thread_id=$thread" t3_project_id=proj-1 harness=codex
   claim_pool_slot "$dir" "$other" "$dir/other-home"
 
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
@@ -1602,6 +1602,11 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
 
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
 
 test_invalid_endpoint_records_refuse_before_mutation
 test_worktree_identity_refusal_names_the_repair_path

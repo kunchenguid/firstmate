@@ -1727,7 +1727,7 @@ e2e_tmux() {
 # safety helper gives it a temporary socket, state directory, and config.
 # ---------------------------------------------------------------------------
 e2e_rex() {
-  local home_tmp out cap_sid cap_bid cap_target before during after rec_backend rec_target rec_sid label rc
+  local home_tmp out cap_sid cap_bid cap_target before during after rec_backend rec_target rec_sid rec_server label rc
   # shellcheck source=tests/rex-test-safety.sh
   . "$ROOT/tests/rex-test-safety.sh"
   rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && { echo "skip: Rex CLI or jq unavailable (rex e2e)"; return 0; }; fail "rex e2e: private Rex server setup failed"; return 1; }
@@ -1755,10 +1755,10 @@ e2e_rex() {
       "$LAUNCH" start >/dev/null 2>&1)
 
   during=$(rex_e2e_shape "$cap_sid")
-  IFS=$'\t' read -r rec_backend rec_target rec_sid <"$home_tmp/state/.afk-daemon-terminal" 2>/dev/null || true
+  IFS=$'\t' read -r rec_backend rec_target rec_sid rec_server <"$home_tmp/state/.afk-daemon-terminal" 2>/dev/null || true
   [ -z "$rec_sid" ] || printf '%s\n' "$rec_sid" >>"$REX_TEST_WORK/allowed"
   if [ "$before" = "$during" ]; then pass "rex e2e: captain session unchanged after start (no tab or split)"; else fail "rex e2e: captain session changed ($before -> $during)"; fi
-  if [ "$rec_backend" = rex ] && [ -n "$rec_sid" ] && [ "$rec_sid" != "$cap_sid" ] \
+  if [ "$rec_backend" = rex ] && [ "$rec_server" = "$REX_TEST_ENDPOINT" ] && [ -n "$rec_sid" ] && [ "$rec_sid" != "$cap_sid" ] \
     && [ "$(rex_e2e fm_backend_rex_session_view "$rec_sid" | jq -r .label)" = "$label" ] \
     && [ "${rec_target%%:*}" = "${rec_sid#session:}" ]; then
     pass "rex e2e: daemon launched in its own dedicated session, recorded by exact id"

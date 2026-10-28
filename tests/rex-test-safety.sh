@@ -35,7 +35,7 @@ rex_test_prepare() {
   : >"$REX_TEST_WORK/allowed"
   : >"$REX_TEST_WORK/rex-config.lua"
   REX_TEST_ENDPOINT="unix://$REX_TEST_WORK/rex.sock"
-  export REX_SERVER="$REX_TEST_ENDPOINT" FM_HOME="$REX_TEST_WORK/home" STATE="$REX_TEST_WORK/home/state"
+  export FM_REX_TASK_SERVER="$REX_TEST_ENDPOINT" REX_SERVER="$REX_TEST_ENDPOINT" FM_HOME="$REX_TEST_WORK/home" STATE="$REX_TEST_WORK/home/state"
   "$REX_TEST_REAL" --autostart=false server run --listen "$REX_TEST_ENDPOINT" \
     --state-dir "$REX_TEST_WORK/server-state" --config "$REX_TEST_WORK/rex-config.lua" --exit-empty \
     >"$REX_TEST_WORK/server.log" 2>&1 &
