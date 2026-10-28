@@ -1176,14 +1176,13 @@ crew_dispatch_validate() {
   else
     verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin","commandcode","polytoken","cortex","kiro"]'
   fi
-  err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" --argjson codex_catalog "$("$SCRIPT_DIR/fm-harness.sh" codex-catalog)" '
+  err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
     def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
-    def codex_level($m; $e): any(($codex_catalog // [])[]; .slug == $m and any(.supported_reasoning_levels[]; .effort == $e));
     def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
-      elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or ($e == "max" and ($m == "gpt-5.6-luna" or codex_level($m; $e))) or ($e == "ultra" and ($m | type) == "string" and $m != "" and $m != "default" and ($codex_catalog == null or codex_level($m; $e))))
+      elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or (($e == "max" or $e == "ultra") and ($m | type) == "string" and $m != "" and $m != "default"))
       elif $e == "ultra" then (($h == "pi" or $h == "pi-signed") and (($m | type) == "string") and ($m | startswith("codex-native/")) and ($m | length) > 13)
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "grok" then (["low","medium","high"] | index($e))

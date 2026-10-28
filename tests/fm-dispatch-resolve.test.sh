@@ -1637,14 +1637,19 @@ for effort in max ultra; do
   expect_code 0 "$code" "Codex catalog profile should resolve"
   assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-6.1-terra' --effort '$effort'" "catalog effort was not selected"
 done
-for profile in gpt-5.6-luna:max gpt-6.1-terra:ultra; do
-  jq --arg model "${profile%%:*}" --arg effort "${profile#*:}" '.rules[0].use |= map(if .harness == "codex" then {harness:"codex", model:$model, effort:$effort} else . end)' "$LANE_RULES" > "$RULES"
-  reset_log
-  CODEX_HOME="$TMP_ROOT/no-codex-catalog" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_NATIVE" run code out err "$BRIEF"
-  expect_code 0 "$code" "an unavailable Codex catalog must not reject $profile: $err"
-  assert_contains "$out" "  profile: --harness 'codex' --model '${profile%%:*}' --effort '${profile#*:}'" "unavailable catalog profile was not selected"
+STALE_CODEX_HOME="$TMP_ROOT/stale-codex-catalog"
+mkdir -p "$STALE_CODEX_HOME"
+printf '%s\n' '{"models":[{"slug":"gpt-6.1-terra","supported_reasoning_levels":[{"effort":"high"}]}]}' > "$STALE_CODEX_HOME/models_cache.json"
+for codex_home in "$TMP_ROOT/no-codex-catalog" "$STALE_CODEX_HOME"; do
+  for profile in gpt-5.6-luna:max gpt-5:max gpt-6.1-terra:max gpt-6.1-terra:ultra; do
+    jq --arg model "${profile%%:*}" --arg effort "${profile#*:}" '.rules[0].use |= map(if .harness == "codex" then {harness:"codex", model:$model, effort:$effort} else . end)' "$LANE_RULES" > "$RULES"
+    reset_log
+    CODEX_HOME="$codex_home" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_NATIVE" run code out err "$BRIEF"
+    expect_code 0 "$code" "a missing or stale Codex catalog must not reject $profile: $err"
+    assert_contains "$out" "  profile: --harness 'codex' --model '${profile%%:*}' --effort '${profile#*:}'" "catalog-independent profile was not selected"
+  done
 done
-pass "Codex max and ultra profiles resolve from the catalog"
+pass "Codex max and ultra profiles resolve without a dispatch-time catalog check"
 
 SCHEMA6_PI_NATIVE="$TMP_ROOT/schema6-pi-native.json"
 jq '.providers |= map(select(.provider != "codex" or .accountKey != "default"))' "$SCHEMA6_NATIVE" > "$SCHEMA6_PI_NATIVE"
