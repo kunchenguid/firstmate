@@ -227,13 +227,9 @@ test_claude_stop_hook_rewakes_at_a_park_boundary_over_an_acknowledged_episode() 
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "hook boundary: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
   sleep 2
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
-    . "$1"
-    marker=$FM_STATE_OVERRIDE/.watcher-down
-    fm_recovery_marker_publish "$marker" downtime || exit 1
-    fm_recovery_marker_read "$marker" || exit 1
-    fm_recovery_marker_ack "$marker" "${FM_RECOVERY_MARKER_TOKEN##*:}" || exit 1
-  ' _ "$ROOT/bin/fm-wake-lib.sh" || fail "fixture: could not acknowledge a downtime episode"
+  printf 'acked:downtime:seeded.1\n' > "$home/state/.watcher-down.seed" \
+    && mv -f "$home/state/.watcher-down.seed" "$home/state/.watcher-down" \
+    || fail "fixture: could not acknowledge a downtime episode"
   acknowledged=$(cat "$home/state/.watcher-down" 2>/dev/null || true)
   case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
   echo 60 > "$home/park-clock"
