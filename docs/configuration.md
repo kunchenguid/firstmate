@@ -1012,7 +1012,7 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 ## Spawn base from the primary checkout (config/spawn-base-primary-checkout)
 
 The optional local, gitignored `config/spawn-base-primary-checkout` presence flag opts this home into a default-off base for fresh task worktrees on projects that land work locally.
-Without it, every fresh ship or scout worktree on a project with an origin remote resets to `origin/<default>`, or to `origin/<base>` for a named base branch, exactly as before.
+Without it, every fresh ship or scout worktree on a project with an origin remote resets to `origin/<default>`, or to `origin/<base>` for a named base branch.
 
 ### Which tasks it changes
 
