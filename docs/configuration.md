@@ -1729,7 +1729,8 @@ This section is the single owner of the canonical schema and its per-field seman
       "use": [
         { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
       ],
-      "why": "<optional rationale that helps firstmate choose>"
+      "why": "<optional rationale that helps firstmate choose>",
+      "skills": ["<optional skill the worker loads for this kind of task>"]
     }
   ],
   "default": [
@@ -1747,6 +1748,15 @@ This section is the single owner of the canonical schema and its per-field seman
 | `use` and optional top-level `default` | Accept one profile object or a non-empty array of profile objects; the single-object form remains fully backward-compatible. |
 | Profile `harness` | Required in every profile. |
 | Profile `model` and `effort`; rule `why` | Optional. |
+| Rule `skills` | Optional non-empty array of skill names. |
+
+**Rule skills**
+
+A rule's `skills` names the skills a worker on that kind of task should load, so they travel with the routing rule instead of being remembered per brief.
+When the matched rule lists `skills`, firstmate adds one line to the brief's `## Firstmate spec` telling the worker to load each named skill before starting, then spawns; the brief scaffold does not add it.
+A rule without `skills`, the `default` profile set, and a task that matches no rule add nothing.
+The field selects no harness, model, or effort, and [typed dispatch resolution](#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) ignores it.
+Because the file is inherited, a secondmate's crewmates get the same skills from the same rules.
 
 **Fields applied only by typed resolution**
 
