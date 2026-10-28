@@ -48,10 +48,11 @@
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
 #   --base-branch is the optional branch selected at intake for a ship or scout
-#   to start from and target instead of origin's default branch. A fresh launch
-#   resets its pooled copy to origin/<branch>, refusing when the project has no
-#   origin or origin lacks that branch, or when the project's registered forge
-#   cannot carry it. It must agree with every Setup "Base branch:" line in the
+#   to start from and target instead of the project's default branch. A fresh
+#   launch resets its pooled copy to origin/<branch>, or to the source clone's
+#   local <branch> when the project has no origin, refusing when that branch does
+#   not exist or when the project's registered forge cannot carry it.
+#   It must agree with every Setup "Base branch:" line in the
 #   brief (bin/fm-brief.sh --base-branch writes one; other such lines are prose),
 #   and a brief with such a line refuses a spawn without the flag. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
@@ -336,10 +337,14 @@
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch (or uses --base-branch, described
-#   above), and resets to its tip. When none is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
+#   above), and resets to its tip. When none is detected, spawn skips the remote
+#   freshness check and instead reads the source clone this slot was cut from
+#   out of the slot's own git metadata, then resets to the branch that clone has
+#   checked out (or --base-branch) without fetching, because the two share one
+#   ref store. Relaunch reuses the recorded worktree without
 #   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
+#   default branch, source clone with no checked-out branch (a detached HEAD),
+#   missing local base branch, or non-clean worktree refuses a fresh spawn rather than
 #   risking a PR based on stale history or discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
@@ -4286,6 +4291,54 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
+# A project with no origin still has a current base: the branch checked out in
+# the clone this slot was cut from. A pool slot is a linked worktree of that
+# clone, and `git worktree list` reports it - the repository's main worktree -
+# first, with the branch its HEAD names, so the slot's own git metadata names
+# both the clone and its base without consulting a pool layout, a slot name, or
+# the spawning project path. The clone shares the slot's ref store, so no fetch
+# could make that branch fresher, but every other guard the origin path applies
+# still has to hold - the caller's cleanliness refusal above, an explicit
+# refusal when the base cannot be resolved rather than a silent launch, and the
+# post-reset identity check. Returning early here instead, as this path once
+# did, started the worker from whatever commit the slot happened to be left at
+# by its previous task.
+# The base is resolved to a commit before the reset so the post-reset identity
+# check below compares two commits rather than re-reading a ref that the reset
+# itself could have moved, and so a missing branch is refused by name instead of
+# surfacing as a reset failure. Like the origin path, this assumes the spawn
+# contract's detached slot; it does not add a detachment check of its own.
+freshen_spawn_worktree_base_locally() { # <worktree> [<base-branch>]
+  local worktree=$1 base=${2:-} source='' checked_out='' line expected actual
+  while IFS= read -r line; do
+    case $line in
+    '') break ;;
+    'worktree '*) source=${line#worktree } ;;
+    'branch refs/heads/'*) checked_out=${line#branch refs/heads/} ;;
+    esac
+  done < <(git -C "$worktree" worktree list --porcelain 2>/dev/null || true)
+  if [ -z "$base" ]; then
+    base=$checked_out
+    [ -n "$base" ] || {
+      echo "error: could not resolve the checked-out branch of source clone '${source:-unknown}' for pooled worktree '$worktree', which has no origin to ask (is its HEAD detached?); pass --base-branch to name the branch to start from" >&2
+      return 1
+    }
+  fi
+  expected=$(git -C "$worktree" rev-parse --verify --quiet "refs/heads/$base^{commit}" 2>/dev/null) || {
+    echo "error: source clone '${source:-unknown}' has no local branch '$base' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  }
+  if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+    echo "error: could not reset pooled worktree '$worktree' to local branch '$base' of source clone '${source:-unknown}'; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ "$actual" != "$expected" ]; then
+    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current local branch '$base' ('$expected') of source clone '${source:-unknown}'; refusing to launch" >&2
+    return 1
+  fi
+}
+
 freshen_spawn_worktree_base() { # <worktree> [<base-branch>]; 2 when the worktree is not clean
   local worktree=$1 base=${2:-} default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
@@ -4301,11 +4354,8 @@ freshen_spawn_worktree_base() { # <worktree> [<base-branch>]; 2 when the worktre
     return 2
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
-    [ -z "$base" ] || {
-      echo "error: pooled worktree '$worktree' has no origin, so it cannot start from base branch '$base'" >&2
-      return 1
-    }
-    return 0
+    freshen_spawn_worktree_base_locally "$worktree" "$base"
+    return
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2

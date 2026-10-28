@@ -4,8 +4,9 @@
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin tip, launches a clean origin-less
-# pool as-is, or stops when a configured origin is unusable.
+# starts the worker from the fetched origin tip, refreshes a clean origin-less
+# pool from the branch checked out in the clone the slot was cut from, or stops
+# when a configured origin is unusable.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -215,8 +216,8 @@ test_non_main_default_branch_refreshes_before_branching() {
   pass "a stale pooled worktree resolves and refreshes a non-main default branch"
 }
 
-make_originless_case() {  # <name> <id>
-  local name=$1 id=$2 case_dir home project pool fakebin initial
+make_originless_case() {  # <name> <id> [<default-branch>]
+  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
@@ -228,38 +229,149 @@ make_originless_case() {  # <name> <id>
   fm_test_spawn_brief "$home" "$id"
   touch "$home/state/.last-watcher-beat"
 
-  git init --quiet -b main "$project"
+  git init --quiet -b "$default" "$project"
   printf 'base\n' > "$project/README.md"
   git -C "$project" add README.md
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
   initial=$(git -C "$project" rev-parse HEAD)
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
 
-  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
 
-test_originless_pool_launches_without_a_freshness_fetch() {
-  local rec id out status before
-  id='pool-originless-r6'
+# Advance the origin-less source clone's currently checked-out branch, so the
+# pool slot's recorded base is genuinely behind the project's local code.
+advance_source_clone() {  # <file> <content>
+  printf '%s\n' "$2" > "$PROJECT_DIR/$1"
+  git -C "$PROJECT_DIR" add "$1"
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "advance $1"
+  git -C "$PROJECT_DIR" rev-parse HEAD
+}
+
+# Commit a branch that only exists locally in the origin-less source clone.
+commit_local_branch() {  # <branch>
+  git -C "$PROJECT_DIR" checkout --quiet -b "$1"
+  printf 'only on %s\n' "$1" > "$PROJECT_DIR/local-only.txt"
+  git -C "$PROJECT_DIR" add local-only.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "branch $1"
+  git -C "$PROJECT_DIR" checkout --quiet "$DEFAULT_BRANCH"
+}
+
+test_originless_pool_refreshes_from_the_source_clone() {
+  local rec id out status advanced
+  id='pool-originless-r7'
   rec=$(make_originless_case originless "$id")
   read_case_record "$rec"
   ! git -C "$POOL_DIR" remote get-url origin >/dev/null 2>&1 \
     || fail "fixture unexpectedly configured an origin remote"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  advanced=$(advance_source_clone advanced-local.txt 'must reach a local-only worker')
+  [ "$advanced" != "$INITIAL_SHA" ] || fail "fixture did not advance the source clone past the pool base"
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "spawn should launch a local-only pooled worktree with no origin"$'\n'"$out"
+  expect_code 0 "$status" "spawn should refresh a local-only pooled worktree with no origin"$'\n'"$out"
   assert_contains "$out" "spawned $id" "spawn did not report success for the origin-less pool"
   assert_not_contains "$out" "could not fetch origin" \
     "spawn attempted a freshness fetch against a nonexistent origin"
   [ ! -e "$POOL_DIR/.git/FETCH_HEAD" ] || fail "spawn fetched against a pooled worktree with no origin"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD on an origin-less pooled worktree that had nothing to refresh against"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$advanced" ] \
+    || fail "spawn left the origin-less pooled worktree on history the source clone had moved past"
+  assert_grep 'must reach a local-only worker' "$POOL_DIR/advanced-local.txt" \
+    "the refreshed origin-less copy is missing the source clone's current content"
+  [ "$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")" = "$advanced" ] \
+    || fail "spawn moved the source clone's own default branch"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed origin-less launch: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed base: pool HEAD=%s source %s=%s pool base was %s\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" "$DEFAULT_BRANCH" "$advanced" "$INITIAL_SHA"
   fi
-  pass "an origin-less pooled worktree launches as-is, skipping the freshness gate"
+  pass "an origin-less pooled worktree refreshes to the source clone's current checked-out branch"
+}
+
+test_originless_base_branch_starts_from_that_local_branch() {
+  local rec id out status wanted
+  id='pool-originless-base-r1'
+  rec=$(make_originless_case originless-base "$id")
+  read_case_record "$rec"
+  commit_local_branch feature/local
+  wanted=$(git -C "$PROJECT_DIR" rev-parse refs/heads/feature/local)
+  advance_source_clone advanced-local.txt 'default branch moved too' >/dev/null
+  brief_with_base "$id" feature/local
+
+  out=$(run_spawn "$id" --scout --base-branch feature/local)
+  status=$?
+  expect_code 0 "$status" "a base branch that exists locally should launch without an origin"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$wanted" ] \
+    || fail "the origin-less copy did not start from the requested local branch"
+  assert_grep 'only on feature/local' "$POOL_DIR/local-only.txt" \
+    "the origin-less copy is missing the requested base branch's content"
+  assert_grep 'base_branch=feature/local' "$HOME_DIR/state/$id.meta" \
+    "the origin-less spawn did not record its base branch"
+  pass "--base-branch starts an origin-less copy from that local branch instead of the default"
+}
+
+test_originless_missing_base_branch_refuses_pool() {
+  local rec id out status before
+  id='pool-originless-base-missing-r1'
+  rec=$(make_originless_case originless-base-missing "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  brief_with_base "$id" feature/absent
+
+  out=$(run_spawn "$id" --scout --base-branch feature/absent)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch the source clone lacks should refuse the spawn"
+  assert_contains "$out" "has no local branch 'feature/absent'" \
+    "the refusal did not name the missing local base branch"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after refusing a missing local base branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused origin-less base spawn published task metadata"
+  pass "a base branch missing from the origin-less source clone refuses the spawn"
+}
+
+# With no origin there is no remote HEAD to ask, so the base is the branch the
+# source clone has checked out, whatever its name - not only main or master.
+test_originless_non_main_default_refreshes_from_that_branch() {
+  local rec id out status advanced
+  id='pool-originless-trunk-r1'
+  rec=$(make_originless_case originless-trunk "$id" trunk)
+  read_case_record "$rec"
+  advanced=$(advance_source_clone advanced-local.txt 'trunk moved ahead')
+  [ "$advanced" != "$INITIAL_SHA" ] || fail "fixture did not advance trunk past the pool base"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "an origin-less project on trunk should refresh from trunk"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$advanced" ] \
+    || fail "spawn did not refresh the origin-less pool to the source clone's trunk"
+  assert_grep 'trunk moved ahead' "$POOL_DIR/advanced-local.txt" \
+    "the refreshed origin-less copy is missing trunk's current content"
+  pass "an origin-less project whose default branch is neither main nor master refreshes from that branch"
+}
+
+# A source clone at a detached HEAD names no branch to start from, so the spawn
+# refuses and names the cause rather than launching from the slot's last commit.
+test_originless_detached_source_clone_refuses_pool() {
+  local rec id out status before
+  id='pool-originless-detached-r1'
+  rec=$(make_originless_case originless-detached "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  advance_source_clone advanced-local.txt 'never reached' >/dev/null
+  git -C "$PROJECT_DIR" checkout --quiet --detach
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a detached origin-less source clone should refuse the spawn"
+  assert_contains "$out" "could not resolve the checked-out branch of source clone" \
+    "the refusal did not explain the detached source clone"
+  assert_contains "$out" "pass --base-branch" "the refusal did not name its remedy"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after refusing a detached source clone"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an origin-less project whose source clone is detached refuses rather than launching stale"
 }
 
 test_originless_dirty_pool_refuses_without_discarding_work() {
@@ -269,6 +381,9 @@ test_originless_dirty_pool_refuses_without_discarding_work() {
   read_case_record "$rec"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
+  # The source clone is deliberately ahead, so a refusal that still reset would
+  # be visible as a moved HEAD rather than a silent no-op.
+  advance_source_clone advanced-local.txt 'a refusal must not pull this in' >/dev/null
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
@@ -279,6 +394,8 @@ test_originless_dirty_pool_refuses_without_discarding_work() {
     || fail "spawn moved HEAD while refusing a dirty origin-less pooled worktree"
   assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
     "spawn discarded local work from an origin-less pool"
+  [ ! -e "$POOL_DIR/advanced-local.txt" ] \
+    || fail "spawn refreshed the base of a dirty origin-less pool it had refused"
   pass "a dirty origin-less pooled worktree is refused without discarding its local work"
 }
 
@@ -322,7 +439,7 @@ test_empty_origin_config_section_refuses_pool() {
 }
 
 test_empty_only_included_origin_config_section_launches_pool() {
-  local rec id out status before config included
+  local rec id out status advanced config included
   id='pool-empty-only-included-origin-section-r1'
   rec=$(make_originless_case empty-only-included-origin-section "$id")
   read_case_record "$rec"
@@ -330,7 +447,7 @@ test_empty_only_included_origin_config_section_launches_pool() {
   included=$(dirname "$config")/empty-origin.inc
   printf '[remote "origin"]\n' > "$included"
   git -C "$POOL_DIR" config include.path "$(basename "$included")"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  advanced=$(advance_source_clone advanced-local.txt 'the local base is still current')
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
@@ -338,13 +455,13 @@ test_empty_only_included_origin_config_section_launches_pool() {
   assert_contains "$out" "spawned $id" "spawn did not report success for the undetectable included section"
   assert_not_contains "$out" "could not fetch origin" \
     "spawn treated an undetectable included empty section as a configured origin"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD despite treating the included empty section as origin-less"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$advanced" ] \
+    || fail "spawn did not take the origin-less local refresh for the included empty section"
   pass "an empty-only included origin section documents the accepted detection boundary"
 }
 
 test_inactive_conditional_origin_include_launches_pool() {
-  local rec id out status before config included
+  local rec id out status advanced config included
   id='pool-inactive-origin-include-r1'
   rec=$(make_originless_case inactive-origin-include "$id")
   read_case_record "$rec"
@@ -352,14 +469,14 @@ test_inactive_conditional_origin_include_launches_pool() {
   included=$(dirname "$config")/inactive-origin.inc
   printf '[fm-test]\n\tmarker = true\n[remote "origin"]\n' > "$included"
   git -C "$POOL_DIR" config 'includeIf.gitdir:/never/matches/this/worktree/.path' "$included"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  advanced=$(advance_source_clone advanced-local.txt 'the local base is still current')
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "spawn should ignore an inactive conditional origin include"$'\n'"$out"
   assert_contains "$out" "spawned $id" "spawn did not report success with an inactive origin include"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD despite having no effective origin"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$advanced" ] \
+    || fail "spawn did not take the origin-less local refresh despite having no effective origin"
   pass "an inactive conditional origin include leaves the pooled worktree origin-less"
 }
 
@@ -1191,7 +1308,11 @@ test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
-test_originless_pool_launches_without_a_freshness_fetch
+test_originless_pool_refreshes_from_the_source_clone
+test_originless_base_branch_starts_from_that_local_branch
+test_originless_missing_base_branch_refuses_pool
+test_originless_non_main_default_refreshes_from_that_branch
+test_originless_detached_source_clone_refuses_pool
 test_originless_dirty_pool_refuses_without_discarding_work
 test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool
