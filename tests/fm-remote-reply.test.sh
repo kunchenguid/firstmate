@@ -56,6 +56,7 @@ fi
   printf 'A\000 connection attempt failed because the connected party did not properly respond\000 Error code: Bash/Service/WSAETIMEDOUT\000\n'
   exit 255
 }
+[ "${FM_REMOTE_REPLY_HANG:-}" != 1 ] || { sleep 30; exit 255; }
 [ "${FM_REMOTE_REPLY_BANNER:-}" != 1 ] || {
   printf 'Welcome to remote-mac\n'
   exit 0
@@ -198,6 +199,31 @@ set -e
 [ "$banner_rc" -eq 1 ] || fail "a successful non-schema leg returned $banner_rc instead of a failed read"
 [ ! -s "$TMP_ROOT/banner.result" ] || fail "a successful non-schema leg emitted a result"
 pass "other failed or non-schema remote legs stay failed reads"
+
+# Stopping a source during its blocked remote read must remove the staged
+# output file through the adapter's signal and EXIT traps.
+SOURCE_TMP="$TMP_ROOT/source-tmp"
+mkdir -p "$SOURCE_TMP"
+set -m
+FM_REMOTE_REPLY_HANG=1 TMPDIR="$SOURCE_TMP" remote_env "$ADAPTER" source ios >/dev/null 2>&1 &
+hung_source=$!
+set +m
+staged=''
+for _ in $(seq 1 100); do
+  staged=$(find "$SOURCE_TMP" -name 'fm-remote-reply-source.*' -print -quit 2>/dev/null || true)
+  [ -n "$staged" ] && break
+  sleep 0.05
+done
+[ -n "$staged" ] || fail "the blocked source never staged its output"
+kill -TERM -- -"$hung_source" 2>/dev/null || true
+wait "$hung_source" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  staged=$(find "$SOURCE_TMP" -name 'fm-remote-reply-source.*' -print -quit 2>/dev/null || true)
+  [ -z "$staged" ] && break
+  sleep 0.05
+done
+[ -z "$staged" ] || fail "a terminated source left staged output behind"
+pass "a terminated source removes its staged output"
 
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"
