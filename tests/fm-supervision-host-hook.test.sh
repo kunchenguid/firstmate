@@ -219,6 +219,38 @@ test_claude_stop_hook_delivers_a_main_only_pass_through() {
 }
 
 
+test_claude_stop_hook_rewakes_at_a_park_boundary_over_an_acknowledged_episode() {
+  local home acknowledged
+  home=$(make_primary_home hook-boundary-acked)
+  echo 0 > "$home/park-clock"
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "hook boundary: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  sleep 2
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_wake_append signal handled "signal: handled before the boundary"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" || fail "fixture: could not queue the handled wake"
+  main_drain_and_ack "$home"
+  acknowledged=$(cat "$home/state/.watcher-down" 2>/dev/null || true)
+  case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
+  echo 60 > "$home/park-clock"
+  wait_until 150 hook_exited "$home" || fail "hook boundary: the Stop hook never returned: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "hook boundary"
+  watcher_live "$home" && fail "the park boundary left the watcher running"
+
+  echo 0 > "$home/park-clock"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "hook boundary: the next park never started a watcher cycle"
+  sleep 2
+  hook_exited "$home" && fail "the next park delivered an empty recovery: $(cat "$home/hook.err")"
+  ! grep -q 'rearm-resurface' "$home/hook.err" || fail "the next park resurfaced the acknowledged episode: $(cat "$home/hook.err")"
+  kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")" 2>/dev/null || true
+  : > "$home/session.stop"
+  wait_until 100 hook_exited "$home" || true
+  pass "host+hook: a park boundary over an acknowledged episode still rewakes main without a resurface"
+}
+
 # The live failure (2026-10-17): after the engine handled a routine wake, the
 # host parked on the handling successor it started for that wake, and that
 # successor never resurfaced a durable row appended later. Five captain inbox
@@ -552,6 +584,7 @@ fm_test_run \
   test_lost_pass_through_handoff \
   test_acknowledged_handoff_at_the_turn_keeps_the_pass_through_row \
   test_handoff_retry_respects_the_receiving_pane \
+  test_claude_stop_hook_rewakes_at_a_park_boundary_over_an_acknowledged_episode \
   test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main \
   test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn \
   test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails \
