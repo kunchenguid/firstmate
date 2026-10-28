@@ -1637,6 +1637,13 @@ for effort in max ultra; do
   expect_code 0 "$code" "Codex catalog profile should resolve"
   assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-6.1-terra' --effort '$effort'" "catalog effort was not selected"
 done
+for profile in gpt-5.6-luna:max gpt-6.1-terra:ultra; do
+  jq --arg model "${profile%%:*}" --arg effort "${profile#*:}" '.rules[0].use |= map(if .harness == "codex" then {harness:"codex", model:$model, effort:$effort} else . end)' "$LANE_RULES" > "$RULES"
+  reset_log
+  CODEX_HOME="$TMP_ROOT/no-codex-catalog" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_NATIVE" run code out err "$BRIEF"
+  expect_code 0 "$code" "an unavailable Codex catalog must not reject $profile: $err"
+  assert_contains "$out" "  profile: --harness 'codex' --model '${profile%%:*}' --effort '${profile#*:}'" "unavailable catalog profile was not selected"
+done
 pass "Codex max and ultra profiles resolve from the catalog"
 
 SCHEMA6_PI_NATIVE="$TMP_ROOT/schema6-pi-native.json"

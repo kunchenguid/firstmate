@@ -305,10 +305,11 @@ VERIFIED_HARNESSES=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(le
 rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" --argjson codex_catalog "$("$SCRIPT_DIR/fm-harness.sh" codex-catalog)" '
   def verified($h): $verified_harnesses | index($h);
   def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
+  def codex_level($m; $e): any(($codex_catalog // [])[]; .slug == $m and any(.supported_reasoning_levels[]; .effort == $e));
   def effort_ok($h; $m; $e):
     if $e == null then true
     elif ($e | type) != "string" then false
-    elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or (($e == "max" or $e == "ultra") and any($codex_catalog[]; .slug == $m and any(.supported_reasoning_levels[]?; .effort == $e))))
+    elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or ($e == "max" and ($m == "gpt-5.6-luna" or codex_level($m; $e))) or ($e == "ultra" and ($m | type) == "string" and $m != "" and $m != "default" and ($codex_catalog == null or codex_level($m; $e))))
     elif $e == "ultra" then (($h == "pi" or $h == "pi-signed") and (($m | type) == "string") and ($m | startswith("codex-native/")) and ($m | length) > 13)
     elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e)) != null
     elif $h == "grok" or $h == "agy" then (["low","medium","high"] | index($e)) != null

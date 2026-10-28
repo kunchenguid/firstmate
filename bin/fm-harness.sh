@@ -20,12 +20,17 @@
 #                                        config/secondmate-harness, or empty when absent.
 #                                        An id selects that mate's override line first.
 #        fm-harness.sh codex-catalog   print the installed Codex model cache as JSON,
-#                                        or an empty catalog when unavailable.
+#                                        or null when it is missing or unreadable.
+#        fm-harness.sh codex-supports <model> <effort>
+#                                        exit 0 when the Codex model supports that
+#                                        effort: gpt-5.6-luna max, or a level the
+#                                        installed catalog advertises for the model.
 #        fm-harness.sh validate-native-effort <harness> <model> <effort>
-#                                        Validate Codex max/ultra against its explicit
-#                                        model's cached supported reasoning levels.
-#                                        Ultra also permits Pi's codex-native model.
-#                                        Missing or malformed catalogs fail closed.
+#                                        Refuse ultra unless Codex supports it for the
+#                                        explicit model, or the harness is pi or
+#                                        pi-signed and the model explicitly names
+#                                        codex-native/<id>. Other efforts retain
+#                                        their adapter's existing policy.
 #        fm-harness.sh ancestry [<pid>] print "<strength> <harness>" for the nearest
 #                                        harness process at or above <pid> (default this
 #                                        process), or nothing when the walk finds none.
@@ -663,19 +668,25 @@ codex_catalog() {
   if command -v jq >/dev/null 2>&1 && [ -r "$catalog" ]; then
     jq -ce 'if (.models | type) == "array" then [.models[] | select((.slug | type) == "string" and (.supported_reasoning_levels | type) == "array") | {slug, supported_reasoning_levels: [.supported_reasoning_levels[] | {effort}]}] else error("invalid catalog") end' "$catalog" 2>/dev/null && return 0
   fi
-  printf '%s\n' '[]'
+  printf '%s\n' null
+}
+
+codex_supports() {
+  local model=${1:-} effort=${2:-}
+  [ "$model:$effort" != gpt-5.6-luna:max ] || return 0
+  codex_catalog | jq -e --arg model "$model" --arg effort "$effort" \
+    'any((. // [])[]; .slug == $model and any(.supported_reasoning_levels[]; .effort == $effort))' >/dev/null 2>&1
 }
 
 validate_native_effort() {
-  local harness=${1:-} model=${2:-} effort=${3:-} catalog
-  if [ "$harness" = codex ] && { [ "$effort" = max ] || [ "$effort" = ultra ]; }; then
-    catalog=$(codex_catalog)
-    if jq -e --arg model "$model" --arg effort "$effort" \
-      'any(.[]; .slug == $model and any(.supported_reasoning_levels[]?; .effort == $effort))' \
-      <<<"$catalog" >/dev/null 2>&1; then
-      return 0
+  local harness=${1:-} model=${2:-} effort=${3:-}
+  if [ "$harness" = codex ] && [ "$effort" = ultra ]; then
+    codex_supports "$model" ultra && return 0
+    if [ "$(codex_catalog)" = null ]; then
+      echo "error: codex ultra cannot be validated: the installed Codex model catalog ${CODEX_HOME:-$HOME/.codex}/models_cache.json is unavailable" >&2
+    else
+      echo "error: codex ultra requires an explicit model advertising ultra in the installed Codex catalog" >&2
     fi
-    echo "error: codex $effort requires an explicit model advertising that effort in the installed Codex catalog" >&2
     return 1
   fi
   [ "$effort" = ultra ] || return 0
@@ -690,6 +701,7 @@ validate_native_effort() {
 
 case "${1:-}" in
   codex-catalog) codex_catalog ;;
+  codex-supports) shift; codex_supports "$@" ;;
   validate-native-effort) shift; validate_native_effort "$@" ;;
   ancestry)
     case "${2:-}" in

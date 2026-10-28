@@ -3229,10 +3229,10 @@ fi
 fm_backend_validate_harness "$BACKEND" "$HARNESS" || exit 1
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
-if [ "$EFFORT" = ultra ] || { [ "$HARNESS" = codex ] && [ "$BACKEND" != t3code ] && [ "$EFFORT" = max ]; }; then
+if [ "$EFFORT" = ultra ]; then
   "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
   [ "$RAW_LAUNCH" = 0 ] || {
-    echo "error: max or ultra requires a canonical --harness launch so its effort flag cannot be omitted" >&2
+    echo "error: --effort ultra requires a canonical --harness launch so its native flag cannot be omitted" >&2
     exit 1
   }
 fi
@@ -3512,9 +3512,15 @@ effort_flag_for_harness() {
     esac
     ;;
   codex)
-    # The resolved profile has already passed model-aware max/ultra validation.
+    # The installed codex config schema uses model_reasoning_effort. Max is
+    # threaded only where Luna or the installed catalog supports it and is
+    # otherwise omitted; ultra already passed validate-native-effort.
     case "$effort" in
-    low | medium | high | xhigh | max | ultra) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+    low | medium | high | xhigh | ultra) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+    max)
+      "$SCRIPT_DIR/fm-harness.sh" codex-supports "$model" max || return 0
+      printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+      ;;
     esac
     ;;
   grok)
