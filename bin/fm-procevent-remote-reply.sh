@@ -19,8 +19,9 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. `relisten` tells that runner to poll again in the same
 # process, still holding the claim, after an empty window and after that re-arm.
-# A window the remote job worker preempted is reported to the runner as an empty
-# window, so it relistens too (see JOB_PREEMPTED below).
+# A window the remote job worker preempted, a failed SSH transport (exit 255),
+# and a remote reader exit 1 or 2 are reported to the runner as an empty window,
+# so it relistens too (see JOB_PREEMPTED and cmd_source below).
 # A continuity break is escalated and not re-armed, so the registration is dropped
 # and the runner stops. The runner does not refresh the owner lease.
 #
@@ -301,7 +302,8 @@ WINDOW_CLOSED_EMPTY=75
 # per-cycle liveness probe. The read is cursor-anchored and non-destructive, so a
 # preempted window loses nothing: it is a window that closed early, and the
 # runner relistens exactly as after WINDOW_CLOSED_EMPTY instead of reading it as
-# a failed read that releases the listener's claim. It proves nothing about the
+# a failed read. Only a failed read other than SSH exit 255 or reader exit 1 or 2
+# releases the listener's claim (see cmd_source). It proves nothing about the
 # channel being caught up, so it records no watermark.
 JOB_PREEMPTED=76
 
@@ -326,15 +328,19 @@ cmd_source() {
   # A remote transport failure can leave diagnostic bytes on stdout, especially
   # when the remote OpenSSH shell is a Windows WSL wrapper. Such bytes are not a
   # delta and must never reach the runner as a malformed capture. Never pass a
-  # failed or non-schema leg to the runner. Returning a nonzero status with no
-  # output leaves the registration available for reconciliation without
-  # advancing the cursor or ingesting transport diagnostics.
+  # failed or non-schema leg to the runner. A failed SSH transport (255) or a
+  # remote reader exit 1 or 2 is a transient empty window: the runner keeps its
+  # claim and relistens at its launch floor, without advancing the cursor or
+  # ingesting diagnostics. There is no backoff, so a persistent failure of that
+  # kind retries once per launch floor (1 second by default) while the claim is
+  # held. Any other failed or non-schema leg returns a nonzero status with no
+  # output, which leaves the registration available for reconciliation.
   class=$(classify_result "$output")
   if [ "$rc" -ne 0 ] || [ "$class" = malformed ]; then
     rm -f -- "$output"
-    # Failed remote legs and non-schema diagnostics are transient empty
-    # windows. Keep the runner claim and let it relisten at its launch floor.
-    return "$WINDOW_CLOSED_EMPTY"
+    case "$rc" in 1|2|255) return "$WINDOW_CLOSED_EMPTY" ;; esac
+    [ "$rc" -ne 0 ] && return "$rc"
+    return 1
   fi
   cat "$output"
   rc=$?
