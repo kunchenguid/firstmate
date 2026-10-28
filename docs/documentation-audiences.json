@@ -549,6 +549,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/provider-reach.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-resolve.md",
       "audience": "maintainer-verification"
     },
