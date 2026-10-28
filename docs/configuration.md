@@ -10,7 +10,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain-hold ask guard](#captain-hold-ask-guard-configcaptain-hold-guard), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
@@ -474,6 +474,36 @@ Linking the code-root copy into the home therefore forks the queue on the first 
 Run every routine Firstmate backlog command through [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh).
 Like lifecycle transitions, it addresses this home's backlog and archive from any working directory.
 Bootstrap reports a code-root `data/backlog.md` or `data/done-archive.md` that is not this home's own file as a `BACKLOG_RECONCILE: code-root ...` line, even in a read-only session.
+
+## Captain-hold ask guard (config/captain-hold-guard)
+
+The optional local, gitignored `config/captain-hold-guard` file makes `bin/fm-captain-hold.sh hold` refuse captain asks that break the advising rule, so a fleet cannot bury the captain in unanswerable or repeated questions.
+It is off by default: with the file absent, `hold` accepts every reason exactly as before.
+Each line turns on one check, and blank lines and `#` comments are ignored:
+
+```text
+require-rec          # every hold reason carries "Rec: <pick>, because <reason>" ("Recommend:" also counts)
+dedupe               # refuse a new hold citing a GitHub PR or issue URL that an open captain hold already cites
+cap 30               # refuse a new hold once the fleet has this many live captain holds
+fleet-data ~/worklog/data   # repeatable: also read the backlog in this data directory
+```
+
+A refused ask says how to fix it: the `dedupe` refusal names the open hold and backlog that already cite the PR or issue, so the new question is added to that hold instead.
+An urgent ask past the cap goes through with `--over-cap "<why this cannot wait>"`, which is recorded on the hold as an `Over cap:` line.
+An open captain hold is any captain hold that is not done, the same rule `open` uses: held now, snoozed by a future `--until`, or lapsed past its `--until`, which is still an answerable call.
+`dedupe` checks every open captain hold and matches only full `github.com/<owner>/<repo>/(pull|issues)/<n>` URLs, so a bare `owner/repo#n` or `PR #n` is not matched.
+`cap` counts only live captain holds, those with no `--until` or a lapsed one, so a hold the captain snoozed to a future date does not count.
+Only the ask itself is checked, never the `--over-cap` text, and `dedupe` likewise ignores the `Over cap:` line saved on an existing hold.
+Re-holding a task that is already an open captain hold skips `dedupe` and `cap`, so a retry or a `--until` deferral never trips them; `require-rec` applies to every hold.
+`cap` is unset unless the file names it.
+
+`dedupe` and `cap` count the whole fleet: this home, its local parent home, every local secondmate registered in the root home's `data/secondmates.md`, and each `fleet-data` directory, which takes an absolute or `~/` path.
+Remote secondmates are not read.
+A directory with no backlog is skipped, and a backlog that cannot be read is reported on stderr and skipped, so a broken home never blocks an ask.
+An unknown setting, a repeated `cap`, or a malformed value refuses every hold and names the line, because the captain's limits are never guessed.
+
+Secondmate homes inherit the file from the primary under the primary-authoritative contract in [`bin/fm-config-inherit-lib.sh`](../bin/fm-config-inherit-lib.sh), so mates file holds under the same rules.
+The script's header owns the exact mechanics, and regression coverage is in [`tests/fm-captain-hold-lifecycle.test.sh`](../tests/fm-captain-hold-lifecycle.test.sh).
 
 ## Runtime backend (config/backend / FM_BACKEND)
 

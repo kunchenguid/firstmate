@@ -10,6 +10,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-hold-reason-lib.sh
+. "$ROOT/bin/fm-hold-reason-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
@@ -640,6 +642,160 @@ SH
   assert_no_grep " --file " "$log" \
     "a captain-hold mutation passed a markdown file override to a beads home"
   pass "captain-hold mutations address the beads backend without a markdown override"
+}
+
+# The opt-in ask guard (config/captain-hold-guard) against a fixture fleet: a
+# root home with one registered local mate, plus a fleet-data work log.
+test_hold_ask_guard_refuses_bad_asks() {
+  local root mate extra err home
+  root=$(make_home guard-root)
+  mate=$(make_home guard-mate)
+  extra=$(make_home guard-worklog)
+  err="$root/guard.err"
+
+  run_captain "$root" hold r-off --title "Guard off" --reason "what now?" >/dev/null 2>"$err" \
+    || fail "guard: an absent config/captain-hold-guard refused a hold: $(cat "$err")"
+
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$root" > "$mate/.fm-secondmate-parent"
+  printf -- '- tesla - Platform (home: %s; scope: platform; projects: sample; added 2026-10-13)\n' \
+    "$mate" > "$root/data/secondmates.md"
+  for home in "$root" "$mate" "$extra"; do
+    printf '# fixture\nrequire-rec\ndedupe\n\nfleet-data %s/data  # work log\n' "$extra" > "$home/config/captain-hold-guard"
+  done
+  # A plain-text hold in the mate (tasks-axi direct) and an encoded hold in the
+  # work log (through this script), so both reason forms are read.
+  tasks_in "$mate" add mate-pr "Merge widgets 26" --repo sample >/dev/null || fail "guard: seed mate task"
+  tasks_in "$mate" hold mate-pr --kind captain \
+    --reason "merge https://github.com/Acme/widgets/pull/26 Rec: yes" >/dev/null || fail "guard: seed mate hold"
+  run_captain "$extra" hold log-pr --title "Dashboard 203" \
+    --reason "ship https://github.com/Acme/dashboard/pull/203 (green)? Rec: yes, because green" >/dev/null 2>"$err" \
+    || fail "guard: seed work-log hold: $(cat "$err")"
+
+  if run_captain "$root" hold r-norec --title "No rec" --reason "what do you want to do here?" >/dev/null 2>"$err"; then
+    fail "guard: an ask with no Rec was accepted"
+  fi
+  grep -qF 'refused: the reason has no recommendation; end it with "Rec: <pick>, because <reason>"' "$err" \
+    || fail "guard: no-Rec refusal did not say how to fix it: $(cat "$err")"
+  ! tasks_in "$root" show r-norec >/dev/null 2>&1 || fail "guard: a refused ask still created its task"
+
+  run_captain "$root" hold r-one --title "Recommend form" \
+    --reason "Rotate the key? recommend: yes, because it leaked" >/dev/null 2>"$err" \
+    || fail "guard: a Recommend: ask was refused: $(cat "$err")"
+
+  if run_captain "$root" hold r-dup --title "Dup" \
+    --reason "Merge https://github.com/acme/Widgets/issues/26? Rec: yes, because green" >/dev/null 2>"$err"; then
+    fail "guard: a PR already cited by a mate hold was accepted"
+  fi
+  grep -qF "refused: acme/widgets#26 is already cited by open captain hold mate-pr in $mate/data/backlog.md; add this ask to that hold" "$err" \
+    || fail "guard: duplicate refusal did not name the mate hold: $(cat "$err")"
+
+  if run_captain "$mate" hold m-dup --title "Dup from mate" \
+    --reason "Ship https://github.com/Acme/dashboard/pull/203 Rec: yes, because green" >/dev/null 2>"$err"; then
+    fail "guard: a PR already cited by an encoded work-log hold was accepted from a mate"
+  fi
+  grep -qF "open captain hold log-pr in $extra/data/backlog.md" "$err" \
+    || fail "guard: duplicate refusal did not name the work-log hold: $(cat "$err")"
+
+  run_captain "$extra" hold log-pr \
+    --reason "still https://github.com/Acme/dashboard/pull/203 Rec: yes, because green" >/dev/null 2>"$err" \
+    || fail "guard: re-holding the hold that cites the PR was refused: $(cat "$err")"
+
+  # Live captain holds fleet-wide now: r-off, r-one, mate-pr, log-pr. The
+  # captain's own future --until snooze is open but not live.
+  tasks_in "$root" add r-snooze "Snoozed" --repo sample >/dev/null || fail "guard: seed snoozed task"
+  tasks_in "$root" hold r-snooze --kind captain --until 2099-01-01 --reason "later Rec: wait" >/dev/null \
+    || fail "guard: seed snoozed hold"
+  printf 'cap 4\n' >> "$root/config/captain-hold-guard"
+  if run_captain "$root" hold r-cap --title "Cap" --reason "Pay the invoice? Rec: yes, because due" >/dev/null 2>"$err"; then
+    fail "guard: an ask over the fleet cap was accepted"
+  fi
+  grep -qF 'refused: 4 live captain holds fleet-wide (cap 4); drop or merge stale holds first, or pass --over-cap' "$err" \
+    || fail "guard: cap refusal did not say how to fix it, or counted the snoozed hold: $(cat "$err")"
+
+  # A hold whose --until has passed is still an open captain call: it counts
+  # toward the cap, dedupe sees it, and re-holding it is not a new hold.
+  tasks_in "$root" add r-lapsed "Lapsed" --repo sample >/dev/null || fail "guard: seed lapsed task"
+  tasks_in "$root" hold r-lapsed --kind captain --until 2020-01-01 \
+    --reason "merge https://github.com/acme/api/pull/9 Rec: yes" >/dev/null || fail "guard: seed lapsed hold"
+  if run_captain "$root" hold r-cap --title "Cap" --reason "Pay the invoice? Rec: yes, because due" >/dev/null 2>"$err"; then
+    fail "guard: an ask over the fleet cap was accepted with a lapsed hold"
+  fi
+  grep -qF 'refused: 5 live captain holds fleet-wide (cap 4)' "$err" \
+    || fail "guard: the cap did not count the lapsed hold: $(cat "$err")"
+  if run_captain "$root" hold r-lapdup --title "Lapsed dup" --over-cap "urgent" \
+    --reason "Merge https://github.com/acme/api/pull/9 now? Rec: yes, because green" >/dev/null 2>"$err"; then
+    fail "guard: a PR already cited by a lapsed hold was accepted"
+  fi
+  grep -qF "refused: acme/api#9 is already cited by open captain hold r-lapsed in $root/data/backlog.md" "$err" \
+    || fail "guard: duplicate refusal did not name the lapsed hold: $(cat "$err")"
+  run_captain "$root" hold r-lapsed --reason "merge https://github.com/acme/api/pull/9 today? Rec: yes" >/dev/null 2>"$err" \
+    || fail "guard: re-holding a lapsed hold was refused: $(cat "$err")"
+
+  if run_captain "$root" hold r-cap --title "Cap" --reason "Pay the invoice?" \
+    --over-cap "rec: https://github.com/Acme/widgets/pull/26" >/dev/null 2>"$err"; then
+    fail "guard: the --over-cap text stood in for the ask's Rec"
+  fi
+  grep -qF 'refused: the reason has no recommendation' "$err" \
+    || fail "guard: the --over-cap text was checked as part of the ask: $(cat "$err")"
+  run_captain "$root" hold r-one --reason "Rotate the key today? Rec: yes, because it leaked" >/dev/null 2>"$err" \
+    || fail "guard: re-holding an active hold at the cap was refused: $(cat "$err")"
+  run_captain "$root" hold r-cap --title "Cap" --reason "Pay the invoice? Rec: yes, because due" \
+    --over-cap "client send blocked today https://github.com/Acme/billing/pull/7" >/dev/null 2>"$err" \
+    || fail "guard: --over-cap did not let an urgent ask through: $(cat "$err")"
+  run_captain "$root" open r-cap >/dev/null 2>&1 || fail "guard: the over-cap ask is not an open captain call"
+  tasks_in "$root" show r-cap --full | fm_hold_reason_decode_stream toon | grep -qF 'Over cap: client send blocked today https://github.com/Acme/billing/pull/7' \
+    || fail "guard: the over-cap reason was not recorded on the hold"
+  # r-cap cites billing#7 only in its Over cap: line, which is not its ask.
+  run_captain "$root" hold r-billing --title "Billing 7" --over-cap "urgent" \
+    --reason "Merge https://github.com/acme/billing/pull/7? Rec: yes, because green" >/dev/null 2>"$err" \
+    || fail "guard: a hold's --over-cap text blocked a later ask about the PR it cited: $(cat "$err")"
+
+  printf 'cap 3\n' >> "$root/config/captain-hold-guard"
+  if run_captain "$root" hold r-bad --title "Bad config" --reason "Ok? Rec: yes" >/dev/null 2>"$err"; then
+    fail "guard: a repeated cap line was accepted"
+  fi
+  grep -qF 'config/captain-hold-guard line 7: cap is set twice' "$err" \
+    || fail "guard: the malformed-config refusal did not name the line: $(cat "$err")"
+  pass "captain-hold ask guard is off by default and refuses no-Rec, duplicate-PR and over-cap asks when configured"
+}
+
+# A fleet home whose backend comes from the user's tasks-axi config keeps no
+# data/backlog.md or .tasks.toml, yet its captain holds still count. The stubbed
+# tasks-axi fakes that home's listing; every other call reaches the real one.
+test_hold_ask_guard_reads_a_user_configured_backend_home() {
+  local root ext user err
+  root=$(make_home guard-cfg-root)
+  ext="$TMP_ROOT/guard-cfg-ext"
+  user="$TMP_ROOT/guard-cfg-user"
+  err="$root/guard.err"
+  mkdir -p "$ext/data" "$user/.tasks-axi" "$TMP_ROOT/guard-cfg-empty/data"
+  ext=$(cd "$ext" && pwd -P)
+
+  printf 'dedupe\nfleet-data %s/data\n' "$TMP_ROOT/guard-cfg-empty" > "$root/config/captain-hold-guard"
+  run_captain "$root" hold r-empty --title "Empty fleet dir" \
+    --reason "Merge https://github.com/acme/ledger/pull/5? Rec: yes" >/dev/null 2>"$err" \
+    || fail "guard: a fleet directory with no backlog refused a hold: $(cat "$err")"
+  assert_no_grep 'warning' "$err" "guard: a fleet directory with no backlog was reported"
+
+  printf 'backend = "beads"\n' > "$user/.tasks-axi/config.toml"
+  cat > "$root/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = list ] && [ "\$(pwd -P)" = "$ext" ]; then
+  printf '%s\n' 'count: 1' 'tasks[1]{id,state,kind,repo,title,hold_kind,hold_reason,hold_until,held}:' \
+    '  ext-pr,queued,task,"-",Ledger,captain,"merge https://github.com/acme/ledger/pull/6","-",yes'
+  exit 0
+fi
+exec "\$REAL_TASKS_AXI" "\$@"
+SH
+  chmod +x "$root/fakebin/tasks-axi"
+  printf 'dedupe\nfleet-data %s/data\n' "$ext" > "$root/config/captain-hold-guard"
+  if HOME="$user" run_captain "$root" hold r-dup --title "Dup" \
+    --reason "Merge https://github.com/acme/ledger/pull/6? Rec: yes" >/dev/null 2>"$err"; then
+    fail "guard: a PR cited by a hold in a user-configured backend home was accepted"
+  fi
+  grep -qF "refused: acme/ledger#6 is already cited by open captain hold ext-pr in $ext/data/backlog.md" "$err" \
+    || fail "guard: the user-configured backend home was not read: $(cat "$err")"
+  pass "captain-hold ask guard reads a home whose backend comes from the user's tasks-axi config"
 }
 
 # A Beads workspace with due.required and no types.custom captain type is the
@@ -4824,3 +4980,5 @@ test_captain_hold_mutations_address_the_beads_backend
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
 test_archived_answered_hold_still_satisfies_the_gate
 test_archived_answer_in_a_user_configured_archive_satisfies_the_gate
+test_hold_ask_guard_refuses_bad_asks
+test_hold_ask_guard_reads_a_user_configured_backend_home

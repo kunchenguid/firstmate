@@ -62,6 +62,7 @@ Repeat and edge cases:
 - Retries of an active hold preserve its hold-set timestamp.
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
+- With the optional [`config/captain-hold-guard`](configuration.md#captain-hold-ask-guard-configcaptain-hold-guard), the ask is checked before anything is written: a reason with no `Rec:`, or a new hold that cites a GitHub PR or issue URL another open captain hold cites or exceeds the fleet cap on live captain holds, is refused and creates no task.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - Before the backend hold runs, `--origin` records the origin the call is held for on its own `Captain hold origin:` body line, which `complete` and `verify` check using backend identities rather than alias spellings.
   If that write fails, the backend hold is not attempted.

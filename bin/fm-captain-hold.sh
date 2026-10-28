@@ -21,7 +21,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--over-cap <why>]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -56,6 +57,11 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+# The optional, off-by-default config/captain-hold-guard makes `hold` refuse an
+# ask that breaks the advising rule: a reason with no `Rec:`, a new hold citing
+# a GitHub PR or issue URL another open captain hold already cites, or a new
+# hold past the fleet-wide cap on live captain holds without `--over-cap <why>`
+# (see "ask guard" below).
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -240,6 +246,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
@@ -1047,9 +1056,171 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   printf '%s %s %s\n' "$id" "$how" "$origin_state"
 }
 
+# --- ask guard: refuse captain asks that break the advising rule -------------
+#
+# Off unless config/captain-hold-guard exists; docs/configuration.md "Captain-hold
+# ask guard" owns its format (require-rec, dedupe, cap <n>, fleet-data <dir>).
+# An open captain hold is any captain-kind row that is not done: held now,
+# snoozed by a future --until, or lapsed past its --until (still an answerable
+# call). `dedupe` matches full github.com/<owner>/<repo>/(pull|issues)/<n> URLs
+# across every open captain hold; `cap` counts only live ones, so a hold the
+# captain snoozed with a future --until does not count. "New" means the task is
+# not already an open captain hold, so re-holding one skips dedupe and cap, and
+# only the ask itself is checked, never its `--over-cap` text. The fleet is this home, its local parent home (or this
+# home when it is the root), every local secondmate registered in the root's
+# data/secondmates.md, and each fleet-data directory. A directory with no
+# backlog is skipped, and one that cannot be read is warned about and skipped,
+# so a broken mate home never blocks an urgent ask. An unknown line, a repeated
+# cap, or a malformed value refuses every hold naming the line, because the
+# captain's limits are never guessed. `--over-cap` is recorded on the hold as
+# an `Over cap:` line. Only the reason passed to `hold` and existing hold rows
+# are read; this still never reads report, chat, or terminal prose.
+
+GUARD_REQUIRE_REC=0
+GUARD_DEDUPE=0
+GUARD_CAP=
+GUARD_FLEET_DATA=
+
+load_ask_guard() {
+  local file="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/captain-hold-guard" line key value n=0
+  [ -e "$file" ] || return 0
+  [ -f "$file" ] && [ -r "$file" ] || fail "config/captain-hold-guard is not a readable file: $file"
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line=${line%%#*}
+    key='' value=''
+    read -r key value <<< "$line" || true
+    case "$key" in
+      '') ;;
+      require-rec) [ -z "$value" ] || fail "config/captain-hold-guard line $n: require-rec takes no value" ; GUARD_REQUIRE_REC=1 ;;
+      dedupe) [ -z "$value" ] || fail "config/captain-hold-guard line $n: dedupe takes no value" ; GUARD_DEDUPE=1 ;;
+      cap)
+        [ -z "$GUARD_CAP" ] || fail "config/captain-hold-guard line $n: cap is set twice"
+        case "$value" in ''|0*|*[!0-9]*) fail "config/captain-hold-guard line $n: cap needs a positive integer" ;; esac
+        GUARD_CAP=$value ;;
+      fleet-data)
+        case "$value" in
+          \~/*) value="$HOME/${value#\~/}" ;;
+          /*) ;;
+          *) fail "config/captain-hold-guard line $n: fleet-data needs an absolute or ~/ path" ;;
+        esac
+        GUARD_FLEET_DATA=$(printf '%s\n%s' "$GUARD_FLEET_DATA" "$value") ;;
+      *) fail "config/captain-hold-guard line $n: unknown setting: $key" ;;
+    esac
+  done < "$file"
+}
+
+reason_has_rec() {  # <reason>
+  printf '%s\n' "$1" | grep -Eiq '(^|[^a-z])rec(ommend)?:[[:space:]]*[^[:space:]]'
+}
+
+FM_GITHUB_REF_RE='github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/(?:pull|issues)/([0-9]+)'
+
+github_refs() {  # <text>; prints owner/repo#n (lowercase), one per line
+  printf '%s\n' "$1" | FM_GITHUB_REF_RE=$FM_GITHUB_REF_RE perl -ne '
+    while (/$ENV{FM_GITHUB_REF_RE}/gi) { my $r = lc "$1#$2"; print "$r\n" unless $seen{$r}++ }'
+}
+
+fleet_data_dirs() {
+  local root=$FM_HOME line dir
+  if fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" \
+    && [ "$FM_SECONDMATE_PARENT_ROUTE" = local ]; then
+    root=$FM_SECONDMATE_PARENT_HOME
+  fi
+  {
+    printf '%s\n' "$DATA" "$root/data"
+    if [ -f "$root/data/secondmates.md" ]; then
+      while IFS= read -r line || [ -n "$line" ]; do
+        secondmate_registry_parse_line "$line" || continue
+        [ "$SECONDMATE_REGISTRY_REMOTE" = 0 ] || continue
+        printf '%s/data\n' "$SECONDMATE_REGISTRY_HOME"
+      done < "$root/data/secondmates.md"
+    fi
+    printf '%s\n' "$GUARD_FLEET_DATA"
+  } | while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    fm_backlog_data_absolute "$dir" 2>/dev/null || true
+  done | LC_ALL=C sort -u
+}
+
+# Prints "<backlog>\t<task-id>\t<live|snoozed>\t <owner/repo#n> ... " for every
+# open captain hold in the fleet: a captain-kind row that is not done, whether
+# held, snoozed by a future --until, or lapsed past its --until. Only a hold
+# still snoozed by its --until is "snoozed"; the refs are the GitHub PR or
+# issue URLs anywhere in the row, reason decoded, except the trailing
+# "Over cap:" line command_hold appends, which is not part of the ask.
+fleet_open_captain_holds() {
+  local dir listing file status
+  fleet_data_dirs | while IFS= read -r dir; do
+    file=$(fm_backlog_file "$dir") || continue
+    status=0
+    fm_backlog_source_present "$dir" "$dir" || status=$?
+    # Status 1 with no markdown backlog and no tasks-axi config: no backlog here.
+    if [ "$status" -eq 1 ] && [ ! -e "$file" ] && [ ! -L "$file" ] && [ ! -e "${dir%/*}/.tasks.toml" ]; then
+      continue
+    fi
+    if [ "$status" -ne 0 ] \
+      || ! listing=$(fm_backlog_row_list "$dir" --fields hold_kind,hold_reason,hold_until,held --limit 100000); then
+      printf 'fm-captain-hold: warning: skipped unreadable backlog %s in the fleet hold check\n' "$file" >&2
+      continue
+    fi
+    printf '%s\n' "$listing" | fm_hold_reason_decode_stream toon | FM_GITHUB_REF_RE=$FM_GITHUB_REF_RE perl -e '
+      my $file = shift;
+      my ($id, $state, $kind, $reason, $until, $held);
+      while (my $line = <STDIN>) {
+        chomp $line;
+        if ($line =~ /^tasks\[\d+\]\{([^}]*)\}:$/) {
+          my @names = split /,/, $1;
+          for my $i (0 .. $#names) {
+            $id = $i if $names[$i] eq "id";
+            $state = $i if $names[$i] eq "state";
+            $kind = $i if $names[$i] eq "hold_kind";
+            $reason = $i if $names[$i] eq "hold_reason";
+            $until = $i if $names[$i] eq "hold_until";
+            $held = $i if $names[$i] eq "held";
+          }
+          next;
+        }
+        next unless defined($kind) && $line =~ /^  (.*)$/;
+        my @f = $1 =~ /("(?:[^"\\]|\\.)*"|[^,]+)/g;
+        next unless ($f[$kind] // "") eq "captain" && ($f[$state] // "") ne "done";
+        my $snoozed = ($f[$held] // "") eq "yes" && ($f[$until] // "") =~ /^\d{4}-\d\d-\d\d$/;
+        $f[$reason] =~ s/\\nOver cap: (?:[^"\\]|\\.)*(?="\z)// if defined($reason) && defined($f[$reason]);
+        my $scan = join ",", @f;
+        my (%seen, @refs);
+        while ($scan =~ /$ENV{FM_GITHUB_REF_RE}/gi) { my $r = lc "$1#$2"; push @refs, $r unless $seen{$r}++ }
+        print "$file\t$f[$id]\t", ($snoozed ? "snoozed" : "live"), "\t @refs \n";
+      }
+    ' "$file"
+  done
+}
+
+guard_captain_ask() {  # <reason> <new-hold-0-or-1> <over-cap-why>
+  local text=$1 new=$2 over_cap=$3 holds ref hit count
+  if [ "$GUARD_REQUIRE_REC" = 1 ]; then
+    reason_has_rec "$text" \
+      || fail "refused: the reason has no recommendation; end it with \"Rec: <pick>, because <reason>\" and file again"
+  fi
+  [ "$new" = 1 ] || return 0
+  [ "$GUARD_DEDUPE" = 1 ] || [ -n "$GUARD_CAP" ] || return 0
+  holds=$(fleet_open_captain_holds)
+  if [ "$GUARD_DEDUPE" = 1 ]; then
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      hit=$(printf '%s\n' "$holds" | awk -F'\t' -v ref=" $ref " 'index($4, ref) { print $2 " in " $1; exit }')
+      [ -z "$hit" ] \
+        || fail "refused: $ref is already cited by open captain hold $hit; add this ask to that hold instead of filing a second one"
+    done <<< "$(github_refs "$text")"
+  fi
+  [ -n "$GUARD_CAP" ] || return 0
+  count=$(printf '%s\n' "$holds" | awk -F'\t' '$3 == "live" { n++ } END { print n + 0 }')
+  [ "$count" -lt "$GUARD_CAP" ] || [ -n "$over_cap" ] \
+    || fail "refused: $count live captain holds fleet-wide (cap $GUARD_CAP); drop or merge stale holds first, or pass --over-cap \"<why this cannot wait>\" for an urgent ask"
+}
+
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0 over_cap='' ask
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1059,12 +1230,16 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --over-cap) shift; over_cap=${1:-}; [ -n "$over_cap" ] || fail "--over-cap needs the reason this ask cannot wait" ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
   [ -n "$reason" ] || fail "reason must not be empty"
+  load_ask_guard
+  ask=$reason
+  [ -z "$over_cap" ] || reason=$(printf '%s\nOver cap: %s' "$reason" "$over_cap")
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
   if [ -n "$origin" ]; then
@@ -1093,6 +1268,11 @@ command_hold() {
     if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
       preserve_hold_set=1
     fi
+    if [ "$existing_hold_kind" = captain ]; then
+      guard_captain_ask "$ask" 0 "$over_cap"
+    else
+      guard_captain_ask "$ask" 1 "$over_cap"
+    fi
     if [ -n "$title" ]; then
       existing_title=$(show_field_value "$show" title)
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
@@ -1100,6 +1280,7 @@ command_hold() {
   else
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
+    guard_captain_ask "$ask" 1 "$over_cap"
     if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
       repo=${repo%/}
