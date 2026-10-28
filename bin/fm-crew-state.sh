@@ -24,7 +24,7 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|publishing|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -237,6 +237,7 @@ KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
+SHIP_MODE=$(meta_value mode)
 
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
@@ -254,7 +255,9 @@ fi
 # and its reason rather than a wedge-suspect idle.
 # A ship `done:` is not current-state done while bin/fm-dod-lib.sh refuses the
 # named-head reachability gate: that claim is blocked so a disposable copy is
-# not treated as finished-and-safe.
+# not treated as finished-and-safe. A PR-based ship that has passed validation
+# without a PR URL is publishing, not done, so its validated branch remains
+# actionable until publication succeeds.
 emit_ship_status_done() {  # [extra-detail]
   local extra=${1:-} reason
   if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then
@@ -270,6 +273,7 @@ map_log_state() {  # <line>
   fi
   case "$(status_line_verb "$1")" in
     working)        echo working ;;
+    publishing)     echo publishing ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
     done)           echo "done" ;;
@@ -554,6 +558,56 @@ passed_pr_detail() {
       ;;
   esac
 }
+
+ship_run_pr_url() {
+  local raw_pr
+  raw_pr=$(strip_quotes "$(nm_field pr)")
+  if fm_pr_url_parse "$raw_pr"; then
+    printf '%s\n' "$FM_PR_URL"
+  elif fm_pr_metadata_identity_parse "$META"; then
+    printf '%s\n' "$FM_PR_META_URL"
+  fi
+}
+
+ship_publication_missing() {
+  local outcome_value=$1 status_value=$2 url=$3
+  case "$SHIP_MODE" in
+    direct-PR|no-mistakes|'') ;;
+    *) return 1 ;;
+  esac
+  [ -z "$url" ] || return 1
+  case "$outcome_value:$status_value" in
+    passed:*|passed-with-override:*|passed-with-skips:*|checks-passed:*) return 0 ;;
+    :completed) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+nm_pr_publication_failed() {
+  local rows row rest step status
+  rows=$(nm_steps_rows)
+  while IFS= read -r row; do
+    row=$(trim "$row")
+    [ -n "$row" ] || continue
+    step=$(trim "${row%%,*}")
+    rest=${row#*,}
+    status=$(strip_quotes "$(trim "${rest%%,*}")")
+    if [ "$step" = pr ] && { [ "$status" = failed ] || [ "$status" = cancelled ]; }; then
+      return 0
+    fi
+  done <<EOF
+$rows
+EOF
+  printf '%s\n' "$RUN_OUT" | grep -Eiq 'publication[^[:cntrl:]]*(failed|error)|pr[^[:cntrl:]]*(failed|error)'
+}
+
+publication_detail() {
+  local branch=${CREW_BRANCH:-$(meta_value branch)} head
+  head=$(strip_quotes "$(nm_field head)")
+  [ -n "$head" ] || head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null || true)
+  printf 'validated commit awaiting PR publication: branch=%s commit=%s' "$branch" "${head:-unknown}"
+}
+
 # Finding count from a findings[N]{...} table header; empty when none.
 nm_findings_count() {
   printf '%s\n' "$RUN_OUT" | grep -oE 'findings\[[0-9]+\]' | head -1 | grep -oE '[0-9]+'
@@ -1161,20 +1215,29 @@ if [ "$HAVE_RUN" = 1 ]; then
     nm_has_gate && has_gate=1
 
     if [ -n "$outcome" ]; then
-      case "$outcome" in
-        passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
-        passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
-        failed)
-          if nm_reclassify_failed_run_as_held_green; then :; else
-            RUN_STATE=failed; RUN_DETAIL="run failed"
-          fi ;;
-        cancelled)
-          if nm_reclassify_failed_run_as_held_green; then :; else
-            RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
-          fi ;;
-        *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
-      esac
+      run_pr_url=$(ship_run_pr_url || true)
+      if ship_publication_missing "$outcome" "$status" "$run_pr_url"; then
+        RUN_STATE=publishing
+        RUN_DETAIL=$(publication_detail)
+      else
+        case "$outcome" in
+          passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
+          passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
+          checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+          failed)
+            if [ -z "$run_pr_url" ] && nm_pr_publication_failed; then
+              RUN_STATE=blocked
+              RUN_DETAIL="PR publication failed; $(publication_detail); retry publication without discarding the commit"
+            elif nm_reclassify_failed_run_as_held_green; then :; else
+              RUN_STATE=failed; RUN_DETAIL="run failed"
+            fi ;;
+          cancelled)
+            if nm_reclassify_failed_run_as_held_green; then :; else
+              RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
+            fi ;;
+          *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
+        esac
+      fi
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
       if [ "$has_gate" = 1 ]; then
         gate=$(nm_gate_line_name)
@@ -1229,6 +1292,13 @@ if [ "$HAVE_RUN" = 1 ]; then
             CI_LOG_STATE=not-ready
             ;;
         esac
+      fi
+    fi
+    if [ -z "$outcome" ] && { [ "$status" = completed ] || [ "$status" = ci ]; }; then
+      run_pr_url=$(ship_run_pr_url || true)
+      if ship_publication_missing "$outcome" "$status" "$run_pr_url"; then
+        RUN_STATE=publishing
+        RUN_DETAIL=$(publication_detail)
       fi
     fi
   fi

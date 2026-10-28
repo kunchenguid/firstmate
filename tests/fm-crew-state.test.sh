@@ -707,6 +707,22 @@ outcome: failed
 EOF
 }
 
+run_failed_publication() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+outcome: failed
+steps[2]{step,status,findings,duration_ms}:
+  test,completed,0,0
+  pr,failed,0,0
+EOF
+}
+
 # The 2026-09-05 jr-voice orphaned-CI-monitor shape: every substantive step
 # completed, only ci failed (after the shared daemon restarted under its
 # merge poll), and GitHub read the PR green and mergeable.
@@ -1633,7 +1649,7 @@ test_terminal_passed_run_pr_overrides_stale_metadata() {
   pass "terminal passed run PR overrides stale task metadata"
 }
 
-test_terminal_passed_without_readable_pr_identity_reports_unknown() {
+test_terminal_passed_without_pr_stays_in_publication() {
   reset_fakes
   local d; d=$(new_case passed-no-pr)
   make_repo_on_branch "$d/wt" fm/feat-dnopr
@@ -1641,11 +1657,12 @@ test_terminal_passed_without_readable_pr_identity_reports_unknown() {
   fm_write_meta "$d/state/feat-dnopr.meta" "window=fm:fm-feat-dnopr" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/feat-dnopr)"
   local out; out=$(run_crew_state "$d" feat-dnopr)
-  assert_contains "$out" "state: done" "passed run without PR identity -> done"
-  assert_contains "$out" "run passed: PR state unknown (no PR identity)" "missing PR identity is honest unknown"
-  assert_not_contains "$out" "merged/closed" "unknown PR state must not get the old merged/closed label"
-  assert_not_contains "$out" "PR merged" "unknown PR state must not be reported merged"
-  pass "terminal passed run without readable PR identity reports unknown"
+  assert_contains "$out" "state: publishing" "passed run without PR identity stays in publication"
+  assert_contains "$out" "branch=fm/feat-dnopr" "publication state names the validated branch"
+  assert_contains "$out" "commit=" "publication state names the validated commit"
+  assert_contains "$out" "awaiting PR publication" "publication state names the required follow-up"
+  assert_not_contains "$out" "state: done" "missing PR identity must not report completion"
+  pass "terminal passed run without PR stays in publication"
 }
 
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged() {
@@ -2255,6 +2272,24 @@ EOF
 # The plain ledger is ordered by creation time, not the time a status changed.
 # A newer failure must not be hidden by an older live run, even when both heads
 # bind to the worktree. These legacy CLI cases lack the AXI identity table.
+test_failed_publication_is_blocked_and_resumable() {
+  reset_fakes
+  local d out
+  d=$(new_case failed-publication)
+  make_repo_on_branch "$d/wt" fm/feat-publish-fail
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-publish-fail.meta" "window=fm:fm-feat-publish-fail" \
+    "worktree=$d/wt" "kind=ship" "branch=fm/feat-publish-fail"
+  FM_FAKE_AXI_STATUS="$(run_failed_publication fm/feat-publish-fail)"
+  out=$(run_crew_state "$d" feat-publish-fail)
+  assert_contains "$out" "state: blocked" "PR publication failure must not be terminal"
+  assert_contains "$out" "PR publication failed" "publication failure must be actionable"
+  assert_contains "$out" "branch=fm/feat-publish-fail" "publication failure must preserve the branch"
+  assert_contains "$out" "commit=" "publication failure must preserve the validated commit"
+  assert_contains "$out" "retry publication" "publication failure must remain resumable"
+  pass "failed PR publication stays blocked and resumable"
+}
+
 test_terminal_run_keeps_newer_failure_over_live_sibling() {
   reset_fakes
   local d base_head live_head short_base short_live out
@@ -5884,7 +5919,7 @@ test_terminal_passed_uses_matching_retirement_receipt_without_forge
 test_terminal_passed_no_forge_switch_skips_read_but_keeps_receipt
 test_terminal_passed_with_open_pr_does_not_claim_merged
 test_terminal_passed_run_pr_overrides_stale_metadata
-test_terminal_passed_without_readable_pr_identity_reports_unknown
+test_terminal_passed_without_pr_stays_in_publication
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
 test_terminal_passed_with_forgejo_pull_reports_its_state
 test_terminal_passed_with_merged_gitlab_mr_reports_merged
@@ -5901,6 +5936,7 @@ test_cross_branch_attribution_via_runs_list
 test_coarse_socket_refusal_reports_blocked
 test_coarse_failed_ledger_with_daemon_down_reports_unknown
 test_cross_branch_attribution_picks_most_recent_row
+test_failed_publication_is_blocked_and_resumable
 test_terminal_run_keeps_newer_failure_over_live_sibling
 test_runs_list_newer_failure_outranks_older_live_row
 test_unfetched_older_live_sibling_does_not_hide_failure
