@@ -75,8 +75,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-# shellcheck source=bin/fm-cursor-lib.sh
-. "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
 
@@ -158,14 +158,16 @@ harness_marker() {
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk below, kept separate so the marker
-# precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
+# True when an exact native or Bun-hosted `omp` process sits within eight
+# parents of this one. The ancestry walk owns both shapes, so the marker
+# precedence above always demands real process evidence before trusting
+# FM_OMP_HARNESS.
 ancestry_names_omp() {
-  local pid=$$ comm
+  local pid=$$
   for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    [ "$(basename -- "$comm")" = omp ] && return 0
+    case "$(harness_process_verdict "$pid")" in
+      'comm omp'|'args omp') return 0 ;;
+    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -181,7 +183,7 @@ ancestry_names_omp() {
 #          (any node process holding a harness-shaped path matches it), so it is
 #          used only when no marker is present.
 harness_process_verdict() {  # <pid>
-  local pid=$1 comm args argv0
+  local pid=$1 comm args argv0 name
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
   argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
   if fm_cursor_process_matches "$comm" '' "$argv0"; then
@@ -223,10 +225,10 @@ harness_process_verdict() {  # <pid>
     # is why detect_own keeps a marker that agrees on the family.
     pi-signed) echo "comm pi"; return ;;
     pi) echo "comm pi"; return ;;
-    # omp is a Bun-compiled single binary whose process name is exactly `omp`
-    # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
-    # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
-    # comp, and similar unrelated commands are not misread as this harness.
+    # A native omp binary has the exact process name `omp` (verified, omp
+    # 18.1.11); a Bun-hosted script is identified by the bun arm below.
+    # Anchored, never *omp*, so ompd, comp, and similar unrelated commands are
+    # not misread as this harness.
     # It sits above the node*|python* interpreter fallback deliberately: the
     # optional claude-bridge extension runs a nested executable literally
     # named `claude` with its own node child, and that fallback's *claude*
@@ -278,6 +280,16 @@ harness_process_verdict() {  # <pid>
     # crewmate/scout adapter only and is never a primary or secondmate, so
     # this arm only lets a kiro crewmate identify its own harness.
     kiro-cli) echo "comm kiro"; return ;;
+    bun)
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      if name=$(fm_bun_harness_name "$comm" "$args"); then
+        case "$name" in
+          pi|pi-signed) echo "args pi" ;;
+          *) echo "args $name" ;;
+        esac
+        return
+      fi
+      ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
