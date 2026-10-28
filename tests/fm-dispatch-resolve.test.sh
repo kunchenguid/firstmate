@@ -15,6 +15,9 @@ set -u
 
 TOOL="$ROOT/bin/fm-dispatch-resolve.sh"
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-resolve)
+export CODEX_HOME="$TMP_ROOT/codex-catalog"
+mkdir -p "$CODEX_HOME"
+printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"}]},{"slug":"gpt-6.1-terra","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}]}]}' > "$CODEX_HOME/models_cache.json"
 HOME_DIR="$TMP_ROOT/home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 NO_CURL_BIN="$TMP_ROOT/no-curl-bin"
@@ -1626,6 +1629,15 @@ TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA5_PAIR" run code out err "$BRIEF
 assert_contains "$out" '  status: escalate' "schema 5 keeps joining by provider alone"
 assert_contains "$out" '  reason: genuine spendPriority tie' "every codex profile reads the one schema 5 codex row"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=11%  spendPriority=-5.6819  runway=projected_exhaustion  -> eligible' "a schema 5 row never needs accountKey"
+
+for effort in max ultra; do
+  jq --arg effort "$effort" '.rules[0].use |= map(if .harness == "codex" then {harness:"codex", model:"gpt-6.1-terra", effort:$effort} else . end)' "$LANE_RULES" > "$RULES"
+  reset_log
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_NATIVE" run code out err "$BRIEF"
+  expect_code 0 "$code" "Codex catalog profile should resolve"
+  assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-6.1-terra' --effort '$effort'" "catalog effort was not selected"
+done
+pass "Codex max and ultra profiles resolve from the catalog"
 
 SCHEMA6_PI_NATIVE="$TMP_ROOT/schema6-pi-native.json"
 jq '.providers |= map(select(.provider != "codex" or .accountKey != "default"))' "$SCHEMA6_NATIVE" > "$SCHEMA6_PI_NATIVE"

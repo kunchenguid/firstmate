@@ -19,12 +19,13 @@
 #                                        print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
 #                                        An id selects that mate's override line first.
+#        fm-harness.sh codex-catalog   print the installed Codex model cache as JSON,
+#                                        or an empty catalog when unavailable.
 #        fm-harness.sh validate-native-effort <harness> <model> <effort>
-#                                        Refuse ultra unless the harness is pi or
-#                                        pi-signed and the model explicitly names
-#                                        codex-native/<id>. Other efforts retain
-#                                        their adapter's existing policy. Native
-#                                        Codex validates model support at startup.
+#                                        Validate Codex max/ultra against its explicit
+#                                        model's cached supported reasoning levels.
+#                                        Ultra also permits Pi's codex-native model.
+#                                        Missing or malformed catalogs fail closed.
 #        fm-harness.sh ancestry [<pid>] print "<strength> <harness>" for the nearest
 #                                        harness process at or above <pid> (default this
 #                                        process), or nothing when the walk finds none.
@@ -657,19 +658,38 @@ resolve_secondmate_effort() {
   secondmate_field 3 "${1:-}"
 }
 
+codex_catalog() {
+  local catalog="${CODEX_HOME:-$HOME/.codex}/models_cache.json"
+  if command -v jq >/dev/null 2>&1 && [ -r "$catalog" ]; then
+    jq -ce 'if (.models | type) == "array" then [.models[] | select((.slug | type) == "string" and (.supported_reasoning_levels | type) == "array") | {slug, supported_reasoning_levels: [.supported_reasoning_levels[] | {effort}]}] else error("invalid catalog") end' "$catalog" 2>/dev/null && return 0
+  fi
+  printf '%s\n' '[]'
+}
+
 validate_native_effort() {
-  local harness=${1:-} model=${2:-} effort=${3:-}
+  local harness=${1:-} model=${2:-} effort=${3:-} catalog
+  if [ "$harness" = codex ] && { [ "$effort" = max ] || [ "$effort" = ultra ]; }; then
+    catalog=$(codex_catalog)
+    if jq -e --arg model "$model" --arg effort "$effort" \
+      'any(.[]; .slug == $model and any(.supported_reasoning_levels[]?; .effort == $effort))' \
+      <<<"$catalog" >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "error: codex $effort requires an explicit model advertising that effort in the installed Codex catalog" >&2
+    return 1
+  fi
   [ "$effort" = ultra ] || return 0
   case "$harness" in
     pi|pi-signed)
       case "$model" in codex-native/?*) return 0 ;; esac
       ;;
   esac
-  echo "error: ultra effort requires pi or pi-signed with an explicit codex-native/<model> model" >&2
+  echo "error: ultra effort requires pi or pi-signed with an explicit codex-native/<model> model, or a supported Codex model" >&2
   return 1
 }
 
 case "${1:-}" in
+  codex-catalog) codex_catalog ;;
   validate-native-effort) shift; validate_native_effort "$@" ;;
   ancestry)
     case "${2:-}" in

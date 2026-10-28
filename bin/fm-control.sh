@@ -1045,7 +1045,7 @@ resolve_relaunch_profile() {
   else
     TARGET_EFFORT=default
   fi
-  if [ "$TARGET_EFFORT" = ultra ]; then
+  if [ "$TARGET_EFFORT" = ultra ] || { [ "$TARGET_HARNESS" = codex ] && [ "$BACKEND" != t3code ] && [ "$TARGET_EFFORT" = max ]; }; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
   # The launch owner applies this home's worker account pin too, but only after

@@ -1366,7 +1366,8 @@ spawn_remote_secondmate() {
     return 1
     ;;
   esac
-  if [ "$effort" = ultra ] && ! "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort"; then
+  # The target host validates Codex against its own catalog.
+  if [ "$effort" = ultra ] && [ "$harness" != codex ] && ! "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort"; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 1
@@ -3228,10 +3229,10 @@ fi
 fm_backend_validate_harness "$BACKEND" "$HARNESS" || exit 1
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
-if [ "$EFFORT" = ultra ]; then
+if [ "$EFFORT" = ultra ] || { [ "$HARNESS" = codex ] && [ "$BACKEND" != t3code ] && [ "$EFFORT" = max ]; }; then
   "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
   [ "$RAW_LAUNCH" = 0 ] || {
-    echo "error: --effort ultra requires the canonical --harness pi or pi-signed launch so its native flag cannot be omitted" >&2
+    echo "error: max or ultra requires a canonical --harness launch so its effort flag cannot be omitted" >&2
     exit 1
   }
 fi
@@ -3511,15 +3512,9 @@ effort_flag_for_harness() {
     esac
     ;;
   codex)
-    # The installed codex config schema uses model_reasoning_effort. The
-    # installed model catalog supports max for gpt-5.6-luna; keep that level
-    # scoped to the model whose catalog entry advertises it.
+    # The resolved profile has already passed model-aware max/ultra validation.
     case "$effort" in
-    low | medium | high | xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-    max)
-      [ "$model" = gpt-5.6-luna ] || return 0
-      printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
-      ;;
+    low | medium | high | xhigh | max | ultra) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
     esac
     ;;
   grok)

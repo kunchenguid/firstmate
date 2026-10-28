@@ -29,6 +29,9 @@ set -u
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-bootstrap-tests)
+export CODEX_HOME="$TMP_ROOT/codex-catalog"
+mkdir -p "$CODEX_HOME"
+printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"max"}]},{"slug":"gpt-6.1-terra","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}]}]}' > "$CODEX_HOME/models_cache.json"
 export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 
 # Hermetic runtime-backend detection. These cases pin the backend per-home via
@@ -1385,6 +1388,7 @@ test_crew_dispatch_validation() {
   done <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
+codex Terra ultra is accepted^{"default":{"harness":"codex","model":"gpt-6.1-terra","effort":"ultra"}}^empty^
 codex Luna max effort is accepted^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
 codex unsupported model max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max

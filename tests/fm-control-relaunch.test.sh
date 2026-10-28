@@ -945,6 +945,29 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   pass "native Ultra relaunch preserves its profile and rejects an unsupported model before stopping"
 }
 
+test_codex_catalog_effort_relaunch() {
+  local dir out rc id effort
+  for effort in max ultra; do
+    id="rl-codex-$effort"
+    dir=$(new_case "$id" "$id")
+    add_ship_task "$dir" "$id" codex
+    printf codex > "$dir/fake/command"
+    printf codex > "$dir/fake/becomes"
+    mkdir -p "$dir/catalog"
+    printf '%s\n' '{"models":[{"slug":"gpt-6.1-terra","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}]}]}' > "$dir/catalog/models_cache.json"
+    out=$(CODEX_HOME="$dir/catalog" run_control "$dir" "$id" relaunch --harness codex --model unsupported --effort "$effort" --note "unsupported profile"); rc=$?
+    expect_code 1 "$rc" "unsupported Codex relaunch must fail: $out"
+    [ "$(cat "$dir/fake/command")" = codex ] || fail "unsupported Codex relaunch stopped the agent"
+    [ ! -s "$dir/fake/literal" ] || fail "unsupported Codex relaunch sent lifecycle input"
+    out=$(CODEX_HOME="$dir/catalog" run_control "$dir" "$id" relaunch --harness codex --model gpt-6.1-terra --effort "$effort" --note "supported profile"); rc=$?
+    expect_code 0 "$rc" "supported Codex relaunch failed: $out"
+    [ "$(meta_field "$dir" "$id" model)" = gpt-6.1-terra ] || fail "Codex relaunch lost model"
+    [ "$(meta_field "$dir" "$id" effort)" = "$effort" ] || fail "Codex relaunch lost effort"
+    assert_contains "$(cat "$dir/fake/literal")" "model_reasoning_effort=\"$effort\"" "Codex relaunch omitted effort"
+  done
+  pass "Codex max and ultra relaunch preserve supported profiles and reject unsupported models before stopping"
+}
+
 # A fake claude that answers `claude auth status` the way the real runner
 # does: signed in only when the selected config root holds a stored login.
 make_claude_auth_stub() {  # <case-dir>
@@ -3034,6 +3057,7 @@ test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
+test_codex_catalog_effort_relaunch
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
