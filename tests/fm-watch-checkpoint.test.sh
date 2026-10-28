@@ -65,11 +65,17 @@ SH
 #!/usr/bin/env perl
 use strict;
 use warnings;
-$SIG{INT} = 'IGNORE';
+$SIG{INT} = sub {
+  open my $int_file, '>', "$ENV{FM_HOME}/int-received" or die "open INT marker: $!";
+  close $int_file;
+};
 open my $pid_file, '>', "$ENV{FM_HOME}/watcher.pid" or die "open pid file: $!";
 printf {$pid_file} "%s\n", $$;
 close $pid_file;
-sleep 7;
+my $cleanup_deadline = time + 7;
+while ((my $left = $cleanup_deadline - time) > 0) {
+  sleep $left;
+}
 open my $cleanup_file, '>', "$ENV{FM_HOME}/cleanup-reached" or die "open cleanup marker: $!";
 print {$cleanup_file} "reached\n";
 close $cleanup_file;
@@ -89,12 +95,13 @@ PL
   expect_code 124 "$status" "Perl fallback checkpoint exit"
   assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 1s" \
     "Perl fallback did not return a quiet checkpoint"
+  [ -e "$home/int-received" ] || fail "the Perl fallback did not deliver INT to the watcher"
   [ -e "$home/cleanup-reached" ] || fail "the Perl fallback killed the watcher before its 8-second cleanup bound"
-  [ ! -e "$home/natural-exit" ] || fail "the INT-ignoring watcher exited naturally instead of being killed"
-  [ -s "$home/watcher.pid" ] || fail "the INT-ignoring watcher did not start"
+  [ ! -e "$home/natural-exit" ] || fail "the INT-surviving watcher exited naturally instead of being killed"
+  [ -s "$home/watcher.pid" ] || fail "the INT-surviving watcher did not start"
   watcher_pid=$(cat "$home/watcher.pid")
   if kill -0 "$watcher_pid" 2>/dev/null; then
-    fail "the INT-ignoring watcher survived the Perl fallback escalation"
+    fail "the watcher survived the Perl fallback KILL escalation"
   fi
   pass "non-GNU timeout falls back to Perl and honors the cleanup bound before escalating"
 }
