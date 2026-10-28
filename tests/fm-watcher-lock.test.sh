@@ -833,15 +833,15 @@ test_lock_respects_live_holder_matching_its_start_time() {
 }
 
 test_lock_reclaims_holder_whose_identity_no_longer_recomputes() {
-  # A lock that records a pid-identity but no start time (a pid-identity
-  # writer's claim made before start times were recorded) is held only while
-  # that identity still recomputes for its live pid. A mismatch is reclaimed
+  # A watch lock that records a pid-identity but no start time (a watcher's
+  # claim made before start times were recorded) is held only while that
+  # identity still recomputes for its live pid. A mismatch is reclaimed
   # without signalling the pid; a matching identity, or no recorded identity
   # at all, still reads as live.
   local dir state lockdir live identity out case_name recorded
   dir=$(make_case lock-identity-mismatch)
   state="$dir/state"
-  lockdir="$state/.contend.lock"
+  lockdir="$state/.watch.lock"
   sleep 300 >/dev/null 2>&1 &
   live=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
@@ -881,6 +881,42 @@ test_lock_reclaims_holder_whose_identity_no_longer_recomputes() {
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
   pass "lock whose recorded identity no longer recomputes is reclaimed without signalling its pid; a matching or unrecorded identity stays held"
+}
+
+test_lock_keeps_live_daemon_holder_with_stale_identity() {
+  # The identity check is the watcher's alone: the supervise daemon never
+  # re-checks that it still owns its lock, so reclaiming a live daemon's lock
+  # over a pre-UTC-pin local-time identity would leave two daemons running.
+  # Its lock keeps the pid-start-then-pid-liveness answer.
+  local dir state lockdir live identity legacy out recorded
+  dir=$(make_case lock-daemon-stale-identity)
+  state="$dir/state"
+  lockdir="$state/.supervise-daemon.lock"
+  sleep 300 >/dev/null 2>&1 &
+  live=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not identify the fixture daemon"
+  legacy=$(COLUMNS=10000 LC_ALL=C TZ=America/Los_Angeles ps -p "$live" -o lstart= -o command= 2>/dev/null | sed 's/^[[:space:]]*//')
+  [ -n "$legacy" ] && [ "$legacy" != "$identity" ] \
+    || fail "the legacy local-time identity does not differ from the current identity, so this case would pass vacuously ('$legacy')"
+  mkdir -p "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  printf '%s\n' "$legacy" > "$lockdir/pid-identity"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s recovered=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "${FM_LOCK_RECOVERED_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  is_live_non_zombie "$live" || fail "the live daemon pid was signalled"
+  recorded=$(cat "$lockdir/pid" 2>/dev/null || true)
+  case "$out" in
+    "rc=1 held=$live recovered=") ;;
+    *) fail "live supervise-daemon lock with a stale identity was reclaimed: $out" ;;
+  esac
+  [ "$recorded" = "$live" ] || fail "live daemon's lock pid was clobbered ('$recorded')"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "live supervise-daemon lock with a stale local-time identity and no start time is not reclaimed"
 }
 
 test_lock_empty_pid_uses_minimum_grace() {
@@ -1793,6 +1829,7 @@ test_lock_does_not_steal_live_lock
 test_lock_reclaims_reused_pid_lock
 test_lock_respects_live_holder_matching_its_start_time
 test_lock_reclaims_holder_whose_identity_no_longer_recomputes
+test_lock_keeps_live_daemon_holder_with_stale_identity
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal

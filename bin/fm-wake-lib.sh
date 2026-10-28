@@ -126,8 +126,8 @@ fm_pid_identity() {
   # bin/fm-extension.mjs's pidIdentity pins the same zone. On a /proc-less host
   # outside UTC, an identity recorded before this pin may read as reused for one
   # upgrade window; this is an accepted bounded upgrade-window residual that the
-  # next lock claim clears, because fm_lock_holder_alive reads that holder as
-  # dead and a replaced watcher stands down at its next poll.
+  # next watch lock claim clears, because fm_lock_holder_alive reads that
+  # watcher as dead and the replaced watcher stands down at its next poll.
   out=$(COLUMNS=10000 LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
@@ -598,18 +598,22 @@ fm_lock_prepare_owner() {
 # True while the lock's recorded holder <pid> is alive. A record that carries
 # the holder's start time is held only while that live pid still has it: macOS
 # and Linux both hand a dead holder's pid to unrelated processes, and pid
-# liveness alone would then read the lock as held forever. A record that also
-# carries a pid-identity (long-lived holders such as the watcher write one) is
-# held only while that identity still recomputes for the pid, so a holder
-# whose identity was recorded in a format this code no longer renders - the
-# fm_pid_identity UTC-pin residual - is replaced rather than stranding every
-# successor beside it. A missing record, or a live pid whose value cannot be
-# read right now, keeps the pid-liveness answer, so only a proven mismatch
-# frees a lock.
+# liveness alone would then read the lock as held forever. The watch lock is
+# additionally held only while its recorded pid-identity still recomputes for
+# the pid, so a watcher whose identity was recorded in a format this code no
+# longer renders - the fm_pid_identity UTC-pin residual - is replaced rather
+# than stranding every successor beside it. Only the watch lock gets that
+# check because only the watcher stands down on its own once a successor owns
+# its lock; other pid-identity writers (the supervise daemon, the afk launch
+# lock) never re-check ownership, so reclaiming theirs would run two live
+# holders at once. A missing record, or a live pid whose value cannot be read
+# right now, keeps the pid-liveness answer, so only a proven mismatch frees a
+# lock.
 fm_lock_holder_alive() {
   local lockdir=$1 pid=$2
   fm_pid_alive "$pid" || return 1
   _fm_lock_record_matches "$lockdir" "$pid" pid-start fm_pid_start_time || return 1
+  [ "$lockdir" = "$STATE/.watch.lock" ] || return 0
   _fm_lock_record_matches "$lockdir" "$pid" pid-identity fm_pid_identity
 }
 
