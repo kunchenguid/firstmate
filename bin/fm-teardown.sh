@@ -65,7 +65,11 @@
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
+# A recorded GitLab merge-request pr= takes its own proof: the merged state is
+# read through fm_pr_gitlab_read_record (plain glab) and its head fetched from
+# refs/merge-requests/<iid>/head, the ref GitLab keeps for every merge request
+# including a merged one, with the same containment checks.
+# A forge lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
@@ -1689,13 +1693,52 @@ $unpushed
 EOF
 }
 
+# The head commit of the recorded GitLab merge request, fetched from the
+# ref GitLab keeps for every merge request including a merged one, so the
+# containment proof below runs on the same ref-based head the GitHub path
+# uses rather than on metadata.
+fetch_merge_request_head() {  # <iid>
+  local iid=$1 resolved
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin \
+    "+refs/merge-requests/$iid/head:refs/fm-review/mr/$iid/head" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/mr/$iid/head^{commit}" 2>/dev/null) || return 1
+  [ -n "$resolved" ] || return 1
+  printf '%s' "$resolved"
+}
+
+# Is the recorded GitLab merge request merged with the worktree's local work
+# contained in its head? The state comes from fm_pr_gitlab_read_record,
+# addressed through the parsed URL identity and never through a configured
+# default host, and the head from refs/merge-requests/<iid>/head on the
+# worktree's origin remote. Returns non-zero when the merge request is not
+# merged, the current work is not contained in its head, or any read fails -
+# the caller falls back to the content check.
+gitlab_mr_is_merged() {
+  local head current landed=0
+  fm_pr_url_parse "$PR_URL" || return 1
+  [ "$FM_PR_PROVIDER" = gitlab ] || return 1
+  fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+  [ "$FM_PR_RECORD_MERGED" = true ] || return 1
+  head=$(fetch_merge_request_head "$FM_PR_NUMBER") || return 1
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
+    landed=1
+  elif unpushed_patches_are_in_pr_head "$head"; then
+    landed=1
+  fi
+  [ "$landed" = 1 ] || return 1
+  return 0
+}
+
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
-# forge for both the PR state and head: a recorded Forgejo URL is read through
-# tea (fm_pr_forgejo_read_record), and everything else through GitHub. Returns
-# non-zero when the PR is not merged, the current work is not contained in the
-# PR head, no PR is found, or any forge read error occurs - the caller then
-# falls back to the content check.
+# forge for both the PR state and head - GitHub through gh, GitLab through
+# fm_pr_gitlab_read_record with its head fetched from
+# refs/merge-requests/<iid>/head, and a recorded Forgejo URL through tea
+# (fm_pr_forgejo_read_record). Returns non-zero when the PR is not merged,
+# the current work is not contained in the PR head, no PR is found, or any
+# forge read error occurs - the caller then falls back to the content check.
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
@@ -1704,6 +1747,11 @@ pr_is_merged() {
     target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
+  # A merge-request target can only be the recorded pr= itself, because the
+  # branch lookup above is GitHub-only, so its whole proof is MR-shaped.
+  case "$target" in
+    *"/-/merge_requests/"*) gitlab_mr_is_merged; return $? ;;
+  esac
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
     fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1

@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|gitlab|forgejo|external> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -73,11 +73,12 @@
 # script never infers a forge and never looks the binding up, and bin/fm-spawn.sh
 # refuses a brief whose forge disagrees with the registry. bin/fm-project-mode.sh's
 # header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`,
-# `forgejo`, and `external` change in the Definition of done. On `forgejo` this
-# script also names tea instead of gh-axi in the ship brief's forge-CLI rule, and
-# on `external` that rule names no forge CLI, because the home's review tool is
-# the only publishing tool. A forge on --mode local-only is refused, because that
-# mode publishes nothing, and `external` also refuses no-mistakes.
+# `gitlab`, `forgejo`, and `external` change in the Definition of done. The
+# ship brief's forge-CLI rule names glab-axi beside gh-axi on `gitlab` and tea
+# instead of gh-axi on `forgejo`, while on `external` it names no forge CLI,
+# because the home's review tool is the only publishing tool. A forge on
+# --mode local-only is refused, because that mode publishes nothing, and
+# `external` also refuses no-mistakes.
 # --shape names how a forge=gerrit task is published, and only `squash` - one
 # change - is accepted: `stack` is refused until a stack can be watched by its
 # membership pinned when its watch is armed, because the merge watch follows one
@@ -98,9 +99,9 @@
 # bin/fm-spawn.sh repeats the check at launch regardless.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
-# on Gerrit, " forge=forgejo" on Forgejo, or " forge=external" on an external
-# review tool. bin/fm-spawn.sh reads that line and
-# refuses to launch a ship task whose explicit --mode or registered forge
+# on Gerrit, " forge=gitlab" on GitLab, " forge=forgejo" on Forgejo, or
+# " forge=external" on an external review tool. bin/fm-spawn.sh reads that line
+# and refuses to launch a ship task whose explicit --mode or registered forge
 # disagrees, so an adjusted brief and the recorded task metadata cannot drift
 # apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -318,16 +319,6 @@ if [ "$KIND" = ship ]; then
   elif [ "$SHAPE_SET" -eq 1 ]; then
     echo "error: --shape applies only with --forge gerrit, where the worker publishes the change itself" >&2
     exit 1
-  fi
-  # A Forgejo project's pull requests are handled with tea, so the ship brief's
-  # forge-CLI rule names it instead of gh-axi; an external review tool has no
-  # forge CLI at all; every other forge keeps gh-axi.
-  if [ "$FORGE" = forgejo ]; then
-    FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations."
-  elif [ "$FORGE" = external ]; then
-    FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations."
-  else
-    FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
   fi
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
@@ -763,6 +754,20 @@ case "$MODE" in
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT") || exit 1
+# A gitlab-primary project works its forge through glab-axi, so the tool rule
+# names it; GitHub stays named for the secondary sync work such a project
+# still does, a forgejo project's pull requests are handled with tea, an
+# external review tool has no forge CLI at all, and every other forge keeps
+# the GitHub-only wording.
+if [ "$FORGE" = gitlab ]; then
+  RULE3="3. Use glab-axi for GitLab operations, gh-axi for GitHub operations, and chrome-devtools-axi for browser operations."
+elif [ "$FORGE" = forgejo ]; then
+  RULE3="3. Use tea for Forgejo operations and chrome-devtools-axi for browser operations."
+elif [ "$FORGE" = external ]; then
+  RULE3="3. Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations."
+else
+  RULE3="3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -785,7 +790,7 @@ $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
-3. $FORGE_RULE_LINE
+$RULE3
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

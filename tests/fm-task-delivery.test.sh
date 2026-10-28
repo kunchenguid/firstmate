@@ -1080,6 +1080,9 @@ test_project_mode_binds_the_forge_orthogonally() {
 no annotation at all|- fp - fixture (added 2026-01-01)|no-mistakes off|none
 mode only|- fp [direct-PR] - fixture (added 2026-01-01)|direct-PR off|none
 forge beside a mode|- fp [no-mistakes forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
+gitlab beside a mode|- fp [no-mistakes-prod-only forge=gitlab] - fixture (added 2026-01-01)|no-mistakes off|gitlab
+gitlab as the only token leaves the default mode|- fp [forge=gitlab] - fixture (added 2026-01-01)|no-mistakes off|gitlab
+gitlab keeps yolo|- fp [direct-PR forge=gitlab +yolo] - fixture (added 2026-01-01)|direct-PR on|gitlab
 forge as the only token leaves the default mode|- fp [forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
 forge before yolo on a direct-PR project|- fp [direct-PR forge=gerrit +yolo] - fixture (added 2026-01-01)|direct-PR off|gerrit
 forge under the conditional policy|- fp [no-mistakes-prod-only forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
@@ -1096,6 +1099,10 @@ ROWS
   err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
   [ -z "$err" ] || fail "a registered forge warned as unknown: $err"
 
+  printf '%s\n' '- fp [no-mistakes-prod-only forge=gitlab] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a registered gitlab forge warned as unknown: $err"
+
   # A forge describes what a mode publishes, and local-only publishes nothing, so
   # the pair is refused rather than kept as an inert annotation: that mode's
   # landing would fast-forward local main with content the server never saw.
@@ -1109,6 +1116,12 @@ ROWS
   done
   err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null) || true
   assert_contains "$err" 'local-only publishes nothing' "the refusal did not say why local-only takes no forge"
+
+  printf '%s\n' '- fp [local-only forge=gitlab] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --forge fp 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "local-only with a gitlab forge did not refuse (status $status, got '$out')"
+  [ -z "$out" ] || fail "a refused local-only gitlab forge still handed the caller a posture: '$out'"
   pass "fm-project-mode: the forge binds from its own token and is reported only through --forge"
 }
 
@@ -1137,7 +1150,7 @@ test_project_mode_refuses_only_a_malformed_forge_binding() {
     assert_contains "$err" "\"$token\"" "$label: the refusal did not name the token it could not read"
     assert_contains "$err" 'forge=gerrit' "$label: the refusal did not name the accepted binding"
   done <<'ROWS'
-an unknown forge value|- fp [no-mistakes forge=gitlab] - fixture (added 2026-01-01)|gitlab
+an unknown forge value|- fp [no-mistakes forge=bitbucket] - fixture (added 2026-01-01)|bitbucket
 a misspelled forge value|- fp [no-mistakes forge=gerit] - fixture (added 2026-01-01)|gerit
 an empty forge value|- fp [no-mistakes +yolo forge=] - fixture (added 2026-01-01)|forge=
 ROWS
@@ -1341,6 +1354,42 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
 # green checks on a server that has neither, and a Gerrit brief on an unbound
 # project would publish to a forge the project is not. Both publishing modes
 # compose with the forge; local-only, which publishes nothing, cannot carry it.
+# A gitlab-registered project's brief must carry the binding like a gerrit
+# one does, and unlike gerrit its yolo posture is not refused: a GitLab merge
+# is not an attributed human approval, so standing merge authority stays
+# available exactly as on a forge-less project.
+test_forge_gitlab_binds_the_brief_and_keeps_yolo() {
+  local rec home proj fakebin out status
+  rec=$(make_home forge-agree-gitlab "- proj [no-mistakes-prod-only forge=gitlab] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" forge-gitlab-a1 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" forge-gitlab-a1 "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a gitlab project launched on a brief that records no forge"
+  assert_contains "$out" "forge mismatch for forge-gitlab-a1" "the refusal did not name the drift it caught"
+  assert_contains "$out" "fm-brief.sh forge-gitlab-a1 proj --mode no-mistakes --forge gitlab" \
+    "the refusal did not print a re-scaffold command naming the gitlab binding"
+  assert_absent "$home/state/forge-gitlab-a1.meta" "the refused spawn still recorded a task"
+
+  FM_HOME="$home" "$BRIEF" forge-gitlab-a2 proj --mode direct-PR --forge gitlab >/dev/null \
+    || fail "a gitlab direct-PR brief should scaffold"
+  brief=$(cat "$home/data/forge-gitlab-a2/brief.md")
+  assert_contains "$brief" \
+    'Use glab-axi for GitLab operations, gh-axi for GitHub operations, and chrome-devtools-axi for browser operations.' \
+    "the gitlab brief's tool rule did not name glab-axi alongside gh-axi"
+  assert_contains "$brief" 'Delivery contract: mode=direct-PR forge=gitlab' \
+    "the gitlab brief's delivery contract did not carry the forge token"
+  assert_not_contains "$brief" 'shape=' \
+    "the gitlab brief scaffolded a shape notice only gerrit owns"
+  fill_brief_subsections "$home/data/forge-gitlab-a2/brief.md" "Open the merge request." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" forge-gitlab-a2 "$proj" claude --mode direct-PR --yolo on 2>&1)
+  assert_not_contains "$out" "forge mismatch" "an agreeing gitlab brief was reported as drift"
+  assert_not_contains "$out" "--yolo on is refused" "yolo was refused on the gitlab forge"
+  pass "forge=gitlab: the brief carries the registered binding and yolo stays available"
+}
+
 test_spawn_requires_the_brief_to_carry_the_registered_forge() {
   local rec home proj fakebin out status
   rec=$(make_home forge-agree-gerrit "- proj [no-mistakes forge=gerrit] - fixture (added 2026-01-01)")
@@ -1761,6 +1810,7 @@ test_forge_external_refuses_promotion
 test_forge_gerrit_changes_what_no_mistakes_means
 test_forge_gerrit_direct_pr_publishes_one_change
 test_spawn_requires_the_brief_to_carry_the_registered_forge
+test_forge_gitlab_binds_the_brief_and_keeps_yolo
 test_spawn_requires_the_brief_to_carry_the_selected_branch
 test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read

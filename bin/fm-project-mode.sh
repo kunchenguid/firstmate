@@ -7,7 +7,7 @@
 # is absent, so every existing installation keeps its current "fm/<task-id>"
 # branch names unchanged.
 # With --forge it prints one word instead: the project's registered forge,
-# none|gerrit|forgejo|external. The forge is asked for explicitly, so the
+# none|gerrit|gitlab|forgejo|external. The forge is asked for explicitly, so the
 # default output stays the same two words for every project, bound or not.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
@@ -28,6 +28,7 @@
 #   - <name> [<mode> +yolo] - <desc> (added <date>)                  -> <mode> on fm/
 #   - <name> [<mode> +yolo branch=<prefix>] - <desc> (added <date>)  -> <mode> <yolo> <prefix>
 #   - <name> [<mode> forge=gerrit] - <desc> (added <date>)           -> <mode> off, --forge gerrit
+#   - <name> [<mode> forge=gitlab] - <desc> (added <date>)           -> <mode> <yolo>, --forge gitlab
 #   - <name> [<mode> forge=forgejo] - <desc> (added <date>)          -> <mode> <yolo>, --forge forgejo
 #   - <name> [direct-PR forge=external] - <desc> (added <date>)      -> direct-PR off, --forge external
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
@@ -58,20 +59,24 @@
 #   remote actually is, never inferred from mode, remote name, host, or protocol.
 #   `none` means a forge whose pull requests and checks no-mistakes already
 #   drives, `gerrit` means a Gerrit server: no pull requests, so the worker
-#   publishes a change with gerrit-axi instead, and `forgejo` means a Forgejo or
-#   Gitea server, whose pull requests the worker handles with tea rather than
-#   gh-axi, and `external` means the project's reviews are created by a review
-#   tool that uploads its own snapshot of the worker's local commits: the
-#   worker never needs to push a branch, and must never push a task branch to
-#   the project's shared origin. Firstmate cannot observe, approve, or merge
-#   such a review, so that rail always escalates (bin/fm-dod-lib.sh owns what
-#   each changes for a worker in each publishing mode;
-#   docs/forgejo-tea-integration.md holds the tea evidence and
-#   docs/external-review-forge.md the external design).
+#   publishes a change with gerrit-axi instead, `gitlab` means a GitLab
+#   instance whose merge requests carry review and CI, so a direct-PR worker
+#   opens one with glab-axi instead of a GitHub pull request
+#   (bin/fm-dod-lib.sh owns what that changes for a worker in each publishing
+#   mode; docs/gitlab-merge-watch.md owns the merge watch and merge),
+#   `forgejo` means a Forgejo or Gitea server, whose pull requests the worker
+#   handles with tea rather than gh-axi (docs/forgejo-tea-integration.md holds
+#   the tea evidence), and `external` means the project's reviews are created
+#   by a review tool that uploads its own snapshot of the worker's local
+#   commits: the worker never needs to push a branch, and must never push a
+#   task branch to the project's shared origin. Firstmate cannot observe,
+#   approve, or merge such a review, so that rail always escalates
+#   (docs/external-review-forge.md the external design).
 #   The binding is EXPLICIT because a provider family must never be guessed;
-#   bin/fm-forge-detect.sh proposes gerrit from a protocol fact at project-add
-#   intake, forgejo has no such fact and is proposed from the captain's own
-#   account of the host, external is never detected or proposed because no
+#   bin/fm-forge-detect.sh proposes gerrit from a protocol fact and gitlab from
+#   a gitlab.com origin at project-add intake, forgejo and a self-hosted GitLab
+#   instance have no such fact and are proposed from the captain's own account
+#   of the host, external is never detected or proposed because no
 #   protocol fact identifies a snapshot-uploading review tool, and the captain's
 #   confirmation is what this record holds.
 #   A forge describes what a mode publishes, so it composes with no-mistakes and
@@ -83,9 +88,11 @@
 # A registered `forge=gerrit` project reports yolo=off with an explicit stderr
 # refusal, on the captain's decision of 2026-09-15: a Gerrit Code-Review+2 is a
 # positive attributed claim that a named human approved, read by colleagues and
-# by any audit, and firstmate must not manufacture one. A registered
-# `forge=external` project reports yolo=off the same way, because firstmate can
-# neither observe nor perform the review tool's approval or merge.
+# by any audit, and firstmate must not manufacture one. `forge=gitlab` keeps
+# yolo available: a GitLab merge is not an attributed human approval. A
+# registered `forge=external` project reports yolo=off the same way, because
+# firstmate can neither observe nor perform the review tool's approval or
+# merge.
 #
 # --raw prints the registered mode annotation unmapped, so a caller that must
 # tell a conditional policy apart from a flat mode sees "no-mistakes-prod-only"
@@ -98,12 +105,12 @@
 # `branch` resolves as it did before the forge existed, and in the mode slot it
 # is read as an unknown mode. A key one or two edits from `forge` (such as
 # `forg=` or `Forge=`) is still ignored, with one stderr warning naming the token
-# and the forge=gerrit, forge=forgejo, and forge=external spellings. The one
-# refusal is a malformed forge binding - a `forge=` token whose value is empty or outside the
-# closed set - which is REFUSED in the default and --forge output forms: nothing
-# on stdout, exit status 3, the token named. Resolving it to "no registered
-# forge" would hand a Gerrit project the pull-request contract the binding
-# exists to prevent.
+# and the accepted forge=gerrit, forge=gitlab, forge=forgejo, and
+# forge=external spellings. The one refusal is a malformed forge binding - a
+# `forge=` token whose value is empty or outside the closed set - which is
+# REFUSED in the default and --forge output forms: nothing on stdout, exit
+# status 3, the token named. Resolving it to "no registered forge" would hand a
+# Gerrit project the pull-request contract the binding exists to prevent.
 # local-only with a forge is refused the same way. --branch-prefix does not make
 # that check: it answers only the registered prefix, and a prefix is orthogonal
 # to the forge binding, so it prints even when the forge token is malformed;
@@ -208,7 +215,7 @@ fi
 posture=
 while IFS=' ' read -r kind rest; do
   case "$kind" in
-    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit, forge=forgejo, or forge=external" >&2 ;;
+    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge bindings are spelled forge=gerrit, forge=gitlab, forge=forgejo, and forge=external" >&2 ;;
     posture) posture=$rest ;;
   esac
 done <<EOF
@@ -231,12 +238,12 @@ if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
 fi
 
 case "$forge" in
-  none|forge=gerrit|forge=forgejo|forge=external) forge=${forge#forge=} ;;
+  none|forge=gerrit|forge=gitlab|forge=forgejo|forge=external) forge=${forge#forge=} ;;
   forge=)
-    echo "refused: empty forge binding \"forge=\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+    echo "refused: empty forge binding \"forge=\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=gitlab, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
     exit 3 ;;
   *)
-    echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+    echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted values are forge=gerrit, forge=gitlab, forge=forgejo, and forge=external, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
     exit 3 ;;
 esac
 if [ "$forge" != none ] && [ "$mode" = local-only ]; then

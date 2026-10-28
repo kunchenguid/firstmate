@@ -362,9 +362,11 @@ fm_pr_number_from_branch() {  # <worktree> <branch> [open|closed|all]
 # tell a positive draft from an unreadable payload. bin/fm-pr-merge.sh refuses
 # a merge unless this prints "false"; bin/fm-pr-check.sh refuses to arm a merge
 # poll only when it prints "true".
-fm_pr_json_draft_state() {  # <pull-request-json>
-  printf '%s' "${1-}" | jq -r '
-    if type == "object" and (.isDraft | type) == "boolean" then (.isDraft | tostring) else "" end
+fm_pr_json_draft_state() {  # <pull-request-json> [json-field]
+  # The default field is GitHub's isDraft; GitLab's REST merge-request payload
+  # names the same fact work_in_progress.
+  printf '%s' "${1-}" | jq -r --arg field "${2:-isDraft}" '
+    if type == "object" and (.[$field] | type) == "boolean" then (.[$field] | tostring) else "" end
   ' 2>/dev/null || true
 }
 
