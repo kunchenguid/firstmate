@@ -115,6 +115,57 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
     "$ledger" 2>/dev/null
 }
 
+# The watcher keeps one bounded episode marker for remote or local endpoints
+# whose classifier remains ambiguous or unreadable. The count is separate from
+# the alert marker so a failed queue append never suppresses a later alert.
+fm_secondmate_liveness_uncertain_record() {  # <id> <ambiguous|unreadable> <threshold>
+  local id=$1 state=$2 threshold=$3 marker tmp previous_state='' previous_count=0
+  FM_SM_LIVE_UNCERTAIN_COUNT=0
+  case "$state" in ambiguous|unreadable) ;; *) return 1 ;; esac
+  case "$threshold" in ''|*[!0-9]*|0) return 2 ;; esac
+  marker="$STATE/.secondmate-liveness-uncertain-$id"
+  if [ -L "$marker" ] || { [ -e "$marker" ] && [ ! -f "$marker" ]; }; then
+    return 2
+  fi
+  if [ -f "$marker" ]; then
+    read -r previous_state previous_count < "$marker" || return 2
+    case "$previous_state:$previous_count" in
+      ambiguous:[0-9]*|unreadable:[0-9]*) ;;
+      *) return 2 ;;
+    esac
+  fi
+  # The episode is uncertainty itself, so ambiguous and unreadable probes stay
+  # consecutive when the backend alternates between those two verdicts.
+  previous_count=$((previous_count + 1))
+  tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-$id.XXXXXX") || return 2
+  if ! printf '%s\t%s\n' "$state" "$previous_count" > "$tmp" || \
+     ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 2
+  fi
+  FM_SM_LIVE_UNCERTAIN_COUNT=$previous_count
+  [ "$previous_count" -ge "$threshold" ] || return 1
+  [ ! -e "$STATE/.secondmate-liveness-uncertain-alert-$id" ] && \
+    [ ! -L "$STATE/.secondmate-liveness-uncertain-alert-$id" ]
+}
+
+fm_secondmate_liveness_uncertain_mark_alert() {  # <id>
+  local id=$1 marker tmp
+  marker="$STATE/.secondmate-liveness-uncertain-alert-$id"
+  [ ! -L "$marker" ] || return 1
+  [ ! -e "$marker" ] || return 0
+  tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-alert-$id.XXXXXX") || return 1
+  if ! printf 'alerted\n' > "$tmp" || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_secondmate_liveness_uncertain_clear() {  # <id>
+  rm -f -- "$STATE/.secondmate-liveness-uncertain-$1" \
+    "$STATE/.secondmate-liveness-uncertain-alert-$1"
+}
+
 # fm_secondmate_liveness_probe <meta> <id> <full|poll>
 #
 # Read-only probe of one registered secondmate's recorded endpoint. Populates:

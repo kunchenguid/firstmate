@@ -3452,7 +3452,7 @@ test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched() {
   # and never a relaunch. Drain the killed leg's downtime marker first so the
   # next watcher does not resurface instead of exercising the tick.
   drain_liveness_wakes "$dir"
-  run_liveness_leg "$dir" ambiguous FM_FAKE_TMUX_CURRENT_COMMAND=node; pid=$LIVENESS_PID
+  run_liveness_leg "$dir" ambiguous FM_FAKE_TMUX_CURRENT_COMMAND=node FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=999999; pid=$LIVENESS_PID
   sleep 4
   is_live_non_zombie "$pid" \
     || fail "the watcher exited against an ambiguous secondmate endpoint: $(cat "$dir/watch-ambiguous.out" "$dir/watch-ambiguous.err")"
@@ -3463,6 +3463,52 @@ test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched() {
     "$state/.watch-triage.log" >/dev/null \
     || fail "the ambiguous probe did not land in the triage log: $(cat "$state/.watch-triage.log" 2>/dev/null)"
   pass "watch liveness: alive and ambiguous endpoints are probed, logged, and never touched"
+}
+
+test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once() {
+  local dir state pid out
+  dir=$(make_secondmate_liveness_case liveness-inconclusive)
+  state="$dir/state"
+
+  # An ambiguous endpoint is safe to leave untouched, but it must not remain
+  # silent forever. Three consecutive uncertain probes produce one parent wake.
+  run_liveness_leg "$dir" inconclusive FM_FAKE_TMUX_CURRENT_COMMAND=node FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 500 || fail "the watcher did not wake after persistent inconclusive liveness"
+  out="$dir/watch-inconclusive.out"
+  grep -F 'check: secondmate sm1 liveness remains ambiguous after 3 consecutive probes; endpoint was not changed' "$out" >/dev/null \
+    || fail "persistent ambiguity did not wake with its evidence: $(cat "$out" "$dir/watch-inconclusive.err")"
+  [ ! -s "$dir/tmux.log" ] || fail "an inconclusive endpoint was killed or relaunched: $(cat "$dir/tmux.log")"
+  [ -e "$state/.secondmate-liveness-uncertain-sm1" ] \
+    || fail "persistent inconclusive tracking marker was not written"
+  [ -e "$state/.secondmate-liveness-uncertain-alert-sm1" ] \
+    || fail "persistent inconclusive alert marker was not written"
+  [ "$(grep -c 'secondmate-liveness-uncertain-sm1' "$state/.wake-queue")" -eq 1 ] \
+    || fail "persistent inconclusive state did not queue exactly one wake: $(cat "$state/.wake-queue")"
+
+  # A restarted watcher must not repeat the alert while the same uncertain
+  # episode continues. A later live probe clears the episode markers.
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" inconclusive-repeat FM_FAKE_TMUX_CURRENT_COMMAND=node FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher repeated an inconclusive alert for the same episode: $(cat "$dir/watch-inconclusive-repeat.out" "$dir/watch-inconclusive-repeat.err")"
+  kill_liveness_leg "$pid"
+  [ "$(grep -c 'secondmate-liveness-uncertain-sm1' "$state/.wake-queue" 2>/dev/null || true)" -eq 0 ] \
+    || fail "the same inconclusive episode queued a second wake: $(cat "$state/.wake-queue")"
+
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" inconclusive-cleared FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher exited while clearing an inconclusive episode: $(cat "$dir/watch-inconclusive-cleared.out" "$dir/watch-inconclusive-cleared.err")"
+  kill_liveness_leg "$pid"
+  [ ! -e "$state/.secondmate-liveness-uncertain-sm1" ] \
+    || fail "a live probe did not clear inconclusive tracking"
+  [ ! -e "$state/.secondmate-liveness-uncertain-alert-sm1" ] \
+    || fail "a live probe did not clear the inconclusive alert marker"
+  pass "watch liveness: persistent inconclusive endpoints alert once and rearm after recovery"
 }
 
 test_secondmate_liveness_tick_cadence_gates_the_probe() {
@@ -3799,6 +3845,7 @@ test_secondmate_liveness_tick_relaunches_dead_endpoint_once
 test_secondmate_liveness_tick_relaunches_missing_endpoint
 test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking
 test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched
+test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once
 test_secondmate_liveness_tick_cadence_gates_the_probe
 test_secondmate_liveness_tick_attempt_bound_parks_then_rearm_on_alive
 test_secondmate_liveness_tick_relaunch_failure_reports_once
