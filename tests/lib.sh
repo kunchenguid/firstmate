@@ -135,8 +135,9 @@ pass() {
 # function (each must emit exactly one `ok - ` line via pass), then print
 # FM_TEST_COMPLETE after all registered calls return. If the suite exits during
 # a call, FM_TEST_ABORT names that invocation and the registered names never run.
-# A suite-owned EXIT handler installed before fm_test_run still runs; an explicit
-# fm_test_cleanup call during a test does not itself report an abort.
+# Abort reporting precedes a suite-owned EXIT handler installed before fm_test_run,
+# which receives the original exit status even if it exits explicitly.
+# An explicit fm_test_cleanup call during a test does not itself report an abort.
 # Adding a test is adding a name to this call; N is not a separately maintained
 # numeral. The names given are the names run.
 # bin/fm-test-tap-verify.sh is the completeness checker the stock macOS Bash
@@ -146,8 +147,15 @@ fm_test_run() {
   [ "$#" -gt 0 ] || fail "fm_test_run: no tests registered"
   exit_trap=$(trap -p EXIT)
   exit_handler=${exit_trap#trap -- }
-  eval "exit_handler=${exit_handler% EXIT}"
-  trap "$exit_handler"$'\nfm_test_report_abort' EXIT
+  exit_handler=${exit_handler% EXIT}
+  # Keep trap -p's quoting for eval. Restore $? in a conditional so errexit
+  # cannot skip cleanup when the suite exited nonzero.
+  trap 'FM_TEST_EXIT_STATUS=$?; fm_test_report_abort
+if (exit "$FM_TEST_EXIT_STATUS"); then
+  eval '"$exit_handler"'
+else
+  eval '"$exit_handler"'
+fi' EXIT
   FM_TEST_RUN_ACTIVE=1
   FM_TEST_RUN_SHELL=$$
   FM_TEST_RUN_SUBSHELL=$BASH_SUBSHELL

@@ -1927,6 +1927,16 @@ case \$FM_ABORT_TEST_CLEANUP in
     }
     trap suite_cleanup EXIT
     ;;
+  exiting)
+    suite_cleanup() {
+      local rc=\$?
+      printf '%s\n' "\$rc" >"\$FM_ABORT_TEST_EVIDENCE/cleanup-status"
+      touch "\$FM_ABORT_TEST_EVIDENCE/custom-cleanup"
+      fm_test_cleanup
+      exit "\$rc"
+    }
+    trap suite_cleanup EXIT
+    ;;
 esac
 test_A() { touch "\$FM_ABORT_TEST_EVIDENCE/A"; pass A; }
 test_B() {
@@ -1947,7 +1957,7 @@ test_D() {
 }
 fm_test_run test_A test_B test_C test_D
 EOF
-  for cleanup in direct delegated default; do
+  for cleanup in exiting direct delegated default; do
   for jobs in 1 2; do
   for mode in exit fail errexit last green cleanup; do
     out="$tmp/$cleanup-$jobs-$mode.out"
@@ -1956,7 +1966,7 @@ EOF
     FM_ABORT_TEST_MODE=$mode FM_ABORT_TEST_EVIDENCE=$markers FM_ABORT_TEST_CLEANUP=$cleanup \
       "$runner" --jobs "$jobs" --json "$tmp/$cleanup-$jobs-$mode.json" "$suite" >"$out" 2>&1 && rc=0 || rc=$?
     assert_absent "$(cat "$markers/cleanup-root")" "registered fixture cleanup did not run"
-    if [ "$cleanup" = delegated ]; then
+    if [ "$cleanup" = delegated ] || [ "$cleanup" = exiting ]; then
       assert_present "$markers/custom-cleanup" "suite-owned cleanup did not run"
     fi
     assert_present "$markers/A" "A did not execute"
@@ -1999,7 +2009,7 @@ count = int(count)
 record, = json.loads(Path(artifact).read_text())["scripts"]
 expected_exit = 7 if mode == "exit" else (1 if failed else 0)
 assert record["exit"] == expected_exit, record
-if cleanup == "delegated":
+if cleanup in ("delegated", "exiting"):
     assert int((Path(markers) / "cleanup-status").read_text()) == expected_exit
 assert sum(line.startswith("FM_TEST_ABORT ") for line in Path(output).read_text().splitlines()) == bool(failed)
 assert record["skipped_after_failure"] == count, record
