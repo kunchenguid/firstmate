@@ -44,6 +44,14 @@ fm_backend_t3code_token_file() {
   printf '%s/t3code-token' "$(fm_backend_t3code_config_dir)"
 }
 
+fm_backend_t3code_server_identity() {
+  node -e 'try { const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!c.origin || !c.environment_id) process.exit(1); process.stdout.write(JSON.stringify([c.origin,c.environment_id])); } catch { process.exit(1); }' "$(fm_backend_t3code_token_file)"
+}
+
+fm_backend_t3code_server_matches() {
+  [ -n "${1:-}" ] && [ "$(fm_backend_t3code_server_identity 2>/dev/null)" = "$1" ]
+}
+
 fm_backend_t3code_tool_check() {
   command -v node >/dev/null 2>&1 || { echo "error: backend=t3code selected but 'node' is not installed" >&2; return 1; }
   command -v treehouse >/dev/null 2>&1 || { echo "error: backend=t3code selected but 'treehouse' is not installed" >&2; return 1; }
@@ -379,23 +387,25 @@ fm_backend_t3code_send_key() {  # <thread-id> <key>
 # transcript visible in T3. Idempotent: an archived thread with no active run,
 # or one the verified server no longer has, is already the end state.
 fm_backend_t3code_kill() {  # <thread-id>
-  local thread=$1 out exists
+  local thread=$1 out exists recorded=${2-${FM_T3CODE_TASK_SERVER:-}}
+  fm_backend_t3code_server_matches "$recorded" || { echo "error: T3 creation server does not match the current credential" >&2; return 1; }
   out=$(fm_backend_t3code_thread_state "$thread") || return 1
   exists=$(printf '%s' "$out" | fm_backend_t3code_json_get exists) || return 1
   case "$exists" in
     true) ;;
-    false) return 0 ;;
+    false) fm_backend_t3code_server_matches "$recorded"; return $? ;;
     *) return 1 ;;
   esac
   if [ "$(printf '%s' "$out" | fm_backend_t3code_json_get archived)" = true ] \
     && ! printf '%s' "$out" | fm_backend_t3code_json_get activeRunId >/dev/null; then
-    return 0
+    fm_backend_t3code_server_matches "$recorded"
+    return $?
   fi
   if printf '%s' "$out" | fm_backend_t3code_json_get activeRunId >/dev/null; then
     fm_backend_t3code_native_interrupt "$thread" >/dev/null || return 1
   fi
   out=$(fm_backend_t3code_mcp archive --thread "$thread") || return 1
-  [ "$(printf '%s' "$out" | fm_backend_t3code_json_get closed)" = true ]
+  [ "$(printf '%s' "$out" | fm_backend_t3code_json_get closed)" = true ] && fm_backend_t3code_server_matches "$recorded"
 }
 
 # fm_backend_t3code_home_env_cleanup: remove what a T3 secondmate spawn wrote

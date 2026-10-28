@@ -919,6 +919,7 @@ escalate_freeze() {  # <buf> <submitted-message> <request-id>
     || ! mv -f "$buf.frozen.tmp" "$buf.frozen"; then
     rm -f "$buf.frozen.tmp" "$buf.frozen" "$buf.frozen-msg"
     log "digest freeze could not be recorded; the next flush rebuilds it"
+    return 1
   fi
 }
 
@@ -960,7 +961,7 @@ escalate_flush_frozen() {  # <state> <buf>
 # (escalate_freeze) is retried first, verbatim.
 ESCALATE_KEPT_FULL=
 escalate_flush() {  # <state>
-  local state=$1 buf msg full='' fresh=0 id=''
+  local state=$1 buf msg full='' fresh=0 id='' frozen_msg=''
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   if [ ! -f "$buf" ] || [ ! -r "$buf" ]; then
@@ -989,7 +990,14 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$ESCALATE_EVENTS" "$msg")
-  [ "${FM_SUPERVISOR_BACKEND:-tmux}" != t3code ] || id="fm-digest-$(_now)-$$-$RANDOM$RANDOM"
+  if [ "${FM_SUPERVISOR_BACKEND:-tmux}" = t3code ]; then
+    id="fm-digest-$(_now)-$$-$RANDOM$RANDOM"
+    msg=$(_collapse_newlines "$msg")
+    fm_operational_input_encode away-supervisor "$msg" frozen_msg || return 1
+    escalate_freeze "$buf" "$frozen_msg" "$id" || return 1
+    escalate_flush_frozen "$state" "$buf"
+    return $?
+  fi
   if inject_msg "$msg" "$state" "" "$id"; then
     unknown_wake_acknowledge_flushed "$state" "$buf" \
       || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
@@ -999,7 +1007,6 @@ escalate_flush() {  # <state>
   fi
   if [ "$INJECT_SUBMIT_ATTEMPTED" = 1 ]; then
     [ -z "$full" ] || ESCALATE_KEPT_FULL=$full
-    [ "$INJECT_LAST_VERDICT" != unconfirmed ] || escalate_freeze "$buf" "$INJECT_SENT_MSG" "$id"
   elif [ "$fresh" = 1 ]; then
     rm -f "$full"
   fi

@@ -489,10 +489,14 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
       esac
       ;;
     t3code)
+      fm_backend_t3code_server_matches "$(fm_meta_get "$meta" t3_server)" || { printf 'unproven\tT3 creation server does not match the current credential'; return 0; }
       # A T3 `missing` is the server's own answer (an archived thread or an
       # HTTP 404), never a reachability guess: an unreachable server reads
       # `unreadable` instead. Re-read the thread so the verdict is current.
-      case "$(fm_backend_t3code_agent_state "$target")" in
+      local t3_state
+      t3_state=$(fm_backend_t3code_agent_state "$target")
+      fm_backend_t3code_server_matches "$(fm_meta_get "$meta" t3_server)" || { printf 'unproven\tT3 creation server changed while proving absence'; return 0; }
+      case "$t3_state" in
         dead) printf 'dead\t' ;;
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;

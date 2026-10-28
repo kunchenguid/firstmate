@@ -714,6 +714,49 @@ CONTROL_LOCK_HELD=1
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
+remote_finalization_finish() {
+  local evidence="$STATE/.seat-retirement-$ID.json" tmp rc
+  [ -f "$evidence" ] && [ ! -L "$evidence" ] || return 1
+  if secondmate_registry_line_for_id "$SECONDMATE_REG" "$ID"; then
+    [ "$SECONDMATE_REGISTRY_REMOTE" = 1 ] || return 1
+  else
+    [ -f "$SECONDMATE_REG" ] && ! grep -qE "^- $ID( |$)" "$SECONDMATE_REG" || return 1
+    SECONDMATE_REGISTRY_HOST=$(jq -er '.local_finalization.host | strings | select(length > 0)' "$evidence") || return 1
+    SECONDMATE_REGISTRY_ROOT=$(jq -er '.local_finalization.root | strings | select(startswith("/"))' "$evidence") || return 1
+    SECONDMATE_REGISTRY_HOME=$(jq -er '.home | strings | select(startswith("/"))' "$evidence") || return 1
+  fi
+  jq -e --arg id "$ID" --arg host "$SECONDMATE_REGISTRY_HOST" --arg root "$SECONDMATE_REGISTRY_ROOT" --arg home "$SECONDMATE_REGISTRY_HOME" '
+    .task == $id and .home == $home and .destroyed == true
+    and .local_finalization.host == $host and .local_finalization.root == $root
+    and (.exit_code == 0 or .exit_code == 4)' "$evidence" >/dev/null || return 1
+  rc=$(jq -r .exit_code "$evidence") || return 1
+  rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
+    "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
+    "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID" || return 1
+  tmp=$(mktemp "$SECONDMATE_REG.XXXXXX") || return 1
+  if grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp"; then :; else
+    [ "$?" = 1 ] || { rm -f "$tmp"; return 1; }
+  fi
+  mv -f -- "$tmp" "$SECONDMATE_REG" || { rm -f "$tmp"; echo "error: remote registry publication failed; retirement evidence is preserved for retry" >&2; return 1; }
+  rm -f -- "$evidence" || return 1
+  printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$SECONDMATE_REGISTRY_HOST" "$SECONDMATE_REGISTRY_HOME"
+  return "$rc"
+}
+
+if [ ! -e "$META" ] && [ ! -L "$META" ] && [ -f "$STATE/.seat-retirement-$ID.json" ]; then
+  fm_lease_forbid_branch "secondmate retirement (fm-teardown)"
+  fm_supervisor_lifecycle_enter "$STATE" "$ID" 0 || exit 1
+  SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
+  META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+  fm_lock_acquire_wait "$META_LOCK" || exit 1
+  META_LOCK_HELD=1
+  [ ! -e "$META" ] && [ ! -L "$META" ] || exit 1
+  LOCAL_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+  fm_lock_acquire_wait "$LOCAL_REGISTRY_LOCK" || exit 1
+  remote_finalization_finish
+  exit $?
+fi
+
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -1312,17 +1355,12 @@ remote_secondmate_teardown() {
   teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || release_rc=$?
   [ "$release_rc" -eq 0 ] || return "$release_rc"
   teardown_retire_status "$STATE" "$ID" || return 1
+  tmp=$(umask 077; mktemp "$STATE/.seat-retirement-$ID.XXXXXX") || return 1
+  jq --arg host "$remote_host" --arg root "$remote_root" '.local_finalization = {host: $host, root: $root}' "$TEARDOWN_REMOTE_RETIREMENT" > "$tmp" \
+    && mv -f -- "$tmp" "$TEARDOWN_REMOTE_RETIREMENT" || { rm -f "$tmp"; return 1; }
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
-  tmp="$SECONDMATE_REG.tmp.$$"
-  grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
-  mv -f -- "$tmp" "$SECONDMATE_REG"
-  [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
-  rm -f -- "$TEARDOWN_REMOTE_RETIREMENT"
-  rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
-    "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
-    "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
-  printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
-  return "$rc"
+  remote_finalization_finish
+
 }
 
 remote_secondmate_teardown_locked() {
@@ -3485,6 +3523,11 @@ preflight_firstmate_home_herdr_children() {  # <home>
     if [ "$child_backend" = herdr ]; then
       teardown_herdr_preflight_target "$child_target" "$child_id" || return 1
     fi
+    if [ "$child_backend" = rex ]; then
+      [ -n "$(meta_value "$child_meta" rex_server)" ] && [ "$(meta_value "$child_meta" rex_server)" = "$(fm_backend_rex_server_endpoint)" ] || return 1
+    elif [ "$child_backend" = t3code ]; then
+      fm_backend_t3code_server_matches "$(meta_value "$child_meta" t3_server)" || return 1
+    fi
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     if [ "$child_kind" = secondmate ]; then
@@ -3612,7 +3655,7 @@ cleanup_firstmate_home_children() {
           # A verified route also permits retry after the previous close won.
           [ "$child_inventory_rc" -eq 2 ] || { [ "$child_inventory_rc" -eq 0 ] && [ -n "$child_windows" ]; } || return 1
         fi
-        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
+        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "$(meta_value "$child_meta" "${child_backend%code}_server")" \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
         child_inventory_rc=0
         child_windows=$(fm_backend_tmux_window_inventory "=${child_t%%:*}") || child_inventory_rc=$?
@@ -3624,7 +3667,7 @@ cleanup_firstmate_home_children() {
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
-        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) \
+        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "$(meta_value "$child_meta" "${child_backend%code}_server")" ) \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       elif [ "$child_backend" = rex ]; then
         child_rex_home=$home
@@ -3633,10 +3676,10 @@ cleanup_firstmate_home_children() {
           [ -n "$child_rex_home" ] || child_rex_home=$child_wt
         fi
         ( unset FM_ROOT_OVERRIDE; FM_HOME="$child_rex_home" FM_ROOT="$child_rex_home" STATE="$child_rex_home/state" \
-          fm_backend_kill "$child_backend" "$child_t" "" "fm-$child_id" ) \
+          fm_backend_kill "$child_backend" "$child_t" "" "fm-$child_id" "$(meta_value "$child_meta" rex_server)" ) \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       else
-        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
+        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "$(meta_value "$child_meta" "${child_backend%code}_server")" \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
@@ -3742,6 +3785,14 @@ remove_secondmate_registry_entry() {
   [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
   return "$rc"
 }
+
+if [ "$BACKEND" = rex ]; then
+  [ "$(fm_meta_get "$META" rex_server)" = "$(fm_backend_rex_server_endpoint)" ] && [ -n "$(fm_meta_get "$META" rex_server)" ] \
+    || { echo "error: Rex creation server does not match; preserving the task and its worktree" >&2; exit 1; }
+elif [ "$BACKEND" = t3code ]; then
+  fm_backend_t3code_server_matches "$(fm_meta_get "$META" t3_server)" \
+    || { echo "error: T3 creation server does not match; preserving the task and its worktree" >&2; exit 1; }
+fi
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
@@ -3996,7 +4047,7 @@ fi
 # T3 project is deliberately left in place: project.delete refuses while the
 # archived thread exists and would take that transcript with it under force.
 if [ "$BACKEND" = t3code ]; then
-  fm_backend_kill t3code "$T" || {
+  fm_backend_kill t3code "$T" "" "fm-$ID" "$(meta_value "$META" t3_server)" || {
     echo "error: could not stop and archive T3 thread $T for $ID; start T3 Code (or archive the thread there) and re-run teardown" >&2
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
@@ -4020,7 +4071,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     remove_harness_worktree_wiring "$WT"
   fi
   if [ -n "$T_ORCA" ]; then
-    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" rex_server)" \
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -4130,7 +4181,7 @@ elif [ "$BACKEND" = herdr ]; then
   fi
 elif [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
-    fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
+    fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" "$(meta_value "$META" rex_server)" ) \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
@@ -4139,7 +4190,7 @@ elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$TEARDOWN_WINDOWLE
   if [ "$BACKEND" = rex ] && { [ -e "$STATE/.rex-mark-$ID" ] || [ -e "$STATE/.rex-progress-$ID" ] || [ -e "$STATE/.rex-tint-$ID" ]; }; then
     FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" clear "$ID" >/dev/null 2>&1 || true
   fi
-  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" rex_server)" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
