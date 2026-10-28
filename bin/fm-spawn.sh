@@ -7454,8 +7454,9 @@ fi
 # kill switch below it is an export statement, so it survives a compound raw
 # launch and the launch-env-allowlist `env -i` wrapper.
 LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
-# Codex max and ultra were checked against this Codex home's catalog, so the
-# worker runs with that same home rather than the pane daemon's.
+# Catalog-dependent Codex max and ultra were checked against this Codex home's
+# catalog, so the worker runs with that same home rather than the pane daemon's.
+# A filtered launch keeps its allowlisted environment instead.
 if [ "$LAUNCH_ENV_ENABLED" != 1 ]; then
   case "$HARNESS:$EFFORT" in
   codex:max | codex:ultra) LAUNCH="export CODEX_HOME=$(shell_quote "${CODEX_HOME:-$HOME/.codex}"); $LAUNCH" ;;
