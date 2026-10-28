@@ -3544,6 +3544,24 @@ test_secondmate_liveness_tick_unqueued_outcome_is_an_error_not_a_wake() {
   pass "watch liveness: an outcome that could not be queued surfaces as an error, not a wake"
 }
 
+test_secondmate_liveness_tick_refuses_failed_queue_snapshot() {
+  local dir state pid rc
+  dir=$(make_secondmate_liveness_case liveness-queue-read-refusal)
+  state="$dir/state"
+  run_liveness_leg "$dir" queue-read-refusal FM_FAKE_WINDOW_GONE=1 FM_WAKE_QUEUE_LOCK_WAIT=invalid; pid=$LIVENESS_PID
+  rc=0
+  wait_for_exit "$pid" 300 || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "a failed queued-key read did not fail the watcher (rc=$rc): $(cat "$dir/watch-queue-read-refusal.out" "$dir/watch-queue-read-refusal.err")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a failed queued-key read appended from an empty snapshot: $(cat "$state/.wake-queue")"
+  ! grep -F 'check: secondmate sm1 auto-relaunched' "$dir/watch-queue-read-refusal.out" >/dev/null \
+    || fail "an unqueued liveness outcome was surfaced as delivered"
+  grep -F 'queued-key read failed; check wake was not queued' "$dir/watch-queue-read-refusal.err" >/dev/null \
+    || fail "the failed queued-key read was not reported: $(cat "$dir/watch-queue-read-refusal.err")"
+  pass "watch liveness: failed queued-key reads do not append or wake"
+}
+
 test_secondmate_liveness_tick_skips_mate_whose_lock_is_held() {
   local dir state pid holder
   dir=$(make_secondmate_liveness_case liveness-locked)
@@ -3685,5 +3703,6 @@ test_secondmate_liveness_tick_relaunch_failure_reports_once
 test_secondmate_liveness_tick_fails_closed_on_ledger_errors
 test_secondmate_liveness_tick_error_keeps_scanning_and_wakes
 test_secondmate_liveness_tick_unqueued_outcome_is_an_error_not_a_wake
+test_secondmate_liveness_tick_refuses_failed_queue_snapshot
 test_secondmate_liveness_tick_skips_mate_whose_lock_is_held
 test_secondmate_liveness_tick_preserves_unreachable_remote
