@@ -227,8 +227,8 @@ test_claude_stop_hook_rewakes_at_a_park_boundary_over_an_acknowledged_episode() 
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "hook boundary: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
   sleep 2
-  printf 'acked:downtime:seeded.1\n' > "$home/state/.watcher-down.seed" \
-    && mv -f "$home/state/.watcher-down.seed" "$home/state/.watcher-down" \
+  printf 'acked:downtime:seeded.1\n' > "$home/state/.watcher-down.seed"
+  mv -f "$home/state/.watcher-down.seed" "$home/state/.watcher-down" \
     || fail "fixture: could not acknowledge a downtime episode"
   acknowledged=$(cat "$home/state/.watcher-down" 2>/dev/null || true)
   case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac

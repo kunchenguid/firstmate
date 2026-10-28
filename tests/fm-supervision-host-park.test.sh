@@ -293,8 +293,8 @@ test_park_boundary_hands_an_acknowledged_episode_back_announced() {
   FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
   wait_until 150 watcher_live "$home" || fail "acked boundary: the host never started a watcher cycle"
   wait_until 150 grep -qs '^watcher: started pid=' "$home/host.out" || fail "acked boundary: the first cycle never reported its watcher"
-  printf 'acked:downtime:seeded.1\n' > "$home/state/.watcher-down.seed" \
-    && mv -f "$home/state/.watcher-down.seed" "$home/state/.watcher-down" \
+  printf 'acked:downtime:seeded.1\n' > "$home/state/.watcher-down.seed"
+  mv -f "$home/state/.watcher-down.seed" "$home/state/.watcher-down" \
     || fail "fixture: could not acknowledge a downtime episode"
   acknowledged=$(cat "$home/state/.watcher-down" 2>/dev/null || true)
   case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
