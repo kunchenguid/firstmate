@@ -1925,6 +1925,7 @@ The file is one JSON object keyed by provider, `typesafe` or `openrouter`, and e
 
 `source` is required and names the adapter, and `macos-keychain` is the first.
 It requires `service`, accepts an optional `account`, and reads that generic-password item with `security find-generic-password -s <service> [-a <account>] -w`.
+Store the item with `security add-generic-password -s <service> [-a <account>] -w`, which prompts for the key and lets `security` read it back without an access dialog.
 Only the service and account reach `security`'s argument list, and the key comes back on a pipe.
 No other field is accepted, so the file has nowhere to put a key.
 `bin/fm-credential-source-lib.sh` owns the schema and the adapters, so a further source adds an adapter there rather than a special case in the resolver.
