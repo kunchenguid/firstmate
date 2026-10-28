@@ -2374,6 +2374,38 @@ test_gate_after_done_or_paused_wakes_once_per_gate() {
   pass "a gate that opens after a done or paused line wakes once per gate"
 }
 
+test_gate_reparked_after_answer_wakes_again() {
+  local dir state out pid gate
+  gate='state: parked · source: run-step · parked at test: 1 finding(s) · ask-user: authority decision · run: 01RUN'
+  make_wait_gate_case wait-gate-reparked 'done: PR https://example.test/pr/3 checks green'
+  dir=$WG_DIR; state="$dir/state"; out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE=$gate
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the first gate did not wake"; }
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first gate wake"
+
+  : > "$out"; : > "$dir/crew-state.log"
+  printf 'harness=grok\n' >> "$state/wg.meta"
+  printf 'answering the gate Ctrl+c:cancel' > "$dir/pane.txt"
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "a busy pane woke: $(cat "$out")"
+  wait_poll_cycle "$state" "$pid" || fail "a busy pane woke: $(cat "$out")"
+  reap "$pid"
+  ack_stopped_cycle "$state" || true
+
+  : > "$out"; : > "$dir/crew-state.log"
+  printf 'finished, awaiting review' > "$dir/pane.txt"
+  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the same gate re-parked after an answer did not wake again"; }
+  grep -F "validation gate after done" "$out" >/dev/null || fail "the re-parked gate wake is wrong: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a gate that re-parks after the worker acted on an answer wakes again"
+}
+
 test_no_gate_after_done_stays_silent() {
   local dir state out pid
   make_wait_gate_case wait-gate-none 'done: PR https://example.test/pr/3 checks green'
@@ -5460,6 +5492,7 @@ fm_test_run \
   test_terminal_stale_surfaced \
   test_stale_terminal_status_overridden_by_active_run \
   test_gate_after_done_or_paused_wakes_once_per_gate \
+  test_gate_reparked_after_answer_wakes_again \
   test_no_gate_after_done_stays_silent \
   test_nonterminal_stale_provably_working_absorbed_then_escalated \
   test_wedge_escalation_marks_demand_deep_inspection_after_threshold \
