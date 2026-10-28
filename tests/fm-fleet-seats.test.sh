@@ -1871,6 +1871,7 @@ rex_window_id=window:$sid
 rex_block_id=block:$bid
 rex_server=unix:/recorded-rex
 spawn_gen=g-sm"
+  # shellcheck disable=SC2016
   env FM_HOME="$home" SEATS="$SEATS" TARGET="$target" bash -c '
     "$SEATS" reserve sm --generation g-sm --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" || exit
     route="$FM_HOME/route.json"

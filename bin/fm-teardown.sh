@@ -732,7 +732,10 @@ remote_finalization_finish() {
   if [ "$(jq -r '.local_finalization.ledger_cleaned_up // false' "$evidence")" != true ]; then
     [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
     tmp=$(umask 077; mktemp "$STATE/.seat-retirement-$ID.XXXXXX") || return 1
-    jq '.local_finalization.ledger_cleaned_up = true' "$evidence" > "$tmp" && mv -f -- "$tmp" "$evidence" || { rm -f "$tmp"; return 1; }
+    if ! (jq '.local_finalization.ledger_cleaned_up = true' "$evidence" > "$tmp" && mv -f -- "$tmp" "$evidence"); then
+      rm -f "$tmp"
+      return 1
+    fi
   fi
   rc=$(jq -r .exit_code "$evidence") || return 1
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
@@ -1362,8 +1365,11 @@ remote_secondmate_teardown() {
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
   teardown_retire_status "$STATE" "$ID" || return 1
   tmp=$(umask 077; mktemp "$STATE/.seat-retirement-$ID.XXXXXX") || return 1
-  jq --arg host "$remote_host" --arg root "$remote_root" '.local_finalization = {host: $host, root: $root, ledger_cleaned_up: true}' "$TEARDOWN_REMOTE_RETIREMENT" > "$tmp" \
-    && mv -f -- "$tmp" "$TEARDOWN_REMOTE_RETIREMENT" || { rm -f "$tmp"; return 1; }
+  if ! (jq --arg host "$remote_host" --arg root "$remote_root" '.local_finalization = {host: $host, root: $root, ledger_cleaned_up: true}' "$TEARDOWN_REMOTE_RETIREMENT" > "$tmp" \
+    && mv -f -- "$tmp" "$TEARDOWN_REMOTE_RETIREMENT"); then
+    rm -f "$tmp"
+    return 1
+  fi
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   remote_finalization_finish
 
