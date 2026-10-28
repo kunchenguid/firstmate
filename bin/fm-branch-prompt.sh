@@ -83,7 +83,7 @@ A second mate's stale wake is a liveness event: report it even when it presents 
 
 # Verdict: routine or captain
 
-Report verdict captain for the finished result of work the captain requested, even when that result is healthy.
+Report verdict captain for the finished result of work the captain requested, even when that result is healthy. This includes a meaningful completion, an actionable failure or blocker, a failure to start, or a fresh consequential review finding; these outcomes must open MAIN processing and are never routine merely because no new choice is required.
 A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine.
 Set silent true for a task-level routine outcome only when it says the worker is still busy, nothing new has happened since the last outcome, and no action was taken.
 Any routine outcome reporting an action, state change, or new result stays rendered; captain outcomes are never silent.
