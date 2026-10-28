@@ -1129,6 +1129,12 @@ done
   echo "error: --account requires a non-empty value" >&2
   exit 1
 }
+# A secondmate, local or remote, launches on its own per-mate pin, so --account
+# is refused here, before the remote route could ignore it.
+[ "$ACCOUNT_SET" -eq 0 ] || [ "$KIND" != secondmate ] || {
+  echo "error: --account applies to ships and scouts; secondmate ${POS[0]:-} launches on its own config/secondmate-accounts/<id>/claude-account pin" >&2
+  exit 1
+}
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.

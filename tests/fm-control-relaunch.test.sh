@@ -1001,7 +1001,7 @@ test_account_list_relaunch_moves_only_on_explicit_account() {
 
 test_account_list_relaunch_refusals_happen_before_stop() {
   local dir out rc id=rl-list-refuse case_name recorded flag needle
-  for case_name in undeclared signed-out unrecorded removed wrong-harness; do
+  for case_name in undeclared newline signed-out unrecorded removed wrong-harness; do
     dir=$(new_case "list-refuse-$case_name" "$id")
     recorded="$dir/first"
     flag=()
@@ -1009,6 +1009,9 @@ test_account_list_relaunch_refusals_happen_before_stop() {
       undeclared)
         flag=(--account "$dir/elsewhere")
         needle="account '$dir/elsewhere' is not declared in config/claude-accounts" ;;
+      newline)
+        flag=(--account "$dir/elsewhere"$'\n'"$dir/second")
+        needle="--account must name one config/claude-accounts entry exactly, with no control characters" ;;
       signed-out)
         flag=(--account "$dir/signed-out")
         needle="config/claude-accounts pins Claude workers to $dir/signed-out, which is not signed in" ;;
@@ -1031,7 +1034,7 @@ test_account_list_relaunch_refusals_happen_before_stop() {
     [ ! -s "$dir/fake/literal" ] || fail "the $case_name refusal must send no lifecycle input"
     cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "the $case_name refusal must leave the task record untouched"
   done
-  pass "fm-control relaunch: undeclared, signed-out, unrecorded, retired, and wrong-runner accounts refuse before the old agent stops"
+  pass "fm-control relaunch: undeclared, newline-split, signed-out, unrecorded, retired, and wrong-runner accounts refuse before the old agent stops"
 }
 
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop() {

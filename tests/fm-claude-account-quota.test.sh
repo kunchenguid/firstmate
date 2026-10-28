@@ -30,12 +30,12 @@ SH
   chmod +x "$FAKEBIN/quota-axi"
 }
 
-# account <dir> <all_models-percent> <all_models-spendPriority> [runway] [model-scope-spendPriority]
+# account <dir> <all_models-percent> <all_models-spendPriority> [runway] [model-scope-spendPriority] [usableRunwaySeconds]
 # A Claude root whose profile-only read reports these numbers.
 account() {
-  local dir=$1 pct=$2 sp=$3 runway=${4:-through_reset} model_sp=${5:-}
+  local dir=$1 pct=$2 sp=$3 runway=${4:-through_reset} model_sp=${5:-} seconds=${6:-}
   mkdir -p "$dir"
-  jq -n --argjson pct "$pct" --argjson sp "$sp" --arg runway "$runway" --arg model_sp "$model_sp" '{
+  jq -n --argjson pct "$pct" --argjson sp "$sp" --arg runway "$runway" --arg model_sp "$model_sp" --arg seconds "$seconds" '{
     schemaVersion: 5,
     providers: [{
       provider: "claude",
@@ -43,7 +43,8 @@ account() {
         status: "known",
         effectiveAvailability: ([
           {scope: "all_models", status: "known", effectivePercentRemaining: $pct,
-           runway: {status: $runway}, selection: {spendPriority: $sp}}
+           runway: ({status: $runway} + (if $seconds == "" then {} else {usableRunwaySeconds: ($seconds | tonumber), projectionConfidence: "established"} end)),
+           selection: {spendPriority: $sp}}
         ] + (if $model_sp == "" then [] else [
           {scope: "model:opus", status: "known", effectivePercentRemaining: 50,
            runway: {status: "through_reset"}, selection: {spendPriority: ($model_sp | tonumber)}}
@@ -124,6 +125,25 @@ test_exhausted_and_unreadable_accounts_print_facts() {
   pass "exhausted, 0%, and unreadable accounts print facts and uncertainty without a verdict"
 }
 
+test_projected_runway_prints_its_seconds() {
+  local out
+  new_case runway
+  account "$CASE/long" 80 0.4 projected_exhaustion "" 241920
+  account "$CASE/short" 30 0.9 projected_exhaustion "" 2700
+  account "$CASE/unknown" 50 0.5 projected_exhaustion
+  printf '%s\n' "$CASE/long" "$CASE/short" "$CASE/unknown" > "$HOME_DIR/config/claude-accounts"
+  out=$(run_tool)
+  assert_contains "$out" "row: $CASE/long  root=$CASE/long  scope=all_models  status=known  remaining=80%  spendPriority=0.4  runway=projected_exhaustion  usableRunwaySeconds=241920  confidence=established" \
+    "a projected exhaustion should carry its runway seconds"
+  assert_contains "$out" "row: $CASE/short  root=$CASE/short  scope=all_models  status=known  remaining=30%  spendPriority=0.9  runway=projected_exhaustion  usableRunwaySeconds=2700  confidence=established" \
+    "each account should carry its own runway seconds"
+  assert_contains "$out" "row: $CASE/unknown  root=$CASE/unknown  scope=all_models  status=known  remaining=50%  spendPriority=0.5  runway=projected_exhaustion  usableRunwaySeconds=-" \
+    "a projection without seconds should show that it is missing"
+  assert_not_contains "$out" "runway=through_reset  usableRunwaySeconds" "through_reset carries no runway seconds"
+  assert_no_choice "$out"
+  pass "a projected exhaustion prints each account's own runway seconds and confidence without a verdict"
+}
+
 test_a_rate_limited_account_names_the_vendor_reason() {
   local out
   new_case rate-limited
@@ -166,6 +186,7 @@ test_absent_or_malformed_lists_refuse() {
 test_two_accounts_print_their_own_rows
 test_the_model_scope_is_printed
 test_exhausted_and_unreadable_accounts_print_facts
+test_projected_runway_prints_its_seconds
 test_a_rate_limited_account_names_the_vendor_reason
 test_ordinary_is_measured_from_the_default_root
 test_absent_or_malformed_lists_refuse

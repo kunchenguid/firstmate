@@ -38,7 +38,7 @@ It never removes this skill's authority, and its `ambiguous`, `escalate`, and `e
 When the home declares `config/claude-accounts`, each Claude candidate is one candidate per declared account, and the spawn needs the chosen account as `--account <entry>`.
 Measure them with `bin/fm-claude-account-quota.sh [--model <model>]` instead of the default TOON's single `claude` row, which reads only the ambient account; its header owns the per-account read and output.
 It prints data only, never a choice: each account's applicable scopes and any uncertainty it could not measure.
-Apply the three gates below to each account's rows, rank the eligible ones by their limiting scope's `spendPriority` exactly as for profiles, and pass the chosen entry as `--account <entry>`.
+Apply the three gates below to each account's rows, taking a projected runway's time from the row's own `usableRunwaySeconds`, rank the eligible ones by their limiting scope's `spendPriority` exactly as for profiles, and pass the chosen entry as `--account <entry>`.
 A genuine tie or no rankable account is the same terminal case as below: decide in the open from the rows or ask the captain, never by file order.
 Account for every declared account in the rationale, including unmeasured ones.
 A typed-resolver `clear` profile for Claude still needs this step's `--account`.

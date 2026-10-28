@@ -237,9 +237,11 @@ fm_worker_account_list() {
 # the explicit one when given, otherwise the task's recorded account when the
 # home declares config/claude-accounts and a Claude ship or scout stays on
 # Claude. Prints nothing otherwise, so a relaunch without a list re-reads the
-# pin exactly as before. Returns 1 only when the list cannot be read.
+# pin exactly as before. Returns 1 when the explicit account holds a control
+# character or the list cannot be read.
 fm_worker_account_relaunch_request() {
   local harness=$1 config=$2 prior=$3 recorded=$4 explicit=$5 mate=${6:-} listed
+  fm_worker_account_request_valid "$explicit" || return 1
   if [ -n "$explicit" ] || [ -n "$mate" ]; then
     printf '%s\n' "$explicit"
     return 0
@@ -315,6 +317,19 @@ fm_worker_account_check() {
   return 0
 }
 
+# fm_worker_account_request_valid <account>
+# Refuses an --account value holding a control character. Declared entries
+# never hold one, and a newline would otherwise split the value before the
+# whole-entry membership check or the account= record sees it.
+fm_worker_account_request_valid() {
+  case "$1" in
+  *[[:cntrl:]]*)
+    echo "error: --account must name one config/claude-accounts entry exactly, with no control characters" >&2
+    return 1
+    ;;
+  esac
+}
+
 # fm_worker_account_select <harness> <config-dir> <model> <executable> [<raw-command>] [<secondmate-id>] [<account>]
 # The whole launch-time decision. Prints nothing for an unpinned runner, so
 # the caller keeps today's launch unchanged. For a pinned one, or a Claude
@@ -327,6 +342,7 @@ fm_worker_account_check() {
 fm_worker_account_select() {
   local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} mate=${6:-} account=${7:-}
   local selection declared root providers word provider='' selected_config setting listed count
+  fm_worker_account_request_valid "$account" || return 1
   if [ -n "$account" ] && [ "$harness" != claude ]; then
     echo "error: --account names one of config/claude-accounts and applies to Claude workers only, not $harness" >&2
     return 1
@@ -357,7 +373,11 @@ fm_worker_account_select() {
       echo "error: config/claude-accounts declares $count Claude accounts, so a Claude ship or scout launch must name one with --account; bin/fm-claude-account-quota.sh measures each, and Firstmate never picks a default" >&2
       return 1
     fi
-    printf '%s\n' "$listed" | grep -qxF -- "$account" || {
+    declared=
+    while IFS= read -r word; do
+      [ "$word" != "$account" ] || { declared=$account; break; }
+    done <<< "$listed"
+    [ -n "$declared" ] || {
       echo "error: account '$account' is not declared in config/claude-accounts; name a declared entry with --account" >&2
       return 1
     }
