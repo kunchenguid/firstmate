@@ -5834,6 +5834,33 @@ runs[2]{id,branch,status,head,pr}:
   pass 'older live status does not hide a newer completed run'
 }
 
+test_failed_selected_detail_read_is_not_attributed() {
+  reset_fakes
+  local d new_head old_head out
+  d=$(new_case failed-selected-detail)
+  make_repo_on_branch "$d/wt" fm/reused-branch
+  new_head=$(git -C "$d/wt" rev-parse HEAD)
+  old_head=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/reused.meta" "window=fm:fm-reused" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating the current run\\n' > "$d/state/reused.status"
+  FM_FAKE_AXI_HOME="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  \"01NEW\",fm/reused-branch,completed,$new_head,\"https://github.com/o/r/pull/2\"
+  \"01OLD\",fm/reused-branch,running,$old_head,\"\""
+  FM_FAKE_RUN_HEAD=$old_head
+  FM_FAKE_AXI_STATUS="$(run_running fm/reused-branch | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_STATUS_RUN_01OLD="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_AXI_STATUS_RUN_01NEW="$(FM_FAKE_RUN_HEAD=$new_head run_passed fm/reused-branch | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS_RUN_ERROR=1
+  FM_FAKE_RUNS_LIST="  completed fm/reused-branch ${new_head:0:7} 2026-09-28 12:00
+  running fm/reused-branch ${old_head:0:7} 2026-09-28 12:00"
+  out=$(run_crew_state "$d" reused)
+  assert_contains "$out" 'selected run unreadable' 'a failed selected-run read reports unknown'
+  assert_not_contains "$out" 'state: done' 'output from a failed selected-run read is not attributed'
+  pass 'failed selected-run detail read is not attributed'
+}
+
 test_newer_failed_run_is_not_hidden_by_older_live_run() {
   make_competing_runs_case newest-failed failed running
   local d=$TMP_ROOT/newest-failed out
@@ -6210,6 +6237,7 @@ test_current_active_run_beats_stale_failed_overview_row
 test_current_active_run_beats_same_head_stale_failed_overview_row
 test_same_head_run_with_unverifiable_timestamp_reports_unknown
 test_older_live_status_does_not_hide_newer_completed_run
+test_failed_selected_detail_read_is_not_attributed
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown

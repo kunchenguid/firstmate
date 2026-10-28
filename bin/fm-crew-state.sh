@@ -1040,10 +1040,10 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           && fm_nm_run_is_active "$RUN_OUT"; then
           case ",$candidate_ids," in
             *,"$reported_id",*|*,\ "$reported_id",*)
-              selected_detail=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") || true
+              selected_detail=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") || selected_detail=
               selected_head=$(strip_quotes "$(fm_nm_field "$selected_detail" head)")
               reported_head=$(strip_quotes "$(fm_nm_field "$RUN_OUT" head)")
-              if fm_nm_run_is_newer_than_selected "$CREW_BRANCH" "$selected_id" "$reported_id" "$candidate_ids" "$selected_head" "$reported_head" "$(nm_runs_list)"; then
+              if fm_nm_run_is_newer_than_selected "$CREW_BRANCH" "$selected_id" "$reported_id" "$selected_head" "$reported_head" "$(nm_runs_list)"; then
                 selected_id=$reported_id
                 selected_status=running
                 selected_detail=
