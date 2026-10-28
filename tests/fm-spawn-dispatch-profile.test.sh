@@ -715,6 +715,27 @@ CASES
   out=$(CODEX_HOME="$TMP_ROOT/missing" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max 2>&1)
   expect_code 0 "$?" "Luna max must not need the catalog: $out"
   [ "$(codex_pane_run "$pane")" = "max|$TMP_ROOT/missing|" ] || fail "Luna max did not reach launch without a catalog"
+  # A relative CODEX_HOME, present or missing, names the caller's store and
+  # reaches the worker as that same absolute path.
+  id=codex-relative-home-ultra
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  out=$(cd "$TMP_ROOT" && CODEX_HOME=codex-catalog run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-6.1-terra --effort ultra 2>&1)
+  expect_code 0 "$?" "relative CODEX_HOME ultra spawn failed: $out"
+  [ "$(codex_pane_run "$pane")" = "ultra|$CODEX_HOME|" ] || fail "relative CODEX_HOME did not reach launch as the caller's absolute path"
+  id=codex-relative-missing-ultra
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  out=$(cd "$TMP_ROOT" && CODEX_HOME=missing run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-6.1-terra --effort ultra 2>&1)
+  expect_code 1 "$?" "missing relative CODEX_HOME must refuse ultra: $out"
+  assert_contains "$out" "$TMP_ROOT/missing/models_cache.json is unavailable" "missing relative catalog was not resolved against the caller"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing relative catalog launched"
+  id=codex-relative-missing-luna
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  out=$(cd "$TMP_ROOT" && CODEX_HOME=missing run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max 2>&1)
+  expect_code 0 "$?" "Luna max with a missing relative CODEX_HOME failed: $out"
+  [ "$(codex_pane_run "$pane")" = "max|$TMP_ROOT/missing|" ] || fail "missing relative CODEX_HOME did not reach launch as the caller's absolute path"
   out=$(CODEX_HOME="$TMP_ROOT/missing" "$ROOT/bin/fm-harness.sh" validate-native-effort codex gpt-6.1-terra ultra 2>&1) && fail "missing catalog must refuse ultra"
   assert_contains "$out" "catalog" "missing catalog refusal did not name the catalog"
   assert_contains "$out" "unavailable" "missing catalog refusal was not distinguished"

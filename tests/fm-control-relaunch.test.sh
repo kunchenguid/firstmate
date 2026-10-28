@@ -961,7 +961,8 @@ test_codex_catalog_effort_relaunch() {
       [ "$(cat "$dir/fake/command")" = codex ] || fail "unsupported Codex relaunch stopped the agent"
       [ ! -s "$dir/fake/literal" ] || fail "unsupported Codex relaunch sent lifecycle input"
     fi
-    out=$(CODEX_HOME="$dir/catalog" run_control "$dir" "$id" relaunch --harness codex --model gpt-6.1-terra --effort "$effort" --note "supported profile"); rc=$?
+    # A relative CODEX_HOME names the caller's store, not one under the worktree.
+    out=$(cd "$dir" && CODEX_HOME=catalog run_control "$dir" "$id" relaunch --harness codex --model gpt-6.1-terra --effort "$effort" --note "supported profile"); rc=$?
     expect_code 0 "$rc" "supported Codex relaunch failed: $out"
     [ "$(meta_field "$dir" "$id" model)" = gpt-6.1-terra ] || fail "Codex relaunch lost model"
     [ "$(meta_field "$dir" "$id" effort)" = "$effort" ] || fail "Codex relaunch lost effort"
@@ -973,10 +974,15 @@ test_codex_catalog_effort_relaunch() {
   add_ship_task "$dir" "$id" codex
   printf codex > "$dir/fake/command"
   printf codex > "$dir/fake/becomes"
-  out=$(CODEX_HOME="$dir/missing" run_control "$dir" "$id" relaunch --harness codex --model gpt-5 --effort max --note "unsupported max"); rc=$?
+  out=$(cd "$dir" && CODEX_HOME=missing run_control "$dir" "$id" relaunch --harness codex --model gpt-6.1-terra --effort ultra --note "missing catalog"); rc=$?
+  expect_code 1 "$rc" "Codex ultra relaunch without a catalog must fail: $out"
+  assert_contains "$out" "$dir/missing/models_cache.json is unavailable" "missing relative catalog was not resolved against the caller"
+  [ "$(cat "$dir/fake/command")" = codex ] || fail "missing-catalog Codex relaunch stopped the agent"
+  out=$(cd "$dir" && CODEX_HOME=missing run_control "$dir" "$id" relaunch --harness codex --model gpt-5 --effort max --note "unsupported max"); rc=$?
   expect_code 0 "$rc" "unsupported Codex max relaunch should omit the effort: $out"
   [ "$(meta_field "$dir" "$id" effort)" = max ] || fail "Codex max relaunch lost recorded effort"
   assert_not_contains "$(cat "$dir/fake/literal")" "model_reasoning_effort" "unsupported Codex max relaunch threaded the effort"
+  assert_contains "$(cat "$dir/fake/literal")" "export CODEX_HOME='$dir/missing'" "Codex relaunch did not export the caller-resolved missing Codex home"
   pass "Codex max and ultra relaunch keep the validated Codex home, omit unsupported max, and reject unsupported ultra before stopping"
 }
 
