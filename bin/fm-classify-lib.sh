@@ -76,14 +76,15 @@ unset _fm_classify_nounset
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
-# its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
-# needs a custom verb vocabulary; absent, this default applies.
+# its away-mode classification. FM_CAPTAIN_RE overrides the configurable set when
+# a home needs a custom verb vocabulary; it cannot suppress the exact
+# no-mistakes implementation handoff. Absent, this default applies.
 #
 # Free-text tokens (PR ready, checks green, ready in branch, merged) exist only for
 # legacy lines that lack a standard terminal verb. status_is_captain_relevant is
-# verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
-# merely because its prose contains one of those tokens (for example
-# "working: rebased onto merged #76").
+# verb-aware: apart from the no-mistakes implementation handoff, a nonterminal
+# working: or paused: line never becomes captain-relevant merely because its prose
+# contains one of those tokens (for example "working: rebased onto merged #76").
 # A declaration whose prefix is not one of those verbs is still an event, shown
 # as the line itself. That covers an unknown word such as parked: or holding:,
 # and a known verb whose correlation token is missing or mismatched, so the
@@ -289,10 +290,11 @@ status_is_terminal_verb() {
 }
 
 # 0 if the given (last) status line matches a captain-relevant verb.
-# Verb-aware by default: terminal verbs always match; nonterminal progress verbs
-# (working, resolved, captain-held) and paused never match from free-text prose;
-# only lines without those leading verbs may still match free-text tokens for
-# legacy bare lines such as "merged" or "PR ready".
+# Verb-aware by default: terminal verbs always match; the exact no-mistakes
+# implementation handoff matches; other nonterminal progress verbs (working,
+# resolved, captain-held) and paused never match from free-text prose. Only lines
+# without those leading verbs may still match free-text tokens for legacy bare
+# lines such as "merged" or "PR ready".
 # Regex matching ignores any emission-time tag before the first colon - here and
 # in the shared event scan, the module's two FM_CAPTAIN_RE sites - so an override
 # keeps matching a stamped event however the worker spelled the stamp; other
@@ -302,7 +304,11 @@ status_is_captain_relevant() {
   [ -n "$line" ] || return 1
   status_line_verb "$line" verb
   case "$verb" in
-    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+    working)
+      [ "$(status_line_note "$line")" = "implemented, ready for the pipeline" ]
+      return
+      ;;
+    resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
       ;;
   esac
