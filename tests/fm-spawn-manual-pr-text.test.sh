@@ -3,8 +3,7 @@
 # title and body itself while the pipeline's pr and ci steps are skipped
 # (bin/fm-project-mode.sh owns the registry token, bin/fm-dod-lib.sh the
 # contract). These drive the real spawn path with a fake terminal: the task
-# record carries pr_text=manual only when the brief and the registry agree, and
-# an ordinary no-mistakes task record stays unchanged.
+# spawn launches only when the brief and the registry agree on the token.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -49,21 +48,17 @@ run_spawn() {  # <id> <args...>
 }
 
 test_spawn_records_the_registered_pr_text() {
-  local id out status meta
+  local id out status
   id=pr-text-s1
   make_case record "$id" "no-mistakes pr=manual" --pr manual
   out=$(run_spawn "$id" --mode no-mistakes --yolo off); status=$?
   expect_code 0 "$status" "a pr=manual no-mistakes spawn should launch"$'\n'"$out"
-  meta="$HOME_DIR/state/$id.meta"
-  assert_grep 'pr_text=manual' "$meta" "the spawn did not record pr_text=manual"
-  [ "$(grep -c '^pr_text=' "$meta")" -eq 1 ] || fail "the task record holds pr_text more than once"
 
   id=pr-text-s2
   make_case plain "$id" "no-mistakes"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off); status=$?
   expect_code 0 "$status" "an ordinary no-mistakes spawn should launch"$'\n'"$out"
-  assert_no_grep 'pr_text=' "$HOME_DIR/state/$id.meta" "an ordinary task record gained a pr_text line"
-  pass "fm-spawn: pr_text=manual is recorded only for a pr=manual task"
+  pass "fm-spawn: a brief and registry that agree on pr=manual or on no token both launch"
 }
 
 test_spawn_refuses_a_pr_text_mismatch_before_launch() {

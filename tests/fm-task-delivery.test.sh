@@ -626,7 +626,7 @@ EOF
 # registry token is carried into the brief's contract line, the pipeline's pr and
 # ci steps are skipped, and the worker writes and publishes the text itself.
 test_pr_manual_brief_hands_the_pr_text_to_the_worker() {
-  local home brief plain
+  local home brief plain based
   home="$TMP_ROOT/pr-manual-brief/home"
   mkdir -p "$home/data" "$home/state"
   FM_HOME="$home" "$BRIEF" pr-manual-b1 proj --mode no-mistakes --pr manual >/dev/null \
@@ -650,6 +650,15 @@ test_pr_manual_brief_hands_the_pr_text_to_the_worker() {
   assert_grep 'ask-user findings are never yours to answer' "$brief" "the ask-user escalation rule was lost"
   assert_no_grep 'checks-passed' "$brief" "the worker was told to wait for a return its skipped ci step never gives"
   assert_no_grep 'Pass `--skip push' "$brief" "the worker was told to skip the push the named-head rule depends on"
+
+  FM_HOME="$home" "$BRIEF" pr-manual-b3 proj --mode no-mistakes --pr manual --base-branch release/2 >/dev/null \
+    || fail "a pr=manual brief with a base branch should scaffold"
+  based="$home/data/pr-manual-b3/brief.md"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'pass `--base-branch release/2` on every `no-mistakes axi run`' "$based" "the worker was not told to rebase onto the base branch"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'open the PR against it with `--base release/2`' "$based" "the worker was not told to open the PR against the base"
+  assert_no_grep 'watches CI for that branch' "$based" "the pr=manual brief still claims the pipeline opens the PR and watches CI"
 
   FM_HOME="$home" "$BRIEF" pr-manual-b2 proj --mode no-mistakes >/dev/null \
     || fail "a default no-mistakes brief should scaffold"
@@ -762,7 +771,6 @@ STUB
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1) \
     || fail "promotion should take the registered pr binding with no flag to remember: $out"
-  assert_grep 'pr_text=manual' "$meta" "the promoted task record did not carry pr_text=manual"
   payload="$TMP_ROOT/pr-manual-promote/payload"
   ( cd "$sendroot" \
     && FM_TEST_CAPTURE="$payload" \
@@ -793,8 +801,7 @@ STUB
   fill_brief_subsections "$home/data/$id/brief.md" "Fix it." "Carry over only the fix."
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off >/dev/null 2>&1 \
     || fail "a prod-only pr=manual project should promote to direct-PR"
-  assert_no_grep 'pr_text=' "$meta" "a direct-PR promotion recorded a pr token it cannot carry"
-  pass "fm-promote: a promoted no-mistakes worker receives the registered pr=manual contract and the task record carries it"
+  pass "fm-promote: a promoted no-mistakes worker receives the registered pr=manual contract "
 }
 
 test_spawn_and_promote_require_filled_task_subsections() {
