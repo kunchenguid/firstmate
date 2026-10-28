@@ -963,6 +963,21 @@ test_codex_catalog_effort_relaunch() {
       [ ! -s "$dir/fake/literal" ] || fail "filtered Codex relaunch sent lifecycle input"
     done
   done
+  for allowed in empty listed; do
+    id="rl-filtered-luna-max-$allowed"
+    dir=$(new_case "$id" "$id")
+    add_ship_task "$dir" "$id" codex
+    printf codex > "$dir/fake/command"
+    printf codex > "$dir/fake/becomes"
+    mkdir -p "$dir/home/config"
+    : > "$dir/home/config/launch-env-allowlist"
+    [ "$allowed" != listed ] || printf 'CODEX_HOME\n' > "$dir/home/config/launch-env-allowlist"
+    out=$(CODEX_HOME="$dir/catalog" run_control "$dir" "$id" relaunch --harness codex --model gpt-5.6-luna --effort max --note "filtered Luna max"); rc=$?
+    expect_code 0 "$rc" "filtered Luna max relaunch failed: $out"
+    [ "$(meta_field "$dir" "$id" effort)" = max ] || fail "filtered Luna max relaunch lost effort"
+    assert_contains "$(cat "$dir/fake/literal")" 'model_reasoning_effort="max"' "filtered Luna max relaunch omitted effort"
+    assert_not_contains "$(cat "$dir/fake/literal")" "export CODEX_HOME=" "filtered Luna max relaunch injected the caller Codex home"
+  done
   for effort in max ultra; do
     id="rl-codex-$effort"
     dir=$(new_case "$id" "$id")

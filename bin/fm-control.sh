@@ -1050,8 +1050,9 @@ resolve_relaunch_profile() {
   else
     TARGET_EFFORT=default
   fi
-  case "$TARGET_HARNESS:$TARGET_EFFORT" in
-    codex:max | codex:ultra)
+  case "$TARGET_HARNESS:$TARGET_MODEL:$TARGET_EFFORT" in
+    codex:gpt-5.6-luna:max) ;;
+    codex:*:max | codex:*:ultra)
       local launch_env_enabled
       launch_env_enabled=$(fm_config_source_present "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/launch-env-allowlist") || return 1
       if [ "$launch_env_enabled" = 1 ]; then

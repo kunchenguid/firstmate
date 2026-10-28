@@ -819,7 +819,22 @@ test_codex_filtered_efforts_refuse_before_spawn() {
       [ ! -s "$LAUNCH_LOG" ] || fail "filtered Codex $effort launched"
     done
   done
-  pass "filtered Codex max and ultra refuse before spawn"
+  for allowlist in empty listed; do
+    id="codex-filtered-luna-max-$allowlist"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    : > "$HOME_DIR/config/launch-env-allowlist"
+    [ "$allowlist" != listed ] || printf 'CODEX_HOME\n' > "$HOME_DIR/config/launch-env-allowlist"
+    out=$(CODEX_HOME="$TMP_ROOT/caller-codex" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max 2>&1)
+    expect_code 0 "$?" "filtered Luna max must spawn: $out"
+    assert_not_contains "$out" "omitting max" "filtered Luna max must not be omitted"
+    assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna max
+    want="$TMP_ROOT/pane-codex"; mkdir -p "$want"
+    [ "$allowlist" = listed ] || want=
+    [ "$(codex_pane_run "$TMP_ROOT/pane-codex")" = "max|$want|" ] \
+      || fail "filtered Luna max did not keep the allowlisted worker environment ($allowlist)"
+  done
+  pass "filtered Codex catalog-dependent max and ultra refuse before spawn; Luna max launches"
 }
 
 # Codex parks a crewmate launch forever on its unanswerable hook-trust modal

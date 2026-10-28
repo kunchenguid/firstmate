@@ -3241,8 +3241,9 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
 fi
 fm_backend_validate_harness "$BACKEND" "$HARNESS" || exit 1
 if [ "$LAUNCH_ENV_ENABLED" = 1 ] && [ "$BACKEND" != t3code ] && [ -z "$ORCA_CODEX_HOME" ]; then
-  case "$HARNESS:$EFFORT" in
-    codex:max | codex:ultra)
+  case "$HARNESS:$MODEL:$EFFORT" in
+    codex:gpt-5.6-luna:max) ;;
+    codex:*:max | codex:*:ultra)
       echo "error: Codex $EFFORT cannot be validated with config/launch-env-allowlist because the destination Codex home is unknown before launch" >&2
       exit 1
       ;;
