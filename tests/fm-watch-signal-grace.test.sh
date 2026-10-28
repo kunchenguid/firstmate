@@ -14,9 +14,12 @@ TMP_ROOT=$(fm_test_tmproot fm-watch-signal-grace-tests)
 # run_batch <name> <grace> <status-file-spec>...
 # A spec is "<task>:<status line>" or "<task>:<status line>:marker". The marker is
 # written after a pause so it is strictly newer than its status file. Prints the
-# whole seconds the watcher took to exit with its wake.
+# whole seconds the watcher took to exit with its wake. When LATE_STATUS is set
+# to "<task>:<status line>", that status is written, with no marker, by the first
+# one-second sleep the watcher runs, which is its first grace poll since the main
+# loop sleeps FM_POLL=2.
 run_batch() {
-  local name=$1 grace=$2 dir state fakebin out pid spec task line start
+  local name=$1 grace=$2 dir state fakebin out pid spec task line start poll
   shift 2
   dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
@@ -28,9 +31,22 @@ run_batch() {
   for spec in "$@"; do
     case "$spec" in *:marker) : > "$state/${spec%%:*}.turn-ended" ;; esac
   done
+  poll=1
+  if [ -n "${LATE_STATUS:-}" ]; then
+    poll=2
+    cat > "$fakebin/sleep" <<SLEEP
+#!/usr/bin/env bash
+if [ "\$1" = 1 ] && [ ! -e "$dir/late-written" ]; then
+  printf '%s\n' '${LATE_STATUS#*:}' > "$state/${LATE_STATUS%%:*}.status"
+  : > "$dir/late-written"
+fi
+exec $(command -v sleep) "\$@"
+SLEEP
+    chmod +x "$fakebin/sleep"
+  fi
   start=$SECONDS
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=1 FM_SIGNAL_GRACE="$grace" FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_POLL=$poll FM_SIGNAL_GRACE="$grace" FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 450 || fail "$name: watcher did not exit: $(cat "$out")"
@@ -66,6 +82,13 @@ test_one_unsettled_status_keeps_full_grace() {
   pass "one terminal status without a newer marker keeps the full grace"
 }
 
+test_status_written_during_grace_keeps_full_grace() {
+  local elapsed
+  elapsed=$(LATE_STATUS='t2:done: finished late' run_batch late-status 15 't1:done: finished:marker')
+  [ "$elapsed" -ge 12 ] || fail "a status written during the grace ended it after ${elapsed}s of 15s"
+  pass "a terminal status written during the grace without a marker keeps the full grace"
+}
+
 test_nonterminal_status_alone_keeps_full_grace() {
   local elapsed
   elapsed=$(run_batch nonterminal 5 't1:working: building:marker')
@@ -84,5 +107,6 @@ test_terminal_status_with_newer_marker_ends_grace_early
 test_paused_status_with_newer_marker_ends_grace_early
 test_terminal_status_without_marker_waits_full_grace
 test_one_unsettled_status_keeps_full_grace
+test_status_written_during_grace_keeps_full_grace
 test_nonterminal_status_alone_keeps_full_grace
 test_fractional_grace_keeps_single_sleep

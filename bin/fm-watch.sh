@@ -3190,14 +3190,15 @@ EOF
 # Treat SIGNAL_GRACE as a maximum: poll once a second and stop early once the
 # batch has settled. A non-integer grace keeps the single sleep.
 wait_signal_grace() {  # <pending-scan-output>
-  local waited=0
+  local waited=0 batch=$1
   case "$SIGNAL_GRACE" in
     ''|*[!0-9]*) sleep "$SIGNAL_GRACE"; return 0 ;;
   esac
   while [ "$waited" -lt "$SIGNAL_GRACE" ]; do
     sleep 1
     waited=$((waited + 1))
-    signal_batch_settled "$1" && return 0
+    batch=$(printf '%s\n%s' "$batch" "$(scan_signals)")
+    signal_batch_settled "$batch" && return 0
   done
   return 0
 }
