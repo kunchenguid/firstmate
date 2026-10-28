@@ -2286,7 +2286,8 @@ test_stall_eviction_of_an_acknowledged_episode_resurfaces() {
   while [ "$i" -lt 40 ]; do
     touch -t 200001010000 "$state/.last-watcher-beat"
     sleep 0.4
-    mtime=$(stat -c %Y "$state/.last-watcher-beat")
+    mtime=$(stat -c %Y "$state/.last-watcher-beat" 2>/dev/null || stat -f %m "$state/.last-watcher-beat")
+    [ -n "$mtime" ] || fail "fixture: the beacon mtime could not be read"
     now=$(date +%s)
     if [ $((now - mtime)) -gt 1000 ]; then
       aged=1
