@@ -677,10 +677,24 @@ seed_rollback() {
   fi
 }
 
+# Whole-name registry row match; must stay identical to the rule in
+# bin/fm-project-mode.sh so seeding and posture resolution agree on spaced names.
+# shellcheck disable=SC2016
+REGISTRY_ROW_IS_AWK='
+  function row_is(n,   prefix, after) {
+    prefix = "- " n
+    if (substr($0, 1, length(prefix)) != prefix) return 0
+    after = substr($0, length(prefix) + 1)
+    return after == "" || substr(after, 1, 2) == " [" || substr(after, 1, 3) == " - "
+  }
+'
+
 registry_line_for_project() {
   local project=$1 line
   [ -f "$DATA/projects.md" ] || return 1
-  line=$(awk -v n="$project" '$1=="-" && $2==n { print; exit }' "$DATA/projects.md")
+  line=$(awk -v n="$project" "$REGISTRY_ROW_IS_AWK"'
+    row_is(n) { print; exit }
+  ' "$DATA/projects.md")
   [ -n "$line" ] || return 1
   printf '%s\n' "$line"
 }
@@ -704,12 +718,9 @@ sync_project_registry() {
   tmp="$sub_reg.tmp.$$"
   names=$(printf '%s\n' "$@" | awk '{ printf "%s%s", sep, $0; sep="\034" }')
   if [ -f "$sub_reg" ]; then
-    awk -v names="$names" '
-      BEGIN {
-        split(names, a, "\034")
-        for (i in a) selected[a[i]]=1
-      }
-      !($1=="-" && ($2 in selected)) { print }
+    awk -v names="$names" "$REGISTRY_ROW_IS_AWK"'
+      BEGIN { k = split(names, a, "\034") }
+      { for (i = 1; i <= k; i++) if (row_is(a[i])) next; print }
     ' "$sub_reg" > "$tmp"
   else
     : > "$tmp"
@@ -784,7 +795,16 @@ refuse_populated_projectless_home() {
     clones+=("$(basename "$project_path")")
   done
   if [ -f "$home/data/projects.md" ]; then
-    registry_entries=$(awk '$1 == "-" && $2 != "" { print $2 }' "$home/data/projects.md") || {
+    registry_entries=$(awk '
+      substr($0, 1, 2) == "- " {
+        rest = substr($0, 3)
+        cut = index(rest, " [")
+        dash = index(rest, " - ")
+        if (dash > 0 && (cut == 0 || dash < cut)) cut = dash
+        name = cut > 0 ? substr(rest, 1, cut - 1) : rest
+        if (name != "") print name
+      }
+    ' "$home/data/projects.md") || {
       echo "error: cannot inspect existing project registry at $home/data/projects.md; resolve its access permissions or retire or clean this home before seeding with --no-projects" >&2
       return 1
     }

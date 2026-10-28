@@ -104,10 +104,13 @@ An expired deferral therefore remains answerable.
 
 While originating task metadata is live, the `complete` subcommand unions the reviewed captain-held task ids, called the reviewed inventory, into `decision_keys=` and appends `decisions_reviewed=1`.
 A post-teardown visual review can complete against the surviving report and durable tasks without recreating volatile task metadata.
+The [lifecycle policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy) assigns caller authority, including the scout's brief-scoped exception for an empty inventory.
+`tests/fm-brief.test.sh` pins that the scout brief's outside-worktree rule names exactly that `complete --none` command, so the write boundary and the completion step cannot drift apart again.
 
 `complete` accepts `--none` as an explicit semantic inventory result.
 `--none` is refused while the origin still has a lifecycle-open keyed status decision.
 Before recording completion, `complete` verifies every listed task against tasks-axi.
+An answered entry that markdown Done retention moved into the configured Done archive still counts, while an archived close with no recorded answer does not.
 The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
 For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
 An entry whose recorded origin differs from the one being completed is refused.
@@ -149,7 +152,7 @@ After cleanup, and still under the task's own lock, teardown does three things:
 
 - It records one `Deliverable of the finished work: ...` line at the end of the task body.
 - It copies a supported pull request or canonical `data/<id>/report.md` into the row's structured artifact fields.
-  A Gerrit change URL is not a pull request tasks-axi accepts, so it appears only in the deliverable line.
+  A Gerrit change or GitLab merge request URL is not a pull request tasks-axi accepts, so it appears only in the deliverable line.
 - It runs `tasks-axi reopen`.
 
 The row returns to Queued with its hold intact.
@@ -162,7 +165,7 @@ That record carries the retention intent as a `mode=retain` line.
 An interrupted cleanup therefore replays the retention at the next session start through the same record, validator, and lock as an ordinary close, and never closes the row.
 
 If the captain answers before replay, `answer` validates that record and copies any supported retained pull request or report into the row before closing it.
-A retained Gerrit change URL is instead recorded as a `Gerrit change <url>` note on that close.
+A retained Gerrit change or GitLab merge request URL is instead recorded as a `Gerrit change <url>` or `GitLab merge request <url>` note on that close.
 Replay then retires the record.
 
 ### Known retained-delivery gaps
@@ -525,6 +528,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
+- An answered call that markdown Done retention moved into the Done archive still passes `verify`, `complete`, and scout teardown, while an archived close carrying no recorded answer still refuses teardown, and an attested call found nowhere is refused by name.
 
 ### Answers, stamps, and deferral
 

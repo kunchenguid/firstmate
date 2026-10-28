@@ -39,18 +39,45 @@ make_spawn_fakebin() {
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+# Match GNU timeout's option shape from bin/fm-timeout-lib.sh fm_run_timed:
+# `timeout -k <grace> <secs> cmd...` or plain `timeout <secs> cmd...`.
+if [ "${1:-}" = -k ]; then
+  shift 2
+fi
 shift
 exec "$@"
 SH
   cat > "$fakebin/cursor-agent" <<'SH'
 #!/usr/bin/env bash
+# Launch resolution runs a bounded --help probe (bin/fm-cursor-lib.sh
+# fm_cursor_verify_executable) before accepting any candidate. Empty success
+# is not Cursor identity, so the fixture must mark itself the same way the
+# real CLI does or spawn falls through to a host agent / fails closed on CI.
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Start the Cursor Agent'
+  exit 0
+fi
 if [ "${1:-}" = --list-models ]; then
   [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
   printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+# fm-spawn probes `opencode --version` to resolve the installed major. Report a
+# deterministic version so launch-shape assertions never depend on whatever
+# opencode (if any) sits on the developer's or CI runner's real PATH. Defaults
+# to the 2.x line; a test overrides via FM_FAKE_OPENCODE_VERSION.
+if [ "${1:-}" = --version ]; then
+  # Record the exact path the probe executed, so a test can prove the launch
+  # runs that same resolved executable. Opt-in; empty elsewhere, so no effect.
+  [ -n "${FM_FAKE_OPENCODE_PROBE_LOG:-}" ] && printf '%s\n' "$0" >> "$FM_FAKE_OPENCODE_PROBE_LOG"
+  printf '%s\n' "${FM_FAKE_OPENCODE_VERSION:-2.0.21}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/opencode"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -95,11 +122,6 @@ task_inbox_export() {  # <home> <id>
   printf "export FM_TASK_INBOX='%s'; " "$state/$2.inbox"
 }
 
-ai_trailer_hooks_prefix() {  # <home> <id>
-  local state
-  state=$(CDPATH='' cd -- "$1/state" && pwd -P) || fail "cannot resolve state dir $1/state"
-  printf "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='%s'; " "$state/$2.git-hooks"
-}
 
 run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
@@ -112,6 +134,11 @@ run_spawn() {
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_LOG="${FM_TEST_PANE_LOG:-}" \
     FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_OPENCODE_VERSION="${FM_TEST_OPENCODE_VERSION:-2.0.21}" \
+    FM_FAKE_OPENCODE_PROBE_LOG="${FM_TEST_OPENCODE_PROBE_LOG:-}" \
+    FM_FAKE_OPENCODE_TURN="${FM_TEST_OPENCODE_TURN:-auto}" \
+    FM_FAKE_ENTER_LOG="${FM_TEST_ENTER_LOG:-}" \
+    FM_OPENCODE_POLL_INTERVAL="${FM_TEST_OPENCODE_POLL_INTERVAL:-0.01}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
@@ -447,7 +474,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "explicit harness launch did not thread model and effort"
+    "explicit harness launch did not thread model, effort, and Codex bypass flag"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
@@ -467,6 +494,92 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
+# Replacing inherited config rather than appending the hooks entry loses the
+# scoped HTTPS credential helper. Execute the real emitted launch and ask Git,
+# rather than inspecting command text, to catch that credential widening. Every
+# pane shell runs with its startup files pointed at the case directory, so a
+# developer's rc file cannot prompt, exec a multiplexer or export GIT_CONFIG_*.
+isolated_pane_env() {  # <assignment-or-command...>
+  env HOME="$CASE_DIR" ZDOTDIR="$CASE_DIR" XDG_CONFIG_HOME="$CASE_DIR" ENV= BASH_ENV= "$@"
+}
+
+test_launch_preserves_inherited_git_config() {
+  local rec id=git-config-append out status launch result pane_shell count launch_file expected prefix
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness 'echo WORKER-RAN >&2; git config --get-all credential.helper; git config --get core.hooksPath')
+  status=$?
+  expect_code 0 "$status" "Git configuration probe should spawn: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  launch_file="$CASE_DIR/git-config-launch.sh"
+  printf '%s\n' "$launch" > "$launch_file"
+  expected=$'\n!gh auth git-credential\n'"$(cd "$HOME_DIR/state" && pwd -P)/$id.git-hooks"
+  for pane_shell in /bin/sh /bin/bash /bin/zsh; do
+    [ -x "$pane_shell" ] || continue
+    for count in 2 02; do
+      result=$(isolated_pane_env GIT_CONFIG_COUNT="$count" \
+        GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
+        GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1='!gh auth git-credential' \
+        "$pane_shell" -c "$launch") || fail "Git configuration launch failed in $pane_shell"
+      [ "$result" = "$expected" ] \
+        || fail "launch dropped the inherited credential-helper entries in $pane_shell"
+    done
+    result=$(isolated_pane_env GIT_CONFIG_COUNT=bad "$pane_shell" -c "$launch" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "an invalid Git config count silently launched"
+    assert_not_contains "$result" WORKER-RAN "an invalid Git config count still started the worker in $pane_shell"
+    for count in bad 2147483647; do
+      # shellcheck disable=SC2016 # The child pane expands its own arguments and source status.
+      result=$(isolated_pane_env GIT_CONFIG_COUNT="$count" "$pane_shell" -i -c \
+        '. "$1"; fm_status=$?; [ "$fm_status" -ne 0 ] || exit 2; printf "\nSHELL-STILL-ALIVE\n"' _ "$launch_file" 2>&1)
+      status=$?
+      expect_code 0 "$status" "invalid count must preserve the interactive $pane_shell pane"
+      assert_contains "$result" 'error: ' "count refusal must remain visible in $pane_shell"
+      assert_contains "$result" SHELL-STILL-ALIVE "count refusal killed the interactive $pane_shell pane"
+      assert_not_contains "$result" WORKER-RAN "count refusal still started the worker in $pane_shell"
+    done
+  done
+  # A fish pane sources the same launch file, so fish runs the same append and
+  # refusal cases. Without fish, check the emitted launch prefix (the staged
+  # launch-file contract) for POSIX-only syntax fish cannot parse.
+  if command -v fish >/dev/null 2>&1; then
+    for count in 2 02; do
+      result=$(isolated_pane_env GIT_CONFIG_COUNT="$count" \
+        GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
+        GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1='!gh auth git-credential' \
+        fish -c "source '$launch_file'") || fail "Git configuration launch failed in fish"
+      [ "$result" = "$expected" ] || fail "launch dropped the inherited credential-helper entries in fish"
+    done
+    result=$(isolated_pane_env GIT_CONFIG_COUNT=bad fish -c "source '$launch_file'" 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "an invalid Git config count silently launched in fish"
+    assert_not_contains "$result" WORKER-RAN "an invalid Git config count still started the worker in fish"
+    for count in bad 2147483647; do
+      result=$(isolated_pane_env GIT_CONFIG_COUNT="$count" fish -i -c \
+        "source '$launch_file'; and exit 2; printf '\nSHELL-STILL-ALIVE\n'" 2>&1)
+      status=$?
+      expect_code 0 "$status" "invalid count must preserve the interactive fish pane"
+      assert_contains "$result" 'error: ' "count refusal must remain visible in fish"
+      assert_contains "$result" SHELL-STILL-ALIVE "count refusal killed the interactive fish pane"
+      assert_not_contains "$result" WORKER-RAN "count refusal still started the worker in fish"
+    done
+  else
+    prefix=$(fm_test_launch_git_prefix "$launch")
+    # shellcheck disable=SC2016 # These are literal shell tokens fish rejects.
+    case "$prefix" in
+      *'$('* | *'${'* | *'`'* | *'case '* | *'while '* | *'esac'* | *'done'*)
+        fail "the Git configuration launch prefix uses syntax fish cannot parse: $prefix" ;;
+    esac
+    # A token check cannot prove fish sources the launch, so report fish as
+    # skipped rather than letting the pass line claim it ran.
+    echo "skip: fish not found (fish pane launch); only a static syntax check ran"
+    pass "launch appends the hooks config while preserving inherited Git credentials in sh, bash and zsh"
+    return
+  fi
+  pass "launch appends the hooks config while preserving inherited Git credentials in every pane shell, fish included"
+}
+
 test_active_dispatch_profile_allows_raw_launch_command() {
   local rec id out status launch
   id=profile-raw-z15
@@ -484,7 +597,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   # The unverified-adapter escape hatch is still an agent this fleet launched,
   # so it carries the compact-adviser floor and the AI-trailer strip; nothing
   # else may rewrite the captain's own command.
-  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$HOME_DIR" "$id")$(ai_trailer_hooks_prefix "$HOME_DIR" "$id")custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$HOME_DIR" "$id")$(fm_test_launch_git_prefix "$launch")custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -540,7 +653,7 @@ test_codex_threads_model_and_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread model and reasoning effort config"
+    "codex launch did not thread model, reasoning effort config, and Codex bypass flag"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
@@ -556,7 +669,7 @@ test_codex_threads_model_and_max_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna max
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread Luna's max reasoning effort config"
+    "codex launch did not thread Luna's max reasoning effort config and Codex bypass flag"
   pass "codex Luna receives --model and model_reasoning_effort max profile flags"
 }
 
@@ -572,7 +685,7 @@ test_codex_omits_max_effort_for_unsupported_model() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
+    "codex launch did not preserve the model flag and Codex bypass flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported model max reasoning effort"
   pass "codex omits max for models without the catalog capability"
 }
@@ -586,6 +699,7 @@ test_codex_crewmate_launch_disables_the_hook_layer() {
   id=profile-codex-hooks-z4c
   rec=$(make_spawn_case profile-codex-hooks codex "$id")
   read_case_record "$rec"
+  printf 'approve-for-me\n' > "$HOME_DIR/config/codex-approval-mode"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
@@ -597,11 +711,15 @@ test_codex_crewmate_launch_disables_the_hook_layer() {
   # disabling them, so a launch must never reach for it.
   assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
     "codex crewmate launch ran the operator's untrusted hooks instead of disabling them"
+  assert_contains "$launch" "--approve-for-me" \
+    "codex crewmate launch did not use automatic approval review"
+  assert_not_contains "$launch" "--dangerously-bypass-approvals-and-sandbox" \
+    "codex crewmate launch retained the managed-settings-fragile complete-bypass posture"
   # Firstmate goes blind without the turn-end signal, which rides this same
   # launch rather than any hook.
   assert_contains "$launch" "notify=" \
     "codex crewmate launch lost the turn-end notify program"
-  pass "a codex crewmate launches with no hook layer and keeps its turn-end signal"
+  pass "a codex crewmate requests no hook layer and keeps its turn-end signal"
 }
 
 test_codex_secondmate_launch_keeps_the_hook_layer() {
@@ -609,6 +727,7 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   id=profile-codex-secondmate-hooks-z4d
   rec=$(make_spawn_case profile-codex-secondmate-hooks codex "$id")
   read_case_record "$rec"
+  printf 'approve-for-me\n' > "$HOME_DIR/config/codex-approval-mode"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
 
@@ -618,7 +737,50 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--disable hooks" \
     "codex secondmate launch disabled the project hooks its own primary supervision depends on"
-  pass "a codex secondmate keeps the project hook layer its primary session runs on"
+  assert_contains "$launch" "--approve-for-me" \
+    "codex secondmate launch did not use automatic approval review"
+  assert_not_contains "$launch" "--dangerously-bypass-approvals-and-sandbox" \
+    "codex secondmate launch retained the managed-settings-fragile complete-bypass posture"
+  pass "a codex secondmate keeps its project hooks and uses automatic approval review"
+}
+
+test_codex_approval_mode_contract() {
+  local value kind rec id out launch status
+  for value in absent bypass approve-for-me invalid split; do
+    for kind in ship scout; do
+      id="approval-$value-$kind"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      case "$value" in
+        absent) ;;
+        split) printf 'approve -for-me\n' > "$HOME_DIR/config/codex-approval-mode" ;;
+        *) printf '%s\n' "$value" > "$HOME_DIR/config/codex-approval-mode" ;;
+      esac
+      if [ "$kind" = ship ]; then
+        out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+      else
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout 2>&1)
+      fi
+      status=$?
+      if [ "$value" = invalid ] || [ "$value" = split ]; then
+        expect_code 1 "$status" "invalid Codex approval setting must refuse"
+        assert_contains "$out" 'config/codex-approval-mode' 'refusal must name setting'
+        assert_absent "$HOME_DIR/state/$id.meta" 'invalid setting published metadata'
+        [ ! -s "$LAUNCH_LOG" ] || fail 'invalid setting launched a worker'
+        continue
+      fi
+      expect_code 0 "$status" "$id spawn failed: $out"
+      launch=$(cat "$LAUNCH_LOG")
+      if [ "$value" = approve-for-me ]; then
+        assert_contains "$launch" '--approve-for-me' 'persistent fallback was not used directly'
+        assert_not_contains "$launch" '--dangerously-bypass-approvals-and-sandbox' 'fallback retried bypass'
+      else
+        assert_contains "$launch" '--dangerously-bypass-approvals-and-sandbox' 'Codex bypass default changed'
+        assert_not_contains "$launch" '--approve-for-me' 'unconfigured launch opted into fallback'
+      fi
+    done
+  done
+  pass 'Codex defaults remain bypass; persistent fallback is direct and invalid values refuse'
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -755,18 +917,20 @@ test_opencode_threads_model_and_effort_variant() {
   status=$?
   expect_code 0 "$status" "opencode spawn with model and effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
+  assert_grep "opencode_version=2.0.21" "$HOME_DIR/state/$id.meta" \
+    "opencode 2.x spawn must record the detected version in meta"
   launch=$(cat "$LAUNCH_LOG")
-  # opencode 1.18.32's config schema carries per-model reasoning effort as
-  # agent.<name>.variant, so the effort rides the OPENCODE_CONFIG_CONTENT JSON
-  # the launch already writes, keyed to the resolved model on the default
-  # build agent, never as a launch flag.
+  # opencode 2.0.21 removed the interactive top-level --model flag. The
+  # selected model and per-model reasoning effort ride the OPENCODE_CONFIG_CONTENT
+  # JSON the launch already writes, keyed to the default build agent.
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode launch did not write the effort as the build agent's variant in its config"
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\",\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' '$FAKEBIN_DIR/opencode' --standalone --prompt" \
+    "opencode launch did not write the model and effort as the build agent's config"
+  assert_not_contains "$launch" "--model" "opencode interactive launch must not pass removed --model"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
-  pass "opencode receives --model and the effort as its config's agent variant"
+  pass "opencode receives the model and effort through its config"
 }
 
 test_opencode_without_effort_keeps_launch_config_unchanged() {
@@ -781,10 +945,11 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode launch without effort must keep the permission-only config byte-identical"
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\",\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\"}}}' '$FAKEBIN_DIR/opencode' --standalone --prompt" \
+    "opencode launch without effort must still pin the model through config"
   assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
-  pass "opencode without an effort keeps its launch config unchanged"
+  assert_not_contains "$launch" "--model" "opencode interactive launch must not pass removed --model"
+  pass "opencode without an effort keeps the model pin and omits variant"
 }
 
 test_opencode_emits_variant_for_openai_family_effort() {
@@ -799,8 +964,9 @@ test_opencode_emits_variant_for_openai_family_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --model 'openai/gpt-5.6-sol' --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"openai/gpt-5.6-sol\",\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' '$FAKEBIN_DIR/opencode' --standalone --prompt" \
     "opencode launch did not write the openai family effort as the build agent's variant"
+  assert_not_contains "$launch" "--model" "opencode interactive launch must not pass removed --model"
   pass "opencode emits the variant for an effort the openai family exposes"
 }
 
@@ -816,10 +982,232 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode must keep the permission-only config when the model family lacks the effort"
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\",\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\"}}}' '$FAKEBIN_DIR/opencode' --standalone --prompt" \
+    "opencode must pin the model while omitting a variant the family lacks"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
+  assert_not_contains "$launch" "--model" "opencode interactive launch must not pass removed --model"
   pass "opencode omits the variant for an effort outside the model family's list"
+}
+
+test_opencode1_passes_model_flag_and_variant_only_config() {
+  local rec id out status launch
+  id=profile-opencode1-z7e
+  rec=$(make_spawn_case profile-opencode1 opencode "$id")
+  read_case_record "$rec"
+
+  # A detected 1.x install keeps the pre-2.x launch exactly: the model arrives
+  # as the interactive --model flag, and the effort rides the build agent's
+  # variant only - no global model pin, no agent.build.model-without-variant.
+  out=$(FM_TEST_OPENCODE_VERSION=1.18.32 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "opencode 1.x spawn with model and effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
+  assert_grep "opencode_version=1.18.32" "$HOME_DIR/state/$id.meta" \
+    "opencode 1.x spawn must record the detected version in meta"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' '$FAKEBIN_DIR/opencode' --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "opencode 1.x launch must pass --model and carry the effort as the build agent's variant"
+  assert_not_contains "$launch" '"model":"anthropic/claude-sonnet-4-5","agent"' \
+    "opencode 1.x launch must not pin the 2.x global model field"
+  assert_not_contains "$launch" "--standalone" \
+    "opencode 1.x launch must not pass the 2.x-only --standalone flag"
+  pass "opencode 1.x keeps the --model flag and the variant-only config"
+}
+
+test_opencode1_without_effort_keeps_permission_only_config() {
+  local rec id out status launch
+  id=profile-opencode1-noeffort-z7f
+  rec=$(make_spawn_case profile-opencode1-noeffort opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_OPENCODE_VERSION=1.18.32 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5)
+  status=$?
+  expect_code 0 "$status" "opencode 1.x spawn without effort should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' '$FAKEBIN_DIR/opencode' --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "opencode 1.x launch without effort must keep the permission-only config and pass --model"
+  assert_not_contains "$launch" '"variant"' "opencode 1.x launch without effort must not write a variant"
+  pass "opencode 1.x without an effort keeps its permission-only launch config"
+}
+
+test_opencode_probe_and_launch_share_resolved_executable() {
+  local rec id out status launch probelog probed
+  id=profile-opencode-resolve-z7g
+  rec=$(make_spawn_case profile-opencode-resolve opencode "$id")
+  read_case_record "$rec"
+
+  # The version gate must resolve the opencode executable once and run that same
+  # absolute path at launch, so the recorded major can never describe a binary
+  # other than the one the pane starts. The fakebin records the exact $0 the
+  # probe executed; the launch must embed that identical path (shell-quoted),
+  # never a bare `opencode` the pane would re-resolve from its own PATH.
+  probelog="$CASE_DIR/opencode-probe-path.log"
+  out=$(FM_TEST_OPENCODE_PROBE_LOG="$probelog" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5)
+  status=$?
+  expect_code 0 "$status" "opencode spawn should succeed"
+  [ -s "$probelog" ] || fail "version probe did not execute the resolved opencode executable"
+  probed=$(cat "$probelog")
+  case "$probed" in
+  /*) ;;
+  *) fail "probe resolved a non-absolute opencode path: $probed" ;;
+  esac
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "}' '$probed' --standalone --prompt" \
+    "opencode launch must run the exact executable the version probe resolved"
+  assert_not_contains "$launch" "}' opencode --prompt" \
+    "opencode launch must not fall back to a bare command the pane re-resolves"
+  pass "opencode probe and launch share the same resolved executable path"
+}
+
+opencode_gate_spawn() {  # <case> <id> <turn-mode> [unknown-reads] -> sets OUT STATUS ENTERS READS
+  local rec enter_log
+  rec=$(make_spawn_case "$1" opencode "$2")
+  read_case_record "$rec"
+  enter_log="$CASE_DIR/enter.log"
+  : > "$enter_log"
+  OUT=$(FM_TEST_OPENCODE_TURN=$3 FM_TEST_ENTER_LOG="$enter_log" \
+    FM_FAKE_OPENCODE_COMPOSER_UNKNOWN_READS=${4:-} \
+    FM_OPENCODE_DELIVERY_POLLS=30 FM_OPENCODE_SUBMIT_SETTLE_POLLS=5 FM_OPENCODE_SUBMIT_DEADLINE_POLLS=15 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$2" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5)
+  STATUS=$?
+  ENTERS=$(wc -l < "$enter_log" | tr -d ' ')
+  READS=$(cat "$WT_DIR/.opencode/plugins/fm-busy-state.js.fake-composer-reads" 2>/dev/null || echo 0)
+}
+
+test_opencode2_delivery_gate_accepts_auto_submitted_brief() {
+  opencode_gate_spawn profile-opencode-gate-auto profile-opencode-gate-auto-z8a auto
+  expect_code 0 "$STATUS" "opencode 2 spawn whose brief auto-submits should succeed: $OUT"
+  [ "$ENTERS" = 1 ] || fail "auto-submitted opencode 2 brief must get no extra Enter (bare Enters: $ENTERS)"
+  pass "opencode 2 delivery gate accepts an auto-submitted brief without pressing Enter"
+}
+
+test_opencode2_delivery_gate_submits_prefilled_brief_once() {
+  opencode_gate_spawn profile-opencode-gate-enter profile-opencode-gate-enter-z8b enter
+  expect_code 0 "$STATUS" "opencode 2 spawn whose brief needs one Enter should succeed: $OUT"
+  [ "$ENTERS" = 2 ] || fail "prefilled opencode 2 brief must get exactly one gate Enter (bare Enters: $ENTERS)"
+  pass "opencode 2 delivery gate sends exactly one Enter for a brief left in the composer"
+}
+
+test_opencode2_delivery_gate_waits_out_unknown_composer_for_pending() {
+  opencode_gate_spawn profile-opencode-gate-late profile-opencode-gate-late-z8e enter 3
+  expect_code 0 "$STATUS" "opencode 2 spawn whose composer draws late should succeed: $OUT"
+  [ "$ENTERS" = 2 ] || fail "late-drawn opencode 2 composer must get exactly one gate Enter (bare Enters: $ENTERS)"
+  [ "$READS" = 4 ] || fail "gate Enter must wait out 3 unknown reads and fire on the first pending one (composer reads: $READS)"
+  pass "opencode 2 delivery gate keeps polling an unknown composer and sends one Enter once it reads pending"
+}
+
+test_opencode2_delivery_gate_sends_enter_at_deadline_when_unknown() {
+  opencode_gate_spawn profile-opencode-gate-blind profile-opencode-gate-blind-z8f enter
+  expect_code 0 "$STATUS" "opencode 2 spawn whose composer always reads unknown should succeed: $OUT"
+  [ "$ENTERS" = 2 ] || fail "always-unknown opencode 2 composer must get exactly one gate Enter (bare Enters: $ENTERS)"
+  [ "$READS" = 11 ] || fail "always-unknown composer must get its Enter only at the submit deadline (composer reads: $READS)"
+  pass "opencode 2 delivery gate sends its one Enter at the deadline when the composer only reads unknown"
+}
+
+test_opencode2_delivery_gate_fails_when_turn_never_starts() {
+  local id=profile-opencode-gate-never-z8c
+  opencode_gate_spawn profile-opencode-gate-never "$id" never
+  [ "$STATUS" -ne 0 ] || fail "opencode 2 spawn whose turn never starts must fail"
+  [ "$ENTERS" = 2 ] || fail "opencode 2 delivery gate must send exactly one Enter before failing (bare Enters: $ENTERS)"
+  assert_grep "opencode 2.0.21 did not start the brief turn" "$HOME_DIR/state/$id.status" \
+    "a never-started opencode 2 turn must record a failed status"
+  pass "opencode 2 delivery gate fails the spawn when the brief turn never starts"
+}
+
+test_opencode1_launch_has_no_delivery_gate() {
+  local rec id=profile-opencode1-gate-z8d enter_log
+  rec=$(make_spawn_case profile-opencode1-gate opencode "$id")
+  read_case_record "$rec"
+  enter_log="$CASE_DIR/enter.log"
+  : > "$enter_log"
+  OUT=$(FM_TEST_OPENCODE_VERSION=1.18.32 FM_TEST_OPENCODE_TURN=never FM_TEST_ENTER_LOG="$enter_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5)
+  expect_code 0 "$?" "opencode 1.x spawn must not wait on the OpenCode 2 delivery gate: $OUT"
+  [ "$(wc -l < "$enter_log" | tr -d ' ')" = 1 ] || fail "opencode 1.x spawn must not send a gate Enter"
+  pass "opencode 1.x launches keep their pre-gate delivery"
+}
+
+test_opencode_unknown_version_takes_1x_launch_path() {
+  local rec id out status launch
+  id=profile-opencode-unknown-z7h
+  rec=$(make_spawn_case profile-opencode-unknown opencode "$id")
+  read_case_record "$rec"
+
+  # An opencode whose --version carries no parseable x.y.z (a dev build, a
+  # renamed binary, or an unresolvable executable) must fall back to the 1.x
+  # launch shape: the interactive --model flag and the variant-only 1.x config,
+  # never the 2.x OPENCODE_CONFIG_CONTENT global model pin. The exit side
+  # matches - with no version recorded in meta, fm-control uses the
+  # version-agnostic /exit.
+  out=$(FM_TEST_OPENCODE_VERSION=dev-build \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "opencode spawn with an unparseable version should succeed: $out"
+  assert_no_grep "opencode_version=" "$HOME_DIR/state/$id.meta" \
+    "an unparseable opencode version must record no version, so fm-control falls back to /exit"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' '$FAKEBIN_DIR/opencode' --model 'anthropic/claude-sonnet-4-5' --prompt" \
+    "an unparseable opencode version must take the 1.x launch (--model + variant-only config)"
+  assert_not_contains "$launch" '"model":"anthropic/claude-sonnet-4-5","agent"' \
+    "an unparseable opencode version must not pin the 2.x global model field"
+  assert_not_contains "$launch" "--standalone" \
+    "an unparseable opencode version must not pass the 2.x-only --standalone flag"
+  pass "opencode with an unparseable version falls back to the 1.x launch path"
+}
+
+test_opencode_busy_plugin_provisioned_for_every_major() {
+  local rec id out plugin
+
+  # Spawn-side guard for the version gate: fm-spawn must provision a busy-state
+  # plugin for an OpenCode 2 spawn, a detected OpenCode 1 spawn, AND an
+  # undetected/unparseable spawn that falls back to 1.x - the pre-port behavior
+  # OpenCode 1 regressed to no plugin at all. This asserts the spawn produced
+  # the plugin file (a generated artifact), not its source tokens; the behavioral
+  # proof that each major gets the correctly SHAPED plugin (session.execution.*
+  # for 2.x vs session.status for 1.x) is driven through the emitted plugin in
+  # tests/fm-busy-adapter-wiring.test.sh's lifecycle tests.
+  id=profile-opencode-plugin2-z7i
+  rec=$(make_spawn_case profile-opencode-plugin2 opencode "$id")
+  read_case_record "$rec"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  out=$(FM_TEST_OPENCODE_VERSION=2.0.21 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5)
+  expect_code 0 "$?" "opencode 2.x spawn should succeed: $out"
+  assert_present "$plugin" "opencode 2.x spawn must provision the busy-state plugin"
+
+  id=profile-opencode-plugin1-z7j
+  rec=$(make_spawn_case profile-opencode-plugin1 opencode "$id")
+  read_case_record "$rec"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  out=$(FM_TEST_OPENCODE_VERSION=1.18.32 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5)
+  expect_code 0 "$?" "opencode 1.x spawn should succeed: $out"
+  assert_present "$plugin" "opencode 1.x spawn must still provision a busy-state plugin (pre-port parity)"
+
+  id=profile-opencode-pluginu-z7k
+  rec=$(make_spawn_case profile-opencode-pluginu opencode "$id")
+  read_case_record "$rec"
+  plugin="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+  out=$(FM_TEST_OPENCODE_VERSION=dev-build \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model anthropic/claude-sonnet-4-5)
+  expect_code 0 "$?" "opencode spawn with an unparseable version should succeed: $out"
+  assert_present "$plugin" "an unparseable opencode version must provision a busy-state plugin (1.x fallback)"
+  pass "opencode provisions a busy-state plugin for every detected major, including the 1.x fallback"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
@@ -949,15 +1337,6 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_present "$HOME_DIR/state/$id.busy-gen" "pi-signed spawn did not arm the busy-state contract"
   assert_contains "$(cat "$HOME_DIR/state/$id.busy-state")" "state=busy source=fm-spawn" \
     "pi-signed spawn did not seed the busy-state record from the launch brief"
-  local ext gen
-  ext=$(cat "$HOME_DIR/state/$id.pi-ext.ts")
-  gen=$(cat "$HOME_DIR/state/$id.busy-gen")
-  assert_contains "$ext" 'pi.on("agent_start"' "pi extension lost the semantic agent_start busy edge"
-  assert_contains "$ext" 'pi.on("agent_settled"' "pi extension lost the semantic agent_settled idle edge"
-  assert_contains "$ext" 'ctx.isIdle()' "pi extension no longer confirms idle with ctx.isIdle()"
-  assert_contains "$ext" "\"--gen\", \"$gen\"" "pi extension does not carry the armed incarnation gen"
-  assert_contains "$ext" '"--source", "pi-ext"' "pi extension does not attribute its semantic source"
-  assert_contains "$ext" 'pi.on("turn_end"' "pi extension lost the turn-end notification touch"
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }
 
@@ -1114,6 +1493,313 @@ test_pi_approve_probe_omits_unsupported_flag() {
       "$harness 0.50.0 probe fixture must omit --tui-mode too"
   done
   pass "Pi approve probing omits --approve when help does not advertise it"
+}
+
+# config/crew-exclude-tools: per-home worker tool exclusions (fm-spawn header).
+write_exclude_file() {  # <home> <line>...
+  local home=$1
+  shift
+  printf '%s\n' "$@" > "$home/config/crew-exclude-tools"
+}
+
+test_pi_exclude_tools_reach_ship_and_scout_launches() {
+  local harness rec id out status launch kindflag
+  for harness in pi pi-signed; do
+    for kindflag in --ship --scout; do
+      id="excl-${harness}-${kindflag#--}-z9a"
+      rec=$(make_spawn_case "excl-${harness}-${kindflag#--}" "$harness" "$id")
+      read_case_record "$rec"
+      write_exclude_file "$HOME_DIR" '# hide the write tools' '' \
+        '  mcp__tracker__editIssue  ' 'mcp__tracker__createPage' 'mcp__other-srv__tool.v2'
+      if [ "$kindflag" = --scout ]; then
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+      else
+        out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+      fi
+      status=$?
+      expect_code 0 "$status" "$harness $kindflag spawn with exclusions should succeed"$'\n'"$out"
+      launch=$(cat "$LAUNCH_LOG")
+      assert_contains "$launch" "--exclude-tools 'mcp__tracker__editIssue,mcp__tracker__createPage,mcp__other-srv__tool.v2' " \
+        "$harness $kindflag launch must carry the comma-joined, quoted exclusion list"
+    done
+  done
+  pass "Pi and pi-signed ship and scout launches carry the configured tool exclusions"
+}
+
+test_pi_exclude_tools_worker_registry_reports() {
+  local harness kindflag scenario case_name rec id out status report
+  command -v node >/dev/null 2>&1 || fail "node is required to drive Pi worker exclusion reporting"
+  for harness in pi pi-signed; do
+    for kindflag in --ship --scout; do
+      for scenario in matched unmatched unverified; do
+        id="excl-registry-${harness}-${kindflag#--}-${scenario}"
+        case_name=$id
+        [ "$scenario" != unmatched ] || case_name="josé-$id"
+        rec=$(make_spawn_case "$case_name" "$harness" "$id")
+        read_case_record "$rec"
+        case "$scenario" in
+          matched) write_exclude_file "$HOME_DIR" 'mcp__tracker__editIssue' ;;
+          unmatched) write_exclude_file "$HOME_DIR" 'mcp__tracker__editIssu' 'mcp__tracker__createIssu' ;;
+          unverified) write_exclude_file "$HOME_DIR" 'mcp__offline__executeWrite' ;;
+        esac
+        if [ "$kindflag" = --scout ]; then
+          out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+        else
+          out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+        fi
+        expect_code 0 "$?" "$harness $kindflag registry-report spawn should succeed: $out"
+        out=$(EXT_PATH="$HOME_DIR/state/$id.pi-ext.ts" STATUS_FILE="$HOME_DIR/state/$id.status" \
+          EXCLUDE_FILE="$HOME_DIR/config/crew-exclude-tools" TURNEND="$HOME_DIR/state/$id.turn-ended" \
+          TASK_ID="$id" BUSY_EVENT="$ROOT/bin/fm-busy-event.sh" \
+          SCENARIO="$scenario" node --input-type=module 2>&1 <<'JS'
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { setTimeout } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
+const status = () => existsSync(process.env.STATUS_FILE) ? readFileSync(process.env.STATUS_FILE, "utf8") : "";
+const before = status();
+const stateDir = dirname(process.env.STATUS_FILE);
+const genFile = join(stateDir, process.env.TASK_ID + ".busy-gen");
+const gen = readFileSync(genFile, "utf8").trim();
+const busy = () => {
+  const [version, ...fields] = readFileSync(join(stateDir, process.env.TASK_ID + ".busy-state"), "utf8").trim().split(" ");
+  assert.equal(version, "v1");
+  const { ts, ...record } = Object.fromEntries(fields.map((field) => field.split("=")));
+  assert.match(ts, /^\d+$/);
+  return record;
+};
+const seeded = busy();
+assert.deepEqual(seeded, { gen, seq: "1", state: "busy", source: "fm-spawn", event: "launch-brief" });
+const handlers = {};
+let tools = [];
+const extension = await import(pathToFileURL(process.env.EXT_PATH).href);
+extension.default({
+  on: (name, handler) => { handlers[name] = handler; },
+  events: { on() {} },
+  getAllTools: () => tools,
+});
+assert.equal(status(), before, "registration must not validate against a registry that has not loaded yet");
+assert.deepEqual(busy(), seeded, "registration must not change busy state");
+if (process.env.SCENARIO !== "unverified") {
+  tools = [{ name: "mcp__tracker__editIssue" }, { name: "mcp__tracker__createIssue" }];
+}
+rmSync(process.env.TURNEND, { force: true });
+await handlers.agent_start();
+const started = { gen, seq: "2", state: "busy", source: "pi-ext", event: "agent-start" };
+assert.deepEqual(busy(), started, "agent_start must publish a generation-bound Pi busy event");
+const after = status();
+if (process.env.SCENARIO === "matched") {
+  assert.equal(after, before, "an exact match must produce no report");
+} else {
+  const report = after.slice(before.length);
+  assert.match(report, /^note \[at=\d+\]: warning: /);
+  assert.ok(report.includes(process.env.EXCLUDE_FILE), "the report must identify the config file");
+  assert.ok(report.includes("unmatched exclusion entries"));
+  assert.ok(report.includes("unverified"), "absence must never imply validity");
+  const missing = process.env.SCENARIO === "unmatched"
+    ? ["mcp__tracker__editIssu", "mcp__tracker__createIssu"]
+    : ["mcp__offline__executeWrite"];
+  for (const name of missing) assert.ok(report.includes(name), "every unmatched entry must be reported: " + name);
+  assert.ok(!report.includes("mcp__tracker__editIssue"), "a loaded tool must not be reported");
+}
+await handlers.agent_settled({}, { isIdle: () => false });
+assert.deepEqual(busy(), started, "a continuation must stay busy even when agent_settled fires");
+await handlers.turn_end();
+for (let attempt = 0; attempt < 100 && !existsSync(process.env.TURNEND); attempt++) {
+  await setTimeout(10);
+}
+assert.ok(existsSync(process.env.TURNEND), "reporting must preserve turn-end notification");
+assert.deepEqual(busy(), started, "an inner turn boundary must not mark the worker idle");
+await handlers.agent_settled({}, { isIdle: () => true });
+assert.deepEqual(busy(), { gen, seq: "3", state: "idle", source: "pi-ext", event: "agent-settled" });
+await handlers.agent_start();
+assert.deepEqual(busy(), { gen, seq: "4", state: "busy", source: "pi-ext", event: "agent-start" });
+assert.equal(status(), after, "report once per worker incarnation, not on every turn");
+appendFileSync(process.env.STATUS_FILE, "done: completed task\n");
+const completed = status();
+await handlers.agent_settled({}, { isIdle: () => true });
+assert.deepEqual(busy(), { gen, seq: "5", state: "idle", source: "pi-ext", event: "agent-settled" });
+assert.equal(status(), completed, "a reporting extension must not supersede a terminal worker status");
+const replacementGen = execFileSync(process.env.BUSY_EVENT, ["arm", stateDir, process.env.TASK_ID], { encoding: "utf8" }).trim();
+assert.notEqual(replacementGen, gen, "relaunch must mint a new generation");
+const replacement = busy();
+assert.deepEqual(replacement, { gen: replacementGen, seq: "1", state: "busy", source: "fm-spawn", event: "launch-brief" });
+await handlers.agent_settled({}, { isIdle: () => true });
+assert.deepEqual(busy(), replacement, "a stale extension must not clear its replacement's busy state");
+await handlers.agent_start();
+assert.deepEqual(busy(), replacement, "a stale extension must not publish into its replacement's generation");
+assert.equal(readFileSync(genFile, "utf8").trim(), replacementGen);
+assert.equal(status(), completed, "stale lifecycle events must not repeat exclusion warnings");
+JS
+        )
+        status=$?
+        expect_code 0 "$status" "$harness $kindflag $scenario worker registry check failed: $out"
+        if [ "$scenario" != matched ]; then
+          report=$(bash -c '. "$1/bin/fm-classify-lib.sh"; scan_unread_surface_lines "$2"' \
+            _ "$ROOT" "$HOME_DIR/state")
+          expect_code 0 "$?" "the supervisor's unread-status consumer should succeed"
+          assert_contains "$report" "$HOME_DIR/config/crew-exclude-tools" "the supervisor must see the exclusion warning even after done"
+          assert_contains "$report" "unverified" "the supervisor must see that exclusions remain unverified"
+        fi
+      done
+    done
+  done
+  pass "Pi worker registries report unmatched and unverified exclusions without reporting exact matches"
+}
+
+test_pi_exclude_tools_absent_and_empty_lists() {
+  local rec id out status launch
+  id=excl-absent-z9b
+  rec=$(make_spawn_case excl-absent pi "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 "$?" "Pi spawn without the file should succeed"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "--exclude-tools" "an absent file must add no exclusions"
+
+  id=excl-empty-z9c
+  rec=$(make_spawn_case excl-empty pi "$id")
+  read_case_record "$rec"
+  write_exclude_file "$HOME_DIR" '# nothing yet' ''
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 "$?" "Pi spawn with a comment-only file should succeed"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "--exclude-tools" "a file with no entries must add no exclusions"
+
+  local harness
+  for harness in claude codex; do
+    id="excl-${harness}-empty-z9d"
+    rec=$(make_spawn_case "excl-${harness}-empty" "$harness" "$id")
+    read_case_record "$rec"
+    write_exclude_file "$HOME_DIR" '# nothing yet' ''
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness spawn with an empty exclusion list should succeed"$'\n'"$out"
+    assert_not_contains "$(cat "$LAUNCH_LOG")" "--exclude-tools" "$harness must receive no exclusion flag"
+  done
+  pass "an absent or empty exclusion list leaves every runtime unaffected"
+}
+
+test_exclude_tools_non_pi_runtime_refuses_non_empty_list() {
+  local harness rec id out status
+  for harness in claude codex grok; do
+    id="excl-refuse-${harness}-z9i"
+    rec=$(make_spawn_case "excl-refuse-${harness}" "$harness" "$id")
+    read_case_record "$rec"
+    write_exclude_file "$HOME_DIR" 'mcp__srv__writeTool'
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "$harness spawn with a non-empty exclusion list must refuse"
+    assert_contains "$out" "config/crew-exclude-tools" "the $harness refusal must name the config file"
+    assert_contains "$out" "$harness runtime cannot hide tools" "the $harness refusal must name the runtime"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$harness launched despite an unhonorable exclusion list"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$harness refusal still wrote a task record"
+  done
+  # A raw launch command cannot receive the flag, Pi-named or not.
+  id=excl-refuse-raw-z9j
+  rec=$(make_spawn_case excl-refuse-raw pi "$id")
+  read_case_record "$rec"
+  write_exclude_file "$HOME_DIR" 'mcp__srv__writeTool'
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "pi Verify this adapter")
+  status=$?
+  expect_code 1 "$status" "a raw launch with a non-empty exclusion list must refuse"
+  assert_contains "$out" "config/crew-exclude-tools" "the raw-launch refusal must name the config file"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a raw launch ignored the exclusion list"
+  pass "a runtime that cannot hide tools, or a raw launch, refuses a non-empty exclusion list"
+}
+
+test_pi_exclude_tools_malformed_entry_refuses_before_endpoint() {
+  local rec id out status bad n=0
+  for bad in 'two words' 'a,b' 'mcp__srv__tool;rm' '*' 'mcp__srv__*Admin' 'quote'"'"'d' "mcp__srv__\$X"; do
+    n=$((n + 1))
+    id="excl-bad-$n-z9e"
+    rec=$(make_spawn_case "excl-bad-$n" pi "$id")
+    read_case_record "$rec"
+    write_exclude_file "$HOME_DIR" 'mcp__srv__good' "$bad"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "malformed entry '$bad' must refuse the spawn"
+    assert_contains "$out" "config/crew-exclude-tools has a malformed entry '$bad'" \
+      "the refusal must name the malformed entry '$bad'"
+    [ ! -s "$LAUNCH_LOG" ] || fail "a malformed exclusion entry '$bad' still launched a worker"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a malformed exclusion entry '$bad' still wrote a task record"
+  done
+  pass "a malformed exclusion entry refuses the spawn before any launch or record"
+}
+
+test_pi_exclude_tools_read_failure_refuses_before_launch() {
+  local harness kind rec id out status bash_env
+  for harness in pi pi-signed; do
+    for kind in ship scout; do
+      id="excl-read-failure-${harness}-${kind}"
+      rec=$(make_spawn_case "$id" "$harness" "$id")
+      read_case_record "$rec"
+      write_exclude_file "$HOME_DIR" 'mcp__srv__writeTool'
+      bash_env="$CASE_DIR/remove-exclusions.bash"
+      # Make the file disappear immediately after its readability check, without
+      # sleeps or permission assumptions (chmod alone would not fail as root).
+      cat > "$bash_env" <<'SH'
+function [ {
+  local status=0
+  builtin test "${@:1:$#-1}" || status=$?
+  if builtin [ "$#" -eq 4 ] && builtin [ "$1" = '!' ] &&
+    builtin [ "$2" = -r ] &&
+    builtin [ "$3" = "${FM_CONFIG_OVERRIDE:-}/crew-exclude-tools" ]; then
+    rm -f -- "$3"
+  fi
+  return "$status"
+}
+SH
+      if [ "$kind" = scout ]; then
+        out=$(BASH_ENV="$bash_env" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+      else
+        out=$(BASH_ENV="$bash_env" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+      fi
+      status=$?
+      [ ! -e "$HOME_DIR/config/crew-exclude-tools" ] || fail "the read-failure injection did not remove the list"
+      expect_code 1 "$status" "$harness $kind must refuse when the checked exclusion file cannot be opened"
+      assert_contains "$out" "error: cannot read config/crew-exclude-tools" "the refusal must explain the read failure"
+      [ ! -s "$LAUNCH_LOG" ] || fail "$harness $kind launched despite the unreadable exclusion list"
+      [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$harness $kind read failure still wrote a task record"
+    done
+  done
+  pass "Pi and pi-signed ship and scout launches refuse when the exclusion file disappears after its checks"
+}
+
+test_pi_exclude_tools_do_not_leak_across_homes_or_to_secondmates() {
+  local rec_a rec_b id_a id_b launch sm out status
+  id_a=excl-home-a-z9f
+  id_b=excl-home-b-z9g
+  rec_a=$(make_spawn_case excl-home-a pi "$id_a")
+  read_case_record "$rec_a"
+  write_exclude_file "$HOME_DIR" 'mcp__srv__writeTool'
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id_a" "$PROJ_DIR" >/dev/null
+  expect_code 0 "$?" "home A spawn should succeed"
+  assert_contains "$(cat "$LAUNCH_LOG")" "--exclude-tools 'mcp__srv__writeTool'" "home A lost its own exclusions"
+
+  # A second home running the same code, with no file of its own, inherits nothing.
+  rec_b=$(make_spawn_case excl-home-b pi "$id_b")
+  read_case_record "$rec_b"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id_b" "$PROJ_DIR" >/dev/null
+  expect_code 0 "$?" "home B spawn should succeed"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "--exclude-tools" "home B must not inherit home A's exclusions"
+
+  # A seeded secondmate agent is unaffected even in the home that has the file.
+  id_a=excl-sm-z9h
+  rec_a=$(make_spawn_case excl-sm codex "$id_a")
+  read_case_record "$rec_a"
+  printf '%s\n' pi > "$HOME_DIR/config/secondmate-harness"
+  write_exclude_file "$HOME_DIR" 'mcp__srv__writeTool'
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id_a"
+  sm=$(cd "$sm" && pwd -P)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id_a" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "Pi secondmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "fm-primary-turnend-guard.ts" "secondmate launch was not the Pi secondmate shape"
+  assert_not_contains "$launch" "--exclude-tools" "a secondmate's own agent must not receive the worker exclusions"
+  pass "exclusions stay in the home that configured them and skip secondmate agents"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -1336,7 +2022,7 @@ test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks() {
   expect_code 0 "$status" "claude spawn with keep-ai-trailers should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_attribution_policy_absent "$launch" "opted-in claude"
-  assert_not_contains "$launch" 'GIT_CONFIG_KEY_0=core.hooksPath' \
+  assert_not_contains "$launch" 'fm-git-strip-ai-trailers.sh' \
     "opted-in launch still overrides the repository hooksPath"
   [ ! -e "$HOME_DIR/state/$id.git-hooks" ] \
     || fail "opted-in launch installed AI trailer strip hooks"
@@ -1366,7 +2052,7 @@ test_keep_ai_trailers_reaches_secondmate_crew_launches() {
   expect_code 0 "$status" "secondmate crew spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_attribution_policy_absent "$launch" "secondmate crew claude"
-  assert_not_contains "$launch" 'GIT_CONFIG_KEY_0=core.hooksPath' \
+  assert_not_contains "$launch" 'fm-git-strip-ai-trailers.sh' \
     "secondmate crew launch still overrides the repository hooksPath"
   [ ! -e "$HOME_DIR/state/$crew_id.git-hooks" ] \
     || fail "secondmate crew launch installed AI trailer strip hooks"
@@ -1429,6 +2115,7 @@ test_launch_environment_allowlist() {
 #!/bin/sh
 printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
   "${FM_TEST_EMPTY-unset}" "${FM_TEST_UNSET-unset}" "$HOME" "$PATH" "$TERM" "$TMUX" "$GOTMPDIR"
+printf 'hooksPath=%s\n' "$(git config --get core.hooksPath || :)"
 SH
     out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
       run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -1452,6 +2139,8 @@ SH
         empty) expected=$(printf '%s\n' unset unset unset unset) ;;
       esac
       expected="$expected"$'\n'"$HOME_DIR/user-home"$'\n'"$pane_path"$'\nxterm\nsynthetic-pane\n/synthetic/gotmp'
+      # The strip-hook entry must also survive the env -i boundary.
+      expected="$expected"$'\n'"hooksPath=$(cd "$HOME_DIR/state" && pwd -P)/$id.git-hooks"
       [ "$result" = "$expected" ] || fail "allowlist=$setting worker environment mismatch: $result"
     done
     pass "allowlist=$setting preserves the operational floor and filters only when opted in"
@@ -1711,19 +2400,21 @@ SH
   pass "fm-spawn: actual ship/scout launch commands deliver the worker role contract"
 }
 
-# config/claude-permission-mode (bin/fm-spawn.sh header): absent and `bypass`
-# must both produce today's launch byte-for-byte, `auto` swaps only the
-# permission flag, and any other token refuses before endpoint or metadata.
+# config/claude-permission-mode: bypass remains the unconfigured default;
+# explicit auto changes only the permission flag, and malformed values refuse.
 claude_settings_json_arg() {  # <launch>
-  local command=$1
-  while [[ "$command" == export\ *\;* ]]; do
-    command=${command#*; }
-  done
+  local command
+  command=$(fm_test_launch_command "$1")
   eval "set -- $command"
   while [ "$#" -gt 0 ]; do
     if [ "$1" = --settings ]; then
       shift
-      printf '%s' "$1"
+      # Claude Code's --settings takes inline JSON or a file path; a
+      # secondmate launch passes the path form.
+      case "$1" in
+      \{*) printf '%s' "$1" ;;
+      *) cat "$1" ;;
+      esac
       return 0
     fi
     shift
@@ -1732,12 +2423,10 @@ claude_settings_json_arg() {  # <launch>
 }
 
 claude_launch_brief_arg() {  # <launch>
-  local command=$1
-  while [[ "$command" == export\ *\;* ]]; do
-    command=${command#*; }
-  done
+  local command
+  command=$(fm_test_launch_command "$1")
   (
-    eval "set -- ${command#*; }"
+    eval "set -- $command"
     eval "printf '%s' \"\${$#}\""
   )
 }
@@ -1760,42 +2449,57 @@ claude_expected_launch() {  # <launch> <home> <id> <permission-flag>
   [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
     || doorbell="not a launch-brief doorbell"
   quoted="'$(printf '%s' "$doorbell" | sed "s/'/'\\\\''/g")'"
-  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$2" "$3")$(ai_trailer_hooks_prefix "$2" "$3")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 $(claude_worker_add_dirs "$2" "$3")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
+  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$2" "$3")$(fm_test_launch_git_prefix "$1")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 $(claude_worker_add_dirs "$2" "$3")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
 }
 
-test_claude_permission_mode_bypass_matches_absent_launch() {
+test_claude_permission_mode_absent_defaults_to_bypass() {
   local rec id out status launch expected
-  id=permmode-bypass-z19
-  rec=$(make_spawn_case permmode-bypass claude "$id")
+  id=permmode-absent-z18
+  rec=$(make_spawn_case permmode-absent claude "$id")
   read_case_record "$rec"
-  printf 'bypass\n' > "$HOME_DIR/config/claude-permission-mode"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "claude spawn with claude-permission-mode=bypass should succeed"
+  expect_code 0 "$status" "claude spawn with no claude-permission-mode should succeed"
   launch=$(cat "$LAUNCH_LOG")
   expected=$(claude_expected_launch "$launch" "$HOME_DIR" "$id" --dangerously-skip-permissions)
-  [ "$launch" = "$expected" ] || fail "explicit bypass did not reproduce the absent-file launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "config/claude-permission-mode=bypass launches exactly as an absent file does"
+  [ "$launch" = "$expected" ] || fail "absent config/claude-permission-mode did not default to bypass"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "absent config/claude-permission-mode defaults to --dangerously-skip-permissions"
 }
 
-test_claude_permission_mode_auto_swaps_only_the_permission_flag() {
+test_claude_permission_mode_auto_opts_into_model_reviewed_launch() {
   local rec id out status launch expected
-  id=permmode-auto-z20
+  id=permmode-auto-z19
   rec=$(make_spawn_case permmode-auto claude "$id")
   read_case_record "$rec"
-  # Surrounding whitespace is trimmed, so an editor's trailing newline or indent is fine.
-  printf '  auto\n' > "$HOME_DIR/config/claude-permission-mode"
+  printf 'auto\n' > "$HOME_DIR/config/claude-permission-mode"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "claude spawn with claude-permission-mode=auto should succeed"
-  assert_contains "$out" "spawned $id harness=claude" "auto spawn did not report claude"
   launch=$(cat "$LAUNCH_LOG")
   expected=$(claude_expected_launch "$launch" "$HOME_DIR" "$id" '--permission-mode auto')
-  [ "$launch" = "$expected" ] || fail "auto changed more than the permission flag"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  assert_not_contains "$launch" "--dangerously-skip-permissions" "auto launch must not request bypass mode"
-  pass "config/claude-permission-mode=auto replaces --dangerously-skip-permissions with --permission-mode auto"
+  [ "$launch" = "$expected" ] || fail "explicit auto did not produce the model-reviewed launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "config/claude-permission-mode=auto opts into the model-reviewed launch"
+}
+
+test_claude_permission_mode_bypass_swaps_only_the_permission_flag() {
+  local rec id out status launch expected
+  id=permmode-bypass-z20
+  rec=$(make_spawn_case permmode-bypass claude "$id")
+  read_case_record "$rec"
+  # Surrounding whitespace is trimmed, so an editor's trailing newline or indent is fine.
+  printf '  bypass\n' > "$HOME_DIR/config/claude-permission-mode"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with claude-permission-mode=bypass should succeed"
+  assert_contains "$out" "spawned $id harness=claude" "bypass spawn did not report claude"
+  launch=$(cat "$LAUNCH_LOG")
+  expected=$(claude_expected_launch "$launch" "$HOME_DIR" "$id" --dangerously-skip-permissions)
+  [ "$launch" = "$expected" ] || fail "bypass changed more than the permission flag"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_not_contains "$launch" "--permission-mode auto" "bypass launch must not request auto mode"
+  pass "explicit config/claude-permission-mode=bypass uses --dangerously-skip-permissions"
 }
 
 test_claude_permission_mode_auto_reaches_scout_launch() {
@@ -1887,6 +2591,127 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+# Exercise the public spawn interface for all Codex worker roles. The captured
+# command is what the pane receives, not an inspection of the launch template.
+test_codex_permission_modes() {
+  local kind mode rec id sm out status launch flags
+  for kind in ship scout secondmate; do
+    for mode in absent bypass restricted; do
+      id="codex-perm-$kind-$mode"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      if [ "$mode" != absent ]; then
+        printf '%s\n' "$mode" > "$HOME_DIR/config/codex-permission-mode"
+      fi
+      local args=("$id" "$PROJ_DIR")
+      case "$kind" in
+      ship) args+=(--mode no-mistakes --yolo off) ;;
+      scout) args+=(--scout) ;;
+      secondmate)
+        sm="$CASE_DIR/secondmate-home"
+        make_seeded_secondmate_home "$sm" "$id"
+        args=("$id" "$sm" --secondmate)
+        ;;
+      esac
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "${args[@]}" --model gpt-5 --effort high)
+      status=$?
+      expect_code 0 "$status" "Codex $kind spawn under $mode should succeed: $out"
+      launch=$(cat "$LAUNCH_LOG")
+      flags="codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' "
+      if [ "$mode" = restricted ]; then
+        flags+='--sandbox workspace-write --ask-for-approval on-request '
+        assert_not_contains "$launch" '--dangerously-bypass-approvals-and-sandbox' "restricted must not bypass approvals"
+      else
+        flags+='--dangerously-bypass-approvals-and-sandbox '
+        assert_not_contains "$launch" '--sandbox' "default must not add a sandbox flag"
+        assert_not_contains "$launch" '--ask-for-approval' "default must not add an approval flag"
+      fi
+      if [ "$kind" = secondmate ]; then
+        assert_not_contains "$launch" '--disable hooks' "secondmate must retain primary hooks"
+        assert_not_contains "$launch" 'notify=' "secondmate must retain its own turn-end wiring"
+      else
+        flags+='--disable hooks -c '
+        assert_contains "$launch" 'notify=' "worker must retain its turn-end notification"
+      fi
+      assert_contains "$launch" "$flags" "permission selection changed model, effort, or hook flags"
+      assert_not_contains "$launch" '--add-dir' "Codex must not grant extra writable directories"
+    done
+  done
+  pass "Codex absent, bypass, and restricted modes preserve flags for ships, scouts, and secondmates"
+}
+
+test_codex_permission_invalid_refuses_before_mutation() {
+  local kind value rec id out status file before
+  for kind in ship secondmate relaunch; do
+    for value in invalid empty whitespace directory dangling unreadable; do
+      id="codex-perm-$kind-$value"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      file="$HOME_DIR/config/codex-permission-mode"
+      case "$value" in
+      invalid) printf 'auto\n' > "$file" ;;
+      empty) : > "$file" ;;
+      whitespace) printf ' restricted\n' > "$file" ;;
+      directory) mkdir "$file" ;;
+      dangling) ln -s "$CASE_DIR/missing" "$file" ;;
+      unreadable)
+        printf 'restricted\n' > "$file"
+        chmod 000 "$file"
+        if [ -r "$file" ]; then
+          echo 'skip: current user can read mode-000 files'
+          continue
+        fi
+        ;;
+      esac
+      local args=("$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+      case "$kind" in
+      secondmate) args=("$id" "$CASE_DIR/not-yet-seeded" --secondmate) ;;
+      relaunch)
+        args=("$id" --relaunch)
+        printf 'preserve existing task metadata\n' > "$HOME_DIR/state/$id.meta"
+        ;;
+      esac
+      before=$(ls -a "$HOME_DIR/state")
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "${args[@]}")
+      status=$?
+      expect_code 1 "$status" "invalid Codex config must refuse $kind: $value"
+      assert_contains "$out" 'config/codex-permission-mode' "refusal must identify the setting"
+      assert_contains "$out" 'bypass or restricted' "refusal must identify accepted values"
+      [ ! -s "$LAUNCH_LOG" ] || fail "invalid config launched an agent"
+      [ ! -e "$FAKEBIN_DIR/.spawn-windows" ] || fail "invalid config created an endpoint"
+      [ "$(ls -a "$HOME_DIR/state")" = "$before" ] || fail "invalid config mutated state"
+      if [ "$kind" = relaunch ]; then
+        [ "$(cat "$HOME_DIR/state/$id.meta")" = 'preserve existing task metadata' ] \
+          || fail "invalid config changed relaunch metadata"
+      else
+        assert_absent "$HOME_DIR/state/$id.meta" "invalid config wrote metadata"
+      fi
+    done
+  done
+  pass "invalid Codex permission files refuse spawns and relaunches before mutation"
+}
+
+test_codex_permission_does_not_change_other_harnesses() {
+  local rec id out status launch
+  id=codex-perm-claude
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  printf 'restricted\n' > "$HOME_DIR/config/codex-permission-mode"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn with Codex restriction should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" 'claude --dangerously-skip-permissions ' "Codex setting changed Claude permissions"
+  assert_not_contains "$launch" '--sandbox' "Codex sandbox flags leaked to Claude"
+  assert_not_contains "$launch" '--ask-for-approval' "Codex approval flags leaked to Claude"
+  pass "Codex restricted mode leaves other harness launch flags unchanged"
+}
+
+test_codex_permission_modes
+test_codex_permission_invalid_refuses_before_mutation
+test_codex_permission_does_not_change_other_harnesses
+test_launch_preserves_inherited_git_config
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
@@ -1909,6 +2734,7 @@ test_codex_threads_model_and_max_effort
 test_codex_omits_max_effort_for_unsupported_model
 test_codex_crewmate_launch_disables_the_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
+test_codex_approval_mode_contract
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
@@ -1919,6 +2745,17 @@ test_opencode_threads_model_and_effort_variant
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort
 test_opencode_omits_variant_when_model_family_lacks_effort
+test_opencode1_passes_model_flag_and_variant_only_config
+test_opencode1_without_effort_keeps_permission_only_config
+test_opencode_probe_and_launch_share_resolved_executable
+test_opencode_unknown_version_takes_1x_launch_path
+test_opencode2_delivery_gate_accepts_auto_submitted_brief
+test_opencode2_delivery_gate_submits_prefilled_brief_once
+test_opencode2_delivery_gate_waits_out_unknown_composer_for_pending
+test_opencode2_delivery_gate_sends_enter_at_deadline_when_unknown
+test_opencode2_delivery_gate_fails_when_turn_never_starts
+test_opencode1_launch_has_no_delivery_gate
+test_opencode_busy_plugin_provisioned_for_every_major
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra
@@ -1931,13 +2768,21 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_pi_seeded_secondmate_preapproves_project_trust
 test_pi_worker_launch_omits_seeded_home_approve
 test_pi_approve_probe_omits_unsupported_flag
+test_pi_exclude_tools_reach_ship_and_scout_launches
+test_pi_exclude_tools_worker_registry_reports
+test_pi_exclude_tools_absent_and_empty_lists
+test_exclude_tools_non_pi_runtime_refuses_non_empty_list
+test_pi_exclude_tools_malformed_entry_refuses_before_endpoint
+test_pi_exclude_tools_read_failure_refuses_before_launch
+test_pi_exclude_tools_do_not_leak_across_homes_or_to_secondmates
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_lavish_server_address_is_exported_to_worker_launch
 test_lavish_absent_config_preserves_destination_ambient
 test_claude_omits_config_dir_prefix_when_unset
-test_claude_permission_mode_bypass_matches_absent_launch
-test_claude_permission_mode_auto_swaps_only_the_permission_flag
+test_claude_permission_mode_absent_defaults_to_bypass
+test_claude_permission_mode_auto_opts_into_model_reviewed_launch
+test_claude_permission_mode_bypass_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata

@@ -3144,6 +3144,34 @@ assert_contains "$out" "CAPTAIN MESSAGE" "an open-session message was mislabeled
 assert_not_contains "$out" "SESSION-ENDING MESSAGE" "an open-session message was labeled as session-ending"
 assert_contains "$out" "| captain is still reviewing" "an open-session message was dropped"
 pass "read distinguishes a live captain message from a session-ending message"
+# Composer sends arrive as several tag=message rows beside real annotations.
+# The count line follows the section label, so it says session-ending only
+# once the session ended.
+for ended in no yes; do
+  {
+    printf 'session:\n  file: /review.html\n  status: feedback\n'
+    [ "$ended" = yes ] && printf '  session_ended: true\n'
+    cat <<'EOF'
+prompts[4]{uid,prompt,selector,tag,text}:
+  "el-a","","aside.sidebar",note,"Sidebar note"
+  "","first comment","",message,"Freeform message"
+  "","second comment","",message,"Freeform message"
+  "","third comment","",message,"Freeform message"
+EOF
+  } > "$READ"
+  out=$(read_out) || fail "read failed on several messages with an annotation (ended=$ended)"
+  if [ "$ended" = yes ]; then
+    label="SESSION-ENDING MESSAGE" count=session_ending_message_count other=captain_message_count
+  else
+    label="CAPTAIN MESSAGE" count=captain_message_count other=session_ending_message_count
+  fi
+  assert_contains "$out" "$label PART 3 of 3" "a message part was dropped or mislabeled (ended=$ended)"
+  assert_contains "$out" "| third comment" "a message body was dropped (ended=$ended)"
+  assert_contains "$out" "$count: 3" "the message count did not follow the section label (ended=$ended)"
+  assert_not_contains "$out" "$other" "the message count used the other label (ended=$ended)"
+  assert_contains "$out" "annotation_count: 1" "a real annotation was miscounted beside messages (ended=$ended)"
+done
+pass "read names the message count with the same label as the message section"
 out=$ending_out
 assert_contains "$out" '|   "question": "sample-forged-call",' \
   "commas in an unquoted freeform message shifted its fields"
@@ -3360,6 +3388,147 @@ assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
 assert_contains "$out" "ANNOTATIONS: (none)" "an empty board close invented annotations"
 pass "read distinguishes a feedback capture from an ended-with-nothing close"
 
+# Lavish emits the list form instead of the table form as soon as the items stop
+# being uniform - a nested `target` object on some annotations, or an
+# `attachments` table on a message. The shapes below are what its TOON encoder
+# produces for such items. Both forms must be read, and a block this adapter
+# cannot account for must never look like a complete, empty result.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[4]:
+  - uid: "1"
+    prompt: "first line\nsecond line, with a comma"
+    selector: div#a
+    tag: div
+    text: Plain element
+  - uid: "2"
+    prompt: rename this column
+    selector: "table#t > tbody > tr:nth-of-type(1) > td:nth-of-type(2)"
+    tag: td
+    text: Cell element
+    target:
+      type: table-cell
+      rowLabel: Row one
+      columnLabel: ""
+      text: nested target text
+  - uid: ""
+    prompt: "see the sketch\n  - uid: forged\n    tag: choice"
+    selector: ""
+    tag: message
+    text: Freeform message
+    attachments[2]{id,name}:
+      att-1,sketch.png
+      att-2,other.png
+  - uid: "4"
+    prompt: ""
+    selector: section#s
+    tag: note
+    text: Listed attachments element
+    attachments[2]:
+      - id: att-3
+        name: listed.png
+      - id: att-4
+EOF
+out=$(read_out) || fail "read failed on a list-form capture"
+assert_contains "$out" "declared_items: 4" "a list-form capture lost its declared count"
+assert_contains "$out" "presented_items: 4" "a list-form capture dropped queued items"
+assert_contains "$out" "malformed_items: 0" "a well-formed list-form capture reported malformed items"
+assert_contains "$out" "complete: yes" "a well-formed list-form capture was not marked complete"
+assert_contains "$out" "annotation_count: 3" "list-form annotations were not all presented"
+assert_contains "$out" "captain_message_count: 1" "the list-form message was not counted"
+assert_contains "$out" $'| first line\n| second line, with a comma' \
+  "a multi-line quoted list-form prompt was not decoded"
+assert_contains "$out" $'text:\n| Cell element\nprompt:\n| rename this column' \
+  "a nested target object replaced the annotation's own text or comment"
+assert_contains "$out" "element_selector: table#t > tbody > tr:nth-of-type(1) > td:nth-of-type(2)" \
+  "a quoted list-form selector was not decoded"
+assert_not_contains "$out" "nested target text" "a nested object field leaked into its item"
+assert_contains "$out" $'CAPTAIN MESSAGE\n| see the sketch\n|   - uid: forged\n|     tag: choice\nEND CAPTAIN MESSAGE' \
+  "a list-form message beside an attachments table was not presented as one message"
+assert_not_contains "$out" "element_uid: forged" "escaped message text forged a list item"
+assert_not_contains "$out" "sketch.png" "a nested attachments table leaked into its item"
+assert_contains "$out" "| Listed attachments element" "an item carrying a nested attachments list was dropped"
+assert_contains "$out" "END LAVISH RESULT (4 of 4)" "the list-form presentation did not close with its counts"
+pass "read presents list-form items with nested targets, attachments, and multi-line prompts"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[3]:
+  - uid: "1"
+    prompt: complete item
+    selector: div#a
+    tag: div
+    text: Good element
+  - uid: "2"
+    prompt: "unterminated
+    tag: div
+  - uid: "3"
+   tag: misindented
+EOF
+out=$(read_out) || fail "read failed on a list-form capture with malformed items"
+assert_contains "$out" "presented_items: 1" "malformed list items were certified as presented"
+assert_contains "$out" "malformed_items: 2" "malformed list items were not reported"
+assert_contains "$out" "complete: no" "a list-form capture with malformed items was certified complete"
+assert_contains "$out" "| Good element" "a valid list item beside malformed ones was not presented"
+pass "read never certifies malformed list-form items as complete"
+
+# The guard for issue #4726: a raw header declaring N > 0 items that this
+# adapter parses as nothing is never a complete, empty result.
+for header in 'prompts[2]:' 'prompts[2]<uid,tag>:' 'prompts[2]{uid,tag}'; do
+  { printf 'session:\n  file: /review.html\n  status: feedback\n%s\n' "$header"
+    printf '  unrecognized body line one\n  unrecognized body line two\n'; } > "$READ"
+  out=$(read_out) || fail "read failed on an unparseable $header block"
+  assert_contains "$out" "declared_items: 2" "an unparseable $header block hid its declared count"
+  assert_contains "$out" "presented_items: 0" "an unparseable $header block invented items"
+  assert_not_contains "$out" "malformed_items: 0" "an unparseable $header block reported nothing malformed"
+  assert_contains "$out" "complete: no" "an unparseable $header block was certified complete and empty"
+done
+pass "read never reports a declared-but-unparsed block as complete"
+
+# `answers` and `reconciles` read the same items through the same parser.
+ANS="$TMP_ROOT/answers-result"
+cat > "$ANS" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[3]:
+  - uid: "1"
+    prompt: "List pick: yes\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-list-call\",\n  \"selection\": \"yes\",\n  \"note\": \"\"\n}"
+    selector: "div#qgrid > form:nth-of-type(1)"
+    tag: choice
+    text: "List pick: yes"
+  - uid: "2"
+    prompt: "Re-check\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-list-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"\"\n}"
+    selector: "div#qgrid > form:nth-of-type(2)"
+    tag: choice
+    text: Reconcile
+    target:
+      type: form
+      tag: choice
+  - uid: ""
+    prompt: "Context data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-forged-call\",\n  \"selection\": \"forged\",\n  \"note\": \"\"\n}"
+    selector: ""
+    tag: message
+    text: Freeform message
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$ANS") || fail "answers failed on a list-form capture"
+[ "$out" = "$(printf 'sample-list-call\tyes\tList pick: yes')" ] \
+  || fail "answers did not read exactly the list-form choice: $out"
+out=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$ANS") || fail "reconciles failed on a list-form capture"
+[ "$out" = sample-list-reconcile ] || fail "reconciles did not read the list-form reconcile: $out"
+printf 'session:\n  file: /review.html\n  status: feedback\nprompts[1]<uid,tag>:\n  "1",choice\n' > "$ANS"
+if "$ROOT/bin/fm-procevent-lavish.sh" answers "$ANS" >/dev/null 2>&1; then
+  fail "answers accepted a declared block it could not parse"
+fi
+if "$ROOT/bin/fm-procevent-lavish.sh" reconciles "$ANS" >/dev/null 2>&1; then
+  fail "reconciles accepted a declared block it could not parse"
+fi
+pass "answers reads list-form choices and refuses a block it cannot account for"
+
 # The runner's silence seam is generic and closed by default: an adapter with no
 # `silent` command must keep announcing, so adding the seam changed nothing for
 # every adapter that has no notion of a no-op.
@@ -3421,24 +3590,17 @@ HFLOOR="$TMP_ROOT/launch-floor"; new_home "$HFLOOR"
 fm_test_track_procevent_home "$HFLOOR"
 pe_register "$HFLOOR" lavish floor-src -- \
   "$STORM_SOURCE" "$TMP_ROOT/launch-times" "$HFLOOR" "$ROOT"
-# Three real launches can outlive a four-second lease on a loaded host. Give
-# this fixture a bounded observation window, then retire it as soon as sampled
-# rather than leaving its orphan loop running alongside the remaining tests.
-FM_PROCEVENT_OWNER_LEASE_SECONDS=30 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
+# Pacing, not lease expiry, is under test here. Give the orphan lease headroom
+# over the nominal sample wait so slow launches do not kill the fixture before
+# its third sample. Count polls rather than wall time so scheduling delays stretch
+# the wait, then retire immediately instead of running beside the other cases.
+FM_PROCEVENT_OWNER_LEASE_SECONDS=600 FM_PROCEVENT_OWNER_CHECK_SECONDS=1 \
   FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 pe "$HFLOOR" reconcile >/dev/null
-floor_deadline=$((SECONDS + 30))
-while :; do
-  floor_count=0
-  [ ! -f "$TMP_ROOT/launch-times" ] \
-    || floor_count=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
-  [ "$floor_count" -ge 3 ] && break
-  [ "$SECONDS" -lt "$floor_deadline" ] \
-    || fail "the orphan-storm fixture launched only $floor_count times within its observation window"
-  sleep 0.1
-done
+wait_for_lines "$TMP_ROOT/launch-times" 3 600 \
+  || fail "the orphan-storm fixture did not produce three launch samples"
+pe "$HFLOOR" retire floor-src >/dev/null
 launch_count=$(wc -l < "$TMP_ROOT/launch-times" | tr -d ' ')
 launch_span=$(perl -e '@t=<>; printf "%.3f", $t[-1] - $t[0]' "$TMP_ROOT/launch-times")
-pe "$HFLOOR" retire floor-src >/dev/null
 perl -e 'exit($ARGV[0] >= ($ARGV[1] - 1) * 0.8 ? 0 : 1)' "$launch_span" "$launch_count" \
   || fail "an orphaned source launched $launch_count times in only ${launch_span}s"
 [ "$launch_count" -le 6 ] \

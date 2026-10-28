@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -72,19 +72,37 @@
 # registry binding, read from data/projects.md at intake and passed here; this
 # script never infers a forge and never looks the binding up, and bin/fm-spawn.sh
 # refuses a brief whose forge disagrees with the registry. bin/fm-project-mode.sh's
-# header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`
-# changes for the worker. A forge on --mode local-only is refused, because that
-# mode publishes nothing.
+# header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`,
+# `forgejo`, and `external` change in the Definition of done. On `forgejo` this
+# script also names tea instead of gh-axi in the ship brief's forge-CLI rule, and
+# on `external` that rule names no forge CLI, because the home's review tool is
+# the only publishing tool. A forge on --mode local-only is refused, because that
+# mode publishes nothing, and `external` also refuses no-mistakes.
 # --shape names how a forge=gerrit task is published, and only `squash` - one
 # change - is accepted: `stack` is refused until a stack can be watched by its
 # membership pinned when its watch is armed, because the merge watch follows one
 # change.
 # It defaults to squash on gerrit and is refused without it.
+# --upstream-consent <host>/<owner>/<repo> records the captain's one-off
+# approval for this one task to publish to that repository when it is
+# firstmate's own upstream. It renders as an `upstream-consent=` token on the
+# Delivery contract line, bin/fm-spawn.sh checks it against this home's role
+# authority and records it in the task record, and bin/fm-promote.sh honors it
+# the same way. Ship-only: a scout publishes nothing and a charter is not a
+# delivery contract.
+# --project <dir> is the task's project directory, used to detect when a ship
+# brief would publish to firstmate's own repository: for such a task this
+# scaffold refuses a publishing mode that the home's role or recorded consent
+# does not authorize, before the contract exists. Pass it on every ship
+# scaffold so detection does not depend on the caller recognizing the repo;
+# bin/fm-spawn.sh repeats the check at launch regardless.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
-# on that forge. bin/fm-spawn.sh reads that line and refuses to launch a ship task
-# whose explicit --mode or registered forge disagrees, so an adjusted brief and the
-# recorded task metadata cannot drift apart.
+# on Gerrit, " forge=forgejo" on Forgejo, or " forge=external" on an external
+# review tool. bin/fm-spawn.sh reads that line and
+# refuses to launch a ship task whose explicit --mode or registered forge
+# disagrees, so an adjusted brief and the recorded task metadata cannot drift
+# apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Both crewmate scaffolds carry one shared rule against administering the
 # infrastructure every lane shares - the no-mistakes daemon and the worktree pool
@@ -150,6 +168,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-role-lib.sh
+. "$SCRIPT_DIR/fm-role-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -157,7 +177,7 @@ IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Name what you are waiting for and what will let you resume; do not repeat the declaration on every poll.
    Do not declare active implementation or reasoning as a wait.
    Firstmate may still raise one first-sight alert; the declared wait then uses the existing long recheck cadence instead of repeated possible-wedge alarms.
-   When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time.
+   When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time; for your own background job or command with a timeout, that time is its start plus its timeout, rounded up to the minute.
    Follow the resolution rule below when the wait clears, then resume the task.
    Use \`blocked:\` when you are stuck and need help.
 EOF
@@ -201,6 +221,10 @@ FORGE=none
 FORGE_SET=0
 SHAPE=
 SHAPE_SET=0
+UPSTREAM_CONSENT=
+UPSTREAM_CONSENT_SET=0
+PROJECT_DIR=
+PROJECT_DIR_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -214,6 +238,8 @@ for a in "$@"; do
       base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
+      upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
+      project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -234,6 +260,10 @@ for a in "$@"; do
     --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
     --shape) want_value=shape ;;
     --shape=*) SHAPE=${a#--shape=}; SHAPE_SET=1 ;;
+    --upstream-consent) want_value="upstream-consent" ;;
+    --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
+    --project) want_value="project" ;;
+    --project=*) PROJECT_DIR=${a#--project=}; PROJECT_DIR_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -289,6 +319,16 @@ if [ "$KIND" = ship ]; then
     echo "error: --shape applies only with --forge gerrit, where the worker publishes the change itself" >&2
     exit 1
   fi
+  # A Forgejo project's pull requests are handled with tea, so the ship brief's
+  # forge-CLI rule names it instead of gh-axi; an external review tool has no
+  # forge CLI at all; every other forge keeps gh-axi.
+  if [ "$FORGE" = forgejo ]; then
+    FORGE_RULE_LINE="Use tea for Forgejo operations and chrome-devtools-axi for browser operations."
+  elif [ "$FORGE" = external ]; then
+    FORGE_RULE_LINE="Publish only through the review tool your Definition of done names, and use chrome-devtools-axi for browser operations."
+  else
+    FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
+  fi
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
@@ -299,6 +339,46 @@ if [ "$BASE_BRANCH_SET" -eq 1 ]; then
     exit 1
   fi
   fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-brief.sh --base-branch" || exit 1
+fi
+if [ "$KIND" != ship ]; then
+  [ "$UPSTREAM_CONSENT_SET" -eq 0 ] || {
+    echo "error: --upstream-consent applies only to ship briefs; a scout publishes nothing and a charter is not a delivery contract" >&2
+    exit 1
+  }
+  [ "$PROJECT_DIR_SET" -eq 0 ] || {
+    echo "error: --project applies only to ship briefs" >&2
+    exit 1
+  }
+fi
+if [ "$UPSTREAM_CONSENT_SET" -eq 1 ]; then
+  [ -n "$UPSTREAM_CONSENT" ] || {
+    echo "error: --upstream-consent requires a non-empty <host>/<owner>/<repo> value" >&2
+    exit 1
+  }
+  fm_role_scope_valid "$UPSTREAM_CONSENT" || {
+    echo "error: --upstream-consent must be <host>/<owner>/<repo> (got '$UPSTREAM_CONSENT')" >&2
+    exit 1
+  }
+  UPSTREAM_CONSENT=$(fm_role_scope_norm "$UPSTREAM_CONSENT")
+fi
+# Self-repository pre-gate for a publishing ship brief: detectable only when
+# --project was passed, so the check runs here only then. bin/fm-spawn.sh
+# repeats it at launch with the resolved project path.
+if [ "$KIND" = ship ] && [ "$MODE" != local-only ] && [ "$PROJECT_DIR_SET" -eq 1 ]; then
+  [ -n "$PROJECT_DIR" ] || {
+    echo "error: --project requires a non-empty directory" >&2
+    exit 1
+  }
+  gate_rc=0
+  fm_role_gate_self_publish "$FM_HOME" "$CONFIG" "$PROJECT_DIR" "$FM_ROOT" "$UPSTREAM_CONSENT" || gate_rc=$?
+  case $gate_rc in
+    0 | 2) ;;
+    *)
+      echo "error: $FM_ROLE_PUB_DENIAL" >&2
+      echo "error: to let this home publish to ${FM_ROLE_PUB_TARGET:-that repository}, write 'maintainer ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>}' into $CONFIG/firstmate-role (docs/configuration.md \"Firstmate role\"), or pass --upstream-consent ${FM_ROLE_PUB_TARGET:-<host>/<owner>/<repo>} for this one task with the captain's explicit approval" >&2
+      exit 1
+      ;;
+  esac
 fi
 ID=${POS[0]}
 BRANCH="$BRANCH_PREFIX$ID"
@@ -379,7 +459,8 @@ INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 IFS= read -r -d '' INBOX_SECTION <<EOF || true
 # Firstmate instruction inbox
 Firstmate steers you through durable message files in $INBOX_DIR.
-When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list $INBOX_DIR/*.msg, read and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
+When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list them with \`find $INBOX_DIR -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V\`, read the complete contents of each record (including its final line even when it is not newline-terminated) and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
+Prefer the format-aware \`fm_task_inbox_body\` reader from \`bin/fm-task-inbox-lib.sh\` when it is available. If you read manually, a header line \`body-terminator=1\` means the writer added exactly one synthetic final newline to terminate the record file; that marked newline is not part of the logical message body, so remove only it and preserve any intentional trailing newlines. Legacy records without that marker may end without a newline; read them through the file end.
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 if [ -e "$CONFIG/wait-no-turns" ]; then
@@ -395,7 +476,7 @@ IFS= read -r -d '' WAIT_SECTION <<'EOF' || true
 # Waiting
 Every turn you take resends your whole context, so a wait must cost no turns.
 After you append `needs-decision:` or `blocked:`, end your turn at once: do not check the inbox, the status file, or anything else, because the answer arrives as a terminal message that starts your next turn.
-Wait on anything external - a pipeline gate, PR checks, a heavy-test slot - with ONE blocking shell command that returns when the state changes: `no-mistakes axi run` or `respond` with `--wait`, `gh pr checks <pr> --watch`, or `until <condition>; do sleep 30; done` for anything else.
+Wait on anything external - a pipeline gate, PR checks - with ONE blocking shell command that returns when the state changes: `no-mistakes axi run` or `respond` with `--wait`, `gh pr checks <pr> --watch`, or `until <condition>; do sleep 30; done` for anything else.
 Never spend turns on `sleep` followed by a status check, and never background a command in order to poll it.
 In Claude Code that `until` loop in a single Bash call is the sanctioned foreground wait: when the harness refuses a sleep-then-check command and points you at backgrounding instead, reissue the wait as the loop rather than accepting the background.
 Bound that command by what your harness lets one command run: in Pi pass the bash tool a `timeout` of at most 2700 seconds, because Pi sets none by default; in Claude Code pass the Bash tool its maximum `timeout` of 600000 ms, because its default is 2 minutes; in Codex keep waiting on a still-running command with empty `write_stdin` polls of up to 300000 ms; elsewhere pass your shell tool its largest timeout and assume at most 10 minutes.
@@ -586,6 +667,14 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+# One shared string keeps the ship and scout shell-path rule identical.
+IFS= read -r -d '' SHARED_NO_CD_RULE <<'EOF' || true
+8. Never start a shell command with `cd`, and never run a search whose path depends on the current directory.
+   Use absolute paths, `git -C <abs>`, or a `( cd <abs> && ... )` subshell.
+   Pass this rule to every sub-agent you launch.
+EOF
+SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -614,7 +703,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; outside it, write only the report and status file below, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
@@ -633,6 +722,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$SHARED_NO_CD_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -641,6 +731,10 @@ Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
+Only when the reviewed inventory is empty, run \`FM_HOME=$(shell_quote "$FM_HOME") bash $(shell_quote "$FM_ROOT/bin/fm-captain-hold.sh") complete $(shell_quote "$ID") --none\`.
+This exception permits only that command, not direct metadata edits, another task, or any backlog write.
+If any captain call remains, ask firstmate to register the inventory and attest completion before you report done.
+If the command refuses, report the refusal to firstmate and stop rather than bypassing the completion gate.
 When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
@@ -668,7 +762,7 @@ case "$MODE" in
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -691,7 +785,7 @@ $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
    Leave the worktree clean before reporting done.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. $FORGE_RULE_LINE
 4. Report status by appending one line:
    \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -713,6 +807,7 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$SHARED_NO_CD_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -725,6 +820,8 @@ EOF
 append_brief_include
 if [ "$FORGE" = none ]; then
   echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
-else
+elif [ "$FORGE" = gerrit ]; then
   echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK} and {FIRSTMATE_SPEC})"
+else
+  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE; replace {TASK} and {FIRSTMATE_SPEC})"
 fi

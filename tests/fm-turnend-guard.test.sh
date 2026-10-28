@@ -196,6 +196,9 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
+  # fixture that ever verifies an executable does not source a missing file.
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -1176,6 +1179,181 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
+# A Pi command started from inside the live session, such as the `pi --help`
+# capability probe, auto-loads this extension too and passes the ancestor walk
+# in lockOwnership. Its pid dies at once, so the marker must stay on the live
+# session above it, while a dead or foreign marker pid is still replaced.
+test_pi_extension_keeps_marker_of_live_ancestor_session() {
+  local repo home ext marker_case out status
+  repo="$TMP_ROOT/pi-marker-guard-root"
+  home="$TMP_ROOT/pi-marker-guard-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  for marker_case in nested dead foreign fresh; do
+    rm -f "$home/state/.pi-turnend-extension-loaded"
+    out=$(PLUGIN="$ext" FM_HOME="$home" MARKER_CASE="$marker_case" node --input-type=module 2>&1 <<'EOF'
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const marker = `${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`;
+const version = `sha256:${createHash("sha256").update(readFileSync(process.env.PLUGIN)).digest("hex")}`;
+// The lock names the parent of this process: a live strict ancestor, exactly where
+// the real session sits above a nested `pi --help`.
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.ppid}\n`);
+
+const handlers = new Map();
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  async sendUserMessage() {},
+};
+async function load() {
+  const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+  mod.default(pi);
+}
+function expectBoundToThisProcess(label) {
+  const content = readFileSync(marker, "utf8");
+  if (content !== `${version}\n${process.pid}\n`) {
+    throw new Error(`${label}: marker was not bound to this process: ${JSON.stringify(content)}`);
+  }
+}
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+switch (process.env.MARKER_CASE) {
+  case "nested": {
+    const before = `${version}\n${process.ppid}\n`;
+    writeFileSync(marker, before);
+    await load();
+    // "reload" exercises the session_start write path without a startup digest.
+    await handlers.get("session_start")?.({ type: "session_start", reason: "reload" }, {});
+    const after = readFileSync(marker, "utf8");
+    if (after !== before) throw new Error(`nested load replaced the marker of the live session: ${JSON.stringify(after)}`);
+    break;
+  }
+  case "dead": {
+    const dead = spawnSync(process.execPath, ["-e", "0"], { stdio: "ignore" }).pid;
+    if (!dead || pidAlive(dead)) throw new Error(`could not produce a dead pid (got ${dead})`);
+    writeFileSync(marker, `${version}\n${dead}\n`);
+    await load();
+    expectBoundToThisProcess("marker on a dead pid");
+    break;
+  }
+  case "foreign": {
+    const foreign = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    try {
+      writeFileSync(marker, `${version}\n${foreign.pid}\n`);
+      await load();
+      expectBoundToThisProcess("marker on a live non-ancestor pid");
+    } finally {
+      foreign.kill("SIGTERM");
+    }
+    break;
+  }
+  case "fresh": {
+    if (existsSync(marker)) throw new Error("fresh case started with a marker present");
+    await load();
+    expectBoundToThisProcess("fresh load");
+    break;
+  }
+  default:
+    throw new Error(`unknown marker case: ${process.env.MARKER_CASE}`);
+}
+EOF
+)
+    status=$?
+    [ "$status" = 0 ] || fail "Pi turn-end marker guard failed for the '$marker_case' case (exit $status): $out"
+    [ -z "$out" ] || fail "Pi turn-end marker guard '$marker_case' case printed output: $out"
+  done
+  pass ".pi primary extension: a nested load keeps the live session's turn-end marker"
+}
+
+# On Windows the session lock may hold a tagged win:<pid> (bin/fm-session-lock-lib.sh),
+# and native Node sees that Windows pid directly. The extension records its marker
+# for an owned or dead tagged holder and never for a live other one, while a
+# malformed tag, and any tag off Windows, stays no identity at all. The platform is
+# set per case so every host exercises both sides.
+test_pi_extension_reads_a_windows_tagged_session_lock() {
+  local repo home ext out status
+  repo="$TMP_ROOT/pi-tagged-lock-root"
+  home="$TMP_ROOT/pi-tagged-lock-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const marker = `${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`;
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const version = `sha256:${createHash("sha256").update(readFileSync(process.env.PLUGIN)).digest("hex")}`;
+const platform = Object.getOwnPropertyDescriptor(process, "platform");
+let loads = 0;
+async function loadOn(name) {
+  rmSync(marker, { force: true });
+  Object.defineProperty(process, "platform", { ...platform, value: name });
+  try {
+    const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?tagged=${(loads += 1)}`);
+    mod.default({ on() {}, async sendUserMessage() {} });
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+}
+
+const dead = spawnSync(process.execPath, ["-e", "0"], { stdio: "ignore" }).pid;
+const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  const cases = [
+    ["win32", `win:${process.pid}`, true, "an owned tagged lock"],
+    ["win32", `win:${dead}`, true, "a dead tagged holder"],
+    ["win32", `win:${other.pid}`, false, "a live other tagged holder"],
+    ["win32", `${process.pid}`, true, "an owned local lock"],
+    ["win32", "win:", false, "a bare tag"],
+    ["win32", `win:${process.pid}x`, false, "a tag with trailing junk"],
+    ["win32", `WIN:${process.pid}`, false, "a differently cased tag"],
+    ["win32", "win:1", false, "a tagged pid 1"],
+    ["linux", `win:${process.pid}`, false, "a tagged lock off Windows"],
+    ["linux", `${process.pid}`, true, "an owned local lock off Windows"],
+  ];
+  for (const [name, value, expectMarker, label] of cases) {
+    writeFileSync(lock, `${value}\n`);
+    await loadOn(name);
+    if (!expectMarker) {
+      if (existsSync(marker)) throw new Error(`${label} (${name}) recorded a marker: ${readFileSync(marker, "utf8")}`);
+      continue;
+    }
+    const content = existsSync(marker) ? readFileSync(marker, "utf8") : "";
+    if (content !== `${version}\n${process.pid}\n`) {
+      throw new Error(`${label} (${name}) did not record this process's marker: ${JSON.stringify(content)}`);
+    }
+  }
+} finally {
+  other.kill("SIGTERM");
+}
+EOF
+)
+  status=$?
+  [ "$status" = 0 ] || fail "Pi turn-end guard misread a Windows-tagged session lock (exit $status): $out"
+  [ -z "$out" ] || fail "Pi turn-end tagged-lock case printed output: $out"
+  pass ".pi primary extension: the turn-end guard reads a Windows-tagged session lock only on Windows"
+}
+
 # --- --claude cooperative mode -----------------------------------------------
 # In --claude mode the guard ignores stop_hook_active (Claude marks every stop
 # after ANY stop-hook continuation true, including asyncRewake rewake turns) and
@@ -1217,6 +1395,9 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
+  # fixture that ever verifies an executable does not source a missing file.
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
@@ -1487,12 +1668,13 @@ test_hook_claude_mode_blocks_on_stuck_arming_claim() {
 }
 
 # The generation model's ownership proof: a live open ledger claim (two-line
-# entry, identity-matched owner, watcher still beating) owns recovery with no
-# lock held at all.
+# entry, identity-matched owner descending from the session-lock pid, watcher
+# still beating) owns recovery with no owner lock held at all.
 test_hook_claude_mode_allows_on_open_generation_claim() {
   local dir out status pid identity
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-open-generation")
   : > "$dir/state/task1.meta"
+  printf '%s\n' "$$" > "$dir/state/.lock"
   sleep 60 &
   pid=$!
   identity=$(fm_test_pid_identity "$pid") || fail "could not compute a claim pid-identity"
@@ -2246,6 +2428,8 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_pi_extension_keeps_marker_of_live_ancestor_session
+test_pi_extension_reads_a_windows_tagged_session_lock
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

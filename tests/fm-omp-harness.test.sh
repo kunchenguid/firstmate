@@ -20,7 +20,8 @@
 #      leaks into a worker whose ancestry holds no omp.
 #   3. Every omp launch clears foreign markers, carries the tracked posture
 #      overlay, --auto-approve, --cwd, and (for a crewmate) one -e pointing at
-#      state/<id>.omp-ext.ts; a secondmate launch names no -e at all.
+#      state/<id>.omp-ext.ts; a secondmate launch names that same busy -e and
+#      nothing else, leaving its primary extensions to auto-discovery.
 #   4. A <provider>/<id> model is validated only when `omp models --json` lists
 #      that provider; an unlisted provider passes through with a notice.
 #   5. Busy state: agent_start is busy, agent_end with willContinue stays busy,
@@ -109,11 +110,19 @@ test_lock_identity_and_liveness_classification() {
 # A fake omp that answers `models --json` with a two-provider catalog and exits
 # 0 for everything else (the launch itself is only recorded by the fake tmux).
 make_fake_omp() {  # <fakebin>
+  # A leading --profile <name> selects that profile's catalog, which also lists
+  # one model of its own, so a catalog check read under the wrong profile shows.
   cat > "$1/omp" <<'SH'
 #!/usr/bin/env bash
+profile=
+if [ "${1:-}" = --profile ]; then profile=$2; shift 2; fi
 case "$1" in
   models)
-    printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-6-astra","selector":"openai-codex/gpt-6-astra"},{"provider":"ollama","id":"qwen3:8b","selector":"ollama/qwen3:8b"}]}'
+    if [ -n "$profile" ]; then
+      printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-6-astra","selector":"openai-codex/gpt-6-astra"},{"provider":"openai-codex","id":"gpt-6-'"$profile"'","selector":"openai-codex/gpt-6-'"$profile"'"}]}'
+    else
+      printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-6-astra","selector":"openai-codex/gpt-6-astra"},{"provider":"ollama","id":"qwen3:8b","selector":"ollama/qwen3:8b"}]}'
+    fi
     ;;
 esac
 exit 0
@@ -210,9 +219,9 @@ test_spawn_model_validation_scoped_to_listed_providers() {
 
 test_secondmate_launch_relies_on_discovery() {
   # A seeded secondmate home, launched for real through fm-spawn on omp: the
-  # launch must carry the posture overlay and pin --cwd to the home, and must
-  # name NO -e, because omp auto-discovers the home's tracked .omp/extensions
-  # and a file named both ways loads twice.
+  # launch must carry the posture overlay and pin --cwd to the home. Its only
+  # -e is the state-resident busy extension: omp auto-discovers the home's
+  # tracked .omp/extensions, and a file named both ways loads twice.
   local world home fakebin launchlog out status launch
   world="$TMP_ROOT/secondmate"
   home="$world/sm"
@@ -238,14 +247,14 @@ test_secondmate_launch_relies_on_discovery() {
   expect_code 0 "$status" "omp secondmate spawn should succeed: $out"
   assert_grep "harness=omp" "$world/home/state/sm.meta" "secondmate meta missing harness=omp"
   launch=$(cat "$launchlog")
-  case "$launch" in
-    *" -e "*) fail "an omp secondmate launch must name no -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch" ;;
-  esac
+  [ "$(printf '%s\n' "$launch" | grep -o ' -e ' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "an omp secondmate launch must name exactly one -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch"
+  assert_contains "$launch" "-e '$world/home/state/sm.omp-ext.ts'" "an omp secondmate launch must load the parent-home busy extension: $launch"
   assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$home'" "secondmate launch lost the posture overlay or the pinned home directory: $launch"
   assert_contains "$launch" "FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$fakebin/omp'" "secondmate launch lost the omp marker or executable"
   assert_contains "$launch" "FM_SUPERVISION_MODEL=extension" "an omp secondmate must run the extension supervision model"
-  assert_absent "$world/home/state/sm.omp-ext.ts" "a secondmate must not receive a per-task worker extension"
-  pass "fm-spawn: a real omp secondmate launch relies on auto-discovery while crewmates load one -e"
+  assert_present "$world/home/state/sm.omp-ext.ts" "a secondmate must receive the per-task busy extension"
+  pass "fm-spawn: a real omp secondmate launch loads only the busy -e and auto-discovers its primary extensions"
 }
 
 test_secondmate_config_pinned_model_is_validated() {
@@ -280,6 +289,100 @@ test_secondmate_config_pinned_model_is_validated() {
   assert_absent "$world/home/state/sm.meta" "a refused secondmate spawn must publish no sm.meta"
   [ ! -s "$launchlog" ] || fail "a refused secondmate spawn must record no launch: $(cat "$launchlog")"
   pass "fm-spawn: the config/secondmate-harness model pin is validated against the omp catalog before launch"
+}
+
+make_omp_secondmate_world() {  # <name> -> echoes <world>; seeded home at <world>/sm, fakebin at <world>/fake/fakebin
+  local world=$TMP_ROOT/$1 home fakebin
+  home="$world/sm"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config" "$home/bin" "$home/data"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'sm\n' > "$home/.fm-secondmate-home"
+  printf 'charter\n' > "$home/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
+  git -C "$home" init -q -b main
+  fakebin=$(make_spawn_fakebin "$world/fake" claude)
+  make_fake_omp "$fakebin"
+  : > "$world/launch.log"
+  printf '%s\n' "$world"
+}
+
+run_omp_secondmate_spawn() {  # <world> <spawn-args...>
+  local world=$1
+  shift
+  # FM_BACKEND=tmux pins the fake tmux, as in the discovery case above.
+  PATH="$world/fake/fakebin:$PATH" TMUX='fake,1,0' FM_BACKEND=tmux CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE='' FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$world/launch.log" \
+    "$ROOT/bin/fm-spawn.sh" sm "$world/sm" "$@" 2>&1
+}
+
+test_secondmate_omp_profile_pin() {
+  # A pinned local omp secondmate launches under its own omp profile: the flag
+  # follows the executable, the catalog check reads that profile (the model
+  # below is listed only there), and the record and spawned line carry it.
+  local world fakebin out status launch
+  world=$(make_omp_secondmate_world secondmate-omp-profile)
+  fakebin="$world/fake/fakebin"
+  mkdir -p "$world/home/config/secondmate-accounts/sm"
+  printf 'speak4\n' > "$world/home/config/secondmate-accounts/sm/omp-profile"
+  out=$(run_omp_secondmate_spawn "$world" omp --secondmate --model openai-codex/gpt-6-speak4)
+  status=$?
+  expect_code 0 "$status" "a pinned omp secondmate spawn should succeed under its profile's catalog: $out"
+  launch=$(cat "$world/launch.log")
+  assert_contains "$launch" "OMP_SKIP_SETUP=1 '$fakebin/omp' --profile 'speak4' --config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$world/sm'" \
+    "a pinned omp secondmate launch must carry --profile right after the executable: $launch"
+  [ "$(printf '%s\n' "$launch" | grep -o -- '--profile' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a pinned omp secondmate launch must name --profile exactly once: $launch"
+  assert_grep 'omp_profile=speak4' "$world/home/state/sm.meta" "the task record must carry the omp profile pin"
+  assert_contains "$out" " omp_profile=speak4" "the spawned line must report the omp profile pin: $out"
+  pass "fm-spawn: a pinned local omp secondmate launches with --profile and validates its model under that profile"
+}
+
+test_secondmate_omp_profile_absent_or_foreign_adds_nothing() {
+  # No pin for this mate - none at all, then only another mate's - adds no flag
+  # and no record field, and the default catalog stays the one consulted.
+  local world out status launch variant
+  for variant in absent foreign; do
+    world=$(make_omp_secondmate_world "secondmate-omp-profile-$variant")
+    if [ "$variant" = foreign ]; then
+      mkdir -p "$world/home/config/secondmate-accounts/other"
+      printf 'speak4\n' > "$world/home/config/secondmate-accounts/other/omp-profile"
+    fi
+    out=$(run_omp_secondmate_spawn "$world" omp --secondmate)
+    status=$?
+    expect_code 0 "$status" "an unpinned ($variant) omp secondmate spawn should succeed: $out"
+    launch=$(cat "$world/launch.log")
+    [ -n "$launch" ] || fail "the $variant case recorded no launch, so its absence assertions would be vacuous"
+    assert_not_contains "$launch" "--profile" "an unpinned ($variant) omp secondmate launch must carry no --profile: $launch"
+    assert_contains "$launch" "OMP_SKIP_SETUP=1 '$world/fake/fakebin/omp' --config" "an unpinned ($variant) launch must keep the executable directly before --config: $launch"
+    if grep -q '^omp_profile=' "$world/home/state/sm.meta"; then
+      fail "an unpinned ($variant) omp secondmate must record no omp_profile: $(cat "$world/home/state/sm.meta")"
+    fi
+    assert_not_contains "$out" "omp_profile=" "an unpinned ($variant) spawned line must report no omp profile: $out"
+  done
+  pass "fm-spawn: an absent pin, or only another secondmate's pin, leaves the omp launch unchanged"
+}
+
+test_secondmate_omp_profile_malformed_refuses() {
+  # A malformed pin, including a name omp rejects as a Windows reserved device
+  # name, refuses before any record or launch, naming the file.
+  local world out status pin n=0
+  for pin in 'Speak4; rm -rf /' aux nul.x com7; do
+    n=$((n + 1))
+    world=$(make_omp_secondmate_world "secondmate-omp-profile-bad-$n")
+    mkdir -p "$world/home/config/secondmate-accounts/sm"
+    printf '%s\n' "$pin" > "$world/home/config/secondmate-accounts/sm/omp-profile"
+    out=$(run_omp_secondmate_spawn "$world" omp --secondmate)
+    status=$?
+    expect_code 1 "$status" "a malformed omp profile pin ($pin) must refuse the spawn: $out"
+    assert_contains "$out" "$world/home/config/secondmate-accounts/sm/omp-profile must hold one omp profile name" \
+      "the refusal must name the malformed pin file ($pin): $out"
+    assert_absent "$world/home/state/sm.meta" "a refused spawn ($pin) must publish no sm.meta"
+    [ ! -s "$world/launch.log" ] || fail "a refused spawn ($pin) must record no launch: $(cat "$world/launch.log")"
+  done
+  pass "fm-spawn: a malformed or reserved omp profile pin refuses before any record or launch"
 }
 
 # --- 3. Busy state -------------------------------------------------------------
@@ -866,6 +969,9 @@ test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
 test_secondmate_config_pinned_model_is_validated
+test_secondmate_omp_profile_pin
+test_secondmate_omp_profile_absent_or_foreign_adds_nothing
+test_secondmate_omp_profile_malformed_refuses
 test_busy_extension_lifecycle
 test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed

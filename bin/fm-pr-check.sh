@@ -8,7 +8,8 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
 # are all accepted, including a merge request or change on a self-hosted
-# instance.
+# instance and a GitHub Enterprise pull request on a host this home names in
+# config/github-hosts.
 # A GitHub pull request the forge reports as a draft is refused, naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
@@ -17,6 +18,8 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
+# The recorded pr= also frees the task's place in a declared project capacity
+# (bin/fm-project-capacity-lib.sh).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -49,6 +52,13 @@ PROVIDER=$FM_PR_PROVIDER
 HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
+# gh and gh-axi address github.com unless told otherwise, so a GitHub Enterprise
+# host is exported once here and every forge read this run makes, including the
+# bin/fm-dod-lib.sh children, addresses the host the recorded identity names.
+# A gitlab, gerrit, or forgejo run keeps its own per-call host handling.
+if [ "$PROVIDER" = github ]; then
+  fm_pr_github_host_export "$HOST"
+fi
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -98,6 +108,26 @@ if [ "$PROVIDER" = gerrit ]; then
   fi
 fi
 
+# Refuse to arm a Forgejo watch with no tea or jq on PATH, for the same reason
+# as the GitLab and Gerrit cases above. tea also addresses a repo by slug only, resolving the
+# host from a named "tea login" rather than from the URL the way gh and glab
+# do, so a poll can only ever succeed when exactly one registered login
+# matches this host; refuse now rather than watch something that can never
+# resolve. This duplicates bin/fm-pr-poll.sh's own login match deliberately:
+# that script is a static, standalone watcher body with no sourced
+# dependency, so it re-derives the same match at every poll instead of
+# trusting a name recorded here.
+if [ "$PROVIDER" = forgejo ]; then
+  if ! command -v tea >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "error: watching a Forgejo pull request requires tea and jq on PATH" >&2
+    exit 1
+  fi
+  fm_pr_forgejo_login "$HOST" >/dev/null || {
+    echo "error: watching a Forgejo pull request at $HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
+    exit 1
+  }
+fi
+
 # The draft state is read before anything is recorded or armed. Only a positive
 # draft reading refuses, because an unreadable one must not block arming.
 if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -112,18 +142,20 @@ fi
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head, and neither does a Gerrit task: a Gerrit
-# revision names one patch set, every amend or rebase is a new patch set, and
-# bin/fm-review-diff.sh has no Gerrit path to resolve a current head with, so a
-# recorded revision would silently become the reviewed content. Both consumers
-# already treat it as optional:
+# output, which would need a JSON processor firstmate does not require, and
+# tea's single-PR view ignores field selection entirely, so neither a GitLab
+# nor a Forgejo task records a pr_head here, and neither does a Gerrit task: a
+# Gerrit revision names one patch set, every amend or rebase is a new patch set,
+# and bin/fm-review-diff.sh has no Gerrit path to resolve a current head with,
+# so a recorded revision would silently become the reviewed content. Both
+# consumers already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh fetches a pull request head from the remote when none is
 # recorded and otherwise diffs the local branch, which is the current content.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
-# and treats a recorded value that disagrees as stale rather than authoritative.
+# bin/fm-pr-merge.sh reads a GitLab or Forgejo head live at merge time for the
+# same reason, and treats a recorded value that disagrees as stale rather than
+# authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
@@ -229,6 +261,29 @@ if command -v jq >/dev/null 2>&1; then
 else
   printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
 fi
+# Opt-in config/ready-after-green: a no-mistakes PR is ready only once the
+# child's own status holds the checks-green report naming this exact PR, so a
+# PR registered while its checks are pending or failing publishes no ready
+# line. The report is read with the same test bin/fm-crew-state.sh uses, so
+# text around `PR <url> checks green` does not withhold the line.
+# The child's later done line still reaches the parent through
+# bin/fm-inactive-reconcile.sh, and registering again after the report
+# publishes this line. Only the last done line counts, so a later done that
+# does not report green withdraws an earlier one.
+fm_pr_check_ready_line_waits_for_green() {
+  local note
+  [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/ready-after-green" ] || return 1
+  case "$PROVIDER:$PR_MODE" in
+    gerrit:*|*:direct-PR|*:local-only) return 1 ;;
+  esac
+  note=$(grep -E '^done( \[at=[^]]*\])?: ' "$STATE/$ID.status" 2>/dev/null | tail -1 | sed -E 's/^done( \[at=[^]]*\])?: //' || true)
+  fm_dod_note_reports_ci_ready "$note" || return 0
+  case " $note " in
+    *"$URL"[^[:alnum:]]*) return 1 ;;
+  esac
+  return 0
+}
+
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything
@@ -242,7 +297,9 @@ PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
 [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
 READY_RC=0
-fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+if ! fm_pr_check_ready_line_waits_for_green; then
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+fi
 case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;

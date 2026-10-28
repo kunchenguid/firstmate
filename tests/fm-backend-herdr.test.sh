@@ -16,6 +16,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
 # shellcheck source=tests/herdr-client-pair-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
@@ -686,12 +688,16 @@ test_exhausted_settle_window_keeps_a_non_shell_foreground_live() {
 }
 
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive() {
-  local lab sleep_bin shell_pid out shell_verdict
+  local lab standin sleep_bin shell_pid out shell_verdict
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   lab="$TMP_ROOT/stale-reg-descendant-bin"; mkdir -p "$lab"
-  # A symlink to a real long-running binary so the kernel records `pi` as the
-  # executable identity (a copied platform binary fails code signing on macOS).
-  ln -sf "$sleep_bin" "$lab/pi"
+  # A symlink to a real long-running stand-in so the kernel records `pi` as the
+  # executable identity (tests/lib.sh fm_agent_standin owns why not host sleep).
+  standin=$(fm_agent_standin "$TMP_ROOT/standin") || {
+    echo "skip: no long-running stand-in survives a rename, so the agent-named descendant case cannot run"
+    return 0
+  }
+  ln -sf "$standin" "$lab/pi"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
   sh -c "'$lab/pi' 300; :" &
@@ -715,13 +721,16 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
 }
 
 test_agent_descendant_under_a_spaced_install_path_stays_alive() {
-  local lab sleep_bin shell_pid out
-  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  local lab standin shell_pid out
+  standin=$(fm_agent_standin "$TMP_ROOT/standin") || {
+    echo "skip: no long-running stand-in survives a rename, so the spaced-path descendant case cannot run"
+    return 0
+  }
   # The executable path the process table reports contains a space (the macOS
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
   lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/pi"
+  ln -sf "$standin" "$lab/pi"
   sh -c "'$lab/pi' 300; :" &
   shell_pid=$!
   sleep 0.3
@@ -3115,6 +3124,68 @@ SH
   pass "herdr presentation ordering: exact new workspace appends to the primary block while focus and relative orders stay stable"
 }
 
+# run_group_order_case <name> <group-key> <children-json-array>: one projected
+# create under parent w1 with the given existing children, then the new w9
+# last; the mover answers with w9 at the requested index. Prints the mover's
+# requested index, or nothing when no move was attempted.
+run_group_order_case() {
+  local name=$1 key=$2 children=$3 dir log resp fb mover mover_log out status
+  dir="$TMP_ROOT/projection-order-group-$name"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
+  : > "$log"; : > "$mover_log"
+  jq -cn --argjson children "$children" '
+    {result: {workspaces: ([{workspace_id: "w1", label: "firstmate"}] + $children
+      + [{workspace_id: "w9", label: "└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"}])}}' > "$dir/base.json"
+  cp "$dir/base.json" "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.9.3","protocol":22},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$3" >> "$FM_FAKE_MOVER_LOG"
+jq -c --argjson at "$3" '
+  .result.workspaces as $w
+  | ([$w[] | select(.workspace_id != "w9")]) as $rest
+  | {id: "fm-workspace-move", result: {type: "workspace_list",
+      workspaces: ($rest[0:$at] + [$w[-1]] + $rest[$at:])}}' "$FM_FAKE_BASE"
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" FM_FAKE_BASE="$dir/base.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w9 firstmate w1 "$1"' "$ROOT" "$key" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "group ordering $name must not fail the spawn: $out"
+  [ -z "$out" ] || fail "group ordering $name emitted a warning: $out"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "group ordering $name called workspace close"
+  assert_not_contains "$(cat "$log")" $'workspace\x1frename' "group ordering $name renamed a workspace"
+  cat "$mover_log"
+}
+
+test_projection_order_group_key_places_new_task_inside_its_group() {
+  local tagged at
+  tagged='[{"workspace_id":"w2","label":"└ a · p:AbCdEfGhIjKlMnOpQrStU1","tokens":{"fm_group_order":"001.Web"}},
+           {"workspace_id":"w3","label":"└ b · p:AbCdEfGhIjKlMnOpQrStU2","tokens":{"fm_group_order":"001.Web"}},
+           {"workspace_id":"w4","label":"└ c · p:AbCdEfGhIjKlMnOpQrStU3","tokens":{"fm_group_order":"003.Other"}},
+           {"workspace_id":"wH","label":"captain-notes"}]'
+  at=$(run_group_order_case middle 002.Backend "$tagged")
+  [ "$at" = 3 ] || fail "a new group-2 task must land after the group-1 children and before group 3, got index: $at"
+  at=$(run_group_order_case same-group 001.Web "$tagged")
+  [ "$at" = 3 ] || fail "a new task must land at the end of its own group, got index: $at"
+  at=$(run_group_order_case first 000.Alpha "$tagged")
+  [ "$at" = 1 ] || fail "a new task sorting first must land at the block start, got index: $at"
+  at=$(run_group_order_case last 999.Zed "$tagged")
+  [ "$at" = 4 ] || fail "a new task sorting last must land at the block end, before a foreign workspace, got index: $at"
+  at=$(run_group_order_case untagged 001.Web '[{"workspace_id":"w2","label":"└ a · p:AbCdEfGhIjKlMnOpQrStU1","tokens":{"fm_group_order":"003.Other"}},
+           {"workspace_id":"w3","label":"└ b · p:AbCdEfGhIjKlMnOpQrStU2"},
+           {"workspace_id":"w4","label":"└ c · p:AbCdEfGhIjKlMnOpQrStU3","tokens":{"fm_group_order":"003.Other"}}]')
+  [ "$at" = 3 ] || fail "an untagged child must never end up behind a new task, got index: $at"
+  at=$(run_group_order_case no-key '' "$tagged")
+  [ "$at" = 4 ] || fail "without a group key the block-end placement must be unchanged, got index: $at"
+  pass "herdr presentation ordering: a group key places only the new workspace inside its group, untagged children stay ahead"
+}
+
 test_projection_order_secondmate_parent_block() {
   local dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order-secondmate"; mkdir -p "$dir/responses"
@@ -3390,8 +3461,8 @@ test_presentation_session_lock_path_is_shared_across_homes() {
     || fail "session lock path resolution failed for home B"
   [ "$path_a" = "$path_b" ] || fail "same session/socket must resolve one shared lock path"
   case "$path_a" in
-    /tmp/firstmate-herdr-presentation/order-*.lock) ;;
-    *) fail "session lock path must use the shared machine namespace: $path_a" ;;
+    "/tmp/firstmate-herdr-presentation-$(id -u)"/order-*.lock) ;;
+    *) fail "session lock path must use this account's namespace: $path_a" ;;
   esac
   case "$path_a" in
     */state/*) fail "session lock path must not live under a home state directory: $path_a" ;;
@@ -3884,6 +3955,73 @@ test_composer_state_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real composer text reads pending"
 }
 
+# A titled rounded top rule reads as a composer only for a pane whose native
+# agent probe names cortex; the identical capture under any other agent, or no
+# agent record, keeps the ambiguous verdict every harness reads. The probe
+# (`agent get`) is asked for only when the classifier reports the identity
+# matters - a titled rounded box with an agent prompt glyph - so every other
+# pane keeps the single capture call it always had.
+cortex_composer_case() {  # <dir-suffix> <capture-body> <agent-json-or-error-body>
+  local dir="$TMP_ROOT/composer-titled-$1" resp log fb
+  mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf '%b' "$2" > "$resp/1.out"
+  printf '%s\n' "$3" > "$resp/2.out"
+  printf '%s\n' "$3" > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT"
+}
+
+cortex_agent_get_calls() {  # <dir-suffix>
+  grep -c "$(printf '\037agent\037get\037')" "$TMP_ROOT/composer-titled-$1/log" || true
+}
+
+test_composer_state_titled_box_requires_cortex_identity() {
+  local out calls titled
+  titled='╭────────────── New Session ──╮\n│ ❯                           │\n╰─────────────────────────────╯\n\n>> bypass safeguards  |  teams: off  |  plan: off\n'
+  out=$(cortex_composer_case cortex "$titled" '{"result":{"agent":{"agent":"cortex","agent_status":"idle"}}}')
+  [ "$out" = empty ] || fail "a titled box under a cortex agent probe should read empty, got '$out'"
+  calls=$(cortex_agent_get_calls cortex)
+  [ "$calls" = 1 ] || fail "a titled box should resolve Cortex with exactly one agent get, saw $calls"
+  out=$(cortex_composer_case other "$titled" '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}')
+  [ "$out" = unknown ] || [ "$out" = pending-unproven ] \
+    || fail "a titled box under a non-cortex agent must stay ambiguous, got '$out'"
+  calls=$(cortex_agent_get_calls other)
+  [ "$calls" = 1 ] || fail "a titled box under another agent should ask for the identity once, saw $calls"
+  out=$(cortex_composer_case absent "$titled" '{"error":{"code":"agent_not_found"}}')
+  [ "$out" = unknown ] || [ "$out" = pending-unproven ] \
+    || fail "a titled box with no agent record must stay ambiguous, got '$out'"
+  pass "fm_backend_herdr_composer_state: titled rounded top rule is a composer only under a cortex agent probe"
+}
+
+# A pane that never shows a titled rounded composer box never pays a second
+# identity read, whatever its verdict: a plain idle box, a plain draft, and
+# titled boxes the Cortex tolerance cannot accept (no prompt glyph row, a
+# non-ASCII title) all keep the one capture call, even under a cortex agent.
+test_composer_state_non_cortex_panes_skip_identity_probe() {
+  local agent='{"result":{"agent":{"agent":"cortex","agent_status":"idle"}}}' out calls name expect body
+  while IFS='|' read -r name expect body; do
+    out=$(cortex_composer_case "$name" "$body" "$agent")
+    case "$expect" in
+      ambiguous)
+        case "$out" in
+          unknown|pending-unproven) ;;
+          *) fail "$name: expected an ambiguous verdict, got '$out'" ;;
+        esac
+        ;;
+      *) [ "$out" = "$expect" ] || fail "$name: expected '$expect', got '$out'" ;;
+    esac
+    calls=$(cortex_agent_get_calls "$name")
+    [ "$calls" = 0 ] || fail "$name: a pane with no titled composer box must not probe identity, saw $calls agent get calls"
+  done <<'CASES'
+plain-empty|empty|  ╭────────────────────────╮\n  │ ❯                      │\n  ╰────────────────────────╯\n
+plain-draft|pending|  ╭────────────────────────╮\n  │ ❯ hello captain        │\n  ╰────────────────────────╯\n
+titled-glyphless|ambiguous|╭────────── Select a model ──╮\n│ ○ Auto                      │\n╰─────────────────────────────╯\n
+titled-nonascii|ambiguous|╭────────────── Nüw Session ──╮\n│ ❯                           │\n╰─────────────────────────────╯\n
+CASES
+  pass "fm_backend_herdr_composer_state: panes without a titled composer box make no second agent get call"
+}
+
 # Issue #3436: Grok 1.0.5's real bottom border is three columns wider than
 # the aligned top and content rows. Herdr has no cursor anchor, so the old
 # geometry verdict was unknown even when this composer was genuinely idle.
@@ -3948,6 +4086,30 @@ test_composer_state_unknown_on_capture_failure() {
   [ "$status" -eq 0 ] || fail "composer_state should not itself fail the caller"
   [ "$out" = unknown ] || fail "an unreadable pane should read as unknown, got '$out'"
   pass "fm_backend_herdr_composer_state: reports unknown when the pane cannot be captured"
+}
+
+test_composer_state_inactive_session_fails_fast_without_server_autostart() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/composer-inactive-session"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # status --json reports stopped server
+  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":false}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state nonexistent:w1:p2' "$ROOT" )
+  status=$?
+  [ "$status" -eq 0 ] || fail "composer_state should exit 0 on inactive session"
+  [ "$out" = unknown ] || fail "composer_state on inactive session should read unknown, got '$out'"
+  assert_not_contains "$(cat "$log")" $'\x1f''server' "composer probe on inactive session must never autostart a herdr server"
+  pass "fm_backend_herdr_composer_state: fails fast to unknown for inactive session without starting server"
+}
+
+# shellcheck disable=SC2016
+test_composer_state_piped_reader_does_not_hang() {
+  local out rc=0
+  out=$( fm_run_timed 3 bash -c '. "$0/bin/fm-backend.sh"; ( fm_backend_composer_state herdr nonexistent-session:p2 ) 2>&1 | head -20' "$ROOT" ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "piped composer probe on bad target hung or failed with rc=$rc"
+  [ "$out" = unknown ] || fail "piped composer probe should print unknown, got '$out'"
+  pass "fm_backend_composer_state (herdr): piped probe on bad target does not hang EOF-sensitive readers"
 }
 
 test_composer_state_unknown_when_no_composer_row_found() {
@@ -5962,6 +6124,7 @@ test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
 test_projection_order_secondmate_parent_block
+test_projection_order_group_key_places_new_task_inside_its_group
 test_projection_order_foreign_legacy_child_is_read_only
 test_projection_order_allows_intervening_parent_child_block
 test_projection_order_human_spaces_never_move_targets
@@ -5992,9 +6155,13 @@ test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending
+test_composer_state_titled_box_requires_cortex_identity
+test_composer_state_non_cortex_panes_skip_identity_probe
 test_composer_state_grok_oversized_title_preserves_safe_verdicts
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
+test_composer_state_inactive_session_fails_fast_without_server_autostart
+test_composer_state_piped_reader_does_not_hang
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_parked_prompt_is_not_empty
 test_composer_state_pi_separator_idle_is_empty

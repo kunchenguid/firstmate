@@ -82,6 +82,9 @@ On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at
 After that bootstrap, every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session.
 It never runs in the SSH process or a Herdr pane.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
+Linux ownership records use the clock-stable `/proc` starttime when it is available, because `ps` start times can drift on hosts such as WSL2 and would otherwise make a healthy worker look dead.
+A pre-update worker whose lock still records bare `ps` lstart still verifies against that legacy rendering, so ensure does not treat the live owner as dead and pile another supervisor beside it; when the configured code root's identity is stale, the ordinary code-identity path stops that one worker and replaces it once.
+[`bin/fm-remote-job-lib.sh`](../bin/fm-remote-job-lib.sh) owns the start identity format and the legacy comparison.
 The [`fm-remote-job-worker.sh` header](../bin/fm-remote-job-worker.sh) owns dispatch cadence and the quiet-scan latency for work arriving after its post-activity burst.
 Active-command and result waits use a separate sampling interval; the [`fm-remote-job-lib.sh` header](../bin/fm-remote-job-lib.sh) owns its defaults, overrides, and completion, cancellation, and timeout latency contract.
 
@@ -437,7 +440,7 @@ All remote secondmates on one host share `fm-remote` and retain separate `2ndmat
   Launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it, instead of attempting a live cutover.
 - A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 - Raw launch commands are not accepted for remote secondmates.
-- Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
+- Backends that already refuse secondmate launch, currently Orca, cmux, and paseo, remain unsupported on the remote host.
 
 ### Liveness recovery
 
@@ -574,7 +577,9 @@ An SSH exit status of 255 while fetching a referenced document leaves the delta 
 
 The process-event runner applies each captured delta through this adapter as soon as it is captured.
 So a mirrored reply reaches the primary status channel without depending on the wake handler running the adapter itself.
-A mirrored line that carries a correlation token settles its pending-reply record and closes that request's own open escalation decision.
+A mirrored line that carries a correlation token settles the pending-reply record only when the mate it came from is the task that request was sent to.
+Another mate echoing the token leaves it open.
+A settled record also closes that request's own open escalation decision.
 
 A remote reply reaches the primary only through this asynchronous mirror.
 Because of that, the primary treats a missing correlated report as a missed report only once the mirror has been read through the end of the remote log after that turn ended.
@@ -587,6 +592,12 @@ The [process-to-event operating contract](configuration.md#process-to-event-sour
 
 The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
+
+The failure appends one `blocked` line to the parent status stream, which opens a decision.
+The line records the reason, the reader position (the cursor offset and the first 12 characters of the prefix hash), and the retirement count (how many times the route has been retired).
+Reading the same break again, with the cursor where it was and the count unchanged, appends nothing.
+A later break at a different reader position, or after another retirement, appends a new `blocked` line and opens the decision again.
+A line written before that position was recorded does not match, so the next break appends the new line once.
 
 ### SSH exit 255 and unavailable homes
 
@@ -622,10 +633,10 @@ There is no two-phase journal and no additional tasks-axi release requirement.
 ### Inherited-material transfer
 
 Locked startup convergence and `bin/fm-config-push.sh` transfer only the declared inherited-material allowlist.
-Changed live routes receive a marked instruction to re-read the transferred files.
-The primary records that remote nudge before delivery and retries it during locked startup convergence after a failed send.
-Local secondmates retain their generation-specific local pointer contract.
-Remote transfers do not copy those primary-local instruction paths.
+The receiver accepts only the items its own remote Firstmate code root declares, so a remote secondmate must run code at least as new as its primary before the primary pushes newly declared inherited material it actually has: an older receiver refuses a present `config/t3code-instances`, and the remaining items of that push are skipped.
+When the primary does not have a newly declared item, the older receiver's refusal of its `absent` record counts as `unchanged` and the push continues, so a home that never configures `config/t3code-instances` converges as before.
+That item still costs one extra `absent` call on every inheritance push to a remote secondmate, on every home, including one that never selects `config/backend=t3code`: the remote job worker runs one home's commands one after another, and the lifecycle test legs that push inheritance measure about 5-12% slower; an older remote code root tolerates the call as above.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#charter-and-seed) owns the placement-specific re-read contract, including changed transfers, unchanged retries, and partial or unknown completion.
 
 ### Relaunch a live remote second mate
 

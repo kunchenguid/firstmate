@@ -42,6 +42,10 @@ SH
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
+  list-windows)
+    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta 2>/dev/null \
+      | grep -v 'dead-' || true
+    exit 0 ;;
   capture-pane)
     case "$*" in
       *fm-domain-alpha*) printf 'stale terminal summary: Phase 7 started\n> \n' ;;
@@ -3042,7 +3046,7 @@ EOF
   printf 'working: old generation\n' > "$home/state/generation-race.status"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = display-message ]; then
+if [ "${1:-}" = list-windows ]; then
   if mkdir "$RACE_ONCE" 2>/dev/null; then
     tmp="$RACE_META.tmp.$$"
     cat > "$tmp" <<EOF
@@ -3354,63 +3358,64 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
-test_task_teardown_during_metadata_capture_does_not_abort_snapshot
-test_current_state_uses_captured_status_observation
-test_relaunched_task_does_not_inherit_reused_endpoint_state
-test_large_local_snapshot_overlaps_local_reads_without_projection_drift
-test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
-test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
-test_domain_alpha_stale_parent_event_does_not_become_current_work
-test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
-test_parent_activity_evidence_is_bounded_and_disclosed
-test_active_child_overrides_old_parent_event
-test_structured_child_decision_reaches_captains_call
-test_bad_secondmate_homes_never_revive_parent_work
-test_oversized_secondmate_summary_stays_strict_unknown
-test_secondmate_and_child_bounds_are_disclosed
-test_parent_decision_is_untrusted_contradiction_only
-test_parent_evidence_reconciles_by_verb_and_key
-test_nonprogressing_child_states_are_explicit
-test_registry_unavailability_and_bounds_are_explicit
-test_current_landed_baseline_is_repeatable_and_prior_report_independent
-test_default_is_bounded_and_local_only
-test_toon_json_parity
-test_landed_includes_secondmate_home_merges
-test_landed_accepts_only_kind_owned_delivery_artifacts
-test_kind_fallback_matches_tasks_axi_word_boundaries
-test_landed_preserves_kindless_v1_summary_reports
-test_landed_default_balances_dominant_and_sparse_homes
-test_landed_default_refills_capacity_after_sparse_homes_exhaust
-test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap
-test_landed_default_preserves_internal_order_for_ties
-test_landed_default_handles_no_landed_items
-test_all_landed_keeps_complete_global_order
-test_landed_bounded_and_disclosed
-test_live_blocker_is_not_charted_queue_work
-test_captains_call_anti_leak
-test_main_orphan_in_flight_is_disclosed_not_invented
-test_main_unstructured_current_is_disclosed_with_structured_sibling
-test_main_orphan_counterfactual_meta_clears_inventory_warning
-test_working_captain_holds_keep_their_bucket_surfaces
-test_active_children_project_independent_of_home_captain_hold
-test_nameless_legacy_summary_uses_its_durable_identifier
-test_newest_filed_gates_are_selected_before_snapshot_bounds
-test_underway_and_gate_rows_carry_the_durable_name_and_filed_date
-test_mixed_secondmate_roles_partial_state_and_captain_readiness
-test_main_captain_readiness_matches_secondmate_projection
-test_completed_scout_report_not_pending
-test_open_decision_surfaces_end_to_end
-test_report_pointers_surface
-test_queued_item_prose_never_hides_it
-test_include_prs_is_the_only_fetch_path
-test_include_prs_maps_custom_branch_prefix_to_task
-test_partial_github_failure_degrades
-test_perl_fallback_bounds_github_call
-test_section_caps_and_expansion_flags
-test_collapsed_captain_call_deferral_and_landed
-test_undated_hold_phrasing_and_aging_projection
-test_blocked_deferred_hold_has_concrete_disclosure
-test_revealed_deferred_holds_show_their_deferral_reason
-test_pr_repository_cap_and_expansion
-test_per_repository_pr_cap_is_disclosed
-test_projection_and_toon_fail_closed
+fm_test_run \
+  test_task_teardown_during_metadata_capture_does_not_abort_snapshot \
+  test_current_state_uses_captured_status_observation \
+  test_relaunched_task_does_not_inherit_reused_endpoint_state \
+  test_large_local_snapshot_overlaps_local_reads_without_projection_drift \
+  test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache \
+  test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute \
+  test_domain_alpha_stale_parent_event_does_not_become_current_work \
+  test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution \
+  test_parent_activity_evidence_is_bounded_and_disclosed \
+  test_active_child_overrides_old_parent_event \
+  test_structured_child_decision_reaches_captains_call \
+  test_bad_secondmate_homes_never_revive_parent_work \
+  test_oversized_secondmate_summary_stays_strict_unknown \
+  test_secondmate_and_child_bounds_are_disclosed \
+  test_parent_decision_is_untrusted_contradiction_only \
+  test_parent_evidence_reconciles_by_verb_and_key \
+  test_nonprogressing_child_states_are_explicit \
+  test_registry_unavailability_and_bounds_are_explicit \
+  test_current_landed_baseline_is_repeatable_and_prior_report_independent \
+  test_default_is_bounded_and_local_only \
+  test_toon_json_parity \
+  test_landed_includes_secondmate_home_merges \
+  test_landed_accepts_only_kind_owned_delivery_artifacts \
+  test_kind_fallback_matches_tasks_axi_word_boundaries \
+  test_landed_preserves_kindless_v1_summary_reports \
+  test_landed_default_balances_dominant_and_sparse_homes \
+  test_landed_default_refills_capacity_after_sparse_homes_exhaust \
+  test_landed_default_uses_deterministic_home_order_when_homes_exceed_cap \
+  test_landed_default_preserves_internal_order_for_ties \
+  test_landed_default_handles_no_landed_items \
+  test_all_landed_keeps_complete_global_order \
+  test_landed_bounded_and_disclosed \
+  test_live_blocker_is_not_charted_queue_work \
+  test_captains_call_anti_leak \
+  test_main_orphan_in_flight_is_disclosed_not_invented \
+  test_main_unstructured_current_is_disclosed_with_structured_sibling \
+  test_main_orphan_counterfactual_meta_clears_inventory_warning \
+  test_working_captain_holds_keep_their_bucket_surfaces \
+  test_active_children_project_independent_of_home_captain_hold \
+  test_nameless_legacy_summary_uses_its_durable_identifier \
+  test_newest_filed_gates_are_selected_before_snapshot_bounds \
+  test_underway_and_gate_rows_carry_the_durable_name_and_filed_date \
+  test_mixed_secondmate_roles_partial_state_and_captain_readiness \
+  test_main_captain_readiness_matches_secondmate_projection \
+  test_completed_scout_report_not_pending \
+  test_open_decision_surfaces_end_to_end \
+  test_report_pointers_surface \
+  test_queued_item_prose_never_hides_it \
+  test_include_prs_is_the_only_fetch_path \
+  test_include_prs_maps_custom_branch_prefix_to_task \
+  test_partial_github_failure_degrades \
+  test_perl_fallback_bounds_github_call \
+  test_section_caps_and_expansion_flags \
+  test_collapsed_captain_call_deferral_and_landed \
+  test_undated_hold_phrasing_and_aging_projection \
+  test_blocked_deferred_hold_has_concrete_disclosure \
+  test_revealed_deferred_holds_show_their_deferral_reason \
+  test_pr_repository_cap_and_expansion \
+  test_per_repository_pr_cap_is_disclosed \
+  test_projection_and_toon_fail_closed

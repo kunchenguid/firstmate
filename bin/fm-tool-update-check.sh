@@ -45,6 +45,9 @@
 # gitignored, and is never propagated to another home. Adding a tool is a config
 # edit, never a code change. docs/configuration.md owns that schema.
 #
+# For tools without CLI update announcements, see `version_url` in
+# docs/configuration.md's "Watched tool updates" section.
+#
 # Probing costs real time, so `check` runs its probes at most once per
 # FM_TOOL_UPDATE_INTERVAL (default 900, 0 disables the gate, otherwise 60..86400)
 # and stays silent in between. Each probe is bounded by
@@ -333,6 +336,8 @@ config_validate() {
       elif ($t | has("announce_args")) and (($t.announce_args | type) != "array" or ($t.announce_args | length) == 0) then "tool \($t.name) announce_args must be a non-empty array"
       elif ($t | has("announce_args")) and ([$t.announce_args[] | select((type != "string") or (test("^[A-Za-z0-9._=+/:-]+$") | not))] | length) > 0 then "tool \($t.name) announce_args must be simple flag strings without spaces"
       elif ($t | has("announce_args")) and (($t | has("announce_pattern")) | not) then "tool \($t.name) announce_args needs announce_pattern"
+      elif ($t | has("version_url")) and (($t.version_url | type) != "string" or ($t.version_url | test("^https://[^[:space:][:cntrl:]]+$") | not)) then "tool \($t.name) version_url must be one https URL"
+      elif ($t | has("version_url")) and (($t | has("command")) | not) then "tool \($t.name) version_url needs command"
       elif ($t | has("git")) and (($t.git | type) != "object") then "tool \($t.name) git must be an object"
       elif ($t | has("git")) and (($t.git.repo | type) != "string" or ($t.git.repo | startswith("/") | not) or ($t.git.repo | test("[[:cntrl:]]"))) then "tool \($t.name) git.repo must be an absolute path on one line"
       elif ($t | has("git")) and ($t.git | has("remote")) and (($t.git.remote | type) != "string" or ($t.git.remote | test("^[A-Za-z0-9._-]+$") | not)) then "tool \($t.name) git.remote must be a simple remote name"
@@ -377,7 +382,8 @@ config_records() {
       ((.announce_args // .version_args // ["--version"]) | join(" ")),
       (.git.repo // ""),
       (.git.remote // "origin"),
-      (.git.branch // "")
+      (.git.branch // ""),
+      (.version_url // "")
     ] | join("\u001f")
   ' "$CONFIG" 2>/dev/null
 }
@@ -412,8 +418,8 @@ probe_output() {
 }
 
 command_findings() {
-  local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5
-  local hit out version matched announce_out status matched_line announced_version
+  local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5 version_url=${6:-}
+  local hit out version matched announce_out status matched_line announced_version published
   local resolved_path='' resolved_version='' resolved_out=''
   local best_path='' best_version='' unreadable='' hits=''
 
@@ -505,6 +511,26 @@ EOF
     # already covers that, so do not blame a copy that was never asked.
     [ -z "$resolved_path" ] || emit "$name check failed: $resolved_path did not report a version"
     return 0
+  fi
+
+  if [ -n "$version_url" ]; then
+    # The published version is read from the document body, never from the URL,
+    # and compared with the newest installed copy found: a newer install elsewhere
+    # on PATH is the "not in effect" finding below, not an available update.
+    if budget_exhausted; then
+      emit "$name check failed: the time budget ran out before $version_url was read"
+    elif ! command -v curl >/dev/null 2>&1; then
+      emit "$name check failed: curl is required to read $version_url"
+    else
+      out=$(fm_run_timed "$(probe_bound)" curl -fsS --max-time "$(probe_bound)" -- "$version_url" 2>/dev/null)
+      status=$?
+      published=$(parse_version "$out")
+      if [ "$status" -ne 0 ] || [ -z "$published" ]; then
+        emit "$name check failed: $version_url did not report a version"
+      elif version_newer "$published" "$best_version"; then
+        emit "$name update available: $published published at $version_url, PATH resolves $resolved_version"
+      fi
+    fi
   fi
 
   if [ -n "$best_version" ] && [ "$best_path" != "$resolved_path" ] \
@@ -705,7 +731,7 @@ record_write() {
 # --- actions ----------------------------------------------------------------
 
 action_check() {
-  local name command_name args_joined announce announce_args repo remote branch
+  local name command_name args_joined announce announce_args repo remote branch version_url
   local line now
 
   [ -f "$CONFIG" ] || return 0
@@ -726,10 +752,10 @@ action_check() {
   if ! config_validate; then
     emit "watched tool registry: $CONFIG_PROBLEM"
   else
-    while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch; do
+    while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch version_url; do
       [ -n "$name" ] || continue
       budget_allows "$name" || break
-      [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args"
+      [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args" "$version_url"
       [ -z "$repo" ] || git_findings "$name" "$repo" "$remote" "$branch"
     done < <(config_records)
   fi

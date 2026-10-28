@@ -5,8 +5,9 @@
 # to a secondmate, this library records a durable parent-owned pending-reply
 # expectation BEFORE delivery, embeds a privacy-safe correlation id in the
 # outbound message, and later resolves that expectation only from a correlated
-# parent status line or status-pointed document - never from transport success,
-# chat content, or unrelated status activity.
+# line in the asked task's own parent status log, or a document it points to -
+# never from transport success, chat content, unrelated status activity, or
+# another task's line that echoes or quotes the token.
 #
 # Safety property (captain direction 2026-07-22): a secondmate agent may ignore
 # the marker and answer only in its visible conversation. The parent must notice
@@ -194,25 +195,37 @@ fm_pending_reply_extract_corr() {  # <text>
   printf '%s' "$text" | grep -oE "$FM_PENDING_REPLY_CORR_RE" 2>/dev/null | head -1 | cut -d= -f2- | tr 'A-F' 'a-f' || true
 }
 
-# 0 if <text> carries the exact correlation token for <corr_id>.
+# 0 if <text> carries the exact correlation token for <corr_id>, as a whole
+# word: xcorr=<id> or corr=<id>ff is a different token, not this one.
 fm_pending_reply_text_has_corr() {  # <text> <corr_id>
-  local text=$1 corr=$2 token
-  token=$(fm_pending_reply_corr_token "$corr")
-  case "$text" in
-    *"$token"*) return 0 ;;
-  esac
-  return 1
+  local text=$1 corr=$2 re
+  re="(^|[^[:alnum:]_])$(fm_pending_reply_corr_token "$corr")([^[:alnum:]_]|\$)"
+  [[ $text =~ $re ]]
 }
 
-# Sanitize a short request summary: single line, bounded, no control chars.
+# Byte length of the first <keep> UTF-8 characters of <text> when it holds more
+# than <max> characters, else -1. Counts lead bytes from od output, so the
+# verdict is the same under every caller locale and never splits a character.
+fm_pending_reply_char_cut() {  # <text> <max> <keep>
+  printf '%s' "$1" | LC_ALL=C od -An -v -tu1 | awk -v max="$2" -v keep="$3" '
+    { for (i = 1; i <= NF; i++) {
+        if ($i < 128 || $i >= 192) { chars++; if (chars == keep + 1) cut = n }
+        n++
+      } }
+    END { print (chars > max ? cut : -1) }'
+}
+
+# Sanitize a short request summary: single line, bounded, no ASCII control chars.
+# Preserve UTF-8 characters, including accents; cap at 120 characters in any locale.
 fm_pending_reply_summarize() {  # <text>
-  local text=$1 cleaned
-  cleaned=$(printf '%s' "$text" | tr '\t\r\n' '   ' | tr -cd '\11\12\15\40-\176' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  local text=$1 cleaned cut
+  cleaned=$(printf '%s' "$text" | tr '\t\r\n' '   ' | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   # Drop an already-present marker/corr prefix so the durable summary stays short.
   cleaned=${cleaned#"$FM_FROMFIRST_MARK"}
   cleaned=$(printf '%s' "$cleaned" | sed -E "s/^corr=[A-Fa-f0-9]{16}[[:space:]]*//")
-  if [ "${#cleaned}" -gt 120 ]; then
-    cleaned="${cleaned:0:117}..."
+  cut=$(fm_pending_reply_char_cut "$cleaned" 120 117)
+  if [ "$cut" -ge 0 ]; then
+    cleaned="$(printf '%s' "$cleaned" | head -c "$cut")..."
   fi
   printf '%s' "$cleaned"
 }
@@ -689,7 +702,13 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     case "$delivery_state" in attempted|confirmed) ;; *) return 1 ;; esac
     unconfirmed=1
   fi
-  status_file=${status_override:-$(fm_pending_reply_get "$rec" parent_status)}
+  status_file=$(fm_pending_reply_get "$rec" parent_status)
+  # Only the asked task's own status log answers its request: another mate's
+  # line echoing or quoting this corr= token must leave the request open.
+  if [ -n "$status_override" ]; then
+    [ "$status_override" -ef "$status_file" ] || return 1
+    status_file=$status_override
+  fi
   if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
     signature=$(fm_pending_reply_file_signature "$status_file")
     previous=$(fm_pending_reply_get "$rec" parent_status_scan_signature)
@@ -811,6 +830,8 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
   case "$native" in
     busy|idle) printf '%s' "$native"; return 0 ;;
   esac
+  # T3's synthetic transcript cannot resolve native busy uncertainty.
+  [ "$backend" != t3code ] || { printf 'unknown'; return 0; }
   tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \

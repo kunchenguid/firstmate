@@ -977,6 +977,30 @@ test_bootstrap_inert_without_token() {
   pass "bootstrap is inert without a non-empty .env token (non-X users unaffected)"
 }
 
+test_bootstrap_preserves_nonrelay_watcher_tuning() {
+  local copy home out rc seen
+  copy="$TMP_ROOT/boot-nonrelay-watcher-tuning"; home="$copy/home"
+  mkdir -p "$home/config" "$home/state"
+  cp -R "$ROOT/bin" "$copy/bin"
+  cat > "$copy/bin/fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_PAUSE_RESURFACE_SECS:-unset}" > "$FM_HOME/watcher-saw"
+SH
+  chmod +x "$copy/bin/fm-watch.sh"
+  printf 'export FM_PAUSE_RESURFACE_SECS=777\n' > "$home/config/watch.env"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_not_contains "$out" "FMX:" "a non-Relay watcher setting must not activate Relay"
+  assert_present "$home/config/watch.env" "bootstrap must preserve non-Relay watcher tuning"
+  rc=0
+  out=$(env -u CONFIG -u FM_PAUSE_RESURFACE_SECS FM_HOME="$home" FM_GUARD_GRACE=3 \
+    "$copy/bin/fm-watch-arm.sh" 2>&1) || rc=$?
+  assert_not_contains "$out" "unbound variable" "the watcher arm crashed while loading watch.env"
+  [ -f "$home/watcher-saw" ] || fail "the watcher arm never launched the watcher (rc=$rc): $out"
+  seen=$(cat "$home/watcher-saw")
+  [ "$seen" = 777 ] || fail "the watcher did not inherit watch.env tuning: saw '$seen'"
+  pass "bootstrap preserves home-local watcher tuning and the arm hands it to the watcher"
+}
+
 test_poll_empty_text_is_silent() {
   local home fakebin out rc
   home="$TMP_ROOT/poll-empty-text"; mkdir -p "$home"
@@ -3284,5 +3308,6 @@ test_bootstrap_reports_missing_x_dependency
 test_bootstrap_does_not_announce_when_arm_fails
 test_bootstrap_does_not_follow_x_artifact_symlinks
 test_bootstrap_inert_without_token
+test_bootstrap_preserves_nonrelay_watcher_tuning
 test_bootstrap_opt_out_cleanup
 test_bootstrap_opt_out_reports_cleanup_failure

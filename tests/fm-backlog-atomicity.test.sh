@@ -36,6 +36,10 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 TMP_ROOT=$(fm_test_tmproot fm-backlog-atomicity)
+# The fixture helpers below call tasks-axi directly, and tasks-axi reads a
+# .tasks.toml from its working directory. Run from the scratch root so an
+# operator override in the checkout cannot redirect those calls.
+cd "$TMP_ROOT" || exit 1
 
 command -v tasks-axi >/dev/null 2>&1 || {
   printf 'ok - skipped (tasks-axi is not installed; the fused transitions are inert without it)\n'
@@ -92,8 +96,33 @@ EOF
 
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+window_file="$(dirname "$0")/.spawn-window"
 case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
-case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    grep -Fqx -- "$name" "$window_file" 2>/dev/null || printf '%s\n' "$name" >> "$window_file"
+    exit 0 ;;
+  kill-window)
+    target=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -t ] && target=$arg
+      previous=$arg
+    done
+    target=${target##*:}
+    target=${target#=}
+    grep -Fvx -- "$target" "$window_file" 2>/dev/null > "$window_file.tmp" || true
+    mv "$window_file.tmp" "$window_file"
+    exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -777,7 +806,7 @@ test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   id=atomic-dispatch-b1
   case_dir=$(make_home dispatch-ok "$id")
   add_item "$case_dir" "$id"
-  cp "$ROOT/.tasks.toml" "$(home_of "$case_dir")/.tasks.toml"
+  fm_test_tasks_toml "$(home_of "$case_dir")/.tasks.toml"
   record_tasks_axi_calls "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"

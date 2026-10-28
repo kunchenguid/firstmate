@@ -37,6 +37,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$ROOT/bin/fm-tmux-lib.sh"
 
 fm_live_gate opt-in FM_SUPERVISION_HOST_ATTENDED_LIVE_E2E claude tmux jq node perl git
 
@@ -242,11 +244,22 @@ choose() {  # <socket> <screen> <option>
   sleep 3
 }
 
+# A bare tmux launch has no native agent-idle event. The Claude-scoped busy
+# read and shared composer classifier must both report an idle input surface.
+claude_ready_state() {  # <socket> <target> -> diagnostic state; success when ready
+  local socket=$1 target=$2 busy composer
+  tmux() { command tmux -L "$socket" "$@"; }
+  busy=$(fm_pane_busy_state "$target" claude)
+  composer=$(fm_tmux_composer_state "$target")
+  printf 'busy=%s composer=%s' "$busy" "$composer"
+  [ "$busy" = idle ] && [ "$composer" = empty ]
+}
+
 # Start the primary interactively in a private tmux server, answer the lab's
 # first-run dialogs, submit the one setup prompt, and wait until it sits idle
 # with the host parked on a live watcher.
 start_primary() {  # <lab>
-  local lab=$1 sock screen i started prompt
+  local lab=$1 sock screen i started prompt readiness=unknown last_seen=none
   sock="$SOCKET-$(basename "$lab")"
   prompt='This is an isolated Firstmate test lab, not a real fleet. Reply with exactly READY now and use no tools. Later, whenever a "Stop hook feedback" message wakes you, do exactly this and nothing else: run `bin/fm-wake-drain.sh` once with the Bash tool, then run the exact `bin/fm-wake-drain.sh --ack-through ...` command that its WAKE_ACK_REQUIRED line prints, then reply with exactly ACKED. Never run any other command, never run bin/fm-watch-arm.sh, and never use any other tool.'
   started=$(date +%s)
@@ -256,16 +269,18 @@ start_primary() {  # <lab>
   i=0
   while [ "$i" -lt 90 ]; do
     screen=$(tmux -L "$sock" capture-pane -p -t primary 2>/dev/null)
+    last_seen=$(printf '%s\n' "$screen" | grep -v '^[[:space:]]*$' | tail -n 6)
+    [ -n "$last_seen" ] || last_seen='empty screen'
     case "$screen" in
-      *'bypass permissions on'*) break ;;
       *'Yes, I trust this folder'*) choose "$sock" "$screen" 'Yes, I trust this folder' ;;
       *'Yes, I accept'*) choose "$sock" "$screen" 'Yes, I accept' ;;
       *'external CLAUDE.md'*|*'external imports'*) choose "$sock" "$screen" 'Yes, allow external imports' ;;
+      *) readiness=$(claude_ready_state "$sock" primary) && break ;;
     esac
     sleep 1
     i=$((i + 1))
   done
-  [ "$i" -lt 90 ] || fail "$(basename "$lab"): Claude never reached its composer"$'\n'"$(diagnose "$lab")"
+  [ "$i" -lt 90 ] || fail "$(basename "$lab"): Claude never reached an idle empty composer (last readiness: $readiness; last screen: $last_seen)"$'\n'"$(diagnose "$lab")"
   sleep 2
   tmux -L "$sock" send-keys -t primary -l "$prompt"
   sleep 1

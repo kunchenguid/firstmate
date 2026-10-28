@@ -7,7 +7,7 @@ Cross-harness provider and credential identity is owned by `references/common/mo
 
 | Fact | Value |
 |---|---|
-| Binary | `fm_cursor_resolve_binary` in `../../../bin/fm-cursor-lib.sh` resolves stable launcher `cursor-agent` or legacy `agent`, never `cursor`; both symlink into `~/.local/share/cursor-agent/versions/<version>/cursor-agent`, whose target auto-update replaces. |
+| Binary | `fm_cursor_resolve_binary` in `../../../bin/fm-cursor-lib.sh` resolves stable launcher `cursor-agent` or legacy `agent`, never `cursor`, and accepts each candidate only after that owner's bounded launch probe (via `fm_run_timed`, so coreutils `timeout` is not required) so a broken preferred name falls through; both names normally symlink into `~/.local/share/cursor-agent/versions/<version>/cursor-agent`, whose target auto-update replaces. |
 | Launch | Positional instructions with `--trust`, `--yolo`, optional `--model <model>`, and `--workspace <absolute-task-worktree>`, after clearing foreign primary markers. |
 | Attribution | Cursor can append a Co-authored-by trailer after the typed message. Unless the home sets `config/keep-ai-trailers` (`../../../../../docs/configuration.md` "Commit attribution"), every fleet launch installs the pane-scoped commit-msg strip in `../../../bin/fm-git-strip-ai-trailers.sh`, which removes known AI trailers and leaves human co-authors and the author identity untouched. |
 | Models | Use current-account `cursor-agent --list-models` or legacy `agent --list-models`; the drifting observed list had only `cursor-grok-4.5-high` and `cursor-grok-4.5-high-fast` for Grok plus several `xhigh` ids, so choose a returned reasoning id and never assume low or medium Grok. |
@@ -50,7 +50,7 @@ Confirmation is verified only on tmux and Herdr.
 Herdr reports Cursor `blocked` in every state, so its native idle path is unreachable; the composer path sees the mid-turn placeholder beside `ctrl+c to stop` as pending.
 `../../../bin/backends/herdr.sh` baselines before Enter and confirms the footer transition, so an already-busy pane cannot confirm.
 
-Zellij, cmux, and Orca do not consult that footer.
+Zellij, cmux, Orca, and tern do not consult that footer.
 A typed-plane native invocation or explicit backend send lands but reports unconfirmed and exits nonzero; ordinary steering uses the durable inbox and exits zero at enqueue.
 Treat this as confirmation failure, not loss, because text lands and busy state comes from the transcript.
 Teaching those backends is separate cross-harness work requiring live checks.

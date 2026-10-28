@@ -128,6 +128,7 @@ source_id() {
 
 cursor_path() { printf '%s/%s.cursor\n' "$CURSOR_DIR" "$1"; }
 ingest_receipt_path() { printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "$2"; }
+retirement_count_path() { printf '%s/%s.retirements\n' "$CURSOR_DIR" "$1"; }
 mirrored_source_path() { printf '%s/.remote-reply-mirrored-%s\n' "$STATE" "$1"; }
 
 read_cursor() { # <id>; sets CURSOR_OFFSET and CURSOR_HASH
@@ -162,6 +163,43 @@ write_cursor() { # <id> <offset> <hash>
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$path"
+}
+
+# A missing file is zero and is not created. Ingest only reads this.
+# Retirement is the one writer, so a crash during ingest cannot change it.
+read_retirement_count() { # <id>; sets RETIREMENT_COUNT
+  local path count lines
+  path=$(retirement_count_path "$1")
+  RETIREMENT_COUNT=0
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  [ -f "$path" ] && [ ! -L "$path" ] || die "reply retirement count is unsafe: $path"
+  lines=$(grep -c '^count=' "$path" 2>/dev/null || true)
+  [ "$lines" = 1 ] || die "reply retirement count is invalid: $path"
+  count=$(sed -n 's/^count=//p' "$path")
+  case "$count" in ''|*[!0-9]*) die "reply retirement count is invalid: $path" ;; esac
+  RETIREMENT_COUNT=$count
+}
+
+write_retirement_count() { # <id> <count>
+  local id=$1 count=$2 path tmp
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  mkdir -p "$CURSOR_DIR" || return 1
+  chmod 700 "$CURSOR_DIR" 2>/dev/null || true
+  path=$(retirement_count_path "$id")
+  [ ! -L "$path" ] || return 1
+  tmp=$(umask 077; mktemp "$CURSOR_DIR/.retirements.XXXXXX") || return 1
+  printf 'count=%s\n' "$count" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! mv -f -- "$tmp" "$path"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Twelve characters distinguish breaks in the status line. The cursor keeps
+# the full digest the reader uses.
+continuity_prefix() {
+  printf '%.12s' "$CURSOR_HASH"
 }
 
 ingest_receipt_matches() { # <id> <sequence> <result>
@@ -544,7 +582,12 @@ cmd_ingest() {
     die "result does not continue the current cursor for $id"
   fi
   if [ "$class" = continuity-broken ]; then
-    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
+    # The same offset, prefix, and retirement count build the same line, so a
+    # retry appends nothing. Retirement removes the cursor before it records
+    # the next count, so a later break is a new line even when the restored
+    # bytes match, and a stop between those steps leaves the count unchanged.
+    read_retirement_count "$id"
+    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason) at offset ${CURSOR_OFFSET} prefix $(continuity_prefix) retirements ${RETIREMENT_COUNT}"
     append_rc=0
     if status_event_recorded "$status_file" "$line"; then
       append_rc=1
@@ -726,7 +769,7 @@ cmd_retire_quiesce_locked() {
 }
 
 cmd_retire_finalize_locked() {
-  local id=${1:-} force=${2:-} sid path
+  local id=${1:-} force=${2:-} sid path cursor
   validate_id "$id"
   [ -z "$force" ] || [ "$force" = --force ] || die "invalid retirement option: $force"
   sid=$(source_id "$id")
@@ -742,7 +785,16 @@ cmd_retire_finalize_locked() {
       done
     fi
   fi
-  rm -f -- "$(cursor_path "$id")"
+  # Remove the cursor first. A stop before the count write leaves that count
+  # unchanged, so the same break still builds the same line.
+  cursor=$(cursor_path "$id")
+  rm -f -- "$cursor" || die "cannot remove remote reply cursor"
+  if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+    die "cannot remove remote reply cursor"
+  fi
+  read_retirement_count "$id"
+  write_retirement_count "$id" "$((RETIREMENT_COUNT + 1))" \
+    || die "cannot record remote reply retirement"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
   rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }
