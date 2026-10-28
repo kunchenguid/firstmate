@@ -515,13 +515,17 @@ test_agent_state_from_process_view() {
 
 # start_shell_tree: a real process tree shaped like a pane whose login shell
 # launched <leaf> through a wrapper script in its own process group: a root
-# shell (TREE_ROOT), a wrapper shell below it, and <leaf> (a `sleep` under that
+# shell (TREE_ROOT), a wrapper shell below it, and <leaf> (a stand-in under that
 # name, TREE_LEAF) below the wrapper. Its args name <dir>/tree, so the suite's
 # fixture reaping also covers it.
 start_shell_tree() {  # <dir> <leaf-name>
-  local dir=$1 leaf=$2 i=0
+  local dir=$1 leaf=$2 i=0 standin
+  standin=$(fm_agent_standin "$dir/standin") || {
+    echo "skip: no long-running stand-in survives a rename, so the shell descendant case cannot run"
+    return 1
+  }
   mkdir -p "$dir/tree"
-  ln -sf "$(command -v sleep)" "$dir/tree/$leaf"
+  ln -sf "$standin" "$dir/tree/$leaf"
   cat >"$dir/tree/wrapper" <<'SH'
 #!/usr/bin/env bash
 "$1" "$2"
@@ -552,13 +556,31 @@ shell_foreground_payload() {  # <foreground-pid>
 }
 
 test_agent_state_sees_a_harness_below_a_shell_foreground() {
-  local dir out sid bid t
+  local dir out sid bid t fakebin real_sleep PATH=$PATH
   dir=$(new_case agent-state-below-shell)
+  # Model a multicall sleep on every host, including macOS and GNU coreutils.
+  # The real process tree must still start when sleep refuses a foreign name.
+  real_sleep=$(command -v sleep) || fail "sleep not found"
+  fakebin=$(fm_fakebin "$dir/multicall")
+  cat >"$fakebin/sleep" <<SH
+#!/usr/bin/env bash
+case "\${0##*/}" in
+  sleep) exec "$real_sleep" "\$@" ;;
+  *) echo "Requested utility \${0##*/} does not match executable name" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/sleep"
+  ln -s "$fakebin/sleep" "$dir/multicall/claude"
+  "$fakebin/sleep" 0 || fail "the fake multicall sleep must run under its own name"
+  if "$dir/multicall/claude" 0 2>/dev/null; then
+    fail "the fake multicall sleep must refuse a harness name, or this case proves nothing"
+  fi
+  export PATH="$fakebin:$PATH"
   out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
   read -r sid _ bid <<<"$out"
   t="${sid#session:}:${bid#block:}"
 
-  start_shell_tree "$dir" claude
+  start_shell_tree "$dir" claude || return 0
   write_process "$dir" "$bid" "$(shell_foreground_payload "$DEAD_PID")"
   assert_equals dead "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" \
     "the reported chain alone holds no harness, so a foreground shell with no live process below it is dead"
@@ -571,7 +593,7 @@ test_agent_state_sees_a_harness_below_a_shell_foreground() {
   stop_shell_tree "$dir"
   rm -f "$dir/fake/status/${bid#block:}.json"
 
-  start_shell_tree "$dir" worker
+  start_shell_tree "$dir" worker || return 0
   write_process "$dir" "$bid" "$(shell_foreground_payload "$TREE_ROOT")"
   assert_equals dead "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" \
     "a shell foreground with only non-harness processes below it is dead"

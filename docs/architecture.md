@@ -124,7 +124,8 @@ A secondmate retains a durable receipt for its idempotent report through the est
 A secondmate home's terminal child ledger lines, PR registrations, captain holds, and merges are published on that same parent route by the scripts that record them, so no captain-facing outcome depends on the mate model appending it ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 Each `fm-wake-drain.sh` presentation runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only handles queued wakes.
-Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
+Routine watcher polling, supervision no-ops, and absorbed benign wakes stay silent.
+Elapsed waiting time can trigger the optional [open-decision reminders](configuration.md#open-decision-reminders-configopen-decision-reminders).
 A declared external wait or an attended `captain-held` declaration trades that silence for one bounded recheck per pause window, naming the dependency or decision owner; while the away-posture record exists, captain-held work waits without rechecks and remains visible in the return brief.
 Crew status files are append-only wake-event logs, not current-state fields.
 Because of that, a per-wake read of only the latest line can bury an earlier still-open `needs-decision`/`blocked` under later unrelated appends; `fm-wake-drain.sh` prints a separate, fleet-wide OPEN DECISIONS section on every presentation (including the empty-queue path session-start relies on), built through `fm-classify-lib.sh`'s cursor-backed incremental scan using the authoritative `status_open_decisions` fold semantics so the buried decision keeps surfacing until that fold closes it while each presentation folds only new status-log appends.
