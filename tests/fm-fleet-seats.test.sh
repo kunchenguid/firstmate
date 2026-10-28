@@ -1583,7 +1583,8 @@ test_nested_remote_serve_uses_registry_owner() {
   local out
   make_remote_fleet nested-remote-owner 2
   sed -n '/^- theshop /p' "$R_ROOT/data/secondmates.md" > "$R_LOCAL/data/secondmates.md"
-  sed -i '/^- theshop /d' "$R_ROOT/data/secondmates.md"
+  sed '/^- theshop /d' "$R_ROOT/data/secondmates.md" > "$R_ROOT/data/secondmates.new"
+  mv "$R_ROOT/data/secondmates.new" "$R_ROOT/data/secondmates.md"
   cat > "$R_ROOT/direct-entrypoint" <<'SH'
 #!/usr/bin/env bash
 root=$(printf '%s' "$2" | base64 -d)
@@ -1899,7 +1900,7 @@ spawn_gen=g-sm"
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done

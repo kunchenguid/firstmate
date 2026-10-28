@@ -2439,6 +2439,18 @@ test_failed_t3_secondmate_is_resumed_in_place() {
   state="$CASE_DIR/state"
   mkdir -p "$state"
   fm_write_meta "$state/smfail.meta" "window=fm-smfail" "kind=secondmate" "harness=claude" "backend=t3code" "t3_thread_id=$thread" "home=$CASE_DIR/sm-home"
+  mkdir -p "$CASE_DIR/home/data"
+  printf '{"pools":[{"name":"recovery","capacity":1,"models":["pool-model-a"]}]}' > "$CONFIG/fleet-seats"
+  printf 'spawn_gen=g-failed\nmodel=pool-model-a\n' >> "$state/smfail.meta"
+  t3_world "$(t3_thread_json "$thread" running false)"
+  FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" \
+    SEATS="$ROOT/bin/fm-fleet-seats.sh" TARGET="$thread" bash -c '
+      "$SEATS" reserve smfail --generation g-failed --kind secondmate --harness claude --model pool-model-a --holder-pid "$$" || exit
+      route="$FM_HOME/route.json"
+      (umask 077; jq -cn --arg t "$TARGET" "{placement: \"local\", backend: \"t3code\", target: \$t, spawn_gen: \"g-failed\", host: null, remote_root: null}" > "$route")
+      "$SEATS" dispatch smfail --generation g-failed --route-file "$route" && "$SEATS" confirm smfail --generation g-failed
+    ' > "$CASE_DIR/seat.out" 2>&1 || fail "preparing pooled failed T3 generation: $(cat "$CASE_DIR/seat.out")"
+  t3_world "$(t3_thread_json "$thread" failed false)"
   out=$(STATE="$state" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" FM_HOME="$CASE_DIR/home" bash -c '
 . "$0/bin/fm-secondmate-liveness-lib.sh"
 fm_secondmate_liveness_probe "$1" smfail poll
@@ -2453,6 +2465,13 @@ fm_secondmate_liveness_relaunch "$1" smfail && echo relaunched=yes || echo relau
     "Re-read your AGENTS.md and your home's config first" "the resumed conversation is told to re-read, as a fresh launch would"
   assert_grep "t3_thread_id=$thread" "$state/smfail.meta" "the endpoint record is unchanged"
   assert_grep relaunched "$state/.secondmate-relaunch-smfail" "the resume is recorded in the relaunch ledger"
+  local seat
+  seat=$(FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" "$ROOT/bin/fm-fleet-seats.sh" show smfail)
+  assert_equals confirmed "$(printf '%s' "$seat" | jq -r '.incarnations[] | select(.generation == "g-failed") | .lifecycle')" "in-place resume freed its counted incarnation"
+  local probe_rc=0
+  FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$ROOT/bin/fm-fleet-seats.sh" reserve contender --generation g-other --kind secondmate --harness claude --model pool-model-a --holder-pid "$$" > "$CASE_DIR/probe.out" 2>&1 || probe_rc=$?
+  expect_code 4 "$probe_rc" "resumed T3 supervisor must retain full capacity: $(cat "$CASE_DIR/probe.out")"
   pass "secondmate liveness backend=t3code: a failed run is resumed on its own thread, never archived and replaced"
 }
 

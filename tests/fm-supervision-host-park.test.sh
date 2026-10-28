@@ -235,7 +235,8 @@ test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted() {
     FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
   wait_until 150 watcher_live "$home" || fail "warm-compact-stale: no watcher started"
   seed_idle_engine_record "$home" 600
-  sed -i 's/^model=.*/model=another-model/' "$home/state/.supervision-host-engine"
+  sed 's/^model=.*/model=another-model/' "$home/state/.supervision-host-engine" > "$home/engine.new"
+  mv "$home/engine.new" "$home/state/.supervision-host-engine"
   echo 10 > "$home/park-clock"
   sleep 3
   [ "$(compact_calls "$home")" = 0 ] || fail "warm-compact-stale: compacted a conversation the next turn would not resume"
@@ -662,6 +663,11 @@ test_superseded_host_leaves_the_owner_untouched() {
     || fail "superseded: the owner host did not stop on TERM"
   pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
 }
+
+if [ "$#" -gt 0 ]; then
+  fm_test_run "$@"
+  exit
+fi
 
 fm_test_run \
   test_latch_trips_after_two_engine_errors_then_probes_and_recovers \
