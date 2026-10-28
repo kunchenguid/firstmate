@@ -22,6 +22,13 @@
 # captain-approved <host>/<owner>/<repo> publication scope for this one task,
 # rendered as an `upstream-consent=<scope>` suffix token on the Delivery
 # contract line so brief, spawn record, and worker instructions agree.
+# The optional seventh argument is the firstmate home's data directory. The two
+# PR-publishing blocks render fm_suite_record_block with it: the worker's last
+# step records its full-suite result and the base commit it ran against in
+# <data>/<task-id>/suite-result (location owned by fm_pr_suite_record_path in
+# bin/fm-pr-lib.sh), and bin/fm-pr-merge.sh reads that record, never executing
+# repository code, when the base branch has no required checks. Absent, the
+# block names the path relative to the firstmate home.
 # Callers of the gate are bin/fm-crew-state.sh (current-state done),
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
@@ -448,8 +455,32 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-}
+# The worker's last step on a PR-publishing task. Written once and rendered by
+# both publishing blocks; bin/fm-pr-merge.sh's header owns how the record is
+# judged (pass bound to the live base commit, fail, or the explicit none).
+fm_suite_record_block() {  # <data-dir> <task-id> [<base-branch>]
+  local data=${1:-data} id=$2 base=${3:-} record base_ref
+  record=$(fm_pr_suite_record_path "$data" "$id")
+  if [ -n "$base" ]; then
+    base_ref="origin/$base"
+  else
+    base_ref='origin/<default branch>'
+  fi
+  cat <<EOF
+Record the full-suite result as your last step, after your final commit and before the done report.
+Firstmate's merge guard executes none of this repository's code, so on a base branch with no required checks it relies on this record:
+1. Run \`git fetch origin\`, then run the project's full test suite or gate on the exact tree you are shipping - the command its AGENTS.md, CONTRIBUTING.md, or README names, never a targeted subset or a "docs-only, nothing to run" skip.
+2. Write the result to \`$record\` with exactly these lines, \`suite=pass\` only when the whole run passed:
+   \`suite=pass\` or \`suite=fail\`
+   \`base=\` followed by the output of \`git merge-base HEAD $base_ref\`
+   \`ran=\` followed by the command you ran
+3. If the project genuinely has no test suite or gate, write \`suite=none\` and \`reason=\` followed by why there is none instead; never use none for a suite that exists.
+4. If $base_ref advances after you wrote the record, rebase, re-run the suite, and rewrite the record: a record made against an older base is refused at merge.
+EOF
+}
+
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<data-dir>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} data=${7:-data} suite_block
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
@@ -472,6 +503,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>]
     nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto, opens its PR against, and watches CI for that branch.
 "
   fi
+  suite_block=$(fm_suite_record_block "$data" "$id" "$base")
   case "$mode:$forge" in
     direct-PR:gerrit)
       cat <<EOF
@@ -560,6 +592,7 @@ The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`$forge_cli\` that is ready for review, not a draft$pr_base.
 Before you report done, read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
+$suite_block
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
@@ -595,6 +628,7 @@ EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
+$suite_block
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.

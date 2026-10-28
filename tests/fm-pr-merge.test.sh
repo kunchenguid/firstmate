@@ -37,6 +37,8 @@ FJ_URL="https://$FJ_HOST/$FJ_OWNER/$FJ_REPO/pulls/9"
 FJ_HEAD=cccccccccccccccccccccccccccccccccccccccc
 FJ_STALE_HEAD=dddddddddddddddddddddddddddddddddddddddd
 
+SUITE_BASE=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
@@ -67,6 +69,13 @@ make_case() {
   # The base branch the forge reports by default: unprotected, with no ruleset
   # rule, so nothing is required unless a case says otherwise.
   write_github_required "$case_dir"
+  # The base branch has no required checks, so the merge also reads one forge
+  # compare (head not behind the base tip) and the worker's recorded suite
+  # result: a passing record made against that same tip, by default.
+  printf '%s\n' 'behind_by=0' "base_sha=$SUITE_BASE" > "$case_dir/github-compare"
+  mkdir -p "$case_dir/home/data/task-x1"
+  printf '%s\n' 'suite=pass' "base=$SUITE_BASE" 'ran=fixture suite' \
+    > "$case_dir/home/data/task-x1/suite-result"
   : > "$case_dir/gh.log"
   # The worktree is a git copy whose HEAD is on a remote-tracking ref, as a
   # pushed ship task's is, so fm-pr-check.sh's named-head gate accepts it when
@@ -262,6 +271,11 @@ case "${1:-} ${2:-}" in
         esac
         cat "$FM_TEST_GH_RUNS"
         exit $?
+        ;;
+      *" repos/"*"/compare/"*)
+        [ ! -f "${FM_TEST_GH_COMPARE}-fail" ] || exit 1
+        cat "$FM_TEST_GH_COMPARE"
+        exit 0
         ;;
       *" repos/"*"/rules/branches/"*merge_queue*) ;;
       *" repos/"*"/rules/branches/"*)
@@ -548,7 +562,7 @@ write_forgejo_pr_json() {
 # count), regardless of any state= override.
 write_forgejo_status_json() {
   local file=$1 kv key value
-  local state=success total=1
+  local state=success total=1 statuses
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -562,8 +576,10 @@ write_forgejo_status_json() {
   if [ "$total" = 0 ]; then
     printf '{"state":"","total_count":0,"statuses":[]}\n' > "$file"
   else
-    printf '{"state":"%s","total_count":%s,"statuses":[%s]}\n' "$state" "$total" \
-      "$(seq "$total" | sed "s/.*/{\"context\":\"ci-&\",\"status\":\"$state\"}/" | paste -sd, -)" \
+    # Built outside the printf arguments: bash 3.2 mangles an escaped quote
+    # inside a command substitution nested in double quotes.
+    statuses=$(seq "$total" | sed "s/.*/{\"context\":\"ci-&\",\"status\":\"$state\"}/" | paste -sd, -)
+    printf '{"state":"%s","total_count":%s,"statuses":[%s]}\n' "$state" "$total" "$statuses" \
       > "$file"
   fi
 }
@@ -678,6 +694,7 @@ run_pr_merge() {
   FM_TEST_GH_RULES_FAIL_BODY="$case_dir/github-rules-fail-body" \
   FM_TEST_GH_BRANCH="$case_dir/github-branch.json" \
   FM_TEST_GH_BRANCH_FAIL="$case_dir/github-branch-fail" \
+  FM_TEST_GH_COMPARE="$case_dir/github-compare" \
   FM_TEST_GH_REQUIRED_RULES="$case_dir/github-required-rules.json" \
   FM_TEST_GH_REQUIRED_RULES_FAIL="$case_dir/github-required-rules-fail" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
@@ -4611,7 +4628,121 @@ test_required_checks_reported_and_green_merge
 test_red_and_unreported_checks_are_reported_together
 test_unreadable_required_set_refuses
 test_allow_missing_waives_only_the_named_unreported_check
+# A base branch with no required checks leaves every other condition vacuously
+# true, so the merge reads one forge compare and the worker's recorded suite
+# result. make_case defaults to a head not behind the base tip and a passing
+# record made against that same tip; each case below breaks exactly one thing.
+# Args: case_dir pr_number message label
+write_suite_record() {  # <case_dir> <line>...
+  local case_dir=$1
+  shift
+  printf '%s\n' "$@" > "$case_dir/home/data/task-x1/suite-result"
+}
+
+assert_unchecked_base_refused() {
+  local case_dir=$1 number=$2 message=$3 label=$4
+  run_required_case "$case_dir" "$number"
+  expect_code 1 "$RC" "$label: the merge must be refused"
+  assert_grep "$message" "$case_dir/stderr" "$label: the refusal did not say why"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "$label: gh pr merge ran despite the refusal"
+  assert_no_grep 'verified: ' "$case_dir/stderr" "$label: the refusal still claimed a verified head"
+}
+
+test_unchecked_base_refuses_without_a_current_passing_suite_record() {
+  local case_dir head
+  head=b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
+  case_dir=$(make_case unchecked-behind)
+  add_gh_mocks "$case_dir" "$head"
+  printf '%s\n' 'behind_by=3' "base_sha=$SUITE_BASE" > "$case_dir/github-compare"
+  assert_unchecked_base_refused "$case_dir" 91 'is 3 commit(s) behind it: rebase and re-validate' unchecked-behind
+
+  case_dir=$(make_case unchecked-stale)
+  add_gh_mocks "$case_dir" "$head"
+  write_suite_record "$case_dir" 'suite=pass' 'base=ffffffffffffffffffffffffffffffffffffffff' 'ran=fixture suite'
+  assert_unchecked_base_refused "$case_dir" 92 \
+    "ran against base ffffffffffffffffffffffffffffffffffffffff but main is now at $SUITE_BASE" unchecked-stale
+
+  case_dir=$(make_case unchecked-fail)
+  add_gh_mocks "$case_dir" "$head"
+  write_suite_record "$case_dir" 'suite=fail' "base=$SUITE_BASE" 'ran=fixture suite'
+  assert_unchecked_base_refused "$case_dir" 93 'recorded a failing full-suite result' unchecked-fail
+
+  case_dir=$(make_case unchecked-none-no-reason)
+  add_gh_mocks "$case_dir" "$head"
+  write_suite_record "$case_dir" 'suite=none'
+  assert_unchecked_base_refused "$case_dir" 94 'says suite=none with no reason=' unchecked-none-no-reason
+
+  case_dir=$(make_case unchecked-missing)
+  add_gh_mocks "$case_dir" "$head"
+  rm -f "$case_dir/home/data/task-x1/suite-result"
+  assert_unchecked_base_refused "$case_dir" 95 'recorded no full-suite result' unchecked-missing
+
+  case_dir=$(make_case unchecked-symlink)
+  add_gh_mocks "$case_dir" "$head"
+  mv "$case_dir/home/data/task-x1/suite-result" "$case_dir/real-suite-result"
+  ln -s "$case_dir/real-suite-result" "$case_dir/home/data/task-x1/suite-result"
+  assert_unchecked_base_refused "$case_dir" 96 'recorded no full-suite result' unchecked-symlink
+
+  case_dir=$(make_case unchecked-unparsable)
+  add_gh_mocks "$case_dir" "$head"
+  write_suite_record "$case_dir" 'the suite went fine, trust me'
+  assert_unchecked_base_refused "$case_dir" 97 'it must name suite=pass, suite=fail, or suite=none' unchecked-unparsable
+
+  case_dir=$(make_case unchecked-compare-unreadable)
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/github-compare-fail"
+  assert_unchecked_base_refused "$case_dir" 98 'could not be read, so a stale base cannot be ruled out' unchecked-compare-unreadable
+  pass "fm-pr-merge refuses a no-required-checks base that is behind, stale, failing, unrecorded, or unreadable"
+}
+
+test_unchecked_base_accepts_an_attested_no_suite_reason() {
+  local case_dir head
+  head=b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3
+  case_dir=$(make_case unchecked-none-reason)
+  add_gh_mocks "$case_dir" "$head"
+  printf '%s\n' 'suite=none' 'reason=a docs-only project with no test command' \
+    > "$case_dir/home/data/task-x1/suite-result"
+  run_required_case "$case_dir" 99
+  expect_code 0 "$RC" "unchecked-none-reason: an explicit no-suite attestation must merge"
+  assert_grep 'the worker attested the project has no full suite: a docs-only project with no test command' \
+    "$case_dir/stderr" "unchecked-none-reason: the attestation was not reported"
+  assert_logged_gh_merge "$case_dir" 99 example/repo --squash
+  pass "fm-pr-merge accepts suite=none with a reason and reports it as the worker's attestation"
+}
+
+test_unchecked_base_override_waives_attended_only() {
+  local case_dir head
+  head=b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4
+  case_dir=$(make_case unchecked-override-attended)
+  add_gh_mocks "$case_dir" "$head"
+  rm -f "$case_dir/home/data/task-x1/suite-result"
+  printf '%s\n' 'behind_by=3' "base_sha=$SUITE_BASE" > "$case_dir/github-compare"
+  run_required_case "$case_dir" 100 --attended-override
+  expect_code 0 "$RC" "unchecked-override-attended: the attended override must waive both conditions"
+  assert_grep 'waived by --attended-override' "$case_dir/stderr" \
+    "unchecked-override-attended: the waiver was not reported"
+  assert_logged_gh_merge "$case_dir" 100 example/repo --squash
+
+  case_dir=$(make_case unchecked-override-away)
+  add_gh_mocks "$case_dir" "$head"
+  rm -f "$case_dir/home/data/task-x1/suite-result"
+  printf '%s\n' 'behind_by=3' "base_sha=$SUITE_BASE" > "$case_dir/github-compare"
+  write_away_record "$case_dir" --words 'merge it when green'
+  run_required_case "$case_dir" 101 --attended-override
+  expect_code 1 "$RC" "unchecked-override-away: the override must not waive the conditions while away"
+  assert_grep 'is 3 commit(s) behind it: rebase and re-validate' "$case_dir/stderr" \
+    "unchecked-override-away: the behind-base refusal was waived"
+  assert_grep 'recorded no full-suite result' "$case_dir/stderr" \
+    "unchecked-override-away: the missing-record refusal was waived"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "unchecked-override-away: gh pr merge ran despite the refusal"
+  pass "fm-pr-merge --attended-override waives the no-required-checks conditions only while attended"
+}
+
 test_allow_missing_follows_the_allow_red_rules
+test_unchecked_base_refuses_without_a_current_passing_suite_record
+test_unchecked_base_accepts_an_attested_no_suite_reason
+test_unchecked_base_override_waives_attended_only
 
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
