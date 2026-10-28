@@ -41,9 +41,9 @@ test_quiet_checkpoint_exits_124_cleanly() {
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
 
-test_perl_timeout_fallback_honors_cleanup_bound_before_escalating() {
+test_non_gnu_timeout_falls_back_to_perl_before_escalating() {
   local home fallback_bin tool tool_path status watcher_pid
-  home=$(make_home perl-fallback)
+  home=$(make_home non-gnu-timeout)
   fallback_bin="$home/fallback-bin"
   mkdir -p "$home/root/bin" "$fallback_bin"
   cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
@@ -52,6 +52,15 @@ test_perl_timeout_fallback_honors_cleanup_bound_before_escalating() {
     tool_path=$(command -v "$tool") || fail "could not locate $tool for the Perl fallback fixture"
     ln -s "$tool_path" "$fallback_bin/$tool"
   done
+  cat > "$fallback_bin/timeout" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'uutils 0.12.0'
+  exit 0
+fi
+exit 137
+SH
+  chmod +x "$fallback_bin/timeout"
   cat > "$home/root/bin/fm-watch.sh" <<'PL'
 #!/usr/bin/env perl
 use strict;
@@ -87,7 +96,7 @@ PL
   if kill -0 "$watcher_pid" 2>/dev/null; then
     fail "the INT-ignoring watcher survived the Perl fallback escalation"
   fi
-  pass "Perl fallback honors the cleanup bound before escalating an INT-ignoring direct watcher"
+  pass "non-GNU timeout falls back to Perl and honors the cleanup bound before escalating"
 }
 
 test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
@@ -345,7 +354,7 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
 }
 
 test_quiet_checkpoint_exits_124_cleanly
-test_perl_timeout_fallback_honors_cleanup_bound_before_escalating
+test_non_gnu_timeout_falls_back_to_perl_before_escalating
 test_announced_recovery_is_not_reannounced_by_next_checkpoint
 test_never_announced_recovery_is_announced_once
 test_queue_append_during_checkpoint_still_resurfaces
