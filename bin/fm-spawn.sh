@@ -5354,6 +5354,7 @@ EOF
     fi
     # The T3 project is the directory the agent runs in: the project for a
     # worker, the home itself for a secondmate.
+    FM_T3CODE_TASK_SERVER=$(fm_backend_t3code_server_identity) || exit 1
     T3CODE_PROJECT_ID=$(fm_backend_t3code_project_ensure "$PROJ_ABS") || exit 1
     T3CODE_MODEL_SELECTION=$(fm_backend_t3code_model_selection "$HARNESS" "${MODEL:-default}" "${EFFORT:-default}" "$T3CODE_PROJECT_ID") || exit 1
     if [ "$KIND" = secondmate ]; then
@@ -7280,6 +7281,7 @@ preserve_relaunch_meta() {
     echo "rex_block_id=$FM_REX_TASK_BLOCK_ID"
   fi
   if [ "$BACKEND" = t3code ]; then
+    echo "t3_server=$FM_T3CODE_TASK_SERVER"
     echo "t3_thread_id=$T"
     echo "t3_project_id=$T3CODE_PROJECT_ID"
   fi
@@ -7824,10 +7826,15 @@ if [ "$SPAWN_SEAT_TRACKED" = 1 ]; then
     exit 1
   }
   SPAWN_SEAT_HOME=
+  SPAWN_SEAT_SERVER=
+  case "$BACKEND" in
+    t3code) SPAWN_SEAT_SERVER=${FM_T3CODE_TASK_SERVER:-} ;;
+    rex) SPAWN_SEAT_SERVER=${FM_REX_TASK_SERVER:-} ;;
+  esac
   [ "$KIND" != secondmate ] || SPAWN_SEAT_HOME=$PROJ_ABS
-  jq -cn --arg b "$BACKEND" --arg t "$T" --arg h "$SPAWN_SEAT_HOME" --arg g "$SPAWN_GEN" \
+  jq -cn --arg b "$BACKEND" --arg t "$T" --arg h "$SPAWN_SEAT_HOME" --arg g "$SPAWN_GEN" --arg server "$SPAWN_SEAT_SERVER" \
     '{placement: "local", backend: $b, target: $t, home: (if $h == "" then null else $h end),
-      host: null, remote_root: null, spawn_gen: $g, operation: null}' >"$SPAWN_SEAT_ROUTE_FILE" || {
+      host: null, remote_root: null, spawn_gen: $g, operation: null, server_identity: $server}' >"$SPAWN_SEAT_ROUTE_FILE" || {
     echo "error: could not stage the fleet seat route for $ID" >&2
     exit 1
   }

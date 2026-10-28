@@ -197,7 +197,7 @@ rex_env() {  # <dir> [VAR=value...] <snippet>
   shift
   (
     unset TERM_PROGRAM REX_SESSION REX_BLOCK REX_SERVER
-    export FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" \
+    export FM_REX_TASK_SERVER=unix:///fake/rex.sock FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" \
       STATE="$dir/home/state" FM_REX_FAKE_DEAD_PID="$DEAD_PID" \
       FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex"
     while [ $# -gt 1 ]; do
@@ -790,6 +790,8 @@ test_kill_closes_and_retires_per_home_session() {
   dir=$(new_case kill)
   out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid1 <<<"$out"
   out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp'); read -r _ _ bid2 <<<"$out"
+  if rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid1#block:}' '' '' unix:///other.sock"; then fail "Rex kill accepted a different creation server"; fi
+  assert_equals 2 "$(state_json "$dir" '.sessions[0].windows | length')" "Rex server mismatch changed the endpoint"
   rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid1#block:}'" || fail "kill of a live block must succeed"
   assert_equals 1 "$(state_json "$dir" '.sessions[0].windows | length')" "kill must close only its own tab"
   rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid1#block:}'" || fail "kill of an already-gone block must succeed"
@@ -1188,6 +1190,11 @@ test_nm_run_progress_reads_captured_status() {
     && fail "output with no steps table must fail"
   pass "rex: validation progress reads captured no-mistakes status by column name"
 }
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
 
 test_bin_prefers_rex_bin_dir
 test_rex_spawn_refuses_unproven_remote_endpoint

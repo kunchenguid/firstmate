@@ -496,6 +496,11 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
     dead|missing)
       FM_SM_LIVE_STATUS=relaunchable
       if [ "$agent_state" = dead ] && [ "$backend" = t3code ]; then
+        if [ -n "$seat_record" ] && ! printf '%s' "$incarnation" | jq -e '.lifecycle == "reserved" or .lifecycle == "confirmed"' >/dev/null; then
+          FM_SM_LIVE_STATUS=skipped
+          FM_SM_LIVE_REASON="the T3 incarnation is terminal; normal capacity admission is required before resuming"
+          return 0
+        fi
         FM_SM_LIVE_RESUME=1
         FM_SM_LIVE_CAUSE="a failed run on its still-readable T3 thread, resumed in place"
       elif [ "$agent_state" = dead ]; then
@@ -630,12 +635,12 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
           local home
           home=$(fm_meta_get "$meta" home)
           [ -n "$home" ] || home=$(fm_meta_get "$meta" worktree)
-          ( unset FM_ROOT_OVERRIDE; FM_HOME="$home" FM_ROOT="$home" STATE="$home/state" fm_backend_kill "$backend" "$target" ) 2>/dev/null || true
+          ( unset FM_ROOT_OVERRIDE; FM_HOME="$home" FM_ROOT="$home" STATE="$home/state" fm_backend_kill "$backend" "$target" "" "fm-$id" "$(fm_meta_get "$meta" "${backend%code}_server")" ) 2>/dev/null || true
         else
-          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+          fm_backend_kill "$backend" "$target" "" "fm-$id" "$(fm_meta_get "$meta" "${backend%code}_server")" 2>/dev/null || true
         fi
       fi
-    elif [ -n "$target" ] && ! fm_backend_kill "$backend" "$target" 2>/dev/null; then
+    elif [ -n "$target" ] && ! fm_backend_kill "$backend" "$target" "" "fm-$id" "$(fm_meta_get "$meta" "${backend%code}_server")" 2>/dev/null; then
       fm_secondmate_liveness_ledger_add "$id" failed || true
       FM_SM_LIVE_STATUS=skipped
       fm_lock_release "$relaunch_lock" || true

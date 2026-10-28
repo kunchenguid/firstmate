@@ -572,8 +572,8 @@ import_legacy_v1() {
           fi
         elif [ -z "$host" ] && fm_backend_validate_task_endpoint "$meta" "$task" >/dev/null 2>&1; then
           home=$(record_field "$meta" home)
-          route=$(jq -cn --arg b "$FM_BACKEND_VALIDATED_BACKEND" --arg t "$FM_BACKEND_VALIDATED_TARGET" --arg h "$home" --arg g "$gen" \
-            '{placement:"local", backend:$b, target:$t, home:(if $h == "" then null else $h end), host:null, remote_root:null, spawn_gen:$g, operation:null}') || return 1
+          route=$(jq -cn --arg b "$FM_BACKEND_VALIDATED_BACKEND" --arg t "$FM_BACKEND_VALIDATED_TARGET" --arg h "$home" --arg g "$gen" --arg server "$(record_field "$meta" t3_server)" \
+            '{placement:"local", backend:$b, target:$t, home:(if $h == "" then null else $h end), host:null, remote_root:null, spawn_gen:$g, operation:null, server_identity:$server}') || return 1
         fi
       fi
     fi
@@ -894,11 +894,15 @@ route_local_gone() {
   backend=$(inc_get "$1" '.route.backend // empty')
   target=$(inc_get "$1" '.route.target // empty')
   [ -n "$backend" ] && [ -n "$target" ] || return 1
+  if [ "$backend" = t3code ]; then
+    fm_backend_source t3code || return 1
+    fm_backend_t3code_server_matches "$(inc_get "$1" '.route.server_identity // empty')" || return 1
+  fi
   state=$(route_local_state "$1") || return 1
   [ "$state" = missing ] || return 1
   [ "$backend" != tmux ] || return 0
   meta=
-  if [ "$backend" = rex ]; then
+  if [ "$backend" = rex ] || [ "$backend" = t3code ]; then
     meta="$HOLDER_STATE/$TASK.meta"
     [ "$(meta_generation "$meta")" = "$1" ] || return 1
     fm_backend_validate_task_endpoint "$meta" "$TASK" >/dev/null 2>&1 || return 1

@@ -359,7 +359,7 @@ forge() {
       return "$FORGE_BOUND_RC"
     fi
     rc=0
-    fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+    fm_run_timed "$remaining" env GH_HOST=github.com GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
       gh "$@" > "$out" 2> "$forge_err" || rc=$?
     if [ "$rc" -eq 0 ]; then
       cat "$out"

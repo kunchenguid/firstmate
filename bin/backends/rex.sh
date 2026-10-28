@@ -1011,7 +1011,8 @@ fm_backend_rex_block_presence() {  # <target>
 # caller keeps its records. An already-gone block is success. A per-home
 # session left with no windows is then retired.
 fm_backend_rex_kill() {  # <target> [unused] [expected-label]
-  local sid
+  local sid recorded=${4-${FM_REX_TASK_SERVER:-}}
+  [ -n "$recorded" ] && [ "$(fm_backend_rex_server_endpoint)" = "$recorded" ] || { echo "error: Rex creation server does not match the current server" >&2; return 1; }
   fm_backend_rex_parse_target "$1" || {
     echo "error: malformed rex target '$1'; cannot close it" >&2
     return 1
@@ -1029,6 +1030,7 @@ fm_backend_rex_kill() {  # <target> [unused] [expected-label]
       return 1
       ;;
   esac
+  [ "$(fm_backend_rex_server_endpoint)" = "$recorded" ] || return 1
   fm_backend_rex_retire_session "$sid"
   return 0
 }
@@ -1064,7 +1066,9 @@ fm_backend_rex_endpoint_absence_recheck() {  # <target> <recorded-server>
   [ -n "$recorded" ] || { printf 'unproven'; return 0; }
   now=$(fm_backend_rex_server_endpoint) || { printf 'unproven'; return 0; }
   [ "$now" = "$recorded" ] || { printf 'unproven'; return 0; }
-  case "$(fm_backend_rex_block_presence "$target")" in
+  state=$(fm_backend_rex_block_presence "$target")
+  [ "$(fm_backend_rex_server_endpoint)" = "$recorded" ] || { printf 'unproven'; return 0; }
+  case "$state" in
     missing) printf 'missing' ;;
     present)
       state=$(fm_backend_rex_agent_state "$target")
