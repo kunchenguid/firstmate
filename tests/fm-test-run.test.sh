@@ -1922,6 +1922,7 @@ test_B() {
     errexit) false ;;
     exit) exit 7 ;;
   esac
+  touch "\$FM_ABORT_TEST_EVIDENCE/B"
   pass B
 }
 test_C() { touch "\$FM_ABORT_TEST_EVIDENCE/C"; pass C; }
@@ -1948,6 +1949,7 @@ EOF
       expected_names=
       assert_present "$markers/C" "green C did not execute"
       assert_present "$markers/D" "green D did not execute"
+      assert_present "$markers/B" "green B did not execute"
     elif [ "$mode" = last ]; then
       [ "$rc" -ne 0 ] || fail "failure in the final invocation must remain nonzero"
       assert_contains "$(cat "$out")" 'FM_TEST_ABORT failed=test_D skipped_after_failure=0 unexecuted=' \
