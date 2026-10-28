@@ -94,7 +94,10 @@ import {
   type ModelRegistry,
   SessionManager,
   ToolExecutionComponent,
+  VERSION,
   type AgentSession,
+  type BeforeAgentStartEvent,
+  type MessageStartEvent,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ToolDefinition,
@@ -111,6 +114,8 @@ import {
 import {
   activateEligibleRowsOwner,
   afkPostureRecordPresent,
+  awayPostureTailFor,
+  branchWakePrompt,
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
@@ -183,22 +188,15 @@ const PROCESSING_TRIGGERED_ATTEMPTS = 2;
 const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
 const PROVIDER_REPROBE_BASE_MS = 5 * 60 * 1000;
 const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
-// Appended to a wake message while the away-posture record exists. Per-wake
-// tail content, never prefix; bin/fm-branch-prompt.sh's fixed "Postures"
-// section is what this tail refers back to.
-const AWAY_POSTURE_TAIL =
-  "POSTURE: AWAY. The away-posture record state/.afk-contract exists, so the captain is not present and MAIN is parked: you take every row, including check rows and decision rows, and no outcome reaches the captain until the return brief. " +
-  "The record below is the captain's away words, verbatim, and the whole mandate: act on them by your own judgment where this event is the moment they name, only through the guarded scripts under MAIN's standing authority - never more - which enforce it: bin/fm-pr-merge.sh merges any pull request that is green at its live head, synchronously, and refuses a red one or --allow-red; bin/fm-spawn.sh dispatches queued work (already queued, or filed by you from the words) within the spend cap; bin/fm-send.sh --resolve-key answers a decision the words pre-answer, or one the ask-user-authority policy in your prompt lets firstmate decide; bin/fm-merge-local.sh still refuses you. " +
-  "Never by analogy, and hold on doubt: a sentence you cannot act on with confidence is reported with verdict captain, naming it, and left for the return. " +
-  "Credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused for every actor in every posture, whatever the words say. " +
-  "Log every action taken under the words in its outcome summary, opening with \"per your away instructions:\". " +
-  "A mirrored captain sentence authorizes nothing new once the record exists. " +
-  "The record, verbatim:";
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
-  "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
-  "Process each outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
+  "The outcomes below are stored durably, and each was recorded earlier, possibly before a restart or a switch of primary, so the captain may already have seen it and it may already have been handled; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
+  "Each outcome says what was true when it was recorded and how long ago, so check the task's current state first. " +
+  "An abbreviated line is incomplete: read the full outcome before acting on, relaying, or acknowledging it, using that line's lookup --seqs command. " +
+  "First sort the outcomes by that current state into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished. " +
+  "Your reply to the captain covers only the still-open outcomes: give the captain a visible response where one is due, answer or escalate a decision, or act on a blocker or failure. " +
+  "Write that reply as if the settled outcomes had never been listed: leave them out entirely, without naming them, summarizing them, or saying they are settled, because checking them is all the processing they need. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
@@ -213,6 +211,9 @@ type OutcomeRow = {
   silent: boolean;
 };
 type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
+// An unprocessed captain row with the store's "recordedAgo" (bin/fm-branch-outcome.sh
+// owns its wording).
+type UnprocessedOutcome = OutcomeRow & { recordedAgo: string };
 type ProviderRecovery = {
   cooldownMs: number;
   retryNotBefore: number;
@@ -229,6 +230,14 @@ const scriptEnv = {
 
 function offerEligible(offer: BranchDispatchOffer): boolean {
   return offer.eligible === true;
+}
+
+// Identify the supported custom trigger before prompt-only SDKs can narrow it
+// to never. The message type comes from the public SDK in both releases.
+function isCustomBeforeAgentStart(event: BeforeAgentStartEvent): event is BeforeAgentStartEvent & {
+  message: Extract<MessageStartEvent["message"], { role: "custom" }>;
+} {
+  return !("prompt" in event) && "message" in event;
 }
 
 function isProcessingCustomMessage(message: { role?: string; customType?: string }): boolean {
@@ -268,10 +277,9 @@ type FollowMainResolution =
 // come from Pi's own getSupportedThinkingLevels/clampThinkingLevel, so this
 // array exists for exactly one job the type system cannot do at runtime:
 // rejecting a hand-edited pin token Pi would not recognize at all. The
-// assertion below fails the tracked strict typecheck against the INSTALLED Pi
-// package (tests/fm-pi-primary-types.test.sh) the moment Pi adds or removes a
-// level, in either direction, so the list cannot drift into a stale Firstmate
-// catalog.
+// assertion below fails compilation if the SDK's types add or remove a level,
+// in either direction, so this list cannot drift from the checked vocabulary.
+// tests/fm-pi-primary-types.test.sh owns the checked SDK matrix.
 const BRANCH_EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 type DeclaredBranchEffort = (typeof BRANCH_EFFORT_LEVELS)[number];
 const piOwnsTheEffortVocabulary: [DeclaredBranchEffort] extends [BranchEffort]
@@ -376,40 +384,53 @@ let ownedLockPid = "";
 // stays the wait.
 const LOCK_ANCESTRY_DEPTH = 8;
 
-function readLockPid(): { lockPid: string; verdict: LockOwnership | null } {
+// The session lock names a local pid or, on Windows, a tagged `win:<pid>`
+// (fm_session_pid_valid in bin/fm-session-lock-lib.sh owns that shape). Native
+// Node on Windows sees Windows pids directly, so a tagged holder is compared
+// and probed by its digits. Any other value is no usable identity, "".
+function lockHolderPid(lockPid: string): string {
+  const tagged = process.platform === "win32" ? /^win:([0-9]+)$/.exec(lockPid) : null;
+  const pid = tagged ? tagged[1] : lockPid;
+  return /^[0-9]+$/.test(pid) && pid !== "1" ? pid : "";
+}
+
+function readLockPid(): { lockPid: string; holderPid: string; verdict: LockOwnership | null } {
   ownedLockPid = "";
   let lockPid = "";
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return { lockPid: "", verdict: "missing" };
+    return { lockPid: "", holderPid: "", verdict: "missing" };
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return { lockPid, verdict: "other" };
-  return { lockPid, verdict: null };
+  const holderPid = lockHolderPid(lockPid);
+  if (!holderPid) return { lockPid, holderPid, verdict: "other" };
+  return { lockPid, holderPid, verdict: null };
 }
 
-function ownershipVerdict(lockPid: string, ancestryMatched: boolean): LockOwnership {
+// ownedLockPid keeps the lock's own value, tag included, because the lease the
+// branch takes must name the holder exactly as line 1 of the lock records it.
+function ownershipVerdict(lockPid: string, holderPid: string, ancestryMatched: boolean): LockOwnership {
   if (ancestryMatched) {
     ownedLockPid = lockPid;
     return "owned";
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return pidAlive(holderPid) ? "other" : "missing";
 }
 
 async function lockOwnership(): Promise<LockOwnership> {
-  const { lockPid, verdict } = readLockPid();
+  const { lockPid, holderPid, verdict } = readLockPid();
   if (verdict) return verdict;
   let pid = String(process.pid);
   for (let i = 0; i < LOCK_ANCESTRY_DEPTH; i += 1) {
-    if (pid === lockPid) {
+    if (pid === holderPid) {
       const current = readLockPid();
       if (current.verdict || current.lockPid !== lockPid) return current.verdict ?? "other";
-      return ownershipVerdict(lockPid, true);
+      return ownershipVerdict(lockPid, holderPid, true);
     }
     pid = await parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return ownershipVerdict(lockPid, false);
+  return ownershipVerdict(lockPid, holderPid, false);
 }
 
 // Pi types its bash spawn hook as a synchronous function
@@ -418,15 +439,15 @@ async function lockOwnership(): Promise<LockOwnership> {
 // than caching the authority: what blocks there is one branch shell command
 // about to spawn a shell anyway, never an arriving outcome.
 function lockOwnershipSync(): LockOwnership {
-  const { lockPid, verdict } = readLockPid();
+  const { lockPid, holderPid, verdict } = readLockPid();
   if (verdict) return verdict;
   let pid = String(process.pid);
   for (let i = 0; i < LOCK_ANCESTRY_DEPTH; i += 1) {
-    if (pid === lockPid) return ownershipVerdict(lockPid, true);
+    if (pid === holderPid) return ownershipVerdict(lockPid, holderPid, true);
     pid = parentPidSync(pid);
     if (!pid || pid === "1") break;
   }
-  return ownershipVerdict(lockPid, false);
+  return ownershipVerdict(lockPid, holderPid, false);
 }
 
 function textOfContent(content: unknown): string {
@@ -491,7 +512,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   if (typeof row.summary !== "string" || !row.summary) return null;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
   const silent = row.silent === true;
-  if (silent && (row.task !== "fleet" || row.verdict !== "routine")) return null;
+  if (silent && row.verdict !== "routine") return null;
   return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
 }
 
@@ -654,10 +675,16 @@ export default function (pi: ExtensionAPI) {
   // queued for the captain's next prompt. The durable truth is the store's
   // processed marker; this only paces re-presentation and resets with the
   // session generation.
-  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
+  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean; visibleFinals: Set<string> };
   let processing: ProcessingState | null = null;
   let queuedProcessingContent: string | null = null;
   let processingOpenedThisRun = false;
+  // Compare only replies to the same consumed sequence set. A retry can be
+  // the first real handling, so only an empty or exact-repeat final is hidden.
+  // Buffer retry streaming until message_end can make that decision; tool
+  // messages always keep their prose, and a user message ends this scope.
+  let activeProcessing: { request: ProcessingState; retry: boolean } | null = null;
+  let userMessageThisTurn = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -997,7 +1024,7 @@ export default function (pi: ExtensionAPI) {
     const message = {
       customType: "fm-branch-merge",
       content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
-      display: !(row.task === "fleet" && row.silent),
+      display: !row.silent,
     };
     if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
     else pi.sendMessage(message, {});
@@ -1005,21 +1032,31 @@ export default function (pi: ExtensionAPI) {
 
   // Captain rows that are read (their visible entry exists) but not yet
   // acknowledged as processed by main, in sequence order. null means the store
-  // could not be read safely, never "nothing".
-  async function readUnprocessedOutcomes(expectedGeneration: number): Promise<OutcomeRow[] | null> {
+  // could not be read safely, never "nothing". A listed line that breaks the
+  // store's contract, its age included, is reported to main as a visible note
+  // and every row stays unprocessed until the store is healthy again.
+  async function readUnprocessedOutcomes(expectedGeneration: number): Promise<UnprocessedOutcome[] | null> {
     if (!(await generationOwnsLock(expectedGeneration))) return null;
     const listed = await runOutcomeScript(["unprocessed"]);
     if (!listed.ok) return null;
-    const rows: OutcomeRow[] = [];
+    const rows: UnprocessedOutcome[] = [];
     for (const line of listed.stdout.split("\n")) {
       if (!line) continue;
-      let row: OutcomeRow | null = null;
+      let row: UnprocessedOutcome | null = null;
       try {
-        row = parseOutcomeRow(JSON.parse(line));
+        const parsed = JSON.parse(line);
+        const outcome = parseOutcomeRow(parsed);
+        const recordedAgo = outcome?.verdict === "captain" ? (parsed as { recordedAgo?: unknown }).recordedAgo : undefined;
+        if (outcome && typeof recordedAgo === "string" && /^[0-9]+[mhd]$/.test(recordedAgo)) row = { ...outcome, recordedAgo };
       } catch {
         row = null;
       }
-      if (!row || row.verdict !== "captain") return null;
+      if (!row) {
+        deliverBranchHealthNote(
+          `Supervision branch could not present unprocessed captain outcomes: the outcome store listed a row that breaks its contract (${line.slice(0, 200)}). Nothing was marked processed; they are presented again once the store is healthy.`,
+        );
+        return null;
+      }
       rows.push(row);
     }
     return rows;
@@ -1029,9 +1066,11 @@ export default function (pi: ExtensionAPI) {
   // failure direction applies: a request that cannot be typed is still
   // delivered as plain text, because an untyped request main can still act on
   // beats an outcome that is never processed.
-  async function processingRequestInput(rows: OutcomeRow[]): Promise<string> {
+  async function processingRequestInput(rows: UnprocessedOutcome[]): Promise<string> {
     const through = rows[rows.length - 1].seq;
-    const listed = rows.map((row) => `[seq ${row.seq}] ${row.task}: ${row.summary}`).join("\n");
+    const listed = rows
+      .map((row) => `[seq ${row.seq}, recorded ${row.recordedAgo} ago] ${row.task}: ${row.summary}`)
+      .join("\n");
     const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
     try {
       return await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", body);
@@ -1040,8 +1079,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Present every unprocessed captain outcome to main as ONE sequence-keyed
-  // processing request. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
+  // Present the oldest bounded batch of unprocessed captain outcomes to main
+  // as one sequence-keyed processing request. After its acknowledgement the
+  // next run boundary presents the next batch. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
   // of a given sequence set open a turn of their own (queued as a follow-up
   // while main is busy); after that the request rides the captain's next
   // prompt instead, once per run, and a session replacement starts the
@@ -1083,7 +1123,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (processing?.pending) return true;
     if (!processing || processing.sequences !== sequences) {
-      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
+      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false, visibleFinals: new Set() };
     }
     // A presentation already sent is consumed by the run it joins or opens;
     // until that run settles, sending a widened or identical copy would hand
@@ -1111,10 +1151,11 @@ export default function (pi: ExtensionAPI) {
   // multi-tool run never receives duplicate requests.
   async function reconcileUnreadOutcomes(expectedGeneration: number, present = true): Promise<boolean> {
     if (!(await generationOwnsLock(expectedGeneration))) return false;
-    // One-time migration per generation: a home whose outcomes were all
-    // delivered before the processed marker existed treats them as processed
-    // rather than re-presenting its whole history. Runs before any new row
-    // can be read below, so nothing delivered from here on is ever skipped.
+    // Once per generation: validate the store's markers and rebuild its
+    // bounded indexes before any row is read below. It never adopts delivered
+    // rows as processed, so an outcome main never acknowledged, including one
+    // a supervision-host drain presented before a switch to Pi, is presented
+    // again dated and check-first.
     if (processedInitializedGeneration !== expectedGeneration) {
       if (!(await runOutcomeScript(["processed-init"])).ok) return false;
       processedInitializedGeneration = expectedGeneration;
@@ -1175,7 +1216,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks an eligible no-change outcome.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -1188,7 +1229,7 @@ export default function (pi: ExtensionAPI) {
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
         silent: Type.Optional(Type.Boolean({
-          description: "True only when a fleet-wide heartbeat review found literally nothing worth reporting; omit or use false whenever any action was taken or any routine result is worth a note",
+          description: "True only for an eligible routine no-change outcome; captain outcomes are never silent, and actions, state changes, or new results stay rendered",
         })),
       }),
       execute: async (_toolCallId, params) => {
@@ -1197,9 +1238,16 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        if (silent && verdictRaw !== "routine") {
+          return {
+            content: [{ type: "text", text: "invalid report: --silent true requires the routine verdict" }],
             details: undefined,
             isError: true,
           };
@@ -1450,7 +1498,7 @@ ${context.command}
     } catch {
       readback = "";
     }
-    return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat the captain's words as unavailable, act on standing authority only, and hold on doubt)"}`;
+    return awayPostureTailFor(readback);
   }
 
   function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false, acceptedAwayOnly = false): Promise<void> {
@@ -1528,9 +1576,7 @@ ${context.command}
         // durable queue keeps every row (bin/fm-lease-lib.sh role-partition).
         const postureTail = afk ? await awayPostureTail() : "";
         try {
-          await session.prompt(
-            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.${postureTail}`,
-          );
+          await session.prompt(branchWakePrompt(message, "fm_branch_report", postureTail));
         } finally {
           wakeTaskScope = null;
         }
@@ -1646,20 +1692,25 @@ ${context.command}
   // synchronous read it replaces did. The generation is captured before that
   // await so a session replaced while it runs cannot be staged into.
   pi.on?.("before_agent_start", async (event, ctx) => {
+    if (isCustomBeforeAgentStart(event)) {
+      processingOpenedThisRun = queuedProcessingContent !== null &&
+        isProcessingCustomMessage(event.message) && event.message.content === queuedProcessingContent;
+      return;
+    }
+    if (!("prompt" in event)) return;
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;
     const promptGeneration = generation;
     if (!(await enqueueDelivery(() => actingAsOwner(promptGeneration)))) return;
     if (promptGeneration !== generation || !currentMainSession || !collectCurrentMainDialog()) return;
 
-    // This event is Pi's authoritative complete current prompt. At this point
+    // For user messages this event is Pi's authoritative complete current prompt. At this point
     // SessionManager still contains only the preceding dialog, so relying on
     // getEntries() here loses the captain request that the next wake may answer.
     // Stage it verbatim and remember the future persisted index for turn_end's
     // duplicate suppression. Operational extension injections are not dialog.
     const prompt = event.prompt;
     processingOpenedThisRun = queuedProcessingContent !== null && prompt === queuedProcessingContent;
-    if (processingOpenedThisRun) queuedProcessingContent = null;
     const trimmed = prompt.trim();
     if (!trimmed || isOperationalUserText(trimmed)) return;
     const file = currentMainSession.getSessionFile() ?? "";
@@ -1673,6 +1724,48 @@ ${context.command}
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
     if (processing) processing.nextTurnQueued = false;
+  });
+  pi.on?.("turn_start", () => {
+    userMessageThisTurn = false;
+  });
+  pi.on?.("message_start", (event) => {
+    if (event.message.role === "user") {
+      userMessageThisTurn = true;
+      activeProcessing = null;
+    } else if (
+      event.message.role === "custom" &&
+      isProcessingCustomMessage(event.message) &&
+      queuedProcessingContent !== null &&
+      event.message.content === queuedProcessingContent
+    ) {
+      // message_start covers both an idle custom prompt and a follow-up
+      // consumed inside an existing run; neither needs before_agent_start.
+      activeProcessing = !userMessageThisTurn && processing ? { request: processing, retry: processing.triggered > 1 } : null;
+      queuedProcessingContent = null;
+    }
+  });
+  pi.registerMarkdownTransformer?.((markdown, context) =>
+    activeProcessing?.retry && context.isStreaming && context.messageType !== "user" ? "" : markdown,
+  );
+  pi.on?.("message_end", (event) => {
+    if (!activeProcessing || event.message.role !== "assistant") return;
+    // message_end runs before tool execution. Keep the whole message when
+    // it carries a call, including prose alongside fm_branch_processed.
+    if (event.message.content.some((part) => part.type === "toolCall")) return;
+    const text = event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
+    const { request, retry } = activeProcessing;
+    if (!retry || (text && !request.visibleFinals.has(text))) {
+      if (text) request.visibleFinals.add(text);
+      return;
+    }
+    // Pi applies the replacement before persistence and transcript rendering.
+    // Preserve the message envelope, including provider usage accounting.
+    return {
+      message: {
+        ...event.message,
+        content: [],
+      },
+    };
   });
   pi.on?.("context", (event, ctx) => {
     if (!afkPostureRecordPresent(state)) return;
@@ -1696,6 +1789,7 @@ ${context.command}
     mainStreaming = false;
     queuedProcessingContent = null;
     processingOpenedThisRun = false;
+    activeProcessing = null;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {
@@ -1755,6 +1849,8 @@ ${context.command}
     consecutiveProviderErrors = 0;
     providerRecovery = null;
     generation += 1;
+    activeProcessing = null;
+    userMessageThisTurn = false;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
     mirrorCollection.stagedCaptain = null;
@@ -1803,6 +1899,9 @@ ${context.command}
     shuttingDown = true;
     generation += 1;
     processing = null;
+    queuedProcessingContent = null;
+    activeProcessing = null;
+    userMessageThisTurn = false;
     pendingMirror.length = 0;
     currentMainSession = null;
     mirrorCollection.collectAnchor = null;
@@ -2157,6 +2256,41 @@ ${context.command}
     return shell;
   };
 
+  // Pi's stock call header (formatToolCallWithArgs) is not a public export.
+  // Before Pi 0.99 it is the bold title alone. Since Pi 0.99 a collapsed call
+  // is `title key=json` on the title line, cut at 100 characters, and an
+  // expanded call puts one muted `key: value` line under the title. Calm-off
+  // rendering has to match the installed Pi or the stock comparison fails.
+  // Keep this in step with that function.
+  const [stockMajor = 0, stockMinor = 0] = VERSION.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const stockCallHeaderShowsArgs = stockMajor > 0 || stockMinor >= 99;
+  const stockCollapsedArgsChars = 100;
+  const stockToolCallHeader = (
+    title: string,
+    args: unknown,
+    theme: Parameters<NonNullable<ToolDefinition["renderCall"]>>[1],
+    expanded: boolean,
+  ): string => {
+    const header = theme.fg("toolTitle", theme.bold(title));
+    if (!stockCallHeaderShowsArgs || args == null) return header;
+    const entries = typeof args === "object" && !Array.isArray(args)
+      ? Object.entries(args)
+      : [["args", args] as [string, unknown]];
+    if (entries.length === 0) return header;
+    if (expanded) {
+      const lines = entries.map(([key, value]) => {
+        const text = typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? String(value));
+        return `  ${key}: ${text.replace(/\t/g, "   ").replace(/\r/g, "").split("\n").join("\n    ")}`;
+      });
+      return `${header}\n${theme.fg("muted", lines.join("\n"))}`;
+    }
+    const pairs = entries.map(([key, value]) => `${key}=${JSON.stringify(value) ?? String(value)}`).join(" ");
+    const preview = pairs.length > stockCollapsedArgsChars
+      ? `${pairs.slice(0, stockCollapsedArgsChars - 3)}...`
+      : pairs;
+    return `${header} ${theme.fg("muted", preview)}`;
+  };
+
   registerFirstmateTool(pi, {
     name: "fm_branch_outcomes",
     label: "Read supervision branch outcomes",
@@ -2167,11 +2301,11 @@ ${context.command}
       recent: Type.Optional(Type.Number({ description: "How many most-recent outcomes to read (default 20)" })),
     }),
     renderShell: "self",
-    renderCall: (_args, theme, context) => {
+    renderCall: (args, theme, context) => {
       if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
       if (calmHides("assistant-tool-call")) return new Container();
       const shellState = context.state as OutcomesToolShellState;
-      shellState.call = new Text(theme.fg("toolTitle", theme.bold("fm_branch_outcomes")), 0, 0);
+      shellState.call = new Text(stockToolCallHeader("fm_branch_outcomes", args, theme, context.expanded), 0, 0);
       return refreshOutcomesToolShell(shellState, theme, context);
     },
     renderResult: (result, options, theme, context) => {
@@ -2229,11 +2363,11 @@ ${context.command}
       through: Type.Number({ description: "The highest outcome sequence number this conversation has processed" }),
     }),
     renderShell: "self",
-    renderCall: (_args, theme, context) => {
+    renderCall: (args, theme, context) => {
       if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
       if (calmHides("assistant-tool-call")) return new Container();
       const shellState = context.state as OutcomesToolShellState;
-      shellState.call = new Text(theme.fg("toolTitle", theme.bold("fm_branch_processed")), 0, 0);
+      shellState.call = new Text(stockToolCallHeader("fm_branch_processed", args, theme, context.expanded), 0, 0);
       return refreshOutcomesToolShell(shellState, theme, context);
     },
     renderResult: (result, _options, theme, context) => {
@@ -2286,6 +2420,9 @@ ${context.command}
           };
         }
         const remaining = await readUnprocessedOutcomes(acknowledgedGeneration);
+        if (acknowledgedGeneration === generation && activeProcessing && through >= activeProcessing.request.through) {
+          activeProcessing = null;
+        }
         if (remaining !== null && remaining.length === 0) processing = null;
         const open = remaining === null
           ? "the remaining outcomes could not be read"
@@ -2315,7 +2452,7 @@ ${context.command}
   });
 
   // Pi only calls this renderer for a message with display: true, which every
-  // routine note uses except an explicitly silent fleet heartbeat.
+  // routine note uses except an explicitly silent no-change outcome.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);

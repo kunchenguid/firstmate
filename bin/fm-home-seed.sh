@@ -456,14 +456,28 @@ EOF
   return 1
 }
 
+# Single reader of a project's registered posture for seeding. It prints the
+# parser's "<mode> <yolo>" line, and fails when bin/fm-project-mode.sh
+# refuses the registry entry, so a posture the fleet cannot resolve stops the
+# seed instead of arriving as an empty mode that passes every posture guard.
+registered_posture_line() {  # <project>
+  local project=$1 line
+  line=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project") || {
+    echo "error: project $project does not resolve to a delivery posture (see the refusal above); correct $DATA/projects.md" >&2
+    return 1
+  }
+  printf '%s\n' "$line"
+}
+
 clone_project() {
-  local project=$1 home=$2 src dst url dst_url mode
+  local project=$1 home=$2 src dst url dst_url mode mode_line
   src="$PROJECTS/$project"
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  mode_line=$(registered_posture_line "$project") || return 1
   read -r mode _ <<EOF
-$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$mode_line
 EOF
   if [ "$mode" = local-only ]; then
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
@@ -485,12 +499,13 @@ EOF
 }
 
 validate_seed_project() {
-  local project=$1 src mode url
+  local project=$1 src mode url mode_line
   src="$PROJECTS/$project"
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
+  mode_line=$(registered_posture_line "$project") || return 1
   read -r mode _ <<EOF
-$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$mode_line
 EOF
   if [ "$mode" = local-only ]; then
     echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
@@ -662,18 +677,36 @@ seed_rollback() {
   fi
 }
 
+# Whole-name registry row match; must stay identical to the rule in
+# bin/fm-project-mode.sh so seeding and posture resolution agree on spaced names.
+# shellcheck disable=SC2016
+REGISTRY_ROW_IS_AWK='
+  function row_is(n,   prefix, after) {
+    prefix = "- " n
+    if (substr($0, 1, length(prefix)) != prefix) return 0
+    after = substr($0, length(prefix) + 1)
+    return after == "" || substr(after, 1, 2) == " [" || substr(after, 1, 3) == " - "
+  }
+'
+
 registry_line_for_project() {
   local project=$1 line
   [ -f "$DATA/projects.md" ] || return 1
-  line=$(awk -v n="$project" '$1=="-" && $2==n { print; exit }' "$DATA/projects.md")
+  line=$(awk -v n="$project" "$REGISTRY_ROW_IS_AWK"'
+    row_is(n) { print; exit }
+  ' "$DATA/projects.md")
   [ -n "$line" ] || return 1
   printf '%s\n' "$line"
 }
 
 project_mode_in_home() {
-  local home=$1 project=$2 mode
+  local home=$1 project=$2 mode mode_line
+  mode_line=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project") || {
+    echo "error: project $project does not resolve to a delivery posture in $home (see the refusal above); correct $home/data/projects.md" >&2
+    return 1
+  }
   read -r mode _ <<EOF
-$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+$mode_line
 EOF
   printf '%s\n' "$mode"
 }
@@ -685,12 +718,9 @@ sync_project_registry() {
   tmp="$sub_reg.tmp.$$"
   names=$(printf '%s\n' "$@" | awk '{ printf "%s%s", sep, $0; sep="\034" }')
   if [ -f "$sub_reg" ]; then
-    awk -v names="$names" '
-      BEGIN {
-        split(names, a, "\034")
-        for (i in a) selected[a[i]]=1
-      }
-      !($1=="-" && ($2 in selected)) { print }
+    awk -v names="$names" "$REGISTRY_ROW_IS_AWK"'
+      BEGIN { k = split(names, a, "\034") }
+      { for (i = 1; i <= k; i++) if (row_is(a[i])) next; print }
     ' "$sub_reg" > "$tmp"
   else
     : > "$tmp"
@@ -708,7 +738,7 @@ sync_project_registry() {
 
 initialize_no_mistakes_project() {
   local home=$1 project=$2 created=$3 mode dst
-  mode=$(project_mode_in_home "$home" "$project")
+  mode=$(project_mode_in_home "$home" "$project") || return 1
   [ "$mode" = no-mistakes ] || return 0
   dst=$(validate_project_destination "$home" "$project") || return 1
   if git -C "$dst" remote get-url no-mistakes >/dev/null 2>&1; then
@@ -765,7 +795,16 @@ refuse_populated_projectless_home() {
     clones+=("$(basename "$project_path")")
   done
   if [ -f "$home/data/projects.md" ]; then
-    registry_entries=$(awk '$1 == "-" && $2 != "" { print $2 }' "$home/data/projects.md") || {
+    registry_entries=$(awk '
+      substr($0, 1, 2) == "- " {
+        rest = substr($0, 3)
+        cut = index(rest, " [")
+        dash = index(rest, " - ")
+        if (dash > 0 && (cut == 0 || dash < cut)) cut = dash
+        name = cut > 0 ? substr(rest, 1, cut - 1) : rest
+        if (name != "") print name
+      }
+    ' "$home/data/projects.md") || {
       echo "error: cannot inspect existing project registry at $home/data/projects.md; resolve its access permissions or retire or clean this home before seeding with --no-projects" >&2
       return 1
     }

@@ -12,6 +12,14 @@ GRANT="$ROOT/bin/fm-wake-grant.sh"
 OUTCOMES="$ROOT/bin/fm-branch-outcome.sh"
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-outcome-backstop-tests)
 
+# These regressions exercise the backstop on a home that does not run the
+# supervision host, so its BRANCH OUTCOMES section stays out of the drain; the
+# explicit off file pins that posture on every primary instead of reading the
+# code root's config (bin/fm-supervision-engine-lib.sh owns the gate).
+mkdir -p "$TMP_ROOT/config"
+: > "$TMP_ROOT/config/supervision-host-off"
+export FM_CONFIG_OVERRIDE="$TMP_ROOT/config"
+
 set_mtime() {  # <epoch> <file>
   perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$1" "$2"
 }

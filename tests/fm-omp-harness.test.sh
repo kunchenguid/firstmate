@@ -20,7 +20,8 @@
 #      leaks into a worker whose ancestry holds no omp.
 #   3. Every omp launch clears foreign markers, carries the tracked posture
 #      overlay, --auto-approve, --cwd, and (for a crewmate) one -e pointing at
-#      state/<id>.omp-ext.ts; a secondmate launch names no -e at all.
+#      state/<id>.omp-ext.ts; a secondmate launch names that same busy -e and
+#      nothing else, leaving its primary extensions to auto-discovery.
 #   4. A <provider>/<id> model is validated only when `omp models --json` lists
 #      that provider; an unlisted provider passes through with a notice.
 #   5. Busy state: agent_start is busy, agent_end with willContinue stays busy,
@@ -109,11 +110,19 @@ test_lock_identity_and_liveness_classification() {
 # A fake omp that answers `models --json` with a two-provider catalog and exits
 # 0 for everything else (the launch itself is only recorded by the fake tmux).
 make_fake_omp() {  # <fakebin>
+  # A leading --profile <name> selects that profile's catalog, which also lists
+  # one model of its own, so a catalog check read under the wrong profile shows.
   cat > "$1/omp" <<'SH'
 #!/usr/bin/env bash
+profile=
+if [ "${1:-}" = --profile ]; then profile=$2; shift 2; fi
 case "$1" in
   models)
-    printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-6-astra","selector":"openai-codex/gpt-6-astra"},{"provider":"ollama","id":"qwen3:8b","selector":"ollama/qwen3:8b"}]}'
+    if [ -n "$profile" ]; then
+      printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-6-astra","selector":"openai-codex/gpt-6-astra"},{"provider":"openai-codex","id":"gpt-6-'"$profile"'","selector":"openai-codex/gpt-6-'"$profile"'"}]}'
+    else
+      printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-6-astra","selector":"openai-codex/gpt-6-astra"},{"provider":"ollama","id":"qwen3:8b","selector":"ollama/qwen3:8b"}]}'
+    fi
     ;;
 esac
 exit 0
@@ -210,9 +219,9 @@ test_spawn_model_validation_scoped_to_listed_providers() {
 
 test_secondmate_launch_relies_on_discovery() {
   # A seeded secondmate home, launched for real through fm-spawn on omp: the
-  # launch must carry the posture overlay and pin --cwd to the home, and must
-  # name NO -e, because omp auto-discovers the home's tracked .omp/extensions
-  # and a file named both ways loads twice.
+  # launch must carry the posture overlay and pin --cwd to the home. Its only
+  # -e is the state-resident busy extension: omp auto-discovers the home's
+  # tracked .omp/extensions, and a file named both ways loads twice.
   local world home fakebin launchlog out status launch
   world="$TMP_ROOT/secondmate"
   home="$world/sm"
@@ -220,6 +229,8 @@ test_secondmate_launch_relies_on_discovery() {
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'sm\n' > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
+  git -C "$home" init -q -b main
   fakebin=$(make_spawn_fakebin "$world/fake" claude)
   make_fake_omp "$fakebin"
   launchlog="$world/launch.log"
@@ -236,14 +247,14 @@ test_secondmate_launch_relies_on_discovery() {
   expect_code 0 "$status" "omp secondmate spawn should succeed: $out"
   assert_grep "harness=omp" "$world/home/state/sm.meta" "secondmate meta missing harness=omp"
   launch=$(cat "$launchlog")
-  case "$launch" in
-    *" -e "*) fail "an omp secondmate launch must name no -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch" ;;
-  esac
+  [ "$(printf '%s\n' "$launch" | grep -o ' -e ' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "an omp secondmate launch must name exactly one -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch"
+  assert_contains "$launch" "-e '$world/home/state/sm.omp-ext.ts'" "an omp secondmate launch must load the parent-home busy extension: $launch"
   assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$home'" "secondmate launch lost the posture overlay or the pinned home directory: $launch"
   assert_contains "$launch" "FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$fakebin/omp'" "secondmate launch lost the omp marker or executable"
   assert_contains "$launch" "FM_SUPERVISION_MODEL=extension" "an omp secondmate must run the extension supervision model"
-  assert_absent "$world/home/state/sm.omp-ext.ts" "a secondmate must not receive a per-task worker extension"
-  pass "fm-spawn: a real omp secondmate launch relies on auto-discovery while crewmates load one -e"
+  assert_present "$world/home/state/sm.omp-ext.ts" "a secondmate must receive the per-task busy extension"
+  pass "fm-spawn: a real omp secondmate launch loads only the busy -e and auto-discovers its primary extensions"
 }
 
 test_secondmate_config_pinned_model_is_validated() {
@@ -258,6 +269,8 @@ test_secondmate_config_pinned_model_is_validated() {
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'sm\n' > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
+  git -C "$home" init -q -b main
   printf 'omp openai-codex/gpt-nope\n' > "$world/home/config/secondmate-harness"
   fakebin=$(make_spawn_fakebin "$world/fake" claude)
   make_fake_omp "$fakebin"
@@ -276,6 +289,100 @@ test_secondmate_config_pinned_model_is_validated() {
   assert_absent "$world/home/state/sm.meta" "a refused secondmate spawn must publish no sm.meta"
   [ ! -s "$launchlog" ] || fail "a refused secondmate spawn must record no launch: $(cat "$launchlog")"
   pass "fm-spawn: the config/secondmate-harness model pin is validated against the omp catalog before launch"
+}
+
+make_omp_secondmate_world() {  # <name> -> echoes <world>; seeded home at <world>/sm, fakebin at <world>/fake/fakebin
+  local world=$TMP_ROOT/$1 home fakebin
+  home="$world/sm"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config" "$home/bin" "$home/data"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'sm\n' > "$home/.fm-secondmate-home"
+  printf 'charter\n' > "$home/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
+  git -C "$home" init -q -b main
+  fakebin=$(make_spawn_fakebin "$world/fake" claude)
+  make_fake_omp "$fakebin"
+  : > "$world/launch.log"
+  printf '%s\n' "$world"
+}
+
+run_omp_secondmate_spawn() {  # <world> <spawn-args...>
+  local world=$1
+  shift
+  # FM_BACKEND=tmux pins the fake tmux, as in the discovery case above.
+  PATH="$world/fake/fakebin:$PATH" TMUX='fake,1,0' FM_BACKEND=tmux CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE='' FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$world/launch.log" \
+    "$ROOT/bin/fm-spawn.sh" sm "$world/sm" "$@" 2>&1
+}
+
+test_secondmate_omp_profile_pin() {
+  # A pinned local omp secondmate launches under its own omp profile: the flag
+  # follows the executable, the catalog check reads that profile (the model
+  # below is listed only there), and the record and spawned line carry it.
+  local world fakebin out status launch
+  world=$(make_omp_secondmate_world secondmate-omp-profile)
+  fakebin="$world/fake/fakebin"
+  mkdir -p "$world/home/config/secondmate-accounts/sm"
+  printf 'speak4\n' > "$world/home/config/secondmate-accounts/sm/omp-profile"
+  out=$(run_omp_secondmate_spawn "$world" omp --secondmate --model openai-codex/gpt-6-speak4)
+  status=$?
+  expect_code 0 "$status" "a pinned omp secondmate spawn should succeed under its profile's catalog: $out"
+  launch=$(cat "$world/launch.log")
+  assert_contains "$launch" "OMP_SKIP_SETUP=1 '$fakebin/omp' --profile 'speak4' --config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$world/sm'" \
+    "a pinned omp secondmate launch must carry --profile right after the executable: $launch"
+  [ "$(printf '%s\n' "$launch" | grep -o -- '--profile' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a pinned omp secondmate launch must name --profile exactly once: $launch"
+  assert_grep 'omp_profile=speak4' "$world/home/state/sm.meta" "the task record must carry the omp profile pin"
+  assert_contains "$out" " omp_profile=speak4" "the spawned line must report the omp profile pin: $out"
+  pass "fm-spawn: a pinned local omp secondmate launches with --profile and validates its model under that profile"
+}
+
+test_secondmate_omp_profile_absent_or_foreign_adds_nothing() {
+  # No pin for this mate - none at all, then only another mate's - adds no flag
+  # and no record field, and the default catalog stays the one consulted.
+  local world out status launch variant
+  for variant in absent foreign; do
+    world=$(make_omp_secondmate_world "secondmate-omp-profile-$variant")
+    if [ "$variant" = foreign ]; then
+      mkdir -p "$world/home/config/secondmate-accounts/other"
+      printf 'speak4\n' > "$world/home/config/secondmate-accounts/other/omp-profile"
+    fi
+    out=$(run_omp_secondmate_spawn "$world" omp --secondmate)
+    status=$?
+    expect_code 0 "$status" "an unpinned ($variant) omp secondmate spawn should succeed: $out"
+    launch=$(cat "$world/launch.log")
+    [ -n "$launch" ] || fail "the $variant case recorded no launch, so its absence assertions would be vacuous"
+    assert_not_contains "$launch" "--profile" "an unpinned ($variant) omp secondmate launch must carry no --profile: $launch"
+    assert_contains "$launch" "OMP_SKIP_SETUP=1 '$world/fake/fakebin/omp' --config" "an unpinned ($variant) launch must keep the executable directly before --config: $launch"
+    if grep -q '^omp_profile=' "$world/home/state/sm.meta"; then
+      fail "an unpinned ($variant) omp secondmate must record no omp_profile: $(cat "$world/home/state/sm.meta")"
+    fi
+    assert_not_contains "$out" "omp_profile=" "an unpinned ($variant) spawned line must report no omp profile: $out"
+  done
+  pass "fm-spawn: an absent pin, or only another secondmate's pin, leaves the omp launch unchanged"
+}
+
+test_secondmate_omp_profile_malformed_refuses() {
+  # A malformed pin, including a name omp rejects as a Windows reserved device
+  # name, refuses before any record or launch, naming the file.
+  local world out status pin n=0
+  for pin in 'Speak4; rm -rf /' aux nul.x com7; do
+    n=$((n + 1))
+    world=$(make_omp_secondmate_world "secondmate-omp-profile-bad-$n")
+    mkdir -p "$world/home/config/secondmate-accounts/sm"
+    printf '%s\n' "$pin" > "$world/home/config/secondmate-accounts/sm/omp-profile"
+    out=$(run_omp_secondmate_spawn "$world" omp --secondmate)
+    status=$?
+    expect_code 1 "$status" "a malformed omp profile pin ($pin) must refuse the spawn: $out"
+    assert_contains "$out" "$world/home/config/secondmate-accounts/sm/omp-profile must hold one omp profile name" \
+      "the refusal must name the malformed pin file ($pin): $out"
+    assert_absent "$world/home/state/sm.meta" "a refused spawn ($pin) must publish no sm.meta"
+    [ ! -s "$world/launch.log" ] || fail "a refused spawn ($pin) must record no launch: $(cat "$world/launch.log")"
+  done
+  pass "fm-spawn: a malformed or reserved omp profile pin refuses before any record or launch"
 }
 
 # --- 3. Busy state -------------------------------------------------------------
@@ -447,7 +554,7 @@ install_omp_extension_fixture() {  # <repo>
   mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$repo/bin" "$repo/node_modules/typebox"
   cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$repo/.pi/extensions/lib/"
-  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-supervision-engine-lib.sh" "$repo/bin/"
   chmod +x "$repo/bin/fm-operational-input.sh"
   printf '{"name":"typebox","type":"module","exports":"./index.js"}\n' > "$repo/node_modules/typebox/package.json"
   printf 'export const Type = { Object(p) { return { type: "object", properties: p }; } };\n' > "$repo/node_modules/typebox/index.js"
@@ -574,14 +681,304 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+# An opted-in home spawns the supervision host in the arm's place; its streamed
+# status line drives readiness and the handling handoff, and a handed-back
+# wake is delivered with every host line and the away note.
+test_watch_extension_runs_the_supervision_host() {  # [away|quiet]
+  local kind=${1:-away} repo home log out status f
+  repo="$TMP_ROOT/watch-host-$kind/repo"; home="$TMP_ROOT/watch-host-$kind/home"; log="$TMP_ROOT/watch-host-$kind/arm.log"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/supervision-host"
+  if [ "$kind" = quiet ]; then
+    # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+    # QUIET): the extension asks the record owner, so the same handback carries
+    # no away note.
+    for f in fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh; do cp "$ROOT/bin/$f" "$repo/bin/$f"; done
+    FM_HOME="$home" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+      || fail "fixture: could not record quiet mode"
+  else
+    : > "$home/state/.afk-contract"
+  fi
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'plain-arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+exit 1
+SH
+  cat > "$repo/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'host=%s args=%s primary=%s predecessor=%s\n' "$$" "$*" "${FM_SUPERVISION_HOST_PRIMARY:-}" \
+  "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+if [ "$(grep -c '^host=' "$FM_ARM_LOG")" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  sleep 1
+  printf 'signal: omp-host done\nsupervision-host: the away session could not take this wake: fixture; this wake is yours\nsupervision-host: outcome 1 for demo [captain]: fixture\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-2\n' "$$"
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    RECORD_KIND="$kind" EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 60 && sent.length < 1; i += 1) await new Promise((r) => setTimeout(r, 100));
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.some((row) => row.startsWith("plain-arm="))) throw new Error(`an opted-in home ran the plain arm: ${rows.join(" | ")}`);
+const hosts = rows.filter((row) => row.startsWith("host="));
+if (hosts.length !== 2) throw new Error(`expected the host and one successor host, got: ${rows.join(" | ")}`);
+if (!hosts.every((row) => / args=park --restart primary=omp /.test(row))) throw new Error(`the host must run as 'park --restart' with the omp pin: ${hosts.join(" | ")}`);
+if (!/predecessor=[0-9]+$/.test(hosts[1])) throw new Error(`the successor host did not receive the closed host as its predecessor: ${hosts[1]}`);
+if (!rows.includes(`confirmed generation=gen-2 watcher=${hosts[1].replace(/^host=([0-9]+).*/, "$1")}`)) {
+  throw new Error(`the handling handoff was not confirmed against the successor host's cycle: ${rows.join(" | ")}`);
+}
+if (sent.length !== 1) throw new Error(`expected one follow-up wake, saw ${sent.length}: ${JSON.stringify(sent)}`);
+for (const needle of [
+  "signal: omp-host done",
+  "supervision-host: the away session could not take this wake: fixture; this wake is yours",
+  "supervision-host: outcome 1 for demo [captain]: fixture",
+]) {
+  if (!sent[0].m.includes(needle)) throw new Error(`the follow-up lacks '${needle}': ${sent[0].m}`);
+}
+const awayNote = sent[0].m.includes("not from the captain: it is not a return");
+if (process.env.RECORD_KIND === "quiet" ? awayNote : !awayNote) {
+  throw new Error(`the away note must appear exactly under an away record (${process.env.RECORD_KIND}): ${sent[0].m}`);
+}
+await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension host mode ($kind record): $out"
+  [ -z "$out" ] || fail "omp watch extension host test printed output: $out"
+  pass ".omp watch extension: an opted-in home runs the supervision host and relays every host line ($kind record)"
+}
+
+# The omp owner stays file-gated: a home without config/supervision-host, or
+# one opted out by config/supervision-host-off, spawns the plain arm and never the host.
+test_watch_extension_keeps_the_arm_without_the_file_or_with_off() {
+  local line label repo home log out status
+  for line in - off; do
+    label=${line#-}; label=${label:-absent}
+    repo="$TMP_ROOT/watch-host-gate-$label/repo"; home="$TMP_ROOT/watch-host-gate-$label/home"; log="$TMP_ROOT/watch-host-gate-$label/arm.log"
+    install_omp_extension_fixture "$repo"
+    mkdir -p "$home/state" "$home/config"
+    [ "$line" = - ] || : > "$home/config/supervision-host-off"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 0
+printf 'plain-arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+sleep 30
+SH
+    cat > "$repo/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'host=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+sleep 30
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" \
+      EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { existsSync, writeFileSync, readFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool = null;
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage() { return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 60 && !existsSync(process.env.FM_ARM_LOG); i += 1) await new Promise((r) => setTimeout(r, 100));
+const rows = existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+if (rows.length === 0 || !rows.every((row) => row.startsWith("plain-arm="))) {
+  throw new Error(`a home that does not run the host must spawn only the plain arm: ${rows.join(" | ")}`);
+}
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "omp watch extension gate ($label): $out"
+    [ -z "$out" ] || fail "omp watch extension gate test printed output ($label): $out"
+  done
+  pass ".omp watch extension: a home without config/supervision-host or with an off file keeps the plain arm"
+}
+
+# A host cycle boundary can close with only a "supervision-host:" line; left
+# unconsumed across a session replacement it rides the persisted handoff and
+# the successor session loads and replays it.
+test_watch_extension_replays_a_host_only_boundary_across_replacement() {
+  local repo home log out status
+  repo="$TMP_ROOT/watch-host-handoff/repo"; home="$TMP_ROOT/watch-host-handoff/home"; log="$TMP_ROOT/watch-host-handoff/arm.log"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/supervision-host"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 0
+exit 1
+SH
+  cat > "$repo/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'host=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$$"
+if [ "$(grep -c '^host=' "$FM_ARM_LOG")" -eq 1 ]; then
+  sleep 1
+  printf 'supervision-host: outcome 1 for demo [captain]: fixture boundary\n'
+  exit 0
+fi
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handoff = `${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`;
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 60 && sent.length < 1; i += 1) await new Promise((r) => setTimeout(r, 100));
+if (sent.length !== 1) throw new Error(`expected one boundary follow-up, saw ${sent.length}: ${JSON.stringify(sent)}`);
+const boundary = "supervision-host: outcome 1 for demo [captain]: fixture boundary";
+if (!sent[0].m.includes(boundary)) throw new Error(`the follow-up lacks the boundary line: ${sent[0].m}`);
+// The session is replaced before omp consumes the boundary follow-up.
+await handlers.get("session_shutdown")({}, {});
+const stored = JSON.parse(readFileSync(handoff, "utf8"));
+if (stored.pending.length !== 1 || !stored.pending[0].message.includes(boundary)) {
+  throw new Error(`the unconsumed boundary did not ride the handoff: ${JSON.stringify(stored)}`);
+}
+await handlers.get("session_start")({ type: "session_start" }, {});
+for (let i = 0; i < 60 && sent.length < 2; i += 1) await new Promise((r) => setTimeout(r, 100));
+const replays = sent.slice(1);
+if (replays.some((item) => item.m.includes("watcher: FAILED"))) throw new Error(`the successor failed to load the handoff: ${JSON.stringify(replays)}`);
+if (replays.length !== 1 || !replays[0].m.includes(boundary)) throw new Error(`the successor did not replay the boundary: ${JSON.stringify(replays)}`);
+await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: replays[0].m }, {});
+await handlers.get("session_shutdown")({}, {});
+if (existsSync(handoff)) throw new Error("a consumed replay must not ride the replacement handoff again");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension host-only handoff: $out"
+  [ -z "$out" ] || fail "omp watch extension host-only handoff test printed output: $out"
+  pass ".omp watch extension: a host-only boundary rides the replacement handoff and replays in the successor session"
+}
+
+# A host whose exit reaches the extension in separate stream chunks is
+# delivered once at its close: a successor host whose status and signal lines
+# land while the previous wake is still being delivered, with its outcome lines
+# after a pause, reaches main as one follow-up carrying both.
+test_watch_extension_delivers_a_split_host_close_whole() {
+  local repo home log out status
+  repo="$TMP_ROOT/watch-host-split/repo"; home="$TMP_ROOT/watch-host-split/home"; log="$TMP_ROOT/watch-host-split/arm.log"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/supervision-host"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 0
+exit 1
+SH
+  cat > "$repo/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'host=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+started="watcher: started pid=$$ (beacon fresh) recovery-generation=gen-$$"
+case "$(grep -c '^host=' "$FM_ARM_LOG")" in
+  1)
+    printf '%s\n' "$started"
+    sleep 1
+    printf 'signal: omp-host first\n'
+    exit 0
+    ;;
+  2)
+    printf '%s\nsignal: omp-host second\n' "$started"
+    sleep 1
+    printf 'supervision-host: outcome 2 for demo [captain]: fixture split\n'
+    exit 0
+    ;;
+esac
+printf '%s\n' "$started"
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await tool.execute();
+for (let i = 0; i < 80 && sent.length < 2; i += 1) await new Promise((r) => setTimeout(r, 100));
+const second = sent.filter((item) => item.m.includes("signal: omp-host second"));
+if (second.length !== 1) throw new Error(`expected one follow-up for the split close, saw ${second.length}: ${JSON.stringify(sent)}`);
+if (!second[0].m.includes("supervision-host: outcome 2 for demo [captain]: fixture split")) {
+  throw new Error(`the split close was delivered without its outcome line: ${second[0].m}`);
+}
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension split host close: $out"
+  [ -z "$out" ] || fail "omp watch extension split host close test printed output: $out"
+  pass ".omp watch extension: a host close split across stream chunks reaches main as one whole follow-up"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
 test_secondmate_config_pinned_model_is_validated
+test_secondmate_omp_profile_pin
+test_secondmate_omp_profile_absent_or_foreign_adds_nothing
+test_secondmate_omp_profile_malformed_refuses
 test_busy_extension_lifecycle
 test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_runs_the_supervision_host
+test_watch_extension_runs_the_supervision_host quiet
+test_watch_extension_keeps_the_arm_without_the_file_or_with_off
+test_watch_extension_replays_a_host_only_boundary_across_replacement
+test_watch_extension_delivers_a_split_host_close_whole

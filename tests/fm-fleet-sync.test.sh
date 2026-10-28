@@ -410,6 +410,27 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+# A registry entry the parser refuses resolves to no posture at all, so sync must
+# skip the clone rather than fall back to the default posture: reading a refusal
+# as "no-mistakes" is how a local-only clone would be fetched and fast-forwarded.
+test_unresolvable_registry_posture_skipped() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" omicron)
+  advance_origin "$home" omicron C1
+  before=$(head_sha "$clone")
+  mkdir -p "$home/data"
+  printf -- '- omicron [local-only forge=githb] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "omicron: skipped: registry entry does not resolve to a delivery posture" \
+    "a refused registry entry was not reported as a skip"
+  assert_not_contains "$out" "STUCK" "a refused registry entry was escalated to STUCK"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "a clone whose registry entry was refused was still fast-forwarded"
+  pass "a clone whose registry entry the parser refuses is skipped, never synced on the default posture"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -662,8 +683,8 @@ test_symlinked_clone_still_syncs() {
   home=$(new_home)
   clone=$(build_pair "$home" sigma)
   advance_origin "$home" sigma C1
-  # A symlinked clone dir is a real clone root; the guard compares resolved paths,
-  # so it must not be mistaken for a directory nested in someone else's repo.
+  # A symlinked clone dir is a real clone root and must not be mistaken for a
+  # directory nested in someone else's repo.
   mv "$clone" "$home/real-sigma"
   ln -s "$home/real-sigma" "$clone"
 
@@ -671,6 +692,38 @@ test_symlinked_clone_still_syncs() {
 
   assert_contains "$out" "sigma: synced" "a symlinked clone must still fast-forward"
   pass "the clone-root guard accepts a symlinked clone directory"
+}
+
+test_clone_root_named_by_another_spelling_still_syncs() {
+  local home clone fakebin alias out
+  home=$(new_home)
+  clone=$(build_pair "$home" tau)
+  advance_origin "$home" tau C1
+  fakebin="$home/fb-rootalias"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  # git reports the clone's own root through an alias that is the same directory
+  # but a different string, as it does on a case-insensitive volume when the home
+  # was recorded with other casing. A symlink stands in for the case difference so
+  # the test also holds on a case-sensitive filesystem.
+  alias="$home/root-alias"
+  ln -s "$clone" "$alias"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+case " $* " in
+  *" rev-parse --show-toplevel "*) printf '%s\n' "${ROOT_ALIAS_FOR_TEST:?}"; exit 0 ;;
+esac
+exec "$real" "$@"
+SH
+  chmod +x "$fakebin/git"
+  out="$home/out"; err="$home/err"
+
+  ROOT_ALIAS_FOR_TEST="$alias" run_sync_guarded "$home" "$fakebin" "$out" "$err" tau || true
+
+  assert_contains "$(cat "$out")" "tau: synced" \
+    "a clone root that git names with another spelling must still fast-forward"
+  assert_not_contains "$(cat "$out")" "not a clone root" \
+    "the guard must compare the directory itself, not the spelling of its path"
+  pass "the clone-root guard accepts a root named by a different spelling of the same directory"
 }
 
 test_non_signature_fetch_failure_is_not_retried() {
@@ -704,6 +757,7 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_unresolvable_registry_posture_skipped
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves
@@ -719,3 +773,4 @@ test_non_signature_fetch_failure_is_not_retried
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_symlinked_clone_still_syncs
+test_clone_root_named_by_another_spelling_still_syncs

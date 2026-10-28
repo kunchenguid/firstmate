@@ -20,7 +20,7 @@ Each supported harness handles its folder-trust gate differently, and the tool r
 For Claude, load `references/harness/claude.md`; its workspace-trust section owns the non-key-answerable gate and spawn-time pre-registration for every spawn kind.
 agy gates every fresh worktree too; the spawn pre-registers it in agy's own store the same way, and a strict post-launch gate answers any dialog that still renders before the spawn reports success.
 Cursor suppresses its dialog with launch-time `--trust`, and Muse suppresses its own with `--yolo`.
-Grok dodges its gate instead of granting trust, because its project picker appears only outside a project and the spawn starts in the isolated git root.
+Grok renders a folder-trust gate in a linked worktree, and `references/harness/grok.md` owns how to verify the worker's real location, answer it, and where the decision persists; the project picker is a separate dialog that stays absent when the spawn starts in a git root.
 Pi gates the fresh-worktree case too, but unlike Claude its dialog is answered with Enter, and `references/harness/pi.md` owns that recipe and where the decision persists.
 Codex shows a directory-trust dialog on the first run for a repository root.
 
@@ -39,7 +39,8 @@ The tool reference records repeat, acknowledgement, and clearing behavior, while
 
 Native resume availability and form belong solely to the selected tool reference.
 Use native resume only when both that reference and the recovery procedure call for it.
-Deterministic relaunch instead trusts instructions on disk, not a private session.
+Deterministic relaunch instead trusts instructions on disk, not a private session, and never needs a session id printed at exit.
+One relaunch-time exception is the runtime's own recorded session identity, used only to keep that runtime's status authority valid across the replacement - `../../../docs/agent-control.md` "Transactional relaunch" owns it.
 
 `../stuck-crewmate-recovery/SKILL.md` owns worker recovery and `../secondmate-provisioning/SKILL.md` owns secondmate recovery; both preserve recorded work.
 The router's recovery scenarios select the additional common references for replacement profiles and secondmates.

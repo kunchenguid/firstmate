@@ -138,6 +138,7 @@ SH
   chmod +x "$fake_root/bin/fm-guard.sh"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+printf 'host=%s\n' "${GH_HOST:-}" >> "$FM_TEST_GH_LOG"
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
@@ -179,6 +180,14 @@ case " $* " in
   *" api repos/"*"/commits/"*"/statuses?per_page=100 "*)
     printf '%s\n' '[[]]'
     ;;
+  *" api --paginate repos/"*"/rules/branches/"*merge_queue*)
+    ;;
+  *" api --paginate repos/"*"/rules/branches/"*)
+    printf '%s\n' '[]'
+    ;;
+  *" api repos/"*"/branches/"*)
+    printf '%s\n' '{"name":"main","protected":false}'
+    ;;
   *" api repos/"*"/pulls/"*)
     printf '%s\n' "{\"state\":\"open\",\"user\":{\"login\":\"author\"},\"head\":{\"sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\"},\"draft\":false,\"mergeable\":true,\"merged_at\":null}"
     ;;
@@ -214,10 +223,56 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
+  # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  # Its defaults are the real server's readings for an OPEN change, and the
+  # submit fields are settable independently of the status so a case can build
+  # the reading a merged change and a merely submittable change share.
+  cat > "$fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GERRIT_AXI_LOG"
+[ "${FM_TEST_GERRIT_FAIL:-0}" = 0 ] || exit 1
+if [ -n "${FM_TEST_GERRIT_RAW:-}" ]; then
+  printf '%s\n' "$FM_TEST_GERRIT_RAW"
+  exit 0
+fi
+change=${FM_TEST_GERRIT_CHANGE:-${2:-0}}
+printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":1,"revision":"%s","url":"%s"}]}\n' \
+  "$change" \
+  "${FM_TEST_GERRIT_SUBJECT:-\"fixture change\"}" \
+  "${FM_TEST_GERRIT_STATUS:-NEW}" \
+  "${FM_TEST_GERRIT_SUBMIT:-NOT_READY}" \
+  "${FM_TEST_GERRIT_SUBMITTABLE:-false}" \
+  "${FM_TEST_GERRIT_BLOCKED_ON:-Code-Review}" \
+  "${FM_TEST_GERRIT_REVISION:-5f07a68436929a527ddc7abadc8ef1abceae40ed}" \
+  "${FM_TEST_GERRIT_URL:-https://gerrit.example/c/group/apps/console/+/4201}"
+SH
+  # no-mistakes, answering only `axi status` the way the real CLI does from a
+  # worker copy: a run object, then its branch_sync block. By default the run's
+  # result is the copy's own passed HEAD and custody is returned; a case
+  # overrides the outcome, the pipeline head, the next action, or makes the read
+  # fail.
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TEST_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_NM_LOG"
+[ "${1:-} ${2:-}" = "axi status" ] || exit 2
+[ "${FM_TEST_NM_FAIL:-0}" = 0 ] || exit 1
+head=$(git rev-parse HEAD 2>/dev/null) || exit 1
+pipeline=${FM_TEST_NM_PIPELINE_HEAD:-$head}
+printf 'run:\n  id: "RUNFIXTURE"\n  branch: fm/task\n  status: completed\n  head_sha: %s\noutcome: %s\n' \
+  "$pipeline" "${FM_TEST_NM_OUTCOME-passed}"
+printf 'branch_sync:\n  state: %s\n  local:\n    head: %s\n  pipeline:\n    current_head: %s\n' \
+  "${FM_TEST_NM_SYNC_STATE:-synchronized}" "$head" "$pipeline"
+if [ -n "${FM_TEST_NM_NEXT_ACTION:-}" ]; then
+  printf '  next_action:\n    code: %s\n    command: no-mistakes axi status\n' "$FM_TEST_NM_NEXT_ACTION"
+fi
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/gerrit-axi"
+  chmod +x "$fakebin/no-mistakes"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/gerrit-axi.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -250,9 +305,10 @@ write_poll_meta() {
 run_check_entry() {
   local dir=$1
   shift
-  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_CONFIG_OVERRIDE="$dir/home/config" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -260,9 +316,10 @@ run_check_entry() {
 run_merge_entry() {
   local dir=$1
   shift
-  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_CONFIG_OVERRIDE="$dir/home/config" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -286,6 +343,31 @@ INVALID_URLS=(
   'https://.gitlab.com/g/p/-/merge_requests/1'
   'https://gitlab.com./g/p/-/merge_requests/1'
   'http://gitlab.com/g/p/-/merge_requests/1'
+  'https://gerrit.example/c/proj/+/0'
+  'https://gerrit.example/c/proj/+/01'
+  'https://gerrit.example/c/proj/+/1/'
+  'https://gerrit.example/c/proj/+/1/2'
+  'https://gerrit.example/c/proj/+/1?x=1'
+  'https://gerrit.example/c/proj/+/1#c'
+  'https://gerrit.example/c/proj/+/1/+/2'
+  'https://gerrit.example/c//+/1'
+  'https://gerrit.example/c/proj//+/1'
+  'https://gerrit.example/c/proj.git/+/1'
+  'https://gerrit.example/c/-proj/+/1'
+  'https://gerrit.example/c/a/-b/+/1'
+  'https://gerrit.example/c/./+/1'
+  'https://gerrit.example/c/a/../+/1'
+  'https://gerrit.example/proj/+/1'
+  'https://gerrit.example/c/proj/1'
+  'https://gerrit.example/#/c/proj/+/1'
+  'https://GERRIT.example/c/proj/+/1'
+  'https://gerrit.example:8443/c/proj/+/1'
+  'https://user@gerrit.example/c/proj/+/1'
+  'https://.gerrit.example/c/proj/+/1'
+  'https://gerrit.example./c/proj/+/1'
+  'http://gerrit.example/c/proj/+/1'
+  'https://github.com/c/proj/+/1'
+  'https://gerrit.example/c/proj/+/1 '
   'https://github.com/o/r/pull/1/'
   ' https://github.com/o/r/pull/1'
   'https://github.com/o/r/pull/1 '
@@ -422,6 +504,48 @@ https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/s
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
 EOF
+  # A Gerrit project is one nested name, so the whole path is the identity and
+  # is never flattened into an owner/repository pair that cannot address it.
+  while IFS='|' read -r url host path number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Gerrit change URL"
+    [ "$FM_PR_PROVIDER" = gerrit ] || fail "parser did not tag a Gerrit change URL as gerrit"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Gerrit change URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Gerrit host"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Gerrit project path"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Gerrit change number"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for a Gerrit change URL"
+  done <<'EOF'
+https://review.internal/c/group/apps/console/+/4201|review.internal|group/apps/console|4201
+https://gerrit.example/c/proj/+/1|gerrit.example|proj|1
+https://gerrit.example.co.uk/c/a/b/c/d/+/42|gerrit.example.co.uk|a/b/c/d|42
+https://review.internal/c/All-Projects/+/123456|review.internal|All-Projects|123456
+EOF
+  while IFS='|' read -r url host owner repo number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Forgejo pull request URL"
+    [ "$FM_PR_PROVIDER" = forgejo ] || fail "parser did not tag a plural-pulls URL as forgejo"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Forgejo pull request URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Forgejo host"
+    [ "$FM_PR_PATH" = "$owner/$repo" ] || fail "parser returned wrong Forgejo project path"
+    [ "$FM_PR_OWNER" = "$owner" ] || fail "parser returned wrong Forgejo owner"
+    [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong Forgejo repository"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Forgejo pull request number"
+  done <<'EOF'
+https://git.example.com/fixture/fixture-repo/pulls/1|git.example.com|fixture|fixture-repo|1
+https://code.internal/my-org/repo.name_with-parts/pulls/123456|code.internal|my-org|repo.name_with-parts|123456
+EOF
+  # A Forgejo-shaped URL on github.com is refused (anti-spoofing, mirroring
+  # fm_pr_forge_host_valid's refusal of github.com), and neither GitHub's
+  # singular "pull" nor GitLab's "/-/merge_requests/" is accepted as forgejo.
+  for row in \
+    'https://github.com/fixture/fixture-repo/pulls/1' \
+    'https://git.example.com/fixture/fixture-repo/pull/1' \
+    'https://git.example.com/group/sub/project/pulls/1'
+  do
+    ! fm_pr_url_parse "$row" || fail "parser accepted a URL that must not resolve as forgejo: $row"
+  done
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
   [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong GitHub host"
@@ -562,6 +686,41 @@ test_draft_pull_request_is_not_armed() {
     > "$dir/stdout" 2> "$dir/stderr" || fail "an unreadable draft state blocked arming"
   [ -f "$dir/home/state/task-a.check.sh" ] || fail "an unreadable draft state was not armed"
   pass "arming refuses a draft pull request, naming it, and arms a ready or unreadable one"
+}
+
+# A secondmate is a persistent worker, not a delivery lane: it never owns a
+# pull request of its own. A URL relayed onto its status channel belongs to a
+# task in the mate's own home, which arms its own watch, so arming one here is
+# refused before anything is recorded - a poll on the mate would otherwise mark
+# the merge notified and queue the mate itself for teardown as landed work.
+test_secondmate_record_refuses_a_pr_watch() {
+  local dir rc
+  dir=$(make_case secondmate-refuses-watch)
+  fm_write_meta "$dir/home/state/domain.meta" \
+    'window=session:fm-domain' \
+    "worktree=$dir/secondmate-home" \
+    "project=$dir/project" \
+    'kind=secondmate' \
+    'mode=secondmate' \
+    'backend=tmux' \
+    "home=$dir/secondmate-home"
+  mkdir -p "$dir/secondmate-home"
+  cp "$dir/home/state/domain.meta" "$dir/meta.before"
+  set +e
+  run_check_entry "$dir" domain https://github.com/o/r/pull/9 \
+    > "$dir/stdout" 2> "$dir/stderr"; rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a merge watch was armed on a secondmate record"
+  grep -qi 'secondmate' "$dir/stderr" || fail "the refusal did not name the record's kind"
+  grep -qF 'https://github.com/o/r/pull/9' "$dir/stderr" \
+    || fail "the refusal did not name the pull request it refused"
+  cmp -s "$dir/meta.before" "$dir/home/state/domain.meta" \
+    || fail "the refusal changed secondmate metadata"
+  [ ! -e "$dir/home/state/domain.check.sh" ] || fail "the refusal armed a poll on a secondmate"
+  [ ! -e "$dir/home/state/domain.pr-poll" ] || fail "the refusal wrote a poll sidecar on a secondmate"
+  [ ! -s "$dir/gh.log" ] || fail "the refusal reached the forge"
+  [ ! -s "$dir/guard.log" ] || fail "the refusal reached the guard"
+  pass "fm-pr-check refuses to record a PR or arm a merge watch on a secondmate record"
 }
 
 # With no forge-reported head (gh cannot supply one), the named head is the
@@ -734,6 +893,162 @@ SH
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
+# A GitHub Enterprise pull request URL is accepted only for a host this home
+# names in config/github-hosts, and the parsed host is carried to every forge
+# call on the check, poll, and merge paths. github.com needs no configuration
+# and keeps the exact behavior it had before the list existed.
+test_github_enterprise_config_resolution() {
+  local code_root url
+  code_root="$TMP_ROOT/github-enterprise-code-root"
+  url=https://leadsonline.ghe.com/Org/repo/pull/7
+  mkdir -p "$code_root/bin" "$code_root/config" "$code_root/home/config" "$code_root/override"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$code_root/bin/"
+  printf 'leadsonline.ghe.com\n' > "$code_root/config/github-hosts"
+  printf 'home.ghe.com\n' > "$code_root/home/config/github-hosts"
+  printf 'override.ghe.com\n' > "$code_root/override/github-hosts"
+
+  (
+    unset FM_HOME FM_CONFIG_OVERRIDE
+    # shellcheck source=/dev/null
+    . "$code_root/bin/fm-pr-lib.sh" || exit 1
+    cd "$TMP_ROOT" || exit 1
+    fm_pr_url_parse "$url" || fail "parser ignored the code-root config with both home variables unset"
+    [ "$FM_PR_PROVIDER|$FM_PR_HOST|$FM_PR_PATH|$FM_PR_OWNER|$FM_PR_REPO|$FM_PR_NUMBER" \
+      = 'github|leadsonline.ghe.com|Org/repo|Org|repo|7' ] \
+      || fail "default-home parsing returned the wrong Enterprise identity"
+
+    FM_HOME=
+    fm_pr_url_parse "$url" || fail "an empty FM_HOME hid the code-root config"
+
+    # Consumed by the separately analyzed parser library.
+    # shellcheck disable=SC2034
+    FM_HOME="$code_root/home"
+    fm_pr_url_parse https://home.ghe.com/Org/repo/pull/7 \
+      || fail "FM_HOME did not override the code-root config"
+    ! fm_pr_url_parse "$url" || fail "FM_HOME still accepted a host only named in the code-root config"
+
+    FM_CONFIG_OVERRIDE="$code_root/override"
+    fm_pr_url_parse https://override.ghe.com/Org/repo/pull/7 \
+      || fail "FM_CONFIG_OVERRIDE did not override FM_HOME"
+    ! fm_pr_url_parse https://home.ghe.com/Org/repo/pull/7 \
+      || fail "FM_CONFIG_OVERRIDE still accepted a host only named in FM_HOME"
+    unset FM_HOME
+    fm_pr_url_parse https://override.ghe.com/Org/repo/pull/7 \
+      || fail "FM_CONFIG_OVERRIDE required FM_HOME"
+
+    unset FM_CONFIG_OVERRIDE
+    fm_pr_url_parse "$url" || fail "parser lost the code-root config after clearing overrides"
+  ) || fail "GitHub Enterprise config resolution failed"
+  pass "GitHub Enterprise config resolves override, home, then the library code root"
+}
+
+test_github_enterprise_hosts() {
+  local dir cfg url out sidecar rc
+  url=https://leadsonline.ghe.com/Org/repo/pull/7
+
+  cfg="$TMP_ROOT/github-enterprise-config"
+  mkdir -p "$cfg"
+  printf '# GitHub Enterprise hosts this home uses\nleadsonline.ghe.com\n' > "$cfg/github-hosts"
+
+  # The allowed host keeps GitHub's own owner and repository rules and becomes
+  # the recorded host, exactly as a self-hosted GitLab or Forgejo host does.
+  out=$(
+    FM_CONFIG_OVERRIDE=$cfg
+    export FM_CONFIG_OVERRIDE
+    fm_pr_url_parse "$url" || exit 1
+    printf '%s|%s|%s|%s|%s|%s\n' "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" \
+      "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER"
+  ) || fail "parser refused a GitHub Enterprise URL this home names"
+  [ "$out" = 'github|leadsonline.ghe.com|Org/repo|Org|repo|7' ] \
+    || fail "parser returned the wrong identity for a GitHub Enterprise URL: $out"
+
+  out=$(
+    FM_CONFIG_OVERRIDE=$cfg
+    export FM_CONFIG_OVERRIDE
+    fm_pr_url_parse https://github.com/o/r/pull/1 || exit 1
+    printf '%s|%s\n' "$FM_PR_PROVIDER" "$FM_PR_HOST"
+  ) || fail "parser refused github.com once a host list existed"
+  [ "$out" = 'github|github.com' ] || fail "github.com identity changed: $out"
+
+  # A look-alike of an allowed host, a different Enterprise host, and a
+  # look-alike of github.com all stay refused while the list exists.
+  for out in \
+    https://leadsonline.ghe.com.evil/Org/repo/pull/7 \
+    https://evil-leadsonline.ghe.com/Org/repo/pull/7 \
+    https://other.ghe.com/Org/repo/pull/7 \
+    https://github.com.evil/o/r/pull/1
+  do
+    FM_CONFIG_OVERRIDE=$cfg fm_pr_url_parse "$out" \
+      && fail "parser accepted a GitHub host the home does not name: $out"
+  done
+  FM_CONFIG_OVERRIDE="$TMP_ROOT/absent-config" fm_pr_url_parse "$url" \
+    && fail "parser accepted a GitHub Enterprise host with no configured host list"
+
+  # Registration records the Enterprise identity and carries its host to every
+  # gh read it makes.
+  dir=$(make_case github-enterprise)
+  write_task_meta "$dir"
+  printf 'leadsonline.ghe.com\n' > "$dir/home/config/github-hosts"
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "check entrypoint refused a configured GitHub Enterprise URL: $(cat "$dir/stderr")"
+  grep -qxF "pr=$url" "$dir/home/state/task-a.meta" \
+    || fail "canonical GitHub Enterprise pr metadata was not recorded"
+  sidecar=$(cat "$dir/home/state/task-a.pr-poll")
+  [ "$sidecar" = $'github\nhttps://leadsonline.ghe.com/Org/repo/pull/7\nleadsonline.ghe.com\nOrg/repo\n7' ] \
+    || fail "published sidecar did not record the GitHub Enterprise host"
+  grep -qxF 'host=leadsonline.ghe.com' "$dir/gh.log" \
+    || fail "no registration read addressed the GitHub Enterprise host"
+  ! grep -qxF 'host=' "$dir/gh.log" \
+    || fail "a registration read addressed github.com for a GitHub Enterprise pull request"
+  FM_CONFIG_OVERRIDE="$dir/home/config" \
+    fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "the recorded GitHub Enterprise poll identity did not re-validate"
+
+  # The static poll reports the merge of that recorded identity.
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail "static poll did not report a merged GitHub Enterprise pull request"
+
+  # Merging addresses the host too, and keeps addressing only owner and
+  # repository in the command itself.
+  : > "$dir/gh.log"
+  run_merge_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "merge entrypoint refused a configured GitHub Enterprise URL: $(cat "$dir/stderr")"
+  grep -qxF 'pr merge 7 --repo Org/repo --match-head-commit 0123456789abcdef0123456789abcdef01234567 --squash' \
+    "$dir/gh.log" || fail "merge wrapper did not derive owner and repository for a GitHub Enterprise pull request"
+  grep -qxF 'host=leadsonline.ghe.com' "$dir/gh.log" \
+    || fail "no merge read addressed the GitHub Enterprise host"
+  ! grep -qxF 'host=' "$dir/gh.log" \
+    || fail "a merge read addressed github.com for a GitHub Enterprise pull request"
+
+  # A host the home does not name is refused before anything is recorded,
+  # armed, or asked of the forge.
+  dir=$(make_case github-enterprise-unlisted)
+  write_task_meta "$dir"
+  set +e
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "check entrypoint accepted an unlisted GitHub Enterprise host"
+  [ "$(cat "$dir/stderr")" = 'error: invalid PR check request' ] \
+    || fail "unlisted GitHub host diagnostic was not the fixed refusal"
+  assert_no_grep 'pr=' "$dir/home/state/task-a.meta" "an unlisted GitHub host recorded pr metadata"
+  [ ! -s "$dir/gh.log" ] || fail "an unlisted GitHub host still reached the forge"
+
+  # github.com keeps its previous shape: the same URL records and merges with no
+  # host exported, so every call addresses github.com exactly as before.
+  dir=$(make_case github-dotcom-unchanged)
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/my-org/repo/pull/37 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "github.com registration broke once the host list existed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/my-org/repo/pull/37' "$dir/home/state/task-a.meta" \
+    || fail "github.com pr metadata changed"
+  [ -s "$dir/gh.log" ] || fail "github.com registration made no forge read"
+  ! grep -qE '^host=.+' "$dir/gh.log" \
+    || fail "github.com registration exported a host it never needed"
+  pass "GitHub Enterprise hosts are accepted only when the home names them and their host reaches every forge call"
+}
+
 # Runs one watcher under a hang guard that TERMs it and returns 124 once it has
 # used sixty seconds of its own time. The guard pauses while the file named by
 # FM_TEST_WATCH_BOUND_PAUSE exists, so a case that holds the watcher on work it
@@ -810,6 +1125,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -1411,11 +1727,570 @@ SH
   pass "teardown removes safe poll artifacts and refuses directory-shaped check files without traversal"
 }
 
+# The Gerrit watch must follow a change exactly as the GitHub watch follows a
+# pull request, on any server, and must never turn an unreadable or merely
+# submittable change into a merge. Its evidence against a real change is in
+# docs/gerrit-change-watch.md; this exercises the same paths hermetically.
+test_gerrit_merge_watch() {
+  local dir state out rc url value notool entry bindir name tool
+  dir=$(make_case gerrit-merge-watch)
+  state="$dir/home/state"
+  url=https://gerrit.example/c/group/apps/console/+/4201
+  # The Gerrit branch reads its status with the real jq, and BASE_PATH is
+  # deliberately restricted, so this exposes jq explicitly rather than depending
+  # on the host keeping it in one of those four directories.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gerrit "$url" gerrit.example group/apps/console 4201 "$POLL" \
+    || fail "could not prepare a Gerrit poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gerrit poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Gerrit poll provenance or metadata binding was invalid"
+  [ "$(cat "$state/task-a.pr-poll")" = "gerrit
+$url
+gerrit.example
+group/apps/console
+4201" ] || fail "published Gerrit sidecar bytes were not exact"
+
+  # Only an exact MERGED status wakes firstmate. Every other reading, including
+  # an abandoned change, a lowercase spelling, and a changed format, stays
+  # silent rather than reporting a merge.
+  for value in NEW ABANDONED merged Merged MERGED_LATER '' not-a-status; do
+    out=$(FM_TEST_GERRIT_STATUS="$value" run_poll "$dir")
+    [ -z "$out" ] || fail "Gerrit poll emitted for status '$value'"
+  done
+
+  # Readiness is not merge. A change that is fully submittable - nothing in its
+  # blocked_on list, submit OK, submittable true - is exactly what an approved
+  # but unsubmitted change looks like, and a merged change reports the same
+  # three fields. Only the status separates them, so only the status is read.
+  out=$(FM_TEST_GERRIT_STATUS=NEW FM_TEST_GERRIT_SUBMIT=OK \
+    FM_TEST_GERRIT_SUBMITTABLE=true FM_TEST_GERRIT_BLOCKED_ON='' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll read a submittable open change as merged"
+
+  out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_SUBMIT=OK \
+    FM_TEST_GERRIT_SUBMITTABLE=true FM_TEST_GERRIT_BLOCKED_ON='' run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll did not emit exactly one merged line"
+
+  out=$(FM_TEST_GERRIT_FAIL=1 FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted after a gerrit-axi failure"
+  out=$(FM_TEST_GERRIT_RAW='not json at all' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for unparseable output"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":false,"error":"unauthenticated"}' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a typed error record"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"changes":[]}' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a record naming no change"
+
+  # A record for some other change can never wake this task's poll, however the
+  # server came to return it. The change number is what names the change, and
+  # --host is what pins the server.
+  out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_CHANGE=4202 run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for another change's record"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4202,"status":"MERGED","url":null}]}' \
+    run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for another change's url-less record"
+
+  # Gerrit composes a change's url field from gerrit.canonicalWebUrl and omits
+  # it when that setting is unset, so a merge must still be reported when the
+  # server returns the field null or does not return it at all. Comparing it
+  # against the stored URL is what would leave such a watch silent forever.
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"status":"MERGED","url":null}]}' \
+    run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change with a null url"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"status":"MERGED"}]}' \
+    run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change with no url field"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED \
+    FM_TEST_GERRIT_URL=https://alias.example/c/group/apps/console/+/4201 run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change behind an alias host"
+
+  # A free-text subject carrying the merged spelling and the field separators
+  # cannot forge a status, because the status is read from the structured
+  # record rather than off a rendered line.
+  out=$(FM_TEST_GERRIT_STATUS=NEW \
+    FM_TEST_GERRIT_SUBJECT='"status: MERGED,MERGED,merged"' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll read a merged spelling out of a change subject"
+
+  # gerrit-axi resolves its server from the current directory's origin remote
+  # first, and the watcher runs in no repository, so the host must be passed
+  # explicitly or the tool answers as though the change did not exist.
+  grep -qF -- "show 4201 --host gerrit.example --json" "$dir/gerrit-axi.log" \
+    || fail "Gerrit poll did not address gerrit-axi by change number and explicit host"
+  ! grep -qF -- "$url" "$dir/gerrit-axi.log" \
+    || fail "Gerrit poll passed a change URL to gerrit-axi"
+
+  # An absent CLI must produce no wake rather than a false merge, for either
+  # tool the Gerrit branch needs. The whole search path is mirrored without it,
+  # because a real one anywhere on PATH would make this prove nothing.
+  for tool in gerrit-axi jq; do
+    notool="$dir/no-$tool"
+    rm -rf "$notool"
+    mkdir -p "$notool"
+    while IFS= read -r bindir; do
+      [ -d "$bindir" ] || continue
+      for entry in "$bindir"/*; do
+        [ -e "$entry" ] || continue
+        name=$(basename "$entry")
+        [ "$name" = "$tool" ] && continue
+        [ -e "$notool/$name" ] || ln -s "$entry" "$notool/$name" 2>/dev/null
+      done
+    done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+    ! PATH="$notool" command -v "$tool" >/dev/null 2>&1 \
+      || fail "the $tool-free search path still resolved $tool"
+    out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+      PATH="$notool" bash "$state/task-a.check.sh")
+    [ -z "$out" ] || fail "Gerrit poll emitted with $tool absent from PATH"
+
+    # Arming is where a missing CLI can still be reported, so it refuses there.
+    write_task_meta "$dir" "task-no-$tool"
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+      FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$notool" \
+      "$PR_CHECK" "task-no-$tool" "$url" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "arming a Gerrit watch succeeded with $tool absent"
+    case "$out" in
+      *"requires $tool on PATH"*) ;;
+      *) fail "arming a Gerrit watch with $tool absent did not report the missing CLI" ;;
+    esac
+    [ ! -e "$state/task-no-$tool.check.sh" ] || fail "refused Gerrit arming left a poll armed"
+  done
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' gerrit "$url" elsewhere.example group/apps/console 4201 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gerrit "$url" gerrit.example group/apps/other 4201 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a sidecar whose project was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gerrit "$url" gerrit.example group/apps/console 4202 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a sidecar whose change number was swapped"
+
+  pass "the Gerrit watch wakes only on an explicit merged status and never on submittability"
+}
+
+# Arming a Gerrit watch records the canonical change identity and no pr_head.
+# A Gerrit revision names one patch set, and bin/fm-review-diff.sh has no Gerrit
+# path to resolve a current head with, so a recorded revision would quietly
+# become the reviewed content after the next amend.
+test_gerrit_arming_records_no_patch_set_revision() {
+  local dir state rc out
+  dir=$(make_case gerrit-arming)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+
+  write_task_meta "$dir" task-rev
+  FM_TEST_GERRIT_REVISION=$(git -C "$dir/wt" rev-parse HEAD) run_check_entry "$dir" task-rev \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null \
+    || fail "arming a Gerrit watch failed"
+  grep -qxF 'pr=https://gerrit.example/c/group/apps/console/+/4201' "$state/task-rev.meta" \
+    || fail "arming did not record the canonical Gerrit change URL"
+  grep -q '^pr_head=' "$state/task-rev.meta" \
+    && fail "arming recorded a Gerrit patch set revision as pr_head"
+  [ -e "$state/task-rev.check.sh" ] || fail "arming a Gerrit watch left no poll armed"
+
+  # Submitting a Gerrit change is refused outright, before anything is read or
+  # recorded, rather than left as a silently absent provider branch.
+  set +e
+  out=$(run_merge_entry "$dir" task-rev \
+    https://gerrit.example/c/group/apps/console/+/4201 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the merge path accepted a Gerrit change"
+  case "$out" in
+    *"does not submit a Gerrit change"*) ;;
+    *) fail "the Gerrit merge refusal did not say firstmate does not submit" ;;
+  esac
+  [ ! -e "$state/task-rev.merge-authority" ] || fail "a refused Gerrit merge recorded merge authority"
+
+  pass "Gerrit arming records no patch set revision and the merge path refuses to submit"
+}
+
+# A push to refs/for/ leaves no ref a fetch can see, so a remote-tracking ref
+# that holds the worker's HEAD - the no-mistakes gate branch after a pipeline
+# run - says nothing about what was published. Arming accepts the named head
+# only when a live read shows the change's current patch set carrying that
+# HEAD's tree - the squash is a new commit on the server's base, so the tree and
+# not the commit names what was published - and refuses otherwise, before
+# anything is recorded or armed. Once arming has recorded the change as pr=, a
+# later done naming it is accepted from that record without a read, so a
+# reviewer's rebase or new patch set on the server does not revoke it.
+test_gerrit_ready_gate_reads_the_published_tree() {
+  local dir state base published other out rc
+  dir=$(make_case gerrit-ready-gate)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  base=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'one\n' > "$dir/wt/a"
+  git -C "$dir/wt" add a
+  git -C "$dir/wt" commit -q -m first
+  printf 'two\n' > "$dir/wt/b"
+  git -C "$dir/wt" add b
+  git -C "$dir/wt" commit -q -m second
+  git -C "$dir/wt" update-ref refs/remotes/no-mistakes/fm/task "$(git -C "$dir/wt" rev-parse HEAD)"
+  published=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$base" -m squashed)
+  other=$(git -C "$dir/wt" rev-parse HEAD~1)
+  [ "$(git -C "$dir/wt" rev-parse "$published^{tree}")" != "$(git -C "$dir/wt" rev-parse "$other^{tree}")" ] \
+    || fail "the fixture's two revisions carry the same tree"
+
+  write_task_meta "$dir" task-mismatch
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$other run_check_entry "$dir" task-mismatch \
+    https://gerrit.example/c/group/apps/console/+/4201 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a change whose patch set is not this copy's HEAD tree"
+  case "$out" in
+    *"not the published content"*) ;;
+    *) fail "the refusal did not say the change does not carry the named head: $out" ;;
+  esac
+  grep -q '^pr=' "$state/task-mismatch.meta" && fail "a refused Gerrit arming recorded pr="
+  [ ! -e "$state/task-mismatch.check.sh" ] || fail "a refused Gerrit arming armed a poll"
+
+  write_task_meta "$dir" task-unknown
+  set +e
+  FM_TEST_GERRIT_REVISION=0123456789abcdef0123456789abcdef01234567 run_check_entry "$dir" task-unknown \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a patch set this copy has never held"
+
+  write_task_meta "$dir" task-unread
+  set +e
+  FM_TEST_GERRIT_FAIL=1 run_check_entry "$dir" task-unread \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a change it could not read"
+
+  : > "$dir/gerrit-axi.log"
+  write_task_meta "$dir" task-published
+  FM_TEST_GERRIT_REVISION=$published run_check_entry "$dir" task-published \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null \
+    || fail "arming refused a change whose current patch set carries this copy's HEAD tree"
+  grep -qF -- "show 4201 --host gerrit.example --json" "$dir/gerrit-axi.log" \
+    || fail "the gate did not read the change from its own server"
+  [ -e "$state/task-published.check.sh" ] || fail "an accepted Gerrit arming left no poll armed"
+  grep -q '^pr_head=' "$state/task-published.meta" \
+    && fail "the gate's live revision was recorded as pr_head"
+
+  git -C "$dir/wt" update-ref -d refs/remotes/no-mistakes/fm/task
+  : > "$dir/gerrit-axi.log"
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=0123456789abcdef0123456789abcdef01234567 \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4" "$5" task-published "$6"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" \
+    "done: PR https://gerrit.example/c/group/apps/console/+/4201 published for review" \
+    "$state" "$state/task-published.meta" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a server-side rebase after arming revoked the recorded change's done: $out"
+  [ ! -s "$dir/gerrit-axi.log" ] || fail "a done naming the recorded change read the server again"
+  pass "Gerrit arming accepts a published HEAD only by the change's current patch set tree"
+}
+
+# On a Gerrit project the pipeline's push is skipped, so a fix round's commits
+# stay in its local gate until the worker recovers custody. A worker that
+# publishes before recovering has an unfixed HEAD and an unfixed patch set that
+# agree, so the published-tree check alone accepts it. A no-mistakes ready
+# report on a Gerrit change must therefore also show the copy holds the run's
+# result: refused while the run still holds the branch, when HEAD's tree is not
+# the pipeline head's, or when the run cannot be read; accepted once recovered,
+# even after the publish's Change-Id stamp rewrote the branch's messages.
+test_gerrit_nm_ready_gate_requires_recovered_custody() {
+  local dir state base unfixed fixed stamped squash elsewhere out rc url line
+  dir=$(make_case gerrit-custody-gate)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  url=https://gerrit.example/c/group/apps/console/+/4201
+  line="done: PR $url published for review"
+  base=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'flawed\n' > "$dir/wt/doc"
+  git -C "$dir/wt" add doc
+  git -C "$dir/wt" commit -q -m "Document the value"
+  unfixed=$(git -C "$dir/wt" rev-parse HEAD)
+  # The pipeline's fix commit exists only in its gate: build it in another repo,
+  # so this copy does not hold its object, exactly as before recovery.
+  elsewhere="$dir/gate-only"
+  git clone -q "$dir/wt" "$elsewhere"
+  printf 'fixed\n' > "$elsewhere/doc"
+  git -C "$elsewhere" commit -q -am "no-mistakes(review): Correct the documented value"
+  fixed=$(git -C "$elsewhere" rev-parse HEAD)
+  git -C "$dir/wt" cat-file -e "$fixed" 2>/dev/null && fail "the fixture copy already holds the pipeline's fix"
+
+  # Case A from the live test: the server holds the unfixed patch set, which
+  # matches the unrecovered HEAD, and the run reports custody unreturned.
+  write_task_meta "$dir" task-unrecovered
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_NM_NEXT_ACTION=recover_custody run_check_entry "$dir" task-unrecovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish of the head before the pipeline's fixes were recovered"
+  case "$out" in
+    *"still holds this copy's branch"*) ;;
+    *) fail "the refusal did not say the run still holds the branch: $out" ;;
+  esac
+  grep -q '^pr=' "$state/task-unrecovered.meta" && fail "a refused unrecovered publish recorded pr="
+  [ ! -e "$state/task-unrecovered.check.sh" ] || fail "a refused unrecovered publish armed a poll"
+
+  # The same state with no next action reported still refuses on the trees.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-unrecovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a copy whose HEAD is not the run's result"
+  case "$out" in
+    *"does not carry the no-mistakes run's result"*) ;;
+    *) fail "the refusal did not say the copy lacks the run's result: $out" ;;
+  esac
+
+  set +e
+  FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_NEXT_ACTION=continue_active_run \
+    run_check_entry "$dir" task-unrecovered "$url" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish while the run is still active"
+
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_FAIL=1 run_check_entry "$dir" task-unrecovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish whose no-mistakes run could not be read"
+  case "$out" in
+    *"could not be read"*) ;;
+    *) fail "the refusal did not say the run could not be read: $out" ;;
+  esac
+
+  # A failed run whose own head was published has nothing to recover, so the
+  # trees agree; its outcome alone refuses it, as does a missing outcome.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_OUTCOME=failed run_check_entry "$dir" task-unrecovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish of a failed no-mistakes run"
+  case "$out" in
+    *"has outcome failed, not a pass"*) ;;
+    *) fail "the refusal did not name the run's failed outcome: $out" ;;
+  esac
+  grep -q '^pr=' "$state/task-unrecovered.meta" && fail "a refused failed-run publish recorded pr="
+  set +e
+  FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_OUTCOME='' run_check_entry "$dir" task-unrecovered "$url" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish of a run with no outcome"
+
+  # A published-for-review done whose URL is not a canonical Gerrit change is
+  # refused, even though a gate push left HEAD on a remote-tracking ref.
+  git -C "$dir/wt" update-ref refs/remotes/no-mistakes/fm/task "$unfixed"
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" \
+    "done: PR https://gerrit.example/r/c/group/apps/console/+/4201/1 published for review" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the done gate accepted a published-for-review report naming no Gerrit change"
+  case "$out" in
+    *"canonical https://<host>/c/<project>/+/<number> form"*) ;;
+    *) fail "the refusal did not name the canonical Gerrit change form: $out" ;;
+  esac
+  git -C "$dir/wt" update-ref -d refs/remotes/no-mistakes/fm/task
+
+  # Recovery fast-forwards the copy to the fix; the publish then stamps a
+  # Change-Id, rewriting the message but not the tree, and pushes one squash.
+  git -C "$dir/wt" fetch -q "$elsewhere" "$fixed"
+  git -C "$dir/wt" merge -q --ff-only "$fixed"
+  stamped=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$unfixed" \
+    -m "no-mistakes(review): Correct the documented value" -m "Change-Id: I0123456789abcdef0123456789abcdef01234567")
+  git -C "$dir/wt" reset -q --hard "$stamped"
+  squash=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$base" -m squashed)
+  [ "$stamped" != "$fixed" ] || fail "the fixture's stamped head did not diverge from the pipeline head"
+
+  # The done gate itself, as crew-state and the secondmate ledger call it.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the done gate refused a recovered, published copy: $out"
+
+  write_task_meta "$dir" task-recovered
+  FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-recovered "$url" >/dev/null \
+    || fail "arming refused a recovered copy whose squash carries the pipeline's result"
+  grep -qxF "pr=$url" "$state/task-recovered.meta" || fail "the recovered publish was not recorded"
+
+  # A direct-PR task never runs the pipeline, so no run is asked about.
+  : > "$dir/nm.log"
+  write_task_meta "$dir" task-direct
+  sed -i.bak 's/^mode=no-mistakes$/mode=direct-PR/' "$state/task-direct.meta" && rm -f "$state/task-direct.meta.bak"
+  FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_FAIL=1 FM_TEST_NM_LOG="$dir/nm.log" \
+    run_check_entry "$dir" task-direct "$url" >/dev/null \
+    || fail "a direct-PR Gerrit publish was refused over a pipeline it never runs"
+  [ ! -s "$dir/nm.log" ] || fail "a direct-PR Gerrit publish consulted no-mistakes"
+  pass "a no-mistakes Gerrit ready report requires the pipeline's fixes recovered into the published copy"
+}
+
 # The GitLab watch must follow a merge request exactly as the GitHub watch
 # follows a pull request, on any instance, and must never turn an unreadable
 # merge request into a merge. Its evidence against the public fixture project
 # https://gitlab.com/KarotKris/gitlab-merge-watch-fixture is in
 # docs/gitlab-merge-watch.md; this exercises the same paths hermetically.
+# A Forgejo pull request is followed by number through "tea api" on the one
+# login registered for its host. Only a boolean merged field of true wakes the
+# poll: tea api exits 0 on an HTTP error with the error body as output, so an
+# error body, an unmerged record, a tea failure, and an ambiguous login all
+# stay silent, and the read never depends on how many newer pull requests the
+# repository has.
+test_forgejo_merge_watch() {
+  local dir state out url value
+  dir=$(make_case forgejo-merge-watch)
+  state="$dir/home/state"
+  url=https://forgejo.example/o/r/pulls/7
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  printf '[\n'
+  printf '  {\n    "name": "main",\n    "url": "https://forgejo.example"\n  }'
+  if [ -n "${FM_TEST_TEA_SECOND_LOGIN:-}" ]; then
+    printf ',\n  {\n    "name": "other",\n    "url": "https://forgejo.example"\n  }'
+  fi
+  printf '\n]\n'
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+[ -z "${FM_TEST_TEA_FAIL:-}" ] || exit 1
+case "${FM_TEST_TEA_PULL:-open}" in
+  merged) printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n' ;;
+  error) printf '{"message":"The target couldn'"'"'t be found.","url":"x"}\n' ;;
+  *) printf '{"state":"open","merged":false,"head":{"sha":"abc"}}\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tea"
+  ln -sf "$(command -v jq)" "$dir/fakebin/jq"
+  : > "$dir/tea.log"
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a forgejo "$url" forgejo.example o/r 7 "$POLL" \
+    || fail "could not prepare a Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Forgejo poll"
+
+  for value in open error; do
+    out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=$value run_poll "$dir")
+    [ -z "$out" ] || fail "Forgejo poll emitted for a $value reading"
+  done
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged FM_TEST_TEA_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted after a tea failure"
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged FM_TEST_TEA_SECOND_LOGIN=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Forgejo poll emitted with an ambiguous tea login"
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_TEA_PULL=merged run_poll "$dir")
+  [ "$out" = merged ] || fail "Forgejo poll did not emit exactly one merged line"
+
+  grep -qF -- "api --login main --repo o/r /repos/{owner}/{repo}/pulls/7" "$dir/tea.log" \
+    || fail "the poll did not read the one pull request by number on the host's login"
+  ! grep -qF -- "pulls list" "$dir/tea.log" \
+    || fail "the poll scanned a pull request list instead of reading by number"
+  pass "Forgejo poll reads one pull request by number through tea api and wakes only on merged true"
+}
+
+# The one tea login for a Forgejo host is found by parsing
+# `tea login list --output json` as JSON, never by splitting each line on
+# quotes. The pretty-printed fixture below is byte-for-byte what tea 0.14.0
+# prints for two logins; the two compact fixtures are the same records with one
+# object per line and as one line, the shapes a line-oriented split misread as
+# a url equal to the login name, refusing every host. Both the sourced helper
+# and the static watcher body, which keeps its own copy of the filter, must
+# resolve every shape, strip scheme, port, and path from the url, and refuse
+# an ambiguous host.
+test_forgejo_login_list_shapes() {
+  local dir state out shape url
+  dir=$(make_case forgejo-login-shapes)
+  state="$dir/home/state"
+  cat > "$dir/tea-multiline.json" <<'JSON'
+[
+  {
+    "name": "fixture-one",
+    "url": "https://git.example.com",
+    "ssh_host": "git.example.com",
+    "user": "someone",
+    "default": "true"
+  },
+  {
+    "name": "fixture-two",
+    "url": "http://code.internal:3000/",
+    "ssh_host": "code.internal",
+    "user": "other",
+    "default": "false"
+  }
+]
+JSON
+  jq -c . "$dir/tea-multiline.json" > "$dir/tea-oneline.json"
+  { printf '[\n'; jq -c '.[]' "$dir/tea-multiline.json" | sed '1!s/^/,/'; printf ']\n'; } \
+    > "$dir/tea-perobject.json"
+  [ "$(wc -l < "$dir/tea-oneline.json")" -eq 1 ] || fail "the one-line fixture is not one line"
+  grep -q '^{"name":"fixture-one","url":"https://git.example.com"' "$dir/tea-perobject.json" \
+    || fail "the per-object fixture does not put a whole login on one line"
+  printf '[{"name":"a","url":"https://git.example.com"},{"name":"b","url":"https://git.example.com:3000/x"}]\n' \
+    > "$dir/tea-ambiguous.json"
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  cat "$FM_TEST_TEA_LOGINS"
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 0
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+printf '{"state":"closed","merged":true,"head":{"sha":"abc"}}\n'
+SH
+  chmod +x "$dir/fakebin/tea"
+  ln -sf "$(command -v jq)" "$dir/fakebin/jq"
+  : > "$dir/tea.log"
+
+  url=https://code.internal/o/r/pulls/7
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a forgejo "$url" code.internal o/r 7 "$POLL" \
+    || fail "could not prepare a Forgejo poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Forgejo poll"
+
+  for shape in multiline oneline perobject; do
+    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login git.example.com) \
+      || fail "$shape: the login helper refused a host with exactly one login"
+    [ "$out" = fixture-one ] || fail "$shape: the login helper resolved '$out' for git.example.com"
+    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login code.internal) \
+      || fail "$shape: the login helper refused a url with a port and trailing slash"
+    [ "$out" = fixture-two ] || fail "$shape: the login helper resolved '$out' for code.internal"
+    ! FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login elsewhere.example >/dev/null \
+      || fail "$shape: the login helper resolved a host with no registered login"
+    out=$(FM_TEST_TEA_LOGINS="$dir/tea-$shape.json" FM_TEST_TEA_LOG="$dir/tea.log" run_poll "$dir")
+    [ "$out" = merged ] || fail "$shape: the static poll did not resolve the login and report the merge"
+    grep -qF -- "api --login fixture-two --repo o/r" "$dir/tea.log" \
+      || fail "$shape: the static poll did not read through the host's login"
+    : > "$dir/tea.log"
+  done
+  ! FM_TEST_TEA_LOGINS="$dir/tea-ambiguous.json" PATH="$dir/fakebin:$PATH" fm_pr_forgejo_login git.example.com >/dev/null \
+    || fail "the login helper picked one of two logins for the same host"
+  out=$(FM_TEST_TEA_LOGINS="$dir/tea-ambiguous.json" FM_TEST_TEA_LOG="$dir/tea.log" run_poll "$dir")
+  [ -z "$out" ] || fail "the static poll read through an ambiguous login"
+  pass "Forgejo login match parses tea's JSON in every line shape, in the helper and the static poll"
+}
+
 test_gitlab_merge_watch() {
   local dir state out rc url value noglab entry bindir name
   dir=$(make_case gitlab-merge-watch)
@@ -1884,6 +2759,11 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
   pass "a different merged PR for the same task gets its own first notification"
 }
 
+# A secondmate is a persistent worker, never landed work: a merge poll armed
+# on its record (bin/fm-pr-check.sh refuses new ones) is residue carrying a
+# relayed child's pr=. When that residue reads merged the watcher retires the
+# poll silently - no merge outcome, no notified marker, no wake that could put
+# the mate itself up for teardown - and leaves every lifecycle artifact whole.
 test_persistent_secondmate_retirement_is_poll_only() {
   local dir state meta_before status_before registry_before endpoint_before rc
   dir=$(make_case merged-retirement-secondmate)
@@ -1907,19 +2787,30 @@ test_persistent_secondmate_retirement_is_poll_only() {
   registry_before=$(shasum -a 256 "$dir/home/data/secondmates.md")
   endpoint_before=$(shasum -a 256 "$dir/endpoint-sentinel")
   seed_canonical_poll "$dir" domain https://github.com/o/r/pull/2
+  add_stop_custom_check "$dir"
 
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "persistent secondmate merged watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "a secondmate's merged poll woke the watcher instead of retiring silently: $(cat "$dir/watch.out")" ;;
+  esac
   assert_poll_absent "$state" domain
+  [ ! -e "$state/domain.pr-poll-merge-notified" ] \
+    || fail "a secondmate's retired poll recorded a merge notification"
+  ! grep -F 'merged-domain-' "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "a secondmate's merged poll queued a landed-work wake"
+  ! grep -F 'domain.check.sh' "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "a secondmate's merged poll queued a check wake"
   [ "$(shasum -a 256 "$state/domain.meta")" = "$meta_before" ] || fail "retirement changed secondmate metadata"
   [ "$(shasum -a 256 "$state/domain.status")" = "$status_before" ] || fail "retirement changed secondmate status"
   [ "$(shasum -a 256 "$dir/home/data/secondmates.md")" = "$registry_before" ] || fail "retirement changed secondmate registry"
   [ "$(shasum -a 256 "$dir/endpoint-sentinel")" = "$endpoint_before" ] || fail "retirement changed secondmate endpoint evidence"
   [ -d "$dir/secondmate-home" ] || fail "retirement removed the persistent secondmate home"
-  pass "merged poll retirement preserves every persistent secondmate lifecycle artifact"
+  pass "a merged poll on a persistent secondmate retires silently: no outcome, marker, or wake, and every lifecycle artifact preserved"
 }
 
 test_retirement_crash_recovery() {
@@ -2869,7 +3760,15 @@ SH
 }
 
 test_parser_matrix
+test_github_enterprise_config_resolution
+test_github_enterprise_hosts
 test_gitlab_merge_watch
+test_forgejo_merge_watch
+test_forgejo_login_list_shapes
+test_gerrit_merge_watch
+test_gerrit_arming_records_no_patch_set_revision
+test_gerrit_ready_gate_reads_the_published_tree
+test_gerrit_nm_ready_gate_requires_recovered_custody
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
@@ -2890,6 +3789,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_draft_pull_request_is_not_armed
+test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation

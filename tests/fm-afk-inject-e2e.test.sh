@@ -162,7 +162,12 @@ chmod +x "$TMUX_SHIM_DIR/tmux"
 # detection). The pane is an inert shell - it just needs to exist.
 "$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-fake-c1 -t supervisor
 
-start_daemon() {
+# The fixture pane is no real harness, so each scenario pins the primary harness
+# the daemon would otherwise detect from this test's own process ancestry:
+# "unknown" preserves the typed U+2063 envelope, "claude" selects the
+# record-backed doorbell that a marker-stripping Claude Code primary receives.
+start_daemon() {  # [primary-harness]
+  FM_DAEMON_PRIMARY_HARNESS="${1:-unknown}" \
   PATH="$TMUX_SHIM_DIR:$PATH" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_TARGET="$SUPERVISOR_PANE" \
@@ -421,8 +426,43 @@ test_scenario_c() {
   pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
 }
 
+# --- Scenario D: a marker-stripping primary gets a record-backed doorbell ----
+# Claude Code removes U+2063 from submitted prompts, so for a claude primary the
+# daemon types one plain doorbell naming a record in this home, and the away-mode
+# return check still reads that submitted line as internal.
+
+test_scenario_d() {
+  reset_state
+  rm -rf "$STATE_DIR/operational-inbox"
+  afk_enter "$STATE_DIR"
+  start_daemon claude
+
+  echo "done: PR https://example.test/pr/400" > "$STATE_DIR/fake-c1.status"
+  sleep 6
+
+  local submitted_count doorbell record
+  submitted_count=$(grep -c '' "$LOG_FILE" || true)
+  [ "$submitted_count" -eq 1 ] \
+    || fail "Scenario D: expected exactly one submitted line, got $submitted_count: $(cat "$LOG_FILE")"
+  awk -F '\t' '$1 ~ /e281a3/ { found = 1 } END { exit !found }' "$LOG_FILE" \
+    && fail "Scenario D: the claude primary was typed the U+2063 marker it strips"
+  doorbell=$(cut -f2 "$LOG_FILE" | head -1)
+  fm_operational_doorbell_path "$doorbell" record \
+    || fail "Scenario D: the submitted line is not a record-backed doorbell: $doorbell"
+  grep -F "${FM_OPERATIONAL_PREFIX}v1 away-supervisor: " "$record" >/dev/null \
+    || fail "Scenario D: the named record lacks the away-supervisor envelope"
+  grep -F 'Supervisor escalate' "$record" >/dev/null \
+    || fail "Scenario D: the named record lacks the escalation digest"
+  should_exit_afk "$STATE_DIR" "$doorbell" \
+    && fail "Scenario D: the submitted doorbell would read as the captain returning"
+
+  stop_daemon
+  pass "Scenario D: a claude primary receives one plain doorbell whose record the away-mode return check reads as internal"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
+test_scenario_d
 
 echo "all e2e injection tests passed"
