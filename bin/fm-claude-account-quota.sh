@@ -27,8 +27,12 @@
 # Output (stdout, TOON-style block), one or more lines per declared entry in
 # file order:
 #   claude-account-quota:
-#     row: <entry>  root=<dir>  scope=<scope>  status=..  remaining=..%  spendPriority=..  runway=..  confidence=..
+#     row: <entry>  root=<dir>  scope=<scope>  status=..  remaining=..%  spendPriority=..  runway=..  usableRunwaySeconds=..  confidence=..
 #     row: <entry>  root=<dir>  uncertainty: <why this account is not fully measured>
+#   usableRunwaySeconds is that scope's own runway time from the same snapshot,
+#   printed whenever quota-axi reports it and always for projected_exhaustion,
+#   where `-` means the snapshot gave no finite time. confidence is the
+#   runway's projectionConfidence, the default TOON's confidence column.
 #   Uncertainty names a failed or invalid read, quota-axi's own unknown or
 #   rate-limited state and reason, a missing claude row, or no applicable scope.
 #   A missing quota-axi prints `error: quota-axi not installed` in the block.
@@ -135,7 +139,9 @@ jq -rs --arg model "$MODEL" '
          else empty end),
         (if ($rows | length) == 0 then "\($head)  uncertainty: no applicable quota scope" else empty end),
         ($rows[] | "\($head)  scope=\(.scope | flat)  status=\(show(.status))  remaining=\(show(.effectivePercentRemaining))%  spendPriority=\(show(.selection.spendPriority))  runway=\(show(.runway.status))"
-          + (if .confidence then "  confidence=\(.confidence | flat)" else "" end))
+          + (if .runway.usableRunwaySeconds != null or .runway.status == "projected_exhaustion"
+             then "  usableRunwaySeconds=\(show(.runway.usableRunwaySeconds))" else "" end)
+          + ((.runway.projectionConfidence // .confidence) as $c | if $c then "  confidence=\($c | flat)" else "" end))
       end
     end)
 ' "$WORK/accounts.jsonl" || die "cannot format the quota readings"

@@ -485,6 +485,20 @@ test_remote_secondmate_account_override_refuses_locally() {
   pass "a remote route refuses a primary-side account override instead of silently ignoring it"
 }
 
+test_remote_secondmate_refuses_account() {
+  local out rc id=acct-remote-flag
+  new_case remote-account-flag claude
+  signed_in_claude_root "$CASE/first"
+  declare_accounts "$CASE/first"
+  printf -- '- %s - Remote fixture (host: account-test.invalid; root: /srv/firstmate; home: /srv/mate; scope: tests; projects: none; added 2026-10-17)\n' \
+    "$id" > "$HOME_DIR/data/secondmates.md"
+  out=$(fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" --secondmate --account "$CASE/first"); rc=$?
+  expect_code 1 "$rc" "--account on a remote secondmate must refuse"
+  assert_refused_before_launch "$id" "$out" "--account applies to ships and scouts"
+  assert_absent "$CASE/claude-checks" "a refused remote launch must not inspect a local login"
+  pass "a remote secondmate refuses --account instead of launching on the remote home's account"
+}
+
 # declare_accounts <entry>...: the home's config/claude-accounts list.
 declare_accounts() {
   printf '%s\n' "$@" > "$HOME_DIR/config/claude-accounts"
@@ -550,6 +564,11 @@ test_account_list_refusals() {
   out=$(spawn_ship "$id-other" --account "$CASE/elsewhere"); rc=$?
   expect_code 1 "$rc" "an undeclared account must refuse"
   assert_refused_before_launch "$id-other" "$out" "account '$CASE/elsewhere' is not declared in config/claude-accounts"
+  signed_in_claude_root "$CASE/elsewhere"$'\n'"$CASE/first"
+  out=$(spawn_ship "$id-newline" --account "$CASE/elsewhere"$'\n'"$CASE/first"); rc=$?
+  expect_code 1 "$rc" "an account holding a newline must refuse even when one of its lines is declared"
+  assert_refused_before_launch "$id-newline" "$out" "--account must name one config/claude-accounts entry exactly, with no control characters"
+  [ ! -e "$CASE/claude-checks" ] || assert_no_grep "$CASE/elsewhere" "$CASE/claude-checks" "a newline account must be refused before its sign-in check"
   out=$(spawn_ship "$id-out" --account "$CASE/signed-out"); rc=$?
   expect_code 1 "$rc" "a signed-out declared account must refuse even with an ambient login and key"
   assert_refused_before_launch "$id-out" "$out" "config/claude-accounts pins Claude workers to $CASE/signed-out, which is not signed in"
@@ -614,6 +633,7 @@ test_account_list_secondmate_needs_its_own_pin() {
 test_secondmate_account_override
 test_secondmate_account_refusals
 test_remote_secondmate_account_override_refuses_locally
+test_remote_secondmate_refuses_account
 test_absent_pin_keeps_the_launch_unchanged
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
