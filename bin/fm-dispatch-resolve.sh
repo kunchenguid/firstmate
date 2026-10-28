@@ -4,13 +4,39 @@
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
+#   fm-dispatch-resolve.sh --supports-credential-source <source>
 #
 # Opt-in gate: FM_DISPATCH_PROVIDER and FM_DISPATCH_MODEL select the provider
 #   and model from the environment or $FM_HOME/.env (environment wins). With no
 #   provider set, retain the original typesafe.ai/jev-latest key gate exactly.
 #   OpenRouter requires both its provider selection and a model. The selected
-#   key lives in a non-exported shell variable and reaches curl through fd 3,
-#   never argv, logs, or child environments.
+#   key comes from the environment, else $FM_HOME/.env, else the credential
+#   source declared for that provider (below). It lives in a non-exported shell
+#   variable and reaches curl through fd 3, never argv, logs, or child
+#   environments.
+#
+# Credential source declaration: the optional $CONFIG/dispatch-credential-sources.json
+#   ($CONFIG is FM_CONFIG_OVERRIDE, else $FM_HOME/config) is a JSON object keyed
+#   by provider (typesafe or openrouter). Each value says where that provider's
+#   key lives and holds no key: {"source": "macos-keychain", "service": "<name>",
+#   "account": "<name>"}, where account is optional and no other field is
+#   accepted. bin/fm-credential-source-lib.sh owns the schema and its adapters;
+#   macos-keychain reads the generic-password item with `security
+#   find-generic-password -s <service> [-a <account>] -w`, so only the service
+#   and account reach argv. The file is read only when neither the environment
+#   nor .env supplied a key, and only the selected provider's entry is used.
+#   With no entry for that provider and no key the tool is off as above. An
+#   unreadable or invalid file exits 2 naming the problem, never a value. A
+#   declared source this host cannot run, or that yields no key within
+#   FM_CREDENTIAL_SOURCE_TIMEOUT seconds (default 5), is an error outcome
+#   ending "nothing sent", with no network or quota call, so it is not
+#   mistaken for an unconfigured resolver.
+#
+# Capability probe: --supports-credential-source <source> prints "supported"
+#   and exits 0, or prints "unsupported" and exits 1, for a source name such as
+#   macos-keychain on this host. It reads no declaration, retrieves no
+#   credential, and runs no credential tool, so a configuration installer can
+#   refuse an unsupported activation before it writes anything.
 #
 # What it does when on with at least one rule: one POST with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
@@ -54,16 +80,18 @@
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
-#   error     -> API, network, response, or quota-axi failure; decide as today
+#   error     -> API, network, response, quota-axi, or declared credential source failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
-#   existing unreadable rules file, malformed rules, missing jq, an unknown
-#   provider, or OpenRouter without a model), which is actionable, never
-#   selected around.
+#   existing unreadable rules file, malformed rules, an unreadable or invalid
+#   credential source declaration, missing jq, an unknown provider, or
+#   OpenRouter without a model), which is actionable, never selected around.
+#   The capability probe is the one other exit: 1 for an unsupported source.
 #
 # Environment:
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, TYPESAFE_API_KEY, and
 #   OPENROUTER_API_KEY are read from the environment or $FM_HOME/.env.
+#   FM_CREDENTIAL_SOURCE_TIMEOUT bounds one declared-source read (default 5).
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -92,6 +120,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-credential-source-lib.sh
+. "$SCRIPT_DIR/fm-credential-source-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
@@ -106,6 +136,12 @@ no_rules() {
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
   exit 0
 }
+emit_error() {
+  local reason=$1
+  echo "dispatch-resolve: error ($reason)" >&2
+  printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  exit 0
+}
 usage() {
   awk '
     NR == 1 { next }
@@ -116,9 +152,14 @@ usage() {
 
 BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
 NEVER_SEND_PATH="$CONFIG/dispatch-never-send"
+CRED_PATH="$CONFIG/dispatch-credential-sources.json"
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
+    --supports-credential-source)
+      [ $# -ge 2 ] || die "--supports-credential-source needs a value"
+      if fm_credsrc_supported "$2"; then echo supported; exit 0; fi
+      echo unsupported; exit 1 ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown flag $1" ;;
     *) [ -z "$BRIEF" ] || die "one brief file only"; BRIEF=$1; shift ;;
@@ -126,6 +167,47 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- opt-in gate ---------------------------------------------------------------
+# declared_key <provider> <private variable>: set the variable from the source
+# $CRED_PATH declares for <provider>. Returns 1 when none is declared, which
+# leaves the off gate in charge. Past that point nothing is mistaken for an
+# unconfigured resolver: an unreadable or invalid declaration is a
+# configuration error, and a declared source this host cannot run or that
+# yields no key is an error outcome. Nothing is sent in either case.
+declared_key() {
+  local provider=$1 src problem value rc
+  [ -e "$CRED_PATH" ] || [ -L "$CRED_PATH" ] || return 1
+  [ -r "$CRED_PATH" ] || die "credential source declaration not readable: $CRED_PATH"
+  command -v jq >/dev/null 2>&1 || die "jq required"
+  problem=$(fm_credsrc_check "$CRED_PATH" typesafe openrouter) \
+    || die "malformed credential source declaration: $CRED_PATH - $problem"
+  fm_credsrc_declares "$CRED_PATH" "$provider" || return 1
+  src=$(fm_credsrc_field "$CRED_PATH" "$provider" source)
+  fm_credsrc_supported "$src" \
+    || emit_error "credential source $src declared for $provider is not supported on this host; nothing sent"
+  value=$(fm_credsrc_read "$CRED_PATH" "$provider"); rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$value" ]; then
+    if fm_timed_out "$rc"; then
+      emit_error "credential source $src declared for $provider did not answer in time; nothing sent"
+    fi
+    emit_error "credential source $src declared for $provider is unavailable; nothing sent"
+  fi
+  printf -v "$2" '%s' "$value"
+}
+
+# select_key <provider> <KEY_NAME> <private variable>: the selected provider's
+# key is the environment copy already in the variable, else KEY_NAME in
+# $FM_HOME/.env, else the source declared for the provider. With none of them
+# the tool is off, exactly as it was before declarations existed.
+select_key() {
+  local provider=$1 name=$2 var=$3
+  [ -n "${!var}" ] || printf -v "$var" '%s' "$(fmx_env_get "$name" "$FM_HOME/.env")"
+  [ -n "${!var}" ] || declared_key "$provider" "$var"
+  if [ -z "${!var}" ]; then
+    echo "dispatch-resolve: off ($name absent from the environment and $FM_HOME/.env)" >&2
+    exit 0
+  fi
+}
+
 DISPATCH_PROVIDER=${FM_DISPATCH_PROVIDER:-}
 [ -n "$DISPATCH_PROVIDER" ] || DISPATCH_PROVIDER=$(fmx_env_get FM_DISPATCH_PROVIDER "$FM_HOME/.env")
 DISPATCH_MODEL=${FM_DISPATCH_MODEL:-}
@@ -134,27 +216,15 @@ case "$DISPATCH_PROVIDER" in
   '')
     DISPATCH_PROVIDER=typesafe
     DISPATCH_MODEL=$TS_MODEL
-    [ -n "$TYPESAFE_API_KEY_PRIVATE" ] || TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-    if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-      echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-      exit 0
-    fi
+    select_key typesafe TYPESAFE_API_KEY TYPESAFE_API_KEY_PRIVATE
     ;;
   typesafe)
     [ -n "$DISPATCH_MODEL" ] || DISPATCH_MODEL=$TS_MODEL
-    [ -n "$TYPESAFE_API_KEY_PRIVATE" ] || TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-    if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-      echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-      exit 0
-    fi
+    select_key typesafe TYPESAFE_API_KEY TYPESAFE_API_KEY_PRIVATE
     ;;
   openrouter)
     [ -n "$DISPATCH_MODEL" ] || die "FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=openrouter"
-    [ -n "$OPENROUTER_API_KEY_PRIVATE" ] || OPENROUTER_API_KEY_PRIVATE=$(fmx_env_get OPENROUTER_API_KEY "$FM_HOME/.env")
-    if [ -z "$OPENROUTER_API_KEY_PRIVATE" ]; then
-      echo "dispatch-resolve: off (OPENROUTER_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-      exit 0
-    fi
+    select_key openrouter OPENROUTER_API_KEY OPENROUTER_API_KEY_PRIVATE
     ;;
   *) die "unknown FM_DISPATCH_PROVIDER: $DISPATCH_PROVIDER (expected typesafe or openrouter)" ;;
 esac
@@ -259,13 +329,6 @@ done < <(jq -r '
   | map(.harness) | unique | .[]' "$RULES")
 
 RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
-
-emit_error() {
-  local reason=$1
-  echo "dispatch-resolve: error ($reason)" >&2
-  printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
-  exit 0
-}
 
 if [ "$RULE_COUNT" -eq 0 ]; then
   no_rules
