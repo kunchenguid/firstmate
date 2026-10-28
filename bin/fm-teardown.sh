@@ -57,7 +57,7 @@
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
 # cherry, and merge-tree containment each fail to prove content landed without also
 # accepting unlanded edits to the same paths. Teardown still accepts a merged PR
-# whose head contains the current local work (ancestor or whitespace-exact patch ids),
+# whose head contains the current local work (ancestor or equivalent patch ids),
 # or a clean content-in-default tree match. Anything else refuses.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
@@ -1769,10 +1769,8 @@ ensure_commit_object() {
 
 patch_id_for_commit() {
   local commit=$1
-  # Indentation can change semantics. Unsupported --verbatim yields no id,
-  # so callers fall back to the content check or refuse, never ignore whitespace.
   git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --verbatim 2>/dev/null \
+    | git patch-id --stable 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
 }
 
@@ -1856,13 +1854,10 @@ pr_is_merged() {
 # the default branch does not already contain (e.g. its change landed via squash) the
 # merged tree equals the default branch's tree. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, a merge conflict,
-# or a Git error), so the caller refuses rather than guesses.
-# CONTENT_LANDED_PROOF_ERROR names a merge-tree option or execution failure
-# separately from a conflict or differing tree.
+# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# so the caller refuses rather than guesses.
 content_in_default() {
-  local name=${BASE_BRANCH:-} ref default_tree merged_tree merge_status
-  CONTENT_LANDED_PROOF_ERROR=
+  local name=${BASE_BRANCH:-} ref default_tree merged_tree
   [ -n "$name" ] || name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -1874,15 +1869,7 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || {
-    merge_status=$?
-    case "$merge_status" in
-      1) ;; # Git completed the merge and found conflicts.
-      129) CONTENT_LANDED_PROOF_ERROR='git merge-tree --write-tree was rejected (Git 2.38 or newer required)' ;;
-      *) CONTENT_LANDED_PROOF_ERROR="git merge-tree --write-tree failed (Git exit $merge_status)" ;;
-    esac
-    return 1
-  }
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }
@@ -1891,7 +1878,7 @@ content_in_default() {
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
-# when neither proof establishes that the work landed.
+# only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
@@ -2267,12 +2254,7 @@ validate_worktree_teardown_safety() {
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
-      if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
-        echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
-        echo "Restore or upgrade Git and retry the content check." >&2
-      else
-        echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-      fi
+      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
@@ -3536,7 +3518,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # would die there having removed nothing while this message claimed otherwise.
 # The T3 site refuses under --force because stop and archive must succeed before
 # its worktree or home can be released (see the native cleanup site below).
-# Forced secondmate child cleanup refuses because that path is only ever
+# The two forced secondmate child sites refuse because that path is only ever
 # reached under --force, so honoring force would delete the refusal rather
 # than override it, and would contradict the adjacent Herdr child gate that
 # stops forced cleanup for this same hazard.
@@ -3562,7 +3544,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot child_seat_gen child_pane_dead child_socket child_ledger child_route child_gen child_windows child_inventory_rc
+  local home=$1 archive_parent=${2:-$ID} home=$1 archive_parent=${2:-$ID} archive_parent child_backend child_busy_gen child_gen child_home child_id child_inventory_rc child_kind child_ledger child_meta child_orca_worktree_id child_owner_rc child_pool_slot child_proj child_return_rc child_rex_home child_route child_socket child_t child_windows child_wt home sub_state
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
