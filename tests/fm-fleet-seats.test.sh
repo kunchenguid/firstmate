@@ -1897,10 +1897,60 @@ spawn_gen=g-sm"
   pass "Rex absence requires generation, endpoint, and server ownership"
 }
 
+test_metadata_free_rex_routes_prove_destruction() {
+  local action shape home fb out rc server expected
+  for action in reclaim cancelled teardown; do
+    for shape in matching different legacy unreadable; do
+      home="$TMP_ROOT/rex-no-meta-$action-$shape"
+      make_home "$home"
+      pools "$home" 1
+      fb=$(fm_fakebin "$home")
+      cat > "$fb/rex" <<'REX'
+#!/usr/bin/env bash
+case "$*" in
+  *whoami*) printf '{"endpoint":"%s"}' "$FM_TEST_REX_ENDPOINT" ;;
+  *) [ "$FM_TEST_REX_UNREADABLE" != 1 ] || { echo 'error: could not connect to the rex server' >&2; exit 4; }; echo 'error: block not found' >&2; exit 3 ;;
+esac
+REX
+      chmod +x "$fb/rex"
+      server=unix:/recorded-rex
+      [ "$shape" != legacy ] || server=
+      FM_HOME="$home" SEATS="$SEATS" SERVER="$server" ROUTE_FILTER='{placement:"local",backend:"rex",target:"00000001-0000-7000-8000-000000000001:00000002-0000-7000-8000-000000000002",spawn_gen:"g-sm",server_identity:$server,host:null,remote_root:null}' bash -c '
+        "$SEATS" reserve sm --generation g-sm --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" >/dev/null || exit
+        route="$FM_HOME/route.json"
+        (umask 077; jq -cn --arg server "$SERVER" "$ROUTE_FILTER" > "$route")
+        "$SEATS" dispatch sm --generation g-sm --route-file "$route" >/dev/null
+      ' || fail "could not dispatch the metadata-free Rex route"
+      FM_TEST_REX_ENDPOINT=unix:/recorded-rex
+      FM_TEST_REX_UNREADABLE=0
+      [ "$shape" != different ] || FM_TEST_REX_ENDPOINT=unix:/another-rex
+      [ "$shape" != unreadable ] || FM_TEST_REX_UNREADABLE=1
+      export FM_TEST_REX_ENDPOINT FM_TEST_REX_UNREADABLE
+      rc=0
+      if [ "$action" = reclaim ]; then
+        out=$(PATH="$fb:$PATH" seats "$home" reclaim sm --generation g-sm 2>&1) || rc=$?
+        expected=reclaimed
+      else
+        out=$(PATH="$fb:$PATH" seats "$home" release sm --generation g-sm --reason "$action" 2>&1) || rc=$?
+        expected=released
+      fi
+      if [ "$shape" = matching ]; then
+        expect_code 0 "$rc" "metadata-free Rex $action: $out"
+        assert_equals "$expected" "$(lifecycle_of "$home" sm g-sm)" "proven destruction retained capacity"
+      else
+        expect_code 3 "$rc" "unproven Rex $action ($shape): $out"
+        assert_equals reserved "$(lifecycle_of "$home" sm g-sm)" "unproven absence freed capacity"
+        [ "$shape" != legacy ] || assert_contains "$out" 'lacks a creation-server identity' 'legacy refusal did not name its missing evidence'
+      fi
+    done
+  done
+  pass "metadata-free Rex reclaim and releases require durable server evidence and proven absence"
+}
+
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -1960,3 +2010,5 @@ test_legacy_routes_support_recovery_and_retain_invalid_endpoints
 test_nested_remote_serve_uses_registry_owner
 
 test_rex_absence_uses_matching_metadata
+
+test_metadata_free_rex_routes_prove_destruction

@@ -2757,6 +2757,25 @@ test_housekeeping_removes_the_iterated_stale_marker() {
   pass "away housekeeping clears the stale marker it rechecked when two records share an endpoint"
 }
 
+test_refused_pooled_launch_reclaims_without_metadata() {
+  local id out rc ledger gen
+  id=$(t3_uid t3pooledrefusal)
+  t3_case pooled-turn-refusal
+  t3_world_set 'w.failTools = { t3_thread_send: {code:"refused", message:"first-turn refusal"} }'
+  t3_worker_setup "$id"
+  printf '{"pools":[{"name":"t3","capacity":1,"models":["claude-sonnet-5"]}]}' > "$CONFIG/fleet-seats"
+  out=$(t3_worker_spawn "$id" claude --model claude-sonnet-5); rc=$?
+  expect_code 1 "$rc" "a definite first-turn refusal must fail: $out"
+  assert_absent "$CASE_DIR/state/$id.meta" "a definite refusal retained provisional metadata"
+  ledger=$(FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$CASE_DIR/state" FM_CONFIG_OVERRIDE="$CONFIG" "$ROOT/bin/fm-fleet-seats.sh" show "$id")
+  gen=$(printf '%s' "$ledger" | jq -r '.incarnations[-1].generation')
+  assert_equals true "$(printf '%s' "$ledger" | jq '.incarnations[-1] | .lifecycle == "reserved" and .launch_phase == "dispatching" and (.route.server_identity | length > 0)')" "refusal did not leave an exact dispatched route"
+  out=$(FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$CASE_DIR/state" FM_CONFIG_OVERRIDE="$CONFIG" "$ROOT/bin/fm-fleet-seats.sh" reclaim "$id" --generation "$gen" 2>&1) || fail "archived T3 route could not be reclaimed without metadata: $out"
+  ledger=$(FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$CASE_DIR/state" FM_CONFIG_OVERRIDE="$CONFIG" "$ROOT/bin/fm-fleet-seats.sh" show "$id")
+  assert_equals reclaimed "$(printf '%s' "$ledger" | jq -r '.incarnations[-1].lifecycle')" "T3 capacity remained stranded"
+  pass "a refused pooled T3 launch is reclaimed from its durable route after metadata rollback"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -2857,3 +2876,5 @@ test_spawn_rejected_lease_is_neither_cleaned_nor_returned
 test_teardown_keeps_tracked_claude_local_md
 test_fractional_poll_event_wait
 test_housekeeping_removes_the_iterated_stale_marker
+
+test_refused_pooled_launch_reclaims_without_metadata

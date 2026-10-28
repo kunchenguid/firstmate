@@ -890,25 +890,36 @@ route_local_state() {
 # destroyed (fm_control_endpoint_absence_verdict), so a buffered launch line
 # can no longer execute.
 route_local_gone() {
-  local backend target state verdict meta
+  local backend target state verdict meta server recorded
+  EVIDENCE_REASON=
   backend=$(inc_get "$1" '.route.backend // empty')
   target=$(inc_get "$1" '.route.target // empty')
   [ -n "$backend" ] && [ -n "$target" ] || return 1
+  server=$(inc_get "$1" '.route.server_identity // empty')
+  meta=
+  if [ "$backend" = rex ] || [ "$backend" = t3code ]; then
+    meta="$HOLDER_STATE/$TASK.meta"
+    if [ -e "$meta" ] || [ -L "$meta" ]; then
+      [ "$(meta_generation "$meta")" = "$1" ] || { EVIDENCE_REASON="metadata names another generation"; return 1; }
+      fm_backend_validate_task_endpoint "$meta" "$TASK" >/dev/null 2>&1 || return 1
+      [ "$FM_BACKEND_VALIDATED_BACKEND" = "$backend" ] && [ "$FM_BACKEND_VALIDATED_TARGET" = "$target" ] || return 1
+      recorded=$(record_field "$meta" "${backend%code}_server")
+      [ -z "$server" ] || [ "$server" = "$recorded" ] || { EVIDENCE_REASON="metadata and ledger name different creation servers"; return 1; }
+      [ -n "$server" ] || [ "$backend" != rex ] || server=$recorded
+    else
+      meta=
+      [ "$(inc_get "$1" '.route.spawn_gen // empty')" = "$1" ] || { EVIDENCE_REASON="the durable route lacks this exact generation"; return 1; }
+    fi
+    [ -n "$server" ] || { EVIDENCE_REASON="the durable route lacks a creation-server identity"; return 1; }
+  fi
   if [ "$backend" = t3code ]; then
     fm_backend_source t3code || return 1
-    fm_backend_t3code_server_matches "$(inc_get "$1" '.route.server_identity // empty')" || return 1
+    fm_backend_t3code_server_matches "$server" || { EVIDENCE_REASON="T3 creation server does not match the current credential"; return 1; }
   fi
   state=$(route_local_state "$1") || return 1
   [ "$state" = missing ] || return 1
   [ "$backend" != tmux ] || return 0
-  meta=
-  if [ "$backend" = rex ] || [ "$backend" = t3code ]; then
-    meta="$HOLDER_STATE/$TASK.meta"
-    [ "$(meta_generation "$meta")" = "$1" ] || return 1
-    fm_backend_validate_task_endpoint "$meta" "$TASK" >/dev/null 2>&1 || return 1
-    [ "$FM_BACKEND_VALIDATED_BACKEND" = "$backend" ] && [ "$FM_BACKEND_VALIDATED_TARGET" = "$target" ] || return 1
-  fi
-  verdict=$(fm_control_endpoint_absence_verdict "$backend" "$target" "$meta")
+  verdict=$(fm_control_endpoint_absence_verdict "$backend" "$target" "$meta" "$server")
   EVIDENCE_REASON=${verdict#*$'\t'}
   [ "${verdict%%$'\t'*}" = gone ]
 }
@@ -1433,7 +1444,8 @@ if [ "$CMD" = release ]; then
         # the same server it created the endpoint on). Anyone else needs the
         # backend's absence proof.
         owner=$(inc_get "$GEN" '.owner_pid // empty')
-        if [ -n "$owner" ] && holder_alive "$owner" "$(inc_get "$GEN" '.owner_pid_identity // ""')" \
+        backend=$(inc_get "$GEN" '.route.backend // empty')
+        if [ "$backend" != rex ] && [ "$backend" != t3code ] && [ -n "$owner" ] && holder_alive "$owner" "$(inc_get "$GEN" '.owner_pid_identity // ""')" \
           && fm_sm_lifecycle_is_ancestor "$owner" && [ "$(route_local_state "$GEN")" = missing ]; then
           :
         else
