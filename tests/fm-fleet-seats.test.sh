@@ -1844,10 +1844,62 @@ project=$home"
   pass "legacy routes without socket ownership and invalid endpoints stay counted"
 }
 
+test_rex_absence_uses_matching_metadata() {
+  local home="$TMP_ROOT/rex-proof" fb target sid bid shape out rc
+  make_home "$home"
+  pools "$home" 1
+  fb=$(fm_fakebin "$home")
+  cat > "$fb/rex" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *whoami*) printf '{"endpoint":"unix:/recorded-rex"}' ;;
+  *) echo 'error: block not found' >&2; exit 3 ;;
+esac
+SH
+  chmod +x "$fb/rex"
+  sid=00000001-0000-7000-8000-000000000001
+  bid=00000002-0000-7000-8000-000000000002
+  target="$sid:$bid"
+  task_record "$home" sm pool-model-a secondmate "worktree=$home
+project=$home
+backend=rex
+window=$target
+endpoint_task_id=sm
+rex_session_id=session:$sid
+rex_window_id=window:$sid
+rex_block_id=block:$bid
+rex_server=unix:/recorded-rex
+spawn_gen=g-sm"
+  env FM_HOME="$home" SEATS="$SEATS" TARGET="$target" bash -c '
+    "$SEATS" reserve sm --generation g-sm --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" || exit
+    route="$FM_HOME/route.json"
+    (umask 077; jq -cn --arg t "$TARGET" "{placement: \"local\", backend: \"rex\", target: \$t, spawn_gen: \"g-sm\", host: null, remote_root: null}" > "$route")
+    "$SEATS" dispatch sm --generation g-sm --route-file "$route"
+  ' > "$home/dispatch.out" 2>&1 || fail "Rex dispatch: $(cat "$home/dispatch.out")"
+  for shape in generation endpoint server matching; do
+    cp "$home/state/sm.meta" "$home/meta.saved"
+    case "$shape" in
+      generation) sed 's/spawn_gen=g-sm/spawn_gen=other/' "$home/meta.saved" > "$home/state/sm.meta" ;;
+      endpoint) printf 'window=other\n' >> "$home/state/sm.meta" ;;
+      server) sed 's@unix:/recorded-rex@unix:/other-rex@' "$home/meta.saved" > "$home/state/sm.meta" ;;
+    esac
+    out=$(PATH="$fb:$PATH" seats "$home" reclaim sm --generation g-sm 2>&1); rc=$?
+    if [ "$shape" = matching ]; then
+      expect_code 0 "$rc" "matching Rex absence: $out"
+      assert_equals reclaimed "$(lifecycle_of "$home" sm g-sm)" "Rex capacity stayed counted"
+    else
+      expect_code 3 "$rc" "foreign Rex metadata ($shape): $out"
+      assert_equals reserved "$(lifecycle_of "$home" sm g-sm)" "foreign Rex metadata freed capacity"
+    fi
+    mv "$home/meta.saved" "$home/state/sm.meta"
+  done
+  pass "Rex absence requires generation, endpoint, and server ownership"
+}
+
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -1905,3 +1957,5 @@ test_reconciliation_distinguishes_matching_and_reused_owner_pids
 test_legacy_routes_support_recovery_and_retain_invalid_endpoints
 
 test_nested_remote_serve_uses_registry_owner
+
+test_rex_absence_uses_matching_metadata

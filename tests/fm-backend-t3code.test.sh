@@ -1719,6 +1719,9 @@ test_spawn_secondmate_runs_thread_in_home_with_env() {
   local id home out thread project create turn settings
   id=$(t3_uid t3smz1)
   t3_case spawn-secondmate
+  if [ "${1:-}" = pooled ]; then
+    printf '{"pools":[{"name":"t3","capacity":1,"models":["claude-sonnet-5"]}]}' > "$CONFIG/fleet-seats"
+  fi
   home="$CASE_DIR/sm-home"
   make_t3_secondmate_home "$home" "$id"
   # The home's own settings, plus a key an earlier spawn wrote that this one does not.
@@ -1729,6 +1732,11 @@ test_spawn_secondmate_runs_thread_in_home_with_env() {
   expect_code 0 $? "fm-spawn.sh --backend t3code --secondmate should succeed against the fake T3 server"$'\n'"$out"
   [ "$(t3_dispatch_types)" = "t3_project_create t3_thread_launch t3_thread_send" ] \
     || fail "a secondmate spawn must create the home's project, then launch the thread, then send the charter, got '$(t3_dispatch_types)'"
+  if [ "${1:-}" = pooled ]; then
+    local seat
+    seat=$(FM_HOME="$CASE_DIR/home" "$ROOT/bin/fm-fleet-seats.sh" show "$id")
+    assert_equals true "$(printf '%s' "$seat" | jq 'any(.incarnations[]; .startup_confirmed == true and .route.backend == "t3code" and .route.target != null)')" "pooled T3 startup did not preserve and confirm its route"
+  fi
   create=$(t3_log_line_of 'r.tool === "t3_project_create"')
   [ "$(t3_request "$create" 'r.arguments.title')" = fm-sm-home ] || fail "the home's T3 project must carry the fm- prefixed title, got '$(t3_request "$create" 'r.arguments.title')'"
   [ "$(t3_request "$create" 'r.arguments.workspaceRoot')" = "$(cd "$home" && pwd -P)" ] || fail "the home's T3 project workspaceRoot must be the home"
@@ -2723,6 +2731,12 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
   exit
 fi
 
+
+if [ "${1:-}" = seat-review ]; then
+  test_spawn_secondmate_runs_thread_in_home_with_env pooled
+  test_uncertain_launch_message_keeps_task_record
+  exit 0
+fi
 
 test_native_restart_rearms_undelivered_stale_warning
 test_housekeeping_preserves_unknown_stale_recheck
