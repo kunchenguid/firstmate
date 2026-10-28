@@ -459,7 +459,6 @@ setup_remote_case() {  # <case-dir> <id> <ssh-mode>
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
-cat > /dev/null
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
@@ -468,6 +467,7 @@ argv_b64=$4
 decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
 rargs=()
 while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
+stdin_payload=$(cat)
 printf '%s\n' "${rargs[*]}" >> "$FM_FAKE_SSH_LOG"
 case "${FM_FAKE_SSH_MODE:-ok}" in
   unreachable) exit 255 ;;
@@ -477,7 +477,7 @@ case "${rargs[1]:-}" in
     # Model the live remote mate: act on the instruction and report back on the
     # parent channel, carrying the correlation token the request embedded.
     if [ -n "${FM_FAKE_ANSWER_STATUS:-}" ]; then
-      corr=$(printf '%s' "${rargs[3]:-}" | grep -oE 'corr=[0-9a-f]{16}' | head -1)
+      corr=$(printf '%s' "$stdin_payload" | grep -oE 'corr=[0-9a-f]{16}' | head -1)
       [ -z "$corr" ] || printf 'done [%s]: open records written down\n' "$corr" \
         >> "$FM_FAKE_ANSWER_STATUS"
     fi

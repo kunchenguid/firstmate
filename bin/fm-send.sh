@@ -934,7 +934,7 @@ else
     fi
     remote_rc=0
     remote_completion_unknown=0
-    REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID" "$MESSAGE")
+    REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID")
     [ -z "$FIRE_AND_FORGET_ID" ] || REMOTE_SEND_ARGS+=(fire-and-forget)
     # Each transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds.
     # fm_run_timed's 124 means the attempt was killed at the bound with remote
@@ -943,15 +943,15 @@ else
     # retry that would only wait out the same busy remote queue again. (A
     # remote job's own timeout also relays as 124; treating it as unconfirmed
     # stays safe because the remote enqueue deduplicates.)
-    fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-      fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" </dev/null || remote_rc=$?
+    printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+      "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" || remote_rc=$?
     if [ "$remote_rc" -eq 124 ]; then
       remote_completion_unknown=1
     elif [ "$remote_rc" -eq 255 ]; then
       remote_completion_unknown=1
       remote_rc=0
-      fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" \
-        fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" </dev/null || remote_rc=$?
+      printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+        "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "${REMOTE_SEND_ARGS[@]}" || remote_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
