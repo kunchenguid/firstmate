@@ -3,7 +3,7 @@
 #
 # A remote steer is delivered by durable record, never by typing its payload:
 # fm-send crosses fm-on.sh to the host-local leg (fm-remote-secondmate-control.sh
-# cmd_send), which writes the message idempotently into the remote home's
+# cmd_send_stdin), which writes the message idempotently into the remote home's
 # steering inbox and rings the remote doorbell best-effort. These tests drive
 # the real fm-send + fm-on executables with a stubbed ssh transport that
 # EXECUTES the real host-local leg against a seeded remote-home fixture (the
