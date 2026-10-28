@@ -649,12 +649,14 @@ An environment variable alone is not reliable when another Herdr server is runni
 When the selected named server is not running, the adapter launches it without these inherited values:
 
 - Firstmate home and directory overrides.
+- Task-scoped snapshot-file overrides (`FM_CREW_STATE_META_OVERRIDE` and `FM_CREW_STATE_STATUS_OVERRIDE`).
 - Harness identity markers.
 - The supervision-model override.
 
-Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
+Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness, or make later status reads use temporary task files after snapshot cleanup.
 An already-running server is reused without restart or environment changes.
-Explicit named-session routing and unrelated launch environment remain intact.
+Explicit named-session routing, unrelated launch environment, and the caller's snapshot overrides remain intact.
+The server-environment regression in `tests/fm-backend-herdr.test.sh` covers this launch boundary.
 
 ### Sending text and keys
 

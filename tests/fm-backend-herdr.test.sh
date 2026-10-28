@@ -154,12 +154,12 @@ case "${1:-}" in
     ;;
   server)
     {
-      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_HERDR_SENTINEL HERDR_SESSION; do
+      for name in FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_HERDR_SENTINEL HERDR_SESSION; do
         eval 'value=${'"$name"'-<unset>}'
         printf '%s=%s\n' "$name" "$value"
       done
       printf 'args=%s\n' "$*"
-    } > "$FM_HERDR_SERVER_ENV_LOG"
+    } >> "$FM_HERDR_SERVER_ENV_LOG"
     : > "$FM_HERDR_SERVER_MARKER"
     ;;
 esac
@@ -1213,24 +1213,37 @@ test_container_ensure_starts_server_and_workspace() {
 }
 
 test_server_ensure_scrubs_home_and_harness_identity() {
-  local dir log marker fb output name
+  local dir log marker fb output name caller
   dir="$TMP_ROOT/server-env"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
   fb=$(make_herdr_server_env_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" FM_HERDR_SENTINEL=kept \
+    FM_CREW_STATE_META_OVERRIDE=/tmp/snapshot/task.meta FM_CREW_STATE_STATUS_OVERRIDE=/tmp/snapshot/task.status \
     FM_HOME=/tmp/wrong-home FM_ROOT_OVERRIDE=/tmp/wrong-root FM_STATE_OVERRIDE=/tmp/wrong-state \
     FM_DATA_OVERRIDE=/tmp/wrong-data FM_PROJECTS_OVERRIDE=/tmp/wrong-projects FM_CONFIG_OVERRIDE=/tmp/wrong-config \
     CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed GROK_AGENT=1 FM_SUPERVISION_MODEL=autoarm \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_server_ensure fmtest || exit 1
+      printf "%s\n" "$FM_CREW_STATE_META_OVERRIDE" "$FM_CREW_STATE_STATUS_OVERRIDE" > "$1/caller"
+      FM_HERDR_SENTINEL=changed
+      export FM_HERDR_SENTINEL
+      fm_backend_herdr_server_ensure fmtest
+    ' "$ROOT" "$dir"
   expect_code 0 $? "server_ensure should start under a polluted launcher environment"
   output=$(cat "$log")
-  for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
+  for name in FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE \
+    FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
     CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL; do
     assert_contains "$output" "$name=<unset>" "server_ensure leaked $name into the long-lived Herdr server"
   done
   assert_contains "$output" "FM_HERDR_SENTINEL=kept" "server_ensure removed an unrelated environment variable"
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
-  pass "fm_backend_herdr_server_ensure: scrubs home and harness identity without disturbing unrelated environment or session routing"
+  caller=$(cat "$dir/caller")
+  [ "$caller" = $'/tmp/snapshot/task.meta\n/tmp/snapshot/task.status' ] || fail "server_ensure changed the caller snapshot overrides"
+  assert_not_contains "$output" "FM_HERDR_SENTINEL=changed" "server_ensure relaunched an already-running server"
+  [ "$(grep -c '^args=' "$log")" -eq 1 ] || fail "server_ensure launched more than one server"
+  pass "fm_backend_herdr_server_ensure: scrubs snapshot, home and harness identity, preserves caller and routing, and reuses the running server"
 }
 
 test_container_ensure_reuses_existing_workspace() {
