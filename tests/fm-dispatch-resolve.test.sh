@@ -3,7 +3,7 @@
 #
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
-# read from file descriptor 3, and answers with a canned typesafe.ai response.
+# read from file descriptor 3, and answers with a canned provider response.
 # A fake quota-axi serves the selected schema-5 fixture. No case touches the
 # network, and the absent-key case proves the tool makes no call
 # at all.
@@ -110,7 +110,8 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] ||
+  [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -138,7 +139,8 @@ chmod +x "$FAKEBIN/curl"
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] ||
+  [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'quota-axi:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -234,9 +236,10 @@ assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives the bearer header on fd 3"
 assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the API key is absent from every child environment"
 body=$(cat "$LOG/body")
+printf '%s\n' "$body" > "$TMP_ROOT/typesafe-body.json"
 assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "default model is jev-latest"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
-assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the whole brief rides in the state"
+assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "a brief without task headings rides whole in the state"
 assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
 assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' "$(jq -c '.questions.rule.criteria | keys' <<<"$body")" "one option per rule plus default"
 assert_equals 'No listed rule applies to this task.' "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "the fixed generic none criterion is the default option"
@@ -245,6 +248,179 @@ assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+
+# --- OpenRouter uses the same Choice validation and resolution path ---------
+OR_KEY='test-openrouter-key-never-in-child-env-or-argv'
+OR_RESPONSE="$TMP_ROOT/openrouter-response.json"
+write_openrouter_response() {
+  write_response "$OR_RESPONSE" "$1" "$2"
+  jq '.model = "typesafe/jev-1.13"' "$OR_RESPONSE" > "$TMP_ROOT/or-response.tmp"
+  mv "$TMP_ROOT/or-response.tmp" "$OR_RESPONSE"
+}
+reset_log
+write_openrouter_response rule_4 0.9
+OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF"
+assert_equals '' "$out" "an OpenRouter key alone does not select the provider"
+assert_contains "$err" 'TYPESAFE_API_KEY absent' "unset provider retains the typesafe off gate"
+assert_absent "$LOG/argv" "an OpenRouter key alone sends nothing"
+reset_log
+FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
+  OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE=$OR_RESPONSE run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "OpenRouter clear exits 0"
+assert_contains "$out" '  status: clear' "OpenRouter clear status"
+assert_contains "$out" '  probabilities: rule_1=0.01 rule_2=0.01 rule_3=0.01 rule_4=0.96 default=0.01' "OpenRouter preserves per-rule probabilities"
+assert_contains "$out" '  profile: --harness '\''cursor'\'' --model '\''cursor-grok-4.6-medium'\''' "OpenRouter uses the shared quota argmax"
+assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions' "OpenRouter endpoint"
+assert_contains "$(cat "$LOG/argv")" $'--max-time\n10' "OpenRouter timeout"
+assert_not_contains "$(cat "$LOG/argv")" "$OR_KEY" "OpenRouter key never appears in curl argv"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "OpenRouter key reaches curl only through fd 3"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "OpenRouter key is absent from child environments"
+assert_equals 'typesafe/jev-1.13' "$(jq -r .model "$LOG/body")" "OpenRouter model is explicit"
+assert_equals 'pager' "$(jq -r .state.task.project "$LOG/body")" "project reaches the model"
+assert_equals 'choice' "$(jq -r .questions.rule.type "$LOG/body")" "OpenRouter uses the native Choice request"
+assert_equals "$(jq -Sc 'del(.model)' "$TMP_ROOT/typesafe-body.json")" "$(jq -Sc 'del(.model)' "$LOG/body")" "providers send identical Choice inputs apart from model"
+assert_not_contains "$(cat "$LOG/body")" 'SECRET-WHY-TEXT' "OpenRouter never sends rule why text"
+pass "OpenRouter clear uses the same output contract and keeps its key out of argv and child environments"
+
+printf '%s\n' 'FM_DISPATCH_PROVIDER=openrouter' 'FM_DISPATCH_MODEL=typesafe/jev-1.13' "OPENROUTER_API_KEY=$OR_KEY" > "$HOME_DIR/.env"
+reset_log
+FAKE_CURL_RESPONSE=$OR_RESPONSE run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "OpenRouter provider, model, and key work from .env"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" ".env OpenRouter key uses fd 3"
+reset_log
+OPENROUTER_API_KEY=env-wins FAKE_CURL_RESPONSE=$OR_RESPONSE run code out err "$BRIEF"
+assert_equals 'Authorization: Bearer env-wins' "$(cat "$LOG/header")" "OpenRouter environment key wins over .env"
+rm -f "$HOME_DIR/.env"
+reset_log
+printf '%s\n' 'pager' > "$HOME_DIR/config/dispatch-never-send"
+FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
+  OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE=$OR_RESPONSE run code out err "$BRIEF" --project pager
+assert_equals '' "$out" "OpenRouter never-send match withholds the request"
+assert_contains "$err" 'nothing sent)' "OpenRouter never-send reports withholding"
+assert_absent "$LOG/argv" "OpenRouter never-send makes no network call"
+rm -f "$HOME_DIR/config/dispatch-never-send"
+
+reset_log
+write_openrouter_response rule_4 0.5
+FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
+  OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE=$OR_RESPONSE run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "OpenRouter low confidence is ambiguous"
+assert_not_contains "$out" '  profile:' "OpenRouter ambiguous response has no profile"
+reset_log
+printf '%s\n' '{"answers":{"rule":{"choice":"rule_4"}}}' > "$OR_RESPONSE"
+FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
+  OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE=$OR_RESPONSE run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "malformed OpenRouter response is an error"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "malformed OpenRouter response names the Choice contract"
+reset_log
+FM_DISPATCH_PROVIDER=openrouter FM_DISPATCH_MODEL=typesafe/jev-1.13 \
+  OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_RESPONSE=$OR_RESPONSE FAKE_CURL_HTTP=429 run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "OpenRouter HTTP error is reported"
+assert_contains "$out" '  reason: http 429 after' "OpenRouter HTTP status is reported"
+assert_not_contains "$out$err" "$OR_KEY" "OpenRouter HTTP error never includes the key"
+reset_log
+FM_DISPATCH_PROVIDER=openrouter OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF"
+expect_code 2 "$code" "OpenRouter missing model is a configuration error"
+assert_contains "$err" 'FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=openrouter' "missing model is actionable"
+assert_absent "$LOG/argv" "missing model makes no network call"
+FM_DISPATCH_PROVIDER=unknown OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF"
+expect_code 2 "$code" "unknown provider is a configuration error"
+assert_contains "$err" 'unknown FM_DISPATCH_PROVIDER' "unknown provider is actionable"
+pass "OpenRouter ambiguous, malformed, HTTP, and missing-model paths are handled"
+
+# --- never-send list: a match or a bad list withholds the request -------------
+NEVER_SEND="$HOME_DIR/config/dispatch-never-send"
+PRIVATE_BRIEF="$TMP_ROOT/private-brief.md"
+cat > "$PRIVATE_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Fix the pager for the Acme-Ledger account 4417-2290.
+
+## Firstmate spec
+- Keep the change small.
+MD
+expect_withheld() {  # <label> <stderr fragment> [<value that must not print>...]
+  local label=$1 fragment=$2
+  shift 2
+  expect_code 0 "$code" "$label exits 0"
+  assert_equals '' "$out" "$label prints nothing on stdout, so firstmate uses its existing intake"
+  assert_contains "$err" "dispatch-resolve: off ($fragment" "$label names why on stderr"
+  assert_contains "$err" 'nothing sent)' "$label says nothing was sent"
+  assert_equals '1' "$(grep -c . <<<"$err")" "$label prints one diagnostic line"
+  assert_absent "$LOG/argv" "$label never calls curl"
+  assert_absent "$LOG/quota-axi.calls" "$label never reads quota"
+  local value
+  for value in "$@"; do
+    assert_not_contains "$err" "$value" "$label never prints the listed value"
+  done
+}
+
+printf '%s\n' '# private values' '' '   ' 'Unlisted-Value' > "$NEVER_SEND"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+assert_contains "$out" '  status: clear' "a list with no match leaves resolution unchanged"
+assert_contains "$(jq -r .state.task.brief "$LOG/body")" 'Acme-Ledger' "a list with no match sends the task text"
+
+printf '%s\n' '# private values' '' '  acme-ledger  ' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "a case-insensitive literal match" "brief text matches $NEVER_SEND line 3" 'acme-ledger' 'Acme-Ledger'
+
+WRAPPED_BRIEF="$TMP_ROOT/wrapped-brief.md"
+printf '# Task\n## Captain'"'"'s intent\nFix the pager for Example Client\nLtd before\tthe\xc2\xa0release.\n' > "$WRAPPED_BRIEF"
+printf '%s\n' 'example  client ltd' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$WRAPPED_BRIEF" --project pager
+expect_withheld "a literal the brief wraps across lines" "brief text matches $NEVER_SEND line 1" 'example' 'Example'
+
+printf '%s\n' 'before the release' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$WRAPPED_BRIEF" --project pager
+expect_withheld "a literal the brief spaces with a tab and a no-break space" "brief text matches $NEVER_SEND line 1" 'release'
+
+printf '%s\n' 'orion-private' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project orion-private
+expect_withheld "a project-name match" "brief text matches $NEVER_SEND line 1" 'orion-private'
+
+printf '%s\n' 'stated root cause' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_withheld "a rule-criterion match" "brief text matches $NEVER_SEND line 1" 'stated root cause'
+
+SECOND_HOME="$TMP_ROOT/secondmate-home"
+mkdir -p "$SECOND_HOME/config"
+printf '%s\n' 'acme-ledger' > "$NEVER_SEND"
+# A child shell keeps the lib's own globals (such as out) out of this script
+# shellcheck disable=SC2016 # Expanded by the child shell
+bash -c '. "$1" && propagate_inheritable_config "$2" "$3"' _ \
+  "$ROOT/bin/fm-config-inherit-lib.sh" "$HOME_DIR/config" "$SECOND_HOME/config" \
+  || fail "inheritance into the secondmate home failed"
+PRIMARY_HOME=$HOME_DIR
+HOME_DIR=$SECOND_HOME
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "an inherited list in a secondmate home" "brief text matches $SECOND_HOME/config/dispatch-never-send line 1" 'acme-ledger' 'Acme-Ledger'
+HOME_DIR=$PRIMARY_HOME
+
+rm -f "$NEVER_SEND"
+mkdir "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "a directory at the list path" "$NEVER_SEND is not a readable regular file"
+rmdir "$NEVER_SEND"
+ln -s "$TMP_ROOT/missing-never-send" "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "a broken symlink at the list path" "$NEVER_SEND is not a readable regular file"
+rm -f "$NEVER_SEND"
+
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+assert_contains "$out" '  status: clear' "no list resolves exactly as before"
+assert_contains "$(jq -r .state.task.brief "$LOG/body")" 'Acme-Ledger' "no list sends the task text as before"
+pass "never-send list withholds the request on a match or a bad list, and never prints the value"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
@@ -341,6 +517,148 @@ assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_mod
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
 pass "ambiguous: confidence below the fixed floor hands the decision back"
+
+# --- per-rule confidence floor ------------------------------------------------
+write_floor_response() {  # <path> <choice> <confidence> <rule_1> <rule_2> <rule_3> <rule_4> <default>
+  cat > "$1" <<JSON
+{ "model": "jev-1.13.0",
+  "answers": { "rule": { "type": "choice", "choice": "$2", "confidence": $3,
+    "probabilities": { "rule_1": $4, "rule_2": $5, "rule_3": $6, "rule_4": $7, "default": $8 } } },
+  "usage": { "input_tokens": 812, "output_tokens": 60 } }
+JSON
+}
+FLOOR_RULES="$TMP_ROOT/floor-rules.json"
+jq '.rules[1].min_confidence = 0.9 | .rules[3].min_confidence = 0.1' "$BASE_RULES" > "$FLOOR_RULES"
+cp "$FLOOR_RULES" "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.18 0.02
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a top rule below its own floor falls to a runner-up that clears its floor"
+assert_contains "$out" '  rule: rule_2 (The task generates images.)   confidence: 0.76' "the model's own pick stays visible"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.18 clears its floor 0.1; rule_2 probability 0.76 is below its floor 0.9' "the fallback names both floors"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the runner-up rule's profiles are resolved"
+assert_not_contains "$(cat "$LOG/body")" 'min_confidence' "the model never sees confidence floors"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.08 0.12
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "no runner-up clearing its own floor is ambiguous"
+assert_contains "$out" '  reason: rule_2 probability 0.76 below its floor 0.9; no other option clears its own floor' "the undeclared default keeps the global floor as a runner-up"
+assert_not_contains "$out" '  fallback:' "no fallback is reported when none is taken"
+assert_not_contains "$out" '  profile:' "ambiguous per-rule floor emits no profile"
+
+jq '.rules[0].min_confidence = 0.1' "$FLOOR_RULES" > "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.76 0.12 0.76 0.0 0.12 0.0
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "equally probable runner-ups never break by option order"
+assert_contains "$out" '  reason: rule_2 probability 0.76 below its floor 0.9; runner-up tie' "a runner-up tie is named"
+
+cp "$FLOOR_RULES" "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_4 0.45 0.01 0.01 0.01 0.45 0.52
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "a declared floor below the global floor lets the picked rule resolve"
+
+# A declared floor needs the same support from a rule as the pick or as a runner-up
+jq '.rules[3].min_confidence = 0.3' "$FLOOR_RULES" > "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_4 0.25 0.25 0.05 0.05 0.35 0.30
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a picked rule clears its declared floor on its own probability, not the answer confidence"
+assert_not_contains "$out" '  fallback:' "a picked rule that clears its own floor takes no fallback"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the picked rule resolves at probability 0.35 over floor 0.3"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.95 0.05 0.55 0.05 0.30 0.05
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a high answer confidence does not lift a picked rule over its own floor"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.30 clears its floor 0.3; rule_2 probability 0.55 is below its floor 0.9' "the runner-up clears the same floor it would need as the pick"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.55 0.05 0.55 0.05 0.25 0.10
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a runner-up below its own floor is not taken"
+assert_contains "$out" '  reason: rule_2 probability 0.55 below its floor 0.9; no other option clears its own floor' "the missed runner-up floor is named"
+cp "$BASE_RULES" "$RULES"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.55 0.01 0.55 0.01 0.42 0.01
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "without declared floors a low pick stays ambiguous"
+assert_contains "$out" '  reason: confidence 0.55 below floor 0.6' "without declared floors the global floor reason is unchanged"
+assert_not_contains "$out" '  fallback:' "without declared floors no runner-up is taken"
+pass "per-rule confidence floors fall to the most probable runner-up that clears its own floor"
+
+# --- the model sees only the task-specific brief sections ----------------------
+SCAFFOLD_BRIEF="$TMP_ROOT/scaffold-brief.md"
+cat > "$SCAFFOLD_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Add a flag to the pager.
+
+## Firstmate spec
+Touch pager.sh only.
+```sh
+# Not a heading inside a fence
+## Setup
+```
+### Out of scope
+Anything else.
+
+# Setup
+BOILERPLATE-SETUP never push to the default branch.
+
+## Captain intent authorized for --intent
+BOILERPLATE-DUPLICATE
+MD
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$SCAFFOLD_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'## Captain\'s intent\nAdd a flag to the pager.' "the captain's intent section is sent"
+assert_contains "$sent" $'## Firstmate spec\nTouch pager.sh only.' "the Firstmate spec section is sent"
+assert_contains "$sent" $'# Not a heading inside a fence\n## Setup\n```\n### Out of scope\nAnything else.' "fenced lines and subheadings stay inside the section"
+assert_not_contains "$sent" 'BOILERPLATE' "scaffold boilerplate after the task sections is not sent"
+assert_not_contains "$sent" '# Task' "the enclosing Task heading is not sent"
+assert_not_contains "$sent" 'Brief kind:' "a brief without a scout contract line gets no kind line"
+
+SPEC_ONLY_BRIEF="$TMP_ROOT/spec-only-brief.md"
+printf '%s\n' '# Task' '## Firstmate spec' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals $'## Firstmate spec\nSpec text.' "$(jq -r .state.task.brief "$LOG/body")" "one recognized section is enough"
+
+printf '%s\n' '# Task' '## Firstmate spec   ' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a heading with trailing blanks is not a section, matching spawn validation"
+
+printf '%s\n' 'Preamble.' '## Firstmate spec' 'Spec text.' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a section outside the Task heading is not a task section"
+
+KIND_BRIEF="$TMP_ROOT/kind-brief.md"
+{ cat "$SCAFFOLD_BRIEF"; printf '%s\n' '# Definition of done' 'Delivery contract: mode=no-mistakes' 'Delivery contract: mode=direct-PR'; } > "$KIND_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'## Captain\'s intent\nAdd a flag to the pager.' "a ship brief still sends its task sections"
+assert_not_contains "$sent" 'Brief kind:' "a ship brief gets no kind line"
+assert_not_contains "$sent" 'mode=' "a ship brief's delivery mode is not sent"
+
+{ cat "$SCAFFOLD_BRIEF"; printf '%s\n' 'This is a SCOUT task: the deliverable is a written report, not a PR.'; } > "$KIND_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'Brief kind: scout (report only)\n\n## Captain\'s intent' "a scout brief's contract line names its kind"
+assert_not_contains "$sent" 'This is a SCOUT task' "the scout contract line itself is not sent"
+
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals "$(cat "$BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a brief with neither heading is sent whole"
+pass "only the brief's task sections and scout tag reach the model, with a whole-brief fallback"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log
@@ -730,6 +1048,8 @@ assert_contains "$err" 'not JSON' "non-JSON rules is named"
 for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"select":"mystery"}]}|unknown select: mystery' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":"high"}]}|min_confidence must be a number from 0 through 1 when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":1.5}]}|min_confidence must be a number from 0 through 1 when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20,"provider":"CLAUDE"}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
@@ -748,6 +1068,11 @@ for bad in \
   expect_code 2 "$code" "malformed rules exit 2: ${bad#*|}"
   assert_contains "$err" "malformed rules file: $RULES - ${bad#*|}" "malformed rules are named: ${bad#*|}"
 done
+printf '%s\n' '{"rules":[{"when":"x","use":[{"harness":"opencode"},{"harness":"rovo"},{"harness":"codex"}]}],"default":[{"harness":"pi"},{"harness":"claude"}]}' > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "multiple provider-less profiles exit 2"
+assert_contains "$err" "malformed rules file: $RULES - use profiles whose harness lacks one authoritative provider family require provider: opencode; use profiles whose harness lacks one authoritative provider family require provider: rovo; default profiles whose harness lacks one authoritative provider family require provider: pi" "all provider-less profiles are reported together across use and default"
+[ "$(printf '%s\n' "$err" | wc -l | tr -d ' ')" -eq 1 ] || fail "provider errors must use one diagnostic"
 assert_absent "$LOG/argv" "configuration errors never reach the network"
 cp "$BASE_RULES" "$RULES"
 for removed in --json --rules --quota; do

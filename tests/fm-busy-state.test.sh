@@ -532,6 +532,29 @@ test_herdr_native_busy_only() {
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
 }
 
+test_tern_native_busy_only() {
+  local state out gen verdict
+  state=$(new_state_dir tern-native)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE"; }
+  FAKE_NATIVE=busy
+  out=$(fm_busy_classify tern 7:9 claude t1 "$state")
+  [ "$out" = "busy tern-native" ] || fail "tern native busy with no record must classify busy, got '$out'"
+  for verdict in idle blocked unknown; do
+    FAKE_NATIVE=$verdict
+    out=$(fm_busy_classify tern 7:9 claude t1 "$state")
+    [ "$out" = "unknown missing" ] || fail "tern native '$verdict' must NOT classify as a verdict, got '$out'"
+  done
+  # A valid record outranks the native verdict.
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
+  FAKE_NATIVE=busy
+  out=$(fm_busy_classify tern 7:9 claude t1 "$state")
+  [ "$out" = "idle claude-hook" ] || fail "the adapter record must outrank tern's native verdict, got '$out'"
+  unset -f fm_backend_busy_state
+  pass "tern's native verdict is trusted for busy only (source tern-native), and records outrank it"
+}
+
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
 # crew-state reader), so it must not disturb their shell: no clobbered
 # positional parameters and no changed glob setting.
@@ -593,7 +616,28 @@ test_progress_is_generation_bound_and_not_semantic_state() {
   pass "native progress is generation-bound, separately recorded, and cleared on arm and retire"
 }
 
+test_turn_ended_notification_is_generation_bound() {
+  local state gen
+  state=$(new_state_dir turn-ended)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 idle --gen "$gen" --source commandcode-mod --event run-end \
+    || fail "current idle event was refused"
+  [ ! -e "$state/t1.turn-ended" ] || fail "an idle event without --turn-ended notified"
+  "$EV" apply "$state" t1 idle --gen "$gen" --source commandcode-mod --event run-end --turn-ended \
+    || fail "current turn-ended event was refused"
+  [ -f "$state/t1.turn-ended" ] || fail "turn-ended notification missing"
+  rm "$state/t1.turn-ended"
+  "$EV" arm "$state" t1 >/dev/null
+  if "$EV" apply "$state" t1 idle --gen "$gen" --source commandcode-mod --event run-end --turn-ended 2>/dev/null; then
+    fail "stale turn-ended event was accepted"
+  fi
+  [ ! -e "$state/t1.turn-ended" ] || fail "stale turn-ended event woke the replacement"
+  if "$EV" progress "$state" t1 --gen "$gen" --turn-ended 2>/dev/null; then fail "--turn-ended accepted outside apply"; fi
+  pass "the turn-ended notification rides the apply generation check"
+}
+
 test_progress_is_generation_bound_and_not_semantic_state
+test_turn_ended_notification_is_generation_bound
 
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
@@ -623,6 +667,7 @@ test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
+test_tern_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

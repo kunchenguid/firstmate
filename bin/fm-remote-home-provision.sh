@@ -8,8 +8,10 @@
 # base64 parent SSH alias, and one base64 project record per line. Each project
 # record's origin is the URL the parent resolved and named, so this host clones
 # from it and re-validates it through bin/fm-project-origin-lib.sh instead of
-# trusting the sender. The remote code root is cloned into an absent home,
-# project origins are cloned on this host, the project registry and charter are
+# trusting the sender. The remote code root is cloned into a private staging
+# directory beside the absent home and installed by rename once complete, so
+# cleanup of the public home cannot remove a live clone's destination. Project
+# origins are cloned on this host, the project registry and charter are
 # published, the durable .fm-secondmate-parent record names this home's route to its parent as
 # "remote" - read by bin/fm-teardown.sh's cleanup gate so a delegated public
 # reply promise, which the subsystem can only carry on the parent's own
@@ -51,6 +53,7 @@ EXISTING_HOME=0
 PUBLISHED=0
 PROVISION_LOCK=
 PROVISION_LOCK_HELD=0
+STAGE_HOME=
 CREATED_PROJECTS="$TMP/created-projects"
 : > "$CREATED_PROJECTS"
 release_provision_lock() {
@@ -72,6 +75,7 @@ restore_owned_file() { # <relative-path>
 rollback() {
   local status=$? project
   if [ "$status" -ne 0 ] && [ "$PUBLISHED" -eq 0 ]; then
+    [ -z "$STAGE_HOME" ] || rm -rf -- "$STAGE_HOME"
     if [ "$CREATED_HOME" -eq 1 ]; then
       rm -rf -- "$FM_HOME"
     elif [ "$EXISTING_HOME" -eq 1 ]; then
@@ -173,8 +177,28 @@ if [ -e "$FM_HOME" ] || [ -L "$FM_HOME" ]; then
     die "unmarked existing remote home contains operational data"
   fi
 else
+  # Clone into a staging path this attempt owns, then publish by rename: a
+  # competing cleanup or rollback aimed at the absent public home cannot
+  # remove a directory a live clone is still writing. Verify the sentinel
+  # after mv: if the destination appeared meanwhile, mv may nest our stage
+  # inside it instead of publishing, so rollback must remove only that stage.
+  STAGE_HOME=$(mktemp -d "$HOME_PARENT/.fm-home-provisioning.XXXXXX") \
+    || die "cannot create remote home staging directory"
+  # A local clone copies loose objects into the new repo. Git 2.55 on the CI
+  # image does that copy before the destination shard directory exists, so the
+  # clone dies intermittently with "failed to copy file to .../objects/xx/hash".
+  # --no-local uses the normal transport and writes a pack instead.
+  git clone --no-local --quiet -- "$FM_ROOT" "$STAGE_HOME" || die "could not clone the remote Firstmate home"
+  STAGE_SENTINEL="${STAGE_HOME##*/}.owner"
+  : > "$STAGE_HOME/$STAGE_SENTINEL" || die "cannot mark the remote home staging directory"
+  mv -- "$STAGE_HOME" "$FM_HOME" || die "cannot install the remote home"
+  if [ ! -f "$FM_HOME/$STAGE_SENTINEL" ] || [ -L "$FM_HOME/$STAGE_SENTINEL" ]; then
+    STAGE_HOME="$FM_HOME/${STAGE_HOME##*/}"
+    die "remote home appeared while it was being provisioned"
+  fi
+  STAGE_HOME=
   CREATED_HOME=1
-  git clone --quiet -- "$FM_ROOT" "$FM_HOME" || die "could not clone the remote Firstmate home"
+  rm -f -- "$FM_HOME/$STAGE_SENTINEL" || die "cannot clear the remote home staging sentinel"
 fi
 for operational_dir in data state config projects; do
   operational_path="$FM_HOME/$operational_dir"
@@ -229,7 +253,7 @@ EOF
     [ "$EXISTING_ORIGIN" = "$ORIGIN" ] || die "project $NAME origin differs from the requested route"
   else
     printf '%s\n' "$NAME" >> "$CREATED_PROJECTS"
-    git clone --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
+    git clone --no-local --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
     if [ "$MODE" = no-mistakes ]; then
       command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is unavailable for project $NAME"
       (cd "$DEST" && no-mistakes init >/dev/null && no-mistakes doctor >/dev/null) \

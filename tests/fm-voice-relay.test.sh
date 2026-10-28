@@ -3520,6 +3520,50 @@ assert_not_contains "$verbs" '"working"' \
   "an earlier line in the same log must not be reported as the state"
 pass "the state verb is a closed vocabulary, so free text cannot ride out on it"
 
+# A worker's status log can carry a declared state and then a line of plain
+# prose appended after it - a note to itself, or context for a human reader.
+# The reader must speak the newest EVENT, not degrade to a note because the
+# tail's last line happens to be prose (issue #4756).
+printf 'paused: holding for the upstream tool release\n' \
+  > "$VERB_HOME/state/four.status"
+printf 'The release window opens tomorrow.\n' >> "$VERB_HOME/state/four.status"
+fm_write_meta "$VERB_HOME/state/four.meta" kind=ship
+cat >> "$VERB_HOME/data/backlog.md" <<'EOF'
+- [ ] four - Fourth thing (repo: d) (kind: ship)
+EOF
+
+after_prose=$(verb_status --scope counts) || fail "counts scope after trailing prose failed"
+assert_contains "$after_prose" '"paused": 1' \
+  "the newest declared status event must survive a trailing prose line"
+assert_contains "$after_prose" '"note": 1' \
+  "trailing prose must not itself be counted as an extra note"
+
+after_prose_full=$(verb_status --scope full) || fail "full scope after trailing prose failed"
+assert_contains "$after_prose_full" '"id": "four"' \
+  "the fourth task should be nameable at full scope"
+assert_contains "$after_prose_full" '"state": "paused"' \
+  "full scope must report the newest event's state, not the last line's"
+pass "the reader scans back through the tail for the newest status event"
+
+# Control: an UNRECOGNISED verb-shaped prefix must not let trailing prose
+# resurrect it either. A prose line after a bad declaration is still skipped,
+# and the bad declaration itself is still a note rather than a state.
+printf '%s: waiting on their next release\n' "$CUSTOMER_TOKEN" \
+  > "$VERB_HOME/state/five.status"
+printf 'A private aside for a human reader, not the state machine.\n' \
+  >> "$VERB_HOME/state/five.status"
+fm_write_meta "$VERB_HOME/state/five.meta" kind=ship
+cat >> "$VERB_HOME/data/backlog.md" <<'EOF'
+- [ ] five - Fifth thing (repo: e) (kind: ship)
+EOF
+
+control=$(verb_status --scope full) || fail "full scope with an unrecognised trailing verb failed"
+assert_contains "$control" '"id": "five"' \
+  "the fifth task should be nameable at full scope"
+assert_contains "$control" '"state": "note"' \
+  "an unrecognised verb-shaped prefix must still report note, never hide behind trailing prose"
+pass "an unrecognised declaration cannot hide behind trailing prose either"
+
 # The two halves of one answer must come from one home. Every script that sets
 # FM_DATA_OVERRIDE sets FM_STATE_OVERRIDE beside it, so a reader that resolved one
 # and not the other would count workers and notes from one home while counting

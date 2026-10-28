@@ -30,19 +30,28 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
-  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
+  cp "$ROOT/bin/fm-afk-contract.sh" "$dir/bin/fm-afk-contract.sh"
+  cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/fm-classify-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/fm-timeout-lib.sh"
+  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$dir/bin/fm-supervision-engine-lib.sh"
+  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh" "$dir/bin/fm-afk-contract.sh"
 }
 
+# A Claude home runs the supervision host unless config/supervision-host-off
+# opts it out, so the fixture home opts out: most cases exercise the plain arm,
+# and the supervision-host cases below remove the opt-out.
 make_primary_dir() {
   local dir=$1
-  mkdir -p "$dir/state"
+  mkdir -p "$dir/state" "$dir/config"
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
+  : > "$dir/config/supervision-host-off"
   install_autoarm_scripts "$dir"
   printf '%s\n' "$dir"
 }
@@ -66,11 +75,13 @@ make_crewmate_worktree_dir() {
 }
 
 # Run the hook as a child of the fake harness holding the fixture home's
-# session lock. $1 = fixture dir. Any extra env assignments must be exported
-# before invocation. Captures stdout+stderr; exit code on stdout of the caller.
+# session lock. $1 = fixture dir. $2 = optional Stop payload, defaulting to a
+# bare Claude-shaped payload with no transcript_path. Any extra env
+# assignments must be exported before invocation. Captures stdout+stderr;
+# exit code on stdout of the caller.
 run_autoarm() {
-  local dir=$1 rc=0
-  printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+  local dir=$1 payload=${2:-'{"session_id":"sess-autoarm","stop_hook_active":false}'} rc=0
+  printf '%s\n' "$payload" \
     | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
@@ -82,11 +93,28 @@ run_autoarm() {
 # Arm fixture variants, installed per test as <dir>/bin/fm-watch-arm.sh.
 write_arm_fixture() {
   local dir=$1 kind=$2
+  # Every fixture records the hook's foreground arms in state/arm-ran. A handling
+  # successor (FM_WATCH_PREDECESSOR_ARM_PID set) is recorded apart in
+  # state/successor-ran so attempt counts stay about the foreground; it confirms
+  # a started watcher and exits, parks while state/successor-park exists, or
+  # fails while state/successor-fail exists.
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'arm=%s predecessor=%s\n' "$$" "$FM_WATCH_PREDECESSOR_ARM_PID" >> "$FM_HOME/state/successor-ran"
+  if [ -e "$FM_HOME/state/successor-fail" ]; then
+    printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
+    exit 1
+  fi
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  while [ -e "$FM_HOME/state/successor-park" ]; do sleep 0.05; done
+  exit 0
+fi
+echo "$$" >> "$FM_HOME/state/arm-ran"
+SH
   case "$kind" in
     actionable)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
@@ -95,33 +123,34 @@ exit 0
 SH
       ;;
     failed)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
 exit 1
 SH
       ;;
     clean)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
 exit 0
 SH
       ;;
     benign-live)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'watcher: FAILED - cycle ended without an actionable reason\n'
 exit 1
 SH
       ;;
+    actionable-many)
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+for i in 1 2 3 4 5 6 7 8 9 10; do printf 'stale: fixture-%s actionable\n' "$i"; done
+exit 0
+SH
+      ;;
     reset-boundary)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 : > "$FM_HOME/state/arm-waiting"
 while [ ! -e "$FM_HOME/state/arm-release" ]; do sleep 0.02; done
 printf 'watcher: FAILED - cycle ended without an actionable reason\n'
@@ -129,9 +158,7 @@ exit 1
 SH
       ;;
     slow-actionable)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 sleep 2
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
@@ -141,9 +168,7 @@ exit 0
 SH
       ;;
     blocking-actionable)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 sleep 6
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
@@ -153,9 +178,7 @@ exit 0
 SH
       ;;
     supersede-then-fail)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'epoch=999 owner_pid=1 outcome=arming updated_at=%s\nfixture-superseder-identity\n' "$(date +%s)" \
   > "$FM_HOME/state/.claude-autoarm-epoch"
 printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
@@ -163,9 +186,7 @@ exit 1
 SH
       ;;
     meta-vanishes)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 rm -f "$FM_HOME/state/task.meta"
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
@@ -175,9 +196,7 @@ exit 0
 SH
       ;;
     afk-appears)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 : > "$FM_HOME/state/.afk"
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
@@ -187,11 +206,31 @@ exit 0
 SH
       ;;
     records-grace)
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+printf '%s\n' "${FM_GUARD_GRACE:-unset}" > "$FM_HOME/state/arm-received-grace"
+printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+exit 0
+SH
+      ;;
+    attached-delivered)
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'signal: task.status done: fixture peer cycle ended\n'
+exit 0
+SH
+      ;;
+    gated-actionable)
+      # Cycle whose watcher closes only when the test releases it, so a second
+      # session can fire its Stop while the cycle is still under way.
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
-printf '%s\n' "${FM_GUARD_GRACE:-unset}" > "$FM_HOME/state/arm-received-grace"
-printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+while [ ! -e "$FM_HOME/state/arm-release" ]; do sleep 0.02; done
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'signal: %s/state/tfmut-116.turn-ended\n' "$FM_HOME"
 exit 0
 SH
       ;;
@@ -414,6 +453,41 @@ test_actionable_close_rewakes_with_reason() {
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
 }
 
+# pi-code (Pi's Claude-hook compatibility extension) delivers a Claude-shaped
+# Stop payload but awaits the hook with no asyncRewake support, so the hook
+# must stand down or it wedges Pi's turn for the declared timeout (issue
+# #3343). The discriminator is the payload's transcript_path: pi-code stamps
+# Pi's own session file under .pi/, which a Claude transcript path never
+# contains, so the stand-down must not overmatch a genuine Claude payload or a
+# payload with no transcript_path at all.
+test_stands_down_only_on_pi_code_transcript_path() {
+  local dir out status
+
+  dir=$(make_primary_dir "$TMP_ROOT/picode-pi")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" '{"session_id":"sess-pi","stop_hook_active":false,"transcript_path":"/home/u/.pi/agent/sessions/s.jsonl"}' 2>/dev/null); status=$?
+  expect_code 0 "$status" "hook must stand down silently on a pi-code-delivered transcript_path"
+  [ -z "$out" ] || fail "pi-code stand-down printed output: $out"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed on a pi-code-delivered payload"
+
+  dir=$(make_primary_dir "$TMP_ROOT/picode-claude")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" '{"session_id":"sess-claude","stop_hook_active":false,"transcript_path":"/home/u/.claude/projects/-home-u--pi-proj/s.jsonl"}' 2>/dev/null); status=$?
+  expect_code 2 "$status" "a Claude-shaped transcript_path must still arm and rewake"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm with a Claude-shaped transcript_path present"
+
+  dir=$(make_primary_dir "$TMP_ROOT/picode-none")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a payload without transcript_path must still arm"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm without a transcript_path"
+
+  pass "auto-arm: stands down only on a pi-code-delivered transcript_path (/.pi/)"
+}
+
 test_actionable_close_with_live_successor_rewakes_once() {
   local dir out out2 status status2 pid identity
   dir=$(make_primary_dir "$TMP_ROOT/actionable-live-successor")
@@ -442,6 +516,58 @@ test_actionable_close_with_live_successor_rewakes_once() {
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   pass "auto-arm: actionable close survives a healthy successor without duplicate delivery"
+}
+
+# An arm that attached to a peer cycle returns when that cycle ends with the wake
+# the peer delivered. Pi, omp, and OpenCode start the next arm before notifying
+# the model; the hook must do the same, naming the closed arm as the successor's
+# predecessor, and the successor must outlive the hook's exit-2 rewake.
+test_attached_cycle_end_starts_handling_successor() {
+  local dir out status foreground predecessor successor i
+  dir=$(make_primary_dir "$TMP_ROOT/attached-successor")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" attached-delivered
+  : > "$dir/state/successor-park"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an attached cycle's delivered wake must still rewake"
+  assert_contains "$out" "signal: task.status done: fixture peer cycle ended" "rewake must carry the delivered reason"
+  [ -s "$dir/state/successor-ran" ] \
+    || fail "the hook returned from the ended attached cycle without starting a handling successor"
+  [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq 1 ] \
+    || fail "exactly one handling successor must start per actionable close: $(cat "$dir/state/successor-ran")"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 1 ] || fail "the foreground arm must run once"
+  foreground=$(cat "$dir/state/arm-ran")
+  predecessor=$(sed -n 's/^arm=[0-9]* predecessor=\([0-9]*\)$/\1/p' "$dir/state/successor-ran")
+  [ "$predecessor" = "$foreground" ] \
+    || fail "the successor must name the closed foreground arm $foreground as its predecessor, got: $(cat "$dir/state/successor-ran")"
+  successor=$(sed -n 's/^arm=\([0-9]*\) .*$/\1/p' "$dir/state/successor-ran")
+  kill -0 "$successor" 2>/dev/null || fail "the handling successor did not outlive the hook's rewake"
+  rm -f "$dir/state/successor-park"
+  i=0
+  while kill -0 "$successor" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(printf '%s\n' "$out" | grep -c '^firstmate watcher wake')" -eq 1 ] \
+    || fail "the successor start must not change the single wake banner: $out"
+  assert_not_contains "$out" "did not confirm" "a confirmed successor adds nothing to the rewake"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: an attached cycle's end starts a handling successor named after the closed arm before the rewake"
+}
+
+test_unconfirmed_handling_successor_still_rewakes() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/successor-unconfirmed")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" attached-delivered
+  : > "$dir/state/successor-fail"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a failed handling successor must never withhold the delivered wake"
+  assert_contains "$out" "signal: task.status done: fixture peer cycle ended" "rewake must still carry the delivered reason"
+  assert_contains "$out" "did not confirm a live watcher" "the rewake must say this turn runs uncovered"
+  assert_contains "$out" "watcher: FAILED - no live watcher with a fresh beacon" "the rewake must carry the successor's own failure line"
+  [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq 1 ] || fail "the failed successor must not be retried inside the rewake path"
+  pass "auto-arm: an unconfirmed handling successor is reported in the rewake instead of blocking it"
 }
 
 test_failed_close_rewakes_with_failure_banner() {
@@ -611,9 +737,19 @@ test_owner_mutex_contention_preserves_failure_episode_reset() {
   out="$dir/state/hook.out"
   run_autoarm_bg "$dir" "$out"
   hook_pid=$RUN_AUTOARM_BG_PID
+  # Reaching the boundary is hook startup, which slows with host contention:
+  # stop on the arm handshake or the hook's own exit, and keep the generous
+  # finite bound for a hook that stalls before the boundary.
   i=0
   while [ ! -e "$dir/state/arm-waiting" ]; do
-    [ "$i" -lt 50 ] || fail "healthy owner never reached the reset boundary"
+    case "$(ps -p "$hook_pid" -o stat= 2>/dev/null || true)" in
+      ''|Z*)
+        [ ! -e "$dir/state/arm-waiting" ] || break
+        wait "$hook_pid"; status=$?
+        fail "healthy owner exited with status $status before the reset boundary: $(cat "$out")"
+        ;;
+    esac
+    [ "$i" -lt 600 ] || fail "healthy owner never reached the reset boundary"
     sleep 0.05
     i=$((i + 1))
   done
@@ -792,6 +928,55 @@ test_abandoned_owner_claim_is_reclaimed_and_rearms() {
   assert_absent "$dir/state/.claude-autoarm.lock" "reclaimed cycle left an owner lock behind"
   assert_absent "$dir/state/.claude-autoarm.lock.steal" "reclaim left its serialization mutex behind"
   pass "auto-arm: an abandoned owner claim is reclaimed so a lapsed cycle re-arms"
+}
+
+# An interrupted reclaim leaves the abandoned-claim mutex linked to a dead
+# owner. The next reclaim must reap it directly, never by nesting another
+# .steal.steal mutex around it.
+test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting() {
+  local dir out status pid holder lnbin lnlog i
+  dir=$(make_primary_dir "$TMP_ROOT/abandoned-claim-dead-steal")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  record_autoarm_epoch "$dir" 464 "$pid" rewake
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_lock_try_create "$2" || exit 7
+    exec sleep 30
+  ' _ "$dir/bin/fm-wake-lib.sh" "$dir/state/.claude-autoarm.lock.steal" >/dev/null 2>&1 &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$dir/state/.claude-autoarm.lock.steal/pid" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  assert_present "$dir/state/.claude-autoarm.lock.steal" "fixture did not leave a dead-owner steal mutex"
+  lnbin="$dir/lnbin"
+  lnlog="$dir/ln.log"
+  mkdir -p "$lnbin"
+  cat > "$lnbin/ln" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg do last=$arg; done
+printf '%s\n' "$last" >> "$FM_TEST_LN_LOG"
+exec /bin/ln "$@"
+SH
+  chmod +x "$lnbin/ln"
+  : > "$lnlog"
+  out=$(PATH="$lnbin:$PATH" FM_TEST_LN_LOG="$lnlog" run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a dead-owner steal mutex must not keep an abandoned claim unrecoverable"
+  [ -e "$dir/state/arm-ran" ] || fail "dead-owner steal mutex left the home unarmed with work in flight"
+  ! grep -q '\.steal\.steal$' "$lnlog" \
+    || fail "reclaiming past a dead steal owner created a nested steal marker: $(tr '\n' ' ' < "$lnlog")"
+  assert_absent "$dir/state/.claude-autoarm.lock.steal" "reclaim left the dead steal mutex behind"
+  pass "auto-arm: an abandoned-claim reclaim reaps a dead steal mutex without nesting"
 }
 
 test_arming_claim_with_fresh_beacon_is_never_reclaimed() {
@@ -1042,21 +1227,31 @@ record_autoarm_v2_claim() {
 
 # A live open generation claim needs no lock to keep the gate closed: the
 # ledger alone defers a concurrent firing, however old the entry, while the
-# watcher keeps beating the beacon.
+# watcher keeps beating the beacon. The owner is a child of the lock-holding
+# session, as a real concurrent hook is; an owner outside that session is the
+# orphan case tested below.
 test_open_generation_claim_defers_without_any_lock() {
-  local dir out status pid
+  local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/v2-open-claim")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
-  pid=$!
-  record_autoarm_v2_claim "$dir" 464 "$pid" arming "$pid" || fail "could not record a v2 claim"
-  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
   : > "$dir/state/.last-watcher-beat"
   assert_absent "$dir/state/.claude-autoarm.lock" "this case must start with no owner lock at all"
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  out=$(printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+    | FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        sleep 60 &
+        owner=$!
+        identity=$(. "$FM_HOME/bin/fm-wake-lib.sh"; fm_pid_identity "$owner") || exit 97
+        printf "epoch=464 owner_pid=%s outcome=arming updated_at=1\n%s\n" "$owner" "$identity" \
+          > "$FM_HOME/state/.claude-autoarm-epoch"
+        touch -t 202001010000 "$FM_HOME/state/.claude-autoarm-epoch"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh" 2>&1
+        rc=$?
+        kill "$owner" 2>/dev/null
+        exit "$rc"
+      '); status=$?
+  [ "$status" -ne 97 ] || fail "could not record a v2 claim for the session-owned sleeper"
   expect_code 0 "$status" "a live open generation claim must keep the single-flight gate closed with no lock held"
   [ -z "$out" ] || fail "deferring to an open generation claim produced output: $out"
   assert_absent "$dir/state/arm-ran" "an open generation claim was superseded and double-armed"
@@ -1088,6 +1283,251 @@ test_stuck_generation_claim_is_superseded_and_rearms() {
   [ "$(epoch_field "$dir" owner_pid)" != "$pid" ] || fail "superseding claim left the stuck owner on the ledger"
   assert_absent "$dir/state/.claude-autoarm.lock" "the generation claim left a lock held after finishing"
   pass "auto-arm: a hung generation owner with no watcher beat is superseded so re-arming self-heals"
+}
+
+# A session restart mid-cycle: the dying session's Stop hook armed
+# a cycle and then the session exited, leaving the hook alive but orphaned - no
+# parent to deliver its exit 2 to. The replacement session's first Stop must NOT
+# defer to that claim: a claim is open only while its owner still descends from
+# the pid in state/.lock, so the replacement takes the next generation, attaches
+# to the same cycle, and is the hook that delivers the actionable close. The
+# orphan is superseded and goes silent. Without this the home stays deaf until a
+# captain turn, and the orphan's banner write into its dead parent's pipe leaves
+# a stranded state/.claude-autoarm-output.* holding the reason line.
+test_orphaned_claim_from_dead_session_is_superseded_by_replacement() {
+  local dir out status orphan_pid orphan_out lock_pid dead_lock_pid i
+  dir=$(make_primary_dir "$TMP_ROOT/orphaned-claim")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" gated-actionable
+  orphan_out="$dir/state/orphan-out"
+  # Dying session: hold the lock, fire the hook as a background child, exit
+  # once the hook has claimed and armed, so the hook outlives its session.
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s\n" "{\"session_id\":\"sess-dying\",\"stop_hook_active\":false}" \
+        | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/orphan-out" 2>&1 &
+      printf "%s\n" "$!" > "$FM_HOME/state/orphan-hook-pid"
+      for _ in $(seq 1 250); do [ -e "$FM_HOME/state/arm-ran" ] && break; sleep 0.02; done
+    '
+  orphan_pid=$(cat "$dir/state/orphan-hook-pid")
+  kill -0 "$orphan_pid" 2>/dev/null || fail "the orphaned hook did not survive its session's exit"
+  [ "$(epoch_field "$dir" owner_pid)" = "$orphan_pid" ] || fail "the dying session's hook did not claim the ledger: $(cat "$dir/state/.claude-autoarm-epoch")"
+  [ "$(epoch_outcome "$dir")" = arming ] || fail "the orphaned claim is not arming: $(epoch_outcome "$dir")"
+
+  # Replacement session: it does NOT write the lock itself. The dead session's
+  # pid is still on line 1, so the hook reclaims it through the real fm-lock.sh
+  # recovery path, exactly as production does, and line 1 becomes the
+  # replacement's own anchor pid. The first Stop fires while the orphan's cycle
+  # is still under way. Wait for it to either defer (the regression) or take the
+  # next generation and arm.
+  dead_lock_pid=$(sed -n 1p "$dir/state/.lock")
+  printf '%s\n' '{"session_id":"sess-replacement","stop_hook_active":false}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' > "$dir/state/replacement-out" 2>&1 &
+  RUN_AUTOARM_BG_PID=$!
+  for i in $(seq 1 250); do
+    kill -0 "$RUN_AUTOARM_BG_PID" 2>/dev/null || break
+    [ "$(wc -l < "$dir/state/arm-ran")" -ge 2 ] && break
+    sleep 0.02
+  done
+  lock_pid=$(sed -n 1p "$dir/state/.lock")
+  : > "$dir/state/arm-release"
+  wait "$RUN_AUTOARM_BG_PID"; status=$?
+  out=$(cat "$dir/state/replacement-out")
+  for i in $(seq 1 250); do kill -0 "$orphan_pid" 2>/dev/null || break; sleep 0.02; done
+  kill -0 "$orphan_pid" 2>/dev/null && { kill "$orphan_pid" 2>/dev/null; fail "the orphaned hook never finished after its cycle closed"; }
+
+  expect_code 2 "$status" "the replacement session's first Stop must supersede the dead session's orphaned claim and rewake, not defer to it"
+  assert_contains "$out" "firstmate watcher wake" "the replacement's rewake must carry the wake banner"
+  assert_contains "$out" "signal: $dir/state/tfmut-116.turn-ended" "the replacement's rewake must carry the cycle's reason line"
+  # Three arms: the orphan's foreground arm, the replacement's foreground arm,
+  # and the handling successor the hook starts after its actionable close
+  # (bin/fm-claude-stop-autoarm.sh owns that contract); the superseded orphan
+  # starts none.
+  [ "$(wc -l < "$dir/state/arm-ran")" -eq 3 ] || fail "expected the orphan's arm, the replacement's arm, and the replacement's handling successor: $(cat "$dir/state/arm-ran")"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the ledger must record the replacement's rewake, got: $(cat "$dir/state/.claude-autoarm-epoch")"
+  [ "$(epoch_field "$dir" owner_pid)" != "$orphan_pid" ] || fail "the orphaned hook still owns the ledger"
+  [ "$(epoch_field "$dir" session_pid)" = "$lock_pid" ] || fail "the rewake must bind the replacement session's lock pid"
+  [ "$lock_pid" != "$dead_lock_pid" ] || fail "fm-lock.sh recovery left the dead session's pid on lock line 1: $lock_pid"
+  ! grep -q 'firstmate watcher wake' "$orphan_out" || fail "the superseded orphan still delivered a banner: $(cat "$orphan_out")"
+  [ -z "$(find "$dir/state" -maxdepth 1 -name '.claude-autoarm-output.*')" ] \
+    || fail "a stranded arm output survived the cycle: $(find "$dir/state" -maxdepth 1 -name '.claude-autoarm-output.*')"
+  pass "auto-arm: a dead session's orphaned open claim is superseded so the replacement session delivers the wake"
+}
+
+# The same session restart, RESUMED (`claude --resume <id>`): the replacement
+# carries the dead session's conversation id, so bin/fm-lock.sh leaves the
+# state/.lock-session sidecar naming that id untouched and the orphan's recorded
+# owner_session_id still matches it. It must still be superseded, because the
+# resumed session holds the lock in a new process and the orphan's recorded
+# lock-holder identity is the dead holder's. Deferring here would leave the resumed
+# home deaf for exactly the case this change exists to fix.
+test_resumed_same_id_session_supersedes_the_orphan() {
+  local dir out status orphan_pid orphan_out lock_pid dead_lock_pid i
+  dir=$(make_primary_dir "$TMP_ROOT/resumed-same-id-orphan")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" gated-actionable
+  orphan_out="$dir/state/orphan-out"
+  printf 'sess-resumed\n' > "$dir/state/.lock-session"
+  export CLAUDE_CODE_SESSION_ID=sess-resumed
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+      export CLAUDE_PID=$$
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s\n" "{\"session_id\":\"sess-resumed\",\"stop_hook_active\":false}" \
+        | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/orphan-out" 2>&1 &
+      printf "%s\n" "$!" > "$FM_HOME/state/orphan-hook-pid"
+      for _ in $(seq 1 250); do [ -e "$FM_HOME/state/arm-ran" ] && break; sleep 0.02; done
+    '
+  orphan_pid=$(cat "$dir/state/orphan-hook-pid")
+  kill -0 "$orphan_pid" 2>/dev/null || fail "the orphaned hook did not survive its session's exit"
+  [ "$(epoch_field "$dir" owner_session_id)" = sess-resumed ] \
+    || fail "the dying session's claim did not record its session id: $(cat "$dir/state/.claude-autoarm-epoch")"
+  [ -n "$(sed -n 3p "$dir/state/.claude-autoarm-epoch")" ] \
+    || fail "the dying session's claim did not record its lock holder identity: $(cat "$dir/state/.claude-autoarm-epoch")"
+
+  # Resumed session: same conversation id, new process. It does NOT write the
+  # lock itself - the dead session's pid is still on line 1, so the hook reclaims
+  # it through the real fm-lock.sh recovery path and line 1 becomes this
+  # process's own anchor pid, while the same-id sidecar is left untouched.
+  dead_lock_pid=$(sed -n 1p "$dir/state/.lock")
+  printf '%s\n' '{"session_id":"sess-resumed","stop_hook_active":false}' \
+    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        export CLAUDE_PID=$$
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' > "$dir/state/replacement-out" 2>&1 &
+  RUN_AUTOARM_BG_PID=$!
+  for i in $(seq 1 250); do
+    kill -0 "$RUN_AUTOARM_BG_PID" 2>/dev/null || break
+    [ "$(wc -l < "$dir/state/arm-ran")" -ge 2 ] && break
+    sleep 0.02
+  done
+  lock_pid=$(sed -n 1p "$dir/state/.lock")
+  : > "$dir/state/arm-release"
+  wait "$RUN_AUTOARM_BG_PID"; status=$?
+  out=$(cat "$dir/state/replacement-out")
+  for i in $(seq 1 250); do kill -0 "$orphan_pid" 2>/dev/null || break; sleep 0.02; done
+  kill -0 "$orphan_pid" 2>/dev/null && { kill "$orphan_pid" 2>/dev/null; fail "the orphaned hook never finished after its cycle closed"; }
+  unset CLAUDE_CODE_SESSION_ID
+
+  expect_code 2 "$status" "a resumed session sharing the dead session's id must supersede its orphaned claim and rewake, not defer to it"
+  assert_contains "$out" "firstmate watcher wake" "the resumed session's rewake must carry the wake banner"
+  [ "$(sed -n 1p "$dir/state/.lock-session")" = sess-resumed ] \
+    || fail "the resumed session's lock recovery rewrote the sidecar, so the test no longer reproduces the same-id path"
+  [ "$(epoch_field "$dir" owner_pid)" != "$orphan_pid" ] || fail "the orphaned hook still owns the ledger"
+  [ "$(epoch_field "$dir" session_pid)" = "$lock_pid" ] || fail "the rewake must bind the resumed session's lock pid"
+  [ "$lock_pid" != "$dead_lock_pid" ] || fail "fm-lock.sh recovery left the dead session's pid on lock line 1: $lock_pid"
+  ! grep -q 'firstmate watcher wake' "$orphan_out" || fail "the superseded orphan still delivered a banner: $(cat "$orphan_out")"
+  pass "auto-arm: a resumed session with the dead session's id still supersedes its orphaned claim"
+}
+
+# A background session whose bridge is recycled mid-cycle loses the contiguous
+# ancestry from its hook to the still-live pid on state/.lock, but keeps the
+# trusted session id recorded beside it (bin/fm-session-lock-lib.sh owns that
+# second ownership signal, and the claiming hook's own admission accepts it). Its
+# live claim must stay open on those signals alone, or a concurrent Stop
+# supersedes a healthy arming owner and the guard reads live recovery as absent.
+# The id signal is pinned to the lock holder's pid-identity recorded at claim
+# time: a claim whose recorded id does not match, one with no sidecar at all, one
+# whose recorded holder identity no longer recomputes from the lock's holder pid
+# (a resumed session keeps the conversation id and may even reuse the dead
+# holder's pid number, but never its identity), and a pre-change entry that
+# records neither field all stay closed on broken ancestry.
+test_recycled_bridge_claim_stays_open_on_session_id_match() {
+  local dir rc
+  dir=$(make_primary_dir "$TMP_ROOT/v2-recycled-bridge-claim")
+  : > "$dir/state/.last-watcher-beat"
+  # $2 is the ledger's owner_session_id field ("" writes a pre-change entry with
+  # neither field), $3 the sidecar's recorded id ("absent" writes no sidecar),
+  # and $4 whether entry line 3 carries the lock holder's own pid-identity
+  # ("current") or a different live process's ("reused": the lock pid number on
+  # line 1 of state/.lock is unchanged, the identity behind it is not). The lock pid is a live sibling of the claim
+  # owner, so the descent signal always fails.
+  probe() {
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+        . "$1/bin/fm-wake-lib.sh"
+        . "$1/bin/fm-session-lock-lib.sh"
+        sleep 60 &
+        owner=$!
+        sleep 60 &
+        other=$!
+        sleep 61 &
+        predecessor=$!
+        identity=$(fm_pid_identity "$owner") || exit 97
+        lock_identity=$(fm_pid_identity "$other") || exit 97
+        if [ "$4" != current ]; then
+          lock_identity=$(fm_pid_identity "$predecessor") || exit 97
+          [ "$lock_identity" != "$(fm_pid_identity "$other")" ] || exit 95
+        fi
+        if [ -n "$2" ]; then
+          printf "epoch=470 owner_pid=%s outcome=arming updated_at=1 owner_session_id=%s\n%s\n%s\n" \
+            "$owner" "$2" "$identity" "$lock_identity" > "$1/state/.claude-autoarm-epoch"
+        else
+          printf "epoch=470 owner_pid=%s outcome=arming updated_at=1\n%s\n" \
+            "$owner" "$identity" > "$1/state/.claude-autoarm-epoch"
+        fi
+        printf "%s\n" "$other" > "$1/state/.lock"
+        if [ "$3" = absent ]; then
+          rm -f "$1/state/.lock-session"
+        else
+          printf "%s\n" "$3" > "$1/state/.lock-session"
+        fi
+        fm_pid_descends_from "$owner" "$other" && exit 96
+        fm_autoarm_claim_open "$1/state"; rc=$?
+        kill "$owner" "$other" "$predecessor" 2>/dev/null
+        exit "$rc"
+      ' _ "$dir" "$1" "$2" "$3"
+  }
+  probe sess-bridge sess-bridge current; rc=$?
+  [ "$rc" -ne 97 ] || fail "could not record a claim for the probe owner"
+  [ "$rc" -ne 95 ] || fail "the probe could not build two distinguishable lock-holder identities"
+  [ "$rc" -ne 96 ] || fail "the probe lock pid was an ancestor of the claim owner, so ancestry was not broken"
+  expect_code 0 "$rc" "a live claim whose recorded session id matches and whose recorded lock-holder identity still recomputes must stay open across a recycled bridge"
+  probe sess-bridge sess-other current; rc=$?
+  expect_code 1 "$rc" "a claim whose recorded session id does not match the sidecar must not be open"
+  probe sess-bridge absent current; rc=$?
+  expect_code 1 "$rc" "a claim with no recorded sidecar id must not be open on broken ancestry"
+  probe sess-bridge sess-bridge reused; rc=$?
+  expect_code 1 "$rc" "a claim whose recorded lock-holder identity does not recompute from the lock's holder pid must not be open, even on a reused pid number"
+  probe "" sess-bridge current; rc=$?
+  expect_code 1 "$rc" "a pre-change entry recording neither field must fall back to ancestry alone"
+  pass "auto-arm: a recycled-bridge claim stays open on its recorded session id and lock-holder identity, and nothing else does"
+}
+
+# A claim with no numeric session-lock pid is never open: nothing can receive
+# its rewake (the hook itself goes silent on a missing or malformed lock), so
+# deferring to it would leave the home deaf. Same live, identity-matched,
+# fresh-beacon owner, three lock states, one predicate.
+test_claim_without_numeric_session_lock_is_not_open() {
+  local dir rc
+  dir=$(make_primary_dir "$TMP_ROOT/v2-lockless-claim")
+  : > "$dir/state/.last-watcher-beat"
+  probe() {
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+        . "$1/bin/fm-wake-lib.sh"
+        sleep 60 &
+        owner=$!
+        identity=$(fm_pid_identity "$owner") || exit 97
+        printf "epoch=464 owner_pid=%s outcome=arming updated_at=1\n%s\n" "$owner" "$identity" \
+          > "$1/state/.claude-autoarm-epoch"
+        case "$2" in
+          self) printf "%s\n" "$$" > "$1/state/.lock" ;;
+          absent) rm -f "$1/state/.lock" ;;
+          *) printf "%s\n" "$2" > "$1/state/.lock" ;;
+        esac
+        fm_autoarm_claim_open "$1/state"; rc=$?
+        kill "$owner" 2>/dev/null
+        exit "$rc"
+      ' _ "$dir" "$1"
+  }
+  probe self; rc=$?
+  [ "$rc" -ne 97 ] || fail "could not record a v2 claim for the probe's sleeper"
+  expect_code 0 "$rc" "a live claim owned by a child of the numeric lock pid must be open"
+  probe absent; rc=$?
+  expect_code 1 "$rc" "a claim with no state/.lock at all must not be open"
+  probe not-a-pid; rc=$?
+  expect_code 1 "$rc" "a claim under a malformed state/.lock must not be open"
+  pass "auto-arm: a claim is open only under a numeric session lock its owner descends from"
 }
 
 # Identity is mandatory at read time: a bare identityless one-line arming
@@ -1142,33 +1582,42 @@ test_superseded_owner_never_reinvokes_the_arm() {
 #      superseded and goes completely silent (exit 0, no banner, no ledger
 #      write), so one supersession episode produces exactly one translation.
 test_superseded_owner_goes_silent_and_never_double_translates() {
-  local dir a_out a_pid b_out b_status c_out c_status a_status i count
+  local dir a_out b_out b_status c_out c_status a_status count
   dir=$(make_primary_dir "$TMP_ROOT/v2-superseded-silence")
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" blocking-actionable
   a_out="$dir/state/a.out"
-  run_autoarm_bg "$dir" "$a_out"
-  a_pid=$RUN_AUTOARM_BG_PID
-  i=0
-  while [ "$(epoch_outcome "$dir")" != arming ] || [ ! -e "$dir/state/arm-ran" ]; do
-    [ "$i" -lt 50 ] || fail "owner A never published its arming claim"
-    sleep 0.1
-    i=$((i + 1))
-  done
-  b_out=$(run_autoarm "$dir" 2>/dev/null); b_status=$?
+  # All three firings belong to ONE session, as concurrent Stop hooks do: the
+  # fake harness holds the lock for the whole scenario and each hook runs as
+  # its child, with exit codes and output left in state/ for the assertions.
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    fire() { printf "%s\n" "{\"session_id\":\"s\",\"stop_hook_active\":false}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/$1.out" 2>&1; echo $? > "$FM_HOME/state/$1.rc"; }
+    fire a &
+    a_pid=$!
+    i=0
+    while ! grep -q "outcome=arming" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null || [ ! -e "$FM_HOME/state/arm-ran" ]; do
+      [ "$i" -lt 50 ] || { echo "owner A never published its arming claim" > "$FM_HOME/state/scenario-fail"; exit 1; }
+      sleep 0.1; i=$((i + 1))
+    done
+    fire b
+    cp "$FM_HOME/state/arm-ran" "$FM_HOME/state/arm-ran.after-b"
+    kill -0 "$a_pid" 2>/dev/null || { echo "owner A finished before the supersession could be exercised" > "$FM_HOME/state/scenario-fail"; exit 1; }
+    touch -t 202001010000 "$FM_HOME/state/.claude-autoarm-epoch"
+    touch -t 202001010000 "$FM_HOME/state/.last-watcher-beat"
+    fire c
+    wait "$a_pid"
+  '
+  [ ! -e "$dir/state/scenario-fail" ] || fail "$(cat "$dir/state/scenario-fail")"
+  b_status=$(cat "$dir/state/b.rc"); b_out=$(cat "$dir/state/b.out")
+  c_status=$(cat "$dir/state/c.rc"); c_out=$(cat "$dir/state/c.out")
+  a_status=$(cat "$dir/state/a.rc")
   expect_code 0 "$b_status" "a firing during a live open claim must defer promptly (no mutex is held across arming)"
   [ -z "$b_out" ] || fail "deferring firing produced output: $b_out"
-  count=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+  count=$(wc -l < "$dir/state/arm-ran.after-b" | tr -d ' ')
   [ "$count" -eq 1 ] || fail "deferring firing must not arm, saw $count arms"
-  # A is still alive mid-arm; make its claim stuck-shaped.
-  kill -0 "$a_pid" 2>/dev/null || fail "owner A finished before the supersession could be exercised"
-  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
-  touch -t 202001010000 "$dir/state/.last-watcher-beat"
-  c_out=$(run_autoarm "$dir" 2>/dev/null); c_status=$?
   expect_code 2 "$c_status" "the superseding generation must translate its own close"
   assert_contains "$c_out" "firstmate watcher wake" "the superseding generation must carry the rewake banner"
-  wait "$a_pid"
-  a_status=$?
   expect_code 0 "$a_status" "the superseded owner must exit 0 instead of double-translating"
   [ ! -s "$a_out" ] || fail "the superseded owner emitted output after losing its generation: $(cat "$a_out")"
   [ "$(epoch_field "$dir" epoch)" = 2 ] || fail "the superseded owner advanced the ledger past its successor: $(epoch_field "$dir" epoch)"
@@ -1226,6 +1675,320 @@ test_long_poll_grace_reaches_arm_wrapper() {
   pass "auto-arm: a long FM_POLL with FM_GUARD_GRACE unset reaches fm-watch-arm.sh with the derived grace"
 }
 
+# Supervision-host fixture variants, installed per test as
+# <dir>/bin/fm-supervision-host.sh. Each run appends its pid to state/host-ran
+# and records the environment the hook handed it.
+write_host_fixture() {
+  local dir=$1 kind=$2
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'echo "$$" >> "$FM_HOME/state/host-ran"\n'
+    printf 'printf "gen=%%s owner=%%s primary=%%s mode=%%s\\n" "${FM_SUPERVISION_HOST_AUTOARM_GEN:-}" "${FM_SUPERVISION_HOST_OWNER_PID:-}" "${FM_SUPERVISION_HOST_PRIMARY:-}" "${1:-}" > "$FM_HOME/state/host-env"\n'
+    case "$kind" in
+      boundary)
+        printf "printf 'pending:downtime:fixture-generation\\n' > \"\$FM_HOME/state/.watcher-down\"\n"
+        printf 'touch "$FM_HOME/state/.last-watcher-beat"\n'
+        printf "printf 'supervision-host: cycle boundary - fixture\\n'\n"
+        ;;
+      handed-back)
+        printf "printf 'pending:downtime:fixture-generation\\n' > \"\$FM_HOME/state/.watcher-down\"\n"
+        printf 'touch "$FM_HOME/state/.last-watcher-beat"\n'
+        printf "printf 'signal: fixture.status\\n'\n"
+        printf "printf 'supervision-host: the away session could not take this wake: fixture; this wake is yours\\n'\n"
+        ;;
+      stood-down)
+        printf "printf 'supervision-host stood down: this session no longer owns supervision\\n'\n"
+        ;;
+      lost-handback|lost-announced-handback)
+        local marker=pending
+        [ "$kind" = lost-handback ] || marker=announced
+        printf "printf '%s:handling:fixture-generation\\\\n' > \"\$FM_HOME/state/.watcher-down\"\\n" "$marker"
+        cat <<'SH'
+printf 'signal: fixture.status\n'
+printf 'supervision-host: branch-outcome: fixture\n'
+printf 'supervision-host: watcher downtime could not be restored for the main hand-back\n'
+exit 1
+SH
+        ;;
+      benign-refusal)
+        cat <<'SH'
+printf 'acked:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'signal: fixture.status\n'
+printf 'supervision-host: branch-outcome: fixture\n'
+SH
+        ;;
+      handed-back-many)
+        cat <<'SH'
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+for i in 1 2 3 4 5 6 7 8 9 10; do printf 'signal: fixture-%s.status\n' "$i"; done
+printf 'supervision-host: the away session could not take this wake: fixture; relay its outcomes\n'
+for i in 1 2 3 4 5 6 7 8 9 10; do printf 'supervision-host: outcome %s for demo [routine]: fixture %s\n' "$i" "$i"; done
+SH
+        ;;
+      crash)
+        printf 'kill -KILL "$$"\n'
+        ;;
+    esac
+    printf 'exit 0\n'
+  } > "$dir/bin/fm-supervision-host.sh"
+  chmod +x "$dir/bin/fm-supervision-host.sh"
+}
+
+test_host_off_flag_keeps_the_arm() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-flag-off")
+  : > "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" boundary
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a home opted out by config/supervision-host-off must still rewake from the arm"
+  assert_present "$dir/state/arm-ran" "a home opted out by config/supervision-host-off did not run the arm"
+  [ ! -e "$dir/state/host-ran" ] || fail "a home opted out by config/supervision-host-off ran the supervision host"
+  assert_contains "$out" "stale: fixture-win actionable" "the arm's reason must still reach the rewake"
+  assert_not_contains "$out" "supervision-host" "an opted-out home's rewake must carry no host line"
+  pass "auto-arm: config/supervision-host-off keeps the hook on the arm exactly as before"
+}
+
+test_host_absent_flag_runs_the_host() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-flag-absent")
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" boundary
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a host cycle boundary on a Claude home without the file must rewake main"
+  assert_present "$dir/state/host-ran" "a Claude home without config/supervision-host did not run the supervision host"
+  [ ! -e "$dir/state/arm-ran" ] || fail "a Claude home without config/supervision-host ran the plain arm instead of the host"
+  assert_contains "$out" "supervision-host: cycle boundary - fixture" "the rewake must carry the host's line"
+  [ "$(sed -n 's/^.* primary=\([a-z]*\) .*$/\1/p' "$dir/state/host-env")" = claude ] \
+    || fail "the host was not told its primary harness: $(cat "$dir/state/host-env")"
+  pass "auto-arm: a Claude home without config/supervision-host runs the host by default"
+}
+
+test_host_boundary_rewakes_with_the_host_line() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-boundary")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" boundary
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a host cycle boundary must rewake main"
+  assert_contains "$out" "firstmate watcher wake" "the host close must carry the wake banner"
+  assert_contains "$out" "supervision-host: cycle boundary - fixture" "the rewake must carry the host's line"
+  [ ! -e "$dir/state/arm-ran" ] || fail "an opted-in home ran the plain arm instead of the host"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "a host boundary must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ "$(sed -n 's/^.* mode=//p' "$dir/state/host-env")" = park ] || fail "the host was not run in park mode: $(cat "$dir/state/host-env")"
+  [ "$(sed -n 's/^.* primary=\([a-z]*\) .*$/\1/p' "$dir/state/host-env")" = claude ] \
+    || fail "the host was not told its primary harness: $(cat "$dir/state/host-env")"
+  [ "$(sed -n 's/^gen=\([0-9]*\) .*$/\1/p' "$dir/state/host-env")" = "$(epoch_field "$dir" epoch)" ] \
+    || fail "the host was not bound to the hook's generation: $(cat "$dir/state/host-env") vs $(head -n 1 "$dir/state/.claude-autoarm-epoch")"
+  [ "$(sed -n 's/^.* owner=\([0-9]*\) .*$/\1/p' "$dir/state/host-env")" = "$(epoch_field "$dir" owner_pid)" ] \
+    || fail "the host was not bound to the hook's owner pid: $(cat "$dir/state/host-env")"
+  pass "auto-arm: an opted-in home runs the host bound to its generation, and a host line rewakes like a wake"
+}
+
+test_host_handback_under_away_record_is_not_a_return() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-handback")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.afk-contract"
+  write_host_fixture "$dir" handed-back
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a wake the host hands back must rewake main"
+  assert_contains "$out" "signal: fixture.status" "the handed-back wake must carry its reason line"
+  assert_contains "$out" "supervision-host: the away session could not take this wake" "the handed-back wake must say why"
+  assert_contains "$out" "not from the captain: it is not a return" "an away-posture handback must say it is not the captain's return"
+  pass "auto-arm: a wake the host hands back under the away record says it is automatic supervision, not a return"
+}
+
+# Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+# QUIET), so a wake the host hands back beside it carries no away note.
+test_host_handback_beside_a_quiet_record_carries_no_away_note() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-handback-quiet")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  FM_HOME="$dir" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
+    || fail "fixture: could not record quiet mode"
+  write_host_fixture "$dir" handed-back
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a wake the host hands back must rewake main"
+  assert_contains "$out" "signal: fixture.status" "the handed-back wake must carry its reason line"
+  assert_not_contains "$out" "not a return" "a present captain's rewake must not call itself away-posture supervision"
+  pass "auto-arm: a wake the host hands back beside a quiet record carries no away note"
+}
+
+test_plain_arm_banner_keeps_its_wake_line_cap() {
+  local dir out expected
+  dir=$(make_primary_dir "$TMP_ROOT/plain-banner")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable-many
+  out=$(run_autoarm "$dir" 2>/dev/null)
+  expected=$(
+    printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
+    for i in 1 2 3 4 5 6 7 8; do printf 'stale: fixture-%s actionable\n' "$i"; done
+    printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
+  )
+  [ "$out" = "$expected" ] || fail "the plain-arm rewake banner changed:"$'\n'"$out"
+  pass "auto-arm: without the host the rewake banner is unchanged, eight wake lines at most"
+}
+
+test_host_handback_carries_every_host_line() {
+  local dir out status expected
+  dir=$(make_primary_dir "$TMP_ROOT/host-many")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" handed-back-many
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a wake the host hands back must rewake main"
+  expected=$(
+    printf 'supervision-host: the away session could not take this wake: fixture; relay its outcomes\n'
+    for i in 1 2 3 4 5 6 7 8 9 10; do printf 'supervision-host: outcome %s for demo [routine]: fixture %s\n' "$i" "$i"; done
+  )
+  [ "$(printf '%s\n' "$out" | grep '^supervision-host:')" = "$expected" ] \
+    || fail "the rewake must carry every host line in the host's order:"$'\n'"$out"
+  [ "$(printf '%s\n' "$out" | grep -c '^signal: ')" -eq 8 ] || fail "the host's wake lines must keep the eight-line cap:"$'\n'"$out"
+  assert_contains "$out" "signal: fixture-8.status" "the first eight wake lines must reach the rewake"
+  pass "auto-arm: a host handback delivers every host line, while its wake lines keep their cap"
+}
+
+test_host_stand_down_is_silent() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-stand-down")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" stood-down
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a host that stood down must not rewake main"
+  [ -z "$out" ] || fail "a host stand-down printed to main: $out"
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 1 ] || fail "a host stand-down was retried"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "a host stand-down must record outcome=clean, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: a host that stood down closes silently without a retry"
+}
+
+# Main already drained and acknowledged the wake, so the rewake is refused on a
+# marker that is no longer downtime: that refusal stays silent and opens no
+# failure episode.
+test_host_benign_rewake_refusal_opens_no_failure_episode() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-benign-refusal")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" benign-refusal
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a refused rewake on an acknowledged marker must stay silent"
+  assert_not_contains "$out" "auto-arm FAILED" "a benign refusal must not deliver a failure notice"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "a benign refusal opened a failure episode"
+  [ "$(epoch_outcome "$dir")" != failed ] || fail "a benign refusal must not record outcome=failed"
+  pass "auto-arm: a host rewake refused on an acknowledged marker opens no failure episode"
+}
+
+# The host handed a wake back but left the marker in handling (pending or
+# announced) with no live successor, so no rewake can commit: the hook delivers
+# the failure notice once per episode and keeps exiting 2 without repeating it.
+assert_host_lost_handback_notifies_once_per_episode() {
+  local kind=$1 dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-$kind")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" "$kind"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a lost hand-back must reach main"
+  assert_contains "$out" "auto-arm FAILED - the supervision host returned an actionable wake" "a lost hand-back must deliver the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "a lost hand-back did not record its failure episode"
+  [ "$(epoch_outcome "$dir")" = failed ] || fail "a lost hand-back must record outcome=failed, got: $(epoch_outcome "$dir")"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a repeated lost hand-back must still reach main"
+  assert_not_contains "$out" "auto-arm FAILED" "a repeated lost hand-back must not repeat the failure notice"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] \
+    || fail "a repeated lost hand-back must record outcome=failed-suppressed, got: $(epoch_outcome "$dir")"
+}
+
+test_host_lost_handback_notifies_once_per_episode() {
+  assert_host_lost_handback_notifies_once_per_episode lost-handback
+  pass "auto-arm: a lost host hand-back notifies once per failure episode"
+}
+
+test_host_lost_announced_handback_notifies_once_per_episode() {
+  assert_host_lost_handback_notifies_once_per_episode lost-announced-handback
+  pass "auto-arm: a lost host hand-back on an announced marker notifies once per failure episode"
+}
+
+test_host_crash_is_retried_then_reported() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-crash")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" crash
+  # A live watcher with a fresh beacon would pass the plain arm's benign-close
+  # check; a host that died has no owner for such a cycle, so it must not.
+  printf 'pending:downtime:fixture-generation\n' > "$dir/state/.watcher-down"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an exhausted host crash must notify"
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 2 ] || fail "a crashed host was not retried within the attempt bound"
+  assert_contains "$out" "auto-arm FAILED" "an exhausted host crash must deliver the failure notice"
+  assert_contains "$out" "The supervision host (docs/supervision-host.md) ran these cycles; its last one exited 137 without a wake." \
+    "the failure notice must name the host and its exit"
+  pass "auto-arm: a host that died without a close is retried, then reported as a failure"
+}
+
+# A model running the hook by hand mid-turn (for example to read its help) is a
+# tool process under the lock-owning session with no Stop payload. Any argument
+# must print help or refuse before anything is armed, since the host or arm it
+# starts would be owned by that short-lived process.
+test_arguments_never_arm() {
+  local dir arg rc out before after before_contents after_contents status
+  dir=$(make_primary_dir "$TMP_ROOT/help-mode")
+  mkdir -p "$dir/config"
+  rm -f "$dir/config/supervision-host-off"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" boundary
+  # The fake session writes state/.lock itself; everything else must be untouched.
+  for arg in --help -h --bogus; do
+    before=$(find "$dir/state" -mindepth 1 ! -name .lock | sort)
+    before_contents=$(find "$dir/state" -type f ! -name .lock -exec cksum {} + | sort)
+    rc=0
+    out=$(FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh" "$1" </dev/null 2>"$FM_HOME/help-stderr"
+      ' _ "$arg") || rc=$?
+    after=$(find "$dir/state" -mindepth 1 ! -name .lock | sort)
+    after_contents=$(find "$dir/state" -type f ! -name .lock -exec cksum {} + | sort)
+    case "$arg" in
+      --bogus)
+        expect_code 2 "$rc" "an unknown argument must be refused"
+        assert_contains "$(cat "$dir/help-stderr")" "unknown argument: --bogus" "the refusal must name the argument"
+        ;;
+      *)
+        expect_code 0 "$rc" "$arg must exit 0"
+        assert_contains "$out" "Usage: fm-claude-stop-autoarm.sh" "$arg must print usage to stdout"
+        ;;
+    esac
+    [ ! -e "$dir/state/host-ran" ] || fail "$arg started the supervision host"
+    [ ! -e "$dir/state/arm-ran" ] || fail "$arg ran the arm"
+    [ "$before" = "$after" ] || fail "$arg changed state: before=[$before] after=[$after]"
+    [ "$before_contents" = "$after_contents" ] || fail "$arg changed state file contents: before=[$before_contents] after=[$after_contents]"
+  done
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "the ordinary Stop path must still rewake from the host"
+  assert_present "$dir/state/host-ran" "the ordinary Stop path did not run the host in the same home"
+  pass "auto-arm: --help, -h, and an unknown argument arm nothing; the Stop path still arms"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -1243,6 +2006,8 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
+test_attached_cycle_end_starts_handling_successor
+test_unconfirmed_handling_successor_still_rewakes
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
@@ -1256,6 +2021,7 @@ test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_term_mid_arm_commits_failure_and_rewakes
 test_abandoned_owner_claim_is_reclaimed_and_rearms
+test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
 test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed
 test_claim_not_named_by_the_ledger_is_never_reclaimed
@@ -1267,6 +2033,10 @@ test_stuck_live_legacy_owner_is_retired_and_reclaimed
 test_stopped_legacy_owner_is_reclaimed_with_term_pending
 test_open_generation_claim_defers_without_any_lock
 test_stuck_generation_claim_is_superseded_and_rearms
+test_orphaned_claim_from_dead_session_is_superseded_by_replacement
+test_resumed_same_id_session_supersedes_the_orphan
+test_claim_without_numeric_session_lock_is_not_open
+test_recycled_bridge_claim_stays_open_on_session_id_match
 test_identityless_ledger_never_defers
 test_superseded_owner_never_reinvokes_the_arm
 test_superseded_owner_goes_silent_and_never_double_translates
@@ -1274,4 +2044,18 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
+test_host_off_flag_keeps_the_arm
+test_host_absent_flag_runs_the_host
+test_host_boundary_rewakes_with_the_host_line
+test_host_handback_under_away_record_is_not_a_return
+test_host_handback_beside_a_quiet_record_carries_no_away_note
+test_plain_arm_banner_keeps_its_wake_line_cap
+test_host_handback_carries_every_host_line
+test_host_stand_down_is_silent
+test_host_benign_rewake_refusal_opens_no_failure_episode
+test_host_lost_handback_notifies_once_per_episode
+test_host_lost_announced_handback_notifies_once_per_episode
+test_host_crash_is_retried_then_reported
+test_arguments_never_arm
 test_fm_lock_status_still_works_with_shared_lib
+test_stands_down_only_on_pi_code_transcript_path

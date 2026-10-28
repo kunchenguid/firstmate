@@ -6,10 +6,10 @@
 // with a disposable component factory, and setHiddenThinkingLabel().
 // ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
 // installs. The focused tests pin those assumptions but never reject a
-// newer Pi solely for its version. The collapsed-thinking and operational-user
-// presentation adapters probe the exact API they patch and degrade independently with a
-// diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it; Pi
-// still exposes no global renderer for arbitrary built-in or custom rows.
+// newer Pi solely for its version. The collapsed-thinking, operational-user, and
+// queued-operational presentation adapters probe the exact API they patch and degrade
+// independently with a diagnostic (see installCalmPresentationAdapter below) if a future
+// Pi removes it; Pi still exposes no global renderer for arbitrary built-in or custom rows.
 // docs/configuration.md owns the home-local Calm preference contract.
 //
 // Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
@@ -49,6 +49,10 @@ import { Box, Container, getKeybindings, type Component } from "@earendil-works/
 import type { TSchema } from "typebox";
 import { installCalmAssistantLayout } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
+import {
+  installCalmPendingOperationalLayout,
+  refreshCalmPendingOperationalRows,
+} from "./lib/fm-calm-pending-operational-layout.ts";
 import {
   CALM_WORKING_SHIP_WIDGET_KEY,
   createCalmWorkingShipAnimation,
@@ -122,6 +126,7 @@ function installCalmPresentationAdapter(name: string, install: () => void): void
 export default function (pi: ExtensionAPI) {
   installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
   installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
+  installCalmPresentationAdapter("queued-operational-row", installCalmPendingOperationalLayout);
 
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
@@ -130,6 +135,7 @@ export default function (pi: ExtensionAPI) {
   // continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
   let workingShipShown = false;
+  let workingShipWidgetDisposed = false;
   // One animation instance per extension lifetime. Hiding the working widget freezes
   // this state; the next working period resumes it. session_start resets it so a fresh
   // Pi session starts at the normal initial position. Never module-global.
@@ -137,6 +143,8 @@ export default function (pi: ExtensionAPI) {
 
   // Single owner of Calm's working-row presentation choice. The widget is only created
   // or removed on a real transition, so repeated starts cannot duplicate its timer.
+  // The slot is shared with standalone Pi Calm; the dispose signal prevents turning
+  // Firstmate Calm off from clearing a widget that the other extension installed.
   const applyWorkingPresentation = (
     ui: ExtensionUIContext,
     forceStockVisibility = false,
@@ -144,14 +152,23 @@ export default function (pi: ExtensionAPI) {
     const showShip = agentRunActive && calmPresentationIsActive();
     if (showShip !== workingShipShown) {
       workingShipShown = showShip;
-      ui.setWidget(
-        CALM_WORKING_SHIP_WIDGET_KEY,
-        showShip
-          ? (tui) => createCalmWorkingShipWidget(tui, workingShipAnimation)
-          : undefined,
-      );
-      ui.setWorkingVisible(!showShip);
-    } else if (forceStockVisibility && !showShip) {
+      if (showShip) {
+        ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, (tui) => {
+          workingShipWidgetDisposed = false;
+          const widget = createCalmWorkingShipWidget(tui, workingShipAnimation);
+          const dispose = widget.dispose;
+          widget.dispose = () => {
+            workingShipWidgetDisposed = true;
+            dispose();
+          };
+          return widget;
+        });
+        ui.setWorkingVisible(false);
+      } else if (!workingShipWidgetDisposed) {
+        ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, undefined);
+        ui.setWorkingVisible(true);
+      }
+    } else if (forceStockVisibility && !showShip && !workingShipWidgetDisposed) {
       ui.setWorkingVisible(true);
     }
   };
@@ -487,6 +504,7 @@ export default function (pi: ExtensionAPI) {
       // unchanged, which is what makes a toggle apply to rows already on screen.
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
       ctx.ui.setStatus("firstmate-calm", undefined);
+      refreshCalmPendingOperationalRows();
 
       const expanded = ctx.ui.getToolsExpanded();
       ctx.ui.setToolsExpanded(!expanded);

@@ -20,6 +20,7 @@
 # `no-mistakes "$@"` specialization. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
+# The no-mistakes forms route host reads through the opt-in home resolver below.
 fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   local dir=$1 timeout_secs=$2 have_timeout=none
   shift 2
@@ -35,10 +36,71 @@ fm_nm_bounded() {  # <dir> <timeout_secs> <command> <args...>
   esac
 }
 
+# Opt-in no-mistakes home resolver for sites that run one no-mistakes daemon
+# per isolated workspace, each against its own NM_HOME. The home cannot be
+# derived from the worktree's `no-mistakes` remote, because every workspace of
+# a project shares one gate URL, so the site provides a resolver and Firstmate
+# only calls it. The resolver is the executable whose absolute path is the
+# first line of this home's config/nm-home-resolver; it is called with the
+# worktree path as its only argument, bounded by 5 seconds, and its stdout,
+# when it exits 0 with exactly one line naming an existing directory by
+# absolute path, is the no-mistakes home for that worktree. The directory
+# must already exist because the CLI creates a fresh home's skeleton on first
+# read, so a wrong answer must not plant one.
+# An explicit non-empty NM_HOME always wins and the resolver is not called.
+# With no config file, a config file naming no absolute executable, or a
+# resolver that fails, times out, or prints anything else, nothing is resolved
+# and every read uses the ambient home exactly as without the hook.
+# Prints the resolved home, or nothing. Never starts a daemon.
+fm_nm_home_resolver_home() {  # <worktree>
+  local wt=$1 cfg cmd out
+  [ -z "${NM_HOME:-}" ] || return 0
+  cfg=${FM_CONFIG_OVERRIDE:-${FM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/config}/nm-home-resolver
+  [ -f "$cfg" ] || return 0
+  IFS= read -r cmd < "$cfg" || [ -n "$cmd" ] || return 0
+  cmd=$(fm_nm_trim "$cmd")
+  case "$cmd" in /*) ;; *) return 0 ;; esac
+  [ -f "$cmd" ] && [ -x "$cmd" ] || return 0
+  out=$(fm_nm_bounded "$wt" 5 "$cmd" "$wt" 2>/dev/null </dev/null) || return 0
+  case "$out" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  case "$out" in *$'\n'*) return 0 ;; esac
+  [ -d "$out" ] || return 0
+  printf '%s\n' "$out"
+}
+
+# 0 when the `no-mistakes` arguments are a host read or a run-targeted abort,
+# the only calls the home resolver above may redirect: the bare `axi`
+# overview, `axi status`, `axi logs`, `runs`, `daemon status`, and
+# `axi abort --run <id>`. Anything else, such as starting or driving a run,
+# keeps the ambient home.
+fm_nm_home_resolver_applies() {  # <no-mistakes args...>
+  case "${1:-}" in
+    axi)
+      [ "$#" -eq 1 ] && return 0
+      case "${2:-}" in
+        status|logs) return 0 ;;
+        abort) [ "${3:-}" = --run ] && [ -n "${4:-}" ] && return 0 ;;
+      esac ;;
+    runs) return 0 ;;
+    daemon) [ "${2:-}" = status ] && return 0 ;;
+  esac
+  return 1
+}
+
 fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
-  local dir=$1 timeout_secs=$2
+  local dir=$1 timeout_secs=$2 home=''
   shift 2
-  fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
+  if fm_nm_home_resolver_applies "$@"; then
+    home=$(fm_nm_home_resolver_home "$dir")
+  fi
+  if [ -n "$home" ]; then
+    NM_HOME=$home fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
+  else
+    fm_nm_bounded "$dir" "$timeout_secs" no-mistakes "$@"
+  fi
 }
 
 fm_nm_run_checked() {  # <dir> <timeout_secs> <args...>
@@ -63,6 +125,22 @@ fm_nm_strip_quotes() {
     \"*\") s=${s#\"}; s=${s%\"} ;;
   esac
   fm_nm_trim "$s"
+}
+
+# Path of no-mistakes' local state database as the CLI would see it from
+# worktree $1: <NM_HOME>/state.sqlite, with NM_HOME falling back to the home
+# resolver above and then to ~/.no-mistakes, and a relative NM_HOME resolving
+# from that worktree. Readers open it with SQLite's mode=ro, so a missing
+# database is never created.
+fm_nm_state_db() {  # <worktree>
+  local root=${NM_HOME:-}
+  [ -n "$root" ] || root=$(fm_nm_home_resolver_home "$1")
+  [ -n "$root" ] || root=~/.no-mistakes
+  case "$root" in
+    /*) ;;
+    *) root="$1/$root" ;;
+  esac
+  printf '%s/state.sqlite\n' "$root"
 }
 
 # Scalar value of a TOON key in captured `axi status` output $1.
@@ -126,8 +204,8 @@ fm_nm_run_status_class() {  # <status_word>
 
 # Select from a complete `no-mistakes axi` overview with the existing awk
 # toolchain. A capped overview requires an optional Python 3 sqlite3 reader
-# for a read-only same-branch query of NM_HOME/state.sqlite (default:
-# ~/.no-mistakes/state.sqlite; relative NM_HOME resolves from the worktree).
+# for a read-only same-branch query of the state database fm_nm_state_db
+# locates for the worktree.
 # Repo identity is the overview's own top-level `repo:` line, which every axi
 # release emits: it is the `working_path` the CLI itself resolved for the
 # queried worktree. That is NOT the task worktree path in general - a linked
@@ -235,7 +313,7 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
     incomplete\|*) available_ids=${selection#*|} ;;
     *) printf '%s\n' "$selection"; return ;;
   esac
-  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$2" "$3" "$available_ids" 2>/dev/null <<'PY'
+  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$2" "$available_ids" "$(fm_nm_state_db "$3")" 2>/dev/null <<'PY'
 import json
 import os
 import re
@@ -244,7 +322,7 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-branch, overview, worktree, available_ids = sys.argv[1:]
+branch, overview, available_ids, database = sys.argv[1:]
 ids = available_ids.split(", ") if available_ids else []
 try:
     repos = [line[6:].strip() for line in overview.splitlines() if line.startswith("repo: ")]
@@ -253,10 +331,7 @@ try:
     repo_path = json.loads(repos[0]) if repos[0].startswith('"') else repos[0]
     if not isinstance(repo_path, str) or not os.path.isabs(repo_path):
         raise ValueError
-    root = Path(os.environ.get("NM_HOME") or Path.home() / ".no-mistakes")
-    if not root.is_absolute():
-        root = Path(worktree) / root
-    with closing(sqlite3.connect((root / "state.sqlite").as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
+    with closing(sqlite3.connect(Path(database).as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
         db.execute("BEGIN")
         repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (repo_path,)).fetchall()
         if len(repo) != 1:
@@ -506,4 +581,78 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
   done <<< "$list"
   printf '%s' "$decided"
   return 0
+}
+
+# Values of column $3 in table $2 (for example `steps` or `active_steps`) of
+# captured `axi status` TOON $1, one line per row, quotes stripped. The column
+# is found by name in the table's own header, so column order is never
+# assumed; a quoted cell may hold commas. Prints nothing when the table or
+# column is absent.
+fm_nm_table_column() {  # <toon-output> <table> <column>
+  printf '%s\n' "$1" | awk -v table="$2" -v column="$3" '
+    function cells(line, out,    n, i, c, q, cur) {
+      n = 0; cur = ""; q = 0
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (c == "\"") { q = !q; continue }
+        if (c == "," && !q) { out[++n] = cur; cur = ""; continue }
+        cur = cur c
+      }
+      out[++n] = cur
+      return n
+    }
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    !inblock {
+      if (match($0, "^[ \t]*" table "\\[[0-9]+\\]\\{[^}]*\\}:")) {
+        hdr = index($0, table)
+        cols = substr($0, index($0, "{") + 1)
+        cols = substr(cols, 1, index(cols, "}") - 1)
+        ncol = split(cols, names, ",")
+        want = 0
+        for (i = 1; i <= ncol; i++) if (trim(names[i]) == column) want = i
+        if (!want) exit
+        inblock = 1
+      }
+      next
+    }
+    {
+      if ($0 ~ /^[ \t]*$/) exit
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) exit
+      n = cells(trim($0), row)
+      print (want <= n ? trim(row[want]) : "")
+    }
+  '
+}
+
+# Validation progress of the run in captured `axi status` TOON $1, as
+# "<percent>\t<position>\t<total>\t<step>\t<round>": <total> is the number of
+# rows in the run's steps[] table, completed and skipped steps count as done,
+# <percent> is done*100/total, <step> is the active step (from active_steps[],
+# else the first step not yet done) at 1-based <position>, and <round> is the
+# active step's round, such as `auto-fix 1/3`. Fails when the run has no steps
+# table. Display only: it does not decide which run is the task's.
+fm_nm_run_progress() {  # <toon-output>
+  local names=() statuses=() total done=0 position=0 step='' round='' active i
+  while IFS= read -r i; do names+=("$i"); done < <(fm_nm_table_column "$1" steps step)
+  while IFS= read -r i; do statuses+=("$i"); done < <(fm_nm_table_column "$1" steps status)
+  total=${#names[@]}
+  [ "$total" -gt 0 ] || return 1
+  for ((i = 0; i < total; i++)); do
+    case "${statuses[i]:-}" in
+      completed | skipped) done=$((done + 1)) ;;
+      *) [ -n "$step" ] || { step=${names[i]}; position=$((i + 1)); } ;;
+    esac
+  done
+  active=$(fm_nm_table_column "$1" active_steps step | head -1)
+  if [ -n "$active" ]; then
+    for ((i = 0; i < total; i++)); do
+      [ "${names[i]}" = "$active" ] || continue
+      step=$active
+      position=$((i + 1))
+      round=$(fm_nm_table_column "$1" active_steps round | head -1)
+      break
+    done
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$((done * 100 / total))" "$position" "$total" "$step" "$round"
 }
