@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -78,6 +78,14 @@
 # on `external` that rule names no forge CLI, because the home's review tool is
 # the only publishing tool. A forge on --mode local-only is refused, because that
 # mode publishes nothing, and `external` also refuses no-mistakes.
+# --pr names who writes the pull request's title and body, defaults to auto, and
+# is the explicit task-side form of the registry's `pr=manual` token exactly as
+# --forge is of `forge=`: read from data/projects.md at intake and passed here,
+# never looked up or inferred, and bin/fm-spawn.sh refuses a brief that
+# disagrees with the registry. `manual` renders a no-mistakes brief whose worker
+# writes the PR text itself with the pipeline's pr and ci steps skipped, and
+# records " pr=manual" on the Delivery contract line. bin/fm-dod-lib.sh's
+# fm_pr_text_valid owns where it is accepted: no-mistakes with no forge only.
 # --shape names how a forge=gerrit task is published, and only `squash` - one
 # change - is accepted: `stack` is refused until a stack can be watched by its
 # membership pinned when its watch is armed, because the merge watch follows one
@@ -99,7 +107,7 @@
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
 # on Gerrit, " forge=forgejo" on Forgejo, or " forge=external" on an external
-# review tool. bin/fm-spawn.sh reads that line and
+# review tool, then " pr=manual" when the worker owns the PR text. bin/fm-spawn.sh reads that line and
 # refuses to launch a ship task whose explicit --mode or registered forge
 # disagrees, so an adjusted brief and the recorded task metadata cannot drift
 # apart.
@@ -108,7 +116,7 @@
 # infrastructure every lane shares - the no-mistakes daemon and the worktree pool
 # their own slot came from - so ship and scout cannot drift apart. A secondmate
 # charter omits it: that home allocates and returns slots for its own crewmates.
-# --mode, --forge, and --shape are refused on scout and secondmate scaffolds: a
+# --mode, --forge, --shape, and --pr are refused on scout and secondmate scaffolds: a
 # scout's deliverable is a report rather than a merge, and a charter is not a
 # delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -221,6 +229,8 @@ FORGE=none
 FORGE_SET=0
 SHAPE=
 SHAPE_SET=0
+PR_TEXT=auto
+PR_TEXT_SET=0
 UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 PROJECT_DIR=
@@ -238,6 +248,7 @@ for a in "$@"; do
       base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
+      pr) PR_TEXT=$a; PR_TEXT_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
@@ -258,6 +269,8 @@ for a in "$@"; do
     --base-branch=*) BASE_BRANCH=${a#--base-branch=}; BASE_BRANCH_SET=1 ;;
     --forge) want_value=forge ;;
     --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
+    --pr) want_value="pr" ;;
+    --pr=*) PR_TEXT=${a#--pr=}; PR_TEXT_SET=1 ;;
     --shape) want_value=shape ;;
     --shape=*) SHAPE=${a#--shape=}; SHAPE_SET=1 ;;
     --upstream-consent) want_value="upstream-consent" ;;
@@ -306,6 +319,7 @@ esac
 # typo or an impossible mode/forge pair stops here rather than reaching a worker.
 if [ "$KIND" = ship ]; then
   fm_forge_valid_for_mode "$FORGE" "$MODE" "fm-brief.sh --forge" || exit 1
+  fm_pr_text_valid "$PR_TEXT" "$MODE" "$FORGE" "fm-brief.sh --pr" || exit 1
   if [ "$FORGE" = gerrit ]; then
     [ "$SHAPE_SET" -eq 1 ] || SHAPE=squash
     case "$SHAPE" in
@@ -329,8 +343,8 @@ if [ "$KIND" = ship ]; then
   else
     FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
   fi
-elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
-  echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ] || [ "$PR_TEXT_SET" -eq 1 ]; then
+  echo "error: --forge, --shape, and --pr apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
 if [ "$BASE_BRANCH_SET" -eq 1 ]; then
@@ -762,7 +776,7 @@ case "$MODE" in
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -818,7 +832,9 @@ A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agen
 $DOD
 EOF
 append_brief_include
-if [ "$FORGE" = none ]; then
+if [ "$PR_TEXT" = manual ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE pr=manual; replace {TASK} and {FIRSTMATE_SPEC})"
+elif [ "$FORGE" = none ]; then
   echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
 elif [ "$FORGE" = gerrit ]; then
   echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK} and {FIRSTMATE_SPEC})"

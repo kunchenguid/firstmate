@@ -17,7 +17,11 @@
 #   refuses a brief whose `forge=` disagrees with the registered binding in
 #   either direction, and refuses --yolo on for a forge=gerrit or
 #   forge=external project, where yolo is inactive (bin/fm-project-mode.sh's
-#   header carries that decision). A forge=external ship also refuses a missing
+#   header carries that decision). The project's pr=manual binding is read the
+#   same way and agrees with the brief's " pr=manual" contract suffix in either
+#   direction; only a no-mistakes ship takes it, so a no-mistakes-prod-only
+#   project's direct-PR task expects none, and spawn records pr_text=manual in
+#   the task metadata. A forge=external ship also refuses a missing
 #   review tool adapter and an unusable personal backup remote, installs the
 #   per-task pre-push guard (bin/fm-git-push-guard.sh) even when the home keeps
 #   AI trailers, and records forge=external, backup_remote=, and backup_prefix=
@@ -873,6 +877,8 @@ fi
 if ! KEEP_AI_TRAILERS=$(fm_config_source_present "$CONFIG/keep-ai-trailers"); then
   exit 1
 fi
+# Set by the PR-text agreement below for a pr=manual ship.
+PR_TEXT=auto
 # Set by the forge agreement below for a forge=external ship.
 EXTERNAL_REVIEW=0
 EXTERNAL_BACKUP_REMOTE=
@@ -4046,6 +4052,27 @@ if [ "$KIND" = ship ]; then
     echo "error: forge mismatch for $ID: $PROJ_NAME is registered forge=$STANDING_FORGE but $SOURCE_BRIEF records forge=$BRIEF_FORGE; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $forge_scaffold, then re-fill those two subsections, so the worker's publication matches the project's forge" >&2
     exit 1
   fi
+  # The registered PR-text binding is read the same way: a brief that disagrees
+  # would hand the pipeline's pr step the text a person owns, or the worker text
+  # the pipeline owns. direct-PR already leaves the text to the worker, so a
+  # conditional-policy project's direct-PR task expects none.
+  if ! STANDING_PR=$("$FM_ROOT/bin/fm-project-mode.sh" --pr "$PROJ_NAME" 2>/dev/null); then
+    "$FM_ROOT/bin/fm-project-mode.sh" --pr "$PROJ_NAME" >/dev/null || true
+    echo "error: $ID cannot launch: the registry entry for $PROJ_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and spawn again" >&2
+    exit 1
+  fi
+  [ -n "$STANDING_PR" ] || STANDING_PR=auto
+  [ "$MODE" = no-mistakes ] || STANDING_PR=auto
+  BRIEF_PR=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]pr=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  [ -n "$BRIEF_PR" ] || BRIEF_PR=auto
+  if [ "$BRIEF_PR" != "$STANDING_PR" ]; then
+    pr_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE"
+    [ "$STANDING_FORGE" = none ] || pr_scaffold="$pr_scaffold --forge $STANDING_FORGE"
+    [ "$STANDING_PR" = auto ] || pr_scaffold="$pr_scaffold --pr $STANDING_PR"
+    echo "error: PR-text mismatch for $ID: $PROJ_NAME is registered pr=$STANDING_PR but $SOURCE_BRIEF records pr=$BRIEF_PR; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $pr_scaffold, then re-fill those two subsections, so the worker owns the PR text exactly when the project says so" >&2
+    exit 1
+  fi
+  PR_TEXT=$STANDING_PR
   # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
   # the captain's decision of 2026-09-15: a Code-Review+2 is a positive
   # attributed claim that a named human approved, and firstmate must not
@@ -6649,7 +6676,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix pr_text model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -6676,6 +6703,7 @@ preserve_relaunch_meta() {
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
   # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
   [ "$EXTERNAL_REVIEW" = 0 ] || echo "forge=external"
+  [ "$PR_TEXT" = auto ] || echo "pr_text=$PR_TEXT"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_remote=$EXTERNAL_BACKUP_REMOTE"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_prefix=$EXTERNAL_BACKUP_PREFIX"
   echo "model=${MODEL:-default}"
