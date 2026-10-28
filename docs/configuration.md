@@ -1634,7 +1634,7 @@ It retains `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` 
 
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
-Codex `max` and `ultra` require a known destination Codex home before launch.
+Codex `ultra` and catalog-dependent `max` require a known destination Codex home before launch; `gpt-5.6-luna` `max` does not, because its support does not depend on the catalog.
 With this filter, only Orca's configured source below can supply one: an explicitly selected absolute `CODEX_HOME`, or an explicitly selected absolute `HOME` when `CODEX_HOME` is absent or unset.
 
 Unless the Orca environment source below is configured, allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.

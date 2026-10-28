@@ -396,8 +396,9 @@
 #   blank lines and lines beginning with # are ignored. Invalid input refuses
 #   before launch, as do path inspection errors such as inaccessible config
 #   directories. An empty file retains only the operational floor below.
-#   Codex max and ultra require a provable destination home; the Orca source
-#   below supports an explicitly snapshotted absolute CODEX_HOME or HOME.
+#   Codex ultra and catalog-dependent max require a provable destination home;
+#   gpt-5.6-luna max does not. The Orca source below supports an explicitly
+#   snapshotted absolute CODEX_HOME or HOME.
 #   Names are read once per spawn; unless the Orca source below applies, values
 #   are expanded in the destination pane, not copied from the invoking process
 #   or written into the launch text.
