@@ -1105,6 +1105,29 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_scout_completion_write_exception_is_task_scoped() {
+  local home id brief command
+  home="$TMP_ROOT/scout completion home"
+  mkdir -p "$home/data"
+  for id in inventory-alpha inventory-beta; do
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --scout >/dev/null \
+      || fail "scout completion scaffold failed"
+    brief="$home/data/$id/brief.md"
+    command="FM_HOME='$home' bash '$ROOT/bin/fm-captain-hold.sh' complete '$id' --none"
+    assert_grep "except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done." "$brief" \
+      "scout outside-write rule did not name its exact completion gate"
+    assert_grep "Only when the reviewed inventory is empty, run \`$command\`." "$brief" \
+      "scout did not receive the empty-inventory command for its own task and home"
+    assert_grep 'This exception permits only that command, not direct metadata edits, another task, or any backlog write.' "$brief" \
+      "scout completion exception granted broader write authority"
+    assert_grep 'If any captain call remains, ask firstmate to register the inventory and attest completion before you report done.' "$brief" \
+      "scout was instructed to write a non-empty inventory itself"
+    assert_grep 'If the command refuses, report the refusal to firstmate and stop rather than bypassing the completion gate.' "$brief" \
+      "scout was allowed to bypass a refused completion"
+  done
+  pass "fm-brief.sh: scouts may attest only their own empty inventory through the guarded command"
+}
+
 # A scout brief offers the Lavish review loop for every compatible board version,
 # including older builds that use the legacy reply path.
 test_scout_lavish_line_follows_presentation_floor() {
@@ -1693,6 +1716,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
+test_scout_completion_write_exception_is_task_scoped
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
 test_inbox_listing_command_is_safe_on_empty_inbox

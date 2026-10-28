@@ -3327,6 +3327,40 @@ On 2.0.22 the brief is submitted on its own, yet the composer still reads pendin
 `opencode debug config` on 2.0.11 normalized the launch's legacy `{"permission":{"*":"allow"}}` into an allow-all `permissions` rule; the same command printed no configuration on 2.0.22, so on 2.0.22 the legacy shape rests on the earlier 2.0.21 verification recorded in the OpenCode harness reference.
 `tests/fm-spawn-dispatch-profile.test.sh` pins the gate's outcomes portably: an auto-submitted brief gets no extra Enter, a prefilled brief gets exactly one, a composer that reads unknown before it draws gets its one Enter only once it reads pending, a composer that only reads unknown gets its one Enter at the submit deadline, and a turn that never starts fails the spawn.
 
+## Pi repeated-read containment
+
+Verified on 2026-10-27 UTC on Linux x86_64 with Node 24.22.1 and npm 11.19.1.
+The operator contract, opt-in default and migration procedure are owned by [configuration](../configuration.md#pi-repeated-read-containment).
+The supported SDK matrix is Pi 1.1.0 and 1.2.0, with each release's sibling packages pinned to the same version rather than resolving newer 1.x packages through public dependency ranges.
+TypeScript 5.9.3 checked all tracked Pi consumers with strict no-emit settings for both versions.
+The real SDK fixture uses synthetic provider responses, intercepted fetches and fake Bash operations; it never sends a request to an inference endpoint.
+
+```sh
+bash tests/fm-pi-primary-types.test.sh
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 1.1.0
+ok - read guard real SDK events/abort against Pi 1.1.0
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 1.2.0
+ok - read guard real SDK events/abort against Pi 1.2.0
+```
+
+Each SDK passed alternating synthetic 85/65-pair histories, SSH-shaped reads, `cut`, outer groups, multiline `nl`/`wc`/`head`/`tail`/`od` pipelines, escaped-newline continuations, duplicate batches and truncated results with compaction.
+Changing output, failed results, foreign ownership, absent opt-in, unknown grouped stages and grouped mutators remained allowed; unrecognized commands are outside the detector rather than denied execution.
+The resumed SDK session retained the stop across marked operational input, extension input and a journal reopen, then accepted deliberate RPC user input.
+No provider fetch occurred after a stop notice, including the small-context compaction case.
+
+Installed Pi 1.4.0 separately passed the token-free RPC guard below, using a synthetic in-process provider, a fake Bash tool and private home/session directories.
+It executed the known multiline grouped read three times, aborted before a fourth execution, refused an operational reset, accepted a fresh RPC user reset and persisted one stop notice plus a proven-owner activation receipt.
+The guard verifies that its Pi process group exits during cleanup.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-read-repetition-live.test.sh
+ok - Pi 1.4.0 installed RPC read guard: veto, abort, durable latch, operational denial and user reset
+```
+
+`tests/fm-read-repetition.test.sh` independently exercises ownership denials and regain, configuration bounds, default-off registration, reset provenance, bounded history, group-recognition controls and preservation of the ignored legacy guard/helper/configuration through a real pre-feature Git fast-forward.
+No macOS or Windows ancestry, native-adapter interception, separate native-tool execution, terminal screenshot/display, worker or fleet-wide protection is claimed.
+The runtime fixture does not reproduce spontaneous model-loop onset or establish a model/serving root cause.
+
 ## OpenCode 1 compatibility of the dual-export plugins
 
 Verified on 2026-10-15 on Linux x86_64 against OpenCode 1.15.7, 1.18.20, and 1.18.31, each installed into a scratch npm prefix and run against a scratch `FM_HOME`.

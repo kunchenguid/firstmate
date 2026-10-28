@@ -117,6 +117,10 @@
 #                          steering-inbox recovery; bin/fm-task-inbox-lib.sh owns
 #                          delivery-attempt, busy-deferral, and unavailable-endpoint policy
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: open decision overdue: <task> key=<key> age=<seconds>s
+#                          opt-in config/open-decision-reminders record-age
+#                          backstop, independent of pane and branch state;
+#                          open_decision_reminder_tick owns its bounded repeats
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -2507,13 +2511,15 @@ pause_state_class() {  # <window> <task>
 # and a row this home does not carry all keep alarming exactly as they do today -
 # a wait this watcher cannot prove is not a wait.
 #
-# The read costs one subprocess and runs only where the watcher is about to
-# alarm, so at most once per distinct stale hash per window, or once per
+# The read costs one subprocess and runs where the watcher is about to
+# alarm: for stale-pane callers, at most once per distinct stale hash per window, or once per
 # STALE_ESCALATE_SECS at the wedge threshold (wedge_wait_evidence), beside the
 # crew-state read the same paths already pay. The secondmate stale gate deliberately runs
 # before this bound and admits only status-declared waits: a backlog-only hold
 # whose mate still says `working:` or `done:` does not reach this read. Reaching
 # it would put backlog reads into windows deliberately skipped on ordinary polls.
+# The opt-in open-decision reminder tick also reads it for overdue keys whose
+# per-key backoff has elapsed, independently of pane classification.
 STALE_WAIT_DECLARATION=
 
 CAPTAIN_CALL_IDENTITY=
@@ -2525,6 +2531,89 @@ task_captain_call_open() {  # <task>
   CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
     open "$task" --identity 2>/dev/null) || return 1
   return 0
+}
+
+# Opt-in durable decision-age backstop. The shared fold owns all transitions;
+# its separate timed view preserves source [at=] values without changing drain
+# output. Scan only this home's logs, excluding its outbound parent channel.
+# Queue at most the oldest due key per poll. STATE/.open-decision-reminders
+# stores <task> TAB <key> TAB <opened> TAB <last-reminder> TAB <next-delay>, so
+# watcher restarts preserve per-key backoff. Resolution removes a row on the
+# next poll; pauses and captain calls suppress reminders without resetting it.
+# FM_OPEN_DECISION_OVERDUE_SECS defaults to 1800; repeats start at that delay,
+# double after each repeat, and cap at FM_OPEN_DECISION_BACKOFF_MAX_SECS (14400).
+# Both settings must be canonical positive integers of at most nine digits,
+# and the cap must be at least the threshold. Invalid enabled settings fail
+# the tick rather than creating an unbounded reminder loop.
+open_decision_reminder_tick() {  # [now-epoch], for deterministic clock callers
+  local now=${1:-} threshold=${FM_OPEN_DECISION_OVERDUE_SECS:-1800}
+  local cap=${FM_OPEN_DECISION_BACKOFF_MAX_SECS:-14400} value
+  local f task open key verb opened note exclude ledger rows='' old=''
+  local old_task old_key old_opened old_last old_delay last delay
+  local due_task='' due_key='' due_opened='' due_delay='' tmp reason
+  OPEN_DECISION_REMINDER=
+  [ -e "$CONFIG/open-decision-reminders" ] || return 0
+  for value in "$threshold" "$cap"; do
+    case "$value" in ''|0*|*[!0-9]*) echo 'watcher: invalid open-decision reminder settings' >&2; return 1 ;; esac
+    [ "${#value}" -le 9 ] || return 1
+  done
+  [ "$cap" -ge "$threshold" ] || { echo 'watcher: open-decision backoff cap is below threshold' >&2; return 1; }
+  [ -n "$now" ] || fm_epoch_seconds_to now
+  ledger="$STATE/.open-decision-reminders"
+  if [ -e "$ledger" ] || [ -L "$ledger" ]; then
+    [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ] || return 1
+    old=$(cat "$ledger") || return 1
+  fi
+  exclude=$(status_scan_parent_channel_exclude "$STATE")
+  for f in "$STATE"/*.status; do
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    [ "$f" != "$exclude" ] || continue
+    task=${f##*/}; task=${task%.status}
+    open=$(status_open_decisions_incremental "$f" '' timed) || return 1
+    [ -n "$open" ] || continue
+    while IFS=$'\t' read -r key verb opened note; do
+      case "$opened" in ''|unknown|*[!0-9]*) continue ;; esac
+      last=0; delay=$threshold
+      while IFS=$'\t' read -r old_task old_key old_opened old_last old_delay; do
+        [ "$old_task" = "$task" ] && [ "$old_key" = "$key" ] && [ "$old_opened" = "$opened" ] || continue
+        case "$old_last:$old_delay" in *[!0-9:]*) continue ;; esac
+        [ -n "$old_last" ] && [ "${#old_last}" -le 12 ] \
+          && [ -n "$old_delay" ] && [ "${#old_delay}" -le 9 ] || continue
+        last=$((10#$old_last)); delay=$((10#$old_delay))
+        [ "$delay" -ge "$threshold" ] || delay=$threshold
+        [ "$delay" -le "$cap" ] || delay=$cap
+        break
+      done <<EOF
+$old
+EOF
+      rows="$rows$task"$'\t'"$key"$'\t'"$opened"$'\t'"$last"$'\t'"$delay"$'\n'
+      [ "$now" -ge "$opened" ] && [ "$((now - opened))" -ge "$threshold" ] || continue
+      [ "$last" -eq 0 ] || [ "$((now - last))" -ge "$delay" ] || continue
+      status_is_paused_or_captain_held "$(status_declared_wait_line "$f")" && continue
+      task_captain_call_open "$task" && continue
+      if [ -z "$due_opened" ] || [ "$opened" -lt "$due_opened" ]; then
+        due_task=$task; due_key=$key; due_opened=$opened; due_delay=$delay
+        if [ "$last" -ne 0 ]; then
+          due_delay=$((delay * 2))
+          [ "$due_delay" -le "$cap" ] || due_delay=$cap
+        fi
+      fi
+    done <<EOF
+$open
+EOF
+  done
+  if [ -n "$due_task" ]; then
+    reason="check: open decision overdue: $due_task key=$due_key age=$((now - due_opened))s"
+    fm_wake_append check "open-decision:$due_task:$due_key" "$reason" || return 1
+    rows=$(printf '%s' "$rows" | awk -F '\t' -v OFS='\t' -v task="$due_task" -v key="$due_key" \
+      -v now="$now" -v delay="$due_delay" '{ if (($1 "") == (task "") && ($2 "") == (key "")) { $4=now; $5=delay } print }') || return 1
+    OPEN_DECISION_REMINDER=$reason
+  fi
+  tmp=$(mktemp "$STATE/.open-decision-reminders.XXXXXX") || return 1
+  if ! printf '%s' "$rows" > "$tmp" || ! mv -f "$tmp" "$ledger"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 # The identity a re-surface throttle is bound to: the task's whole status-log
@@ -3576,6 +3665,12 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+
+  open_decision_reminder_tick || {
+    echo 'watcher: open-decision reminder check failed' >&2
+    exit 1
+  }
+  [ -z "$OPEN_DECISION_REMINDER" ] || wake "$OPEN_DECISION_REMINDER"
 
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which

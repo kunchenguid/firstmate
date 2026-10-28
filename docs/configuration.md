@@ -176,6 +176,64 @@ The Claude Code mod reloads it on every `session.start`, including same-process 
 It also loads the preference lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Pi repeated-read containment
+
+The tracked `.pi/extensions/fm-primary-read-repetition.ts` extension provides an optional read-loop safeguard for a Linux Pi primary.
+It is off by default, including when configuration is absent or omits `enabled`.
+When enabled, it stops the owning primary after three identical recognized reads return the same successful result within fifteen minutes.
+It blocks the next call before execution and requires fresh interactive or RPC user input to resume.
+Extension input and marked operational follow-ups cannot reset that stop, including the turn-end guard's recovery message.
+The stopped owner also cancels compaction so the aborted turn cannot start a separate compaction request.
+Changing results, errors and nonzero exit codes break the repetition sequence.
+An identical call already in flight is temporarily blocked without being counted as a completed success.
+
+Optional `config/read-repetition.json` configures the guard at extension load:
+
+```json
+{"enabled": true, "repeatLimit": 3, "windowMs": 900000}
+```
+
+`repeatLimit` must be an integer from 2 through 32, and `windowMs` an integer from 1000 through 86400000.
+An absent file uses `enabled: false`, `repeatLimit: 3` and `windowMs: 900000`; malformed JSON, unknown keys or invalid values report an extension-load error instead of silently substituting limits.
+`enabled: false` registers no guard handlers.
+Configuration changes require the next extension load.
+
+Ownership requires the effective home, current directory, session directory and primary PID marker to match this primary, with the session lock naming its process or a verified ancestor.
+Workers, supervision branches, foreign owners and nested capability probes remain outside the guard.
+Linux ancestry uses bounded `ps` queries, including when a wrapper holds the lock.
+Enabled configuration on macOS or Windows reports an unsupported-platform load error; those platforms have no protection claim.
+Missing ownership evidence leaves the guard inactive without writing session history or aborting another session.
+A proven owner records `fm-read-repetition-activation-v1` in its Pi session journal with the effective limits and restored latch state; extension discovery alone is not evidence of activation.
+
+The recognizer counts Pi's native `read`, `grep`, `find` and `ls` tools plus a conservative subset of ordinary shell reads.
+It recognizes a narrow SSH read shape without executing or interpreting its command.
+Supported shell forms include simple `cat`, bounded `head`/`tail`, `sed -n N,Mp`, pipeline `cut -cN-M`, selected `grep` options, `nl -ba`, `wc -l`/`-c` and `od -An -tx1c`.
+One outer parenthesized group may contain a sequence of recognized reads separated by semicolons or newlines, including `cd /project`, read pipelines and unquoted backslash-newline continuations.
+Every stage must be recognized; nesting, brace groups, shell substitutions, redirections other than `2>&1`, additional shell interpreters and unknown programs or options are uncounted.
+Ungrouped multiline shell commands and polling tools are also uncounted.
+An unrecognized stage makes the entire shell command uncounted, even if its output repeats hundreds of times.
+This is a repetition detector, not command authorization or comprehensive loop detection.
+History contains bounded hashes, labels and timestamps rather than read arguments or output; the stopped latch survives reload and compaction.
+SDK-generated temporary paths in truncated Bash footers are normalized only when matching truncation metadata identifies them.
+
+The extension uses the existing tracked-file distribution and trusted Pi project auto-discovery described in the [setup guide](../README.md).
+The supported interception surface is Pi's own session event pipeline, including RPC sessions; its tool-call, result, input, session and compaction-veto hooks must all execute.
+Other primary harnesses, worker interruption and tool execution in a separate native adapter are outside this extension's protection.
+An adapter's `firstmate:native-tools` registration does not forward this interception or abort contract.
+The stop is stored as a displayed custom message, but a native app may filter that message; an abort alone does not prove that its detailed notice was shown.
+Current SDK and installed-harness evidence is recorded in [runtime backend verification](verification/runtime-backends.md#pi-repeated-read-containment).
+
+### Migrating an ignored local guard
+
+The managed entrypoint and `lib/fm-primary-read-repetition-policy.ts` intentionally differ from the local workaround's `fm-read-repetition-guard.ts` and `lib/fm-read-repetition.ts`.
+An update therefore preserves those old ignored files and `config/read-repetition.json`, including with an updater from before this feature.
+If the legacy entrypoint is present, enabling the managed guard refuses to register its handlers and reports the migration needed; a broken symlink at that path also refuses activation.
+The legacy extension may still run under its own rules until it is migrated.
+Before enabling the managed guard, preserve both legacy files and any existing configuration in a private backup outside Pi's extension discovery directories, then move the legacy entrypoint outside `.pi/extensions`.
+Retain the backup and deliberately review the existing configuration before setting `enabled: true` and reloading extensions normally.
+No automatic migration, removal, overwrite, reload or live-process change occurs.
+For a locally installed file at either new managed path, preflight the update and use Git's `--no-overwrite-ignore` fast-forward option; an older updater does not protect arbitrary ignored-path collisions.
+
 ## Pi supervision branch
 
 On a Pi primary, an in-process supervision branch handles eligible task-local wake rows and selected heartbeat reviews.
@@ -923,6 +981,22 @@ The away-mode daemon honors the same evidence before it escalates a possible-wed
 With the flag absent the wedge timer spends no read for it and keeps the unchanged escalation schedule, reasons, and `demand-deep-inspection` wording.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the wait-evidence contract and `bin/fm-classify-lib.sh`'s `status_worker_wait_verb` owns which lines count.
+
+## Open-decision reminders (config/open-decision-reminders)
+
+The optional local, gitignored `config/open-decision-reminders` presence flag enables a default-off watcher backstop for unanswered keyed `needs-decision` and `blocked` records.
+On each poll, the watcher queues at most one `check: open decision overdue: <task> key=<key> age=<seconds>s` wake for the oldest eligible overdue key, independently of pane state or supervision-branch classification.
+Declared `paused:` waits and tasks already held for the captain are exempt.
+Resolving a key stops its reminders, and a later opening starts a new reminder episode.
+Only explicit keys with valid source `[at=<epoch>]` timestamps can be aged.
+
+`FM_OPEN_DECISION_OVERDUE_SECS` defaults to `1800` seconds.
+Repeats start at that interval, double after each repeat, and cap at `FM_OPEN_DECISION_BACKOFF_MAX_SECS`, which defaults to `14400` seconds.
+Both settings must be canonical positive integers of at most nine digits, with the cap at least the threshold.
+Invalid settings stop the watcher with an error when the flag is present.
+Pass them in the watcher's environment, or export them in `config/watch.env` for watchers started through `bin/fm-watch-arm.sh`.
+The flag is home-local and is not inherited by secondmate homes.
+`bin/fm-watch.sh`'s `open_decision_reminder_tick` owns the per-key schedule, which persists across watcher restarts.
 
 ## Validating-run deferral (config/wedge-defer-validating)
 
@@ -3056,7 +3130,7 @@ FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
-FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs have no age grace
+FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs, and live ones whose start time no longer matches the holder's recorded start time, have no age grace
 FM_GUARD_GRACE=300      # beacon freshness threshold for guard verdicts, arm health checks, and the primary turn-end guard; see docs/turnend-guard.md for model-aware exceptions
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, an open Stop auto-arm generation claim, or a fresh epoch before deciding recovery ownership or failure progression
