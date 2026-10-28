@@ -1677,7 +1677,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # headless (no TUI client) if not already running, mirroring tmux's `tmux
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
 # NOT auto-start the server, so this must run before any workspace/tab/pane
-# call, and this is the single place Firstmate starts a local herdr server,
+# call, and this is the adapter's single local herdr server startup path,
 # including the implicit start a pane read reaches through
 # fm_backend_herdr_target_ready. The server outlives its launcher and passes its
 # startup environment to every later pane, including the panes it restores from
