@@ -41,6 +41,8 @@
 #   (q2) no-mistakes + squash-merged, local followed pipeline rebase -> ALLOW
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
+#   (q6) pushed work, tracking ref absent or stale             -> ALLOW  (refresh)
+#   (q7) local-only commits / dirty / unreachable remote        -> REFUSE (refresh)
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
@@ -936,6 +938,99 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+# Push the task branch to a fork WITHOUT fetching it back, so the worktree has no
+# (or only a stale) remote-tracking ref for work that is safely on the remote.
+# Args: case_dir
+add_fork_pushed_without_fetch() {
+  local case_dir=$1
+  git init -q --bare "$case_dir/fork.git"
+  git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
+  # Push by URL: a push through the remote's name would refresh its tracking ref.
+  git -C "$case_dir/wt" push -q "$case_dir/fork.git" fm/task-x1
+}
+
+run_stale_ref_case() {
+  local case_dir=$1
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+}
+
+test_pushed_work_with_absent_tracking_ref_allows() {
+  local case_dir rc
+  case_dir=$(make_case stale-absent)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "pushed work"
+  add_fork_pushed_without_fetch "$case_dir"
+  git -C "$case_dir/wt" rev-parse --verify -q refs/remotes/fork/fm/task-x1 >/dev/null \
+    && fail "stale-absent: setup left a tracking ref behind"
+  run_stale_ref_case "$case_dir"
+  expect_code 0 "$rc" "stale-absent: work on the fork must close with no local tracking ref"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "stale-absent: printed a REFUSED line"
+  pass "work pushed to a fork closes when no local tracking ref exists yet"
+}
+
+test_pushed_work_with_stale_tracking_ref_allows() {
+  local case_dir rc
+  case_dir=$(make_case stale-behind)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" one.txt 1 "first"
+  add_fork_with_pushed_branch "$case_dir"
+  wt_commit_file "$case_dir" two.txt 2 "second"
+  wt_commit_file "$case_dir" three.txt 3 "third"
+  git -C "$case_dir/wt" push -q "$case_dir/fork.git" fm/task-x1
+  run_stale_ref_case "$case_dir"
+  expect_code 0 "$rc" "stale-behind: work on the fork must close past a stale tracking ref"
+  pass "work pushed to a fork closes when the local tracking ref is stale"
+}
+
+test_local_only_commits_still_refuse_after_refresh() {
+  local case_dir rc
+  case_dir=$(make_case stale-genuine)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" one.txt 1 "pushed"
+  add_fork_pushed_without_fetch "$case_dir"
+  wt_commit_file "$case_dir" two.txt 2 "local only"
+  run_stale_ref_case "$case_dir"
+  expect_code 1 "$rc" "stale-genuine: commits only on this disk must refuse"
+  grep -q 'has work not on any remote and not landed' "$case_dir/stderr" \
+    || fail "stale-genuine: refusal wording changed"
+  grep -q 'local only' "$case_dir/stderr" || fail "stale-genuine: refusal did not list the local-only commit"
+  ! grep -q 'could not be refreshed' "$case_dir/stderr" \
+    || fail "stale-genuine: blamed a refresh failure when every remote was fetched"
+  pass "genuinely local-only commits are still refused after the remotes are refreshed"
+}
+
+test_dirty_worktree_still_refuses_with_pushed_work() {
+  local case_dir rc
+  case_dir=$(make_case stale-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" one.txt 1 "pushed"
+  add_fork_pushed_without_fetch "$case_dir"
+  printf 'edit\n' >> "$case_dir/wt/one.txt"
+  run_stale_ref_case "$case_dir"
+  expect_code 1 "$rc" "stale-dirty: uncommitted changes must refuse"
+  grep -q 'uncommitted changes' "$case_dir/stderr" || fail "stale-dirty: no uncommitted-changes refusal"
+  pass "uncommitted changes are still refused when the pushed work is safe"
+}
+
+test_unreachable_remote_refuses_rather_than_passing() {
+  local case_dir rc
+  case_dir=$(make_case stale-unreachable)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" one.txt 1 "pushed"
+  add_fork_pushed_without_fetch "$case_dir"
+  mv "$case_dir/fork.git" "$case_dir/fork.gone"
+  run_stale_ref_case "$case_dir"
+  expect_code 1 "$rc" "stale-unreachable: an unreachable remote must not read as safe"
+  grep -q 'has work not on any remote and not landed' "$case_dir/stderr" \
+    || fail "stale-unreachable: refusal wording changed"
+  grep -q 'a remote could not be refreshed (possibly timed out; see FM_TEARDOWN_FETCH_TIMEOUT)' "$case_dir/stderr" \
+    || fail "stale-unreachable: refusal does not say the remote could not be refreshed"
+  pass "a remote that cannot be fetched refuses instead of passing"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -5790,6 +5885,11 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_pushed_work_with_absent_tracking_ref_allows
+test_pushed_work_with_stale_tracking_ref_allows
+test_local_only_commits_still_refuse_after_refresh
+test_dirty_worktree_still_refuses_with_pushed_work
+test_unreachable_remote_refuses_rather_than_passing
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_pr_ready_line_waits_for_green_when_opted_in
