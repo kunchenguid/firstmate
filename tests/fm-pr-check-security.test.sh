@@ -240,6 +240,9 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_FAIL:-0}" = 0 ] || exit 1
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 case " $* " in
+  *" api "*) [ "${FM_TEST_GLAB_STDERR_NOTICE:-0}" = 0 ] || printf '%s\n' 'A new version of glab is available' >&2 ;;
+esac
+case " $* " in
   *" -F json "*)
     # The arming probe records, at each record read, whether task-a's poll
     # was already published and whether its control lock was held.
@@ -1123,12 +1126,15 @@ test_github_enterprise_hosts() {
 # exits on a later check's wake without the poll's result.
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
-  local check_timeout_env=(-u FM_CHECK_TIMEOUT)
+  local check_timeout_env=(-u FM_CHECK_TIMEOUT) case_dir
+  case_dir=$(dirname "$home")
   [ -z "${FM_TEST_CHECK_TIMEOUT:-}" ] || check_timeout_env=("FM_CHECK_TIMEOUT=$FM_TEST_CHECK_TIMEOUT")
   shift 2
   perl -MPOSIX=WNOHANG -MTime::HiRes=time,sleep -e 'my $pause=shift; my $left=shift; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } my $last=time; while (waitpid($pid, WNOHANG) == 0) { my $now=time; $left -= $now - $last unless length $pause && -e $pause; $last=$now; if ($left <= 0) { kill "TERM", $pid; waitpid $pid, 0; exit 124 } sleep 0.02 } exit($? >> 8)' \
     "${FM_TEST_WATCH_BOUND_PAUSE:-}" "${FM_TEST_WATCH_BOUND:-60}" env "${check_timeout_env[@]}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" \
+      FM_TEST_GH_LOG="$case_dir/gh.log" FM_TEST_GLAB_LOG="$case_dir/glab.log" \
+      FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" FM_TEST_GERRIT_AXI_LOG="$case_dir/gerrit-axi.log" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 FM_TEST_JQ="$REAL_JQ" PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -1336,10 +1342,12 @@ injected'; do
 
   # The same degraded head/pipeline on a later poll stays silent.
   rm -f "$state/.last-check"
+  set +e
+  rc=0
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
-  rc=$?
-  [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through a duplicate degraded poll"
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-2): rc=$rc"
   [ "$(grep -c 'degraded after ready' "$dir/watch-2.out")" -eq 0 ] \
     || fail "watcher woke again for the same degraded transition"
   ack_watcher_cycle "$state" || fail "duplicate cycle acknowledgement failed"
@@ -1352,19 +1360,30 @@ injected'; do
   [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through a changed degraded poll"
   [ "$(grep -c 'degraded after ready: degraded pipeline=942' "$dir/watch-3.out")" -eq 1 ] \
     || fail "watcher did not wake again for a changed degraded pipeline"
+  ack_watcher_cycle "$state" || fail "changed degraded wake acknowledgement failed"
 
   # A merge-train drop wakes only after the car was seen on the train, once
   # per drop, and a re-queue arms the next drop.
   rm -f "$state/task-a.pr-poll-degraded"
   rm -f "$state/.last-check"
+  set +e
+  rc=0
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-4.out" 2> "$dir/watch-4.err"
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-4.out" 2> "$dir/watch-4.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-4): rc=$rc"
   [ "$(grep -c 'degraded after ready' "$dir/watch-4.out")" -eq 0 ] \
     || fail "watcher woke for a drop it never saw on the train"
+  grep -F 'reported a train drop it never saw on the train' "$state/.watch-triage.log" >/dev/null \
+    || fail "the unseen-drop step never polled the drop"
   ack_watcher_cycle "$state" || fail "unseen drop cycle acknowledgement failed"
   rm -f "$state/.last-check"
+  set +e
+  rc=0
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=car \
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-5.out" 2> "$dir/watch-5.err"
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-5.out" 2> "$dir/watch-5.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-5): rc=$rc"
   [ "$(grep -c 'degraded after ready' "$dir/watch-5.out")" -eq 0 ] \
     || fail "watcher woke for a merge request that is on its train"
   ack_watcher_cycle "$state" || fail "on-train cycle acknowledgement failed"
@@ -1375,14 +1394,22 @@ injected'; do
     || fail "watcher did not wake once for a train drop"
   ack_watcher_cycle "$state" || fail "drop cycle acknowledgement failed"
   rm -f "$state/.last-check"
+  set +e
+  rc=0
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-7.out" 2> "$dir/watch-7.err"
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-7.out" 2> "$dir/watch-7.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-7): rc=$rc"
   [ "$(grep -c 'degraded after ready' "$dir/watch-7.out")" -eq 0 ] \
     || fail "watcher woke again for the same train drop"
   ack_watcher_cycle "$state" || fail "repeat drop cycle acknowledgement failed"
   rm -f "$state/.last-check"
+  set +e
+  rc=0
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=car \
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-8.out" 2> "$dir/watch-8.err"
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-8.out" 2> "$dir/watch-8.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-8): rc=$rc"
   ack_watcher_cycle "$state" || fail "re-queue cycle acknowledgement failed"
   rm -f "$state/.last-check"
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
@@ -2729,6 +2756,11 @@ group/subgroup/project
   # merge status, and a failed or unknown car read stays silent.
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car run_poll "$dir")
   [ "$out" = ontrain ] || fail "GitLab poll did not report a merge request on its train: $out"
+  out=$(FM_TEST_GLAB_STDERR_NOTICE=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car run_poll "$dir")
+  [ "$out" = ontrain ] || fail "a stderr notice on a good car read spoiled the on-train report: $out"
+  out=$(FM_TEST_GLAB_STDERR_NOTICE=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941" ] \
+    || fail "stderr noise on a 404 car read hid the train drop: $out"
   out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=canceled FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_DETAIL=need_rebase run_poll "$dir")
   [ "$out" = "degraded train=dropped url=$url reason=need_rebase pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941" ] || fail "GitLab poll did not report a train drop with a non-failed pipeline: $out"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone \

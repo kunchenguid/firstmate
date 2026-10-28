@@ -301,13 +301,18 @@ case "$provider" in
           ''|0*|*[!0-9]*) pipeline= ;;
         esac
         [ "${#pipeline}" -le 18 ] || pipeline=
-        car=$(GITLAB_HOST=$host glab api "projects/$enc/merge_trains/merge_requests/$number" 2>&1)
+        # stdout is the car record and stderr the CLI's diagnostics: a notice on
+        # a good read must not spoil the record, nor noise on a 404 hide it.
+        errfile=$(mktemp "${TMPDIR:-/tmp}/fm-pr-poll.XXXXXX") || exit 0
+        car=$(GITLAB_HOST=$host glab api "projects/$enc/merge_trains/merge_requests/$number" 2>"$errfile")
         car_rc=$?
+        car_err=$(cat "$errfile" 2>/dev/null)
+        rm -f "$errfile"
         if [ "$car_rc" -eq 0 ]; then
           printf '%s' "$car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1 \
             && printf '%s\n' ontrain
         else
-          case $car in
+          case $car_err in
             *'(HTTP 404)'*)
               GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null \
                 | jq -e '(.state == "opened" or .state == "locked")' >/dev/null 2>&1 || exit 0
