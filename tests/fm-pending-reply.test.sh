@@ -2123,6 +2123,52 @@ test_summary_keeps_accents_and_caps_by_character() {
   pass "the summary keeps accented letters, drops control characters, and caps by character"
 }
 
+test_recovery_keeps_full_request_and_no_record_is_not_recovery() {
+  local home state corr rec request hook_log msg
+  home=$(setup_parent full-recovery-request)
+  state="$home/state"
+  hook_log="$TMP_ROOT/full-recovery-request.log"
+  : > "$hook_log"
+  request="audit the release chain and then preserve this exact instruction: $(printf 'x%.0s' $(seq 1 180))"
+  FM_PENDING_REPLY_NOW=2200
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  full_request_hook() {
+    printf '%s' "$2" > "$hook_log"
+  }
+  export -f full_request_hook
+  export FM_PENDING_REPLY_SEND_HOOK=full_request_hook
+
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$request")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ "$(cat "$(fm_pending_reply_request_path "$state" "$corr")")" = "$request" ] \
+    || fail "the complete original request must be durable"
+  [ "$(fm_pending_reply_get "$rec" request_summary)" != "$request" ] \
+    || fail "the bounded summary must remain separate from the full request"
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery should send"
+  msg=$(cat "$hook_log")
+  case "$msg" in
+    *"$request"*) : ;;
+    *) fail "recovery must identify the complete request"$'\\n'"$msg" ;;
+  esac
+  case "$msg" in
+    *"report only - do NOT act"*|*"does not re-issue"*) : ;;
+    *) fail "recovery must keep the full request inert"$'\\n'"$msg" ;;
+  esac
+
+  printf 'done [corr=%s]: no record of this request\n' "$corr" > "$state/hibit.status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "a mate that has no record must not count recovery as complete"
+  fi
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "a no-record reply must leave recovery unresolved"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  pass "recovery preserves the full request and no-record is not recovery"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2174,5 +2220,6 @@ test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
 test_same_kind_escalation_reopens_after_operator_close
 test_summary_keeps_accents_and_caps_by_character
+test_recovery_keeps_full_request_and_no_record_is_not_recovery
 
 printf 'ok - all pending-reply tests passed\n'

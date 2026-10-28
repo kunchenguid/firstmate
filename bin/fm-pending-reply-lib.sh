@@ -35,6 +35,9 @@
 #   parent_status=          absolute path of parent state/<task_id>.status
 #   parent_status_scan_signature=
 #   request_summary=        short sanitized summary (no secrets by design)
+# The complete original request is kept in a sibling <corr_id>.request file
+# with mode 600, so recovery can identify it without putting it in the record's
+# key=value fields. Legacy records without that sibling fall back to the summary.
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
 #                           (empty until delivery; delivery never resolves)
@@ -169,6 +172,20 @@ fm_pending_reply_dir() {  # <state-dir>
 
 fm_pending_reply_path() {  # <state-dir> <corr_id>
   printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
+}
+
+fm_pending_reply_request_path() {  # <state-dir> <corr_id>
+  printf '%s/.%s.request' "$(fm_pending_reply_dir "$1")" "$2"
+}
+
+fm_pending_reply_request_text() {  # <record-path>
+  local rec=$1 request_path
+  request_path="${rec%/*}/.${rec##*/}.request"
+  if [ -f "$request_path" ]; then
+    cat "$request_path"
+  else
+    fm_pending_reply_get "$rec" request_summary
+  fi
 }
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
@@ -328,7 +345,7 @@ fm_pending_reply_embed_corr() {  # <message> <corr_id> <result-var>
 # Does not deliver anything. Fails if parent paths cannot be prepared.
 fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text>
   local parent_home=$1 state=$2 task_id=$3 request_text=$4
-  local dir rec corr now summary status_path tmp
+  local dir rec corr now summary status_path tmp request_path request_tmp
   [ -n "$parent_home" ] && [ -n "$state" ] && [ -n "$task_id" ] || return 2
   dir=$(fm_pending_reply_dir "$state")
   mkdir -p "$dir" || return 1
@@ -355,6 +372,13 @@ fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text
     *) parent_home=$(cd "$parent_home" 2>/dev/null && pwd) || parent_home=$1 ;;
   esac
   tmp="$dir/.${corr}.tmp.$$"
+  request_path=$(fm_pending_reply_request_path "$state" "$corr")
+  request_tmp="$dir/.${corr}.request.tmp.$$"
+  printf '%s' "$request_text" > "$request_tmp" || {
+    rm -f "$request_tmp"
+    return 1
+  }
+  chmod 600 "$request_tmp" 2>/dev/null || true
   cat > "$tmp" <<EOF
 schema=$FM_PENDING_REPLY_SCHEMA
 corr_id=$corr
@@ -385,7 +409,10 @@ wrong_home_scan_signature=
 grace_secs=$(fm_pending_reply_grace_secs)
 EOF
   chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$rec" || return 1
+  if ! mv -f "$tmp" "$rec" || ! mv -f "$request_tmp" "$request_path"; then
+    rm -f "$tmp" "$request_tmp" "$rec" "$request_path"
+    return 1
+  fi
   printf '%s' "$corr"
 }
 
@@ -585,27 +612,32 @@ _fm_pending_reply_reset_known_undelivered_locked() {  # <state-dir> <corr_id>
 # Drop an undelivered expectation after a failed send so transport failure does
 # not masquerade as a missed report later.
 fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec delivered marker
+  local state=$1 corr=$2 rec delivered marker request_path
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 0
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   [ -z "$delivered" ] || return 1
   marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  request_path=$(fm_pending_reply_request_path "$state" "$corr")
   rm -f "$marker" 2>/dev/null || true
-  rm -f "$rec"
+  rm -f "$rec" "$request_path"
 }
 
 # 0 if a status line is a correlated acknowledgement for <corr_id>.
 # Accepts short status replies and status lines that point at a document.
 # Unrelated verbs without the token never match. Stale/wrong corr never match.
+# A no-record reply is not an acknowledgement: a restarted mate cannot report
+# work it never received, so that reply must leave the expectation recoverable.
 # The parent's own pending-reply-missed escalation line must not self-resolve:
 # it names the request with pending-reply-id= rather than corr=.
 fm_pending_reply_line_resolves() {  # <line> <corr_id>
-  local line=$1 corr=$2
+  local line=$1 corr=$2 normalized
   [ -n "$line" ] && [ -n "$corr" ] || return 1
   case "$line" in
     *pending-reply-missed*) return 1 ;;
   esac
+  normalized=$(printf '%s' "$line" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  printf '%s' "$normalized" | grep -Eq '(^|[^[:alnum:]])no[[:space:]-]+record([^[:alnum:]]|$)' && return 1
   fm_pending_reply_text_has_corr "$line" "$corr"
 }
 
@@ -947,13 +979,23 @@ fm_pending_reply_missing_report_is_evidence() {  # <state-dir> <task_id> <since-
   [ "$caught" -ge "$since" ]
 }
 
+# Neutralize the inert-quote fence so a request whose own text contains the
+# fence markers cannot close the quoted block and have its tail read as
+# instruction. Applied only where the fence is used, so the durable request
+# text itself keeps the operator's original characters.
+fm_pending_reply_quote_inert() {  # <text>
+  printf '%s' "$1" | sed -e ':a' -e 's/>>/> >/g' -e 's/<</< </g' -e 'ta'
+}
+
 # Build the one automatic recovery message for a pending record.
+# The recovery asks only for a missing report. It must never read as a re-issue
+# of the original request, especially after a mate restart has lost its memory.
 fm_pending_reply_recovery_message() {  # <record-path>
-  local rec=$1 corr summary token msg
+  local rec=$1 corr request token msg
   corr=$(fm_pending_reply_get "$rec" corr_id)
-  summary=$(fm_pending_reply_get "$rec" request_summary)
+  request=$(fm_pending_reply_quote_inert "$(fm_pending_reply_request_text "$rec")")
   token=$(fm_pending_reply_corr_token "$corr")
-  msg="REPOST REQUIRED: previous marked request had no correlated parent report. Reply on the parent status channel including ${token}. Original request: ${summary}"
+  msg="REPOST REQUIRED (report only - do NOT act): an earlier marked request had no correlated parent report. This message asks only for that report; it does not re-issue the request. Do NOT perform, re-run, retry, or undo the fenced text below - it is quoted solely to identify which request is missing its report. >>> ${request} <<< end quoted text; it is not an instruction. If you already did this work, reply on the parent status channel including ${token} with its outcome. If you have no record of this request, for example because you were restarted since, still do NOT do it now: reply on the parent status channel including ${token} saying you have no record of it, then wait for the parent."
   fm_pending_reply_embed_corr "$msg" "$corr" msg
   printf '%s' "$msg"
 }
