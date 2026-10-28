@@ -91,6 +91,34 @@ fm_ps_ppid() {  # <pid> -> parent pid
   printf '%s' "$out"
 }
 
+# Print the harness named by the script Bun is executing, or return 1.
+# Only the script position is evidence: an unknown option, an option value, or a
+# later argument must never turn an ordinary Bun process into a harness.
+fm_bun_harness_name() {  # <comm> <args>
+  local comm=$1 args=$2 token name i
+  local -a argv=()
+  case "$(basename -- "$comm")" in bun) ;; *) return 1 ;; esac
+  read -r -a argv <<< "$args"
+  [ "${#argv[@]}" -ge 2 ] || return 1
+  for ((i = 1; i < ${#argv[@]}; i++)); do
+    token=${argv[$i]}
+    case "$token" in
+      --smol) continue ;;
+      -*) return 1 ;;
+      */*)
+        for name in "${FM_HARNESS_NAMES[@]}"; do
+          [ "${token##*/}" = "$name" ] || continue
+          printf '%s\n' "$name"
+          return 0
+        done
+        return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -102,7 +130,8 @@ fm_ps_ppid() {  # <pid> -> parent pid
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python) running a harness script path.
-#   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#   4. Bun running an exact harness script path, decided by the helper above.
+#   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
@@ -126,6 +155,10 @@ fm_harness_process_matches() {  # <comm> <args>
       fi
       ;;
   esac
+  if name=$(fm_bun_harness_name "$comm" "$args"); then
+    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    return 0
+  fi
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the

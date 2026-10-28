@@ -188,9 +188,9 @@ mkfifo "$RPC_IN" || fail "could not create the rpc fifo"
 : > "$RPC_LOG"
 (
   cd "$PROJECT" &&
-    env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    env -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       -u FM_HOME -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE \
-      FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 \
+      CLAUDECODE=1 FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 \
       FM_GUARD_GRACE="$GUARD_GRACE" \
       omp --mode rpc --no-session --cwd "$PROJECT" --config "$PROJECT/.omp/fm-worker-overlay.yml" --auto-approve \
         --model "$MODEL" --thinking low < "$RPC_IN" > "$RPC_LOG" 2> "$RPC_ERR"
@@ -213,8 +213,14 @@ case "$first" in
 esac
 lock_pid=$(sed -n '1p' "$PROJECT/state/.lock" 2>/dev/null || true)
 omp_real_pid=$(pgrep -P "$OMP_PID" -x omp 2>/dev/null | head -1 || true)
+[ -n "$omp_real_pid" ] || omp_real_pid=$(pgrep -P "$OMP_PID" -x bun 2>/dev/null | head -1 || true)
 [ -n "$omp_real_pid" ] || omp_real_pid=$OMP_PID
 [ "$lock_pid" = "$omp_real_pid" ] || fail "the session lock names pid '$lock_pid', not the omp process $omp_real_pid; ancestry detection failed"
+ancestry_verdict=$("$ROOT/bin/fm-harness.sh" ancestry "$omp_real_pid")
+case "$ancestry_verdict" in
+  'comm omp'|'args omp') ;;
+  *) fail "the real omp process ancestry resolved as '$ancestry_verdict', not omp" ;;
+esac
 [ -f "$PROJECT/state/.session-start-complete" ] || fail "session start did not record completion"
 pass "omp $OMP_VERSION: before_agent_start delivered the digest into model context and the lock names the omp process"
 
