@@ -125,9 +125,11 @@ fm_pid_identity() {
   # host's grant owner as dead, discard the grant, and refuse its drain.
   # bin/fm-extension.mjs's pidIdentity pins the same zone. On a /proc-less host
   # outside UTC, an identity recorded before this pin may read as reused for one
-  # upgrade window; this is an accepted bounded upgrade-window residual that the
-  # next watch lock claim clears, because fm_lock_holder_alive reads that
-  # watcher as dead and the replaced watcher stands down at its next poll.
+  # upgrade window; this is an accepted bounded upgrade-window residual. Only
+  # the watch lock's next claim clears it, because fm_lock_holder_alive reads
+  # that watcher as dead and the replaced watcher stands down at its next poll.
+  # The supervise-daemon lock (fm_afk_daemon_owns_supervision, daemon_pid_matches)
+  # and the autoarm claim's abandonment proof keep the residual by design.
   out=$(COLUMNS=10000 LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
