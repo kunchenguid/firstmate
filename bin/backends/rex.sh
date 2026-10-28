@@ -182,6 +182,23 @@ fm_backend_rex_version_check() {  # [start|read]
   return 0
 }
 
+# fm_backend_rex_local_server_ensure: Rex's process and cwd views are only
+# authoritative on the machine running Firstmate. A Unix socket endpoint is
+# local to this machine; other endpoint transports do not prove locality and
+# are refused conservatively before spawn leases a worktree or opens a tab.
+fm_backend_rex_local_server_ensure() {
+  local endpoint
+  endpoint=$(fm_backend_rex_server_endpoint) || {
+    echo "error: could not determine the Rex server endpoint; Rex workers need a Rex server on this machine. For work on another host, use remote second mates (docs/remote-secondmates.md)" >&2
+    return 1
+  }
+  case "$endpoint" in
+    unix://*) return 0 ;;
+  esac
+  echo "error: Rex server endpoint '$endpoint' is not proven to be on this machine; Rex workers need a Rex server on this machine. For work on another host, use remote second mates (docs/remote-secondmates.md)" >&2
+  return 1
+}
+
 # fm_backend_rex_container_ensure: the spawn-time gate (tool, CLI, server).
 # The container itself is chosen inside fm_backend_rex_create_task, under the
 # session lock.

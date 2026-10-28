@@ -228,10 +228,11 @@ SH
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
 else
-  test_path_helpers_match_dirname_and_basename
-  test_epoch_helper_matches_date_and_never_forks_more
-  test_signal_seen_path_and_lock_abs_path_are_unchanged
-  test_recovery_marker_read_accepts_exactly_one_newline
-  test_window_to_task_matches_the_meta_pipeline
-  test_classify_stat_helpers_read_the_kernel_name_once
+  fm_test_run \
+    test_path_helpers_match_dirname_and_basename \
+    test_epoch_helper_matches_date_and_never_forks_more \
+    test_signal_seen_path_and_lock_abs_path_are_unchanged \
+    test_recovery_marker_read_accepts_exactly_one_newline \
+    test_window_to_task_matches_the_meta_pipeline \
+    test_classify_stat_helpers_read_the_kernel_name_once
 fi
