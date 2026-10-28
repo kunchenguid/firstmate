@@ -277,7 +277,14 @@ case " $* " in
           *) printf '%s\n' '[]' ;;
         esac
         ;;
-      *pipelines/77/jobs*) printf '%s\n' "${FM_TEST_GLAB_CHILD_JOBS:-[]}" ;;
+      *pipelines/77/jobs*)
+        # A child pipeline in another project is served only under that
+        # project's own path.
+        case "${FM_TEST_GLAB_CHILD_PROJECT:-}:$*" in
+          :*|*:*"projects/$FM_TEST_GLAB_CHILD_PROJECT/pipelines/77/"*) printf '%s\n' "${FM_TEST_GLAB_CHILD_JOBS:-[]}" ;;
+          *) printf '%s\n' '[]' ;;
+        esac
+        ;;
       *pipelines/*bridges*) printf '%s\n' "${FM_TEST_GLAB_BRIDGES:-[]}" ;;
       *pipelines/*jobs*) printf '%s\n' "${FM_TEST_GLAB_JOBS:-[]}" ;;
       *) printf '%s\n' '[]' ;;
@@ -1442,7 +1449,7 @@ test_degraded_wake_survives_an_unsaved_marker() {
   pass "a degraded wake is queued before its dedupe marker, so a failed marker save never silences it"
 }
 test_arming_baselines_an_already_degraded_change() {
-  local dir state url url1
+  local dir state url url1 fail_env
   dir=$(make_case degraded-baseline)
   state="$dir/home/state"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
@@ -1531,6 +1538,40 @@ test_arming_baselines_an_already_degraded_change() {
     || fail "a failed re-arm left the previous poll no longer matching its metadata"
   [ ! -e "$state/.control-task-a.lock" ] || fail "a failed re-arm left the control lock held"
   pass "a stalled re-arm leaves the previous watch and metadata intact"
+
+  # An unreadable forge read is an unknown baseline, not a clean one: arming
+  # fails like a timeout, and a failed re-arm keeps the previous watch.
+  dir=$(make_case degraded-baseline-unreadable)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  for fail_env in FM_TEST_GLAB_FAIL FM_TEST_GLAB_API_FAIL; do
+    if (export "$fail_env=1" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car
+        run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err"); then
+      fail "arming succeeded although its baseline read failed ($fail_env)"
+    fi
+    grep -q 'could not read the forge' "$dir/unreadable.err" || fail "arming did not name the unreadable baseline read ($fail_env)"
+    [ ! -e "$state/.control-task-a.lock" ] || fail "an unreadable baseline read left the control lock held ($fail_env)"
+    [ ! -e "$state/task-a.check.sh" ] || fail "an unreadable baseline read published a poll ($fail_env)"
+  done
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success run_check_entry "$dir" task-a "$url1" >/dev/null 2>&1 \
+    || fail "arming the first GitLab watch for the unreadable case failed"
+  if FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>&1; then
+    fail "re-arming succeeded although its baseline read failed"
+  fi
+  grep -q "^pr=$url1\$" "$state/task-a.meta" || fail "an unreadable re-arm replaced the task's PR metadata"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an unreadable re-arm left the previous poll no longer matching its metadata"
+  dir=$(make_case degraded-baseline-unreadable-gh)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  if FM_TEST_GH_FAIL=1 run_check_entry "$dir" task-a https://github.com/o/r/pull/9 >/dev/null 2>"$dir/unreadable.err"; then
+    fail "arming a GitHub watch succeeded although its baseline read failed"
+  fi
+  grep -q 'could not read the forge' "$dir/unreadable.err" || fail "arming did not name the unreadable GitHub baseline read"
+  [ ! -e "$state/task-a.check.sh" ] || fail "an unreadable GitHub baseline read published a poll"
+  pass "an unreadable baseline read fails arming and keeps the previous watch"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -2699,6 +2740,13 @@ group/subgroup/project
     run_poll "$dir")
   [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure,e2e test:script_failure' ] \
     || fail "GitLab poll did not follow a failed bridge into its child pipeline: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_CHILD_PROJECT=555 \
+    FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure"}]' \
+    FM_TEST_GLAB_BRIDGES='[{"name":"child","status":"failed","downstream_pipeline":{"id":77,"project_id":555}}]' \
+    FM_TEST_GLAB_CHILD_JOBS='[{"name":"e2e test","status":"failed","failure_reason":"script_failure"}]' \
+    run_poll "$dir")
+  [ "$out" = 'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure,e2e test:script_failure' ] \
+    || fail "GitLab poll did not read a cross-project child pipeline through its own project: $out"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
     FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure\nnewline"}]' \
     run_poll "$dir")
