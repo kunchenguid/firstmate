@@ -4945,7 +4945,11 @@ EOF
       # A durable lease (bin/fm-home-seed.sh's pattern): there is no pane to run
       # the interactive `treehouse get` in, and a slot a live T3 thread points at
       # must never be handed on while that thread could re-create it.
-      WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+      T3CODE_POOL_ROOT=$(fm_treehouse_home_root "$FM_HOME") || {
+        echo "error: could not resolve the Treehouse worktree root for home $FM_HOME" >&2
+        exit 1
+      }
+      WT=$(cd "$PROJ_ABS" && treehouse --root "$T3CODE_POOL_ROOT" get --lease --lease-holder "$ID") || {
         echo "error: treehouse get --lease failed to lease a worktree for $ID from $PROJ_ABS" >&2
         exit 1
       }
@@ -5544,40 +5548,50 @@ elif [ "$RELAUNCH" -eq 1 ]; then
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A t3code slot was leased and validated in its target branch above.
   if [ "$BACKEND" != t3code ]; then
-    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Allocate from THIS home's own Treehouse root. Without it every home cloning
+  # the same origin shares one pool, and a slot that is free there can still be a
+  # linked worktree of another home's clone - which the isolation assertion below
+  # refuses, blocking the task until a human releases the slot from the home that
+  # owns it. fm_treehouse_home_root (bin/fm-wake-lib.sh) owns the derivation and
+  # the reason returns need no matching flag.
+    SPAWN_POOL_ROOT=$(fm_treehouse_home_root "$FM_HOME") || {
+    echo "error: could not resolve the Treehouse worktree root for home '$FM_HOME'; refusing to allocate task $ID a worktree from a pool shared with other homes" >&2
+    exit 1
+  }
+    spawn_send_text_line "$WT_TARGET" "treehouse --root $(shell_quote "$SPAWN_POOL_ROOT") get"
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
-    # Target the stable window id, not the name: if the name is ever lost (e.g. an
-    # automatic-rename slips through), display-message -t <bad-name> falls back to the
-    # active client's window, which would misread firstmate's OWN pane path as the
-    # worktree and tangle a hook into the primary checkout. The window id never lies.
-    # The project comparison is physical: spawn_worktree_isolated screens each
-    # read against PROJ_ABS_REAL, not PROJ_ABS, because a symlinked project prefix
-    # would otherwise make the pane's OS-level cwd read differ from PROJ_ABS on
-    # the very first poll, before the pane has actually moved.
-    #
-    # A single read that already looks isolated is not proof the pane settled
-    # there: on some tmux/WSL setups a brand-new window's pane_current_path
-    # transiently reports an unrelated stale path (seen live as another real git
-    # checkout entirely) before the shell catches up with treehouse get's cd. That
-    # stale path passes spawn_worktree_isolated too (it resolves to a real,
-    # distinct worktree top-level), so accepting it on one read alone silently
-    # records the wrong worktree= in state/<id>.meta. Require two consecutive
-    # reads to agree on the same isolated path before accepting it; a mismatch
-    # just becomes the new candidate rather than resetting the wait, so a pane
-    # that is already settled by the first real read only costs the one existing
-    # inter-poll sleep as confirmation, not a whole extra cycle on top.
-    #
-    # Every candidate is screened with the isolation guard's own predicate, so a
-    # read of the project itself or of the repository primary checkout is treated
-    # as the transient it is and the wait continues, instead of being adopted and
-    # then refused by the guard.
-    # A candidate the screen rejects is never adopted, so a host where the pane
-    # never reaches an isolated worktree spends the whole window before refusing.
-    # That wait is deliberate - telling a transient apart from a terminal
-    # misconfiguration would need machinery this path does not want - so the
-    # refusal has to be self-explaining instead: carry the last path seen and the
-    # reason it was rejected, and report both at the deadline.
+  # Target the stable window id, not the name: if the name is ever lost (e.g. an
+  # automatic-rename slips through), display-message -t <bad-name> falls back to the
+  # active client's window, which would misread firstmate's OWN pane path as the
+  # worktree and tangle a hook into the primary checkout. The window id never lies.
+  # The project comparison is physical: spawn_worktree_isolated screens each
+  # read against PROJ_ABS_REAL, not PROJ_ABS, because a symlinked project prefix
+  # would otherwise make the pane's OS-level cwd read differ from PROJ_ABS on
+  # the very first poll, before the pane has actually moved.
+  #
+  # A single read that already looks isolated is not proof the pane settled
+  # there: on some tmux/WSL setups a brand-new window's pane_current_path
+  # transiently reports an unrelated stale path (seen live as another real git
+  # checkout entirely) before the shell catches up with treehouse get's cd. That
+  # stale path passes spawn_worktree_isolated too (it resolves to a real,
+  # distinct worktree top-level), so accepting it on one read alone silently
+  # records the wrong worktree= in state/<id>.meta. Require two consecutive
+  # reads to agree on the same isolated path before accepting it; a mismatch
+  # just becomes the new candidate rather than resetting the wait, so a pane
+  # that is already settled by the first real read only costs the one existing
+  # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  #
+  # Every candidate is screened with the isolation guard's own predicate, so a
+  # read of the project itself or of the repository primary checkout is treated
+  # as the transient it is and the wait continues, instead of being adopted and
+  # then refused by the guard.
+  # A candidate the screen rejects is never adopted, so a host where the pane
+  # never reaches an isolated worktree spends the whole window before refusing.
+  # That wait is deliberate - telling a transient apart from a terminal
+  # misconfiguration would need machinery this path does not want - so the
+  # refusal has to be self-explaining instead: carry the last path seen and the
+  # reason it was rejected, and report both at the deadline.
     candidate=""
     last_seen=""
     last_reason="the pane reported no path"
@@ -5602,7 +5616,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
       exit 1
     fi
-
     if spawn_endpoint_closes_on_abort; then
       validate_spawn_worktree "treehouse get" "$WT ($(spawn_endpoint_hint))"
     else

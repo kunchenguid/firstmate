@@ -85,7 +85,7 @@ This gate replaces the HTTP dispatch probe and version floor of the pre-V2 trans
 
 ## Task shape and metadata
 
-Each ship or scout task has one Treehouse worktree, leased durably with `treehouse get --lease --lease-holder <id>`, and one T3 thread launched with the `existing_worktree` workspace strategy on that worktree.
+Each ship or scout task has one Treehouse worktree, leased durably with `treehouse --root <home-scoped-root> get --lease --lease-holder <id>`, and one T3 thread launched with the `existing_worktree` workspace strategy on that worktree.
 A secondmate's T3 project is its home and its thread is launched with the `root` workspace strategy, so the agent runs in the home on whatever branch the home is on.
 T3 assigns the thread id at launch (`mcp:<uuid>`), and the task records it as `t3_thread_id`.
 The normal isolation and unlanded-work refusal rules still apply.

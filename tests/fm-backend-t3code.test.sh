@@ -14,6 +14,8 @@ unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
 # shellcheck source=tests/t3-fake-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
 
@@ -124,6 +126,12 @@ make_treehouse_fakebin() {  # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 printf '{"tool":"treehouse","args":"%s","cwd":"%s"}\n' "$*" "$PWD" >> "${FM_T3_TREEHOUSE_LOG:?}"
+case "${1:-}" in
+  --root)
+    [ -n "${2:-}" ] || exit 1
+    shift 2
+    ;;
+esac
 case "${1:-}" in
   get)
     # FM_T3_TREEHOUSE_GET_WORLD changes the fake T3 world while the slot is
@@ -1530,8 +1538,10 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   thread=$(bash -c '. "$1"; fm_meta_get "$2" t3_thread_id' _ "$ROOT/bin/fm-backend.sh" "$state/$id.meta")
   case "$thread" in mcp:*) ;; *) fail "meta t3_thread_id should be the id T3 assigned, got '$thread'" ;; esac
   [ "$(t3_dispatch_types)" = "t3_thread_launch t3_thread_send" ] || fail "spawn must launch an idle thread, then send the brief, got '$(t3_dispatch_types)'"
-  [ "$(t3_log_line_of 'r.tool === "treehouse" && r.args === "get --lease --lease-holder '"$id"'" && r.cwd === "'"$proj"'"')" -gt 0 ] \
-    || fail "spawn must lease the slot with treehouse get --lease --lease-holder <id> from the project"
+  root=$(fm_treehouse_home_root "$CASE_DIR/home") \
+    || fail "could not derive the T3 home's Treehouse root"
+  [ "$(t3_log_line_of 'r.tool === "treehouse" && r.args === "--root '"$root"' get --lease --lease-holder '"$id"'" && r.cwd === "'"$proj"'"')" -gt 0 ] \
+    || fail "spawn must lease the slot with the T3 home's global Treehouse --root and lease holder from the project"
   local create turn
   create=$(t3_log_line_of 'r.tool === "t3_thread_launch"')
   turn=$(t3_log_line_of 'r.tool === "t3_thread_send"')

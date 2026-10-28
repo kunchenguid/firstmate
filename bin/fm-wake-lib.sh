@@ -1630,6 +1630,56 @@ fm_local_firstmate_state_dirs() {  # <first-state>
   done
 }
 
+# The Treehouse worktree root this home allocates from.
+#
+# Treehouse keys a pool by the REPOSITORY - its resolved origin - and not by the
+# clone, so every firstmate home on this machine that clones one origin lands in
+# a single pool under a single root. Homes then compete for the same numbered
+# slots, and a slot a home has never touched still reads as free while its
+# checkout is a linked worktree of ANOTHER home's clone. bin/fm-spawn.sh's
+# isolation assertion correctly refuses that slot, and the work stops until a
+# human releases it from the home that actually owns it. Giving each home its own
+# root removes the shared namespace the collision needs: `treehouse --root <root>
+# get` allocates below <root>/.treehouse, so homes that pass different roots
+# never see each other's slots.
+#
+# The root is a pure function of the home's own resolved path, so every process
+# that knows the home derives the identical root however that home was spelled on
+# the way in. It is deliberately NOT derived from a marker inside the home, such
+# as .fm-secondmate-home: a marker can be rewritten or restored, and a root that
+# moves orphans the pool it already allocated. The base is the parent of the
+# local root Firstmate home, so every local home derives its pool outside the
+# homes while retaining one stable machine-local base.
+#
+# Only `get` takes this. `treehouse return <path>` resolves the pool from the
+# path it is handed, so every worktree leased under a previously shared root
+# stays returnable and nothing has to be migrated;
+# tests/fm-treehouse-pool-isolation-live-e2e.test.sh pins both halves against the
+# real provider.
+#
+fm_treehouse_home_root() {  # <home>
+  local home=$1 abs base pool_root slug hash derived root_home
+  abs=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  root_home=$(fm_firstmate_root_home "$abs") || return 1
+  case "$root_home" in
+    /) base=/ ;;
+    *) base=${root_home%/*}; [ -n "$base" ] || base=/ ;;
+  esac
+  # The slug is readability only; the hash carries the identity. Reduce it to a
+  # conservative character set so an unusual home name cannot produce a path that
+  # needs quoting wherever this root is printed or sent to a shell.
+  slug=${abs##*/}
+  slug=$(printf '%s' "$slug" | tr -c 'A-Za-z0-9._-' '-')
+  case "$slug" in
+    ''|-*|*[!A-Za-z0-9._-]*) slug=home ;;
+  esac
+  hash=$(printf '%s' "$abs" | git hash-object --stdin 2>/dev/null) || return 1
+  [ -n "$hash" ] || return 1
+  pool_root="$base/.firstmate-worktrees"
+  derived="$pool_root/$slug-${hash:0:12}"
+  printf '%s\n' "$derived"
+}
+
 # The one lock serializing Treehouse slot allocation and return for a project,
 # and project capacity admission (bin/fm-project-capacity-lib.sh), which a
 # fresh spawn evaluates under it on every backend.
@@ -1640,6 +1690,10 @@ fm_local_firstmate_state_dirs() {  # <first-state>
 # derives the identical path. Its identity is the project's resolved origin, so
 # separate clones of one origin share a single lock; an origin-less local-only
 # project falls back to its own worktree top instead of failing to resolve.
+# fm_treehouse_home_root above means homes no longer allocate from one pool, but
+# this lock stays fleet-wide on purpose: pools under the previously shared root
+# are still reachable while their worktrees drain, and a lock narrowed to one
+# home would stop serializing exactly those returns.
 fm_treehouse_project_lock_path() {  # <project-dir>
   local project=$1 root origin identity hash top
   [ -d "$project" ] || return 1

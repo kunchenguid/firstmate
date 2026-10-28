@@ -103,11 +103,9 @@
 # consent-gated external-imports flags land on that resolved canonical
 # checkout, never on the linked-worktree argument itself.
 #
-# The test is deliberately NOT a treehouse or orca path prefix. Treehouse's
-# root is configurable (--root, TREEHOUSE_ROOT, config, and a relative
-# in-project pool), so a prefix check would refuse legitimate roots, accept
-# whatever a mutable env var names, and add exactly the policy surface this
-# registration must not grow. The structural test is verified for treehouse
+# The test is deliberately NOT a treehouse or orca path prefix. A prefix check
+# would add policy to this registration path rather than verifying the shared
+# git structure. The structural test is verified for treehouse
 # worktrees, which are linked git worktrees. Orca's worktree shape is UNVERIFIED:
 # docs/orca-backend.md calls it an "independent worktree", which does not
 # establish a shared git common dir, and orca is macOS-only and was not installed
