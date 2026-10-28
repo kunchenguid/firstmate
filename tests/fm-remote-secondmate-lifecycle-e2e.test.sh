@@ -39,6 +39,18 @@ TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 PARENT_ROUTE_INBOX="$REMOTE_HOME/state/parent-route/ios.inbox"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
+stop_fixture_watcher() {
+  local pid=$1 signal deadline
+  for signal in TERM KILL; do
+    kill -s "$signal" -- "-$pid" 2>/dev/null || true
+    deadline=$((SECONDS + 2))
+    while kill -0 -- "-$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+      sleep 0.02
+    done
+  done
+  kill -0 "$pid" 2>/dev/null && return 1
+  wait "$pid" 2>/dev/null || true
+}
 cleanup() {
   local status=$? log
   local worker_pid=''
@@ -63,8 +75,7 @@ cleanup() {
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" "$TMP_ROOT/race-clone.release" 2>/dev/null || true
   # A watcher leg cut short by a failed assertion is still polling the root.
   if [ -n "${watch_pid:-}" ]; then
-    kill "$watch_pid" 2>/dev/null || true
-    wait "$watch_pid" 2>/dev/null || true
+    stop_fixture_watcher "$watch_pid" || true
   fi
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
@@ -1555,24 +1566,26 @@ tabs_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
 watch_relaunch_timeout=120
 # exec keeps $! the watcher itself rather than the function's subshell, so a
 # kill reaches the process that probes and writes into the fixture root.
+set -m
 FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   FM_SECONDMATE_LIVENESS_TIMEOUT="$watch_relaunch_timeout" \
   FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
-# Use a wall-clock deadline because each poll forks kill(1); the watcher can
-# legitimately run through its bounded relaunch allowance on a loaded runner.
-watch_deadline=$((SECONDS + watch_relaunch_timeout + 30))
-while kill -0 "$watch_pid" 2>/dev/null && [ "$SECONDS" -lt "$watch_deadline" ]; do
+set +m
+# Use a wall-clock deadline because each poll forks kill(1); allow the bounded
+# relaunch window plus startup headroom on a loaded runner.
+watch_exit_budget=$((watch_relaunch_timeout + 30))
+watch_exit_deadline=$((SECONDS + watch_exit_budget))
+while kill -0 "$watch_pid" 2>/dev/null && [ "$SECONDS" -lt "$watch_exit_deadline" ]; do
   sleep 0.02
 done
 watch_still_alive=no
 kill -0 "$watch_pid" 2>/dev/null && watch_still_alive=yes
 if [ "$watch_still_alive" = yes ]; then
-  kill "$watch_pid" 2>/dev/null || true
-  wait "$watch_pid" 2>/dev/null || true
-  fail "the watcher did not exit on its auto-relaunch wake within its ${watch_relaunch_timeout}s relaunch bound: stdout: $(cat "$TMP_ROOT/watch-liveness.out" 2>/dev/null); stderr: $(cat "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
+  stop_fixture_watcher "$watch_pid" || true
+  fail "the watcher did not exit on its auto-relaunch wake within ${watch_exit_budget}s (still alive: yes; pid $watch_pid): stdout: $(cat "$TMP_ROOT/watch-liveness.out" 2>/dev/null); stderr: $(cat "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
 fi
 wait "$watch_pid" \
   || fail "the liveness watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-liveness.err")"
@@ -1612,17 +1625,18 @@ mkdir -p "$WATCH_STATE_UNREACHABLE"
 cp "$WATCH_STATE/ios.meta" "$WATCH_STATE_UNREACHABLE/ios.meta"
 touch "$WATCH_STATE_UNREACHABLE/home-summary.json"
 ssh_before=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
+set -m
 FM_FAKE_SSH_MODE=unreachable FM_STATE_OVERRIDE="$WATCH_STATE_UNREACHABLE" \
   FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
   FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-unreachable.out" 2> "$TMP_ROOT/watch-unreachable.err" &
 watch_pid=$!
+set +m
 sleep 4
 kill -0 "$watch_pid" 2>/dev/null \
   || fail "the watcher exited against an unreachable remote secondmate: $(cat "$TMP_ROOT/watch-unreachable.out" "$TMP_ROOT/watch-unreachable.err")"
-kill "$watch_pid" 2>/dev/null || true
-wait "$watch_pid" 2>/dev/null || true
+stop_fixture_watcher "$watch_pid" || fail "the unreachable watcher could not be stopped"
 watch_pid=''
 sleep 1
 ssh_after=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
