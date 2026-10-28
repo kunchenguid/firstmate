@@ -53,7 +53,7 @@
 #                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, rex-native, t3code-native, tern-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   endpoint-gone, herdr-native, rex-native, t3code-native, tern-native, grok-regex, rovo-regex, agy-regex, mcode-title, mcode-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
@@ -81,7 +81,8 @@
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
 #      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
-#      task from its rendered tail, then unknown missing
+#      task from its rendered tail, then the MiniMax Code title and
+#      rendered-tail fallback classifies an mcode task, then unknown missing
 #   6. malformed, stale, or untrusted records -> unknown, never a fallback
 #
 # fm_busy_launch_prompt_parked (the launch-prompt classifier-only source): a
@@ -100,12 +101,14 @@
 # a real busy verdict once any hook has posted, and it defers to whatever
 # harness-specific trust pre-registration already exists (fm-claude-trust.sh,
 # GEMINI_CLI_TRUST_WORKSPACE) to stop the dialog from appearing at all.
-# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY are the ONLY
-# rendered-text busy fallbacks that survive the redesign, because none of their
-# structured lifecycles was credited-live-verified
+# Apart from the launch-prompt backstop above, Grok, Rovo, AGY, and MiniMax Code
+# are the ONLY rendered-text busy fallbacks that survive the redesign, because none
+# of their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
-# hook surface at all, see references/harness/agy.md); each is scoped to
+# hook surface at all, see references/harness/agy.md; mcode 0.7.1 loads hooks
+# only from global or manually enabled project files, see
+# references/harness/mcode.md); each is scoped to
 # its own harness= and can never classify another adapter. The delivery
 # guards in bin/fm-composer-lib.sh match rendered footers for submit
 # acknowledgement and away-mode supervisor injection only; neither is a
@@ -915,6 +918,37 @@ fm_busy_agy_tail_busy() {
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
 }
 
+# fm_busy_mcode_title_state: classify the terminal title MiniMax Code publishes
+# as `<status> | <session name> | MCode` (verified live, mcode 0.7.1: `Ready`
+# at start, `Working` for the whole turn including tool calls, `Done` after it,
+# `Stopped` after an Escape interrupt; the bundle also names `Needs approval`,
+# `Needs input`, `Needs login`, `Failed`, and `Error`). Prints busy for Working,
+# settled for a finished or never-started turn, parked for a turn waiting on a
+# human, and unknown for anything else, including a title setting that omits
+# the status or the app name.
+fm_busy_mcode_title_state() {  # <title>
+  case "$1" in
+    *' | MCode') ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  case "${1%% | *}" in
+    Working) printf 'busy' ;;
+    Ready|Done|Stopped|Failed|Error) printf 'settled' ;;
+    'Needs approval'|'Needs input'|'Needs login') printf 'parked' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_busy_mcode_tail_busy: the MiniMax Code rendered-tail busy signature, the
+# spinner row pinned above its composer while a turn runs (`⠼ Running 27s ·
+# Option+Enter queue · Enter steer · Ctrl+O details · Esc stop`, verified live
+# on mcode 0.7.1; the idle row reads `Message · Enter send`). Only the row's
+# left part is matched, so a narrow pane that truncates the row still matches.
+fm_busy_mcode_tail_busy() {
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qE 'Option\+Enter queue · Enter steer'
+}
+
 # --- launch-prompt signatures (fm_busy_launch_prompt_parked) ----------------
 #
 # Each function consumes a captured pane tail on stdin (the caller's whole
@@ -1193,6 +1227,42 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         printf 'busy agy-regex'
       else
         printf 'unknown agy-regex'
+      fi
+      return 0
+      ;;
+    mcode)
+      # Two independent signals, either of which proves busy: the terminal
+      # title a live mcode publishes (fm_backend_mcode_title proves the pane
+      # is still mcode before reading it) and the pinned spinner row. Idle is
+      # claimed only from a settled title with no spinner row in the tail;
+      # a parked title (approval, input, login) or no readable title is
+      # unknown, never idle.
+      local title title_state=unknown
+      if command -v fm_backend_mcode_title >/dev/null 2>&1 \
+         && title=$(fm_backend_mcode_title "$backend" "$target" 2>/dev/null); then
+        title_state=$(fm_busy_mcode_title_state "$title")
+      fi
+      if [ "$title_state" = busy ]; then
+        printf 'busy mcode-title'
+        return 0
+      fi
+      if [ -z "$tail40" ]; then
+        if command -v fm_backend_capture >/dev/null 2>&1; then
+          tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+            printf 'unknown capture-failed'
+            return 0
+          }
+        else
+          printf 'unknown capture-failed'
+          return 0
+        fi
+      fi
+      if printf '%s' "$tail40" | fm_busy_mcode_tail_busy; then
+        printf 'busy mcode-regex'
+      elif [ "$title_state" = settled ]; then
+        printf 'idle mcode-title'
+      else
+        printf 'unknown mcode-title'
       fi
       return 0
       ;;

@@ -2271,8 +2271,9 @@ EOF
 #                 running agent. No registered status outranks the process
 #                 view, because a killed mid-turn agent leaves `working`
 #                 behind just as a quit one leaves `idle`.
-#   live        - `agent get` succeeds with a registered agent_status and the
-#                 process-level view is `agent` or `other`: a harness process
+#   live        - `agent get` succeeds with a registered agent_status (or the
+#                 stateless `unknown` of Firstmate's own `mcode` registration)
+#                 and the process-level view is `agent` or `other`: a harness process
 #                 is running, or something that is not a bare shell is, so the
 #                 registration keeps its authority. An idle or blocked agent
 #                 is still a genuine, still-registered agent, not a restored
@@ -2305,6 +2306,11 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
     working|idle|done|blocked) ;;
+    # Firstmate's own MiniMax Code registration (fm_backend_herdr_report_mcode)
+    # deliberately carries no lifecycle state, so `unknown` under the `mcode`
+    # label is still a registration and the process view below decides it.
+    unknown) [ "$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)" = mcode ] \
+      || { printf 'unknown'; return 0; } ;;
     *) printf 'unknown'; return 0 ;;
   esac
   case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
@@ -3203,6 +3209,32 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
+# fm_backend_herdr_report_mcode: register the pane as the `mcode` agent from
+# source firstmate:mcode with state `unknown`. Herdr has no MiniMax Code
+# detection (0.9.5), so without this the pane reads agent_not_found and the
+# liveness probe calls a live worker dead. The state is never updated: busy
+# state comes from bin/fm-busy-lib.sh's mcode arm, and `unknown` keeps Herdr's
+# native verdict from ever claiming idle or busy for it. A report from outside
+# the pane applies to a pane with nothing bound, Herdr drops it when mcode
+# exits, and a relaunch reports again (verified on Herdr 0.9.5).
+fm_backend_herdr_report_mcode() {  # <target>
+  local out
+  fm_backend_herdr_parse_target "$1" || return 1
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane report-agent "$FM_BACKEND_HERDR_PANE" \
+    --source firstmate:mcode --agent mcode --state unknown 2>&1) || return 1
+  [ -z "$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)" ]
+}
+
+# fm_backend_herdr_mcode_title: the terminal title of a pane registered as the
+# `mcode` agent (bin/fm-spawn.sh reports that registration, and Herdr drops it
+# when the agent exits, verified on Herdr 0.9.5); nonzero for any other pane.
+fm_backend_herdr_mcode_title() {  # <target>
+  local out
+  fm_backend_herdr_parse_target "$1" || return 1
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -er 'select(.result.agent.agent == "mcode") | .result.agent.terminal_title // empty | select(length > 0)' 2>/dev/null
+}
+
 # fm_backend_herdr_composer_identity: the native agent identity/state probe
 # backing the shared classifier's separated (pi) shape - the genuine herdr
 # primitive no other backend has natively.
@@ -3233,11 +3265,13 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # cortex=ask: a titled rounded composer box is the one shape a Cortex agent
   # identity changes, so the classifier answers need-identity for it and the
-  # lazy probe below runs; no other verdict pays for it.
+  # lazy probe below runs; no other verdict pays for it. mcode=ask: a
+  # non-empty read of a bare `›` composer pays the same one probe, because only
+  # the pane's `mcode` registration names MiniMax Code's placeholder colour.
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null); then
-    caps=$(printf 'styled=1\ncursor=0\nidentity=1\ncortex=ask')
+    caps=$(printf 'styled=1\ncursor=0\nidentity=1\ncortex=ask\nmcode=ask')
   elif cap=$(fm_backend_herdr_visible_capture "$target"); then
-    caps=$(printf 'styled=0\ncursor=0\nidentity=1\ncortex=ask')
+    caps=$(printf 'styled=0\ncursor=0\nidentity=1\ncortex=ask\nmcode=ask')
   else
     printf 'unknown'
     return 0

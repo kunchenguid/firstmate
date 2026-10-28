@@ -234,7 +234,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex|mcode)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -547,6 +547,7 @@
 #     __CORTEXBIN__ resolved Cortex Code executable
 #     __CORTEXPLUGIN__ private per-task Cortex plugin directory with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __MCODEBIN__  resolved MiniMax Code executable for an mcode launch
 #     __OPENCODEBIN__ quoted concrete opencode executable path resolved from PATH -
 #                  the same binary the version-gate probe reads, so the recorded
 #                  major can never describe a different executable than the pane
@@ -565,7 +566,7 @@
 # a mate's completed turns stay in its own home. Codex stays unknown until a semantic
 # source exists. Grok keeps its rendered-tail fallback and is not given a parent
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
-# as for a crewmate. Muse, gemini, agy, devin, cortex, and rovo are refused as secondmates.
+# as for a crewmate. Muse, gemini, agy, devin, cortex, mcode, and rovo are refused as secondmates.
 # A raw launch command for a claude, pi, pi-signed, or omp secondmate is not armed
 # and retires any arm an earlier launch of that mate left, so its verdict is unknown:
 # the raw command carries no --settings or -e flag to load the wiring.
@@ -592,7 +593,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, devin, commandcode, and cortex are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, agy, devin, commandcode, cortex, and mcode are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -2443,7 +2444,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | mcode)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2731,6 +2732,21 @@ launch_template() {
   # agy exposes no hook surface, so busy state is a rendered-tail fallback
   # (bin/fm-busy-lib.sh) and nothing is armed below.
   agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
+  # MiniMax Code (`mcode`): a positional prompt starts the interactive TUI and
+  # submits it at once, U+2063 marker intact (verified, mcode 0.7.1: a
+  # multi-line launch prompt ran with no extra Enter, and the model read the
+  # marker byte). --model takes `<provider>/<model>`; mcode silently runs its
+  # default for an unknown id, so bin/fm-mcode-config.sh checks the id first.
+  # The TUI has no effort flag (only `mcode exec --effort`), so the effort
+  # axis stays in task metadata (record-and-omit). It has no permission flag
+  # either: unattended work rides the captain's own global Full access, which
+  # the same preflight refuses to launch without. No folder-trust dialog
+  # renders on a fresh worktree. NO_COLOR is cleared and COLORTERM pinned so
+  # the placeholder keeps the truecolor the composer guard reads, and the
+  # foreign primary markers are cleared because mcode publishes none of its own.
+  # No hook is loaded: busy state is the title and rendered-tail fallback in
+  # bin/fm-busy-lib.sh, so nothing is armed below.
+  mcode) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR COLORTERM=truecolor __MCODEBIN__ __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -2945,7 +2961,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, devin, commandcode, polytoken, and cortex are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, devin, commandcode, polytoken, cortex, and mcode are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2965,7 +2981,9 @@ esac
 # docs/supervision-protocols/ carries no polytoken primary wake protocol.
 # cortex has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no cortex wake protocol (cortex 1.1.104).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ]; }; then
+# mcode has none either: it loads no per-process hooks at all, and
+# docs/supervision-protocols/ carries no mcode wake protocol (mcode 0.7.1).
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = mcode ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2995,6 +3013,15 @@ if [ "$HARNESS" = cortex ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ];
   exit 1
 fi
 
+# MiniMax Code's placeholder is proven ghost text only with an mcode pane
+# identity, and its busy title is readable only through a proven mcode pane;
+# tmux (its foreground process) and Herdr (the registration reported below)
+# supply both, and zellij, cmux, orca, paseo, rex, tern, and t3code do not.
+if [ "$HARNESS" = mcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
+  echo "error: mcode is verified on the tmux and herdr backends only; backend=$BACKEND cannot prove its composer empty or read its turn state. Select backend tmux or herdr." >&2
+  exit 1
+fi
+
 # config/crew-exclude-tools (header above): refuse before worker provisioning
 # if this launch cannot honor the list. Secondmate agents are not covered.
 EXCLUDE_TOOLS=
@@ -3018,6 +3045,12 @@ commandcode)
 cortex)
   CORTEX_BIN=$(command -v cortex) || {
     echo "error: cortex executable not found on PATH" >&2
+    exit 1
+  }
+  ;;
+mcode)
+  MCODE_BIN=$(command -v mcode) || {
+    echo "error: mcode executable not found on PATH; install MiniMax Code (@minimax-ai/code) or select a different verified harness" >&2
     exit 1
   }
   ;;
@@ -3130,6 +3163,11 @@ if [ "$HARNESS" = omp ]; then
 fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+fi
+# MiniMax Code: the captain's global Full access and a configured model id
+# are proven read-only before any worktree, endpoint, or record exists.
+if [ "$HARNESS" = mcode ]; then
+  "$SCRIPT_DIR/fm-mcode-config.sh" preflight "$MODEL" || exit 1
 fi
 # polytoken's model validation composes firstmate's model and effort axes into
 # the launch model reference (bin/fm-polytoken-lib.sh owns the reasoning): the
@@ -3362,7 +3400,7 @@ model_flag_for_harness() {
     [ "$oc_major" = 1 ] || return 0
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
-  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | cortex)
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | cortex | mcode)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   # polytoken encodes reasoning effort inside the model reference, so the
@@ -5455,6 +5493,34 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# mcode carries its brief on the launch command and shows no trust dialog, so
+# its gate is the agy shape without the dialog: positive proof that the brief
+# is being processed, the same verdict the supervisor reads (the `Working`
+# title or the pinned spinner row through fm_busy_classify), before the spawn
+# reports success. Herdr has no MiniMax Code detection, so on Herdr every poll
+# first reports the pane's `mcode` registration
+# (fm_backend_herdr_report_mcode); the report is idempotent, and repeating it
+# covers a first poll that lands before mcode owns the pane. Readiness on Herdr
+# also requires the registration to read back, because without it the
+# liveness probe would call the live worker dead.
+mcode_wait_for_working() {
+  local i=0 max=${FM_MCODE_READY_POLLS:-60} interval=${FM_MCODE_POLL_INTERVAL:-0.5} pane
+  while [ "$i" -lt "$max" ]; do
+    [ "$BACKEND" != herdr ] || fm_backend_herdr_report_mcode "$T" >/dev/null 2>&1 || true
+    pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
+    case "$(fm_busy_classify "$BACKEND" "$T" mcode "$ID" "$STATE" "$pane")" in
+      busy*)
+        if [ "$BACKEND" != herdr ] || fm_backend_mcode_title herdr "$T" >/dev/null 2>&1; then
+          return 0
+        fi
+        ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
 # polytoken's launch-then-confirm gate, in the same shape as agy's: the brief
 # rides the launch command (--prompt submits it after the TUI attaches), so
 # readiness is positive proof the brief is being processed rather than proof a
@@ -6922,6 +6988,7 @@ cortex)
   LAUNCH=${LAUNCH//__CORTEXPLUGIN__/"$(shell_quote "$STATE_REAL/$ID.cortex-plugin")"}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+mcode) LAUNCH=${LAUNCH//__MCODEBIN__/"$(shell_quote "$MCODE_BIN")"} ;;
 opencode)
   # The resolved absolute path probed for the version gate above, so the pane
   # runs exactly the binary whose major was recorded. An unresolved executable
@@ -6971,7 +7038,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | mcode)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -7421,6 +7488,12 @@ if [ "$HARNESS" = agy ]; then
     else
       agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window $T, so the brief could not be confirmed to run there"
     fi
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = mcode ]; then
+  if ! mcode_wait_for_working; then
+    agy_spawn_fail "mcode did not start processing its brief in window $T"
     exit 1
   fi
 fi

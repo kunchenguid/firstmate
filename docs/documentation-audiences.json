@@ -229,6 +229,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/mcode.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/muse.md",
       "audience": "agent-runtime"
     },
@@ -554,6 +558,10 @@
     },
     {
       "path": "docs/verification/lint-option-a.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/mcode.md",
       "audience": "maintainer-verification"
     },
     {

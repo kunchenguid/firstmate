@@ -65,6 +65,7 @@ omp is anchored to the exact `omp` identity for the same reason, so `ompd` and `
 AGY, Devin, and Command Code are anchored to the exact `agy`, `devin`, and `command-code` identities for the same reason, so unrelated names containing any of those fragments remain ambiguous.
 Polytoken is anchored to the exact `polytoken` identity for the same reason, so unrelated names containing that fragment remain ambiguous.
 Cortex is anchored to the exact `cortex` identity for the same reason.
+MiniMax Code is anchored to the exact `minimax-code` process title its node bundle sets, so tmux's bare `node` and unrelated names containing that fragment remain ambiguous.
 An unrelated tool that ships a binary named exactly `cortex` is still classified as an agent when it is a pane's foreground process, because the exact name is the only identity Cortex Code carries.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 
@@ -79,6 +80,7 @@ Since OpenCode 1.18.0 its left bar also draws the working directory and branch r
 OpenCode 1.19.0 draws its mode/model footer row de-emphasised, so the classifier proves that footer from both the ghost-stripped and the ANSI-stripped form of the row; the dated capture and the plain-form safety argument are in [runtime backend verification](verification/runtime-backends.md#2026-10-14-opencode-1190-de-emphasised-modefooter-row-in-the-left-bar-composer).
 Real text in an identified shape is pending, while only positively proven emptiness reads empty.
 A blank or otherwise unidentified cursor row is `unknown` and every consumer defers, except that a foreground process proven to be Cursor or Cortex is re-read cursorlessly because each parks its terminal cursor below its footer.
+A foreground process proven to be MiniMax Code is re-read at its own cursor row with that identity whenever the first read is not `empty`, because only the identity names its placeholder and next-message suggestion colour as ghost text.
 That identity-gated exception preserves the strict container-proof rule for every other pane, so a modal dialog, a dead shell between stale rules, or a mid-redraw pane is never an injection target.
 The shared classifier accepts a shell glyph as an empty agent composer only inside a bordered container.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.

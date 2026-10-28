@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# Portable MiniMax Code (mcode) worker adapter regression. Vendor facts are
+# refreshed by fm-mcode-signals-live-e2e.test.sh; this suite needs no mcode
+# install and no credentials.
+set -u
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$ROOT/bin/fm-control-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$ROOT/bin/fm-composer-lib.sh"
+# shellcheck source=bin/fm-agent-process-lib.sh
+. "$ROOT/bin/fm-agent-process-lib.sh"
+TMP_ROOT=$(fm_test_tmproot fm-mcode-harness)
+HARNESS="$ROOT/bin/fm-harness.sh"
+CONFIG_TOOL="$ROOT/bin/fm-mcode-config.sh"
+unset CLAUDECODE PI_CODING_AGENT GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI FM_OMP_HARNESS ATLASSIAN_AGENT_TYPE ROVODEV_CLI
+unset MINIMAX_DATA_DIR MAVIS_DATA_DIR
+
+mkdir -p "$TMP_ROOT/names"
+for name in minimax-code minimax-code-helper; do ln -s /bin/bash "$TMP_ROOT/names/$name"; done
+# shellcheck disable=SC2016
+out=$(CLAUDECODE=1 "$TMP_ROOT/names/minimax-code" -c '"$1"; :' _ "$HARNESS")
+[ "$out" = mcode ] || fail "native mcode ancestry must beat foreign CLAUDECODE: $out"
+# shellcheck disable=SC2016
+out=$("$TMP_ROOT/names/minimax-code-helper" -c '"$1" ancestry "$$"; :' _ "$HARNESS")
+[ "$out" != 'comm mcode' ] || fail "unrelated minimax-code-helper claimed the adapter"
+[ "$(fm_agent_process_classify_name /usr/bin/minimax-code)" = agent ] || fail "liveness lost mcode"
+[ "$(fm_agent_process_classify_name minimax-code-helper)" = other ] || fail "liveness claims unrelated executable"
+pass "mcode native identity; anchored liveness"
+
+[ "$(fm_control_interrupt_key mcode)" = Escape ] || fail 'wrong interrupt key'
+[ "$(fm_control_interrupt_repeat mcode)" = 1 ] || fail 'a second fast Escape opens the edit-message mode'
+[ -z "$(fm_control_interrupt_arm_signal mcode)" ] || fail 'a single press needs no arm proof'
+[ "$(fm_control_interrupt_clear_key mcode)" = C-u ] || fail 'mcode restores a cancelled prompt that must be cleared'
+[ "$(fm_control_exit_command mcode)" = /quit ] || fail 'wrong exit command'
+hazard=$(fm_control_interrupt_hazard_signal mcode)
+for row in '    Editing the selected message' '    Enter replace and regenerate · Esc cancel'; do
+  printf '%s\n' "$row" | grep -Eq -- "$hazard" || fail "edit-message mode not recognized: $row"
+done
+for row in '    Press Esc again to edit the latest message' '  ›  Ask Mcode to do anything'; do
+  ! printf '%s\n' "$row" | grep -Eq -- "$hazard" || fail "harmless row read as the edit-message mode: $row"
+done
+[ "$(fm_control_harness_family mcode)" = mcode ] || fail 'recorded family lost'
+fm_control_harness_supports_kind mcode ship || fail 'ship refused'
+fm_control_harness_supports_kind mcode scout || fail 'scout refused'
+! fm_control_harness_supports_kind mcode secondmate || fail 'secondmate accepted'
+[ -z "$(fm_control_harness_wiring_paths mcode /wt /st id)" ] || fail 'mcode loads no per-task wiring file'
+pass "worker-only resolution, single-press interrupt with clear, edit-message hazard, and lifecycle capabilities"
+
+# The composer rows mcode 0.7.1 renders (captured live): the header row, a
+# bold 38;2;104;192;255 `›`, a reverse-video cursor cell, and the placeholder or
+# next-message suggestion in 38;2;173;173;173, between two 38;2;102;102;102 rules.
+esc=$(printf '\033')
+rule=$(printf '─%.0s' $(seq 1 60))
+glyph="${esc}[1m${esc}[38;2;104;192;255m›${esc}[0m"
+screen() {  # <header> <styled composer row>
+  printf '%s\n' "  ● done" "    └ Completed in 3s" \
+    "  ${esc}[1m${esc}[38;2;104;192;255m$1${esc}[0m${esc}[38;2;102;102;102m · ${esc}[1m${esc}[38;2;214;214;214mEnter${esc}[0m${esc}[38;2;173;173;173m send" \
+    "  ${esc}[38;2;102;102;102m  $rule" "  $2" "  ${esc}[38;2;102;102;102m  $rule" "" \
+    "  ${esc}[38;2;173;173;173m…/wt${esc}[38;2;102;102;102m │ Full access │ ✦ M3.1-Flash · Effort default"
+}
+ghost() { printf '%s' "$glyph ${esc}[7m${esc}[38;2;173;173;173m${1:0:1}${esc}[0m${esc}[38;2;173;173;173m${1:1}${esc}[39m"; }
+idle=$(screen Message "$(ghost 'Ask Mcode to do anything')")
+suggest=$(screen 'Suggested next message' "$(ghost 'Verify that notes.txt contains alpha.')")
+draft=$(screen Prompt "$glyph typed draft text${esc}[7m ${esc}[0m")
+slash=$(screen Command "$glyph ${esc}[1m${esc}[38;2;104;192;255m/quit${esc}[0;7m ${esc}[0m")
+caps=$'styled=1\ncursor=1\nidentity=1'
+cursorless=$'styled=1\ncursor=0\nidentity=1'
+for shot in idle suggest; do
+  [ "$(fm_composer_classify_screen "$caps" "${!shot}" 4 $'mcode\tidle')" = empty ] || fail "$shot not empty for the tmux identity"
+  [ "$(fm_composer_classify_screen "$cursorless" "${!shot}" '' $'mcode\tunknown')" = empty ] || fail "$shot not empty for the Herdr registration"
+  # The divergence that keeps the case honest: without an mcode identity the
+  # same ghost text is bright enough to read as typed input.
+  [ "$(fm_composer_classify_screen "$caps" "${!shot}" 4 probe-absent)" = pending ] || fail "$shot read empty without the mcode identity"
+  [ "$(fm_composer_classify_screen "$caps" "${!shot}" 4 $'claude\tidle')" = pending ] || fail "another identity borrowed the mcode ghost colour on $shot"
+done
+for shot in draft slash; do
+  [ "$(fm_composer_classify_screen "$caps" "${!shot}" 4 $'mcode\tidle')" = pending ] || fail "typed $shot must stay pending"
+  [ "$(fm_composer_classify_screen "$cursorless" "${!shot}" '' $'mcode\tunknown')" = pending ] || fail "typed $shot must stay pending cursorless"
+done
+# A typed slash command is drawn bold in luminance ~172.9, just under the
+# placeholder's 173, so no luminance ceiling can strip one and keep the other;
+# only the exact colour does.
+[ "$(FM_COMPOSER_GHOST_LUMA_MAX=174 fm_composer_classify_screen "$caps" "$slash" 4 probe-absent)" != pending ] \
+  || fail 'the luminance trap the exact colour avoids has vanished; re-check the mcode ghost rule'
+asked=$'styled=1\ncursor=0\nidentity=1\nmcode=ask'
+[ "$(fm_composer_classify_screen "$asked" "$idle")" = need-identity ] || fail 'a non-empty bare › read must ask for the mcode identity'
+[ "$(fm_composer_classify_screen "$asked" "$idle" '' $'mcode\tunknown')" = empty ] || fail 'the mcode identity answer was not applied'
+plain_box=$(printf '%s\n' '╭────╮' '│    │' '╰────╯')
+[ "$(fm_composer_classify_screen "$asked" "$plain_box")" = empty ] || fail 'an empty read paid for an mcode identity probe'
+pass "composer placeholder and suggestion, draft and slash safety, exact-colour identity scoping, and the lazy Herdr probe"
+
+[ "$(fm_busy_mcode_title_state 'Working | wt (mvs_7422) | MCode')" = busy ] || fail 'busy title misread'
+for title in 'Ready | wt (mvs_7422) | MCode' 'Done | Run sleep 8 | MCode' 'Stopped | Run sleep 8 | MCode' 'Failed | x | MCode' 'Error | x | MCode'; do
+  [ "$(fm_busy_mcode_title_state "$title")" = settled ] || fail "settled title misread: $title"
+done
+for title in 'Needs approval | x | MCode' 'Needs input | x | MCode' 'Needs login | x | MCode'; do
+  [ "$(fm_busy_mcode_title_state "$title")" = parked ] || fail "parked title misread: $title"
+done
+for title in 'Working | x' 'zsh' '' 'Working on it | MCode tips'; do
+  [ "$(fm_busy_mcode_title_state "$title")" = unknown ] || fail "foreign title claimed: $title"
+done
+busy_tail='  ⠼ Running 27s · Option+Enter queue · Enter steer · Ctrl+O details · Esc stop'
+idle_tail='    Message · Enter send · Ctrl+J newline'
+# Drive the two signals apart through the classifier's own backend seams.
+FAKE_TITLE=
+FAKE_TAIL=
+fm_backend_mcode_title() { [ -n "$FAKE_TITLE" ] && printf '%s' "$FAKE_TITLE"; }
+fm_backend_capture() { printf '%s\n' "$FAKE_TAIL"; }
+fm_backend_busy_state() { printf 'unknown'; }
+classify() { FAKE_TITLE=$1 FAKE_TAIL=$2; fm_busy_classify tmux fake:w mcode worker "$TMP_ROOT/no-state"; }
+[ "$(classify 'Working | wt | MCode' "$idle_tail")" = 'busy mcode-title' ] || fail 'the title alone must prove busy'
+[ "$(classify 'Done | wt | MCode' "$busy_tail")" = 'busy mcode-regex' ] || fail 'the spinner row alone must prove busy'
+[ "$(classify '' "$busy_tail")" = 'busy mcode-regex' ] || fail 'a missing title must not hide the spinner row'
+[ "$(classify 'Done | wt | MCode' "$idle_tail")" = 'idle mcode-title' ] || fail 'a settled title with no spinner must read idle'
+[ "$(classify '' "$idle_tail")" = 'unknown mcode-title' ] || fail 'no title must never read idle'
+[ "$(classify 'Needs approval | wt | MCode' "$idle_tail")" = 'unknown mcode-title' ] || fail 'a parked worker must not read idle'
+unset -f fm_backend_mcode_title fm_backend_capture fm_backend_busy_state
+printf '%s\n' "$busy_tail" | fm_busy_lines_match mcode || fail 'mcode delivery signal lost'
+printf '%s\n' '  ⠏ Loading · Option+Enter queue · Enter steer · Ctrl+O de' | fm_busy_lines_match mcode || fail 'a truncated spinner row lost'
+printf '%s\n' "$busy_tail" | fm_busy_lines_match || fail 'the harness-less union lost mcode'
+! printf '%s\n' "$idle_tail" | fm_busy_lines_match mcode || fail 'idle header read busy'
+! printf 'esc to cancel\n' | fm_busy_lines_match mcode || fail 'borrowed another harness signal'
+pass "busy state: title and spinner row each prove busy, idle only from a settled title, parked and unreadable stay unknown"
+
+data="$TMP_ROOT/minimax"
+mkdir -p "$data"
+write_config() {  # <permission line or empty>
+  {
+    printf 'logLevel: info\nprovider:\n  minimax:\n    name: MiniMax\n    models:\n'
+    printf '      MiniMax-M3:\n        name: M3\n      "MiniMax-M3.1-Flash":\n        name: M3.1-Flash\n'
+    printf '    model_order:\n      - MiniMax-M3.1-Flash\ndefaultModel: minimax/MiniMax-M3.1-Flash\n'
+    [ -z "$1" ] || printf '%s\n' "$1"
+  } > "$data/config.yaml"
+}
+preflight() { MINIMAX_DATA_DIR=$data "$CONFIG_TOOL" preflight "$@" 2>&1; }
+write_config ''
+out=$(preflight) && fail 'an unset permission mode was accepted'
+assert_contains "$out" '/permission full' 'refusal must name the fix'
+write_config 'permissionMode: auto'
+out=$(preflight) && fail 'Auto mode was accepted'
+write_config "permissionMode: 'bypassPermissions'"
+out=$(preflight) || fail "Full access refused: $out"
+out=$(preflight minimax/MiniMax-M3.1-Flash) || fail "a configured quoted model refused: $out"
+out=$(preflight minimax/MiniMax-M3) || fail "a configured model refused: $out"
+out=$(preflight minimax/MiniMax-Bogus-9) && fail 'an unknown model was accepted although mcode would silently run its default'
+assert_contains "$out" 'minimax/MiniMax-M3, minimax/MiniMax-M3.1-Flash' 'refusal must list the configured ids'
+out=$(preflight other/thing) || fail "an unlisted provider must launch unvalidated: $out"
+assert_contains "$out" unvalidated 'unvalidated launch must be announced'
+out=$(preflight MiniMax-M3) && fail 'a model without its provider was accepted'
+out=$(MINIMAX_DATA_DIR="$TMP_ROOT/absent" "$CONFIG_TOOL" preflight 2>&1) && fail 'an unreadable config was accepted'
+pass "launch preflight: Full access required, configured models only, unlisted providers announced"
+
+case_dir="$TMP_ROOT/spawn"
+fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+fm_fake_exit0 "$fakebin" mcode
+# The spawn readiness gate reads the pane: serve a chosen mcode screen and
+# delegate every other call to the fixture's fake tmux.
+mv "$fakebin/tmux" "$fakebin/tmux-base"
+cat > "$fakebin/tmux" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = capture-pane ] && [ -n "${FM_FAKE_MCODE_SCREEN:-}" ]; then
+  printf '%s\n' "$FM_FAKE_MCODE_SCREEN"
+  exit 0
+fi
+exec "$(dirname "$0")/tmux-base" "$@"
+EOF
+chmod +x "$fakebin/tmux"
+home="$case_dir/home"
+proj="$case_dir/project"
+wt="$case_dir/wt"
+fm_test_spawn_home "$home" mcode
+fm_git_worktree "$proj" "$wt" mcode-test
+spawn_case() {  # <id> [fm-spawn args...]
+  local id=$1
+  shift
+  fm_test_spawn_brief "$home" "$id"
+  MINIMAX_DATA_DIR=$data FM_MCODE_READY_POLLS=3 FM_MCODE_POLL_INTERVAL=0 \
+    FM_FAKE_MCODE_SCREEN=${FM_FAKE_MCODE_SCREEN-$busy_tail} \
+    FM_FAKE_LAUNCH_LOG="$case_dir/$id.launch" fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" --scout --harness mcode "$@" 2>&1
+}
+out=$(spawn_case mc-high --model minimax/MiniMax-M3.1-Flash --effort high) || fail "spawn failed: $out"
+launch=$(cat "$case_dir/mc-high.launch")
+assert_contains "$launch" "$fakebin/mcode' --model 'minimax/MiniMax-M3.1-Flash' " 'resolved binary or model lost'
+assert_contains "$launch" '-u NO_COLOR COLORTERM=truecolor' 'placeholder styling not pinned'
+assert_contains "$launch" 'env -u CLAUDECODE' 'foreign launcher marker not cleared'
+assert_contains "$launch" 'encode launch-brief' 'typed launch envelope lost'
+case "$launch" in *--effort*|*__*) fail "effort reached argv or a placeholder survived: $launch" ;; esac
+assert_grep 'harness=mcode' "$home/state/mc-high.meta" 'harness not recorded'
+assert_grep 'effort=high' "$home/state/mc-high.meta" 'effort not recorded'
+assert_absent "$home/state/mc-high.busy-gen" 'mcode has no semantic writer, so nothing may be armed'
+pass "scout launch carries the model, records and omits effort, pins colour, and arms nothing"
+
+out=$(FM_FAKE_MCODE_SCREEN="$idle_tail" spawn_case mc-stuck) && fail 'a launch that never showed a busy turn reported success'
+assert_contains "$out" 'mcode did not start processing its brief' "wrong readiness failure: $out"
+assert_grep 'mcode did not start processing its brief' "$home/state/mc-stuck.status" 'readiness failure not recorded'
+pass "readiness gate requires a busy turn before the spawn reports success"
+
+refuse_case() {  # <id> <expected> [fm-spawn args...]
+  local id=$1 expected=$2 refusal
+  shift 2
+  refusal=$(spawn_case "$id" "$@") && fail "$id was launched"
+  assert_contains "$refusal" "$expected" "wrong refusal for $id: $refusal"
+  assert_absent "$case_dir/$id.launch" "$id launched"
+  assert_absent "$home/state/$id.meta" "refused $id left a task record"
+}
+refuse_case mc-bogus 'is not configured' --model minimax/MiniMax-Bogus-9
+write_config 'permissionMode: auto'
+refuse_case mc-auto '/permission full'
+write_config 'permissionMode: bypassPermissions'
+cat > "$fakebin/orca" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}'
+EOF
+chmod +x "$fakebin/orca"
+for backend in zellij cmux orca; do
+  refuse_case "mc-$backend" "mcode is verified on the tmux and herdr backends only; backend=$backend" --backend "$backend"
+done
+if out=$(MINIMAX_DATA_DIR=$data fm_test_run_spawn "$home" "$wt" "$fakebin" mc-sm "$proj" --secondmate --harness mcode 2>&1)
+then fail 'mcode secondmate launch accepted'; fi
+assert_contains "$out" 'crewmate/scout adapter only' 'wrong secondmate refusal'
+pass "refusals before any record: unknown model, missing Full access, unverified backends, secondmate"

@@ -499,7 +499,7 @@ test_recovery_grade_read_widens_only_at_its_own_boundary() {
 # the shell pid it names is a real process this test owns, so the descendant
 # walk runs against the real operating-system process table.
 
-stale_registration_case() {  # <dir-suffix> <agent_status> <process-info-body|-> [process-info-exit]
+stale_registration_case() {  # <dir-suffix> <agent_status> <process-info-body|-> [process-info-exit] [agent-label]
   local dir="$TMP_ROOT/stale-reg-$1" resp log fb n
   mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
   # The probe below classifies the same pane three times (pane state, the
@@ -510,7 +510,7 @@ stale_registration_case() {  # <dir-suffix> <agent_status> <process-info-body|->
     # +1: pane get -> the pane structurally exists
     printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/$((n + 1)).out"
     # +2: agent get -> a registered agent with the given status
-    printf '{"result":{"agent":{"agent":"pi","agent_status":"%s"}}}\n' "$2" > "$resp/$((n + 2)).out"
+    printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "${5:-pi}" "$2" > "$resp/$((n + 2)).out"
     # +3: pane process-info -> the pane's actual process view
     [ "$3" = - ] || printf '%s\n' "$3" > "$resp/$((n + 3)).out"
     [ -z "${4:-}" ] || printf '%s\n' "$4" > "$resp/$((n + 3)).exit"
@@ -562,6 +562,25 @@ test_registered_agent_with_a_live_foreground_process_stays_alive() {
   [ "$out" = "live alive refused" ] \
     || fail "a registered agent whose foreground process is Pi must stay live/alive, got '$out'"
   pass "herdr stale registration: a registered agent with a live Pi foreground process still reads alive"
+}
+
+# Firstmate registers a MiniMax Code pane itself (Herdr has no mcode detection)
+# with the stateless `unknown`, so that label and status still count as a
+# registration and the process view decides it, exactly as for any agent.
+test_stateless_mcode_registration_is_decided_by_the_process_view() {
+  local sleep_bin shell_pid out
+  out=$(stale_registration_case live-mcode unknown \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"minimax-code","argv0":"minimax-code","argv":["minimax-code"],"cmdline":"minimax-code"}]}}}' '' mcode)
+  [ "$out" = "live alive refused" ] \
+    || fail "a stateless mcode registration over a live minimax-code process must read live/alive, got '$out'"
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  "$sleep_bin" 300 &
+  shell_pid=$!
+  out=$(stale_registration_case shell-mcode unknown "$(shell_only_process_info "$shell_pid")" '' mcode)
+  kill "$shell_pid" 2>/dev/null || true
+  [ "$out" = "stale-agent dead refused" ] \
+    || fail "a stateless mcode registration over a shell-only pane must read stale-agent/dead, got '$out'"
+  pass "herdr mcode registration: the stateless unknown status is decided by the process view"
 }
 
 # --- the bound agent session reference (relaunch session continuity) --------
@@ -6027,6 +6046,7 @@ test_stale_registration_ignores_status_and_reads_the_process
 test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
 test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable
 test_registered_agent_with_a_live_foreground_process_stays_alive
+test_stateless_mcode_registration_is_decided_by_the_process_view
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive
 test_transient_prompt_helper_settles_into_stale_agent
 test_exhausted_settle_window_keeps_a_non_shell_foreground_live
