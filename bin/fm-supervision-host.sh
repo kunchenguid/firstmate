@@ -561,10 +561,11 @@ stream_ready_line() {
 }
 
 # Warm-cache compaction (bin/fm-warm-compact-lib.sh owns the gate and the
-# guards). The park is the primary's idle episode: the owner starts the host at
-# the primary's turn end and the host exits when main is needed. The engine
-# conversation's episode is the time since its last handled turn. Each is
-# compacted at most once per episode, and neither result reaches the close.
+# guards)
+# Direct primary conversation can continue during a park, so the transcript
+# owns primary idle age; park age only schedules ticks
+# Engine idle age remains time since the last handled turn
+# No result reaches the close; primary attempts remain once per park
 WARM_COMPACT_LAST_TICK=-1
 WARM_COMPACT_PRIMARY_DONE=0
 WARM_COMPACT_VERDICT=
@@ -580,7 +581,7 @@ warm_compact_tick() {
   turn_crosses_boundary && return 0
   if [ "$PRIMARY" = claude ] && [ "$WARM_COMPACT_PRIMARY_DONE" -eq 0 ] && [ -n "${FM_WARM_COMPACT_TRANSCRIPT:-}" ] \
     && target=$(discover_supervisor_target) && backend=$(discover_supervisor_backend); then
-    verdict=$(fm_warm_compact_primary "$CONFIG" "$backend" "$target" "$PARK_ELAPSED" "$FM_WARM_COMPACT_TRANSCRIPT" 0)
+    verdict=$(fm_warm_compact_primary "$CONFIG" "$backend" "$target" "$FM_WARM_COMPACT_TRANSCRIPT" 0)
     case "$verdict" in sent | failed) WARM_COMPACT_PRIMARY_DONE=1; log_line "warm-compact	primary	$verdict" ;; esac
   fi
   if fm_supervision_host_config "$CONFIG" "$PRIMARY" && [ -n "$FM_SUPERVISION_ENGINE" ] && engine_record_resumable; then
