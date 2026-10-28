@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fm-claude-account-quota.sh - measure each Claude account a home declares in
-# config/claude-accounts, in isolation, and show which one quota favors.
+# config/claude-accounts, in isolation, and print each one's quota facts.
 #
 # Usage:
 #   fm-claude-account-quota.sh [--model <model>]
@@ -20,25 +20,19 @@
 #
 # Each entry binds to its own snapshot's claude row and to the scopes that bound
 # --model: all_models/all_products plus model:<id> and product:<id> for the
-# bare id. The eligibility and ranking rules are the quota-array-dispatch
-# skill's, applied to accounts instead of profiles: an exhausted_now runway or a
-# known 0% scope is not eligible; an unmeasured account, an unknown scope, or a
-# non-numeric spendPriority stays eligible but unranked; a ranked account
-# carries its limiting scope's spendPriority. The highest known spendPriority is
-# shown as the account to pass; a genuine tie, or no rankable account,
-# escalates instead of picking by file order.
+# bare id. This prints facts only; it never judges eligibility or picks an
+# account. The quota-array-dispatch skill applies its gates and spendPriority
+# ranking to these rows and chooses the --account to pass.
 #
-# Output (stdout, TOON-style block):
+# Output (stdout, TOON-style block), one or more lines per declared entry in
+# file order:
 #   claude-account-quota:
-#     status: clear | escalate | error
-#     reason: <why the status is not clear>
-#     candidate: <entry>  scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
-#     account: --account <entry>     (status clear only)
-#   clear    -> pass the account line to fm-spawn.sh with the chosen profile,
-#               after the skill's reasoning-class and runway gates
-#   escalate -> decide in the open from the candidate rows, or ask the captain
-#   error    -> quota-axi is missing; decide as for unmeasured quota
-#   Outcomes exit 0. Exit 2 for a usage error, an absent list, or a list that
+#     row: <entry>  root=<dir>  scope=<scope>  status=..  remaining=..%  spendPriority=..  runway=..  confidence=..
+#     row: <entry>  root=<dir>  uncertainty: <why this account is not fully measured>
+#   Uncertainty names a failed or invalid read, quota-axi's own unknown or
+#   rate-limited state and reason, a missing claude row, or no applicable scope.
+#   A missing quota-axi prints `error: quota-axi not installed` in the block.
+#   Readings exit 0. Exit 2 for a usage error, an absent list, or a list that
 #   bin/fm-worker-account-lib.sh refuses, which is actionable, never selected
 #   around.
 #
@@ -92,14 +86,14 @@ LISTED=$(fm_worker_account_list claude "$CONFIG") || exit 2
 [ -n "$LISTED" ] || die "this home declares no config/claude-accounts; there is nothing to measure"
 
 if ! command -v quota-axi >/dev/null 2>&1; then
-  printf 'claude-account-quota:\n  status: error\n  reason: quota-axi not installed\n'
+  printf 'claude-account-quota:\n  error: quota-axi not installed\n'
   exit 0
 fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-claude-account-quota.XXXXXX") || die "cannot create a scratch directory"
 trap 'rm -rf "$WORK"' EXIT
 
-# Every entry becomes {account, snapshot} or {account, error}; jq does the rest.
+# Every entry becomes {account, root, snapshot} or {account, root, error}.
 : > "$WORK/accounts.jsonl"
 while IFS= read -r entry; do
   root=$entry
@@ -112,9 +106,9 @@ while IFS= read -r entry; do
     error="quota-axi could not read this account"
   fi
   if [ -n "$error" ]; then
-    jq -cn --arg account "$entry" --arg error "$error" '{account: $account, error: $error}'
+    jq -cn --arg account "$entry" --arg root "$root" --arg error "$error" '{account: $account, root: $root, error: $error}'
   else
-    jq -c --arg account "$entry" '{account: $account, snapshot: .}' "$WORK/snapshot.json"
+    jq -c --arg account "$entry" --arg root "$root" '{account: $account, root: $root, snapshot: .}' "$WORK/snapshot.json"
   fi >> "$WORK/accounts.jsonl" || die "cannot record the quota reading for $entry"
 done <<< "$LISTED"
 
@@ -128,51 +122,20 @@ jq -rs --arg model "$MODEL" '
       .scope == "all_models" or .scope == "all_products" or
       ($model != "" and (.scope == ("model:" + $b) or .scope == ("product:" + $b)))
     )];
-  def evaluate:
-    .account as $a |
-    if .error then {account: $a, eligible: true, unranked: true, reason: .error}
+  "claude-account-quota:",
+  (.[] | "  row: \(.account | flat)  root=\(.root | flat)" as $head |
+    if .error then "\($head)  uncertainty: \(.error | flat)"
     else
       ([.snapshot.providers[]? | select(.provider == "claude")] | first) as $row |
-      if $row == null then {account: $a, eligible: true, unranked: true, reason: "no claude quota row"}
+      if $row == null then "\($head)  uncertainty: no claude quota row"
       else
         applicable($row) as $rows |
-        if any($rows[]; (.runway.status // "") == "exhausted_now") then
-          ($rows | map(select((.runway.status // "") == "exhausted_now")) | first) as $bad |
-          {account: $a, scope: $bad.scope, pct: ($bad.effectivePercentRemaining // null), runway: $bad.runway.status, eligible: false, reason: "runway exhausted_now at \($bad.scope)"}
-        elif any($rows[]; .status == "known" and (.effectivePercentRemaining | type) == "number" and .effectivePercentRemaining <= 0) then
-          ($rows | map(select(.status == "known" and .effectivePercentRemaining <= 0)) | first) as $bad |
-          {account: $a, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: false, reason: "0% remaining at \($bad.scope)"}
-        elif (["known", "partial"] | index($row.quotaSemantics.status)) == null then
-          {account: $a, eligible: true, unranked: true, reason: "unmeasured (\($row.quotaSemantics.status)\(if $row.state.status then ": " + ($row.state.error // $row.state.status) else "" end))"}
-        elif ($rows | length) == 0 then
-          {account: $a, eligible: true, unranked: true, reason: "no applicable quota scope"}
-        elif any($rows[]; .status != "known") then
-          ($rows | map(select(.status != "known")) | first) as $bad |
-          {account: $a, scope: $bad.scope, eligible: true, unranked: true, reason: "quota scope \($bad.scope) unknown"}
-        elif any($rows[]; (.selection.spendPriority | type) != "number") then
-          ($rows | map(select((.selection.spendPriority | type) != "number")) | first) as $bad |
-          {account: $a, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: true, unranked: true, reason: "spendPriority missing at \($bad.scope)"}
-        else
-          ($rows | min_by(.selection.spendPriority)) as $lim |
-          {account: $a, scope: $lim.scope, pct: $lim.effectivePercentRemaining, runway: $lim.runway.status, spendPriority: $lim.selection.spendPriority, eligible: true}
-        end
+        (if (["known", "partial"] | index($row.quotaSemantics.status)) == null then
+          "\($head)  uncertainty: quota \(show($row.quotaSemantics.status))\(if $row.state.status then " (\($row.state.status | flat): \(show($row.state.error)))" else "" end)"
+         else empty end),
+        (if ($rows | length) == 0 then "\($head)  uncertainty: no applicable quota scope" else empty end),
+        ($rows[] | "\($head)  scope=\(.scope | flat)  status=\(show(.status))  remaining=\(show(.effectivePercentRemaining))%  spendPriority=\(show(.selection.spendPriority))  runway=\(show(.runway.status))"
+          + (if .confidence then "  confidence=\(.confidence | flat)" else "" end))
       end
-    end;
-  map(evaluate) as $cands |
-  [$cands[] | select(.eligible and ((.unranked // false) | not))] as $ranked |
-  (if ($ranked | length) == 0 then {status: "escalate", reason: "no rankable eligible account"}
-   else
-     ($ranked | max_by(.spendPriority)) as $best |
-     if ([$ranked[] | select(.spendPriority == $best.spendPriority)] | length) > 1
-     then {status: "escalate", reason: "genuine spendPriority tie"}
-     else {status: "clear", chosen: $best.account}
-     end
-   end) as $verdict |
-  "claude-account-quota:",
-  "  status: \($verdict.status)",
-  (if $verdict.reason then "  reason: \($verdict.reason)" else empty end),
-  ($cands[] | "  candidate: \(.account | flat)"
-    + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
-    + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat)" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
-  (if $verdict.chosen then "  account: --account \($verdict.chosen | flat | @sh)" else empty end)
-' "$WORK/accounts.jsonl" || die "cannot evaluate the quota readings"
+    end)
+' "$WORK/accounts.jsonl" || die "cannot format the quota readings"
