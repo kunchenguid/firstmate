@@ -1,7 +1,7 @@
 # Antigravity CLI
 
-Antigravity's `agy` TUI, verified end to end on 2026-09-10 with agy 1.2.0 on Linux through the Herdr backend.
-Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it because `../../../../../docs/supervision-protocols/` carries no agy wake protocol.
+Antigravity's `agy` TUI, verified end to end with agy 1.2.0+ on Linux through the Herdr backend.
+Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 `../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
 ## Operating facts
@@ -40,7 +40,7 @@ The unauthenticated failure mode was not observed, so treat any auth prompt or r
 
 Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy`, never `*agy*`.
 No environment marker is promoted: `AGENT=1` observed on a live TUI is an inherited launcher value, not an agy identity, and agy does not clear an inherited `CLAUDECODE` - but a structural agy ancestor now outranks that retained marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
-agy is deliberately absent from the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh`, where muse, gemini, and rovo are also absent: a crewmate-only adapter must never own a home session lock.
+agy is included in the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh`, allowing an agy session to hold a home session lock.
 
 ## Worker busy state and turn end
 
@@ -48,8 +48,11 @@ agy is deliberately absent from the session-lock name vocabulary in `../../../..
 `fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
 Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
-## Primary integration
+## Primary and secondmate integration
 
-Unsupported and unverified.
-`../../../../../docs/supervision-protocols/` carries no agy protocol, no turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, interrupt, and exit.
-`references/common/primary-hooks.md`'s unsupported-boundary rule applies: never invent a wake protocol from a similar TUI.
+Antigravity CLI loads `<workspace>/.agents/hooks.json` for hook lifecycle events.
+SessionStart executes `bin/fm-sessionstart-agy.sh` to inject the session-start digest into model context.
+PreToolUse invokes `bin/fm-arm-pretool-check.sh --agy`, `bin/fm-cd-pretool-check.sh --agy`, and `bin/fm-subagent-pretool-check.sh --agy`.
+Stop executes `bin/fm-turnend-guard-agy.sh`, which parks on a home-scoped watcher cycle running `bin/fm-watch.sh` and re-arms via `{"decision":"continue","reason":"..."}` with `[supervision-park]` on timeout, or delivers actionable wake output.
+A bounded 3-block repair nag is enforced via `bin/fm-turnend-guard.sh --agy` before failing open with `{}`.
+See `../../../../../docs/supervision-protocols/agy.md` for the complete supervision protocol.

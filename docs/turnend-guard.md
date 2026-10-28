@@ -24,6 +24,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 | How each harness blocks or follows up | [Harness integrations](#harness-integrations) |
 | Claude's Stop auto-arm cooperation, block budget, and fail-open | [Claude cooperative mode](#claude-cooperative-mode) |
 | Cursor's parked hook | [Cursor park](#cursor-park) |
+| Antigravity's parked hook | [Antigravity park](#antigravity-park) |
 | Known gaps | [Compatibility limits](#compatibility-limits) |
 | Tests and live evidence | [Regression coverage](#regression-coverage) |
 
@@ -262,6 +263,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 | omp | `session_stop` in `.omp/extensions/fm-primary-turnend-guard.ts` | Blocking hook that compels one continuation |
 | Cursor | `stop` hook in `.cursor/hooks.json` | Cannot block, so it parks and returns at most one follow-up |
 | Grok | `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` | Native blocking, or one legacy `grok --resume` fallback |
+| Antigravity | `Stop` hook in `.agents/hooks.json` | Synchronous Stop-hook park running `bin/fm-watch.sh` with bounded repair nag via `bin/fm-turnend-guard.sh --agy` |
 
 The registrations in detail:
 
@@ -301,6 +303,9 @@ The registrations in detail:
   The discriminator is the payload's own `transcript_path`, not the environment and not the shared foreign-host predicate above.
   pi-code stamps it with Pi's session file under `/.pi/`, a path component a Claude transcript never carries.
   The stand-down fails toward running, matching the guards above, so no payload, no `jq`, or no `transcript_path` still arms, and every other Claude-shaped hook pi-code delivers keeps running.
+- Antigravity registers a `Stop` hook in `.agents/hooks.json` with a 360s timeout, anchoring commands safely to the project root and delegating the turn boundary to `bin/fm-turnend-guard-agy.sh`.
+  In linked crewmate worktrees or foreign checkouts, the wrapper stands down immediately with `{}`.
+  In primary or persistent secondmate homes, the hook parks synchronously inside `bin/fm-watch.sh`, keeping supervision continuity alive until an incoming wake event arrives or a bounded repair nag is returned via `bin/fm-turnend-guard.sh --agy`.
 
 ### Claude and Codex blocking
 
@@ -523,6 +528,20 @@ Without those records an older park still running after the next `stop` could le
 Cursor's `beforeSubmitPrompt` step fires once on a real captain message and does not fire for hook-driven follow-ups, so invalidating the park baton there would close the pre-claim window exactly.
 The step is now registered only for the [dialog mirror](supervision-host.md#the-dialog-mirror); it does not invalidate the park baton.
 Baton invalidation and the `preCompact` surface remain deferred.
+
+### Antigravity park
+
+Antigravity CLI evaluates project-local `.agents/hooks.json` (Stop event) at the end of every agent turn.
+Like Cursor, Antigravity does not expose an asynchronous background rewake channel on Stop.
+`bin/fm-turnend-guard-agy.sh` parks a bounded foreground `bin/fm-watch.sh --timeout <poll>` inside the Stop hook itself:
+
+- An actionable wake drained by the watcher resets `state/.turnend-blocks` and returns `{"decision":"continue","reason":"<wake-output>"}` on stdout, immediately starting a follow-up supervision turn with the wake output.
+- A poll timeout while work remains in flight returns `{"decision":"continue","reason":"[supervision-park] ..."}` so the agent re-parks the Stop watcher for the next window.
+- When the fleet becomes empty while parked, it resets `state/.turnend-blocks`, emits `{}`, and lets the turn end cleanly.
+- An unexpected failure or inability to establish a cycle delegates to `bin/fm-turnend-guard.sh --agy` for a bounded 3-block repair nag before failing open.
+
+Before parking, the hook stands down with `{}` in crewmate or scout linked worktrees, passes through non-normal termination reasons, enforces an execution count ceiling, and verifies session-lock ownership so a foreign session never steals supervision.
+Each invocation publishes a unique claim in `state/.agy-park-owner` and yields cleanly with `{}` if a newer Stop hook supersedes this park while waiting.
 
 ### Adapter failures in the pull guard
 

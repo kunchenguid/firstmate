@@ -40,6 +40,7 @@
 # Grok consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
 # Cursor consumes the stdout decision object.
+# Antigravity (agy) consumes the stdout decision object.
 set -u
 
 CMD=""
@@ -47,18 +48,21 @@ CMD_SET=0
 BACKGROUND=""
 CLAUDE_MODE=0
 CURSOR_MODE=0
+AGY_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor]
+Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor|--agy]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex/Cursor tool_input.command).
+toolInput.command, Antigravity toolCall.args.CommandLine/command, or
+Claude/Codex/Cursor tool_input.command).
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
 With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
 because Cursor reads the returned object rather than the exit status.
+With --agy, a deny is Antigravity's decision object on stdout and exit 0.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -93,6 +97,10 @@ while [ "$#" -gt 0 ]; do
       CURSOR_MODE=1
       shift
       ;;
+    --agy)
+      AGY_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -114,10 +122,10 @@ if [ "$CMD_SET" -eq 0 ]; then
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
-  if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  if [ "$CURSOR_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolCall.args.CommandLine // .toolCall.args.command // .toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
   [ -n "$CMD" ] || exit 0
   # Kept for transport parity only.
   # shellcheck disable=SC2034
@@ -170,6 +178,35 @@ ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
 ACTIVE_HOME=${FM_HOME:-$ROOT}
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
+}
+
+if [ "$AGY_MODE" -eq 1 ]; then
+  case "$CMD" in
+    *fm-watch-arm.sh*)
+      STATE="${FM_STATE_OVERRIDE:-$ACTIVE_HOME/state}"
+      WATCH_PATH="$ACTIVE_HOME/bin/fm-watch.sh"
+      if [ -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
+        # shellcheck source=bin/fm-wake-lib.sh
+        . "$SCRIPT_DIR/fm-wake-lib.sh"
+        if fm_watcher_healthy "$STATE" "$WATCH_PATH" "${FM_GUARD_GRACE:-300}" "$ACTIVE_HOME"; then
+          CODE="manual-arm-redundant"
+          REASON="manual watcher arm is denied because watcher supervision is already healthy; the Stop-hook park (bin/fm-turnend-guard-agy.sh) maintains continuity automatically"
+          DETAIL="[$CODE] $REASON"
+          if command -v jq >/dev/null 2>&1; then
+            jq -cn --arg r "$DETAIL" '{decision:"deny",reason:$r}'
+          else
+            ESCAPED=$(json_escape "$DETAIL")
+            printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+          fi
+          exit 0
+        fi
+      fi
+      ;;
+  esac
+fi
+
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
@@ -185,14 +222,18 @@ CODE=${REST%%"$TAB"*}
 REASON=${REST#*"$TAB"}
 [ -n "$CODE" ] && [ -n "$REASON" ] && [ "$REASON" != "$REST" ] || exit 0
 
-json_escape() {
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
-}
-
 DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 if [ "$CURSOR_MODE" -eq 1 ]; then
   printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
+if [ "$AGY_MODE" -eq 1 ]; then
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg r "$DETAIL" '{decision:"deny",reason:$r}'
+  else
+    printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+  fi
   exit 0
 fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
