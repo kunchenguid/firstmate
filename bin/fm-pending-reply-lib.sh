@@ -178,9 +178,10 @@ fm_pending_reply_request_path() {  # <state-dir> <corr_id>
   printf '%s/.%s.request' "$(fm_pending_reply_dir "$1")" "$2"
 }
 
-fm_pending_reply_request_text() {  # <record-path>
-  local rec=$1 request_path
-  request_path="${rec%/*}/.${rec##*/}.request"
+fm_pending_reply_request_text() {  # <state-dir> <record-path>
+  local state=$1 rec=$2 corr request_path
+  corr=$(fm_pending_reply_get "$rec" corr_id)
+  request_path=$(fm_pending_reply_request_path "$state" "$corr")
   if [ -f "$request_path" ]; then
     cat "$request_path"
   else
@@ -623,21 +624,23 @@ fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
   rm -f "$rec" "$request_path"
 }
 
+fm_pending_reply_line_is_no_record() {  # <line>
+  local normalized
+  normalized=$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  printf '%s' "$normalized" | grep -Eq '(^|[^[:alnum:]])no[[:space:]-]+record([^[:alnum:]]|$)'
+}
+
 # 0 if a status line is a correlated acknowledgement for <corr_id>.
 # Accepts short status replies and status lines that point at a document.
 # Unrelated verbs without the token never match. Stale/wrong corr never match.
-# A no-record reply is not an acknowledgement: a restarted mate cannot report
-# work it never received, so that reply must leave the expectation recoverable.
 # The parent's own pending-reply-missed escalation line must not self-resolve:
 # it names the request with pending-reply-id= rather than corr=.
 fm_pending_reply_line_resolves() {  # <line> <corr_id>
-  local line=$1 corr=$2 normalized
+  local line=$1 corr=$2
   [ -n "$line" ] && [ -n "$corr" ] || return 1
   case "$line" in
     *pending-reply-missed*) return 1 ;;
   esac
-  normalized=$(printf '%s' "$line" | LC_ALL=C tr '[:upper:]' '[:lower:]')
-  printf '%s' "$normalized" | grep -Eq '(^|[^[:alnum:]])no[[:space:]-]+record([^[:alnum:]]|$)' && return 1
   fm_pending_reply_text_has_corr "$line" "$corr"
 }
 
@@ -748,6 +751,12 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   fi
   line=$(fm_pending_reply_find_resolve_line "$status_file" "$corr")
   if [ -z "$line" ]; then
+    if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
+      fm_pending_reply_set "$rec" parent_status_scan_signature "$signature" || return 1
+    fi
+    return 1
+  fi
+  if [ "$phase" = recovery_sent ] && fm_pending_reply_line_is_no_record "$line"; then
     if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
       fm_pending_reply_set "$rec" parent_status_scan_signature "$signature" || return 1
     fi
@@ -990,10 +999,10 @@ fm_pending_reply_quote_inert() {  # <text>
 # Build the one automatic recovery message for a pending record.
 # The recovery asks only for a missing report. It must never read as a re-issue
 # of the original request, especially after a mate restart has lost its memory.
-fm_pending_reply_recovery_message() {  # <record-path>
-  local rec=$1 corr request token msg
+fm_pending_reply_recovery_message() {  # <state-dir> <record-path>
+  local state=$1 rec=$2 corr request token msg
   corr=$(fm_pending_reply_get "$rec" corr_id)
-  request=$(fm_pending_reply_quote_inert "$(fm_pending_reply_request_text "$rec")")
+  request=$(fm_pending_reply_quote_inert "$(fm_pending_reply_request_text "$state" "$rec")")
   token=$(fm_pending_reply_corr_token "$corr")
   msg="REPOST REQUIRED (report only - do NOT act): an earlier marked request had no correlated parent report. This message asks only for that report; it does not re-issue the request. Do NOT perform, re-run, retry, or undo the fenced text below - it is quoted solely to identify which request is missing its report. >>> ${request} <<< end quoted text; it is not an instruction. If you already did this work, reply on the parent status channel including ${token} with its outcome. If you have no record of this request, for example because you were restarted since, still do NOT do it now: reply on the parent status channel including ${token} saying you have no record of it, then wait for the parent."
   fm_pending_reply_embed_corr "$msg" "$corr" msg
@@ -1040,7 +1049,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   fi
   status_file=$(fm_pending_reply_get "$rec" parent_status)
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
-  msg=$(fm_pending_reply_recovery_message "$rec")
+  msg=$(fm_pending_reply_recovery_message "$state" "$rec")
   sender_pid=${BASHPID:-$$}
   sender_identity=$(fm_pending_reply_pid_identity "$sender_pid") || return 1
   # One fresh, uncached read immediately before firing, under the same

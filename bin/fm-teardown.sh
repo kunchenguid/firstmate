@@ -857,7 +857,7 @@ handoff_wake_retire_validate() {
 }
 
 handoff_wake_retire() {
-  local marker=$HANDOFF_WAKE_RETIRE_MARKER corr=$HANDOFF_WAKE_RETIRE_CORR lock rec confirmation rc=0
+  local marker=$HANDOFF_WAKE_RETIRE_MARKER corr=$HANDOFF_WAKE_RETIRE_CORR lock rec confirmation request rc=0
   [ -n "$marker" ] || return 0
   [ -f "$marker" ] && [ ! -L "$marker" ] \
     && [ "$(cat "$marker" 2>/dev/null || true)" = "$HANDOFF_WAKE_RETIRE_VALUE" ] || return 1
@@ -866,10 +866,11 @@ handoff_wake_retire() {
     fm_lock_acquire_wait "$lock" || return 1
     rec=$(fm_pending_reply_path "$STATE" "$corr")
     confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
+    request=$(fm_pending_reply_request_path "$STATE" "$corr")
     if { [ ! -e "$rec" ] && [ ! -L "$rec" ]; } \
       || { [ -f "$rec" ] && [ ! -L "$rec" ] \
         && [ "$(fm_pending_reply_get "$rec" task_id)" = "$ID" ]; }; then
-      rm -f -- "$confirmation" "$rec" "$marker" || rc=$?
+      rm -f -- "$confirmation" "$request" "$rec" "$marker" || rc=$?
     else
       rc=1
     fi
@@ -880,7 +881,7 @@ handoff_wake_retire() {
 }
 
 handoff_wake_retire_stage_restore() {
-  local stage=$HANDOFF_WAKE_RETIRE_STAGE marker rec confirmation name destination
+  local stage=$HANDOFF_WAKE_RETIRE_STAGE marker rec confirmation request name destination
   [ -n "$stage" ] || return 0
   marker="$STATE/.backlog-handoff-$ID.wake-pending"
   rec=
@@ -888,12 +889,14 @@ handoff_wake_retire_stage_restore() {
   if [ -n "$HANDOFF_WAKE_RETIRE_CORR" ]; then
     rec=$(fm_pending_reply_path "$STATE" "$HANDOFF_WAKE_RETIRE_CORR")
     confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$HANDOFF_WAKE_RETIRE_CORR")
+    request=$(fm_pending_reply_request_path "$STATE" "$HANDOFF_WAKE_RETIRE_CORR")
   fi
-  for name in record confirmation marker; do
+  for name in record confirmation request marker; do
     [ -e "$stage/$name" ] || continue
     case "$name" in
       record) destination=$rec ;;
       confirmation) destination=$confirmation ;;
+      request) destination=$request ;;
       marker) destination=$marker ;;
     esac
     [ -n "$destination" ] && [ ! -e "$destination" ] && [ ! -L "$destination" ] \
@@ -944,7 +947,7 @@ handoff_wake_retire_stage_recover() {
     return 1
   }
   local staged
-  for staged in "$stage/marker" "$stage/record" "$stage/confirmation"; do
+  for staged in "$stage/marker" "$stage/record" "$stage/confirmation" "$stage/request"; do
     [ ! -e "$staged" ] && [ ! -L "$staged" ] && continue
     [ -f "$staged" ] && [ ! -L "$staged" ] || {
       echo "REFUSED: receiver wake retirement state for secondmate $ID is unsafe" >&2
@@ -966,7 +969,7 @@ handoff_wake_retire_stage_recover() {
 
 handoff_wake_retire_stage() {
   local stage="$STATE/.backlog-handoff-$ID.wake-retiring" marker=$HANDOFF_WAKE_RETIRE_MARKER
-  local corr=$HANDOFF_WAKE_RETIRE_CORR rec confirmation
+  local corr=$HANDOFF_WAKE_RETIRE_CORR rec confirmation request
   [ -n "$marker" ] || return 0
   [ ! -e "$stage" ] && [ ! -L "$stage" ] || return 1
   (umask 077; mkdir -- "$stage") || return 1
@@ -981,11 +984,16 @@ handoff_wake_retire_stage() {
     }
     rec=$(fm_pending_reply_path "$STATE" "$corr")
     confirmation=$(fm_pending_reply_delivery_confirmation_path "$STATE" "$corr")
+    request=$(fm_pending_reply_request_path "$STATE" "$corr")
     if [ -e "$rec" ] && ! mv -- "$rec" "$stage/record"; then
       handoff_wake_retire_stage_restore || true
       return 1
     fi
     if [ -e "$confirmation" ] && ! mv -- "$confirmation" "$stage/confirmation"; then
+      handoff_wake_retire_stage_restore || true
+      return 1
+    fi
+    if [ -e "$request" ] && ! mv -- "$request" "$stage/request"; then
       handoff_wake_retire_stage_restore || true
       return 1
     fi
@@ -1090,7 +1098,7 @@ remote_recovery_paths_validate() {
 # confirmation when present. Shared by local and remote secondmate retirement
 # after the home/route is safely gone.
 pending_replies_cleanup_for_task() {
-  local pending_dir=$1 expected_real=${2-} rec base corr task_id
+  local pending_dir=$1 expected_real=${2-} rec base corr task_id request_path
   [ -d "$pending_dir" ] || return 0
   (
     CDPATH='' cd -- "$pending_dir" 2>/dev/null || exit 1
@@ -1106,7 +1114,8 @@ pending_replies_cleanup_for_task() {
       printf '%s' "$base" | grep -Eq '^[a-f0-9]{16}$' || exit 1
       corr=$(fm_meta_get "$rec" corr_id)
       [ -z "$corr" ] || [ "$corr" = "$base" ] || exit 1
-      rm -f -- "./.delivery-confirmed-$base" "$rec" || exit 1
+      request_path="./.${base}.request"
+      rm -f -- "./.delivery-confirmed-$base" "$request_path" "$rec" || exit 1
     done
   )
 }

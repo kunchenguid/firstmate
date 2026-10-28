@@ -2140,12 +2140,19 @@ test_recovery_keeps_full_request_and_no_record_is_not_recovery() {
   export FM_PENDING_REPLY_SEND_HOOK=full_request_hook
 
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$request")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: audited access logs, no record of the leaked key\n' "$corr" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "a first-pass report containing no record should resolve"
+
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$request")
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ "$(cat "$(fm_pending_reply_request_path "$state" "$corr")")" = "$request" ] \
     || fail "the complete original request must be durable"
   [ "$(fm_pending_reply_get "$rec" request_summary)" != "$request" ] \
     || fail "the bounded summary must remain separate from the full request"
   fm_pending_reply_mark_delivered "$state" "$corr"
+  : > "$state/hibit.status"
   fm_pending_reply_observe_busy "$state" "$corr" busy
   fm_pending_reply_observe_busy "$state" "$corr" idle
   fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery should send"
