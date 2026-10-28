@@ -286,6 +286,28 @@ test_park_boundary_ends_the_park_before_the_hook_timeout() {
 }
 
 
+test_park_boundary_hands_an_acknowledged_episode_back_announced() {
+  local home acknowledged
+  home=$(make_home boundary-acked attended)
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "acked boundary: the host never started a watcher cycle"
+  sleep 2
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_wake_append signal handled "signal: handled before the boundary"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" || fail "fixture: could not queue the handled wake"
+  main_drain_and_ack "$home"
+  acknowledged=$(cat "$home/state/.watcher-down" 2>/dev/null || true)
+  case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
+  watcher_live "$home" || fail "fixture: the watcher exited before the boundary"
+  echo 60 > "$home/park-clock"
+  wait_until 150 host_exited "$home" || fail "acked boundary: the host did not end its park"
+  watcher_live "$home" && fail "the park boundary left the watcher running"
+  assert_re '^announced:downtime:' "$home/state/.watcher-down" \
+    "the park boundary must hand an acknowledged episode back as announced, not pending"
+  pass "host: the park boundary hands an acknowledged episode back as announced"
+}
+
 # A close that lands while a turn is running can only wait: the host ends its
 # park at the bound regardless of how many closes are queued behind it. The
 # park runs on the test clock (FM_TEST_SUPERVISION_HOST_CLOCK), which the test
@@ -673,6 +695,7 @@ fm_test_run \
   test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted \
   test_compaction_abandoned_at_the_park_boundary_is_not_marked_done \
   test_park_boundary_ends_the_park_before_the_hook_timeout \
+  test_park_boundary_hands_an_acknowledged_episode_back_announced \
   test_park_boundary_holds_under_back_to_back_closes \
   test_park_boundary_rechecked_just_before_the_engine_turn \
   test_park_test_clock_requires_the_marker \
