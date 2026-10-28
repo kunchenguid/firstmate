@@ -1637,6 +1637,33 @@ STUB
   pass "forge=forgejo: spawn agreement and promotion carry the binding, name tea, and keep yolo"
 }
 
+# azure-devops is a value of the same binding: the spawn refuses a brief that
+# drops it and accepts an agreeing one with +yolo, because an Azure DevOps pull
+# request is completed through the ordinary merge authority.
+test_forge_azure_devops_rides_the_same_binding() {
+  local rec home proj fakebin out status
+  rec=$(make_home forge-azure-devops "- proj [direct-PR +yolo forge=azure-devops] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" forge-ado-s1 direct-PR
+  out=$(run_spawn "$home" "$fakebin" forge-ado-s1 "$proj" claude --mode direct-PR --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an azure-devops project launched on a brief that records no forge"
+  assert_contains "$out" "forge mismatch for forge-ado-s1" "the refusal did not name the drift it caught"
+  assert_contains "$out" "fm-brief.sh forge-ado-s1 proj --mode direct-PR --forge azure-devops" \
+    "the refusal did not print the azure-devops re-scaffold command"
+  assert_absent "$home/state/forge-ado-s1.meta" "the refused spawn still recorded a task"
+
+  FM_HOME="$home" "$BRIEF" forge-ado-s2 proj --mode direct-PR --forge azure-devops >/dev/null \
+    || fail "an azure-devops direct-PR brief should scaffold"
+  fill_brief_subsections "$home/data/forge-ado-s2/brief.md" "Open the pull request." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" forge-ado-s2 "$proj" claude --mode direct-PR --yolo on 2>&1)
+  assert_not_contains "$out" "forge mismatch" "an agreeing azure-devops brief and registry were reported as drift"
+  assert_not_contains "$out" "--yolo on is refused" "yolo was refused on azure-devops, where only gerrit and external deactivate it"
+  pass "forge=azure-devops: the spawn's agreement check carries the binding and keeps yolo"
+}
+
 # direct-PR composes with the forge: the mode still means "publish without the
 # pipeline", and on Gerrit publishing is one gerrit-axi call rather than a push
 # plus a pull request. The worker reports the published change, never submits or
@@ -1766,6 +1793,7 @@ test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_forge_forgejo_rides_the_same_binding
+test_forge_azure_devops_rides_the_same_binding
 test_spawn_and_promote_require_filled_task_subsections
 test_project_mode_resolves_branch_prefix
 echo "# all fm-task-delivery tests passed"

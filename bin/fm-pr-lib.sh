@@ -5,12 +5,15 @@
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
 # "path" is the full project path, which is owner/repository on GitHub and
-# Forgejo, an arbitrarily nested group/subgroup/project namespace on GitLab, and
-# an arbitrarily nested project name on Gerrit, where "number" is the change
-# number. A GitLab or Gerrit project can sit at any depth, so no
-# owner/repository pair can address one and the sidecar carries the whole path
-# instead. GitLab, Gerrit, and Forgejo all run on self-hosted instances, and
-# Gerrit runs nowhere else, so the host is part of that identity rather than a
+# Forgejo, an arbitrarily nested group/subgroup/project namespace on GitLab, an
+# arbitrarily nested project name on Gerrit, where "number" is the change
+# number, and on Azure DevOps everything between the host and /pullrequest/,
+# which is where its organization, optional collection, project, and repository
+# live (fm_pr_azure_devops_parts). A GitLab or Gerrit project can sit at any
+# depth, so no owner/repository pair can address one and the sidecar carries
+# the whole path instead. GitLab, Gerrit, and Forgejo all run on self-hosted
+# instances, Gerrit runs nowhere else, and Azure DevOps Services serves two
+# host forms, so the host is part of that identity rather than a
 # constant. GitHub runs on github.com and on GitHub Enterprise (Cloud *.ghe.com
 # and Enterprise Server), so its host is part of that identity too. Every
 # consumer re-derives the identity
@@ -31,6 +34,10 @@ FM_PR_PATH=
 FM_PR_OWNER=
 FM_PR_REPO=
 FM_PR_NUMBER=
+FM_PR_AZURE_DEVOPS_DECODED=
+FM_PR_AZURE_DEVOPS_ORG_URL=
+FM_PR_AZURE_DEVOPS_PROJECT=
+FM_PR_AZURE_DEVOPS_REPO=
 FM_PR_DATA_PROVIDER=
 FM_PR_DATA_URL=
 FM_PR_DATA_HOST=
@@ -242,18 +249,118 @@ fm_pr_github_host_export() {  # <host>
   export GH_HOST
 }
 
+# An Azure DevOps organization name: letters, digits, and inner hyphens, at
+# most 50 characters. It is also a DNS label in the <org>.visualstudio.com
+# form, where fm_pr_url_parse already requires it in lowercase.
+fm_pr_azure_devops_org_valid() {
+  local org=${1-}
+  local LC_ALL=C
+  [ "${#org}" -ge 1 ] && [ "${#org}" -le 50 ] || return 1
+  case "$org" in
+    -*|*-|*[!A-Za-z0-9-]*) return 1 ;;
+  esac
+}
+
+# An Azure DevOps project or repository name reaches a URL as one
+# percent-encoded path segment, so "Contoso%20Core" is canonical rather than
+# mangled. Only RFC 3986 unreserved characters, plus the "&" and "@" that
+# no-mistakes leaves bare when it builds a pull request URL, appear literally;
+# every other byte is an uppercase %XX escape. An escape of an unreserved
+# character is refused so a name keeps one spelling, and an escape that decodes
+# to a control character, "/", or "\" is refused because it would name
+# something other than what the URL shows. On success
+# FM_PR_AZURE_DEVOPS_DECODED holds the decoded name.
+fm_pr_azure_devops_segment_valid() {
+  local segment=${1-} rest hex
+  local LC_ALL=C
+  FM_PR_AZURE_DEVOPS_DECODED=
+  [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 1024 ] || return 1
+  case "$segment" in
+    *[!A-Za-z0-9._~\&@%-]*) return 1 ;;
+  esac
+  rest=$segment
+  while :; do
+    case "$rest" in
+      *%*) rest=${rest#*%} ;;
+      *) break ;;
+    esac
+    hex=${rest:0:2}
+    case "$hex" in
+      [0-9A-F][0-9A-F]) ;;
+      *) return 1 ;;
+    esac
+    case "$hex" in
+      [01]?|7F|2F|5C|2D|2E|3[0-9]|4[1-9A-F]|5[0-9A]|5F|6[1-9A-F]|7[0-9A]|7E) return 1 ;;
+    esac
+  done
+  # Every "%" now starts a validated two-digit escape and the segment holds no
+  # backslash, so %b sees only the \xNN sequences built here.
+  printf -v FM_PR_AZURE_DEVOPS_DECODED '%b' "${segment//%/\\x}"
+  [ "${#FM_PR_AZURE_DEVOPS_DECODED}" -ge 1 ] && [ "${#FM_PR_AZURE_DEVOPS_DECODED}" -le 255 ] || return 1
+  case "$FM_PR_AZURE_DEVOPS_DECODED" in
+    .|..) return 1 ;;
+  esac
+}
+
+# The --organization URL az needs and the decoded project and repository of an
+# Azure DevOps Services path (see fm_pr_url_parse for the two URL forms).
+# dev.azure.com carries the organization as the first path segment, and
+# <org>.visualstudio.com carries it in the host, where the one collection
+# Azure DevOps Services has, DefaultCollection, may lead the path; az addresses
+# both through the organization URL alone. Sets FM_PR_AZURE_DEVOPS_ORG_URL,
+# FM_PR_AZURE_DEVOPS_PROJECT, and FM_PR_AZURE_DEVOPS_REPO.
+fm_pr_azure_devops_parts() {  # <host> <path>
+  local host=${1-} path=${2-} org_url project
+  local LC_ALL=C
+  local -a segments
+  FM_PR_AZURE_DEVOPS_ORG_URL=
+  FM_PR_AZURE_DEVOPS_PROJECT=
+  FM_PR_AZURE_DEVOPS_REPO=
+  [ "${#path}" -ge 7 ] && [ "${#path}" -le 2048 ] || return 1
+  case "$path" in
+    /*|*/|*//*) return 1 ;;
+  esac
+  IFS=/ read -ra segments <<< "$path"
+  case "$host" in
+    dev.azure.com)
+      [ "${#segments[@]}" -eq 4 ] || return 1
+      fm_pr_azure_devops_org_valid "${segments[0]}" || return 1
+      org_url="https://dev.azure.com/${segments[0]}"
+      segments=("${segments[@]:1}")
+      ;;
+    *.visualstudio.com)
+      fm_pr_azure_devops_org_valid "${host%.visualstudio.com}" || return 1
+      if [ "${#segments[@]}" -eq 4 ]; then
+        [ "${segments[0]}" = DefaultCollection ] || return 1
+        segments=("${segments[@]:1}")
+      fi
+      [ "${#segments[@]}" -eq 3 ] || return 1
+      org_url="https://$host"
+      ;;
+    *) return 1 ;;
+  esac
+  [ "${segments[1]}" = _git ] || return 1
+  fm_pr_azure_devops_segment_valid "${segments[0]}" || return 1
+  project=$FM_PR_AZURE_DEVOPS_DECODED
+  fm_pr_azure_devops_segment_valid "${segments[2]}" || return 1
+  FM_PR_AZURE_DEVOPS_ORG_URL=$org_url
+  FM_PR_AZURE_DEVOPS_PROJECT=$project
+  FM_PR_AZURE_DEVOPS_REPO=$FM_PR_AZURE_DEVOPS_DECODED
+}
+
 # Parse a canonical pull request, merge request, or Gerrit change URL into the
 # provider-tagged identity. Validation is strict and per provider: the GitHub
-# username and repository rules are unchanged, and GitLab, Gerrit, and Forgejo
-# each get their own namespace rules rather than a loosened GitHub rule.
+# username and repository rules are unchanged, and GitLab, Gerrit, Forgejo, and
+# Azure DevOps each get their own namespace rules rather than a loosened GitHub
+# rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github and forgejo
-# because bin/fm-pr-merge.sh addresses both by owner/repository. A gitlab or
-# gerrit URL leaves them empty, and those paths address the project by FM_PR_HOST and
-# FM_PR_PATH instead, so a change on any instance resolves without a hardcoded
-# host.
+# because bin/fm-pr-merge.sh addresses both by owner/repository. A gitlab,
+# gerrit, or azure-devops URL leaves them empty, and those paths address the
+# project by FM_PR_HOST and FM_PR_PATH instead, so a change on any instance
+# resolves without a hardcoded host.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path number
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -278,6 +385,27 @@ fm_pr_url_parse() {
     # shellcheck disable=SC2034
     FM_PR_REPO=${BASH_REMATCH[3]}
     FM_PR_NUMBER=${BASH_REMATCH[4]}
+    return 0
+  fi
+  # Azure DevOps Services serves a pull request at
+  # https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/<id> and at
+  # https://<org>.visualstudio.com/[DefaultCollection/]<project>/_git/<repo>/pullrequest/<id>,
+  # and no-mistakes reports the second form without the collection while
+  # Azure DevOps' own repository URL keeps it, so both spellings are accepted
+  # as written rather than rewritten into one. The singular "pullrequest" route
+  # matches no other forge's shape. A pull request id is a 32-bit integer.
+  pattern='^https://(dev\.azure\.com|[a-z0-9-]{1,50}\.visualstudio\.com)/([A-Za-z0-9._~&@%/-]+)/pullrequest/([1-9][0-9]{0,9})$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    number=${BASH_REMATCH[3]}
+    [ "$number" -le 2147483647 ] || return 1
+    fm_pr_azure_devops_parts "$host" "$path" || return 1
+    FM_PR_PROVIDER=azure-devops
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=$number
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last
@@ -1304,6 +1432,95 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
   # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_change_carries_head.
   # shellcheck disable=SC2034
   FM_PR_RECORD_REVISION=$revision
+}
+
+# One Azure DevOps pull request read through az and printed as compact JSON,
+# only when it names exactly this pull request in exactly this project and
+# repository. A pull request id is unique per organization rather than per
+# repository, so az resolves any id in the organization; binding the answer to
+# the URL's project and repository keeps a URL that names another repository
+# from reading an unrelated pull request. Azure DevOps compares those names
+# case-insensitively. --detect false keeps az from consulting a git remote in
+# the current directory, so only the parsed organization is ever reached.
+# Returns 1 when the record cannot be read and 2 when it reads back as another
+# repository's pull request.
+fm_pr_azure_devops_read_pr() {  # <host> <path> <number>
+  local host=$1 path=$2 number=$3 json
+  command -v az >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_pr_azure_devops_parts "$host" "$path" || return 1
+  if ! json=$(az repos pr show --id "$number" --organization "$FM_PR_AZURE_DEVOPS_ORG_URL" \
+      --detect false --only-show-errors --output json 2>/dev/null) || [ -z "$json" ]; then
+    return 1
+  fi
+  printf '%s' "$json" | jq -e --argjson id "$number" '
+    type == "object" and .pullRequestId == $id
+    and (.repository | type) == "object" and (.repository.name | type) == "string"
+    and (.repository.project | type) == "object" and (.repository.project.name | type) == "string"
+  ' >/dev/null 2>&1 || return 1
+  printf '%s' "$json" | jq -e \
+    --arg project "$FM_PR_AZURE_DEVOPS_PROJECT" --arg repo "$FM_PR_AZURE_DEVOPS_REPO" '
+    (.repository.name | ascii_downcase) == ($repo | ascii_downcase)
+    and (.repository.project.name | ascii_downcase) == ($project | ascii_downcase)
+  ' >/dev/null 2>&1 || return 2
+  printf '%s' "$json" | jq -c . 2>/dev/null
+}
+
+# The state, merged flag, and source head of one Azure DevOps pull request.
+# Azure DevOps reports a pull request as active, completed, or abandoned, and a
+# completed one is merged only when it also names the commit its completion
+# made on the target (lastMergeCommit); a completed record without one is an
+# unreadable answer, never a merge. FM_PR_RECORD_HEAD is lastMergeSourceCommit,
+# the source commit the pull request last merged or completed with, and is
+# empty while Azure DevOps has not computed one.
+fm_pr_azure_devops_read_record() {  # <host> <path> <number>
+  local json fields line total=0 named=0 state='' merge='' head='' merged=false
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  FM_PR_RECORD_HEAD=
+  json=$(fm_pr_azure_devops_read_pr "$@") || return 1
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      def sha: if type == "string" then . else "" end;
+      if (.status | type) == "string" and .status != "" and (.status | test("\n") | not) then
+        "state=" + .status,
+        "merge=" + ((.lastMergeCommit.commitId // "") | sha),
+        "head=" + ((.lastMergeSourceCommit.commitId // "") | sha)
+      else
+        error("no status")
+      end' 2>/dev/null); then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merge=*) merge=${line#merge=} ;;
+      head=*) head=${line#head=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  [ "$named" -eq 3 ] && [ "$total" -eq 3 ] && [ -n "$state" ] || return 1
+  if [ "$state" = completed ]; then
+    fm_pr_head_valid "$merge" || return 1
+    merged=true
+  fi
+  fm_pr_head_valid "$head" || head=
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail and bin/fm-teardown.sh.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+  # Consumed by bin/fm-teardown.sh pr_is_merged.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_HEAD=$head
 }
 
 fm_pr_poll_retirement_data_valid() {

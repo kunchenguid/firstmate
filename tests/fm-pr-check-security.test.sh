@@ -368,6 +368,51 @@ INVALID_URLS=(
   'http://gerrit.example/c/proj/+/1'
   'https://github.com/c/proj/+/1'
   'https://gerrit.example/c/proj/+/1 '
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/0'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/01'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/2147483648'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/99999999999'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/1/'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/1?_a=overview'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/1#x'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequests/1'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/+1'
+  'https://fabrikam@dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/1'
+  'https://dev.azure.com:443/fabrikam/Fabrikam/_git/web-app/pullrequest/1'
+  'http://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/1'
+  'https://Dev.Azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/1'
+  'https://dev.azure.com.evil/fabrikam/Fabrikam/_git/web-app/pullrequest/1'
+  'https://evil.example/fabrikam/Fabrikam/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/Fabrikam/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/extra/pullrequest/1'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/pullrequest/1'
+  'https://dev.azure.com/-fabrikam/Fabrikam/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam//_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git//pullrequest/1'
+  'https://dev.azure.com/fabrikam/./_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/Fabrikam/_git/../pullrequest/1'
+  'https://dev.azure.com/fabrikam/O%2FP/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/O%2fP/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/O%41/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/O%2E%2E/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/O%5CP/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/O%00P/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/O%0AP/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/O%7FP/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/O%2/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/O%%41/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/Contoso Core/_git/web-app/pullrequest/1'
+  'https://dev.azure.com/fabrikam/O$P/_git/web-app/pullrequest/1'
+  'https://fabrikam.visualstudio.com/OtherCollection/Assistant/_git/Assistant/pullrequest/1'
+  'https://fabrikam.visualstudio.com/defaultcollection/Assistant/_git/Assistant/pullrequest/1'
+  'https://fabrikam.visualstudio.com/DefaultCollection/x/Assistant/_git/Assistant/pullrequest/1'
+  'https://Fabrikam.visualstudio.com/Assistant/_git/Assistant/pullrequest/1'
+  'https://fabrikam.visualstudio.com.evil/Assistant/_git/Assistant/pullrequest/1'
+  'https://-fabrikam.visualstudio.com/Assistant/_git/Assistant/pullrequest/1'
+  'https://a.b.visualstudio.com/Assistant/_git/Assistant/pullrequest/1'
+  'https://visualstudio.com/Assistant/_git/Assistant/pullrequest/1'
+  $'https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/1\n'
   'https://github.com/o/r/pull/1/'
   ' https://github.com/o/r/pull/1'
   'https://github.com/o/r/pull/1 '
@@ -475,7 +520,7 @@ UNSAFE_LIFECYCLE_IDS=(
 )
 
 test_parser_matrix() {
-  local id row url owner repo number
+  local id row url owner repo number host path org_url project
   while IFS='|' read -r url owner repo number; do
     [ -n "$url" ] || continue
     fm_pr_url_parse "$url" || fail "parser rejected canonical URL"
@@ -535,6 +580,30 @@ EOF
   done <<'EOF'
 https://git.example.com/fixture/fixture-repo/pulls/1|git.example.com|fixture|fixture-repo|1
 https://code.internal/my-org/repo.name_with-parts/pulls/123456|code.internal|my-org|repo.name_with-parts|123456
+EOF
+  # Both Azure DevOps Services URL forms keep the URL exactly as written, and
+  # the organization, decoded project, and decoded repository az addresses come
+  # from it; a percent-encoded project name decodes rather than being refused.
+  while IFS='|' read -r url host path number org_url project repo; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Azure DevOps pull request URL: $url"
+    [ "$FM_PR_PROVIDER" = azure-devops ] || fail "parser did not tag an Azure DevOps URL as azure-devops"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Azure DevOps pull request URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Azure DevOps host"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Azure DevOps path"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Azure DevOps pull request id"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for an Azure DevOps URL"
+    [ "$FM_PR_AZURE_DEVOPS_ORG_URL" = "$org_url" ] || fail "parser returned wrong Azure DevOps organization for $url"
+    [ "$FM_PR_AZURE_DEVOPS_PROJECT" = "$project" ] || fail "parser returned wrong Azure DevOps project for $url"
+    [ "$FM_PR_AZURE_DEVOPS_REPO" = "$repo" ] || fail "parser returned wrong Azure DevOps repository for $url"
+  done <<'EOF'
+https://dev.azure.com/fabrikam/Fabrikam/_git/web-app/pullrequest/1234|dev.azure.com|fabrikam/Fabrikam/_git/web-app|1234|https://dev.azure.com/fabrikam|Fabrikam|web-app
+https://fabrikam.visualstudio.com/DefaultCollection/Assistant/_git/Assistant/pullrequest/42|fabrikam.visualstudio.com|DefaultCollection/Assistant/_git/Assistant|42|https://fabrikam.visualstudio.com|Assistant|Assistant
+https://fabrikam.visualstudio.com/Assistant/_git/Assistant/pullrequest/42|fabrikam.visualstudio.com|Assistant/_git/Assistant|42|https://fabrikam.visualstudio.com|Assistant|Assistant
+https://contoso.visualstudio.com/Contoso%20Core/_git/Evaluation/pullrequest/4242|contoso.visualstudio.com|Contoso%20Core/_git/Evaluation|4242|https://contoso.visualstudio.com|Contoso Core|Evaluation
+https://contoso.visualstudio.com/DefaultCollection/Contoso%20Core/_git/Evaluation/pullrequest/2147483647|contoso.visualstudio.com|DefaultCollection/Contoso%20Core/_git/Evaluation|2147483647|https://contoso.visualstudio.com|Contoso Core|Evaluation
+https://dev.azure.com/my-org/R&D%28tools%29/_git/repo.name_with~parts/pullrequest/1|dev.azure.com|my-org/R&D%28tools%29/_git/repo.name_with~parts|1|https://dev.azure.com/my-org|R&D(tools)|repo.name_with~parts
 EOF
   # A Forgejo-shaped URL on github.com is refused (anti-spoofing, mirroring
   # fm_pr_forge_host_valid's refusal of github.com), and neither GitHub's
@@ -2210,6 +2279,141 @@ SH
   pass "Forgejo poll reads one pull request by number through tea api and wakes only on merged true"
 }
 
+# az reproducing `az repos pr show --output json` for one Azure DevOps pull
+# request, with the extension read `az extension show` answers. Its defaults
+# are an active, non-draft pull request in the fixture project and repository;
+# a case overrides the status, draft flag, repository, project, completion
+# commit, or id, or makes the read or the extension fail. Every invocation is
+# logged beside the case's fakebin.
+write_az_watch_stub() {
+  local dir=$1
+  cat > "$dir/fakebin/az" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$(cd "$(dirname "$0")/.." && pwd)/az.log"
+case "${1:-} ${2:-}" in
+  "extension show")
+    [ -z "${FM_TEST_AZ_NO_EXT:-}" ] || exit 1
+    exit 0
+    ;;
+  "repos pr") ;;
+  *) exit 2 ;;
+esac
+[ -z "${FM_TEST_AZ_FAIL:-}" ] || exit 1
+id=${FM_TEST_AZ_ID:-}
+prev=
+for arg in "$@"; do
+  [ "$prev" != --id ] || id=${id:-$arg}
+  prev=$arg
+done
+merge=null
+[ -z "${FM_TEST_AZ_MERGE:-}" ] || merge="{\"commitId\":\"$FM_TEST_AZ_MERGE\"}"
+printf '{"pullRequestId":%s,"status":"%s","isDraft":%s,"repository":{"name":"%s","project":{"name":"%s"}},"lastMergeCommit":%s}\n' \
+  "$id" "${FM_TEST_AZ_STATUS:-active}" "${FM_TEST_AZ_DRAFT:-false}" \
+  "${FM_TEST_AZ_REPO:-fixture-repo}" "${FM_TEST_AZ_PROJECT:-Fixture Project}" "$merge"
+SH
+  chmod +x "$dir/fakebin/az"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  : > "$dir/az.log"
+}
+
+# Arming an Azure DevOps watch needs az with its azure-devops extension and jq,
+# refuses a draft and a pull request id that reads back as another
+# repository's, and arms an unreadable one as GitHub does. The armed poll is
+# the static program, which wakes only on a completed pull request in exactly
+# this project and repository that names the commit its completion made.
+test_azure_devops_arm_and_watch() {
+  local dir state out rc url value merge
+  url='https://fixture.visualstudio.com/DefaultCollection/Fixture%20Project/_git/fixture-repo/pullrequest/7'
+  merge=5656565656565656565656565656565656565656
+
+  if ! PATH="$BASE_PATH" command -v az >/dev/null 2>&1; then
+    dir=$(make_case azure-devops-arm-no-az)
+    write_task_meta "$dir"
+    set +e
+    run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr"; rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "arming an Azure DevOps watch succeeded without az"
+    grep -qF 'requires az and jq on PATH' "$dir/stderr" || fail "the missing az refusal did not name az"
+    [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "a watch was armed without az"
+  fi
+
+  dir=$(make_case azure-devops-arm-no-extension)
+  write_task_meta "$dir"
+  write_az_watch_stub "$dir"
+  set +e
+  FM_TEST_AZ_NO_EXT=1 run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr"; rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming an Azure DevOps watch succeeded without the azure-devops extension"
+  grep -qF 'requires the az azure-devops extension' "$dir/stderr" \
+    || fail "the missing extension refusal did not name the extension"
+  ! grep -qF 'pr=' "$dir/home/state/task-a.meta" || fail "a refused watch recorded the pull request"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "a watch was armed without the extension"
+
+  for value in draft other-repo; do
+    dir=$(make_case "azure-devops-arm-$value")
+    write_task_meta "$dir"
+    write_az_watch_stub "$dir"
+    cp "$dir/home/state/task-a.meta" "$dir/meta.before"
+    set +e
+    if [ "$value" = draft ]; then
+      FM_TEST_AZ_DRAFT=true run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr"; rc=$?
+    else
+      FM_TEST_AZ_REPO=unrelated run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr"; rc=$?
+    fi
+    set -e
+    [ "$rc" -ne 0 ] || fail "arming accepted an Azure DevOps $value pull request"
+    grep -qF "$url" "$dir/stderr" || fail "the $value refusal did not name the pull request"
+    cmp -s "$dir/meta.before" "$dir/home/state/task-a.meta" || fail "a refused $value watch changed the task metadata"
+    [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "a refused $value watch armed a poll"
+    [ ! -s "$dir/guard.log" ] || fail "a refused $value watch reached the guard"
+  done
+  grep -qF 'does not name a pull request in that project and repository' "$dir/stderr" \
+    || fail "the other-repository refusal did not name the mismatch"
+
+  dir=$(make_case azure-devops-arm-unreadable)
+  write_task_meta "$dir"
+  write_az_watch_stub "$dir"
+  FM_TEST_AZ_FAIL=1 run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "an unreadable Azure DevOps pull request blocked arming"
+  [ -f "$dir/home/state/task-a.check.sh" ] || fail "an unreadable Azure DevOps pull request was not armed"
+
+  dir=$(make_case azure-devops-watch)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  write_az_watch_stub "$dir"
+  run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "arming refused a ready Azure DevOps pull request: $(cat "$dir/stderr")"
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "the Azure DevOps pull request was not recorded as written"
+  ! grep -q '^pr_head=' "$state/task-a.meta" || fail "an Azure DevOps task recorded a head"
+  [ -f "$state/task-a.check.sh" ] || fail "the Azure DevOps watch was not armed"
+  cmp -s "$state/task-a.check.sh" "$POLL" || fail "the armed Azure DevOps check is not the static poll"
+  grep -qF -- 'repos pr show --id 7 --organization https://fixture.visualstudio.com --detect false' "$dir/az.log" \
+    || fail "arming did not read the pull request by id in the URL's organization alone"
+
+  for value in active abandoned; do
+    out=$(FM_TEST_AZ_STATUS=$value FM_TEST_AZ_MERGE=$merge run_poll "$dir")
+    [ -z "$out" ] || fail "Azure DevOps poll emitted for an $value pull request"
+  done
+  out=$(FM_TEST_AZ_STATUS=completed run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for a completion that names no merge commit"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_MERGE=not-a-commit run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for a completion with a malformed merge commit"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_MERGE=$merge FM_TEST_AZ_REPO=unrelated run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for another repository's pull request"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_MERGE=$merge FM_TEST_AZ_PROJECT=Other run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for another project's pull request"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_MERGE=$merge FM_TEST_AZ_ID=8 run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for another pull request id"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_MERGE=$merge FM_TEST_AZ_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted after an az failure"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_MERGE=$merge FM_TEST_AZ_REPO=FIXTURE-REPO run_poll "$dir")
+  [ "$out" = merged ] || fail "Azure DevOps poll did not match the repository name case-insensitively"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_MERGE=$merge run_poll "$dir")
+  [ "$out" = merged ] || fail "Azure DevOps poll did not emit exactly one merged line"
+  [ ! -s "$dir/gh.log" ] || fail "an Azure DevOps watch reached the GitHub CLI"
+  pass "Azure DevOps arming refuses a draft or another repository's id and the poll wakes only on this pull request's landed completion"
+}
+
 # The one tea login for a Forgejo host is found by parsing
 # `tea login list --output json` as JSON, never by splitting each line on
 # quotes. The pretty-printed fixture below is byte-for-byte what tea 0.14.0
@@ -3764,6 +3968,7 @@ test_github_enterprise_config_resolution
 test_github_enterprise_hosts
 test_gitlab_merge_watch
 test_forgejo_merge_watch
+test_azure_devops_arm_and_watch
 test_forgejo_login_list_shapes
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision

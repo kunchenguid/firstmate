@@ -2579,6 +2579,670 @@ test_forgejo_merge_method_and_extra_args() {
   pass "fm-pr-merge maps --squash/--rebase to Forgejo's Do field, defaults to the repository's default merge style, and refuses any other extra argument"
 }
 
+# The Azure DevOps fixture: a placeholder organization on dev.azure.com, a
+# project name that needs percent-encoding, and the project and repository ids
+# the completion route names. az is always the mock below, so nothing resolves.
+AZ_ORG=fm-fixture
+AZ_PROJECT='Fixture Project'
+AZ_REPO=fixture-repo
+AZ_URL="https://dev.azure.com/$AZ_ORG/Fixture%20Project/_git/$AZ_REPO/pullrequest/9"
+AZ_PROJECT_ID=11111111-2222-3333-4444-555555555555
+AZ_REPO_ID=66666666-7777-8888-9999-000000000000
+AZ_HEAD=1212121212121212121212121212121212121212
+AZ_STALE_HEAD=3434343434343434343434343434343434343434
+AZ_MERGE_COMMIT=5656565656565656565656565656565656565656
+# Azure DevOps confirms an accepted completion asynchronously; the mock
+# confirms at once, so a case that never confirms need not wait between reads.
+export FM_PR_AZURE_DEVOPS_CONFIRM_DELAY=0
+
+# az mock recording every invocation in az.log. `repos pr show` answers from
+# az-pr.json, from az-pr-recheck.json once the policies were read (when that
+# file exists), and from az-pr-post.json once a completion was accepted, failing
+# while az-post-view-failures counts down; `repos pr policy list` answers from
+# az-policies.json; and `rest --method patch` is the one path that can complete
+# the pull request, copying its body to az-rest-body.json and failing with the
+# contents of az-rest-fails when that file exists, after completing the pull
+# request anyway when az-rest-applied also exists, as when the response is lost
+# after Azure DevOps applied the PATCH. az-no-extension makes the azure-devops
+# extension read fail.
+add_az_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/az" <<'SH'
+#!/usr/bin/env bash
+set -u
+case_dir=$(cd "$(dirname "$0")/.." && pwd)
+printf '%s\n' "$*" >> "$case_dir/az.log"
+case "${1:-} ${2:-} ${3:-}" in
+  "extension show "*)
+    [ ! -e "$case_dir/az-no-extension" ] || exit 1
+    ;;
+  "repos pr show")
+    [ ! -e "$case_dir/az-view-fails" ] || exit 1
+    if [ -e "$case_dir/az-completed" ]; then
+      if [ -s "$case_dir/az-post-view-failures" ]; then
+        left=$(cat "$case_dir/az-post-view-failures")
+        if [ "$left" -gt 0 ]; then
+          printf '%s\n' "$((left - 1))" > "$case_dir/az-post-view-failures"
+          exit 1
+        fi
+      fi
+      cat "$case_dir/az-pr-post.json"
+    elif [ -e "$case_dir/az-policies-read" ] && [ -e "$case_dir/az-pr-recheck.json" ]; then
+      cat "$case_dir/az-pr-recheck.json"
+    else
+      cat "$case_dir/az-pr.json"
+    fi
+    ;;
+  "repos pr policy")
+    [ "${4:-}" = list ] || exit 2
+    [ ! -e "$case_dir/az-policies-fail" ] || exit 1
+    : > "$case_dir/az-policies-read"
+    cat "$case_dir/az-policies.json"
+    ;;
+  "rest --method patch")
+    body='' prev=''
+    for arg in "$@"; do
+      [ "$prev" != --body ] || body=${arg#@}
+      prev=$arg
+    done
+    cp "$body" "$case_dir/az-rest-body.json"
+    if [ -e "$case_dir/az-rest-fails" ]; then
+      [ ! -e "$case_dir/az-rest-applied" ] || : > "$case_dir/az-completed"
+      cat "$case_dir/az-rest-fails" >&2
+      exit 1
+    fi
+    : > "$case_dir/az-completed"
+    printf '{"status":"completed"}\n'
+    ;;
+  *) exit 2 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/az"
+  ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
+}
+
+# write_azure_devops_pr_json <file> [<field>=<value> ...]
+# A pull request payload in the shape `az repos pr show` prints that satisfies
+# every pre-merge condition by default, with named fields overridden so one
+# case drives exactly one condition. An empty head or merge omits that commit,
+# and draft is raw JSON so a case can make it unreadable with null.
+write_azure_devops_pr_json() {
+  local file=$1 kv key value
+  local status=active draft=false merge_status=succeeded head=$AZ_HEAD merge=''
+  local project=$AZ_PROJECT repo=$AZ_REPO strategy='' id=9
+  shift
+  for kv in "$@"; do
+    key=${kv%%=*}
+    value=${kv#*=}
+    case "$key" in
+      status) status=$value ;;
+      draft) draft=$value ;;
+      merge_status) merge_status=$value ;;
+      head) head=$value ;;
+      merge) merge=$value ;;
+      project) project=$value ;;
+      repo) repo=$value ;;
+      strategy) strategy=$value ;;
+      id) id=$value ;;
+      *) fail "write_azure_devops_pr_json: unknown field '$key'" ;;
+    esac
+  done
+  # shellcheck disable=SC2016 # $names are jq variables bound by --arg.
+  "$JQ_BIN" -n --argjson id "$id" --arg status "$status" --argjson draft "$draft" \
+    --arg merge_status "$merge_status" --arg head "$head" --arg merge "$merge" \
+    --arg project "$project" --arg repo "$repo" --arg strategy "$strategy" \
+    --arg project_id "$AZ_PROJECT_ID" --arg repo_id "$AZ_REPO_ID" '
+    {pullRequestId: $id, status: $status, isDraft: $draft, mergeStatus: $merge_status,
+     lastMergeSourceCommit: (if $head == "" then null else {commitId: $head} end),
+     lastMergeCommit: (if $merge == "" then null else {commitId: $merge} end),
+     repository: {id: $repo_id, name: $repo, project: {id: $project_id, name: $project}},
+     completionOptions: (if $strategy == "" then null else {mergeStrategy: $strategy} end)}' \
+    > "$file"
+}
+
+# azure_devops_policy <kind> <status> <blocking> <name> [<context-json>] [<settings-json>]
+# One policy evaluation in the shape `az repos pr policy list` prints. kind is
+# build, status, reviewers, or strategy, each Azure DevOps' own policy type id.
+azure_devops_policy() {
+  local type context=${5:-null} settings=${6:-}
+  [ -n "$settings" ] || settings='{}'
+  case "$1" in
+    build) type=0609b952-1397-4640-95ec-e00a01b2c241 ;;
+    status) type=cbdc66da-9728-4af8-aada-9a5a32e4a226 ;;
+    reviewers) type=fa4e907d-c16b-4a4c-9dfa-4906e5d171dd ;;
+    strategy) type=fa4e907d-c16b-4a4c-9dfa-4916e5d171ab ;;
+    *) fail "azure_devops_policy: unknown kind '$1'" ;;
+  esac
+  # shellcheck disable=SC2016 # $names are jq variables bound by --arg.
+  "$JQ_BIN" -nc --arg type "$type" --arg status "$2" --argjson blocking "$3" --arg name "$4" \
+    --argjson context "$context" --argjson settings "$settings" '
+    {status: $status, context: $context,
+     configuration: {isEnabled: true, isBlocking: $blocking, isDeleted: false,
+       type: {id: $type, displayName: $name},
+       settings: ({displayName: $name} + $settings)}}'
+}
+
+# write_azure_devops_policies <case_dir> [<policy-json> ...]
+write_azure_devops_policies() {
+  local case_dir=$1
+  shift
+  if [ "$#" -eq 0 ]; then
+    printf '[]\n' > "$case_dir/az-policies.json"
+  else
+    printf '%s\n' "$@" | "$JQ_BIN" -s . > "$case_dir/az-policies.json"
+  fi
+}
+
+# The approved required build every default case carries, at the given head.
+azure_devops_green_build() {
+  azure_devops_policy build approved true ci "{\"lastMergeSourceCommitId\":\"${1:-$AZ_HEAD}\"}"
+}
+
+# make_azure_devops_case <name> [<pr-field>=<value> ...]: a case dir with the az
+# mock, an active pull request, an approved required build at its head and an
+# approved reviewer policy, and a completed read-back from that head. Echoes
+# the case dir.
+make_azure_devops_case() {
+  local name=$1 case_dir
+  shift
+  case_dir=$(make_case "$name")
+  add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  add_az_mock "$case_dir"
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/az.log"
+  write_azure_devops_pr_json "$case_dir/az-pr.json" "$@"
+  write_azure_devops_pr_json "$case_dir/az-pr-post.json" status=completed merge="$AZ_MERGE_COMMIT"
+  write_azure_devops_policies "$case_dir" "$(azure_devops_green_build)" \
+    "$(azure_devops_policy reviewers approved true 'Minimum number of reviewers')"
+  printf '%s\n' "$case_dir"
+}
+
+# The completion request az was asked to send, or empty if none.
+az_completion_line() {
+  grep -F 'rest --method patch' "$1" 2>/dev/null | tail -1
+}
+
+test_azure_devops_completion_is_bound_to_the_verified_head() {
+  local case_dir rc line
+  case_dir=$(make_azure_devops_case azure-devops-completes)
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "azure-devops-completes: a green, approved pull request should complete: $(cat "$case_dir/stderr")"
+  assert_grep "pr=$AZ_URL" "$case_dir/state/task-x1.meta" \
+    "azure-devops-completes: pr= was not recorded before completing"
+  assert_grep "repos pr show --id 9 --organization https://dev.azure.com/$AZ_ORG --detect false" "$case_dir/az.log" \
+    "azure-devops-completes: the pull request was not read by id in the URL's organization alone"
+  assert_grep "repos pr policy list --id 9 --organization https://dev.azure.com/$AZ_ORG --detect false" "$case_dir/az.log" \
+    "azure-devops-completes: the branch policies were not read"
+  line=$(az_completion_line "$case_dir/az.log")
+  case "$line" in
+    *"--url https://dev.azure.com/$AZ_ORG/$AZ_PROJECT_ID/_apis/git/repositories/$AZ_REPO_ID/pullrequests/9?api-version=7.1 --resource 499b84ac-1321-427f-aa17-267ca6975798 "*) : ;;
+    *) fail "azure-devops-completes: unexpected completion request: '$line'" ;;
+  esac
+  [ "$("$JQ_BIN" -cS . "$case_dir/az-rest-body.json")" = "{\"completionOptions\":{\"bypassPolicy\":false,\"deleteSourceBranch\":false},\"lastMergeSourceCommit\":{\"commitId\":\"$AZ_HEAD\"},\"status\":\"completed\"}" ] \
+    || fail "azure-devops-completes: the completion body was not bound to the verified head without bypass: $(cat "$case_dir/az-rest-body.json")"
+  assert_no_grep 'repos pr update' "$case_dir/az.log" \
+    "azure-devops-completes: an unbound az repos pr update was used"
+  assert_grep "every branch policy passing at head $AZ_HEAD" "$case_dir/stderr" \
+    "azure-devops-completes: the verified head was not reported"
+  assert_grep "verified: $AZ_URL is completed from head $AZ_HEAD" "$case_dir/stdout" \
+    "azure-devops-completes: the landing was not confirmed"
+  [ "$(sed -n 6p "$case_dir/state/task-x1.merge-authority" 2>/dev/null || true)" = attended ] \
+    || fail "azure-devops-completes: the merge authority was not persisted"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "azure-devops-completes: a pull request reached the GitHub CLI"
+  pass "fm-pr-merge completes an Azure DevOps pull request through one PATCH bound to the verified head, never bypassing policy"
+}
+
+# Both Azure DevOps Services URL forms address the same organization, so a
+# visualstudio.com URL with or without DefaultCollection completes through the
+# host's own organization URL.
+test_azure_devops_visualstudio_forms_complete() {
+  local case_dir rc url name
+  for name in plain collection; do
+    if [ "$name" = plain ]; then
+      url="https://fm-fixture.visualstudio.com/Fixture%20Project/_git/$AZ_REPO/pullrequest/9"
+    else
+      url="https://fm-fixture.visualstudio.com/DefaultCollection/Fixture%20Project/_git/$AZ_REPO/pullrequest/9"
+    fi
+    case_dir=$(make_azure_devops_case "azure-devops-form-$name")
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "azure-devops-form-$name: $url should complete: $(cat "$case_dir/stderr")"
+    assert_grep "--organization https://fm-fixture.visualstudio.com --detect false" "$case_dir/az.log" \
+      "azure-devops-form-$name: the pull request was not read through its host's organization URL"
+    case "$(az_completion_line "$case_dir/az.log")" in
+      *"--url https://fm-fixture.visualstudio.com/$AZ_PROJECT_ID/_apis/git/repositories/$AZ_REPO_ID/pullrequests/9?"*) : ;;
+      *) fail "azure-devops-form-$name: the pull request was not completed on its host's repository route" ;;
+    esac
+  done
+  pass "fm-pr-merge completes both visualstudio.com URL forms through the host's organization"
+}
+
+test_azure_devops_each_condition_refuses_independently() {
+  local case_dir rc name expected spec fields policies
+  local build_red build_running optional_red status_pending other_head expired reviewers
+  # Each evaluation is built first: bash 3.2 misparses escaped quotes inside a
+  # command substitution that is itself inside double quotes.
+  build_red=$(azure_devops_policy build rejected true ci)
+  build_running=$(azure_devops_policy build running true ci)
+  optional_red=$(azure_devops_policy build rejected false lint)
+  status_pending=$(azure_devops_policy status queued true security/scan)
+  other_head=$(azure_devops_green_build "$AZ_STALE_HEAD")
+  expired=$(azure_devops_policy build approved true ci "{\"lastMergeSourceCommitId\":\"$AZ_HEAD\",\"isExpired\":true}")
+  reviewers=$(azure_devops_policy reviewers running true 'Minimum number of reviewers')
+  set -- \
+    "status|status=abandoned||status is \"abandoned\", not active" \
+    "draft|draft=true||the pull request is a draft" \
+    "draft-unreadable|draft=null||the draft state is unreadable" \
+    "merge-status|merge_status=conflicts||mergeStatus is \"conflicts\", not succeeded" \
+    "build-red||$build_red|required check \"ci\" is rejected, not approved" \
+    "build-running||$build_running|required check \"ci\" is running, not approved" \
+    "optional-red||$optional_red|optional check \"lint\" is rejected, not approved" \
+    "status-pending||$status_pending|required check \"security/scan\" is queued, not approved" \
+    "build-other-head||$other_head|build \"ci\" passed at $AZ_STALE_HEAD, not at the current head $AZ_HEAD" \
+    "build-expired||$expired|build \"ci\" passed, but its result has expired or is not current" \
+    "reviewers||$reviewers|required policy \"Minimum number of reviewers\" is running, not approved"
+  for spec in "$@"; do
+    IFS='|' read -r name fields policies expected <<SPEC
+$spec
+SPEC
+    if [ -n "$fields" ]; then
+      case_dir=$(make_azure_devops_case "azure-devops-refuse-$name" "$fields")
+    else
+      case_dir=$(make_azure_devops_case "azure-devops-refuse-$name")
+    fi
+    [ -z "$policies" ] || write_azure_devops_policies "$case_dir" "$policies"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$AZ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "azure-devops-refuse-$name: fm-pr-merge should refuse"
+    assert_grep "error: refusing to merge $AZ_URL" "$case_dir/stderr" \
+      "azure-devops-refuse-$name: refusal did not name the pull request"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "azure-devops-refuse-$name: refusal did not name the failing condition: $(cat "$case_dir/stderr")"
+    [ -z "$(az_completion_line "$case_dir/az.log")" ] \
+      || fail "azure-devops-refuse-$name: a completion was attempted despite the refusal"
+    assert_grep "pr=$AZ_URL" "$case_dir/state/task-x1.meta" \
+      "azure-devops-refuse-$name: a refusal should still leave the recorded PR reference"
+    assert_present "$case_dir/state/task-x1.check.sh" \
+      "azure-devops-refuse-$name: a refusal should still leave the merge poll armed"
+  done
+  pass "fm-pr-merge refuses on each Azure DevOps pull request and branch policy condition independently"
+}
+
+# Only evaluations that apply and gate the head are judged: a policy Azure
+# DevOps marks notApplicable, an optional non-check policy, an optional build
+# nobody queued by hand, and the merge strategy policy's own status (which
+# reads rejected until a completion names a strategy) never refuse.
+test_azure_devops_advisory_policies_do_not_refuse() {
+  local case_dir rc
+  case_dir=$(make_azure_devops_case azure-devops-advisory)
+  write_azure_devops_policies "$case_dir" "$(azure_devops_green_build)" \
+    "$(azure_devops_policy build notApplicable true 'path-filtered build')" \
+    "$(azure_devops_policy reviewers rejected false 'Comment requirements')" \
+    "$(azure_devops_policy build queued false 'manual perf run' null '{"manualQueueOnly":true}')" \
+    "$(azure_devops_policy strategy rejected true 'Require a merge strategy' null '{"allowSquash":true}')"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "azure-devops-advisory: advisory and inapplicable policies must not refuse: $(cat "$case_dir/stderr")"
+  [ "$("$JQ_BIN" -r '.completionOptions.mergeStrategy' "$case_dir/az-rest-body.json")" = squash ] \
+    || fail "azure-devops-advisory: the merge strategy policy's only allowed strategy was not named"
+  pass "fm-pr-merge judges only applicable gating policies and never the merge strategy policy's own status"
+}
+
+test_azure_devops_allow_red_waives_only_an_optional_check() {
+  local case_dir rc
+  case_dir=$(make_azure_devops_case azure-devops-allow-red-optional)
+  write_azure_devops_policies "$case_dir" "$(azure_devops_green_build)" \
+    "$(azure_devops_policy build rejected false lint)"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" --allow-red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "azure-devops-allow-red-optional: a named optional check should be waived: $(cat "$case_dir/stderr")"
+  assert_grep "except optional check lint, waived by --allow-red" "$case_dir/stderr" \
+    "azure-devops-allow-red-optional: the waiver was not reported"
+  [ -n "$(az_completion_line "$case_dir/az.log")" ] \
+    || fail "azure-devops-allow-red-optional: the waived pull request was not completed"
+
+  case_dir=$(make_azure_devops_case azure-devops-allow-red-required)
+  write_azure_devops_policies "$case_dir" "$(azure_devops_policy build rejected true ci)"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" --allow-red ci \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-devops-allow-red-required: a required check must not be waived"
+  assert_grep '--allow-red cannot waive it because Azure DevOps enforces a required policy at completion' "$case_dir/stderr" \
+    "azure-devops-allow-red-required: the refusal did not explain the required policy"
+  [ -z "$(az_completion_line "$case_dir/az.log")" ] \
+    || fail "azure-devops-allow-red-required: a completion was attempted past a required red check"
+
+  case_dir=$(make_azure_devops_case azure-devops-allow-red-other)
+  write_azure_devops_policies "$case_dir" "$(azure_devops_green_build)" \
+    "$(azure_devops_policy build rejected false lint)"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" --allow-red typo \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-devops-allow-red-other: a waiver naming another check must not waive this one"
+  assert_grep 'optional check "lint" is rejected, not approved' "$case_dir/stderr" \
+    "azure-devops-allow-red-other: the unwaived optional check was not reported"
+  pass "fm-pr-merge --allow-red waives only the one named optional Azure DevOps check"
+}
+
+test_allow_missing_refused_on_azure_devops() {
+  local case_dir rc
+  case_dir=$(make_azure_devops_case azure-devops-allow-missing)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" --allow-missing validate \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "azure-devops-allow-missing: --allow-missing must not apply on Azure DevOps"
+  assert_grep '--allow-missing does not apply to Azure DevOps' "$case_dir/stderr" \
+    "azure-devops-allow-missing: refusal did not name Azure DevOps"
+  [ ! -s "$case_dir/az.log" ] || fail "azure-devops-allow-missing: az ran despite --allow-missing"
+  pass "fm-pr-merge refuses --allow-missing on Azure DevOps"
+}
+
+test_azure_devops_merge_strategy() {
+  local case_dir rc spec name args policies pr_field expected
+  # name|caller args|merge strategy policy settings|pull request field|named strategy
+  set -- \
+    "none||||" \
+    "caller-squash|--squash|||squash" \
+    "caller-merge|--merge|||noFastForward" \
+    "caller-method|--method rebaseMerge|||rebaseMerge" \
+    "pr-own|||strategy=rebase|rebase" \
+    "policy-only||{\"allowSquash\":true,\"allowRebase\":false}||squash" \
+    "legacy-policy||{\"useSquashMerge\":false}||noFastForward" \
+    "caller-within-policy|--rebase|{\"allowSquash\":true,\"allowRebase\":true}||rebase"
+  for spec in "$@"; do
+    IFS='|' read -r name args policies pr_field expected <<SPEC
+$spec
+SPEC
+    if [ -n "$pr_field" ]; then
+      case_dir=$(make_azure_devops_case "azure-devops-strategy-$name" "$pr_field")
+    else
+      case_dir=$(make_azure_devops_case "azure-devops-strategy-$name")
+    fi
+    if [ -n "$policies" ]; then
+      write_azure_devops_policies "$case_dir" "$(azure_devops_green_build)" \
+        "$(azure_devops_policy strategy rejected true 'Require a merge strategy' null "$policies")"
+    fi
+    set +e
+    # shellcheck disable=SC2086 # The caller arguments are deliberately split.
+    run_pr_merge "$case_dir" task-x1 "$AZ_URL" ${args:+-- $args} \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "azure-devops-strategy-$name: the completion should proceed: $(cat "$case_dir/stderr")"
+    [ "$("$JQ_BIN" -r '.completionOptions.mergeStrategy // ""' "$case_dir/az-rest-body.json")" = "$expected" ] \
+      || fail "azure-devops-strategy-$name: expected strategy '$expected', sent $(cat "$case_dir/az-rest-body.json")"
+  done
+
+  # name|caller args|merge strategy policy settings|expected refusal
+  set -- \
+    "several||{\"allowSquash\":true,\"allowNoFastForward\":true}|allows several merge strategies (noFastForward, squash)" \
+    "disallowed|--rebase|{\"allowSquash\":true}|merge strategy rebase is not one the repository's merge strategy policy allows (squash)" \
+    "unknown|--method fancy||unknown Azure DevOps merge strategy 'fancy'" \
+    "extra-arg|--delete-branch-after||extra merge arguments are not yet supported for Azure DevOps merges"
+  for spec in "$@"; do
+    IFS='|' read -r name args policies expected <<SPEC
+$spec
+SPEC
+    case_dir=$(make_azure_devops_case "azure-devops-strategy-refuse-$name")
+    if [ -n "$policies" ]; then
+      write_azure_devops_policies "$case_dir" "$(azure_devops_green_build)" \
+        "$(azure_devops_policy strategy rejected true 'Require a merge strategy' null "$policies")"
+    fi
+    set +e
+    # shellcheck disable=SC2086 # The caller arguments are deliberately split.
+    run_pr_merge "$case_dir" task-x1 "$AZ_URL" ${args:+-- $args} \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "azure-devops-strategy-refuse-$name: fm-pr-merge should refuse"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "azure-devops-strategy-refuse-$name: refusal did not name the reason: $(cat "$case_dir/stderr")"
+    [ -z "$(az_completion_line "$case_dir/az.log")" ] \
+      || fail "azure-devops-strategy-refuse-$name: a completion was attempted despite the refusal"
+  done
+  pass "fm-pr-merge names the caller's, the pull request's, or the policy's only merge strategy, and refuses rather than choosing among several"
+}
+
+test_azure_devops_unreadable_or_moving_state_refuses() {
+  local case_dir rc
+  case_dir=$(make_azure_devops_case azure-devops-no-source head=)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-devops-no-source: an uncomputed source commit must refuse"
+  assert_grep 'could not read the Azure DevOps pull request source commit before merging' "$case_dir/stderr" \
+    "azure-devops-no-source: refusal did not name the unread source commit"
+  [ -z "$(az_completion_line "$case_dir/az.log")" ] \
+    || fail "azure-devops-no-source: a completion was attempted without a verified head"
+
+  case_dir=$(make_azure_devops_case azure-devops-policies-unreadable)
+  : > "$case_dir/az-policies-fail"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-devops-policies-unreadable: unreadable policies must refuse"
+  assert_grep 'could not read the Azure DevOps branch policies before merging' "$case_dir/stderr" \
+    "azure-devops-policies-unreadable: refusal did not name the unread policies"
+  [ -z "$(az_completion_line "$case_dir/az.log")" ] \
+    || fail "azure-devops-policies-unreadable: a completion was attempted with unread policies"
+
+  case_dir=$(make_azure_devops_case azure-devops-moved)
+  write_azure_devops_pr_json "$case_dir/az-pr-recheck.json" head="$AZ_STALE_HEAD"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-devops-moved: a head that moved while the policies were read must refuse"
+  assert_grep "the pull request changed while its policies were read (head $AZ_HEAD became $AZ_STALE_HEAD)" "$case_dir/stderr" \
+    "azure-devops-moved: refusal did not name the moved head"
+  [ -z "$(az_completion_line "$case_dir/az.log")" ] \
+    || fail "azure-devops-moved: a completion was attempted after the head moved"
+
+  case_dir=$(make_azure_devops_case azure-devops-stale-recorded)
+  printf 'pr_head=%s\n' "$AZ_STALE_HEAD" >> "$case_dir/state/task-x1.meta"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "azure-devops-stale-recorded: the live head satisfies every condition, so it should complete"
+  assert_grep "recorded head $AZ_STALE_HEAD disagrees with the live head $AZ_HEAD" "$case_dir/stderr" \
+    "azure-devops-stale-recorded: the stale recorded head was trusted silently"
+  [ "$("$JQ_BIN" -r '.lastMergeSourceCommit.commitId' "$case_dir/az-rest-body.json")" = "$AZ_HEAD" ] \
+    || fail "azure-devops-stale-recorded: the completion was not bound to the live head"
+  pass "fm-pr-merge refuses an unread source commit, unread policies, or a head that moves mid-read, and binds to the live head"
+}
+
+# A pull request id is unique per organization, so a URL whose id reads back as
+# another repository's pull request must not record, arm, or complete anything.
+test_azure_devops_other_repository_refuses_before_recording() {
+  local case_dir rc
+  case_dir=$(make_azure_devops_case azure-devops-other-repo repo=unrelated-repo)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "azure-devops-other-repo: another repository's pull request was completed"
+  assert_grep 'does not name a pull request in that project and repository' "$case_dir/stderr" \
+    "azure-devops-other-repo: refusal did not name the repository mismatch"
+  assert_no_grep "pr=$AZ_URL" "$case_dir/state/task-x1.meta" \
+    "azure-devops-other-repo: the mismatched URL was recorded"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "azure-devops-other-repo: a poll was armed on another repository's pull request"
+  [ -z "$(az_completion_line "$case_dir/az.log")" ] \
+    || fail "azure-devops-other-repo: a completion was attempted on another repository's pull request"
+  pass "fm-pr-merge refuses an Azure DevOps id that reads back as another repository's pull request"
+}
+
+test_azure_devops_missing_tool_refuses_before_recording() {
+  local case_dir rc tool other
+  for tool in az jq; do
+    if [ "$tool" = az ]; then other=jq; else other=az; fi
+    case_dir=$(make_azure_devops_case "azure-devops-no-$tool")
+    mirror_path_without "$case_dir/no$tool" "$tool" "$case_dir/fakebin"
+    PATH="$case_dir/no$tool" command -v "$other" >/dev/null 2>&1 \
+      || fail "azure-devops-no-$tool: the $tool-free search path lost the $other mock as well"
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$case_dir/home" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+    PATH="$case_dir/no$tool" \
+      "$PR_MERGE" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "azure-devops-no-$tool: fm-pr-merge should refuse"
+    assert_grep "error: completing an Azure DevOps pull request requires $tool on PATH" \
+      "$case_dir/stderr" "azure-devops-no-$tool: refusal did not name the missing tool"
+    assert_no_grep "pr=$AZ_URL" "$case_dir/state/task-x1.meta" \
+      "azure-devops-no-$tool: a PR reference was recorded despite the missing tool"
+  done
+
+  case_dir=$(make_azure_devops_case azure-devops-no-extension)
+  : > "$case_dir/az-no-extension"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "azure-devops-no-extension: fm-pr-merge should refuse"
+  assert_grep 'requires the az azure-devops extension' "$case_dir/stderr" \
+    "azure-devops-no-extension: refusal did not name the missing extension"
+  assert_no_grep "pr=$AZ_URL" "$case_dir/state/task-x1.meta" \
+    "azure-devops-no-extension: a PR reference was recorded despite the missing extension"
+  [ -z "$(az_completion_line "$case_dir/az.log")" ] \
+    || fail "azure-devops-no-extension: a completion was attempted without the extension"
+  pass "fm-pr-merge refuses before recording anything when az, jq, or the azure-devops extension is absent"
+}
+
+# A failed completion request is judged by reading the pull request back once.
+# Azure DevOps refuses a completion whose lastMergeSourceCommit is no longer the
+# source head with HTTP 409 TF401192 (docs/azure-devops-integration.md), and the
+# pull request stays active: that refusal is reported verbatim without claiming
+# anything about what merged. az also fails when the response is lost after
+# Azure DevOps applied the PATCH, and a pull request that then reads back
+# completed from the verified head is reported as landed.
+test_azure_devops_failed_completion_is_judged_by_its_read_back() {
+  local case_dir rc
+  case_dir=$(make_azure_devops_case azure-devops-completion-refused)
+  printf '%s\n' "ERROR: Conflict({\"message\":\"TF401192: The pull request's source branch has been updated since the operation was requested.\",\"typeKey\":\"GitPullRequestStaleException\"})" \
+    > "$case_dir/az-rest-fails"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "azure-devops-completion-refused: a refused completion must fail"
+  assert_grep 'error: > ERROR: Conflict({"message":"TF401192' "$case_dir/stderr" \
+    "azure-devops-completion-refused: Azure DevOps' own refusal was not quoted"
+  assert_grep "the completion request for $AZ_URL failed, and the pull request has not read back as completed from head $AZ_HEAD" "$case_dir/stderr" \
+    "azure-devops-completion-refused: the failure did not say the pull request has not completed: $(cat "$case_dir/stderr")"
+  assert_no_grep 'nothing was merged' "$case_dir/stderr" \
+    "azure-devops-completion-refused: the failure claimed an outcome it never read"
+  assert_absent "$case_dir/state/task-x1.merge-authority" \
+    "azure-devops-completion-refused: merge authority was persisted for a refused completion"
+  assert_no_grep "verified: $AZ_URL is completed" "$case_dir/stdout" \
+    "azure-devops-completion-refused: a refused completion was reported as landed"
+
+  case_dir=$(make_azure_devops_case azure-devops-completion-response-lost)
+  printf '%s\n' 'ERROR: Connection aborted.' > "$case_dir/az-rest-fails"
+  : > "$case_dir/az-rest-applied"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "azure-devops-completion-response-lost: a completion that landed must not fail: $(cat "$case_dir/stderr")"
+  assert_grep "verified: $AZ_URL is completed from head $AZ_HEAD" "$case_dir/stdout" \
+    "azure-devops-completion-response-lost: the landing was not reported"
+  [ "$(sed -n 6p "$case_dir/state/task-x1.merge-authority" 2>/dev/null || true)" = attended ] \
+    || fail "azure-devops-completion-response-lost: the merge authority was not persisted"
+  assert_no_grep 'has not read back as completed' "$case_dir/stderr" \
+    "azure-devops-completion-response-lost: a landed completion was reported as failed"
+  pass "fm-pr-merge judges a failed Azure DevOps completion request by reading the pull request back"
+}
+
+test_azure_devops_completion_is_confirmed_before_it_counts() {
+  local case_dir rc spec name post expected
+  # An accepted completion that does not land is a definite failure.
+  set -- \
+    "other-source|status=completed merge=$AZ_MERGE_COMMIT head=$AZ_STALE_HEAD|it completed from source commit $AZ_STALE_HEAD, not the verified head $AZ_HEAD" \
+    "abandoned|status=abandoned|it reads back abandoned" \
+    "conflicts|merge_status=conflicts|it is still active with mergeStatus conflicts"
+  for spec in "$@"; do
+    IFS='|' read -r name post expected <<SPEC
+$spec
+SPEC
+    case_dir=$(make_azure_devops_case "azure-devops-confirm-$name")
+    # shellcheck disable=SC2086 # The fields are deliberately split.
+    write_azure_devops_pr_json "$case_dir/az-pr-post.json" $post
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "azure-devops-confirm-$name: an unlanded completion must fail"
+    assert_grep "Azure DevOps accepted the completion request for $AZ_URL, but it did not land: $expected" "$case_dir/stderr" \
+      "azure-devops-confirm-$name: the non-landing was not named: $(cat "$case_dir/stderr")"
+  done
+
+  # A completion Azure DevOps has not finished yet stays with the armed poll.
+  case_dir=$(make_azure_devops_case azure-devops-confirm-pending)
+  write_azure_devops_pr_json "$case_dir/az-pr-post.json" merge_status=queued
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "azure-devops-confirm-pending: an unconfirmed completion leaves the poll armed"
+  assert_grep 'has not confirmed it landed yet; the merge poll remains armed' "$case_dir/stderr" \
+    "azure-devops-confirm-pending: the pending confirmation was not reported"
+  assert_no_grep 'verified:' "$case_dir/stdout" \
+    "azure-devops-confirm-pending: an unconfirmed completion was reported as landed"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "azure-devops-confirm-pending: the merge poll was not left armed"
+  [ "$(grep -c 'repos pr show' "$case_dir/az.log")" -ge 10 ] \
+    || fail "azure-devops-confirm-pending: the confirmation was not retried"
+
+  # A transient read failure after an accepted completion is retried.
+  case_dir=$(make_azure_devops_case azure-devops-confirm-retry)
+  printf '2\n' > "$case_dir/az-post-view-failures"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$AZ_URL" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "azure-devops-confirm-retry: a landed completion must not fail on a transient read"
+  [ "$(cat "$case_dir/az-post-view-failures")" = 0 ] \
+    || fail "azure-devops-confirm-retry: the confirmation read was not retried"
+  assert_grep "verified: $AZ_URL is completed from head $AZ_HEAD" "$case_dir/stdout" \
+    "azure-devops-confirm-retry: the landing was not confirmed after the retry"
+  pass "fm-pr-merge confirms an Azure DevOps completion landed from the verified head before reporting it"
+}
+
 test_gitlab_head_override_args_refuse_before_recording() {
   local case_dir rc
   case_dir=$(make_gitlab_case gitlab-head-override)
@@ -2988,6 +3652,17 @@ test_forgejo_missing_tool_refuses_before_recording
 test_forgejo_rejected_merge_is_never_trusted_by_exit_status
 test_forgejo_transient_confirm_read_failure_still_persists_authority
 test_forgejo_merge_method_and_extra_args
+test_azure_devops_completion_is_bound_to_the_verified_head
+test_azure_devops_visualstudio_forms_complete
+test_azure_devops_each_condition_refuses_independently
+test_azure_devops_advisory_policies_do_not_refuse
+test_azure_devops_allow_red_waives_only_an_optional_check
+test_azure_devops_merge_strategy
+test_azure_devops_unreadable_or_moving_state_refuses
+test_azure_devops_other_repository_refuses_before_recording
+test_azure_devops_missing_tool_refuses_before_recording
+test_azure_devops_failed_completion_is_judged_by_its_read_back
+test_azure_devops_completion_is_confirmed_before_it_counts
 
 # The merge gate asks whether the task is still held for the captain. A home
 # that carries no backlog records no captain calls at all, so nothing can be
@@ -4618,5 +5293,6 @@ test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
 test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo
+test_allow_missing_refused_on_azure_devops
 test_allow_no_pipeline_merges_only_a_null_head_pipeline
 test_allow_no_pipeline_is_attended_only_and_gitlab_only

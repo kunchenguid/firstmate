@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# tests/fm-project-mode.test.sh - unit tests for the `forgejo` and `external`
-# values of bin/fm-project-mode.sh's closed `forge=` registry binding. The
-# binding's grammar, its Gerrit value, and its refusals are pinned in
-# tests/fm-task-delivery.test.sh; this file covers only what forgejo and
-# external add: forgejo binds in any token order, keeps +yolo (unlike gerrit),
-# and is refused on local-only like every forge; external binds, reports
+# tests/fm-project-mode.test.sh - unit tests for the `forgejo`, `azure-devops`,
+# and `external` values of bin/fm-project-mode.sh's closed `forge=` registry
+# binding. The binding's grammar, its Gerrit value, and its refusals are pinned
+# in tests/fm-task-delivery.test.sh; this file covers only what forgejo,
+# azure-devops, and external add: forgejo and azure-devops bind in any token
+# order, keep +yolo (unlike gerrit), and are refused on local-only like every
+# forge; external binds, reports
 # yolo=off with a refusal like gerrit, and is refused on local-only; and the
 # plain (no --forge/--raw) output stays exactly two words, because tests/fm-secondmate-safety.test.sh and
 # tests/fm-secondmate-lifecycle-e2e.test.sh assert that shape with strict
@@ -32,6 +33,9 @@ cat > "$DATA/projects.md" <<'EOF'
 - reviewed-yolo [direct-PR +yolo forge=external] - +yolo cannot apply to an external review (added 2026-01-01)
 - reviewed-local [local-only forge=external] - an external review on a mode that publishes nothing (added 2026-01-01)
 - near-miss [direct-PR forg=external] - a near miss of the forge key (added 2026-01-01)
+- ado [no-mistakes forge=azure-devops] - an Azure DevOps Services repository (added 2026-01-01)
+- ado-yolo [forge=azure-devops direct-PR +yolo] - forge token first, keeping +yolo (added 2026-01-01)
+- ado-local [local-only forge=azure-devops] - an Azure DevOps forge on a mode that publishes nothing (added 2026-01-01)
 EOF
 
 run_mode() {
@@ -82,7 +86,25 @@ done
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" glabbed 2>&1 >/dev/null) || true
 assert_contains "$err" 'forge=forgejo' "the unknown-forge refusal did not name forge=forgejo as an accepted value"
 assert_contains "$err" 'forge=external' "the unknown-forge refusal did not name forge=external as an accepted value"
-pass "fm-project-mode: a value outside none|gerrit|forgejo|external is refused and the refusal names the accepted values"
+assert_contains "$err" 'forge=azure-devops' "the unknown-forge refusal did not name forge=azure-devops as an accepted value"
+pass "fm-project-mode: a value outside none|gerrit|forgejo|azure-devops|external is refused and the refusal names the accepted values"
+
+[ "$(run_mode ado)" = "no-mistakes off" ] || fail "forge=azure-devops changed the two-word output: $(run_mode ado)"
+[ "$(run_forge ado)" = "azure-devops" ] || fail "forge=azure-devops did not resolve: $(run_forge ado)"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" ado 2>&1 >/dev/null)
+[ -z "$err" ] || fail "a registered forge=azure-devops warned: $err"
+[ "$(run_mode ado-yolo)" = "direct-PR on" ] || fail "forge=azure-devops must keep +yolo: $(run_mode ado-yolo)"
+[ "$(run_forge ado-yolo)" = "azure-devops" ] || fail "forge=azure-devops placed before the mode token did not resolve: $(run_forge ado-yolo)"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" ado-yolo 2>&1 >/dev/null)
+[ -z "$err" ] || fail "+yolo on a forge=azure-devops project was refused or warned: $err"
+for flag in "" --forge; do
+  # shellcheck disable=SC2086 # An empty flag must expand to nothing.
+  out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" $flag ado-local 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "local-only with forge=azure-devops did not refuse${flag:+ under $flag} (status $status, got '$out')"
+  [ -z "$out" ] || fail "a refused local-only Azure DevOps forge still handed the caller a posture: '$out'"
+done
+pass "fm-project-mode: forge=azure-devops binds in any token order, keeps +yolo, and is refused on local-only"
 
 [ "$(run_forge reviewed)" = "external" ] || fail "forge=external did not resolve: $(run_forge reviewed)"
 [ "$(run_mode reviewed)" = "direct-PR off" ] || fail "forge=external changed the two-word output: $(run_mode reviewed)"

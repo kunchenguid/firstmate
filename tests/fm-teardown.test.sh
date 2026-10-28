@@ -843,6 +843,28 @@ SH
   pass "teardown closes a landed GitLab task with its merge request URL as a note and GitHub and Forgejo tasks with --pr"
 }
 
+# tasks-axi refuses an Azure DevOps pull request URL as a --pr link, so a
+# landed Azure DevOps task closes with that URL recorded as a note instead.
+test_teardown_closes_an_azure_devops_task_with_its_pull_request_url_as_a_note() {
+  local case_dir out
+  local ado_url='https://fabrikam.visualstudio.com/DefaultCollection/Contoso%20Core/_git/repo/pullrequest/12'
+  case_dir=$(make_case tasks-axi-close-azure-devops)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$ado_url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed Azure DevOps task failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left a landed Azure DevOps task's backlog item at $(backlog_row_state "$case_dir"): $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "body: \"Azure DevOps pull request $ado_url\"" >/dev/null \
+    || fail "closed Azure DevOps backlog item did not record its pull request URL as a note"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a landed Azure DevOps close left its pending-close record behind"
+  pass "teardown closes a landed Azure DevOps task with its pull request URL as a note"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -1131,6 +1153,65 @@ test_squash_merged_forgejo_pr_allows_when_main_moved_on() {
       || fail "forgejo-merged-$merged: teardown did not read the Forgejo pull request through tea"
   done
   pass "teardown proves a Forgejo task landed from the merged pull request when the content check is inconclusive"
+}
+
+# Override az to answer one Azure DevOps pull request read with the supplied
+# status, source commit, completion commit (none when empty), and repository.
+add_az_pull_for_head() {
+  local case_dir=$1 status=$2 head=$3 merge=$4 repo=${5:-repo} merge_json=null
+  [ -z "$merge" ] || merge_json="{\"commitId\":\"$merge\"}"
+  cat > "$case_dir/fakebin/az" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/az.log"
+[ "\${1:-} \${2:-} \${3:-}" = "repos pr show" ] || exit 1
+printf '%s\n' '{"pullRequestId":7,"status":"$status","repository":{"name":"$repo","project":{"name":"Team Project"}},"lastMergeSourceCommit":{"commitId":"$head"},"lastMergeCommit":$merge_json}'
+SH
+  chmod +x "$case_dir/fakebin/az"
+}
+
+# An Azure DevOps squash completion leaves the source branch's commits off the
+# target branch, so once the default branch moves on and edits the same lines,
+# only the pull request's completed record can prove the work landed: its
+# source commit is the head the local work must be contained in. Every other
+# reading - still active, completed without the commit its completion made,
+# another repository's pull request, or local work past the completed source -
+# refuses.
+test_squash_completed_azure_devops_pr_allows_when_main_moved_on() {
+  local case_dir rc pr_head tmp variant status merge repo mode expected
+  local url='https://dev.azure.com/example/Team%20Project/_git/repo/pullrequest/7'
+  for variant in completed active no-merge-commit other-repo unlanded; do
+    status=completed merge=5656565656565656565656565656565656565656 repo=repo mode=rebased expected=1
+    case "$variant" in
+      completed) expected=0 ;;
+      active) status=active merge= ;;
+      no-merge-commit) merge= ;;
+      other-repo) repo=other ;;
+      unlanded) mode=rebased-plus-unlanded ;;
+    esac
+    case_dir=$(make_case "azure-devops-completed-$variant")
+    write_meta "$case_dir" no-mistakes ship
+    pr_head=$(setup_squash_rebased_history "$case_dir" "$mode")
+    tmp="$case_dir/_main_later"
+    git clone -q "$case_dir/origin.git" "$tmp"
+    printf '%s\n' base main-edit feature-edit-reworded > "$tmp/shared.txt"
+    git -C "$tmp" add -- shared.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "main rewords shared"
+    git -C "$tmp" push -q origin main
+    rm -rf "$tmp"
+    printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+    add_gh_axi_error "$case_dir"
+    add_az_pull_for_head "$case_dir" "$status" "$pr_head" "$merge" "$repo"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code "$expected" "$rc" "azure-devops-completed-$variant: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    grep -qF -- 'repos pr show --id 7 --organization https://dev.azure.com/example --detect false' "$case_dir/az.log" \
+      || fail "azure-devops-completed-$variant: teardown did not read the Azure DevOps pull request through az"
+  done
+  pass "teardown proves an Azure DevOps task landed only from this pull request's completed record and contained source commit"
 }
 
 test_squash_merged_same_file_different_content_refuses() {
@@ -5785,6 +5866,7 @@ test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
+test_teardown_closes_an_azure_devops_task_with_its_pull_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
@@ -5824,6 +5906,7 @@ test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_forgejo_pr_allows_when_main_moved_on
+test_squash_completed_azure_devops_pr_allows_when_main_moved_on
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable
