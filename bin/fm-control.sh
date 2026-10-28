@@ -1045,8 +1045,7 @@ resolve_relaunch_profile() {
   else
     TARGET_EFFORT=default
   fi
-  # Codex is checked against the catalog its relaunched worker runs with.
-  if [ "$TARGET_EFFORT" = ultra ] && [ "$TARGET_HARNESS" != codex ]; then
+  if [ "$TARGET_EFFORT" = ultra ] && [ "$TARGET_HARNESS:$BACKEND" != codex:t3code ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
   # The launch owner applies this home's worker account pin too, but only after

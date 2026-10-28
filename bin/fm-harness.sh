@@ -678,11 +678,6 @@ codex_supports() {
     'any((. // [])[]; .slug == $model and any(.supported_reasoning_levels[]; .effort == $effort))' >/dev/null 2>&1
 }
 
-codex_effort_args() {
-  codex_supports "$@" || return 0
-  printf -- '-c\nmodel_reasoning_effort="%s"\n' "$2"
-}
-
 validate_native_effort() {
   local harness=${1:-} model=${2:-} effort=${3:-}
   if [ "$harness" = codex ] && [ "$effort" = ultra ]; then
@@ -706,7 +701,7 @@ validate_native_effort() {
 
 case "${1:-}" in
   codex-catalog) codex_catalog ;;
-  codex-effort-args) shift; codex_effort_args "$@" ;;
+  codex-supports) shift; codex_supports "$@" ;;
   validate-native-effort) shift; validate_native_effort "$@" ;;
   ancestry)
     case "${2:-}" in

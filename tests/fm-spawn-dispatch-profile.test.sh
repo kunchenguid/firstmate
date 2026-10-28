@@ -662,49 +662,63 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-# Run the captured launch the way the destination pane would, with its own
-# CODEX_HOME, and print the effort Codex received or "refused".
-codex_pane_effort() {  # <pane-codex-home>
+# Run the captured launch the way the destination pane would, from a pane
+# daemon with its own CODEX_HOME and inherited CURSOR_AGENT, and print
+# "<effort>|<CODEX_HOME>|<CURSOR_AGENT>" as the Codex process saw them.
+codex_pane_run() {  # <pane-codex-home>
   local bin="$CASE_DIR/pane-bin"
   mkdir -p "$bin"
   # shellcheck disable=SC2016  # The fake codex expands its own arguments.
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" > "$(dirname "$0")/args"' > "$bin/codex"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" > "$(dirname "$0")/args"' \
+    'printf "%s|%s\n" "${CODEX_HOME-}" "${CURSOR_AGENT-}" > "$(dirname "$0")/env"' > "$bin/codex"
   chmod +x "$bin/codex"
-  rm -f "$bin/args"
-  (cd "$WT_DIR" && CODEX_HOME="$1" PATH="$bin:$PATH" bash -c "$(cat "$LAUNCH_LOG")") >/dev/null 2>&1 \
-    && [ -f "$bin/args" ] || { echo refused; return; }
-  sed -n 's/^model_reasoning_effort="\(.*\)"$/\1/p' "$bin/args"
+  rm -f "$bin/args" "$bin/env"
+  (cd "$WT_DIR" && CODEX_HOME="$1" CURSOR_AGENT=1 PATH="$bin:$PATH" bash -c "$(cat "$LAUNCH_LOG")") >/dev/null 2>&1 \
+    || fail "the captured Codex launch failed"
+  printf '%s|%s\n' "$(sed -n 's/^model_reasoning_effort="\(.*\)"$/\1/p' "$bin/args")" "$(cat "$bin/env")"
 }
 
 test_codex_catalog_efforts() {
-  local rec id out model effort pane got
+  local rec id out model effort pane got want
   pane="$TMP_ROOT/pane-codex"
   mkdir -p "$pane"
   printf '%s\n' '{"models":[{"slug":"gpt-5","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}]}]}' > "$pane/models_cache.json"
-  # Each case: model effort, the effort Codex receives with the spawning
-  # process's catalog, then with a divergent pane catalog that swaps support.
-  while read -r model effort same divergent; do
+  # Each case: model, effort, the effort Codex receives ("-" for omitted). The
+  # pane catalog swaps support, so following it instead of the spawn's fails.
+  while read -r model effort want; do
     id="codex-$model-$effort"
     rec=$(make_spawn_case "$id" codex "$id")
     read_case_record "$rec"
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model" --effort "$effort" 2>&1)
     expect_code 0 "$?" "Codex $model $effort spawn failed: $out"
     assert_meta_profile "$HOME_DIR/state/$id.meta" codex "$model" "$effort"
-    got=$(codex_pane_effort "$CODEX_HOME")
-    [ "$got" = "${same#-}" ] || fail "Codex $model $effort with the spawn catalog got '$got', want '${same#-}'"
-    got=$(codex_pane_effort "$pane")
-    [ "$got" = "${divergent#-}" ] || fail "Codex $model $effort with the pane catalog got '$got', want '${divergent#-}'"
+    got=$(codex_pane_run "$pane")
+    [ "$got" = "${want#-}|$CODEX_HOME|" ] || fail "Codex $model $effort got '$got', want '${want#-}|$CODEX_HOME|'"
   done <<'CASES'
-gpt-6.1-terra ultra ultra refused
-gpt-6.1-terra max max -
-gpt-5 ultra refused ultra
-gpt-5 max - max
-gpt-5.6-luna max max max
+gpt-6.1-terra ultra ultra
+gpt-6.1-terra max max
+gpt-5 max -
+gpt-5.6-luna max max
 CASES
+  for model in gpt-5 missing; do
+    id="codex-refused-$model-ultra"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model" --effort ultra 2>&1)
+    expect_code 1 "$?" "unsupported Codex ultra profile must fail: $out"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unsupported profile published metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "unsupported profile launched"
+  done
+  id=codex-luna-max-no-catalog
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  out=$(CODEX_HOME="$TMP_ROOT/missing" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max 2>&1)
+  expect_code 0 "$?" "Luna max must not need the catalog: $out"
+  [ "$(codex_pane_run "$pane")" = "max|$TMP_ROOT/missing|" ] || fail "Luna max did not reach launch without a catalog"
   out=$(CODEX_HOME="$TMP_ROOT/missing" "$ROOT/bin/fm-harness.sh" validate-native-effort codex gpt-6.1-terra ultra 2>&1) && fail "missing catalog must refuse ultra"
   assert_contains "$out" "catalog" "missing catalog refusal did not name the catalog"
   assert_contains "$out" "unavailable" "missing catalog refusal was not distinguished"
-  pass "Codex max and ultra follow the catalog of the Codex home the launched worker runs with"
+  pass "Codex max and ultra follow the spawn's catalog and launch with that same Codex home"
 }
 
 test_codex_omits_max_effort_for_unsupported_model() {
@@ -720,7 +734,7 @@ test_codex_omits_max_effort_for_unsupported_model() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' " "codex launch did not preserve the model flag"
   assert_contains "$launch" " --dangerously-bypass-approvals-and-sandbox" "codex launch did not preserve the Codex bypass flag"
-  [ -z "$(codex_pane_effort "$CODEX_HOME")" ] || fail "codex launch must omit unsupported model max reasoning effort"
+  [ "$(codex_pane_run "$CODEX_HOME")" = "|$CODEX_HOME|" ] || fail "codex launch must omit unsupported model max reasoning effort"
   pass "codex omits max for models without the catalog capability"
 }
 
@@ -1273,7 +1287,7 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
       assert_not_contains "$launch" "'max'" "native Ultra was aliased to max"
     done
   done
-  for native_profile in 'claude:codex-native/gpt-6-astra' 'pi:openai-codex/gpt-6-astra' 'pi:default' 'pi:codex-native/'; do
+  for native_profile in 'claude:codex-native/gpt-6-astra' 'codex:codex-native/gpt-6-astra' 'pi:openai-codex/gpt-6-astra' 'pi:default' 'pi:codex-native/'; do
     harness=${native_profile%%:*}; model=${native_profile#*:}; id="ultra-refused-$RANDOM"
     rec=$(make_spawn_case "$id" "$harness" "$id")
     read_case_record "$rec"
