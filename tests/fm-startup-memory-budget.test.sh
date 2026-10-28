@@ -5,6 +5,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$ROOT/bin/fm-quota-axi-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-startup-memory-budget)
@@ -24,13 +26,7 @@ if [ "${1:-}" = --version ]; then
 fi
 exit 0
 SH
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'quota-axi 0.1.51 (fake)'
-fi
-exit 0
-SH
+  fm_fake_version_tool "$fakebin" quota-axi FM_FAKE_QUOTA_AXI_VERSION "$FM_QUOTA_AXI_MIN"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0

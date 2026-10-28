@@ -1684,8 +1684,7 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-Firstmate chooses the best matching rule with judgment; shell scripts do not match the natural-language rules.
-Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+The [dispatch intake contract](../AGENTS.md#4-harness-and-runtime-dispatch) owns rule selection and the concrete profile passed to `fm-spawn.sh`.
 
 **Spawn requirements**
 
@@ -1705,6 +1704,7 @@ This section is the single owner of the canonical schema and its per-field seman
       "when": "<natural-language condition describing a kind of task>",
       "approval": "captain",
       "min_confidence": 0.85,
+      "until": "<optional ISO 8601 UTC instant, YYYY-MM-DDTHH:MM:SSZ>",
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
         { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
@@ -1730,13 +1730,17 @@ This section is the single owner of the canonical schema and its per-field seman
 
 **Fields applied only by typed resolution**
 
-Rule `approval`, `min_confidence`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+Rule `approval`, `min_confidence`, `until`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 
 - `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
 
+`until` is an ISO 8601 UTC instant (`YYYY-MM-DDTHH:MM:SSZ`).
+The resolver drops the rule at or after that instant, before building the model's option list.
+The resolver rejects malformed values, including invalid calendar dates and clock values, before filtering expired rules or making network requests.
+
 `min_confidence` is a number from 0 through 1.
-The rule's own probability in the answer must reach it, replacing the resolver's global 0.6 floor on the answer's confidence.
+The rule's own probability in the answer must reach it.
 Set it high when a wrong pick is costly and low when the rule is a safe runner-up.
 
 **Rule quota floors**
@@ -1771,8 +1775,6 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 - Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
 - On pane backends, an omitted model or effort means the selected harness uses its own default for that axis; [T3 selection](t3code-backend.md#provider-instances-and-models) owns server-backed defaults.
 - OpenCode receives the effort as its default `build` agent's `variant`, keyed to the resolved model, inside the `OPENCODE_CONFIG_CONTENT` JSON its launch already writes (the per-model reasoning-effort field of the config schema, verified on opencode 1.18.32); with no model resolved, the effort is recorded in task metadata but omitted from the launch.
-- Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
-- If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 - On pane backends, except for `ultra` under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
   For T3 Code, follow the [catalog validation contract](t3code-backend.md#provider-instances-and-models).
 - Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
@@ -1819,7 +1821,9 @@ Firstmate invokes the resolve path directly after writing the brief, without a p
 
 **What the model receives**
 
-When on and at least one rule exists, the tool sends the project name and the brief's task-specific text as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, approvals, or confidence floors.
+When on and at least one unexpired rule exists, the tool sends the project name and the brief's task-specific text as state.
+It asks one Choice question with each remaining rule's `when` and the fixed neutral option for no matching rule.
+The model never sees quota, catalogs, `why`, `use`, approvals, confidence floors, or `until`.
 OpenRouter's Decisions API accepts the same Choice request shape and returns the same typed answer, including confidence and a probability per option; both providers use the same response validation and post-model gates.
 The task-specific text is the brief's `## Captain's intent` and `## Firstmate spec` sections under `# Task` that `bin/fm-brief.sh` scaffolds, read by the same parser that feeds `fm-spawn.sh` validation and the no-mistakes `--intent` contract; a brief with neither section is sent whole.
 
@@ -1849,7 +1853,9 @@ That one diagnostic names the list line number at most and never prints the list
 
 **Missing or invalid rules**
 
-An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
+An absent rules file, a default-only file, or no unexpired rules returns `no rules to match` without a model, Pi refresh, or quota request.
+This leaves firstmate's existing routing in control.
+An existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
 
 **Checks performed after the answer**
 
@@ -1857,8 +1863,15 @@ After the answer, code applies all remaining checks and ranking:
 
 - The confidence floor and the matched rule's `approval` and `floor`.
 - Each candidate's `provider` and `floor`.
-- Every applicable account-wide and model/product row from one `quota-axi --json` snapshot.
+- Every applicable account-wide and model/product row from one quota snapshot with bounded reuse.
 - The numeric `spendPriority` argmax over candidates, using each candidate's limiting row.
+
+Before reading quota, the resolver attempts a bounded session refresh for each distinct Pi executable/provider pair in unexpired rules and the top-level default.
+Refresh requires a `provider/model` value; the provider is that model prefix, not the profile's quota-family `provider` field.
+It uses the profile's `pi` or `pi-signed` executable and the [worker account pin](#worker-account-pin-configclaude-account-configpi-account) when configured.
+A refused pin skips refresh; an undeclared provider skips that provider's refresh, without retrying under an ambient account.
+A missing executable or failed refresh does not stop resolution.
+The [resolver header](../bin/fm-dispatch-resolve.sh) owns the refresh command, timeout, and quota reuse limit.
 
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
 
@@ -1868,7 +1881,7 @@ The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and sche
 **Confidence and fallback rules**
 
 - A rule that declares `min_confidence` is checked against that rule's own probability, whether it is the picked option or a runner-up, so a runner-up never needs weaker support than it would as the pick.
-- A picked rule without `min_confidence`, and the neutral option, keep the global 0.6 floor on the answer's confidence exactly as before, so a file with no declared floors behaves as it did.
+- A picked rule without `min_confidence`, and the neutral option, use the global 0.6 answer-confidence threshold for the low-confidence path below.
 
 When the picked rule declares its own floor but its probability falls below it, the tool checks the other options:
 
@@ -1876,6 +1889,13 @@ When the picked rule declares its own floor but its probability falls below it, 
 2. Print a `fallback:` line naming both floors and resolve that rule as though it had been picked.
 
 No qualifying option, or two equally probable qualifying options, produces `ambiguous`.
+
+Only picks without a declared floor use the low-confidence path when answer confidence falls below the global threshold.
+The resolver selects the most probable option whose declared floor, if any, is met.
+Options without a declared floor, including the neutral option, need no minimum probability on this path.
+A tie between the highest-probability qualifying options returns `ambiguous`.
+Otherwise, the resolver applies approval and quota checks to the selected option.
+After approval and rule-floor checks permit candidate ranking, the result note marks low confidence.
 
 **Candidate eligibility and evidence**
 
@@ -1887,30 +1907,30 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 
 | Result | Meaning |
 | --- | --- |
-| `clear` | A `profile:` line ready for `fm-spawn.sh`. |
-| `ambiguous` | Confidence below the floor with no runner-up taken. |
+| `clear` | A `profile:` line ready for `fm-spawn.sh`; a low-confidence note marks an answer that resolved below the global floor. |
+| `ambiguous` | A rule-declared `min_confidence` missed with no qualifying runner-up, a runner-up tie, or a below-floor answer whose top options tie. |
 | `escalate` | An approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie. |
 | `error` | API, network, malformed response metadata, rendering, or quota-axi failure. |
 
 Every result above exits 0.
 
+- The response's selected choice must be an offered option before any confidence fallback, Pi refresh, or quota read.
 - Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
 - Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, a missing `jq`, an unknown provider, or an OpenRouter provider without a model, each reported and never selected around.
 - Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 
 **Firstmate retains the dispatch decision**
 
-The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
+[`AGENTS.md` section 4](../AGENTS.md#4-harness-and-runtime-dispatch) owns outcome handling and the permitted overrides of a clear profile.
+The captain-approval gate and `fm-spawn.sh` validation still apply.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
-
-Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
 **Key handling and provider settings**
 
 - The resolver copies either environment-provided key into a non-exported private variable and unsets both `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` before launching child processes; bootstrap also protects the typesafe key.
 - The resolver sends only the selected key to `curl` as a header read from a file descriptor, never on argv, and never prints, logs, or writes either key.
 - The typesafe.ai endpoint is `https://api.typesafe.ai/v1/systemone`, and the OpenRouter endpoint is `https://openrouter.ai/api/alpha/decisions`.
-- The default confidence floor remains 0.6; request timeouts are 5 seconds for typesafe.ai and 10 seconds for OpenRouter.
+- Request timeouts are 5 seconds for typesafe.ai and 10 seconds for OpenRouter.
 
 The recommended OpenRouter model is `typesafe/jev-1.13` because it is built for fast typed choices and supplies native per-option probabilities without generated text.
 The dated model catalog observation is recorded in [dispatch verification](verification/dispatch-resolve.md#the-api-the-tool-depends-on).
