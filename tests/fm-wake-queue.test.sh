@@ -3765,7 +3765,7 @@ SH
   chmod +x "$dir/fakebin/ssh"
   : > "$dir/ssh.log"
 
-  run_liveness_leg "$dir" unreachable FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log"; pid=$LIVENESS_PID
+  run_liveness_leg "$dir" unreachable FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log" FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=999999; pid=$LIVENESS_PID
   sleep 4
   is_live_non_zombie "$pid" \
     || fail "the watcher exited against an unreachable remote secondmate: $(cat "$dir/watch-unreachable.out" "$dir/watch-unreachable.err")"
@@ -3854,3 +3854,4 @@ test_secondmate_liveness_tick_error_keeps_scanning_and_wakes
 test_secondmate_liveness_tick_unqueued_outcome_is_an_error_not_a_wake
 test_secondmate_liveness_tick_skips_mate_whose_lock_is_held
 test_secondmate_liveness_tick_preserves_unreachable_remote
+test_secondmate_liveness_tick_alerts_persistent_remote_probe_failure_once
