@@ -47,8 +47,7 @@ cleanup() {
       [ ! -f "$TMP_ROOT/$log" ] || { printf 'diagnostic: %s\n' "$log"; cat "$TMP_ROOT/$log"; }
     done
     if [ -n "${watch_pid:-}" ]; then
-      printf 'diagnostic: watcher pid=%s and private fixture process inventory\n' "$watch_pid"
-      ps -eo pid,ppid,pgid,lstart,args
+      printf 'diagnostic: fixture watcher pid=%s\n' "$watch_pid"
       for log in "$WATCH_STATE/.wake-queue" \
         "$WATCH_STATE/.secondmate-relaunch-ios" \
         "$WATCH_STATE/ios.meta" \
