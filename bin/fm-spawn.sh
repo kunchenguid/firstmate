@@ -876,8 +876,6 @@ fi
 if ! KEEP_AI_TRAILERS=$(fm_config_source_present "$CONFIG/keep-ai-trailers"); then
   exit 1
 fi
-# Set by the PR-text agreement below for a pr=manual ship.
-PR_TEXT=auto
 # Set by the forge agreement below for a forge=external ship.
 EXTERNAL_REVIEW=0
 EXTERNAL_BACKUP_REMOTE=
@@ -4071,7 +4069,6 @@ if [ "$KIND" = ship ]; then
     echo "error: PR-text mismatch for $ID: $PROJ_NAME is registered pr=$STANDING_PR but $SOURCE_BRIEF records pr=$BRIEF_PR; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $pr_scaffold, then re-fill those two subsections, so the worker owns the PR text exactly when the project says so" >&2
     exit 1
   fi
-  PR_TEXT=$STANDING_PR
   # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
   # the captain's decision of 2026-09-15: a Code-Review+2 is a positive
   # attributed claim that a named human approved, and firstmate must not
