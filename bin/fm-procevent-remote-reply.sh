@@ -19,8 +19,9 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. `relisten` tells that runner to poll again in the same
 # process, still holding the claim, after an empty window and after that re-arm.
-# A window the remote job worker preempted is reported to the runner as an empty
-# window, so it relistens too (see JOB_PREEMPTED below).
+# A window the remote job worker preempted, a failed SSH transport (exit 255),
+# and a remote reader exit 1 or 2 are reported to the runner as an empty window,
+# so it relistens too (see JOB_PREEMPTED and cmd_source below).
 # A continuity break is escalated and not re-armed, so the registration is dropped
 # and the runner stops. The runner does not refresh the owner lease.
 #
@@ -301,7 +302,8 @@ WINDOW_CLOSED_EMPTY=75
 # per-cycle liveness probe. The read is cursor-anchored and non-destructive, so a
 # preempted window loses nothing: it is a window that closed early, and the
 # runner relistens exactly as after WINDOW_CLOSED_EMPTY instead of reading it as
-# a failed read that releases the listener's claim. It proves nothing about the
+# a failed read. Only a failed read other than SSH exit 255 or reader exit 1 or 2
+# releases the listener's claim (see cmd_source). It proves nothing about the
 # channel being caught up, so it records no watermark.
 JOB_PREEMPTED=76
 
