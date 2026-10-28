@@ -2781,7 +2781,11 @@ test_lock_wait_returns_when_its_directory_is_removed() {
     kill -TERM "$holder" 2>/dev/null || true
     fail "the waiter stopped waiting on a live hold while its directory still existed"
   fi
-  rm -rf "$state"
+  i=0
+  while [ -e "$state" ] && [ "$i" -lt 50 ]; do
+    rm -rf "$state" 2>/dev/null || sleep 0.02
+    i=$((i + 1))
+  done
   i=0
   while [ "$i" -lt 20 ] && kill -0 "$waiter" 2>/dev/null; do
     sleep 0.1
