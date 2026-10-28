@@ -277,30 +277,36 @@ test_promote_requires_and_records_the_delivery_contract() {
 # A home with config/spawn-base-primary-checkout can start a scout from the
 # primary checkout's default branch, which may carry commits origin has never
 # received, so a promotion to a publishing mode names origin's default branch as
-# the base to return to. Local-only, a home without the flag, and a named base
-# keep their wording.
+# the base to return to. Local-only, a home without the flag, a project without
+# an origin remote (which spawn never moves off its slot's HEAD), and a named
+# base keep their wording.
 test_promote_names_origin_for_a_publishing_mode_in_an_opted_in_home() {
-  local flag mode home id instructions out status
+  local flag remote mode rec home proj fakebin id instructions out status
   for flag in on off; do
-    for mode in direct-PR no-mistakes local-only; do
-      home="$TMP_ROOT/promote-base-$flag-$mode/home"
-      id="promote-base-$flag-${mode%%-*}-c1"
-      mkdir -p "$home/state" "$home/config"
-      [ "$flag" = off ] || : > "$home/config/spawn-base-primary-checkout"
-      write_brief "$home" "$id"
-      printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+    for remote in origin none; do
+      for mode in direct-PR no-mistakes local-only; do
+        rec=$(make_home "promote-base-$flag-$remote-$mode" "- proj [$mode] - fixture (added 2026-01-01)")
+        IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+        [ "$remote" = none ] || git -C "$proj" remote add origin "file://$TMP_ROOT/promote-base-$flag-$remote-$mode/origin.git"
+        id="promote-base-$flag-$remote-${mode%%-*}-c1"
+        [ "$flag" = off ] || : > "$home/config/spawn-base-primary-checkout"
+        write_brief "$home" "$id"
+        printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$home/state/$id.meta"
 
-      out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1)
-      status=$?
-      expect_code 0 "$status" "flag $flag, $mode: the promotion should succeed"$'\n'"$out"
-      instructions="$home/data/$id/ship-instructions.md"
-      if [ "$flag" = on ] && [ "$mode" != local-only ]; then
-        assert_grep "3. Return to a clean copy of origin's default branch rather than the primary checkout's, which can carry commits origin has never received, then create your branch" \
-          "$instructions" "flag $flag, $mode: a publishing promotion did not name origin's default branch as its base"
-      else
-        assert_grep '3. Return to a clean default-branch base, then create your branch' \
-          "$instructions" "flag $flag, $mode: the promotion changed the default-branch wording"
-      fi
+        out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1)
+        status=$?
+        expect_code 0 "$status" "flag $flag, remote $remote, $mode: the promotion should succeed"$'\n'"$out"
+        instructions="$home/data/$id/ship-instructions.md"
+        if [ "$flag" = on ] && [ "$remote" = origin ] && [ "$mode" != local-only ]; then
+          assert_grep "3. Return to a clean copy of origin's default branch rather than the primary checkout's, which can carry commits origin has never received, then create your branch" \
+            "$instructions" "flag $flag, remote $remote, $mode: a publishing promotion did not name origin's default branch as its base"
+        else
+          assert_grep '3. Return to a clean default-branch base, then create your branch' \
+            "$instructions" "flag $flag, remote $remote, $mode: the promotion changed the default-branch wording"
+        fi
+      done
     done
   done
 
@@ -315,7 +321,7 @@ test_promote_names_origin_for_a_publishing_mode_in_an_opted_in_home() {
   expect_code 0 "$status" "a named-base promotion in an opted-in home should succeed"$'\n'"$out"
   assert_grep "3. Return to a clean copy of the base branch \`feature/hub\`, then create your branch" \
     "$home/data/$id/ship-instructions.md" "the opt-in changed a named base branch's promotion wording"
-  pass "fm-promote: an opted-in home sends a publishing promotion back to origin's default branch"
+  pass "fm-promote: an opted-in home sends a publishing promotion on a project with origin back to origin's default branch"
 }
 
 # A symlink at state/<id>.meta is the containment hazard the shared publisher

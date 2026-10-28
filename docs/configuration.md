@@ -1023,7 +1023,7 @@ When the primary checkout's `<default>` and origin's have diverged, the spawn pr
 A project without an origin remote is unaffected, and a relaunch never changes the base a task already has.
 
 `bin/fm-review-diff.sh` reads the same flag, so a local-only ship or a scout is reviewed against the branch it delivers to and its diff shows only its own work, while a no-mistakes or direct-PR ship stays anchored on `origin/<default>`.
-`bin/fm-promote.sh` reads it too, telling a scout promoted to no-mistakes or direct-PR to return to origin's default branch rather than the primary checkout's.
+`bin/fm-promote.sh` reads it too, telling a scout promoted to no-mistakes or direct-PR on a project with an origin remote to return to origin's default branch rather than the primary checkout's.
 
 The flag is per home and is not inherited by secondmate homes, which keep their own project clones and opt in separately.
 Only its presence is read, at each fresh spawn, review, and promotion.

@@ -1231,7 +1231,7 @@ push_forge_only_commit() {
   git -C "$publisher" push --quiet origin main
 }
 
-spawn_delivery() { # <id> <direct-PR|local-only|scout>
+spawn_delivery() { # <id> <no-mistakes|direct-PR|local-only|scout>
   if [ "$2" = scout ]; then
     run_spawn "$1" --scout
   else
@@ -1266,15 +1266,18 @@ test_default_keeps_origin_tip_while_the_primary_leads() {
 
 # With the opt-in the base follows the delivery: a local-only ship or a scout
 # starts from the primary checkout's branch when it strictly contains origin's
-# tip, and every other case keeps origin's tip - a publishing mode, a primary
-# that has diverged (reported in a note), and a primary that trails origin. The
-# slot's base and the commit the captain's review starts from must be the same
-# commit, so each case also commits on the slot and runs the opted-in review.
+# tip, and every other case keeps origin's tip - either publishing mode, a
+# primary that has diverged (reported in a note), and a primary that trails
+# origin. The slot's base and the commit the captain's review starts from must
+# be the same commit, so each case also commits on the slot and runs the
+# opted-in review.
 test_opt_in_base_follows_the_delivery_and_the_review_follows_the_base() {
-  local shape contract id rec out status head expected review base_line review_start landings
+  local shape contract publishes id rec out status head expected review base_line review_start landings
   for shape in leading diverged trailing; do
-    for contract in direct-PR local-only scout; do
+    for contract in no-mistakes direct-PR local-only scout; do
       id="pool-opt-in-$shape-$contract-r1"
+      publishes=0
+      case $contract in no-mistakes | direct-PR) publishes=1 ;; esac
       landings=2
       [ "$shape" != trailing ] || landings=0
       rec=$(make_local_landing_case "opt-in-$shape-$contract" "$id" "$landings")
@@ -1286,14 +1289,14 @@ test_opt_in_base_follows_the_delivery_and_the_review_follows_the_base() {
       status=$?
       expect_code 0 "$status" "$shape/$contract: an opted-in spawn should launch"$'\n'"$out"
       head=$(git -C "$POOL_DIR" rev-parse HEAD)
-      if [ "$shape" = leading ] && [ "$contract" != direct-PR ]; then
+      if [ "$shape" = leading ] && [ "$publishes" = 0 ]; then
         expected=$(git -C "$PROJECT_DIR" rev-parse main)
         [ "$expected" != "$INITIAL_SHA" ] || fail "$shape/$contract: fixture did not advance the primary checkout"
       else
         expected=$(git -C "$POOL_DIR" rev-parse origin/main)
       fi
       [ "$head" = "$expected" ] || fail "$shape/$contract: the slot started at $head, not $expected"
-      if [ "$shape" = diverged ] && [ "$contract" != direct-PR ]; then
+      if [ "$shape" = diverged ] && [ "$publishes" = 0 ]; then
         assert_contains "$out" "main in the primary checkout has diverged from origin/main (ahead by 2, behind by 1); starting from origin's tip" \
           "$shape/$contract: the spawn did not report the divergence it set aside"
       else
