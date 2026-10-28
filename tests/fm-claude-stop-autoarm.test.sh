@@ -14,6 +14,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+FM_TEST_REAL_LN=$(command -v ln)
+export FM_TEST_REAL_LN
+
 TMP_ROOT=$(fm_test_tmproot fm-claude-stop-autoarm)
 fm_git_identity fmtest fmtest@example.invalid
 
@@ -29,6 +32,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-startup-network-lib.sh" "$dir/bin/fm-startup-network-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
@@ -964,7 +968,7 @@ test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting() {
 last=
 for arg do last=$arg; done
 printf '%s\n' "$last" >> "$FM_TEST_LN_LOG"
-exec /bin/ln "$@"
+exec "$FM_TEST_REAL_LN" "$@"
 SH
   chmod +x "$lnbin/ln"
   : > "$lnlog"
@@ -1995,6 +1999,22 @@ test_fm_lock_status_still_works_with_shared_lib() {
   assert_contains "$out" "lock: free" "fm-lock.sh status must keep working after the session-lock lib extraction"
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
+
+test_startup_receipt_keeps_primary_handling_without_crew() {
+  local dir out status generation=fixture.5378.primary
+  dir=$(make_primary_dir "$TMP_ROOT/startup-handling")
+  mkdir -p "$dir/state/.startup-network-wake-receipts"
+  printf '%s\n' "$generation" > "$dir/state/.startup-network-wake-receipts/$generation"
+  printf '1\t1\tcheck\tstartup-network:%s\tcheck: startup-network: actionable\n' "$generation" > "$dir/state/.wake-queue"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "queued startup handling must rewake without crew tasks"
+  assert_contains "$out" "firstmate watcher wake" "startup handling lost its rewake"
+  [ -s "$dir/state/.wake-queue" ] || fail "handoff consumed startup handling before acknowledgement"
+  pass "primary handoff: receipt preserves startup-only handling until acknowledgement"
+}
+
+test_startup_receipt_keeps_primary_handling_without_crew
 
 test_inert_in_child_worktree
 test_inert_without_session_lock

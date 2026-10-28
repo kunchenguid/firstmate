@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
 # docs/watcher-continuity.md owns the recovery-episode state contract.
+# Startup generation keys additionally use .startup-network-wake-receipts/<g>:
+# a plain file containing g, committed under the queue lock only after a complete
+# matching row exists. Publication ownership fences fresh appends against a new
+# reservation. An existing receipt or row suppresses another append; consumer
+# acknowledgement writes missing receipts for its own rows before removal.
+# Receipt failure leaves rows queued. These receipts suppress enqueue replay,
+# never count as primary handling acknowledgement, and are not pruned with rows.
 
 FM_WAKE_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
@@ -2404,6 +2411,9 @@ fm_wake_clean_field() {
 
 fm_wake_append() {
   local status=0
+  if [ "${1:-}" = check ]; then
+    case ${2:-} in startup-network:*) fm_wake_append_startup "$@"; return $? ;; esac
+  fi
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fm_wake_append_locked "$@" || status=$?
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -2417,6 +2427,13 @@ fm_wake_append() {
 # deletes consumed rows under the same lock) acquire the lock once, run this and
 # their own write, then release.
 fm_wake_append_locked() {
+  if [ "${1:-}" = check ]; then
+    case ${2:-} in startup-network:*) fm_wake_append_startup_locked "$@"; return $? ;; esac
+  fi
+  _fm_wake_append_row_locked "$@"
+}
+
+_fm_wake_append_row_locked() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   local recovery_marker
   case "$kind" in
@@ -2462,6 +2479,95 @@ fm_wake_append_locked() {
     FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
   fi
   return "$status"
+}
+
+# Startup publication and reservation take their lock before the queue lock.
+# Public append follows that order too; locked callers must already own both.
+fm_wake_append_startup() {
+  local current publish="$STATE/.startup-network.lock" own_publish=0 rc=0
+  fm_current_pid current || return 1
+  if [ "$(cat "$publish/pid" 2>/dev/null || true)" != "$current" ]; then
+    fm_lock_acquire_wait "$publish" || return 1
+    own_publish=1
+  fi
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    fm_wake_append_startup_locked "$@" || rc=$?
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  fi
+  [ "$own_publish" -eq 0 ] || fm_lock_release "$publish"
+  return "$rc"
+}
+
+fm_wake_startup_receipt_write() { # <generation>, caller owns queue lock
+  local generation=$1 root="$STATE/.startup-network-wake-receipts" receipt tmp current
+  # shellcheck source=bin/fm-startup-network-lib.sh
+  . "$FM_WAKE_LIB_DIR/fm-startup-network-lib.sh" || return 1
+  fm_startup_generation_valid "$generation" || return 1
+  fm_current_pid current || return 1
+  [ "$(cat "$FM_WAKE_QUEUE_LOCK/pid" 2>/dev/null || true)" = "$current" ] || return 1
+  fm_startup_wake_receipted "$STATE" "$generation" && return 0
+  [ -f "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ] \
+    && awk -F '\t' -v key="startup-network:$generation" \
+      'NF == 5 && $2 ~ /^[0-9]+$/ && $3 == "check" && $4 == key { found=1; exit } END { exit !found }' \
+      "$FM_WAKE_QUEUE" || return 1
+  if [ -e "$root" ] || [ -L "$root" ]; then
+    [ -d "$root" ] && [ ! -L "$root" ] || return 1
+  else
+    (umask 077; mkdir "$root") || return 1
+  fi
+  receipt="$root/$generation"
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    [ "$(cat "$receipt")" != "$generation" ] || return 0
+  fi
+  tmp=$(mktemp "$root/.receipt.XXXXXX") || return 1
+  if ! printf '%s\n' "$generation" > "$tmp" || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$receipt"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_wake_append_startup_locked() { # <check> <startup-network:generation> <payload>
+  local generation=${2#startup-network:} current result
+  # shellcheck source=bin/fm-startup-network-lib.sh
+  . "$FM_WAKE_LIB_DIR/fm-startup-network-lib.sh" || return 1
+  fm_startup_generation_valid "$generation" || return 2
+  [ "$1" = check ] || return 2
+  fm_current_pid current || return 1
+  [ "$(cat "$STATE/.startup-network.lock/pid" 2>/dev/null || true)" = "$current" ] \
+    && [ "$(cat "$FM_WAKE_QUEUE_LOCK/pid" 2>/dev/null || true)" = "$current" ] || return 1
+  [ "$(fm_startup_field "$STATE/.startup-network.status" generation)" = "$generation" ] \
+    && [ "$(fm_startup_field "$STATE/.startup-network.status" report_published)" = 1 ] \
+    || return 1
+  result=$(fm_startup_result_path "$STATE" "$generation") || return 1
+  fm_startup_report_requires_wake "$result/report" "$(fm_startup_field "$result/status" state)" || return 1
+  [ "$(cat "$STATE/.startup-network.delivered" 2>/dev/null || true)" != "$generation" ] || return 1
+  fm_startup_wake_receipted "$STATE" "$generation" && return 0
+  if [ -f "$FM_WAKE_QUEUE" ] && awk -F '\t' -v key="$2" \
+    'NF == 5 && $2 ~ /^[0-9]+$/ && $3 == "check" && $4 == key { found=1; exit } END { exit !found }' \
+    "$FM_WAKE_QUEUE"; then
+    fm_wake_startup_receipt_write "$generation"
+    return $?
+  fi
+  _fm_wake_append_row_locked "$@" || return $?
+  fm_wake_startup_receipt_write "$generation"
+}
+
+# Receipt exactly the startup rows this actor will remove. Failure leaves the
+# original queue untouched, including after an appender died before its receipt.
+fm_wake_commit_startup_receipts_through() { # <cutoff> <owned-sequences-file>
+  local cutoff=$1 rows=$2 key keys
+  keys=$(awk -F '\t' -v cutoff="$cutoff" -v rows="$rows" '
+    BEGIN { while ((getline line < rows) > 0) owned[line]=1 }
+    NF == 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff && ($2 in owned) \
+      && $3 == "check" && $4 ~ /^startup-network:[A-Za-z0-9._-]+$/ { print $4 }
+  ' "$FM_WAKE_QUEUE") || return 1
+  [ -n "$keys" ] || return 0
+  while IFS= read -r key; do
+    fm_wake_startup_receipt_write "${key#startup-network:}" || return 1
+  done <<< "$keys"
 }
 
 # fm_wake_queued_keys <kind>
