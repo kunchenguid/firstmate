@@ -1832,17 +1832,19 @@ fm_failure_episode_reset() {
 #     (continuity falls to the synchronous guard), and the identity is read
 #     from the ledger entry alone - never substituted from any lock - so a
 #     reused pid can never authenticate someone else's stale entry. Line 3 of an
-#     arming entry that recorded owner_session_id is the pid-identity of the
-#     session-lock holder the claim was taken under, read the same way.
+#     arming entry that recorded owner_session_id is the session-lock identity
+#     of the holder the claim was taken under, read by the session-lock bridge
+#     when the holder is a tagged Windows pid.
 #   - A claim is OPEN (fm_autoarm_claim_open) while its outcome is "arming",
 #     its owner pid is alive, its recorded identity successfully recomputes
 #     and matches that pid, its owner is still REACHABLE by its session -
-#     either it DESCENDS from the session-lock pid (state/.lock line 1, which
-#     must be numeric: a missing or malformed lock means no session can receive
-#     a rewake) or its recorded owner_session_id matches the trusted session id
-#     beside that lock (state/.lock-session) WHILE the recorded pid-identity of
-#     the lock holder it claimed under (entry line 3) still recomputes from the
-#     lock's current holder pid. The id signal is the second one
+#     either it DESCENDS from the numeric session-lock pid (state/.lock line 1)
+#     or, for a tagged Windows session-lock pid that is outside the local
+#     process table, its recorded owner_session_id matches the trusted session
+#     id beside that lock (state/.lock-session) WHILE the recorded pid-identity
+#     of the lock holder it claimed under (entry line 3) still recomputes from
+#     the lock's current holder pid. A missing or malformed lock means no
+#     session can receive a rewake. The id signal is the second one
 #     the claiming hook's own admission accepts (fm_session_lock_owned_by_self),
 #     so a background session whose bridge is recycled mid-cycle keeps its live
 #     claim; pinning it to the recorded lock-holder identity is what keeps a
@@ -1933,7 +1935,7 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
 # Parse the current ledger claim. Sets FM_AUTOARM_GEN, FM_AUTOARM_OWNER,
 # FM_AUTOARM_OUTCOME, FM_AUTOARM_SESSION, FM_AUTOARM_RECOVERY,
 # FM_AUTOARM_OWNER_SESSION_ID, FM_AUTOARM_OWNER_LOCK_IDENTITY (line 3 of the
-# entry: the pid-identity of the session-lock holder as the claim was taken), and
+# entry: the session-lock identity of the holder as the claim was taken), and
 # FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
 # line 2 - identity is never substituted from a lock, so a transient
 # micro-mutex hold or a reused pid can never authenticate a stale entry).
@@ -1997,15 +1999,13 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
   [ -n "$current" ] || return 1
   [ "$current" = "$FM_AUTOARM_IDENTITY" ] || return 1
   lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
+  _fm_wake_require_session_lock
+  fm_session_pid_valid "$lock_pid" || return 1
   if ! fm_pid_descends_from "$FM_AUTOARM_OWNER" "$lock_pid"; then
     [ -n "$FM_AUTOARM_OWNER_SESSION_ID" ] || return 1
     [ -n "$FM_AUTOARM_OWNER_LOCK_IDENTITY" ] || return 1
-    lock_identity=$(fm_pid_identity "$lock_pid" 2>/dev/null) || return 1
+    lock_identity=$(fm_session_pid_identity "$lock_pid" 2>/dev/null) || return 1
     [ "$lock_identity" = "$FM_AUTOARM_OWNER_LOCK_IDENTITY" ] || return 1
-    _fm_wake_require_session_lock
     recorded=$(fm_session_lock_recorded_session_id "$state" 2>/dev/null || true)
     [ -n "$recorded" ] && [ "$recorded" = "$FM_AUTOARM_OWNER_SESSION_ID" ] || return 1
   fi
@@ -2041,7 +2041,8 @@ fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
   [ "$FM_AUTOARM_OUTCOME" = rewake ] || return 1
   lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
   [ -n "$FM_AUTOARM_SESSION" ] && [ "$FM_AUTOARM_SESSION" = "$lock_pid" ] || return 1
-  fm_pid_alive "$lock_pid" || return 1
+  _fm_wake_require_session_lock
+  fm_session_pid_alive "$lock_pid" || return 1
   fm_recovery_marker_read "$state/.watcher-down" || return 1
   recovery=${FM_RECOVERY_MARKER_TOKEN##*:}
   [ -n "$FM_AUTOARM_RECOVERY" ] && [ "$FM_AUTOARM_RECOVERY" = "$recovery" ] || return 1
@@ -2072,7 +2073,7 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
     *[![:alnum:]_.-]*) session_id= ;;
   esac
   lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
-  lock_identity=$(fm_pid_identity "$lock_pid" 2>/dev/null || true)
+  lock_identity=$(fm_session_pid_identity "$lock_pid" 2>/dev/null || true)
   [ -n "$lock_identity" ] || session_id=
   fm_lock_try_acquire "$lock" || return 1
   if fm_autoarm_claim_open "$state" "$grace"; then

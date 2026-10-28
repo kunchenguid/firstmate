@@ -182,7 +182,8 @@ fm_supervision_host_outcomes_drained() {
 
 # fm_supervision_host_main_key <state-dir>: print the key of the current main
 # session, which changes at every main session start: the session-lock holder,
-# a checksum of its process identity (bin/fm-wake-lib.sh fm_pid_identity), and
+# a checksum of its process identity (fm_session_pid_identity in
+# bin/fm-session-lock-lib.sh, which reads a tagged Windows pid too), and
 # a checksum of its session sidecar, so a later session given a recycled lock
 # pid never shares it. The host keys its engine conversation and broken-session
 # latch to it; the dialog mirror (bin/fm-host-mirror.sh) keys each entry and
@@ -193,7 +194,8 @@ fm_supervision_host_outcomes_drained() {
 fm_supervision_host_main_key() {
   local pid identity
   pid=$(sed -n '1p' "$1/.lock" 2>/dev/null)
-  identity=$(fm_pid_identity "$pid" 2>/dev/null) && [ -n "$identity" ] || return 1
+  _fm_wake_require_session_lock
+  identity=$(fm_session_pid_identity "$pid" 2>/dev/null) && [ -n "$identity" ] || return 1
   printf '%s:%s:%s\n' "$pid" "$(printf '%s\n' "$identity" | cksum | awk '{ print $1 }')" \
     "$(sed -n '1p' "$1/.lock-session" 2>/dev/null | cksum | awk '{ print $1 }')"
 }
