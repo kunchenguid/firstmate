@@ -291,7 +291,6 @@ test_park_boundary_hands_an_acknowledged_episode_back_announced() {
   home=$(make_home boundary-acked attended)
   FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
   wait_until 150 watcher_live "$home" || fail "acked boundary: the host never started a watcher cycle"
-  sleep 2
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"
     fm_wake_append signal handled "signal: handled before the boundary"
