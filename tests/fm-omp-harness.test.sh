@@ -13,8 +13,8 @@
 # catches vendor drift against a real omp. Neither replaces the other.
 #
 # The load-bearing contracts:
-#   1. omp publishes no marker; the anchored process name `omp` is the ancestry
-#      evidence, and ompd/comp never identify.
+#   1. omp publishes no marker; the anchored native process name `omp` or an
+#      exact omp script run by Bun is the ancestry evidence, and ompd/comp never identify.
 #   2. FM_OMP_HARNESS=omp is a precedence override that needs a real omp
 #      ancestor: it beats an inherited CLAUDECODE under omp and is inert when it
 #      leaks into a worker whose ancestry holds no omp.
@@ -65,15 +65,22 @@ make_named_shells() {  # <dir> -> echoes <bindir>
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
-  local bin out
+  local bin out blind="$TMP_ROOT/blind-ancestry"
   bin=$(make_named_shells "$TMP_ROOT/named")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
+  # The decoy must not identify ON ITS OWN NAME, so the suite's own primary is
+  # blinded here too. Without that, a suite running inside an omp session
+  # resolves its own ancestry to omp, the decoy inherits it, and the assertion
+  # fails on the real parent rather than on the decoy's name - a Bun-hosted omp
+  # primary makes exactly that ancestry resolvable.
+  mkdir -p "$blind"
+  fm_fake_blind_ancestry "$blind"
   for decoy in ompd comp; do
     # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-    out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS PATH="$blind:$PATH" \
       "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
     [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
   done
@@ -82,9 +89,12 @@ test_detection_anchored_name_and_marker_precedence() {
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
+  # ...and is inert when it leaks into a worker with no omp ancestor. Blind the
+  # suite's own primary so its structural identity cannot outrank the marker.
+  mkdir -p "$blind"
+  fm_fake_blind_ancestry "$blind"
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS PATH="$blind:$PATH" CLAUDECODE=1 FM_OMP_HARNESS=omp \
     bash -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
@@ -103,6 +113,55 @@ test_lock_identity_and_liveness_classification() {
   [ "$(fm_agent_process_classify_name ompd)" != agent ] || fail "tmux liveness must not classify ompd as an agent"
   [ "$(fm_agent_process_classify_name comp)" != agent ] || fail "tmux liveness must not classify comp as an agent"
   pass "session lock and tmux liveness: omp is anchored, decoys stay out"
+}
+
+test_bun_hosted_omp_detection_and_lock() {
+  local bin="$TMP_ROOT/bun-hosted/bin" home="$TMP_ROOT/bun-hosted/home"
+  local out owner args
+  local -a rejected=(
+    'bun /tmp/tool.js build --tag claude'
+    'bun /tmp/tool.js --cwd /opt/omp'
+    'bun /tmp/tool.js /opt/omp'
+    'bun --cwd /opt/omp /tmp/tool.js'
+    'bun --smol --cwd /opt/omp /tmp/tool.js'
+    'bun -e claude'
+    'bun tool.js claude'
+    'bun /opt/omp/data/file.js'
+    'bun /tmp/cli.js --x'
+    'bun /tmp/ompd'
+  )
+  fm_harness_process_matches bun 'bun /Users/u/.bun/bin/omp --resume session' \
+    || fail "session-lock identity must accept a Bun-hosted omp script"
+  fm_harness_process_matches bun 'bun --smol /usr/local/bin/pi' \
+    || fail "session-lock identity must accept a valueless Bun option before the script"
+  for args in "${rejected[@]}"; do
+    if fm_harness_process_matches bun "$args"; then
+      fail "an ordinary Bun command was misidentified as a harness: $args"
+    fi
+  done
+
+  mkdir -p "$bin" "$home/state"
+  ln -sf /bin/bash "$bin/bun"
+  cat > "$bin/omp" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_TEST_BUN_HOME/state/owner.pid"
+"$1"
+:
+SH
+  chmod +x "$bin/omp"
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_TEST_BUN_HOME="$home" CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    "$bin/bun" "$bin/omp" "$HARNESS")
+  [ "$out" = omp ] || fail "a Bun-hosted omp must outrank an inherited Claude marker, got '$out'"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_TEST_BUN_HOME="$home" FM_HOME="$home" CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    "$bin/bun" "$bin/omp" "$ROOT/bin/fm-lock.sh")
+  owner=$(cat "$home/state/owner.pid")
+  [ "$out" = "lock acquired: harness pid $owner" ] \
+    || fail "a Bun-hosted omp could not acquire its home lock: $out"
+  [ "$(cat "$home/state/.lock")" = "$owner" ] \
+    || fail "the Bun-hosted omp lock names $(cat "$home/state/.lock"), expected $owner"
+  pass "fm-harness and session lock: Bun-hosted omp is identified without admitting ordinary Bun commands"
 }
 
 # --- 2. Launch ---------------------------------------------------------------
@@ -965,6 +1024,7 @@ EOF
 
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
+test_bun_hosted_omp_detection_and_lock
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
