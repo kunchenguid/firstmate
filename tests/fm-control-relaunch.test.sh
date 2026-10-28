@@ -946,7 +946,23 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
 }
 
 test_codex_catalog_effort_relaunch() {
-  local dir out rc id effort
+  local dir out rc id effort allowed
+  for effort in max ultra; do
+    for allowed in empty listed; do
+      id="rl-filtered-$effort-$allowed"
+      dir=$(new_case "$id" "$id")
+      add_ship_task "$dir" "$id" codex
+      printf codex > "$dir/fake/command"
+      mkdir -p "$dir/home/config"
+      : > "$dir/home/config/launch-env-allowlist"
+      [ "$allowed" != listed ] || printf 'CODEX_HOME\n' > "$dir/home/config/launch-env-allowlist"
+      out=$(CODEX_HOME="$dir/catalog" run_control "$dir" "$id" relaunch --harness codex --model gpt-6.1-terra --effort "$effort" --note "filtered profile"); rc=$?
+      expect_code 1 "$rc" "filtered Codex $effort must refuse: $out"
+      assert_contains "$out" 'config/launch-env-allowlist' "filtered refusal did not name the config"
+      [ "$(cat "$dir/fake/command")" = codex ] || fail "filtered Codex relaunch stopped the agent"
+      [ ! -s "$dir/fake/literal" ] || fail "filtered Codex relaunch sent lifecycle input"
+    done
+  done
   for effort in max ultra; do
     id="rl-codex-$effort"
     dir=$(new_case "$id" "$id")

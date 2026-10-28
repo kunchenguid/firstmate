@@ -396,6 +396,8 @@
 #   blank lines and lines beginning with # are ignored. Invalid input refuses
 #   before launch, as do path inspection errors such as inaccessible config
 #   directories. An empty file retains only the operational floor below.
+#   Codex max and ultra require a provable destination home; the Orca source
+#   below supports an explicitly snapshotted absolute CODEX_HOME or HOME.
 #   Names are read once per spawn; unless the Orca source below applies, values
 #   are expanded in the destination pane, not copied from the invoking process
 #   or written into the launch text.
@@ -1612,6 +1614,7 @@ GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
 SPAWN_STAGED_LAUNCH_FILE=
+ORCA_CODEX_HOME_FILE=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1888,6 +1891,7 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  [ -z "$ORCA_CODEX_HOME_FILE" ] || rm -f -- "$ORCA_CODEX_HOME_FILE" 2>/dev/null || true
   if [ "$status" -ne 0 ] && [ "${ORCA_LAUNCH_ENV_ENABLED:-0}" = 1 ] && [ -n "$SPAWN_STAGED_LAUNCH_FILE" ]; then
     if [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; then
       rm -f -- "$SPAWN_STAGED_LAUNCH_FILE" 2>/dev/null || true
@@ -2166,6 +2170,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
 fi
 ORCA_LAUNCH_ENV_ENABLED=0
 ORCA_LAUNCH_ENV_ARGS=
+ORCA_CODEX_HOME=
 if [ "$RELAUNCH" -eq 0 ]; then
   mkdir -p "$STATE" || {
     echo "error: could not create parent state directory" >&2
@@ -2282,8 +2287,13 @@ if [ "$RELAUNCH" -eq 0 ]; then
           exit 1
           ;;
       esac
+      ORCA_CODEX_HOME_FILE=$(mktemp "$STATE/.orca-codex-home.XXXXXXXX") || exit 1
       ORCA_LAUNCH_ENV_ARGS=$(fm_backend_orca_launch_env_args \
-        "$ORCA_LAUNCH_ENV_SESSION" "$LAUNCH_ENV_NAMES") || exit 1
+        "$ORCA_LAUNCH_ENV_SESSION" "$LAUNCH_ENV_NAMES" codex-home 3>"$ORCA_CODEX_HOME_FILE") || exit 1
+      ORCA_CODEX_HOME=$(cat "$ORCA_CODEX_HOME_FILE" && printf .) || exit 1
+      ORCA_CODEX_HOME=${ORCA_CODEX_HOME%.}
+      rm -- "$ORCA_CODEX_HOME_FILE" || exit 1
+      ORCA_CODEX_HOME_FILE=
     elif [ -n "$LAUNCH_ENV_NAMES" ]; then
       echo "warning: backend=orca resolves config/launch-env-allowlist names from the Orca terminal's own environment, not this home's; set config/launch-env-tmux-session to take them from a scoped tmux session" >&2
     fi
@@ -3230,11 +3240,23 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 fm_backend_validate_harness "$BACKEND" "$HARNESS" || exit 1
+if [ "$LAUNCH_ENV_ENABLED" = 1 ] && [ "$BACKEND" != t3code ] && [ -z "$ORCA_CODEX_HOME" ]; then
+  case "$HARNESS:$EFFORT" in
+    codex:max | codex:ultra)
+      echo "error: Codex $EFFORT cannot be validated with config/launch-env-allowlist because the destination Codex home is unknown before launch" >&2
+      exit 1
+      ;;
+  esac
+fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 # T3 checks Codex efforts against its own server catalog before leasing.
 if [ "$EFFORT" = ultra ]; then
-  [ "$HARNESS:$BACKEND" = codex:t3code ] || "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
+  if [ "$HARNESS" = codex ] && [ -n "$ORCA_CODEX_HOME" ]; then
+    CODEX_HOME="$ORCA_CODEX_HOME" "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
+  else
+    [ "$HARNESS:$BACKEND" = codex:t3code ] || "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
+  fi
   [ "$RAW_LAUNCH" = 0 ] || {
     echo "error: --effort ultra requires a canonical --harness launch so its native flag cannot be omitted" >&2
     exit 1
@@ -3522,7 +3544,12 @@ effort_flag_for_harness() {
     case "$effort" in
     low | medium | high | xhigh | ultra) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
     max)
-      "$SCRIPT_DIR/fm-harness.sh" codex-supports "$model" max || return 0
+      if ! CODEX_HOME="${ORCA_CODEX_HOME:-${CODEX_HOME:-$HOME/.codex}}" "$SCRIPT_DIR/fm-harness.sh" codex-supports "$model" max; then
+        if [ "$BACKEND" != t3code ]; then
+          echo "warning: cannot confirm codex model '$model' supports max from the installed catalog; omitting max" >&2
+        fi
+        return 0
+      fi
       printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
       ;;
     esac
@@ -7427,9 +7454,11 @@ fi
 LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
 # Codex max and ultra were checked against this Codex home's catalog, so the
 # worker runs with that same home rather than the pane daemon's.
-case "$HARNESS:$EFFORT" in
-codex:max | codex:ultra) LAUNCH="export CODEX_HOME=$(shell_quote "${CODEX_HOME:-$HOME/.codex}"); $LAUNCH" ;;
-esac
+if [ "$LAUNCH_ENV_ENABLED" != 1 ]; then
+  case "$HARNESS:$EFFORT" in
+  codex:max | codex:ultra) LAUNCH="export CODEX_HOME=$(shell_quote "${CODEX_HOME:-$HOME/.codex}"); $LAUNCH" ;;
+  esac
+fi
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 # When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
 # own environment, carry it into the launch command text so Claude Code's

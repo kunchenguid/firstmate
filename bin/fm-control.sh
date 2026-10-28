@@ -206,6 +206,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -1048,6 +1050,16 @@ resolve_relaunch_profile() {
   else
     TARGET_EFFORT=default
   fi
+  case "$TARGET_HARNESS:$TARGET_EFFORT" in
+    codex:max | codex:ultra)
+      local launch_env_enabled
+      launch_env_enabled=$(fm_config_source_present "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/launch-env-allowlist") || return 1
+      if [ "$launch_env_enabled" = 1 ]; then
+        echo "error: Codex $TARGET_EFFORT cannot be validated with config/launch-env-allowlist because the destination Codex home is unknown before launch" >&2
+        return 1
+      fi
+      ;;
+  esac
   if [ "$TARGET_EFFORT" = ultra ] && [ "$TARGET_HARNESS:$BACKEND" != codex:t3code ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
