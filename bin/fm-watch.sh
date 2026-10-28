@@ -3628,7 +3628,9 @@ while :; do
   # ever recreates the lock, and that case is the self-eviction below. A
   # successor reclaiming this watcher's lock removes it before relinking it
   # under the steal mutex, so a missing holder during a steal is that
-  # self-eviction too, not a teardown.
+  # self-eviction too, not a teardown. The holder is re-read after the steal
+  # mutex, so a steal that finished between the first two reads is not read as
+  # a teardown either.
   # Scoped to this process alone: no other watcher is signalled.
   if [ "$WATCH_HOME_EXISTED" -eq 1 ] && [ ! -d "$FM_HOME" ]; then
     echo "watcher: exiting - home no longer exists: $FM_HOME" >&2
@@ -3636,7 +3638,7 @@ while :; do
   elif [ ! -d "$STATE" ]; then
     echo "watcher: exiting - state directory no longer exists: $STATE" >&2
     exit 1
-  elif [ ! -e "$WATCH_LOCK/pid" ] && [ ! -e "$WATCH_LOCK.steal" ]; then
+  elif [ ! -e "$WATCH_LOCK/pid" ] && [ ! -e "$WATCH_LOCK.steal" ] && [ ! -e "$WATCH_LOCK/pid" ]; then
     echo "watcher: exiting - state directory was torn down (singleton lock removed): $STATE" >&2
     exit 1
   elif [ ! -d "$SCRIPT_DIR" ]; then
