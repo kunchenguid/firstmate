@@ -258,6 +258,11 @@ case " $* " in
     ;;
   *" api "*)
     [ "${FM_TEST_GLAB_API_FAIL:-0}" = 0 ] || exit 1
+    # A hung detail read that ignores SIGALRM the way glab's Go runtime does,
+    # so only a real kill can cut it.
+    case "${FM_TEST_GLAB_DETAIL_HANG:-0}:$*" in
+      1:*pipelines/*) trap '' ALRM; exec sleep 60 ;;
+    esac
     case "$*" in
       *merge_trains/merge_requests/*)
         : > "$FM_TEST_GLAB_LOG.train"
@@ -2611,7 +2616,7 @@ SH
 }
 
 test_gitlab_merge_watch() {
-  local dir state out rc url value noglab nojq entry bindir name wide train
+  local dir state out rc url value noglab nojq entry bindir name wide train started elapsed
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
   # The poll reads the merge request as JSON, so the fixture's search path
@@ -2689,6 +2694,21 @@ group/subgroup/project
     esac
     [ "$(grep -c 'api projects/.*/pipelines/' "$dir/glab.log")" -le 8 ] \
       || fail "GitLab detail reads exceeded their budget (train=$train): $(grep -c 'api projects/.*/pipelines/' "$dir/glab.log")"
+  done
+  # A hung detail read is cut by its own time limit, so both paths still
+  # emit the known failure well inside the watcher's 30-second check bound.
+  for train in '' gone; do
+    rm -f "$dir/glab.log.train"
+    started=$SECONDS
+    out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE="$([ -n "$train" ] && echo success || echo failed)" \
+      FM_TEST_GLAB_TRAIN="$train" FM_TEST_GLAB_DETAIL_HANG=1 run_poll "$dir")
+    elapsed=$((SECONDS - started))
+    case $out in
+      'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941') [ -z "$train" ] || fail "GitLab train drop emitted a pipeline line under a hung detail read: $out" ;;
+      "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941") [ -n "$train" ] || fail "GitLab failed pipeline emitted a train line under a hung detail read: $out" ;;
+      *) fail "GitLab poll lost the known failure under a hung detail read (train=$train): $out" ;;
+    esac
+    [ "$elapsed" -lt 25 ] || fail "a hung GitLab detail read held the poll ${elapsed}s (train=$train)"
   done
   rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \

@@ -188,6 +188,22 @@ case "$provider" in
     # stay silent. Without jq the poll falls back to the plain state field,
     # which keeps the merged wake for a watch armed before jq was required.
     enc=${path//\//%2F}
+    gitlab_detail_read() {  # <api path>
+        # Each detail read gets its own hard limit of five seconds, so a hung
+        # read is cut rather than holding the poll until the watcher's check
+        # timeout kills it before it prints. This body sources nothing, so the
+        # limit is the same perl fork-and-kill bound the watcher falls back to
+        # for its own checks: the read runs in its own process group, which
+        # gets TERM then KILL at the deadline. A bare alarm is not enough,
+        # because glab's Go runtime ignores SIGALRM. Without perl the read is
+        # bounded only by that check timeout.
+        if command -v perl >/dev/null 2>&1; then
+          # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
+          GITLAB_HOST=$host perl -e 'my $t = shift; my $pid = fork; exit 1 unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' 5 glab api "$1"
+        else
+          GITLAB_HOST=$host glab api "$1"
+        fi
+    }
     gitlab_failure_detail() {  # <pipeline>; sets detail
         # The degraded line names the failed jobs with their forge failure
         # reasons, following a failed bridge into its child pipeline so the
@@ -195,11 +211,11 @@ case "$provider" in
         # seen-list keep one misbehaving pipeline graph from looping the
         # read, and every read failure simply shortens the detail: a fetch
         # failure can never be read as a change of state. A read budget -
-        # at most four pipelines of two reads each, and none started once
-        # this poll has run ten seconds - keeps a large pipeline graph inside
-        # the watcher's check timeout, so the known failure is still emitted
-        # with whatever detail the budget allowed rather than killed before
-        # it prints.
+        # at most four pipelines of two time-limited reads each, and none
+        # started once this poll has run ten seconds - keeps a large or slow
+        # pipeline graph inside the watcher's check timeout, so the known
+        # failure is still emitted with whatever detail the budget allowed
+        # rather than killed before it prints.
         detail=
         seen=
         frontier=$1
@@ -212,7 +228,7 @@ case "$provider" in
             [ "$detail_pipelines" -lt 4 ] && [ "$SECONDS" -lt 10 ] || return 0
             detail_pipelines=$((detail_pipelines + 1))
             seen="$seen $current "
-            names=$(GITLAB_HOST=$host glab api "projects/$enc/pipelines/$current/jobs?per_page=100" 2>/dev/null \
+            names=$(gitlab_detail_read "projects/$enc/pipelines/$current/jobs?per_page=100" 2>/dev/null \
               | jq -r 'if type == "array" then
                   [.[]
                     | select((.status // "") == "failed")
@@ -226,7 +242,7 @@ case "$provider" in
                   ""
                 end' 2>/dev/null) || names=
             [ -n "$names" ] && detail="$detail${detail:+,}$names"
-            children=$(GITLAB_HOST=$host glab api "projects/$enc/pipelines/$current/bridges?per_page=100" 2>/dev/null \
+            children=$(gitlab_detail_read "projects/$enc/pipelines/$current/bridges?per_page=100" 2>/dev/null \
               | jq -r 'if type == "array" then
                   [.[]
                     | select((.status // "") == "failed")
