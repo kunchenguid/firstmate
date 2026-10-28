@@ -225,6 +225,40 @@ trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
+# The degraded dedupe baseline is the poll's own reading at the ready report:
+# a change already degraded is not news, and a merge request already on its
+# merge train arms the wake for its drop. It is read first, under the task's
+# control lock the watcher holds while it reads and dedupes, and before the
+# metadata is rewritten: a stalled or failed read fails registration with the
+# task metadata and the previously published poll unchanged. Lock order is
+# control -> meta -> publish (bin/fm-pr-merge.sh already holds control while it
+# runs this script, so a merge-time re-record skips taking it).
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  CONTROL_LOCK="$STATE/.control-$ID.lock"
+  fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
+  CONTROL_LOCK_HELD=1
+fi
+# The read runs under the control lock the watcher waits on, so it is bounded
+# by the watcher's own check bound.
+BASELINE_RC=0
+BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --validated "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
+if [ "$BASELINE_RC" != 0 ]; then
+  if [ "$BASELINE_RC" = 124 ]; then
+    echo "error: baseline read of the PR poll timed out" >&2
+  else
+    echo "error: baseline read of the PR poll failed" >&2
+  fi
+  exit 1
+fi
+case $BASELINE in
+  'degraded head='*|'degraded pipeline='*)
+    BASELINE=${BASELINE#degraded }
+    BASELINE=${BASELINE%% *}
+    ;;
+  ontrain) BASELINE=train=on ;;
+  *) BASELINE= ;;
+esac
+
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
@@ -259,39 +293,9 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
-# The degraded dedupe baseline is the poll's own reading at the ready report:
-# a change already degraded is not news, and a merge request already on its
-# merge train arms the wake for its drop. It replaces the marker of any watch
-# this registration replaces, before the new poll is published and under the
-# task's control lock the watcher holds while it reads and dedupes, so no
-# watcher read falls between them. A merge-time re-record already runs under
-# that lock (bin/fm-pr-merge.sh).
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
-  CONTROL_LOCK="$STATE/.control-$ID.lock"
-  fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
-  CONTROL_LOCK_HELD=1
-fi
-# The read runs under the control lock the watcher waits on, so it is bounded
-# by the watcher's own check bound; a stalled or failed read fails registration
-# (the EXIT cleanup releases the lock, and nothing is published yet).
-BASELINE_RC=0
-BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --validated "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
-if [ "$BASELINE_RC" != 0 ]; then
-  if [ "$BASELINE_RC" = 124 ]; then
-    echo "error: baseline read of the PR poll timed out" >&2
-  else
-    echo "error: baseline read of the PR poll failed" >&2
-  fi
-  exit 1
-fi
-case $BASELINE in
-  'degraded head='*|'degraded pipeline='*)
-    BASELINE=${BASELINE#degraded }
-    BASELINE=${BASELINE%% *}
-    ;;
-  ontrain) BASELINE=train=on ;;
-  *) BASELINE= ;;
-esac
+# The baseline read above replaces the marker of any watch this registration
+# replaces, just before the new poll is published and still under the control
+# lock, so no watcher read falls between them.
 if [ -z "$BASELINE" ] || ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
     "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE"; then
   rm -f -- "$STATE/$ID.pr-poll-degraded"

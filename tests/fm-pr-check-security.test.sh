@@ -1410,7 +1410,7 @@ test_degraded_wake_survives_an_unsaved_marker() {
   pass "a degraded wake is queued before its dedupe marker, so a failed marker save never silences it"
 }
 test_arming_baselines_an_already_degraded_change() {
-  local dir state url
+  local dir state url url1
   dir=$(make_case degraded-baseline)
   state="$dir/home/state"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
@@ -1481,6 +1481,24 @@ test_arming_baselines_an_already_degraded_change() {
   [ ! -e "$state/.control-task-a.lock" ] || fail "a timed-out baseline read left the control lock held"
   [ ! -e "$state/task-a.check.sh" ] || fail "a timed-out baseline read published a poll"
   pass "a stalled baseline read fails arming without a lock or poll"
+
+  # A stalled re-arm to another PR leaves the task armed on the previous one.
+  dir=$(make_case degraded-rearm-timeout)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  url1=https://gitlab.example/group/subgroup/project/-/merge_requests/1
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success run_check_entry "$dir" task-a "$url1" >/dev/null 2>&1 \
+    || fail "arming the first GitLab watch failed"
+  if FM_CHECK_TIMEOUT=1 FM_TEST_GLAB_SLEEP=3 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success \
+      run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/rearm.err"; then
+    fail "re-arming succeeded although its baseline read timed out"
+  fi
+  grep -q "^pr=$url1\$" "$state/task-a.meta" || fail "a failed re-arm replaced the task's PR metadata"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a failed re-arm left the previous poll no longer matching its metadata"
+  [ ! -e "$state/.control-task-a.lock" ] || fail "a failed re-arm left the control lock held"
+  pass "a stalled re-arm leaves the previous watch and metadata intact"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
