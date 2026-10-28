@@ -3270,6 +3270,43 @@ evict_stalled_holder() {
   ! fm_pid_alive "$pid"
 }
 
+# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
+# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
+# substitution, so it matches the stored holder pid for the self-eviction check.
+# Set before acquisition, because the startup interrupt handler below needs it
+# to tell "the lock on disk is mine" from "someone else's".
+WATCHER_PID=${BASHPID:-$$}
+
+# Acquisition below publishes the lock pid, but the EXIT trap that releases it
+# and the steady-state INT trap that routes an interrupt through it are only
+# installed further down, once the recovery-marker checks have run. An INT inside
+# that gap would kill this process with the default disposition and strand the
+# lock under a dead pid, which is exactly what fm-watch-checkpoint.sh's bounded
+# INT does to a watcher that is still starting. This handler closes the gap for
+# INT: while this process still owns the lock it releases it through the same
+# downtime-publishing transition watcher_cleanup uses, then exits like the
+# steady-state INT trap. HUP and TERM keep their default disposition here exactly
+# as watcher_stop_signals leaves them in the steady state, so this window cannot
+# drop a stop request; a lock they strand names a dead pid the next acquirer
+# reclaims. It is installed before acquisition so no INT can land between the
+# lock pid appearing and the handler existing; before this process owns the lock
+# the pid check makes it a plain exit. It is deliberately not an EXIT trap: the
+# recovery-marker checks below exit 1 while retaining the lock on purpose
+# ("retaining stale lock evidence").
+watcher_startup_interrupt() {
+  trap - INT
+  if [ -n "${WATCH_STARTUP_HANG_PID:-}" ]; then
+    kill "$WATCH_STARTUP_HANG_PID" 2>/dev/null || true
+  fi
+  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ] \
+    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" release-lock "$WATCH_LOCK" \
+      downtime "$CLEANUP_LOCK_BOUND"; then
+    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
+  fi
+  exit 1
+}
+trap watcher_startup_interrupt INT
+
 EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
@@ -3303,6 +3340,25 @@ done
 if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
+
+# Test-only seam: hold inside the startup window, after the handler above is
+# installed and before the steady-state traps supersede it, so a test can deliver
+# an interrupt into that window deterministically. A no-op when unset. The sleep
+# runs as a background job the shell waits on, because bash defers a trap until
+# the current foreground command finishes and would otherwise swallow the signal
+# for the whole hold. The readiness marker is touched only once the handler is
+# installed and the lock is held, so a test waits on it rather than racing the
+# lock pid published inside acquisition.
+case "${FM_WATCH_STARTUP_HANG:-}" in
+  ''|*[!0-9.]*) ;;
+  *)
+    : > "$STATE/.watch-startup-hang" 2>/dev/null || true
+    sleep "$FM_WATCH_STARTUP_HANG" &
+    WATCH_STARTUP_HANG_PID=$!
+    wait "$WATCH_STARTUP_HANG_PID" 2>/dev/null || true
+    ;;
+esac
+
 handling_successor_has_queued_row() {
   local queued=1
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
@@ -3443,12 +3499,10 @@ watcher_cleanup() {
   fi
   return "$cleanup_status"
 }
+# These supersede the startup interrupt handler installed before lock
+# acquisition: from here on the EXIT trap owns lock release.
 trap watcher_cleanup EXIT
 watcher_stop_signals
-# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
-# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
-# substitution, so it matches the stored holder pid for the self-eviction check.
-WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.

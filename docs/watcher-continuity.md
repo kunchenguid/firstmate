@@ -494,6 +494,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - The typed self-eviction failure.
 - Bounded and successor-linked lifecycle rows.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+- An interrupt delivered inside the watcher's startup window, before its steady-state traps arm, which still releases the singleton lock through the downtime-publishing transition instead of stranding it under a dead PID.
 
 ### Claude auto-arm and turn-end guard
 
