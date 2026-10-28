@@ -1087,4 +1087,24 @@ expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
 
+# --- codex max follows the codex catalog, as bootstrap and fm-spawn do -------
+ASTRA_CODEX_HOME="$TMP_ROOT/astra-codex-home"
+mkdir -p "$ASTRA_CODEX_HOME"
+jq '.rules[3].use = {harness: "codex", model: "gpt-6-astra", effort: "max"}' "$BASE_RULES" > "$RULES"
+printf '%s\n' '{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]}]}' > "$ASTRA_CODEX_HOME/models_cache.json"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY CODEX_HOME="$ASTRA_CODEX_HOME" run code out err "$BRIEF"
+expect_code 0 "$code" "a catalog-advertised codex max profile exits 0"
+assert_not_contains "$err" 'malformed rules file' "a catalog-advertised codex max profile is a valid rule"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-6-astra' --effort 'max'" "a catalog-advertised non-Luna codex max profile resolves"
+printf '%s\n' '{"models":[{"slug":"gpt-6-astra","supported_reasoning_levels":[{"effort":"high"},{"effort":"xhigh"}]}]}' > "$ASTRA_CODEX_HOME/models_cache.json"
+reset_log
+TYPESAFE_API_KEY=$KEY CODEX_HOME="$ASTRA_CODEX_HOME" run code out err "$BRIEF"
+expect_code 2 "$code" "an unadvertised codex max profile exits 2"
+assert_contains "$err" "malformed rules file: $RULES - each use profile effort must be supported by its harness and model" "an unadvertised codex max profile is named"
+assert_absent "$LOG/argv" "an unadvertised codex max profile never reaches the network"
+cp "$BASE_RULES" "$RULES"
+pass "codex max profiles are valid exactly when the launch catalog advertises max"
+
 printf '# all fm-dispatch-resolve tests passed\n'

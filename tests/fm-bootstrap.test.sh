@@ -1335,6 +1335,109 @@ test_pr_health_monitor_arms_only_with_its_flag() {
   pass "bootstrap arms the PR health monitor only when config/pr-health-monitor exists"
 }
 
+# write_codex_catalog <dir> <slug>:<level,level,...>... seeds <dir>/models_cache.json
+# in the shape codex itself writes (supported_reasoning_levels of {effort} objects).
+write_codex_catalog() {
+  local dir=$1 spec slug levels models=
+  shift
+  for spec in "$@"; do
+    slug=${spec%%:*}
+    levels=${spec#*:}
+    [ -z "$models" ] || models+=,
+    models+=$(jq -cn --arg s "$slug" --arg l "$levels" \
+      '{slug: $s, supported_reasoning_levels: ($l | split(",") | map({effort: .}))}')
+  done
+  mkdir -p "$dir"
+  printf '{"models":[%s]}\n' "$models" > "$dir/models_cache.json"
+}
+
+# Bootstrap must accept a codex max profile exactly when fm-spawn would pass
+# model_reasoning_effort="max" for it: the model's entry in the codex catalog
+# advertises max, or the model is gpt-5.6-luna and the catalog is absent or
+# unparsable. The catalog column seeds CODEX_HOME: "advertising" lists max for
+# gpt-6-astra and gpt-5.6-luna and omits it for gpt-5, "lacking" lists none of
+# them with max, "none" writes no catalog, and "malformed" writes one that does
+# not parse.
+test_crew_dispatch_codex_max_follows_catalog() {
+  local catalog label body expect mode case_dir fakebin out n
+  n=0
+  while IFS='^' read -r catalog label body mode expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/dispatch-codex-max-$n"
+    mkdir -p "$case_dir/home/config" "$case_dir/codex-home"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
+    case "$catalog" in
+      advertising)
+        write_codex_catalog "$case_dir/codex-home" gpt-5:low,medium,high,xhigh \
+          gpt-5.6-luna:low,medium,high,xhigh,max gpt-6-astra:low,medium,high,xhigh,max,ultra ;;
+      lacking)
+        write_codex_catalog "$case_dir/codex-home" gpt-5:low,medium,high,xhigh \
+          gpt-5.6-luna:low,medium,high,xhigh gpt-6-astra:low,medium,high,xhigh ;;
+      malformed)
+        printf '{"models":' > "$case_dir/codex-home/models_cache.json" ;;
+      none) ;;
+      *) fail "$label: unknown catalog fixture $catalog" ;;
+    esac
+    fakebin=$(make_fake_toolchain "$case_dir")
+    add_real_jq "$fakebin"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      CODEX_HOME="$case_dir/codex-home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      exact)
+        [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
+    esac
+  done <<'ROWS'
+advertising^codex Astra max is accepted when its catalog entry advertises max^{"rules":[{"when":"hard root cause","use":{"harness":"codex","model":"gpt-6-astra","effort":"max"}}]}^empty^
+advertising^codex Luna max is accepted when its catalog entry advertises max^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
+advertising^codex default profile Astra max is accepted from the catalog^{"default":{"harness":"codex","model":"gpt-6-astra","effort":"max"}}^empty^
+advertising^codex array profile Astra max is accepted from the catalog^{"rules":[{"when":"hard root cause","use":[{"harness":"claude","effort":"max"},{"harness":"codex","model":"gpt-6-astra","effort":"max"}]}]}^empty^
+advertising^codex max is flagged for a model whose catalog entry lacks max^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+advertising^codex max is flagged for a model missing from the catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-7","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+advertising^codex max without a model is flagged even with a catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+advertising^one unadvertised codex max in an array flags the file^{"rules":[{"when":"hard root cause","use":[{"harness":"codex","model":"gpt-6-astra","effort":"max"},{"harness":"codex","model":"gpt-5","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+lacking^codex Luna max is flagged when a usable catalog lacks it^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+lacking^codex Astra max is flagged when a usable catalog lacks it^{"rules":[{"when":"hard root cause","use":{"harness":"codex","model":"gpt-6-astra","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+none^codex Luna max keeps its fallback without a catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
+none^codex Astra max is flagged without a catalog^{"rules":[{"when":"hard root cause","use":{"harness":"codex","model":"gpt-6-astra","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+malformed^codex Luna max keeps its fallback on a malformed catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
+malformed^codex Astra max is flagged on a malformed catalog^{"rules":[{"when":"hard root cause","use":{"harness":"codex","model":"gpt-6-astra","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+ROWS
+  pass "bootstrap accepts codex max exactly when the launch catalog advertises it, with the Luna fallback only off a usable catalog"
+}
+
+# Under config/launch-env-allowlist a CODEX_HOME that is not allowlisted never
+# reaches the env -i launch, so bootstrap must judge codex max against the
+# $HOME/.codex catalog the launched codex will actually read.
+test_crew_dispatch_codex_max_reads_the_launch_catalog() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/dispatch-codex-max-launch-env"
+  mkdir -p "$case_dir/home/config" "$case_dir/user-home/.codex"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '{"rules":[{"when":"hard root cause","use":{"harness":"codex","model":"gpt-6-astra","effort":"max"}}]}' \
+    > "$case_dir/home/config/crew-dispatch.json"
+  # The spawner's CODEX_HOME advertises max for Astra; the pane's $HOME/.codex does not.
+  write_codex_catalog "$case_dir/codex-home" gpt-6-astra:low,medium,high,xhigh,max
+  write_codex_catalog "$case_dir/user-home/.codex" gpt-6-astra:low,medium,high,xhigh
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+
+  printf '# no CODEX_HOME\n' > "$case_dir/home/config/launch-env-allowlist"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/user-home" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    CODEX_HOME="$case_dir/codex-home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max" ] ||
+    fail "a CODEX_HOME the allowlist drops must not vouch for codex max, got: $out"
+
+  printf 'CODEX_HOME\n' > "$case_dir/home/config/launch-env-allowlist"
+  out=$(PATH="$fakebin:$BASE_PATH" HOME="$case_dir/user-home" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    CODEX_HOME="$case_dir/codex-home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "an allowlisted CODEX_HOME catalog must vouch for codex max, got: $out"
+  pass "bootstrap judges codex max against the catalog the launch-env allowlist lets the launch read"
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out child_env n
   n=0
@@ -1347,7 +1450,11 @@ test_crew_dispatch_validation() {
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
+    # No codex catalog: these rows describe the catalog-less rule, so the
+    # developer's own ~/.codex must not leak into them.
+    mkdir -p "$case_dir/codex-home"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      CODEX_HOME="$case_dir/codex-home" \
       TYPESAFE_API_KEY=test-key FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
@@ -1360,7 +1467,8 @@ test_crew_dispatch_validation() {
   done <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
-codex Luna max effort is accepted^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
+codex Luna max effort is accepted without a catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
+codex Astra max effort is flagged without a catalog^{"rules":[{"when":"hard root cause","use":{"harness":"codex","model":"gpt-6-astra","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 codex unsupported model max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
@@ -1508,3 +1616,5 @@ test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_pr_health_monitor_arms_only_with_its_flag
 test_crew_dispatch_validation
+test_crew_dispatch_codex_max_follows_catalog
+test_crew_dispatch_codex_max_reads_the_launch_catalog

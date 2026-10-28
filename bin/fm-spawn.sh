@@ -744,24 +744,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
-if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist"); then
-  exit 1
-fi
-LAUNCH_ENV_NAMES=
-if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
-  if [ ! -f "$CONFIG/launch-env-allowlist" ] || [ ! -r "$CONFIG/launch-env-allowlist" ]; then
-    echo "error: config/launch-env-allowlist must be a readable regular file" >&2
-    exit 1
-  fi
-  if ! LAUNCH_ENV_NAMES=$(jq -Rrs '
-    split("\n") | map(select(. != "" and (startswith("#") | not))) |
-    if all(.[]; test("^[A-Za-z_][A-Za-z0-9_]*$")) then .[]
-    else error("expected environment names only") end
-  ' "$CONFIG/launch-env-allowlist" 2>/dev/null); then
-    echo "error: config/launch-env-allowlist must contain one environment name per line, blank lines, or # comments" >&2
-    exit 1
-  fi
-fi
+# shellcheck source=bin/fm-launch-env-lib.sh
+. "$SCRIPT_DIR/fm-launch-env-lib.sh"
+# Sets LAUNCH_ENV_ENABLED and LAUNCH_ENV_NAMES (fm-launch-env-lib.sh header).
+fm_launch_env_load "$CONFIG" || exit 1
 # config/claude-permission-mode (header above): resolved once per spawn or
 # relaunch, before any mutation, so a malformed file refuses instead of
 # launching a worker on a permission posture the captain did not choose.
@@ -3362,6 +3348,10 @@ model_flag_for_harness() {
   esac
 }
 
+# codex_catalog_path, codex_catalog_usable, codex_model_advertises_effort, and
+# codex_max_effort_launches come from fm-launch-env-lib.sh, which bootstrap's
+# crew-dispatch check and bin/fm-dispatch-resolve.sh share so they accept codex
+# max exactly when a launch would pass it.
 effort_flag_for_harness() {
   local harness=$1 effort=$2 model=${3:-} oc_major=${4:-}
   if [ "$harness" != opencode ]; then
@@ -3374,14 +3364,21 @@ effort_flag_for_harness() {
     esac
     ;;
   codex)
-    # The installed codex config schema uses model_reasoning_effort. The
-    # installed model catalog supports max for gpt-5.6-luna; keep that level
-    # scoped to the model whose catalog entry advertises it.
+    # The installed codex config schema uses model_reasoning_effort. Only some
+    # models accept max, so pass it only when the requested model's entry in
+    # codex's own catalog advertises it; otherwise omit it with a warning
+    # (record-and-omit). gpt-5.6-luna keeps its long-standing max as a fallback
+    # when the catalog is unreadable, unparsable, or jq is unavailable.
     case "$effort" in
     low | medium | high | xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
     max)
-      [ "$model" = gpt-5.6-luna ] || return 0
-      printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+      local cache
+      cache=$(codex_catalog_path)
+      if codex_max_effort_launches "$cache" "$model"; then
+        printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+      else
+        echo "warning: codex model '${model:-default}' does not advertise max reasoning effort in $cache; launching at codex's default effort" >&2
+      fi
       ;;
     esac
     ;;
