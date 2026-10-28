@@ -28,9 +28,8 @@
 #   With no entry for that provider and no key the tool is off as above. An
 #   unreadable or invalid file exits 2 naming the problem, never a value. A
 #   declared source this host cannot run, or that yields no key within
-#   FM_CREDENTIAL_SOURCE_TIMEOUT seconds (default 5), is an error outcome
-#   ending "nothing sent", with no network or quota call, so it is not
-#   mistaken for an unconfigured resolver.
+#   5 seconds, is an error outcome ending "nothing sent", with no network or
+#   quota call, so it is not mistaken for an unconfigured resolver.
 #
 # Capability probe: --supports-credential-source <source> prints "supported"
 #   and exits 0, or prints "unsupported" and exits 1, for a source name such as
@@ -91,7 +90,6 @@
 # Environment:
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, TYPESAFE_API_KEY, and
 #   OPENROUTER_API_KEY are read from the environment or $FM_HOME/.env.
-#   FM_CREDENTIAL_SOURCE_TIMEOUT bounds one declared-source read (default 5).
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one

@@ -633,7 +633,7 @@ run_on_path "$NO_SECURITY_BIN" code out err "$BRIEF" --project pager
 expect_unavailable "a declared source whose tool is missing" "$UNSUPPORTED"
 reset_log
 started=$SECONDS
-FM_CREDENTIAL_SOURCE_TIMEOUT=1 FAKE_SECURITY_HANG="$LOG/hang.pid" run code out err "$BRIEF" --project pager
+FAKE_SECURITY_HANG="$LOG/hang.pid" run code out err "$BRIEF" --project pager
 elapsed=$((SECONDS - started))
 expect_unavailable "a declared source that never answers" 'credential source macos-keychain declared for typesafe did not answer in time; nothing sent'
 [ "$elapsed" -lt 30 ] || fail "an unanswered Keychain read held the resolver for ${elapsed}s"
@@ -644,11 +644,6 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 ! kill -0 "$hang_pid" 2>/dev/null || fail "the unanswered Keychain read was left running"
-for bound in 0 abc; do
-  reset_log
-  FM_CREDENTIAL_SOURCE_TIMEOUT=$bound run code out err "$BRIEF" --project pager
-  assert_contains "$out" '  status: clear' "a bound that is not a positive integer ($bound) falls back to the default"
-done
 rm -f "$CRED"
 declare_source "$CRED" openrouter absent-svc
 reset_log

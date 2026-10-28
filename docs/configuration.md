@@ -1784,9 +1784,10 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 - When the file exists, bootstrap validates it with `jq`.
 - Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 - Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
-- Bootstrap enables resolver-only checks for `approval`, `min_confidence`, `floor`, and present `provider` declarations when `TYPESAFE_API_KEY` is non-empty in the environment or the home's `.env`, regardless of `FM_DISPATCH_PROVIDER`.
-  An OpenRouter key alone does not enable these bootstrap checks, and neither does a key that only a declared credential source supplies; the resolver validates those declarations itself before any request.
-  Without a typesafe key in the environment or `.env`, bootstrap retains its pre-existing verified-harness baseline.
+- Bootstrap enables resolver-only checks for `approval`, `min_confidence`, `floor`, and present `provider` declarations when `TYPESAFE_API_KEY` is non-empty in the environment or the home's `.env`, or when the home's valid `config/dispatch-credential-sources.json` names a `typesafe` source, regardless of `FM_DISPATCH_PROVIDER`.
+  Bootstrap only checks that declaration; it never reads the key or runs the source's tool.
+  An OpenRouter key or OpenRouter declaration alone does not enable these bootstrap checks; the resolver validates those declarations itself before any request.
+  Without a typesafe key or a declared typesafe source, bootstrap retains its pre-existing verified-harness baseline.
 - Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 - While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 
@@ -1938,7 +1939,7 @@ Three outcomes stay distinct:
   The line names providers and fields and never prints a declared value.
 - **Unavailable source.** An entry whose source this host cannot run, or that yields no key, ends as the `error` outcome with exit 0 and a reason ending `nothing sent`, and makes no network or quota call.
   The reason says whether the host cannot run the source, the source holds no readable key, or it did not answer in time, and it never relays the tool's own output.
-  A source that does not answer within `FM_CREDENTIAL_SOURCE_TIMEOUT` seconds (default 5, a positive integer) ends the same way, so an unanswered Keychain access prompt cannot hold an intake.
+  A source that does not answer within 5 seconds ends the same way, so an unanswered Keychain access prompt cannot hold an intake.
 
 A configuration installer can check a source before it writes anything:
 
@@ -3172,7 +3173,6 @@ FM_DISPATCH_PROVIDER=   # typesafe or openrouter; absent preserves the original 
 FM_DISPATCH_MODEL=      # explicit model for the selected provider; required for openrouter
 TYPESAFE_API_KEY=       # typesafe dispatch key, from the environment, .env, or the declared credential source ("Typed dispatch resolution")
 OPENROUTER_API_KEY=     # OpenRouter dispatch key, from the environment, .env, or the declared credential source
-FM_CREDENTIAL_SOURCE_TIMEOUT=5   # seconds allowed for one declared credential-source read; a positive integer, else 5
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)

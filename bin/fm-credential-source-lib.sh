@@ -7,7 +7,8 @@
 # never hold the key itself, for example
 #   {"typesafe": {"source": "macos-keychain", "service": "typesafe-api-key"}}
 # bin/fm-dispatch-resolve.sh reads it only after the environment and .env have
-# supplied no key; docs/configuration.md "Typed dispatch resolution" owns the
+# supplied no key, and bin/fm-bootstrap.sh only checks whether it declares a
+# typesafe source; docs/configuration.md "Typed dispatch resolution" owns the
 # file's location and the operator contract.
 #
 # A source is an adapter: FM_CREDSRC_SCHEMA names each adapter and its fields,
@@ -29,6 +30,10 @@
 # Adapter name -> the fields it takes. A declaration holds "source" plus
 # exactly these fields, so no field exists for a credential value to sit in.
 FM_CREDSRC_SCHEMA='{"macos-keychain":{"required":["service"],"optional":["account"]}}'
+
+# Seconds one adapter read may take, so an access prompt nobody answers cannot
+# hold the caller.
+FM_CREDSRC_TIMEOUT=5
 
 # fm_credsrc_supported <source>
 # Succeed when <source> names an adapter this host can run. It checks the host
@@ -122,16 +127,13 @@ fm_credsrc_read() {
   esac
 }
 
-# macos-keychain: one generic-password read. Only the service and, when
-# declared, the account reach argv; the key comes back on stdout. The read is
-# bounded by FM_CREDENTIAL_SOURCE_TIMEOUT seconds (default 5, a positive
-# integer) so a Keychain access prompt nobody answers cannot hold the caller.
+# macos-keychain: one generic-password read, bounded by FM_CREDSRC_TIMEOUT.
+# Only the service and, when declared, the account reach argv; the key comes
+# back on stdout.
 fm_credsrc_macos_keychain() {  # <service> [<account>]
-  local bound=${FM_CREDENTIAL_SOURCE_TIMEOUT:-5}
-  case "$bound" in '' | 0* | *[!0-9]*) bound=5 ;; esac
   if [ -n "${2:-}" ]; then
-    fm_run_timed "$bound" security find-generic-password -s "$1" -a "$2" -w 2>/dev/null </dev/null
+    fm_run_timed "$FM_CREDSRC_TIMEOUT" security find-generic-password -s "$1" -a "$2" -w 2>/dev/null </dev/null
   else
-    fm_run_timed "$bound" security find-generic-password -s "$1" -w 2>/dev/null </dev/null
+    fm_run_timed "$FM_CREDSRC_TIMEOUT" security find-generic-password -s "$1" -w 2>/dev/null </dev/null
   fi
 }
