@@ -229,6 +229,10 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 - For a key the status log still owns, that script's header owns the status-log close.
 - A key the status log no longer owns is resolved to a still-open captain-held task and fed as one keyed line.
   The script tries the key as a task id first, then the legacy derived identity.
+- A `captain-hold-<task>-<n>` key open in a secondmate's ledger copy names a call held in that mate's own backlog.
+  After the answer is delivered, the script also feeds `<task>\t<answer>\t` (empty label) to that mate home's own intake, directly for a local mate and through `fm-remote-secondmate-control.sh answers` for a remote one, so the call closes without waiting for the mate's next turn.
+  That feed is best-effort and never changes the send's exit status.
+  A steer to a mate with such open calls that carries no `--resolve-key` prints one notice naming them.
 
 `bin/fm-procevent.sh` is the captured-result channel:
 
