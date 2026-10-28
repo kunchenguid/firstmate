@@ -596,6 +596,57 @@ SH
   pass "a declared wait on a pane whose hash changes every poll is rechecked once per cadence"
 }
 
+# The same never-settling pane, but the declaration names an `until` time that
+# has already passed. An elapsed clearing time is owed its recheck now, once
+# per declaration (handle_paused_stale), so the changed-hash path must not hold
+# it to the status-age cadence the way it holds an open-ended declaration.
+test_elapsed_until_on_a_never_settling_pane_is_rechecked_before_the_cadence() {
+  local dir state fakebin out statusf window key sig wakes
+  dir=$(make_case paused-until-passed-ticking-pane); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/parked.status"
+  window="test:fm-parked"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'paused: rate limit until %s\n' "$(iso_utc_at "$(( $(date +%s) - 30 ))")" > "$statusf"
+  # Written well inside the cadence, so only the elapsed time can admit the recheck.
+  set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  mv "$fakebin/tmux" "$fakebin/tmux.real"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = capture-pane ]; then
+  tick_file="$(dirname "$0")/capture-tick"
+  tick=$(( $(cat "$tick_file" 2>/dev/null || echo 0) + 1 ))
+  printf '%s\n' "$tick" > "$tick_file"
+  printf 'parked, clock %s\n' "$tick"
+  exit 0
+fi
+exec "$(dirname "$0")/tmux.real" "$@"
+SH
+  chmod +x "$fakebin/tmux"
+
+  FM_TEST_PAUSE_RESURFACE=999 parked_watch_round "$state" "$fakebin" "$out" "$dir/unused-pane.txt" "$window" exit \
+    || fail "an elapsed until time on a never-settling pane was held to the cadence instead of rechecked at once: $(cat "$out")"
+  wakes=$(wedge_stale_wakes "$state" "$window")
+  [ "$wakes" -eq 1 ] || fail "the due recheck queued $wakes wakes instead of one"
+  grep -F 'declared clearing time has passed' "$state/.wake-queue" >/dev/null \
+    || fail "the due recheck did not say the declared time passed: $(cat "$state/.wake-queue")"
+  grep -F 'possible wedge' "$state/.wake-queue" >/dev/null && fail "the due recheck became a wedge"
+  case "$(cat "$state/.paused-resurfaced-$key" 2>/dev/null)" in
+    *:due) ;;
+    *) fail "the due recheck was not recorded as the passed declared time" ;;
+  esac
+  ack_stopped_cycle "$state" || fail "could not acknowledge the due recheck"
+
+  # Once per declaration: the pane keeps ticking and the same elapsed time stays quiet.
+  FM_TEST_PAUSE_RESURFACE=999 parked_watch_round "$state" "$fakebin" "$out" "$dir/unused-pane.txt" "$window" absorb \
+    || fail "the due recheck repeated on a ticking pane instead of firing once per declaration: $(cat "$out")"
+  wakes=$(wedge_stale_wakes "$state" "$window")
+  [ "$wakes" -eq 0 ] || fail "a ticking pane repeated the due recheck $wakes time(s)"
+  pass "an elapsed until time on a pane whose hash changes every poll is rechecked before the cadence, then once per declaration"
+}
+
 test_live_paused_until_controls_recheck_time() {
   local dir state fakebin out capture_file statusf window key sig wakes future past
   dir=$(make_case live-paused-until); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1548,6 +1599,7 @@ fm_test_run \
   test_absorbed_replacement_wait_does_not_inherit_the_old_throttle \
   test_live_declared_wait_churn_honors_the_resurface_throttle \
   test_declared_wait_on_a_never_settling_pane_keeps_the_bounded_recheck \
+  test_elapsed_until_on_a_never_settling_pane_is_rechecked_before_the_cadence \
   test_live_paused_until_controls_recheck_time \
   test_open_captain_call_bounds_stale_churn \
   test_stale_churn_without_a_captain_call_still_alarms \

@@ -4199,6 +4199,9 @@ EOF
         fi
       fi
     else
+      # 0 iff the previous poll also saw a new hash: the pane is churning rather
+      # than changing once on its way to a stable first sight.
+      if [ "$(cat "$cf" 2>/dev/null || true)" = 0 ]; then churning=0; else churning=1; fi
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       paused_bound=1
@@ -4220,10 +4223,18 @@ EOF
             # declaration that has stood a whole cadence takes its recheck here.
             # Inside the cadence the recheck stays out, because a replacement
             # declaration would otherwise wake here ahead of its plain first sight.
+            # A declared `until` time that has passed is the one exception: that
+            # recheck is owed now, not a cadence later, and handle_paused_stale
+            # fires it once per declaration. It still waits for a second churned
+            # poll, because a pane that changed once and settles takes its plain
+            # first sight at the stable-hash surface two polls later.
             if [ "$kind" = secondmate ]; then
               handle_paused_stale "$w" "$task" "$h"
             else
-              if [ "$(age_of "$STATE/$task.status")" -ge "$PAUSE_RESURFACE_SECS" ]; then
+              if [ "$(age_of "$STATE/$task.status")" -ge "$PAUSE_RESURFACE_SECS" ] \
+                || { [ "$churning" -eq 0 ] \
+                  && until=$(status_paused_until "$(status_declared_wait_line "$STATE/$task.status")") \
+                  && [ "$(date +%s)" -ge "$until" ]; }; then
                 handle_paused_stale "$w" "$task" "$h"
               fi
               clear_stale_hash_tracking "$key"
