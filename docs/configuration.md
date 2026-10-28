@@ -11,8 +11,6 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker routing and fleet-wide route limits | [Crew dispatch profiles](#crew-dispatch-profiles-configcrew-dispatchjson) and [fleet seat pools](#fleet-seat-pools-configfleet-seats) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
@@ -862,7 +860,7 @@ Create it with `touch "$FM_HOME/config/ready-after-green"`; remove it to restore
 It is off by default: without the flag, `bin/fm-pr-check.sh` publishes the line when it registers the PR, whatever the state of the checks.
 With the flag present and a `no-mistakes` task, registration still records the PR and arms the merge poll, but publishes the line only when the last `done` line in the child's status reports `PR <url> checks green` for that same PR, with any text around it.
 A registration made earlier publishes nothing, and registering again after the green report publishes the line.
-The `direct-PR` and `local-only` modes and Gerrit changes are unaffected.
+The `direct-PR` and `local-only` modes, where ready means opened for review, and Gerrit changes are unaffected.
 The child's own `done` line still reaches the parent through `bin/fm-inactive-reconcile.sh`.
 The flag is a home-local preference and is not inherited by secondmate homes; [`bin/fm-pr-check.sh`](../bin/fm-pr-check.sh) owns the mechanics.
 
@@ -998,22 +996,6 @@ With the flag absent the wedge timer spends no read for it and keeps the unchang
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the wait-evidence contract and `bin/fm-classify-lib.sh`'s `status_worker_wait_verb` owns which lines count.
 
-## Open-decision reminders (config/open-decision-reminders)
-
-The optional local, gitignored `config/open-decision-reminders` presence flag enables a default-off watcher backstop for unanswered keyed `needs-decision` and `blocked` records.
-On each poll, the watcher queues at most one `check: open decision overdue: <task> key=<key> age=<seconds>s` wake for the oldest eligible overdue key, independently of pane state or supervision-branch classification.
-Declared `paused:` waits and tasks already held for the captain are exempt.
-Resolving a key stops its reminders, and a later opening starts a new reminder episode.
-Only explicit keys with valid source `[at=<epoch>]` timestamps can be aged.
-
-`FM_OPEN_DECISION_OVERDUE_SECS` defaults to `1800` seconds.
-Repeats start at that interval, double after each repeat, and cap at `FM_OPEN_DECISION_BACKOFF_MAX_SECS`, which defaults to `14400` seconds.
-Both settings must be canonical positive integers of at most nine digits, with the cap at least the threshold.
-Invalid settings stop the watcher with an error when the flag is present.
-Pass them in the watcher's environment, or export them in `config/watch.env` for watchers started through `bin/fm-watch-arm.sh`.
-The flag is home-local and is not inherited by secondmate homes.
-`bin/fm-watch.sh`'s `open_decision_reminder_tick` owns the per-key schedule, which persists across watcher restarts.
-
 ## Validating-run deferral (config/wedge-defer-validating)
 
 The optional local, gitignored `config/wedge-defer-validating` presence flag opts this home into a default-off deferral in the watcher's wedge timer.
@@ -1024,26 +1006,6 @@ The away-mode daemon has no such deferral of its own.
 With the flag absent the wedge timer spends no current-state read for it and keeps the unchanged escalation schedule, reasons, and `demand-deep-inspection` wording.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the deferral contract and `bin/fm-classify-lib.sh`'s `crew_run_is_validating` owns which verdicts count.
-
-## Spawn base from the primary checkout (config/spawn-base-primary-checkout)
-
-The optional local, gitignored `config/spawn-base-primary-checkout` presence flag opts this home into a default-off base for fresh task worktrees on projects that land work locally.
-Without it, every fresh ship or scout worktree on a project with an origin remote resets to `origin/<default>`, or to `origin/<base>` for a named base branch.
-
-### Which tasks it changes
-
-With it present, a fresh local-only ship, or a scout spawned without `--base-branch`, starts from the primary checkout's `<default>` when that branch strictly contains origin's tip.
-A local-only project lands work there through `bin/fm-merge-local.sh` and never pushes, so `origin/<default>` stays at the last push, and a fresh task would otherwise start behind work already landed and load the project's instruction files from that stale tree.
-A no-mistakes or direct-PR ship and any task with a named base branch still start from origin's tip, because that work is delivered against origin.
-When the primary checkout's `<default>` and origin's have diverged, the spawn prints a note and starts from origin's tip.
-A project without an origin remote is unaffected, and a relaunch never changes the base a task already has.
-
-`bin/fm-review-diff.sh` reads the same flag, so a local-only ship or a scout is reviewed against the branch it delivers to and its diff shows only its own work, while a no-mistakes or direct-PR ship stays anchored on `origin/<default>`.
-`bin/fm-promote.sh` reads it too, telling a scout promoted to no-mistakes or direct-PR on a project with an origin remote to return to origin's default branch rather than the primary checkout's.
-
-The flag is per home and is not inherited by secondmate homes, which keep their own project clones and opt in separately.
-Only its presence is read, at each fresh spawn, review, and promotion.
-The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the exact base rule, and the [`fm-review-diff.sh` header](../bin/fm-review-diff.sh) owns the review anchor.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -1998,8 +1960,6 @@ Every result above exits 0.
 
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
-Firstmate still applies those gates before dispatch, including when `preferred_provider` is present.
-Explicit captain overrides retain precedence over the resolver's suggestion.
 
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
@@ -2881,7 +2841,6 @@ bin/fm-procevent.sh reconcile
 
 The source waits outside the conversational turn, and its completed result arrives through the existing process-event `check` path.
 Classify the captured result through its immutable package identity with `bin/fm-procevent.sh classify <result-file>`, acknowledge it with the existing `handled` command only after it is handled, and use the printed `retire --if-owner` command when explicit retirement is needed.
-The [host-error capture and retry contract](extension-bindings.md#compatibility-and-failure-semantics) defines how repeated external host failures retain inspectable evidence while polling continues.
 
 **Keep blocking sources out of the turn**
 
@@ -3451,7 +3410,7 @@ FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn, expli
 FM_STREAM_SILENT_MAX_SECS=         # opt-in Pi worker foreground model-stream silence threshold; off by default; see the option above and bin/fm-busy-lib.sh
 FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call, and repeated first-sight alarms from an otherwise-unclassifiable pane whose recovery-grade endpoint probe proves its agent alive and whose own status log or task worktree was written within FM_STALE_ESCALATE_SECS (without that progress evidence every new hash still surfaces immediately); a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait, backlog captain hold, or, where config/wedge-defer-worker-wait or config/wedge-defer-parked-gate arms it, its worker's own still-open `blocked:` or `needs-decision:` line or unanswered supervisor-owed validation gate, or, where config/wedge-defer-validating arms it, attributed validation run that is running or fixing, defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; set it in config/watch.env for durable non-Relay tuning of watchers started through bin/fm-watch-arm.sh, while the Codex checkpoint route with no config/supervision-host and the away-mode daemon start the watcher directly and use the default; a captain-held transfer or backlog captain hold is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
 FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
-FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered secondmate's recorded endpoint; bin/fm-secondmate-liveness-lib.sh owns recovery authorization, actions, refusal rules, and emits exactly one check wake per relaunch; zero or invalid values use 60
+FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered secondmate's recorded endpoint; bin/fm-secondmate-liveness-lib.sh owns recovery authorization, refusal rules, and emits exactly one check wake per relaunch; zero or invalid values use 60
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds allowed separately for a watcher-driven relaunch's per-home lock wait and its spawn execution; a lock-wait timeout skips recovery without touching the endpoint or recording an attempt; zero or invalid values use 120
 FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
 FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600   # window the relaunch bound counts state/.secondmate-relaunch-<id> attempt lines over; the file is also the durable per-mate relaunch record; zero or invalid values use 3600

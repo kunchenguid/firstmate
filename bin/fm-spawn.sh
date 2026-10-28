@@ -339,24 +339,11 @@
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch (or uses --base-branch, described
-#   above), and resets to its tip. A home that creates the default-off
-#   config/spawn-base-primary-checkout flag (docs/configuration.md) instead
-#   resets a local-only ship or a scout without --base-branch to that same
-#   branch in the primary checkout when it strictly contains origin's tip: a
-#   local-only project lands work there through bin/fm-merge-local.sh and never
-#   pushes, so origin stays frozen at the last push. A publishing mode
-#   (bin/fm-dod-lib.sh fm_mode_publishes) and a named base branch keep origin's
-#   tip, because that work is delivered against origin. Two branches that have
-#   diverged also keep origin's tip, with a note counting both sides. The
-#   primary's commit is read from the local object store, so nothing more is
-#   fetched, and every base this picks contains origin's tip, so the reset
-#   discards nothing the origin-only rule would have kept. When no origin
-#   configuration is detected, spawn skips that remote freshness check and
-#   launches from the clean worktree's current HEAD. Relaunch reuses the
-#   recorded worktree without fetching or resetting its base. An unreachable
-#   detected origin, unresolved default branch, or non-clean worktree refuses
-#   a fresh spawn rather than risking a PR based on stale history or
-#   discarding local work.
+#   above), and resets to its tip. When none is detected, spawn skips that remote freshness check and launches from the
+#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
+#   fetching or resetting its base. An unreachable detected origin, unresolved
+#   default branch, or non-clean worktree refuses a fresh spawn rather than
+#   risking a PR based on stale history or discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -4727,32 +4714,8 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
-# The opt-in half of the base rule the header owns: return 0 and set
-# SPAWN_PRIMARY_BASE_REV when <project>'s own <default> should be this fresh
-# slot's base instead of origin's tip <origin-rev>. A pool slot shares the
-# primary checkout's object store, so reading that commit fetches nothing, and a
-# commit the slot cannot read keeps origin's tip.
-SPAWN_PRIMARY_BASE_REV=
-spawn_base_from_primary_checkout() { # <worktree> <project> <default> <origin-rev> <mode>
-  local worktree=$1 project=$2 default=$3 origin_rev=$4 mode=$5 primary_rev ahead behind
-  SPAWN_PRIMARY_BASE_REV=
-  if [ -z "$project" ] || fm_mode_publishes "$mode"; then
-    return 1
-  fi
-  primary_rev=$(git -C "$project" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null) || return 1
-  ahead=$(git -C "$worktree" rev-list --count "$origin_rev..$primary_rev" 2>/dev/null) || return 1
-  behind=$(git -C "$worktree" rev-list --count "$primary_rev..$origin_rev" 2>/dev/null) || return 1
-  [ "$ahead" -gt 0 ] || return 1
-  if [ "$behind" -eq 0 ]; then
-    SPAWN_PRIMARY_BASE_REV=$primary_rev
-    return 0
-  fi
-  echo "note: pooled worktree '$worktree': $default in the primary checkout has diverged from origin/$default (ahead by $ahead, behind by $behind); starting from origin's tip" >&2
-  return 1
-}
-
-freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 when the worktree is not clean
-  local worktree=$1 base=${2:-} project=${3:-} mode=${4:-} default target expected reset_ref actual status
+freshen_spawn_worktree_base() { # <worktree> [<base-branch>]; 2 when the worktree is not clean
+  local worktree=$1 base=${2:-} default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -4797,14 +4760,7 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  reset_ref=$target
-  if [ -z "$base" ] && [ -e "$CONFIG/spawn-base-primary-checkout" ] \
-    && spawn_base_from_primary_checkout "$worktree" "$project" "$default" "$expected" "$mode"; then
-    target="$default in the primary checkout"
-    expected=$SPAWN_PRIMARY_BASE_REV
-    reset_ref=$expected
-  fi
-  if ! git -C "$worktree" reset --hard "$reset_ref" >/dev/null; then
+  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -5429,7 +5385,7 @@ EOF
       [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
       validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
       T3CODE_LEASED=1
-      freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || {
+      freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || {
         if [ "$?" -eq 2 ]; then
           T3CODE_LEASED=0
           echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2
@@ -6138,7 +6094,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
-  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
+  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || exit 1
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
@@ -7229,7 +7185,6 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -7859,21 +7814,6 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
-# Seat dispatch records the endpoint before any launch reaches it.
-if [ "$SPAWN_SEAT_TRACKED" = 1 ]; then
-  SPAWN_SEAT_ROUTE_FILE=$(umask 077 && mktemp "$STATE/.seat-route-$ID.XXXXXX") || {
-    echo "error: could not stage the fleet seat route for $ID" >&2
-    exit 1
-  }
-  SPAWN_SEAT_HOME=
-  [ "$KIND" != secondmate ] || SPAWN_SEAT_HOME=$PROJ_ABS
-  jq -cn --arg b "$BACKEND" --arg t "$T" --arg h "$SPAWN_SEAT_HOME" --arg g "$SPAWN_GEN" \
-    '{placement: "local", backend: $b, target: $t, home: (if $h == "" then null else $h end), host: null, remote_root: null, spawn_gen: $g, operation: null}' >"$SPAWN_SEAT_ROUTE_FILE" || exit 1
-  spawn_seats dispatch "$ID" --generation "$SPAWN_GEN" --route-file "$SPAWN_SEAT_ROUTE_FILE" >/dev/null || exit 1
-  SPAWN_SEAT_DISPATCHED=1
-elif [ -n "$SPAWN_REMOTE_OPERATION" ]; then
-  spawn_host_receipt_update dispatched || exit 1
-fi
 if [ "$BACKEND" = t3code ]; then
   # No pane: the launch is the thread's first message, carrying the same
   # encoded brief the LAUNCH template embeds; MODEL/EFFORT were fixed as the
@@ -7926,6 +7866,34 @@ else
     trap 'exit 130' INT
     trap 'exit 143' TERM
   fi
+  # Seat dispatch (bin/fm-fleet-seats.sh): the reserved generation moves to
+  # dispatching with this exact endpoint BEFORE the source line or Enter reaches
+  # it, so a crash from here on leaves a counted reservation with a recoverable
+  # route, and only the first dispatch may deliver.
+  if [ "$SPAWN_SEAT_TRACKED" = 1 ]; then
+    SPAWN_SEAT_ROUTE_FILE=$(umask 077 && mktemp "$STATE/.seat-route-$ID.XXXXXX") || {
+      echo "error: could not stage the fleet seat route for $ID" >&2
+      exit 1
+    }
+    SPAWN_SEAT_HOME=
+    [ "$KIND" != secondmate ] || SPAWN_SEAT_HOME=$PROJ_ABS
+    jq -cn --arg b "$BACKEND" --arg t "$T" --arg h "$SPAWN_SEAT_HOME" --arg g "$SPAWN_GEN" \
+      '{placement: "local", backend: $b, target: $t, home: (if $h == "" then null else $h end),
+        host: null, remote_root: null, spawn_gen: $g, operation: null}' >"$SPAWN_SEAT_ROUTE_FILE" || {
+      echo "error: could not stage the fleet seat route for $ID" >&2
+      exit 1
+    }
+    spawn_seats dispatch "$ID" --generation "$SPAWN_GEN" --route-file "$SPAWN_SEAT_ROUTE_FILE" >/dev/null || {
+      echo "error: the fleet seat owner did not permit launch delivery for $ID generation $SPAWN_GEN; nothing was delivered" >&2
+      exit 1
+    }
+    SPAWN_SEAT_DISPATCHED=1
+  elif [ -n "$SPAWN_REMOTE_OPERATION" ]; then
+    spawn_host_receipt_update dispatched || {
+      echo "error: the host operation receipt for $ID could not record launch dispatch; nothing was delivered" >&2
+      exit 1
+    }
+  fi
   sleep 0.3
   spawn_orca_launch_send_fail() {
     rm -f -- "$LAUNCH_FILE" 2>/dev/null || true
@@ -7977,6 +7945,43 @@ else
   if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
     spawn_orca_wait_launch_consumed
     trap - HUP INT TERM
+  fi
+  if [ "$T3CODE_LAUNCH_UNCONFIRMED" = 1 ]; then
+    echo "error: the launch brief for $ID may already have been delivered to T3 thread $T: its outcome is unproven (a lost reply or a T3 error that can follow a commit). The task record is kept; inspect the thread in T3 Code, and if the brief is absent resend only the identical brief text, which reuses its request id within the hour" >&2
+    exit 1
+  fi
+  # Supervisor startup confirmation: a pooled secondmate launch (or a host-local
+  # launch for a remote parent's seat) succeeds only once the recovery-grade
+  # classifier reads this generation's exact endpoint 'alive'. A timeout or an
+  # unprovable backend fails the spawn with the seat still counted and its route
+  # recorded; it never reports success, and never frees the seat.
+  if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_POOLED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
+    spawn_startup_state=unverified
+    if fm_control_backend_state_verified "$BACKEND"; then
+      spawn_startup_deadline=$((SECONDS + ${FM_CONTROL_LAUNCH_WAIT:-90}))
+      while :; do
+        spawn_startup_state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null || printf unreadable)
+        [ "$spawn_startup_state" != alive ] || break
+        [ "$SECONDS" -lt "$spawn_startup_deadline" ] || break
+        sleep "${FM_CONTROL_POLL:-0.5}"
+      done
+    fi
+    if [ "$spawn_startup_state" != alive ]; then
+      echo "error: secondmate $ID was launched into $T but its startup was not confirmed (endpoint reads '$spawn_startup_state'); its fleet seat stays counted and its route is preserved for recovery" >&2
+      exit 1
+    fi
+    if [ "$SPAWN_SEAT_TRACKED" = 1 ]; then
+      spawn_seats confirm "$ID" --generation "$SPAWN_GEN" >/dev/null || {
+        echo "error: secondmate $ID started, but its fleet seat could not record the confirmed startup; it stays counted for reconciliation" >&2
+        exit 1
+      }
+      SPAWN_SEAT_CONFIRMED=1
+    else
+      spawn_host_receipt_update started || {
+        echo "error: secondmate $ID started, but the host operation receipt could not record it" >&2
+        exit 1
+      }
+    fi
   fi
 fi
 if [ "$HARNESS" = kimi ]; then
@@ -8148,7 +8153,7 @@ fi
 # classifier reads this generation's exact endpoint `alive`. A timeout or an
 # unprovable backend fails the spawn with the seat still counted and its route
 # recorded; it never reports success, and never frees the seat.
-if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_POOLED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_TRACKED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
   spawn_startup_state=unverified
   if fm_control_backend_state_verified "$BACKEND"; then
     spawn_startup_elapsed=0
@@ -8175,7 +8180,7 @@ if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_POOLED" = 1 ] || [ -n "$SPAWN_RE
       echo "error: secondmate $ID started, but the host operation receipt could not record it" >&2
       exit 1
     }
-  fi
+fi
 fi
 
 SPAWN_DELIVERY=

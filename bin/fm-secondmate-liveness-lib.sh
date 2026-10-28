@@ -19,12 +19,13 @@
 #   unverified  - the endpoint is recorded under a session this home does not
 #                 own, so probing is not authorized
 #
-# Only `dead` and `missing` authorize recovery. The generation-bound recheck
-# and seat reclamation below must authorize replacement before any endpoint is
-# closed or spawn is attempted; a shell-only endpoint from an unconfirmed
-# submitted launch can still start its agent. The probe and recovery functions
-# below own whether recovery means resuming the endpoint or proving its close
-# before replacement; docs/t3code-backend.md owns T3's native status meanings.
+# Only `dead` and `missing` are recovery candidates; the probe and recovery
+# functions below own whether that means resuming the endpoint or proving its
+# close before replacement, and the generation-bound recheck and seat
+# reclamation below must authorize replacement before any endpoint is closed or
+# spawn is attempted. In particular, a shell-only endpoint from an unconfirmed
+# submitted launch can still start its agent. docs/t3code-backend.md owns T3's
+# native status meanings.
 # `ambiguous`, `unreadable`, and `unverified` leave the endpoint untouched -
 # relaunching on inconclusive evidence could create a second endpoint beside a
 # live one - and an unreachable remote host is never evidence of death, so a
@@ -535,21 +536,22 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 # or host evidence); a generation that cannot be proven finished - for example
 # a submitted launch whose endpoint still holds only a shell - stays counted
 # and nothing is killed or spawned. Only then does it take the per-home relaunch
-# lock, record the attempt, and kill a confirmed-dead local endpoint if required
-# (FM_SM_LIVE_KILL). It runs the guarded spawn, which reserves a new generation
-# inside this same episode, then records its outcome in the per-mate ledger.
+# lock, record the attempt, kill a confirmed-dead local endpoint if required
+# (FM_SM_LIVE_KILL), run the guarded spawn, and record its outcome.
 # On t3code a close that cannot be proven stops there: the thread and its
 # metadata stay as recorded, the verdict becomes skipped, and nothing is
 # spawned, because a second thread beside a live one is the duplicate
 # supervisor recovery must never create. Other backends keep their existing
 # best-effort kill. FM_SM_LIVE_RESUME instead sends the endpoint's backend
-# resume turn and spawns nothing. The header owns lock-wait bounds. A positive
-# timeout wraps the spawn in fm_run_timed so a watcher poll stays bounded;
-# 124/137 mean the bound fired. Returns the spawn exit status; combined spawn
-# output is in FM_SM_LIVE_OUT and status in FM_SM_LIVE_RC. When the verdict is
-# abandoned, the seat cannot be reclaimed, the lock wait expires, the ledger
-# cannot be read, or the attempt row cannot be appended, nothing is killed or
-# spawned and no attempt is recorded: the verdict becomes
+# resume turn and spawns nothing.
+# The guarded secondmate spawn reserves a new generation inside this same
+# episode. The header owns the lock-wait bounds. A positive timeout separately
+# wraps the spawn in fm_run_timed so a watcher poll stays bounded; 124/137 mean
+# the bound fired. Returns the spawn exit status; combined spawn output is in
+# FM_SM_LIVE_OUT and the status in FM_SM_LIVE_RC. When the verdict is abandoned,
+# the seat cannot be reclaimed, the lock wait expires, the ledger cannot be
+# read, or the attempt row cannot be appended, nothing is killed or spawned
+# (and no attempt is recorded): the verdict becomes
 # FM_SM_LIVE_STATUS=skipped with FM_SM_LIVE_REASON set and this returns 1.
 # Caller holds the liveness lock and owns reporting.
 fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
@@ -607,16 +609,20 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     return 1
   fi
   if [ "$FM_SM_LIVE_KILL" = 1 ]; then
-    if [ "$FM_SM_LIVE_BACKEND" = tmux ] && [ -n "$FM_SM_LIVE_SOCKET" ]; then
+    local backend target window
+    backend=$FM_SM_LIVE_BACKEND
+    target=$FM_SM_LIVE_TARGET
+    [ -n "$backend" ] || backend=$(fm_backend_of_meta "$meta")
+    if [ -z "$target" ]; then
+      target=$(fm_backend_target_of_meta "$meta")
+      if [ -z "$target" ]; then
+        window=$(fm_meta_get "$meta" window)
+        target=$window
+      fi
+    fi
+    if [ "$backend" = tmux ] && [ -n "$FM_SM_LIVE_SOCKET" ]; then
       local TMUX="$FM_SM_LIVE_SOCKET,0,0"
       export TMUX
-    fi
-    local backend target window
-    backend=$(fm_backend_of_meta "$meta")
-    target=$(fm_backend_target_of_meta "$meta")
-    if [ -z "$target" ]; then
-      window=$(fm_meta_get "$meta" window)
-      target=$window
     fi
     if [ "$backend" != t3code ]; then
       if [ -n "$target" ]; then
@@ -640,7 +646,8 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
   fi
   if [ "$FM_SM_LIVE_RESUME" = 1 ]; then
     local target
-    target=$(fm_backend_target_of_meta "$meta")
+    target=$FM_SM_LIVE_TARGET
+    [ -n "$target" ] || target=$(fm_backend_target_of_meta "$meta")
     if fm_backend_source t3code && FM_SM_LIVE_OUT=$(fm_backend_t3code_resume_failed "$target" 2>&1); then
       fm_secondmate_liveness_ledger_add "$id" relaunched || true
     else
