@@ -44,7 +44,7 @@
 //       [--worktree <abs-path>] [--branch <name>] [--message-file <file>]
 //     t3_thread_launch at runtimeMode full-access. With --worktree the
 //     workspace strategy is existing_worktree; without it, root (the project's
-//     own checkout). Reads the thread and its t3_thread_configuration back and
+//     own checkout). Reads the thread and its t3_thread_configure back and
 //     archives and refuses it unless T3 bound exactly that workspace, full
 //     access, instance, model, and every requested option value; a refused
 //     thread that does not then read back archived with no active run exits
@@ -91,13 +91,13 @@
 //     different run). T3 ends the run asynchronously after the request.
 //   fm-t3-mcp.mjs requests --thread <id>
 //     The thread's pending runtime requests: questions (each user-input
-//     request id with its questions, from t3_pending_request_list/read) and
+//     request id with its questions, from t3_pending_request list/read) and
 //     approvals, the count of pending requests those tools cannot see or
 //     answer (permission approvals, answered only in T3 Code itself). The
 //     signature names the question ids, the approval count, and the activity
 //     item id of each approval T3 shows among the thread's last 100 items.
 //   fm-t3-mcp.mjs respond --thread <id> --request <request-id> --answers-file <file>
-//     t3_pending_request_respond with the JSON object in <file>, keyed by
+//     t3_pending_request respond with the JSON object in <file>, keyed by
 //     question id. It cannot approve a permission request.
 //   fm-t3-mcp.mjs watch --thread <id>... --timeout-ms <n> [--escalated <id>=<signature>]...
 //     The T3 event wait for the watcher. It first reads every thread: one
@@ -167,12 +167,10 @@ export const REQUIRED_TOOLS = [
   "t3_thread_interrupt",
   "t3_thread_organize",
   "t3_thread_list",
-  "t3_thread_configuration",
+  "t3_thread_configure",
   "t3_project_list",
   "t3_project_create",
-  "t3_pending_request_list",
-  "t3_pending_request_read",
-  "t3_pending_request_respond",
+  "t3_pending_request",
   "orchestrator_capabilities",
 ];
 const ENVIRONMENT_TOOL = "t3_environment_read";
@@ -874,7 +872,7 @@ async function launch(flags) {
   let config;
   try {
     t = threadOf(await session.call("t3_thread_read", { threadId: out.threadId, limit: 1, runLimit: 1 }));
-    config = await session.call("t3_thread_configuration", { threadId: out.threadId });
+    config = await session.call("t3_thread_configure", { threadId: out.threadId });
   } catch (e) {
     const archived = await archiveLaunched();
     throw new Refusal(
@@ -1045,7 +1043,7 @@ function threadOf(out) {
 async function pendingOf(session, threadId, t) {
   const count = t.pendingRequestCount ?? 0;
   if (!count) return { questions: [], approvals: 0, approvalIds: [] };
-  const listed = await session.call("t3_pending_request_list", { threadId });
+  const listed = await session.call("t3_pending_request", { action: "list", threadId });
   const ids = [...new Set(listed?.requestIds ?? [])].sort();
   const approvals = Math.max(0, count - ids.length);
   if (!approvals) return { questions: ids, approvals, approvalIds: [] };
@@ -1066,8 +1064,8 @@ async function requests(flags) {
   const pending = await pendingOf(session, threadId, t);
   const questions = [];
   for (const requestId of pending.questions) {
-    const q = await session.call("t3_pending_request_read", { threadId, requestId });
-    questions.push({ requestId, questions: q?.questions ?? [] });
+    const q = await session.call("t3_pending_request", { action: "read", threadId, requestId });
+    questions.push({ requestId, questions: q?.questions ?? q?.request?.questions ?? [] });
   }
   return { ok: true, threadId, pendingRequestCount: t.pendingRequestCount ?? 0, questions, approvals: pending.approvals, signature: pendingSignature(pending) };
 }
@@ -1084,7 +1082,7 @@ async function respond(flags) {
   }
   if (!answers || typeof answers !== "object" || Array.isArray(answers)) usage("--answers-file must hold a JSON object keyed by question id");
   const { session } = await verifiedSession(flags);
-  await session.call("t3_pending_request_respond", { threadId, requestId, answers });
+  await session.call("t3_pending_request", { action: "respond", threadId, requestId, answers });
   return { ok: true, threadId, requestId };
 }
 
