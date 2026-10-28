@@ -842,7 +842,9 @@ test_lock_reclaims_holder_whose_identity_no_longer_recomputes() {
   dir=$(make_case lock-identity-mismatch)
   state="$dir/state"
   lockdir="$state/.watch.lock"
-  sleep 300 >/dev/null 2>&1 &
+  # Naming the holder under the fixture root lets the suite's cleanup reap it
+  # if an assertion below fails before the kill at the end.
+  (exec -a "$dir/holder" sleep 300) >/dev/null 2>&1 &
   live=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
     || fail "could not identify the fixture holder"
@@ -892,7 +894,9 @@ test_lock_keeps_live_daemon_holder_with_stale_identity() {
   dir=$(make_case lock-daemon-stale-identity)
   state="$dir/state"
   lockdir="$state/.supervise-daemon.lock"
-  sleep 300 >/dev/null 2>&1 &
+  # Naming the holder under the fixture root lets the suite's cleanup reap it
+  # if an assertion below fails before the kill at the end.
+  (exec -a "$dir/holder" sleep 300) >/dev/null 2>&1 &
   live=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
     || fail "could not identify the fixture daemon"

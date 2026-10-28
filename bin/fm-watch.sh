@@ -3625,7 +3625,10 @@ while :; do
   # A detached helper this watcher started (home-summary refresh, reconcile)
   # can recreate a deleted state directory before the next poll, so a lock
   # with no holder at all is read as the same teardown: only a fresh watcher
-  # ever recreates the lock, and that case is the self-eviction below.
+  # ever recreates the lock, and that case is the self-eviction below. A
+  # successor reclaiming this watcher's lock removes it before relinking it
+  # under the steal mutex, so a missing holder during a steal is that
+  # self-eviction too, not a teardown.
   # Scoped to this process alone: no other watcher is signalled.
   if [ "$WATCH_HOME_EXISTED" -eq 1 ] && [ ! -d "$FM_HOME" ]; then
     echo "watcher: exiting - home no longer exists: $FM_HOME" >&2
@@ -3633,7 +3636,7 @@ while :; do
   elif [ ! -d "$STATE" ]; then
     echo "watcher: exiting - state directory no longer exists: $STATE" >&2
     exit 1
-  elif [ ! -e "$WATCH_LOCK/pid" ]; then
+  elif [ ! -e "$WATCH_LOCK/pid" ] && [ ! -e "$WATCH_LOCK.steal" ]; then
     echo "watcher: exiting - state directory was torn down (singleton lock removed): $STATE" >&2
     exit 1
   elif [ ! -d "$SCRIPT_DIR" ]; then
