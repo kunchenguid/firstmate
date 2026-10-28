@@ -4,11 +4,13 @@
 set -u
 WATCHER_ONLY=0
 SPAWN_RECOVERY_ONLY=0
+CLEANUP_ONLY=0
 case "${1:-}" in
+  --cleanup-only) CLEANUP_ONLY=1 ;;
   --watcher-only) WATCHER_ONLY=1 ;;
   --spawn-recovery-only) WATCHER_ONLY=1; SPAWN_RECOVERY_ONLY=1 ;;
   '') ;;
-  *) printf 'usage: %s [--watcher-only|--spawn-recovery-only]\n' "$0" >&2; exit 2 ;;
+  *) printf 'usage: %s [--watcher-only|--spawn-recovery-only|--cleanup-only]\n' "$0" >&2; exit 2 ;;
 esac
 
 # shellcheck source=tests/lib.sh
@@ -40,15 +42,51 @@ PARENT_ROUTE_INBOX="$REMOTE_HOME/state/parent-route/ios.inbox"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 stop_fixture_watcher() {
-  local pid=$1 signal deadline
+  local pid=$1 signal deadline member group own_group snapshot owned alive
+  local -a pids groups
+  snapshot=$(ps -eo pid=,ppid=,pgid=,stat=) || return 1
+  own_group=$(ps -o pgid= -p "$$" | tr -d ' ') || return 1
+  owned=$(printf '%s\n' "$snapshot" | awk -v root="$pid" '
+    { parent[$1]=$2; group[$1]=$3 }
+    END {
+      owned[root]=1
+      do {
+        changed=0
+        for (p in parent) if (!owned[p] && owned[parent[p]]) { owned[p]=1; changed=1 }
+      } while (changed)
+      for (p in owned) if (owned[p]) print p, group[p]
+    }') || return 1
+  pids=(); groups=("$pid")
+  while read -r member group; do
+    pids+=("$member")
+    if [ -n "$group" ] && [ "$group" != "$own_group" ]; then
+      groups+=("$group")
+    fi
+  done <<<"$owned"
   for signal in TERM KILL; do
-    kill -s "$signal" -- "-$pid" 2>/dev/null || true
+    for group in "${groups[@]}"; do
+      kill -s "$signal" -- "-$group" 2>/dev/null || true
+    done
+    for member in "${pids[@]}"; do
+      kill -s "$signal" "$member" 2>/dev/null || true
+    done
     deadline=$((SECONDS + 2))
-    while kill -0 -- "-$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+    while :; do
+      snapshot=$(ps -eo pid=,pgid=,stat=) || return 1
+      alive=$(printf '%s\n' "$snapshot" | awk -v pids="${pids[*]}" -v groups="${groups[*]}" '
+        BEGIN {
+          n=split(pids,a," "); for (i=1;i<=n;i++) p[a[i]]=1
+          n=split(groups,a," "); for (i=1;i<=n;i++) g[a[i]]=1
+        }
+        $3 !~ /^Z/ && (p[$1] || g[$2]) { print $1 }
+      ')
+      [ -n "$alive" ] || break
+      [ "$SECONDS" -lt "$deadline" ] || break
       sleep 0.02
     done
+    [ -n "$alive" ] || break
   done
-  kill -0 "$pid" 2>/dev/null && return 1
+  [ -z "$alive" ] || return 1
   wait "$pid" 2>/dev/null || true
 }
 cleanup() {
@@ -60,10 +98,10 @@ cleanup() {
     done
     if [ -n "${watch_pid:-}" ]; then
       printf 'diagnostic: fixture watcher pid=%s\n' "$watch_pid"
-      for log in "$WATCH_STATE/.wake-queue" \
-        "$WATCH_STATE/.secondmate-relaunch-ios" \
-        "$WATCH_STATE/ios.meta" \
-        "$WATCH_STATE/.watch.lock/"* \
+      for log in "${WATCH_STATE:-$PARENT/state}/.wake-queue" \
+        "${WATCH_STATE:-$PARENT/state}/.secondmate-relaunch-ios" \
+        "${WATCH_STATE:-$PARENT/state}/ios.meta" \
+        "${WATCH_STATE:-$PARENT/state}/.watch.lock/"* \
         "$REMOTE_HOME/state/parent-route/"*; do
         [ ! -f "$log" ] || { printf 'diagnostic: %s\n' "$log"; cat "$log"; }
       done
@@ -75,7 +113,7 @@ cleanup() {
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" "$TMP_ROOT/race-clone.release" 2>/dev/null || true
   # A watcher leg cut short by a failed assertion is still polling the root.
   if [ -n "${watch_pid:-}" ]; then
-    stop_fixture_watcher "$watch_pid" || true
+    stop_fixture_watcher "$watch_pid" || { printf 'error: fixture watcher cleanup failed\n' >&2; return 1; }
   fi
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
@@ -89,6 +127,33 @@ cleanup() {
   fm_test_remove_tree "$TMP_ROOT"
 }
 trap cleanup EXIT
+
+cat >"$TMP_ROOT/recovery.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+printf '%s\n' "$$" >"$1"
+while :; do sleep 1; done
+SH
+set -m
+bash -c '
+  . "$1/bin/fm-timeout-lib.sh"
+  fm_run_timed 120 bash "$2/recovery.sh" "$2/recovery.pid"
+' _ "$ROOT" "$TMP_ROOT" &
+watch_pid=$!
+set +m
+deadline=$((SECONDS + 10))
+while [ ! -s "$TMP_ROOT/recovery.pid" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.02; done
+[ -s "$TMP_ROOT/recovery.pid" ] || fail "recovery child did not start"
+recovery_pid=$(cat "$TMP_ROOT/recovery.pid")
+recovery_group=$(ps -o pgid= -p "$recovery_pid" | tr -d ' ')
+[ "$recovery_group" != "$watch_pid" ] || fail "recovery must use a separate process group"
+stop_fixture_watcher "$watch_pid" || fail "recovery descendants survived cleanup"
+watch_pid=''
+if ps -eo pgid=,stat= | awk -v group="$recovery_group" '$1 == group && $2 !~ /^Z/ { found=1 } END { exit !found }'; then
+  fail "orphan recovery group survived interrupt"
+fi
+pass "watcher cleanup stops a separate timeout recovery process group"
+[ "$CLEANUP_ONLY" -eq 0 ] || exit 0
 
 # Materialize the current branch as the remote host's tracked code root. The
 # fixture is a real git repository because provisioning and guarded sync exercise

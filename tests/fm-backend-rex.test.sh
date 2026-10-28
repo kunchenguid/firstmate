@@ -1180,6 +1180,33 @@ test_marks_clear_removes_records_and_caches() {
   pass "rex: clearing a task removes its mark, tint, and caches"
 }
 
+test_marks_failed_clear_preserves_retry() {
+  local retry cache
+  for retry in clear sync; do
+    mark_case "marks-retry-$retry"
+    printf 'on\n' >"$MARK_DIR/home/config/rex-status-marks"
+    printf 'subtle\n' >"$MARK_DIR/home/config/rex-tint"
+    printf '%s\n' "window=$MARK_T" "backend=rex" "kind=ship" >"$MARK_DIR/home/state/t1.meta"
+    mark_task_status "blocked [at=1700000000]: stuck"
+    mark_status '[]'
+    marks_run sync || fail "sync failed"
+    printf '42\tValidating\n' >"$MARK_DIR/home/state/.rex-progress-t1"
+    touch "$MARK_DIR/fake/unreachable"
+    if marks_run clear t1; then fail "unreachable clear must fail"; fi
+    for cache in mark progress tint; do
+      [ -s "$MARK_DIR/home/state/.rex-$cache-t1" ] || fail "failed clear lost $cache retry evidence"
+    done
+    rm "$MARK_DIR/fake/unreachable" "$MARK_DIR/home/config/rex-status-marks" "$MARK_DIR/home/config/rex-tint"
+    mark_status '[{"id":"fm","app":"firstmate","state":"blocked","msg":"stuck"},{"id":"fm-progress","app":"firstmate","state":"working","progress":42}]'
+    : >"$MARK_TTY"
+    marks_run "$retry" t1 || fail "retry failed"
+    grep -qF 'state=clear:app=firstmate:id=fm' "$MARK_TTY" || fail "retry must clear displayed mark"
+    grep -qF $'\033]111\033\\' "$MARK_TTY" || fail "retry must reset tint"
+    compgen -G "$MARK_DIR/home/state/.rex-*-t1" >/dev/null && fail "successful retry must drop caches"
+  done
+  pass "rex: failed clear retains all channel evidence for explicit and unconfigured sync retries"
+}
+
 test_nm_run_progress_reads_captured_status() {
   local out caps="$ROOT/tests/captures/no-mistakes-v1.70.1"
   out=$(bash -c '. "$1/bin/fm-nm-run-lib.sh"; fm_nm_run_progress "$(cat "$2")"' _ "$ROOT" "$caps/replacement.toon")
@@ -1232,4 +1259,5 @@ test_firstmate_records_never_count_as_worker_state
 test_marks_are_off_by_default
 test_marks_producer_converges_and_notifies_once
 test_marks_clear_removes_records_and_caches
+test_marks_failed_clear_preserves_retry
 test_nm_run_progress_reads_captured_status
