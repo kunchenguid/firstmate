@@ -7814,6 +7814,34 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
+# Seat dispatch (bin/fm-fleet-seats.sh): the reserved generation moves to
+# dispatching with this exact endpoint BEFORE the source line or Enter reaches
+# it, so a crash from here on leaves a counted reservation with a recoverable
+# route, and only the first dispatch may deliver.
+if [ "$SPAWN_SEAT_TRACKED" = 1 ]; then
+  SPAWN_SEAT_ROUTE_FILE=$(umask 077 && mktemp "$STATE/.seat-route-$ID.XXXXXX") || {
+    echo "error: could not stage the fleet seat route for $ID" >&2
+    exit 1
+  }
+  SPAWN_SEAT_HOME=
+  [ "$KIND" != secondmate ] || SPAWN_SEAT_HOME=$PROJ_ABS
+  jq -cn --arg b "$BACKEND" --arg t "$T" --arg h "$SPAWN_SEAT_HOME" --arg g "$SPAWN_GEN" \
+    '{placement: "local", backend: $b, target: $t, home: (if $h == "" then null else $h end),
+      host: null, remote_root: null, spawn_gen: $g, operation: null}' >"$SPAWN_SEAT_ROUTE_FILE" || {
+    echo "error: could not stage the fleet seat route for $ID" >&2
+    exit 1
+  }
+  spawn_seats dispatch "$ID" --generation "$SPAWN_GEN" --route-file "$SPAWN_SEAT_ROUTE_FILE" >/dev/null || {
+    echo "error: the fleet seat owner did not permit launch delivery for $ID generation $SPAWN_GEN; nothing was delivered" >&2
+    exit 1
+  }
+  SPAWN_SEAT_DISPATCHED=1
+elif [ -n "$SPAWN_REMOTE_OPERATION" ]; then
+  spawn_host_receipt_update dispatched || {
+    echo "error: the host operation receipt for $ID could not record launch dispatch; nothing was delivered" >&2
+    exit 1
+  }
+fi
 if [ "$BACKEND" = t3code ]; then
   # No pane: the launch is the thread's first message, carrying the same
   # encoded brief the LAUNCH template embeds; MODEL/EFFORT were fixed as the
@@ -7865,34 +7893,6 @@ else
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
-  fi
-  # Seat dispatch (bin/fm-fleet-seats.sh): the reserved generation moves to
-  # dispatching with this exact endpoint BEFORE the source line or Enter reaches
-  # it, so a crash from here on leaves a counted reservation with a recoverable
-  # route, and only the first dispatch may deliver.
-  if [ "$SPAWN_SEAT_TRACKED" = 1 ]; then
-    SPAWN_SEAT_ROUTE_FILE=$(umask 077 && mktemp "$STATE/.seat-route-$ID.XXXXXX") || {
-      echo "error: could not stage the fleet seat route for $ID" >&2
-      exit 1
-    }
-    SPAWN_SEAT_HOME=
-    [ "$KIND" != secondmate ] || SPAWN_SEAT_HOME=$PROJ_ABS
-    jq -cn --arg b "$BACKEND" --arg t "$T" --arg h "$SPAWN_SEAT_HOME" --arg g "$SPAWN_GEN" \
-      '{placement: "local", backend: $b, target: $t, home: (if $h == "" then null else $h end),
-        host: null, remote_root: null, spawn_gen: $g, operation: null}' >"$SPAWN_SEAT_ROUTE_FILE" || {
-      echo "error: could not stage the fleet seat route for $ID" >&2
-      exit 1
-    }
-    spawn_seats dispatch "$ID" --generation "$SPAWN_GEN" --route-file "$SPAWN_SEAT_ROUTE_FILE" >/dev/null || {
-      echo "error: the fleet seat owner did not permit launch delivery for $ID generation $SPAWN_GEN; nothing was delivered" >&2
-      exit 1
-    }
-    SPAWN_SEAT_DISPATCHED=1
-  elif [ -n "$SPAWN_REMOTE_OPERATION" ]; then
-    spawn_host_receipt_update dispatched || {
-      echo "error: the host operation receipt for $ID could not record launch dispatch; nothing was delivered" >&2
-      exit 1
-    }
   fi
   sleep 0.3
   spawn_orca_launch_send_fail() {
@@ -7946,43 +7946,7 @@ else
     spawn_orca_wait_launch_consumed
     trap - HUP INT TERM
   fi
-  if [ "$T3CODE_LAUNCH_UNCONFIRMED" = 1 ]; then
-    echo "error: the launch brief for $ID may already have been delivered to T3 thread $T: its outcome is unproven (a lost reply or a T3 error that can follow a commit). The task record is kept; inspect the thread in T3 Code, and if the brief is absent resend only the identical brief text, which reuses its request id within the hour" >&2
-    exit 1
-  fi
-  # Supervisor startup confirmation: a pooled secondmate launch (or a host-local
-  # launch for a remote parent's seat) succeeds only once the recovery-grade
-  # classifier reads this generation's exact endpoint 'alive'. A timeout or an
-  # unprovable backend fails the spawn with the seat still counted and its route
-  # recorded; it never reports success, and never frees the seat.
-  if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_POOLED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
-    spawn_startup_state=unverified
-    if fm_control_backend_state_verified "$BACKEND"; then
-      spawn_startup_deadline=$((SECONDS + ${FM_CONTROL_LAUNCH_WAIT:-90}))
-      while :; do
-        spawn_startup_state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null || printf unreadable)
-        [ "$spawn_startup_state" != alive ] || break
-        [ "$SECONDS" -lt "$spawn_startup_deadline" ] || break
-        sleep "${FM_CONTROL_POLL:-0.5}"
-      done
-    fi
-    if [ "$spawn_startup_state" != alive ]; then
-      echo "error: secondmate $ID was launched into $T but its startup was not confirmed (endpoint reads '$spawn_startup_state'); its fleet seat stays counted and its route is preserved for recovery" >&2
-      exit 1
-    fi
-    if [ "$SPAWN_SEAT_TRACKED" = 1 ]; then
-      spawn_seats confirm "$ID" --generation "$SPAWN_GEN" >/dev/null || {
-        echo "error: secondmate $ID started, but its fleet seat could not record the confirmed startup; it stays counted for reconciliation" >&2
-        exit 1
-      }
-      SPAWN_SEAT_CONFIRMED=1
-    else
-      spawn_host_receipt_update started || {
-        echo "error: secondmate $ID started, but the host operation receipt could not record it" >&2
-        exit 1
-      }
-    fi
-  fi
+
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
@@ -8153,7 +8117,7 @@ fi
 # classifier reads this generation's exact endpoint `alive`. A timeout or an
 # unprovable backend fails the spawn with the seat still counted and its route
 # recorded; it never reports success, and never frees the seat.
-if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_TRACKED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_POOLED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
   spawn_startup_state=unverified
   if fm_control_backend_state_verified "$BACKEND"; then
     spawn_startup_elapsed=0
@@ -8180,7 +8144,7 @@ if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_TRACKED" = 1 ] || [ -n "$SPAWN_R
       echo "error: secondmate $ID started, but the host operation receipt could not record it" >&2
       exit 1
     }
-fi
+  fi
 fi
 
 SPAWN_DELIVERY=

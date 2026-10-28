@@ -631,7 +631,7 @@ meta_state() {
           if fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1; then
             endpoint_state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || endpoint_state=unreadable
             if [ "$endpoint_state" = missing ]; then
-              verdict=$(fm_control_endpoint_absence_verdict "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")
+              verdict=$(fm_control_endpoint_absence_verdict "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$meta")
               [ "${verdict%%$'\t'*}" != gone ] || { echo other; return; }
             fi
           fi
@@ -890,14 +890,21 @@ route_local_state() {
 # destroyed (fm_control_endpoint_absence_verdict), so a buffered launch line
 # can no longer execute.
 route_local_gone() {
-  local backend target state verdict
+  local backend target state verdict meta
   backend=$(inc_get "$1" '.route.backend // empty')
   target=$(inc_get "$1" '.route.target // empty')
   [ -n "$backend" ] && [ -n "$target" ] || return 1
   state=$(route_local_state "$1") || return 1
   [ "$state" = missing ] || return 1
   [ "$backend" != tmux ] || return 0
-  verdict=$(fm_control_endpoint_absence_verdict "$backend" "$target")
+  meta=
+  if [ "$backend" = rex ]; then
+    meta="$HOLDER_STATE/$TASK.meta"
+    [ "$(meta_generation "$meta")" = "$1" ] || return 1
+    fm_backend_validate_task_endpoint "$meta" "$TASK" >/dev/null 2>&1 || return 1
+    [ "$FM_BACKEND_VALIDATED_BACKEND" = "$backend" ] && [ "$FM_BACKEND_VALIDATED_TARGET" = "$target" ] || return 1
+  fi
+  verdict=$(fm_control_endpoint_absence_verdict "$backend" "$target" "$meta")
   EVIDENCE_REASON=${verdict#*$'\t'}
   [ "${verdict%%$'\t'*}" = gone ]
 }
