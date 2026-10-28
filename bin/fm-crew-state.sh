@@ -1029,8 +1029,11 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         IFS='|' read -r _ selected_id selected_status candidate_ids <<< "$run_choice"
         # A bare `axi status` identity can be an older live sibling while the
         # overview's newest row is terminal.  It may replace a terminal row
-        # only when the creation-ordered runs ledger proves that the reported
-        # live run is newer and is one of the same-branch candidates.
+        # only when it is a same-branch candidate proven newer than every
+        # other candidate, by ULID timestamp (same head) or by the
+        # creation-ordered runs ledger (different heads).  A selection proven
+        # older than the live run, while another candidate is not, reports
+        # unknown rather than hiding that candidate.
         reported_id=$(strip_quotes "$(nm_field id)")
         reported_branch=$(strip_quotes "$(nm_field branch)")
         selected_detail=
@@ -1040,16 +1043,36 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           && fm_nm_run_is_active "$RUN_OUT"; then
           case ",$candidate_ids," in
             *,"$reported_id",*|*,\ "$reported_id",*)
-              selected_detail=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") || selected_detail=
-              selected_head=$(strip_quotes "$(fm_nm_field "$selected_detail" head)")
               reported_head=$(strip_quotes "$(fm_nm_field "$RUN_OUT" head)")
-              if fm_nm_run_is_newer_than_selected "$CREW_BRANCH" "$selected_id" "$reported_id" "$selected_head" "$reported_head" "$(nm_runs_list)"; then
+              runs_ledger=
+              newer_than_all=1
+              newer_than_selected=0
+              IFS=', ' read -ra candidates <<< "$candidate_ids"
+              for candidate_id in "${candidates[@]}"; do
+                [ "$candidate_id" = "$reported_id" ] && continue
+                candidate_detail=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$candidate_id") || candidate_detail=
+                [ "$candidate_id" = "$selected_id" ] && selected_detail=$candidate_detail
+                if [ -n "$candidate_detail" ] && fm_nm_run_is_active "$candidate_detail"; then
+                  emit unknown run-step "competing live runs; run ids: $candidate_ids"
+                fi
+                candidate_head=$(strip_quotes "$(fm_nm_field "$candidate_detail" head)")
+                if [ -z "$runs_ledger" ] && [ -n "$candidate_head" ] && [ "${candidate_head:0:7}" != "${reported_head:0:7}" ]; then
+                  runs_ledger=$(nm_runs_list)
+                fi
+                if fm_nm_run_is_newer_than "$CREW_BRANCH" "$candidate_id" "$reported_id" "$candidate_head" "$reported_head" "$runs_ledger"; then
+                  [ "$candidate_id" = "$selected_id" ] && newer_than_selected=1
+                else
+                  precedence_status=$?
+                  [ "$precedence_status" = 2 ] && emit unknown run-step "same-head run ordering unverified; run ids: $candidate_ids"
+                  newer_than_all=0
+                fi
+              done
+              if [ "$newer_than_all" = 1 ]; then
                 selected_id=$reported_id
                 selected_status=running
                 selected_detail=
-              else
-                precedence_status=$?
-                [ "$precedence_status" = 2 ] && emit unknown run-step "same-head run ordering unverified; run ids: $candidate_ids"
+              elif [ "$newer_than_selected" = 1 ]; then
+                emit unknown run-step "run ordering unverified; run ids: $candidate_ids"
               fi
               ;;
           esac

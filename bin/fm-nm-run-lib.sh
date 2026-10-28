@@ -202,9 +202,10 @@ fm_nm_run_status_class() {  # <status_word>
   esac
 }
 
-# 0 when the status identity with $3 is newer than the overview-selected run
-# with $2; 2 means same-head ULIDs share a creation timestamp.
-fm_nm_run_is_newer_than_selected() {  # <branch> <selected-id> <reported-id> <selected-head> <reported-head> <runs-list>
+# 0 when the status identity with $3 is newer than the same-branch candidate
+# run with $2; 2 means same-head ULIDs share a creation timestamp. The runs
+# ledger $6 is read only for different heads.
+fm_nm_run_is_newer_than() {  # <branch> <candidate-id> <reported-id> <candidate-head> <reported-head> <runs-list>
   local branch=$1 selected_id=$2 reported_id=$3 selected_head=$4 reported_head=$5 runs=$6 first_match
   if [ -n "$selected_head" ] && [ "${selected_head:0:7}" = "${reported_head:0:7}" ]; then
     [[ "$selected_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ && "$reported_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]] || return 1
