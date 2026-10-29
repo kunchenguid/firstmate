@@ -143,6 +143,12 @@ cat > "$FAKEBIN/ln" <<'SH'
 set -u
 case "$FAKE_RECEIPT_IO_MODE:$*" in
   ln-fail:*'/seen/.seen.'*) exit 1 ;;
+  crash-after-reserve:*'/seen/.seen.'*)
+    PATH=$ORIGINAL_PATH ln "$@" || exit 1
+    PATH=$ORIGINAL_PATH rm -f -- "$1" || exit 1
+    kill -TERM "$PPID"
+    exit 143
+    ;;
   *) PATH=$ORIGINAL_PATH exec ln "$@" ;;
 esac
 SH
@@ -280,6 +286,17 @@ receipt_count() {
     count=$((count + 1))
   done
   printf '%s\n' "$count"
+}
+
+receipt_state() {
+  local count=0 receipt state=
+  for receipt in "$HOME_DIR/state/zalo-folder-qa/seen"/*; do
+    [ -e "$receipt" ] || [ -L "$receipt" ] || continue
+    count=$((count + 1))
+    state=$receipt
+  done
+  [ "$count" -eq 1 ] || return 1
+  cat "$state"
 }
 
 test_required_private_pins_fail_closed() {
@@ -571,6 +588,7 @@ test_run_sends_only_fixed_unavailable_once_and_deduplicates() {
     || fail 'run sent a non-fixed answer or a non-configured target'
   [ "$(call_count 'login.microsoftonline.com')" -eq 0 ] || fail 'exact-group run contacted Graph token service'
   [ "$(call_count '/drives/')" -eq 0 ] || fail 'exact-group run contacted Graph data service'
+  [ "$(receipt_state)" = sent ] || fail 'successful acknowledgement did not transition the receipt to sent'
 
   rm -rf "$FAKE_LOG_DIR"
   mkdir -m 700 "$FAKE_LOG_DIR"
@@ -584,10 +602,47 @@ test_run_sends_only_fixed_unavailable_once_and_deduplicates() {
   pass 'integrated run sends only the fixed response and deduplicates across restarts'
 }
 
+test_run_stops_for_crash_window_pending_receipt() {
+  local output rc event
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  reset_runtime
+  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' crash-1)
+  queue_event "$event"
+  FAKE_RECEIPT_IO_MODE=crash-after-reserve
+  export FAKE_RECEIPT_IO_MODE
+  output=$(run_tool run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'crash-window fixture did not stop the first run'
+  [ "$(call_count '/getUpdates')" -eq 1 ] || fail 'crash-window fixture did not reserve after one poll'
+  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'crash-window fixture reached sendMessage'
+  [ "$(receipt_state)" = pending ] || fail 'crash window did not preserve a pending receipt'
+
+  rm -rf "$FAKE_LOG_DIR"
+  mkdir -m 700 "$FAKE_LOG_DIR"
+  : > "$UPDATE_QUEUE"
+  FAKE_RECEIPT_IO_MODE=exact
+  export FAKE_RECEIPT_IO_MODE
+  output=$(run_tool run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'restart accepted an unresolved pending receipt'
+  case "$output" in
+    *'unresolved pending receipt requires operator reconciliation'*) ;;
+    *) fail 'restart did not report pending receipt reconciliation' ;;
+  esac
+  [ "$(call_count '/getMe')" -eq 0 ] || fail 'pending restart reached bot verification'
+  [ "$(call_count '/getUpdates')" -eq 0 ] || fail 'pending restart polled for another event'
+  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'pending restart retried or skipped into another send'
+  [ "$(receipt_state)" = pending ] || fail 'pending restart changed the unresolved receipt'
+  case "$output" in *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) fail 'pending restart exposed a private value' ;; esac
+  pass 'crash-window pending receipts stop restart for operator reconciliation'
+}
+
 test_run_stops_before_receipt_capacity_overflow() {
   local output rc event
-  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID" "$REFRESH_FILE" 1
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID" "$REFRESH_FILE" 2
   reset_runtime
+  mkdir -p "$HOME_DIR/state/zalo-folder-qa/seen"
+  printf 'sent\n' > "$HOME_DIR/state/zalo-folder-qa/seen/preexisting"
   event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' cap-1)
   queue_event "$event"
   event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho lần nữa là bao nhiêu?' cap-2)
@@ -600,8 +655,8 @@ test_run_stops_before_receipt_capacity_overflow() {
     *) fail 'receipt capacity overflow did not report the fail-closed stop' ;;
   esac
   [ "$(call_count '/sendMessage')" -eq 1 ] || fail 'capacity overflow sent or retried the second message'
-  [ "$(receipt_count)" -eq 1 ] || fail 'capacity overflow created an extra receipt'
-  pass 'run stops before exceeding the configured receipt capacity'
+  [ "$(receipt_count)" -eq 2 ] || fail 'capacity overflow ignored the startup count or created an extra receipt'
+  pass 'run initializes and updates its receipt count without exceeding capacity'
 }
 
 test_run_stops_on_receipt_io_errors() {
@@ -635,10 +690,11 @@ test_run_stops_on_receipt_io_errors() {
   rc=$?
   [ "$rc" -ne 0 ] || fail 'stale receipt temporary did not stop run'
   case "$output" in
-    *'receipt reservation failed'*) ;;
-    *) fail 'stale receipt temporary did not report the fail-closed stop' ;;
+    *'receipt state initialization failed'*) ;;
+    *) fail 'stale receipt temporary did not fail startup validation' ;;
   esac
-  [ "$(call_count '/getUpdates')" -eq 1 ] || fail 'stale receipt temporary continued polling'
+  [ "$(call_count '/getMe')" -eq 0 ] || fail 'stale receipt temporary reached bot verification'
+  [ "$(call_count '/getUpdates')" -eq 0 ] || fail 'stale receipt temporary reached polling'
   [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'stale receipt temporary sent a message'
   pass 'receipt I/O and cleanup errors stop without sending or masquerading as duplicates'
 }
@@ -658,6 +714,7 @@ test_run_fails_closed_on_malformed_send_and_has_no_reply_command() {
     [ "$(call_count '/getUpdates')" -eq 1 ] || fail "$mode send outcome continued polling"
     [ "$(call_count '/sendMessage')" -eq 1 ] || fail "$mode send outcome was retried"
     [ "$(receipt_count)" -eq 1 ] || fail "$mode send outcome lost its reserved receipt"
+    [ "$(receipt_state)" = pending ] || fail "$mode send outcome did not remain pending"
   done
 
   reset_runtime
@@ -682,6 +739,7 @@ fm_test_run \
   test_run_acquires_portable_lock_without_flock \
   test_run_never_sends_for_dm_wrong_group_or_malformed_poll \
   test_run_sends_only_fixed_unavailable_once_and_deduplicates \
+  test_run_stops_for_crash_window_pending_receipt \
   test_run_stops_before_receipt_capacity_overflow \
   test_run_stops_on_receipt_io_errors \
   test_run_fails_closed_on_malformed_send_and_has_no_reply_command

@@ -56,6 +56,7 @@ GRAPH_REFRESH_TOKEN_FILE=
 MAX_SEEN_RECEIPTS=
 GRAPH_ACCESS_TOKEN=
 SOURCE_STATUS_JSON=
+RECEIPT_COUNT=0
 
 UNAVAILABLE_TEXT='Nguồn dữ liệu Check tồn kho âm hiện chưa khả dụng; tôi chưa thể trả lời từ dữ liệu đã xác minh.'
 
@@ -339,38 +340,81 @@ message_digest() {
   fi
 }
 
-seen_or_reserve() { # <message-id>; 0=newly reserved, 1=already seen, 2=error
-  local digest receipt tmp existing receipt_count=0
-  digest=$(printf '%s' "$1" | message_digest) || return 2
-  receipt=$SEEN_DIR/$digest
-  for existing in "$SEEN_DIR"/.seen.*; do
-    [ -e "$existing" ] || [ -L "$existing" ] || continue
-    return 2
+message_receipt_path() {
+  local digest
+  digest=$(printf '%s' "$1" | message_digest) || return 1
+  printf '%s/%s\n' "$SEEN_DIR" "$digest"
+}
+
+read_receipt_state() {
+  local receipt=$1 state
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  state=$(cat "$receipt") || return 1
+  case "$state" in
+    pending|sent) printf '%s\n' "$state" ;;
+    *) return 1 ;;
+  esac
+}
+
+initialize_receipts() {
+  local receipt state count=0 invalid=0 pending=0
+  for receipt in "$SEEN_DIR"/*; do
+    [ -e "$receipt" ] || [ -L "$receipt" ] || continue
+    if state=$(read_receipt_state "$receipt"); then
+      count=$((count + 1))
+      [ "$state" != pending ] || pending=1
+    else
+      invalid=1
+    fi
   done
+  for receipt in "$SEEN_DIR"/.[!.]* "$SEEN_DIR"/..?*; do
+    [ -e "$receipt" ] || [ -L "$receipt" ] || continue
+    invalid=1
+  done
+  [ "$pending" -eq 0 ] || return 2
+  [ "$invalid" -eq 0 ] && [ "$count" -le "$MAX_SEEN_RECEIPTS" ] || return 1
+  RECEIPT_COUNT=$count
+}
+
+reserve_pending_receipt() {
+  local receipt state tmp
+  receipt=$(message_receipt_path "$1") || return 2
   if [ -e "$receipt" ] || [ -L "$receipt" ]; then
-    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 2
-    return 1
+    state=$(read_receipt_state "$receipt") || return 2
+    [ "$state" = sent ] && return 1
+    return 2
   fi
-  for existing in "$SEEN_DIR"/*; do
-    [ -e "$existing" ] || [ -L "$existing" ] || continue
-    receipt_count=$((receipt_count + 1))
-    [ "$receipt_count" -lt "$MAX_SEEN_RECEIPTS" ] \
-      || return 2
-  done
+  [ "$RECEIPT_COUNT" -lt "$MAX_SEEN_RECEIPTS" ] || return 2
   tmp=$(mktemp "$SEEN_DIR/.seen.XXXXXX") || return 2
-  if ! printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"; then
+  if ! printf 'pending\n' > "$tmp"; then
     rm -f -- "$tmp" || return 2
     return 2
   fi
   if ln "$tmp" "$receipt" 2>/dev/null; then
     rm -f -- "$tmp" || return 2
+    RECEIPT_COUNT=$((RECEIPT_COUNT + 1))
     return 0
   fi
   rm -f -- "$tmp" || return 2
-  if [ -f "$receipt" ] && [ ! -L "$receipt" ]; then
+  return 2
+}
+
+mark_receipt_sent() {
+  local receipt state tmp
+  receipt=$(message_receipt_path "$1") || return 1
+  state=$(read_receipt_state "$receipt") || return 1
+  [ "$state" = pending ] || return 1
+  tmp=$(mktemp "$SEEN_DIR/.seen.XXXXXX") || return 1
+  if ! printf 'sent\n' > "$tmp"; then
+    rm -f -- "$tmp" || return 1
     return 1
   fi
-  return 2
+  if ! mv -f "$tmp" "$receipt"; then
+    rm -f -- "$tmp" || return 1
+    return 1
+  fi
+  state=$(read_receipt_state "$receipt") || return 1
+  [ "$state" = sent ]
 }
 
 cmd_check() {
@@ -396,7 +440,7 @@ cmd_handle() {
 }
 
 cmd_run() {
-  local raw event code reserve_status
+  local raw event code receipt_status
   load_config
   need jq
   need curl
@@ -408,6 +452,14 @@ cmd_run() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  if initialize_receipts; then
+    :
+  else
+    receipt_status=$?
+    [ "$receipt_status" -ne 2 ] \
+      || die 'unresolved pending receipt requires operator reconciliation; refusing to poll or send'
+    die 'receipt state initialization failed; refusing to poll or send'
+  fi
   verify_bot || die 'bot identity check failed'
   log 'ready for the configured group; data answers remain unavailable'
   while :; do
@@ -420,16 +472,18 @@ cmd_run() {
     event=$(printf '%s' "$raw" | jq -c '.result')
     parse_event "$event"
     [ "$EVENT_ACTION" = query ] || continue
-    if seen_or_reserve "$EVENT_MESSAGE_ID"; then
+    if reserve_pending_receipt "$EVENT_MESSAGE_ID"; then
       :
     else
-      reserve_status=$?
-      [ "$reserve_status" -eq 1 ] && continue
+      receipt_status=$?
+      [ "$receipt_status" -eq 1 ] && continue
       die 'receipt reservation failed; refusing a new message'
     fi
     if ! send_unavailable_reply; then
-      die 'fixed unavailable reply failed or had an unknown outcome; duplicate replay is suppressed'
+      die 'fixed unavailable reply failed or had an unknown outcome; pending receipt requires operator reconciliation'
     fi
+    mark_receipt_sent "$EVENT_MESSAGE_ID" \
+      || die 'reply was acknowledged but receipt transition failed; operator reconciliation required'
   done
 }
 
