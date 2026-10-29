@@ -1449,7 +1449,7 @@ test_degraded_wake_survives_an_unsaved_marker() {
   pass "a degraded wake is queued before its dedupe marker, so a failed marker save never silences it"
 }
 test_arming_baselines_an_already_degraded_change() {
-  local dir state url url1 fail_env
+  local dir state url url1 fail_env value
   dir=$(make_case degraded-baseline)
   state="$dir/home/state"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
@@ -1545,15 +1545,26 @@ test_arming_baselines_an_already_degraded_change() {
   state="$dir/home/state"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   write_task_meta "$dir" task-a
-  for fail_env in FM_TEST_GLAB_FAIL FM_TEST_GLAB_API_FAIL; do
-    if (export "$fail_env=1" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car
-        run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err"); then
-      fail "arming succeeded although its baseline read failed ($fail_env)"
-    fi
-    grep -q 'could not read the forge' "$dir/unreadable.err" || fail "arming did not name the unreadable baseline read ($fail_env)"
-    [ ! -e "$state/.control-task-a.lock" ] || fail "an unreadable baseline read left the control lock held ($fail_env)"
-    [ ! -e "$state/task-a.check.sh" ] || fail "an unreadable baseline read published a poll ($fail_env)"
+  if FM_TEST_GLAB_FAIL=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
+      run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err"; then
+    fail "arming succeeded although its baseline read failed"
+  fi
+  grep -q 'could not read the forge' "$dir/unreadable.err" || fail "arming did not name the unreadable baseline read"
+  [ ! -e "$state/.control-task-a.lock" ] || fail "an unreadable baseline read left the control lock held"
+  [ ! -e "$state/task-a.check.sh" ] || fail "an unreadable baseline read published a poll"
+  # A readable merge request whose merge-train car read fails for any reason
+  # other than a 404 arms as not on a train, so the merged wake is kept.
+  for fail_env in FM_TEST_GLAB_API_FAIL FM_TEST_GLAB_TRAIN; do
+    rm -f "$state/task-a.check.sh" "$state/task-a.pr-poll-degraded"
+    if [ "$fail_env" = FM_TEST_GLAB_TRAIN ]; then value=fail; else value=1; fi
+    (export "$fail_env=$value" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success
+      [ "$fail_env" = FM_TEST_GLAB_TRAIN ] || export FM_TEST_GLAB_TRAIN=car
+      run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err") \
+      || fail "arming failed on an unreadable merge-train car read ($fail_env): $(cat "$dir/unreadable.err")"
+    [ -f "$state/task-a.check.sh" ] || fail "an unreadable merge-train car read published no poll ($fail_env)"
+    [ ! -e "$state/task-a.pr-poll-degraded" ] || fail "an unreadable merge-train car read recorded a baseline ($fail_env)"
   done
+  rm -f "$state/task-a.check.sh"
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success run_check_entry "$dir" task-a "$url1" >/dev/null 2>&1 \
     || fail "arming the first GitLab watch for the unreadable case failed"
   if FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>&1; then
@@ -2783,7 +2794,7 @@ group/subgroup/project
       run_poll "$dir")
     case $out in
       'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure'*) [ -z "$train" ] || fail "GitLab train drop emitted a pipeline line: $out" ;;
-      "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure"*) [ -n "$train" ] || fail "GitLab failed pipeline emitted a train line: $out" ;;
+      "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941") [ -n "$train" ] || fail "GitLab failed pipeline emitted a train line: $out" ;;
       *) fail "GitLab poll lost the known failure under the detail budget (train=$train): $out" ;;
     esac
     [ "$(grep -c 'api projects/.*/pipelines/' "$dir/glab.log")" -le 8 ] \
@@ -2866,13 +2877,18 @@ EOF
     || fail "stderr noise on a 404 car read hid the train drop: $out"
   out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=canceled FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_DETAIL=need_rebase run_poll "$dir")
   [ "$out" = "degraded train=dropped url=$url reason=need_rebase pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941" ] || fail "GitLab poll did not report a train drop with a non-failed pipeline: $out"
+  # A train drop names only the pipeline link, so a merge request never on a
+  # train costs no pipeline detail reads on each poll.
+  : > "$dir/glab.log"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone \
     FM_TEST_GLAB_JOBS='[{"name":"ruby","status":"failed","failure_reason":"script_failure"}]' \
     FM_TEST_GLAB_BRIDGES='[{"name":"child","status":"failed","downstream_pipeline":{"id":77}}]' \
     FM_TEST_GLAB_CHILD_JOBS='[{"name":"e2e test","status":"failed","failure_reason":"script_failure"}]' \
     run_poll "$dir")
-  [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941 jobs=ruby:script_failure,e2e test:script_failure" ] \
-    || fail "GitLab train drop did not name the failed jobs including the child pipeline: $out"
+  [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941" ] \
+    || fail "GitLab train drop did not name only the pipeline link: $out"
+  ! grep -q 'api projects/.*/pipelines/' "$dir/glab.log" \
+    || fail "GitLab train drop read pipeline details: $(cat "$dir/glab.log")"
   rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=merged FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll read a just-merged merge request as a train drop: $out"

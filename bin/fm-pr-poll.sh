@@ -186,9 +186,10 @@ case "$provider" in
     # Any other open merge request has its merge-train car read: a present car
     # emits "ontrain", an absent one (HTTP 404) emits a degraded train=dropped
     # line, but only if a re-read still finds the merge request open (a train
-    # that just merged it also leaves no car), naming the merge request's detailed merge status, its head pipeline URL
-    # and that pipeline's failed jobs, and the watcher
-    # wakes only when it last saw the car on the train. Every error, a closed
+    # that just merged it also leaves no car), naming the merge request's
+    # detailed merge status and its head pipeline URL, and the watcher wakes
+    # only when it last saw the car on the train. Any other car read failure
+    # reads as not on a train, even for the arming baseline. Every error, a closed
     # merge request, a pending or green head pipeline, and an unreadable record
     # stay silent. Without jq the poll falls back to the plain state field,
     # which keeps the merged wake for a watch armed before jq was required.
@@ -319,7 +320,7 @@ case "$provider" in
         car_err=$(cat "$errfile" 2>/dev/null)
         rm -f "$errfile"
         if [ "$car_rc" -eq 0 ]; then
-          printf '%s' "$car" | jq -e . >/dev/null 2>&1 || exit "$unknown"
+          printf '%s' "$car" | jq -e . >/dev/null 2>&1 || exit 0
           printf '%s' "$car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1 \
             && printf '%s\n' ontrain
         else
@@ -329,22 +330,13 @@ case "$provider" in
                 | jq -r 'if type == "object" and (.state | type) == "string" then .state else error("invalid") end' 2>/dev/null) \
                 || exit "$unknown"
               case $reread in opened|locked) ;; *) exit 0 ;; esac
-              detail=
               line="degraded train=dropped url=$url"
               [ -z "$reason" ] || line="$line reason=$reason"
-              if [ -n "$pipeline" ]; then
-                gitlab_failure_detail "$pipeline"
-                detail=$(printf '%s' "$detail" | head -c 300)
-                case $detail in
-                  *$'\n'*) detail= ;;
-                esac
-                line="$line pipeline_url=https://$host/$path/-/pipelines/$pipeline"
-                [ -z "$detail" ] || line="$line jobs=$detail"
-              fi
+              [ -z "$pipeline" ] || line="$line pipeline_url=https://$host/$path/-/pipelines/$pipeline"
               [ "${#line}" -le 2000 ] || exit 0
               printf '%s\n' "$line"
               ;;
-            *) exit "$unknown" ;;
+            *) exit 0 ;;
           esac
         fi
         exit 0
