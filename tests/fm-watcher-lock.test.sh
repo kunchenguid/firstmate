@@ -630,7 +630,7 @@ test_lock_resumes_own_interrupted_steal_reap() {
 # Interrupt the real cleanup at its unlink, after it publishes its tombstone.
 test_lock_tombstone_tracks_reaper_start_time() (
   local dir state lockdir owner reaper tomb i rc holder_start unrelated_start unrelated
-  sleep 300 &
+  sleep "$FM_TEST_STUB_MAX_BLOCK_SECONDS" &
   unrelated=$!
   trap 'kill "$unrelated" 2>/dev/null || true; wait "$unrelated" 2>/dev/null || true' EXIT
   # macOS start times have one-second precision.
@@ -650,7 +650,10 @@ test_lock_tombstone_tracks_reaper_start_time() (
     rm() {
       if [ "${!#}" = "$lock" ]; then
         : > "$ready"
-        while [ ! -e "$release" ]; do sleep 0.05; done
+        while [ ! -e "$release" ] && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null \
+          && [ "$SECONDS" -lt "$FM_TEST_STUB_MAX_BLOCK_SECONDS" ]; do
+          sleep 0.05
+        done
       fi
       command rm "$@"
     }
