@@ -723,7 +723,7 @@ test_run_stops_on_receipt_sync_errors() {
   local output rc event fail_at expected_sends expected_state
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
   event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' sync-1)
-  for fail_at in 1 2 3 4; do
+  for fail_at in 5 6 7 8; do
     reset_runtime
     queue_event "$event"
     FAKE_RECEIPT_SYNC_FAIL_AT=$fail_at
@@ -737,10 +737,10 @@ test_run_stops_on_receipt_sync_errors() {
     expected_sends=0
     expected_state=
     case "$fail_at" in
-      1) ;;
-      2) expected_state=pending ;;
-      3) expected_sends=1; expected_state=pending ;;
-      4) expected_sends=1; expected_state=sent ;;
+      5) ;;
+      6) expected_state=pending ;;
+      7) expected_sends=1; expected_state=pending ;;
+      8) expected_sends=1; expected_state=sent ;;
     esac
     [ "$(call_count '/sendMessage')" -eq "$expected_sends" ] \
       || fail "receipt sync failure $fail_at crossed the wrong send boundary"
@@ -752,8 +752,8 @@ test_run_stops_on_receipt_sync_errors() {
         || fail "receipt sync failure $fail_at published an unsynchronized receipt"
     fi
     case "$fail_at:$output" in
-      1:*'receipt reservation failed'*|2:*'receipt reservation failed'*) ;;
-      3:*'receipt transition failed'*|4:*'receipt transition failed'*) ;;
+      5:*'receipt reservation failed'*|6:*'receipt reservation failed'*) ;;
+      7:*'receipt transition failed'*|8:*'receipt transition failed'*) ;;
       *) fail "receipt sync failure $fail_at did not report its fail-closed stop" ;;
     esac
     case "$output" in
@@ -761,6 +761,74 @@ test_run_stops_on_receipt_sync_errors() {
     esac
   done
   pass 'file and directory sync failures stop at both receipt transitions'
+}
+
+test_run_durably_publishes_first_use_state() {
+  local output rc fail_at expected_error expected_retry_syncs
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  for fail_at in 1 2 3 4; do
+    reset_runtime
+    FAKE_RECEIPT_SYNC_FAIL_AT=$fail_at
+    export FAKE_RECEIPT_SYNC_FAIL_AT
+    output=$(run_tool run 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "first-use sync failure $fail_at did not stop run"
+    [ "$(cat "$RECEIPT_SYNC_COUNTER")" -eq "$fail_at" ] \
+      || fail "first-use sync failure $fail_at continued synchronizing"
+    [ "$(call_count '/getMe')" -eq 0 ] || fail "first-use sync failure $fail_at verified the bot"
+    [ "$(call_count '/getUpdates')" -eq 0 ] || fail "first-use sync failure $fail_at reached polling"
+    [ "$(call_count '/sendMessage')" -eq 0 ] || fail "first-use sync failure $fail_at sent a message"
+    expected_error='state directory'
+    [ "$fail_at" -le 2 ] || expected_error='seen directory'
+    case "$output" in
+      *"$expected_error"*'failed; refusing to verify, poll, or send'*) ;;
+      *) fail "first-use sync failure $fail_at did not report its fail-closed stop" ;;
+    esac
+    case "$output" in
+      *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) fail "first-use sync failure $fail_at exposed a private value" ;;
+    esac
+
+    rm -rf "$FAKE_LOG_DIR"
+    mkdir -m 700 "$FAKE_LOG_DIR"
+    : > "$UPDATE_QUEUE"
+    FAKE_RECEIPT_SYNC_FAIL_AT=0
+    export FAKE_RECEIPT_SYNC_FAIL_AT
+    output=$(run_tool run 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "terminal fake poll did not stop retry after sync failure $fail_at"
+    expected_retry_syncs=2
+    [ "$fail_at" -ge 3 ] || expected_retry_syncs=4
+    [ "$(cat "$RECEIPT_SYNC_COUNTER")" -eq "$((fail_at + expected_retry_syncs))" ] \
+      || fail "retry after sync failure $fail_at bypassed durable directory publication"
+    [ "$(call_count '/getMe')" -eq 1 ] || fail "retry after sync failure $fail_at did not verify the bot"
+    [ "$(call_count '/getUpdates')" -eq 1 ] || fail "retry after sync failure $fail_at did not reach polling"
+    [ "$(call_count '/sendMessage')" -eq 0 ] || fail "retry after sync failure $fail_at sent without an event"
+  done
+
+  reset_runtime
+  output=$(run_tool run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'terminal fake poll did not stop first-use run'
+  [ "$(cat "$RECEIPT_SYNC_COUNTER")" -eq 4 ] \
+    || fail 'first-use run did not synchronize both new directories and parents'
+  [ "$(call_count '/getMe')" -eq 1 ] || fail 'durable first-use state did not reach bot verification'
+  [ "$(call_count '/getUpdates')" -eq 1 ] || fail 'durable first-use state did not reach polling'
+  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'first-use run sent without an event'
+
+  rm -rf "$FAKE_LOG_DIR"
+  mkdir -m 700 "$FAKE_LOG_DIR"
+  : > "$UPDATE_QUEUE"
+  FAKE_RECEIPT_SYNC_FAIL_AT=5
+  export FAKE_RECEIPT_SYNC_FAIL_AT
+  output=$(run_tool run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'terminal fake poll did not stop steady-state run'
+  [ "$(cat "$RECEIPT_SYNC_COUNTER")" -eq 4 ] \
+    || fail 'steady-state run redundantly synchronized existing state directories'
+  [ "$(call_count '/getMe')" -eq 1 ] || fail 'steady-state state validation did not reach bot verification'
+  [ "$(call_count '/getUpdates')" -eq 1 ] || fail 'steady-state state validation did not reach polling'
+  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'steady-state run sent without an event'
+  pass 'first-use state publication is durable before external operations'
 }
 
 test_run_fails_closed_on_malformed_send_and_has_no_reply_command() {
@@ -807,4 +875,5 @@ fm_test_run \
   test_run_stops_before_receipt_capacity_overflow \
   test_run_stops_on_receipt_io_errors \
   test_run_stops_on_receipt_sync_errors \
+  test_run_durably_publishes_first_use_state \
   test_run_fails_closed_on_malformed_send_and_has_no_reply_command

@@ -169,6 +169,7 @@ init_state() {
   else
     mkdir -p "$STATE_DIR"
     chmod 700 "$STATE_DIR"
+    sync_new_directory "$STATE_DIR" "$STATE_ROOT" 'state directory'
   fi
   if [ -e "$SEEN_DIR" ] || [ -L "$SEEN_DIR" ]; then
     [ -d "$SEEN_DIR" ] && [ ! -L "$SEEN_DIR" ] || die "unsafe seen directory: $SEEN_DIR"
@@ -176,6 +177,7 @@ init_state() {
     chmod 700 "$SEEN_DIR"
   else
     mkdir -m 700 "$SEEN_DIR"
+    sync_new_directory "$SEEN_DIR" "$STATE_DIR" 'seen directory'
   fi
 }
 
@@ -356,7 +358,7 @@ read_receipt_state() {
   esac
 }
 
-sync_receipt_path() {
+sync_path() {
   python3 - "$1" "$2" <<'PY'
 import os
 import stat
@@ -379,6 +381,20 @@ try:
 finally:
     os.close(fd)
 PY
+}
+
+sync_new_directory() {
+  local directory=$1 parent=$2 label=$3
+  if ! sync_path directory "$directory"; then
+    rmdir "$directory" \
+      || die "$label synchronization and cleanup failed; operator reconciliation required"
+    die "$label synchronization failed; refusing to verify, poll, or send"
+  fi
+  if ! sync_path directory "$parent"; then
+    rmdir "$directory" \
+      || die "$label publication and cleanup failed; operator reconciliation required"
+    die "$label publication failed; refusing to verify, poll, or send"
+  fi
 }
 
 initialize_receipts() {
@@ -415,12 +431,12 @@ reserve_pending_receipt() {
     rm -f -- "$tmp" || return 2
     return 2
   fi
-  if ! sync_receipt_path file "$tmp"; then
+  if ! sync_path file "$tmp"; then
     rm -f -- "$tmp" || return 2
     return 2
   fi
   if ln "$tmp" "$receipt" 2>/dev/null; then
-    if ! sync_receipt_path directory "$SEEN_DIR"; then
+    if ! sync_path directory "$SEEN_DIR"; then
       rm -f -- "$tmp" || return 2
       return 2
     fi
@@ -442,7 +458,7 @@ mark_receipt_sent() {
     rm -f -- "$tmp" || return 1
     return 1
   fi
-  if ! sync_receipt_path file "$tmp"; then
+  if ! sync_path file "$tmp"; then
     rm -f -- "$tmp" || return 1
     return 1
   fi
@@ -450,7 +466,7 @@ mark_receipt_sent() {
     rm -f -- "$tmp" || return 1
     return 1
   fi
-  sync_receipt_path directory "$SEEN_DIR" || return 1
+  sync_path directory "$SEEN_DIR" || return 1
   state=$(read_receipt_state "$receipt") || return 1
   [ "$state" = sent ]
 }
