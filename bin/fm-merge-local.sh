@@ -202,7 +202,7 @@ case "$hold_status" in
     ;;
 esac
 # Recheck after the approval read. Git's ref transaction below verifies and
-# locks the worker head together with the default-branch update.
+# locks the worker head together with the landing-branch update.
 if [ "$(fm_dod_local_done_head "$META")" != "$MERGE_HEAD" ] || ! local_head_matches; then
   echo "error: local done head or branch changed during approval check; refusing" >&2
   exit 1
@@ -219,7 +219,7 @@ prepare
 commit
 EOF
 if [ "$merge_status" -ne 0 ]; then
-  # The transaction left main untouched. Undo only the staged fast-forward;
+  # The transaction left the landing branch untouched. Undo only the staged fast-forward;
   # the two-tree checkout also protects any intervening local edits here.
   git -C "$PROJ" read-tree -m -u "$MERGE_HEAD" "$before" || {
     echo "error: local merge refused and checkout restoration failed in $PROJ" >&2

@@ -1016,7 +1016,7 @@ Without it, every fresh ship or scout worktree on a project with an origin remot
 
 ### Which tasks it changes
 
-With it present, a fresh local-only ship, or a scout spawned without `--base-branch`, starts from the primary checkout's `<default>` when that branch strictly contains origin's tip.
+With it present, a fresh local-only ship or scout spawned without `--base-branch` starts from the primary checkout's `<default>` when that branch strictly contains origin's tip.
 A local-only project lands work there through `bin/fm-merge-local.sh` and never pushes, so `origin/<default>` stays at the last push, and a fresh task would otherwise start behind work already landed and load the project's instruction files from that stale tree.
 A no-mistakes or direct-PR ship still starts from origin's tip, because that work is delivered against origin, and any task with a named base branch starts from `origin/<base>`.
 When the primary checkout's `<default>` and origin's have diverged, the spawn prints a note and starts from origin's tip.
