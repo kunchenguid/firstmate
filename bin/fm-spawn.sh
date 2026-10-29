@@ -59,7 +59,7 @@
 #   nothing changes.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
-#   steering inbox. This never rewrites a project's instruction files or a
+#   steering inbox, status log, and report directory. This never rewrites a project's instruction files or a
 #   secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
@@ -3950,7 +3950,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
   {
-    fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" &&
+    fm_brief_worker_role "$STATE" "$ID" "$FM_ROOT" "$DATA" &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then

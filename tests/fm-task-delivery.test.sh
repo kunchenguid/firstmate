@@ -1111,6 +1111,58 @@ EOF
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
 }
 
+# A worker reports through this home's records, not through whatever same-named
+# directory its project tracks. The briefs here carry only relative task paths,
+# the shape that once let a status log and a report land inside a project that
+# keeps its own `state/` and `data/` under version control. Following the launch
+# contract's named paths from inside the project must reach the home and leave
+# the project untouched, whether or not the project tracks those directories.
+# shellcheck disable=SC2016 # Backticks are literal brief and contract text.
+test_launch_contract_names_home_task_records() {
+  local rec home proj fakebin shape kind id out brief status_path report_dir
+  rec=$(make_home home-task-records)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  for shape in tracked untracked; do
+    if [ "$shape" = tracked ]; then
+      mkdir -p "$proj/state" "$proj/data"
+      printf 'project state\n' > "$proj/state/keep.txt"
+      printf 'project data\n' > "$proj/data/keep.txt"
+      git -C "$proj" add state data || fail "could not stage tracked project directories"
+      git -c user.name=test -c user.email=test@example.com -C "$proj" commit -q -m 'track state and data' ||
+        fail "could not commit tracked project directories"
+    fi
+    for kind in scout no-mistakes; do
+      id="records-$shape-$kind"
+      write_brief "$home" "$id"
+      printf '\nAppend progress to `state/%s.status` and write `data/%s/report.md`.\n' "$id" "$id" >> "$home/data/$id/brief.md"
+      if [ "$kind" = scout ]; then
+        out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --scout)
+      else
+        printf 'Delivery contract: mode=no-mistakes\n' >> "$home/data/$id/brief.md"
+        out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --mode no-mistakes --yolo off)
+      fi
+      brief="$home/data/$id/launch-brief.md"
+      assert_present "$brief" "$shape $kind did not render a launch brief: $out"
+      status_path=$(sed -n 's/^Your status log is `\([^`]*\)`.*/\1/p' "$brief")
+      report_dir=$(sed -n 's/.*firstmate-facing report and task files belong in `\([^`]*\)`.*/\1/p' "$brief")
+      [ "$status_path" = "$home/state/$id.status" ] ||
+        fail "$shape $kind launch contract did not name the home status log (got '$status_path')"
+      [ "$report_dir" = "$home/data/$id/" ] ||
+        fail "$shape $kind launch contract did not name the home report directory (got '$report_dir')"
+      assert_grep 'never a same-named path inside the project worktree' "$brief" \
+        "$shape $kind launch contract left relative task paths to resolve against the worktree"
+      ( cd "$proj" && printf 'done: finished\n' >> "$status_path" && printf 'findings\n' > "${report_dir}report.md" ) ||
+        fail "$shape $kind could not follow the named task paths from the project"
+      assert_grep 'done: finished' "$home/state/$id.status" "$shape $kind status did not reach the home"
+      assert_present "$home/data/$id/report.md" "$shape $kind report did not reach the home"
+      [ -z "$(git -C "$proj" status --porcelain)" ] || fail "$shape $kind wrote task records into the project"
+    done
+  done
+  pass "fm-spawn: the launch contract routes status and report to the home whether or not the project tracks state/ or data/"
+}
+
 # The forge binding is orthogonal to the mode and to +yolo, exactly as +yolo is
 # orthogonal to the mode: it is read from its own `forge=` token wherever that
 # token sits in the annotation, and it is never derived from the mode. It is
@@ -1738,6 +1790,7 @@ test_forge_gerrit_direct_pr_publishes_one_change() {
 
 test_authorized_intent_keeps_words_without_composed_address
 test_spawn_refreshes_legacy_worker_roles
+test_launch_contract_names_home_task_records
 
 # --branch-prefix never touches the default "<mode> <yolo>" output (order- and
 # presence-independent), defaults an unregistered/plain project to the legacy
