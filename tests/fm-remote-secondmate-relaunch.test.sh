@@ -971,6 +971,9 @@ cat > "$RETIRE_BIN/fm-teardown.sh" <<'SH'
 }
 touch "$FM_TEST_RETIRE_INVOKED" || exit 1
 [ "${FM_TEST_RETIRE_REFUSE:-0}" != 1 ] || exit 8
+[ "$FM_REMOTE_RETIRE_PENDING" = "$FM_TEST_RETIRE_PENDING" ] || exit 9
+jq --argjson rc "${FM_TEST_RETIRE_EXIT:-0}" '.exit_code = $rc' "$FM_REMOTE_RETIRE_PENDING" >"$FM_REMOTE_RETIRE_PENDING.tmp" || exit 1
+mv "$FM_REMOTE_RETIRE_PENDING.tmp" "$FM_REMOTE_RETIRE_PENDING" || exit 1
 rm -rf -- "$FM_TEST_RETIRE_HOME" || exit 1
 [ -z "${FM_TEST_RETIRE_KEEP_ENDPOINT:-}" ] || exit 0
 touch "$FM_TEST_RETIRE_ABSENT" || exit 1
@@ -1098,6 +1101,27 @@ jq -e --arg id "$RETIRE_ID" --arg g "$RETIRE_GEN" '
   .task == $id and .generation == $g and .destroyed == true and .exit_code == 4
 ' "$RETIRE_PROOF" >/dev/null || fail "the lost-slot retirement proof did not keep exit 4"
 assert_absent "$RETIRE_PENDING" "the lost-slot retirement retained its pending record"
+for force_arg in ordinary forced; do
+  retirement_reset "retire-four-interrupted-$force_arg" "retirement.four-$force_arg" "four-interrupted-$force_arg"
+  retirement_force=''
+  [ "$force_arg" != forced ] || retirement_force=--force
+  OUT=$(FM_TEST_RETIRE_EXIT=4 FM_TEST_RETIRE_CRASH_AFTER_REMOVE=1 host_retirement retire "$RETIRE_ID" ${retirement_force:+"$retirement_force"} --expect-generation "$RETIRE_GEN"); RC=$?
+  expect_code 1 "$RC" "interrupted lost-slot retirement: $OUT"
+  assert_absent "$RETIRE_HOME" "interrupted lost-slot fixture kept home"
+  jq -e '.exit_code == 4' "$RETIRE_PENDING" >/dev/null || fail "interruption lost known outcome"
+  OUT=$(host_retirement retire "$RETIRE_ID" --expect-generation "$RETIRE_GEN"); RC=$?
+  expect_code 4 "$RC" "lost-slot interruption retry: $OUT"
+  jq -e '.exit_code == 4 and .destroyed == true' "$RETIRE_PROOF" >/dev/null || fail "retry converted lost-slot to success"
+done
+retirement_reset retire-unknown retirement.unknown unknown
+OUT=$(FM_TEST_RETIRE_CRASH_AFTER_REMOVE=1 host_retirement retire "$RETIRE_ID" --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 1 "$RC" "unknown-outcome fixture"
+jq '.exit_code = null' "$RETIRE_PENDING" >"$RETIRE_PENDING.tmp"
+mv "$RETIRE_PENDING.tmp" "$RETIRE_PENDING"
+OUT=$(host_retirement retire "$RETIRE_ID" --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 1 "$RC" "unknown outcome must refuse completion: $OUT"
+assert_absent "$RETIRE_PROOF" "unknown outcome became successful proof"
+assert_present "$RETIRE_PENDING" "unknown outcome lost recovery evidence"
 pass "host retirement publishes pending evidence before destruction and finishes interrupted retries"
 
 echo "ALL TESTS PASSED"
