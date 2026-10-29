@@ -1938,6 +1938,32 @@ test_coverage_guard_uses_c_order_under_localized_locale() {
   pass "coverage comparisons retain C ordering under en_US UTF-8"
 }
 
+test_changed_read_containment_selects_its_regressions() {
+  local tmp repo source listed script
+  tmp=$(fm_test_tmproot fm-test-run-read-containment)
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/tests/fixtures"
+  for script in fm-read-repetition.test.sh fm-read-repetition-live.test.sh fm-pi-primary-types.test.sh; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/$script"
+    chmod +x "$repo/tests/$script"
+  done
+  for source in .pi/extensions/fm-primary-read-repetition.ts .pi/extensions/lib/fm-primary-read-repetition-policy.ts tests/fixtures/fm-read-repetition-sdk.mjs tests/fixtures/fm-read-repetition-live.mjs; do
+    : > "$repo/$source"
+  done
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm read-containment-fixture
+  for source in .pi/extensions/fm-primary-read-repetition.ts .pi/extensions/lib/fm-primary-read-repetition-policy.ts tests/fixtures/fm-read-repetition-sdk.mjs tests/fixtures/fm-read-repetition-live.mjs; do
+    printf '\n' >> "$repo/$source"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) || fail "selection failed for $source"
+    for script in fm-read-repetition.test.sh fm-read-repetition-live.test.sh fm-pi-primary-types.test.sh; do
+      assert_contains "$listed" "tests/$script" "$source omitted $script"
+    done
+    git -C "$repo" checkout -q -- "$source"
+  done
+  pass "read-containment extension and fixture changes select all three regression suites"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -1990,3 +2016,5 @@ test_aggregate_json
 test_changed_extension_and_watcher_regressions_are_selected
 
 test_coverage_guard_uses_c_order_under_localized_locale
+
+test_changed_read_containment_selects_its_regressions
