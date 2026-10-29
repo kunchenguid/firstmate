@@ -124,7 +124,7 @@ test_gate_refuses_missing_tools() {
   expect_code 4 "$RC" "a server without t3_thread_launch must be refused"
   assert_equals capability_gate "$(field "$OUT" error.code)" "the refusal should be the capability gate"
   assert_contains "$ERR" "t3_thread_launch" "the refusal should name the missing tool"
-  t3_fake_set 'w.tools = ["t3_thread_launch","t3_thread_send","t3_thread_read","t3_thread_wait","t3_thread_interrupt","t3_thread_organize","t3_thread_list","t3_thread_configuration","t3_project_list","t3_project_create","t3_pending_request_list","t3_pending_request_read","t3_pending_request_respond","orchestrator_capabilities"]'
+  t3_fake_set 'w.tools = ["t3_thread_launch","t3_thread_send","t3_thread_read","t3_thread_wait","t3_thread_interrupt","t3_thread_organize","t3_thread_list","t3_thread_configure","t3_project_list","t3_project_create","t3_pending_request","orchestrator_capabilities"]'
   mcp status
   expect_code 4 "$RC" "a server without t3_environment_read cannot prove its identity"
   assert_contains "$ERR" "lacks t3_environment_read" "the refusal should name the missing identity tool"
@@ -601,7 +601,7 @@ test_launch_reads_back_full_configuration() {
   t3_fake_set 'delete w.bindOptions; w.bindModel = "gpt-6-luna"'
   mcp launch --project "$project" --title model --model-selection "$sel" --worktree "$WT"
   expect_code 4 "$RC" "a launch on another model is refused"
-  pass "fm-t3-mcp launch: t3_thread_configuration must read back the instance, model, and every requested option"
+  pass "fm-t3-mcp launch: t3_thread_configure must read back the instance, model, and every requested option"
 }
 
 test_requests_and_respond() {
@@ -621,7 +621,7 @@ test_requests_and_respond() {
   printf '{"q1":"a"}' > "$TMP_ROOT/answers"
   mcp respond --thread thread-q --request req-question --answers-file "$TMP_ROOT/answers"
   expect_code 0 "$RC" "respond: $ERR"
-  assert_equals '{"q1":"a"}' "$(field "$(t3_fake_calls t3_pending_request_respond)" answers)" "the answers reach t3_pending_request_respond"
+  assert_equals '{"q1":"a"}' "$(field "$(t3_fake_calls t3_pending_request | tail -1)" answers)" "the answers reach t3_pending_request respond"
   mcp respond --thread thread-q --request req-approval --answers-file "$TMP_ROOT/answers"
   expect_code 3 "$RC" "a permission approval cannot be answered through the question tools"
   mcp requests --thread thread-q
