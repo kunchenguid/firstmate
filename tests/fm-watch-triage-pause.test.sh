@@ -220,7 +220,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
   printf 'idle bare shell after agent exit\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held.meta"
   printf 'paused: held per captain while an external decision is pending\n' > "$statusf"
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
@@ -266,7 +266,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
   printf 'idle bare shell after captain-held transfer\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held.meta"
   printf 'captain-held [key=route]: tracked by held-decision-route\n' > "$statusf"
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
@@ -291,7 +291,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
   window="test:fm-gate"
   printf 'idle external-decision gate\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/gate.meta"
   printf 'paused: waiting at an active external-decision gate\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -351,7 +351,7 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
     window="test:fm-held"
     printf 'idle after agent exit\n' > "$capture_file"
-    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held.meta"
     printf '%s\n' "$initial" > "$statusf"
     back=$(( $(date +%s) - 500 ))
     if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
@@ -449,7 +449,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
     window="test:fm-parked"
-    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/parked.meta"
     printf '%s\n' "$status_line" > "$statusf"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
     key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -530,7 +530,7 @@ test_live_paused_until_controls_recheck_time() {
   dir=$(make_case live-paused-until); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
   window="test:fm-parked"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/parked.meta"
   future=$(iso_utc_at "$(( $(date +%s) + 7200 ))")
   printf 'paused: rate limit until %s\n' "$future" > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
@@ -1186,7 +1186,7 @@ test_captain_held_rechecked_under_a_quiet_record() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held-afk.status"
   window="test:fm-held-afk"
   printf 'idle awaiting the captain\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held-afk.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held-afk.meta"
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held-afk_status"
   key=$(printf '%s' "$window" | tr '.:/' '___')
@@ -1209,7 +1209,7 @@ test_live_captain_held_first_sight_silenced_by_away_record() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held-live.status"
   window="test:fm-held-live"
   printf 'parked at the decision gate\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held-live.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held-live.meta"
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held-live_status"
   key=$(printf '%s' "$window" | tr '.:/' '___')
@@ -1256,7 +1256,7 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record() {
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held-afk.status"
   window="test:fm-held-afk"
   printf 'idle awaiting the captain\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held-afk.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/held-afk.meta"
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held-afk_status"
   key=$(printf '%s' "$window" | tr '.:/' '___')

@@ -1225,7 +1225,7 @@ fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
   local meta=$1 id=$2 state=$3 tail40=${4-} backend target harness
   [ -f "$meta" ] || { printf 'unknown missing'; return 0; }
   backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
+  target=$(fm_backend_io_target_of_meta "$meta" 2>/dev/null) || target=
   harness=$(fm_meta_get "$meta" harness)
   if [ -z "$target" ]; then
     printf 'unknown no-target'

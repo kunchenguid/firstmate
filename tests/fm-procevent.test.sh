@@ -15,6 +15,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-fixtures.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP_ROOT=$(fm_test_tmproot fm-procevent-tests)
@@ -1107,6 +1109,7 @@ esac
 exit 0
 SH
 chmod +x "$RING_BIN/tmux"
+fm_test_tmux_protocol "$RING_BIN/tmux"
 REDELIVER_ART="$TMP_ROOT/redeliver-board.html"
 printf '<h1>redeliver</h1>\n' > "$REDELIVER_ART"
 lavish_session "$REDELIVER_ART"

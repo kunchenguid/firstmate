@@ -4,9 +4,10 @@
 # Reference backend (AGENTS.md section 8; data/fm-backend-design-d7). P1 moves
 # the tmux command sequences that fm-send.sh, fm-peek.sh, fm-watch.sh,
 # fm-spawn.sh, and fm-teardown.sh already ran inline into named functions
-# here, running the EXACT same commands in the EXACT same order, so the
-# default (tmux, `backend=` absent) path stays byte-identical. Sourced only
-# through bin/fm-backend.sh's fm_backend_source, never directly.
+# here, originally running the same commands in the same order. The
+# fm_backend_io_target_of_meta header in bin/fm-backend.sh owns the current
+# task-I/O compatibility contract. Sourced only through that file's
+# fm_backend_source, never directly.
 #
 # Worktree acquisition (running `treehouse get` inside the pane, and polling
 # its cwd) is unchanged by this extraction: P1 scopes only the session
@@ -163,12 +164,23 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 # The target is passed through exactly as the caller means it, so a caller that
 # requires the exact recorded session asks for `=session` and still gets the
 # same classification.
+# Absence is judged on the selected tmux server because task records carry no socket identity; follow-up: https://github.com/kunchenguid/firstmate/issues/7590.
 fm_backend_tmux_window_inventory() {  # <session-target>
   local windows
-  if windows=$(LC_ALL=C tmux list-windows -t "$1" -F '#{window_name}' 2>&1); then
-    printf '%s\n' "$windows"
-    return 0
-  fi
+  case "$1" in
+    -a)
+      if windows=$(LC_ALL=C tmux list-windows -a -F '#{window_name}' 2>&1); then
+        printf '%s\n' "$windows"
+        return 0
+      fi
+      ;;
+    *)
+      if windows=$(LC_ALL=C tmux list-windows -t "$1" -F '#{window_name}' 2>&1); then
+        printf '%s\n' "$windows"
+        return 0
+      fi
+      ;;
+  esac
   case "$windows" in
     *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
       return 2
@@ -179,10 +191,17 @@ fm_backend_tmux_window_inventory() {  # <session-target>
 
 # Resolve one exact window selector in one exact session to its stable id.
 # The shared dispatcher header owns the accepted target grammar.
+# Return 2 for proven absence, 1 for a read that cannot prove membership.
 fm_backend_tmux_window_id() {  # <session-name> <window-name|index|@id>
-  local session=$1 selector=$2 rows window_id window_index window_name
+  local session=$1 selector=$2 rows window_id window_index window_name rc
   rows=$(LC_ALL=C tmux list-windows -t "=$session" \
-    -F '#{window_id}|#{window_index}|#{window_name}' 2>/dev/null) || return 1
+    -F '#{window_id}|#{window_index}|#{window_name}' 2>/dev/null) || {
+    # The shared inventory reader owns definitive missing-server/session errors.
+    fm_backend_tmux_window_inventory "=$session" >/dev/null
+    rc=$?
+    [ "$rc" -ne 2 ] || return 2
+    return 1
+  }
   while IFS='|' read -r window_id window_index window_name; do
     case "$selector" in
       @*) [ "$window_id" = "$selector" ] || continue ;;
@@ -194,7 +213,98 @@ fm_backend_tmux_window_id() {  # <session-name> <window-name|index|@id>
   done <<EOF
 $rows
 EOF
-  return 1
+  return 2
+}
+
+# Bind task I/O to a pane inside its exact recorded window. This deliberately
+# uses the existing window-id resolver, not another general tmux target parser.
+# Fresh spawn resolves its initial pane once; bound task I/O passes its recorded
+# %id through every read, literal send and Enter retry independently of focus.
+# Unbound legacy task I/O bypasses this resolver and retains its window target.
+# Return 2 only when the requested I/O binding is provably absent on the
+# selected server; lifecycle callers must still check the recorded window.
+# Ambiguous, moved and unreadable bindings return 1. Neither failure permits
+# reading or sending to another pane.
+fm_backend_tmux_task_pane() {  # <session:window> [recorded-pane-id]
+  local target=$1 pane=${2:-} session window wid panes rc all_panes
+  case "$target" in
+    *:*:*|:*|*:) return 1 ;;
+    *:*) session=${target%%:*}; window=${target#*:} ;;
+    *) return 1 ;;
+  esac
+  if [ -n "$pane" ]; then
+    case "$pane" in
+      %*) case "${pane#%}" in ''|*[!0-9]*) return 1 ;; esac ;;
+      *) return 1 ;;
+    esac
+  fi
+  wid=$(fm_backend_tmux_window_id "${session#=}" "${window#=}") || {
+    rc=$?
+    echo "error: cannot resolve exact tmux window $target; refusing task I/O" >&2
+    if [ "$rc" -eq 2 ]; then
+      if [ -n "$pane" ]; then
+        all_panes=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null) || {
+          if fm_backend_tmux_window_inventory -a >/dev/null; then
+            return 1
+          else
+            rc=$?
+            [ "$rc" -eq 2 ] && return 2
+            return 1
+          fi
+        }
+        printf '%s\n' "$all_panes" | grep -Fqx -- "$pane" && return 1
+        return 2
+      fi
+      if fm_backend_tmux_window_inventory -a >/dev/null; then
+        return 1
+      else
+        rc=$?
+        [ "$rc" -eq 2 ] && return 2
+        return 1
+      fi
+    fi
+    return 1
+  }
+  panes=$(tmux list-panes -t "$wid" -F '#{pane_id}' 2>/dev/null) || {
+    if fm_backend_tmux_window_inventory -a >/dev/null; then
+      return 1
+    else
+      rc=$?
+      [ "$rc" -eq 2 ] && return 2
+      return 1
+    fi
+  }
+  if [ -n "$pane" ]; then
+    printf '%s\n' "$panes" | grep -Fqx -- "$pane" || {
+      echo "error: recorded agent pane $pane is absent from $target; refusing task I/O" >&2
+      # A moved pane is a broken binding, not proof that the agent is gone.
+      # Inspect only the recorded id, never another pane's content or process.
+      all_panes=$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null) || {
+        if fm_backend_tmux_window_inventory -a >/dev/null; then
+          return 1
+        else
+          rc=$?
+          [ "$rc" -eq 2 ] && return 2
+          return 1
+        fi
+      }
+      printf '%s\n' "$all_panes" | grep -Fqx -- "$pane" && return 1
+      return 2
+    }
+  else
+    case "$panes" in
+      *$'\n'*|'')
+        echo "error: tmux window $target has no unambiguous agent pane; refusing task I/O without tmux_pane_id" >&2
+        return 1
+        ;;
+    esac
+    pane=$panes
+    case "$pane" in
+      %*) case "${pane#%}" in ''|*[!0-9]*) return 1 ;; esac ;;
+      *) return 1 ;;
+    esac
+  fi
+  printf '%s' "$pane"
 }
 
 # Adapter-owned tmux endpoint membership. Every comparison is literal and
@@ -421,26 +531,38 @@ fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
   local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
+    %*)
+      case "${target#%}" in ''|*[!0-9]*) printf 'unreadable'; return 0 ;; esac
+      # A stable pane id has no active-pane fallback. Verify the read itself
+      # before asking the existing process classifier about this pane.
+      if ! windows=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null); then
+        printf 'unreadable'; return 0
+      fi
+      [ -n "$windows" ] || { printf 'missing'; return 0; }
+      [ "$windows" = "$target" ] || { printf 'unreadable'; return 0; }
+      ;;
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
-    *:*) ;;
+    *:*)
+      session=${target%%:*}
+      window=${target#*:}
+      windows=$(fm_backend_tmux_window_inventory "$session")
+      inventory_status=$?
+      if [ "$inventory_status" -ne 0 ]; then
+        if [ "$inventory_status" -eq 2 ]; then
+          printf 'missing'
+        else
+          printf 'unreadable'
+        fi
+        return 0
+      fi
+      if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
+        printf 'missing'
+        return 0
+      fi
+
+      ;;
     *) printf 'unreadable'; return 0 ;;
   esac
-  session=${target%%:*}
-  window=${target#*:}
-  windows=$(fm_backend_tmux_window_inventory "$session")
-  inventory_status=$?
-  if [ "$inventory_status" -ne 0 ]; then
-    if [ "$inventory_status" -eq 2 ]; then
-      printf 'missing'
-    else
-      printf 'unreadable'
-    fi
-    return 0
-  fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'missing'
-    return 0
-  fi
 
   foreground=$(fm_backend_tmux_foreground_comms "$target")
   while IFS= read -r name; do

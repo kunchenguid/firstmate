@@ -141,9 +141,9 @@ pass "event_wait_or_sleep: herdr keeps the push wait in a mixed home; T3's wait 
 
 reset_state
 fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
-CAP_CALLS=0
+: > "$TMP/capcalls"
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
-fm_backend_events_capable() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
+fm_backend_events_capable() { printf 'probe\n' >> "$TMP/capcalls"; return 0; }
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_wait_transition() {
   # The wait runs in its own process, so record what it saw for the assertion.
@@ -153,6 +153,7 @@ fm_backend_wait_transition() {
 : > "$TMP/wtcalls"
 event_wait_or_sleep
 event_wait_or_sleep
+CAP_CALLS=$(wc -l < "$TMP/capcalls" | tr -d '[:space:]')
 [ "$CAP_CALLS" = 1 ] || fail "capability probe must be memoized across waits, got $CAP_CALLS calls"
 [ "$(cat "$TMP/wtcalls")" = $'1\n1' ] || fail "cached capability verdict was not passed to each wait, got: $(cat "$TMP/wtcalls")"
 pass "event_wait_or_sleep: one cached capability probe owns validation across bounded waits"

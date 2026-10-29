@@ -791,17 +791,30 @@ task_window_harness() {  # <window> <state>
 # its verdict is native, so a failed transcript read is uncertainty, not removal.
 # Other backends treat a failed capture as gone.
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend harness label task tail40='' verdict
+  local win=$1 state=$2 backend harness label task meta target target_rc=0 window_rc=0 tail40='' verdict
   backend=$(task_window_backend "$win" "$state")
   harness=$(task_window_harness "$win" "$state")
   task=$(window_to_task "$win" "$state")
+  meta="$state/$task.meta"
+  target=$(fm_backend_io_target_of_meta "$meta" 2>/dev/null) || target_rc=$?
+  if [ "$target_rc" -ne 0 ]; then
+    if [ -f "$meta" ] && [ "$backend" = tmux ] && grep -q '^tmux_pane_id=' "$meta"; then
+      case "$win" in *:*:*|:*|*:) return 1 ;; *:*) ;; *) return 1 ;; esac
+      fm_backend_source tmux || return 1
+      fm_backend_tmux_window_id "${win%%:*}" "${win#*:}" >/dev/null 2>&1 || window_rc=$?
+      [ "$window_rc" -ne 2 ] || return 2
+      return 1
+    fi
+    [ "$target_rc" -ne 2 ] || return 2
+    return 1
+  fi
   label="fm-$task"
   if [ "$backend" = t3code ]; then
-    [ "$(fm_backend_agent_state "$backend" "$win" 2>/dev/null)" != missing ] || return 2
+    [ "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null)" != missing ] || return 2
   else
-    tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
+    tail40=$(fm_backend_capture "$backend" "$target" 40 "$label" 2>/dev/null) || return 2
   fi
-  verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
+  verdict=$(fm_busy_classify "$backend" "$target" "$harness" "$task" "$state" "$tail40")
   case "$verdict" in
     busy\ *) return 0 ;;
     unknown\ t3code-native) return 3 ;;

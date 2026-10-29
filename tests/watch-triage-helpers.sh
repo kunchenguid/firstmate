@@ -222,7 +222,7 @@ wedge_threshold_fixture() {  # <name> <status-log> <status-age-secs> [<wedge-tim
   statusf="$state/wedge.status"
   text='waiting at the gate'
   printf '%s' "$text" > "$dir/pane.txt"
-  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/wedge.meta"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\ntmux_pane_id=%%1\n' "$window" > "$state/wedge.meta"
   printf '%s\n' "$log" > "$statusf"
   back=$(( $(date +%s) - age ))
   set_mtime "$back" "$statusf"

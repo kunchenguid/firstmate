@@ -6,8 +6,9 @@
 # data/fm-backend-design-d7/herdr-addendum.md ("Events as the core
 # abstraction"). P1 extracted the tmux command sequences that fm-send.sh,
 # fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh already ran inline
-# into bin/backends/tmux.sh, with those SAME command sequences, so the default
-# (tmux) path stays byte-identical. P2 adds bin/backends/herdr.sh, a verified
+# into bin/backends/tmux.sh with the then-current command sequences. The
+# fm_backend_io_target_of_meta header below owns the current tmux task-I/O
+# compatibility contract. P2 adds bin/backends/herdr.sh, a verified
 # spawn-capable backend with its own required CI lane, behind `--backend
 # herdr`/`FM_BACKEND=herdr`/`config/backend`, and behind runtime auto-detection
 # when firstmate itself is running inside herdr with no explicit backend setting;
@@ -49,10 +50,10 @@
 #
 # Compatibility contract: a task's meta may omit `backend=`; every reader here
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
-# `backend=tmux` for a default-backend task, so existing and newly spawned
-# default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently herdr, zellij, orca, cmux, paseo, rex, or
+# `backend=tmux` for a default-backend task. Only a task spawned on a non-tmux
+# spawn-capable backend, currently herdr, zellij, orca, cmux, paseo, rex,
 # t3code, or tern, carries an explicit `backend=` line.
+# Pane identity is independent of that default.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -438,6 +439,34 @@ fm_backend_target_of_meta() {  # <meta-file>
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
+}
+
+# Resolve task I/O separately from its lifecycle window. For tmux, the recorded
+# tmux_pane_id must still belong to that exact window. Legacy metadata without
+# that field retains its window-based I/O, including active-pane selection.
+# Other backends already record a pane/surface/terminal and remain unchanged.
+# A failed read is never permission to fall back to the active pane.
+# For tmux, status 2 proves the requested I/O binding is absent on the selected
+# server, not that the lifecycle window is missing; lifecycle callers check the
+# recorded window independently. Status 1 leaves membership unproven. Other
+# backends retain their existing resolution status.
+fm_backend_io_target_of_meta() {  # <meta-file>
+  local meta=$1 window pane=
+  if [ "$(fm_backend_of_meta "$meta")" != tmux ]; then
+    fm_backend_target_of_meta "$meta"
+    return
+  fi
+  if ! grep -q '^tmux_pane_id=' "$meta"; then
+    fm_backend_target_of_meta "$meta"
+    return
+  fi
+  window=$(fm_backend_meta_exact_value "$meta" window) || return 1
+  pane=$(fm_backend_meta_exact_value "$meta" tmux_pane_id) || {
+    echo "error: malformed tmux_pane_id in $meta; refusing task I/O" >&2
+    return 1
+  }
+  fm_backend_source tmux || return 1
+  fm_backend_tmux_task_pane "$window" "$pane"
 }
 
 # fm_backend_validate_task_endpoint: validate a task cleanup record entirely
@@ -908,11 +937,13 @@ fm_backend_source() {  # <name>
   esac
 }
 
-# fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
-# selector to a live session-provider target. Four forms, in order:
+# fm_backend_resolve_selector: resolve a raw selector to a recorded lifecycle
+# target or an ad hoc session-provider target. Metadata-aware task I/O callers
+# resolve through fm_backend_io_target_of_meta first; this helper owns the
+# explicit and legacy fallback vocabulary below. Four forms, in order:
 #   target with ":"   used as-is (the escape hatch for a window/pane outside
 #                      this firstmate home) - backend-independent, a literal string.
-#   exact task id      routed through <state-dir>/<id>.meta's backend target
+#   exact task id      routed through <state-dir>/<id>.meta's lifecycle target
 #                      (`window=` normally, `terminal=` for Orca,
 #                      `t3_thread_id=` for T3 Code) -
 #                      backend-independent, a stored value, NOT re-verified

@@ -825,6 +825,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_test_tmux_protocol "$fakebin/tmux"
 }
 
 # A launch refused after it claimed its slot must leave the pool and the task

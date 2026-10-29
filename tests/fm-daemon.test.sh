@@ -1393,6 +1393,63 @@ test_housekeeping_busy_declared_wait_matures_its_window() {
   pass "housekeeping matures a busy pane's declared-wait window into exactly one recheck per window"
 }
 
+test_housekeeping_missing_bound_pane_uses_window_lifecycle() {
+  local dir state fakebin task win key old marker_epoch
+  dir=$(make_supercase missing-bound-pane-lifecycle)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task='bound-pane-gone'; win="sess:fm-$task"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "tmux_pane_id=%9" "harness=pi"
+  printf 'working: waiting for the next turn\n' > "$state/$task.status"
+  old=$(( $(date +%s) - 5000 ))
+  printf '%s\n' "$old" > "$state/.subsuper-stale-$key"
+
+  (
+    fm_backend_capture() { fail "a missing bound pane routed capture to the monitor"; }
+    fm_backend_busy_state() { fail "a missing bound pane observed the monitor's busy state"; }
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_STATE_OVERRIDE="$state" \
+      FM_STALE_ESCALATE_SECS=240 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  ) || fail "live-window stale supervision failed for a missing bound pane"
+  grep -F "stale persisted" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a missing bound pane made a live stale window disappear from supervision"
+
+  rm -f "$state/.subsuper-escalations" "$state/.subsuper-escalations.since"
+  printf 'paused: awaiting an external dependency\n' > "$state/$task.status"
+  printf '%s\n' "$old" > "$state/.subsuper-paused-$key"
+  (
+    fm_backend_capture() { fail "a missing bound pane routed pause capture to the monitor"; }
+    fm_backend_busy_state() { fail "a missing bound pane observed the monitor's pause state"; }
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_STATE_OVERRIDE="$state" \
+      FM_PAUSE_RESURFACE_SECS=240 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  ) || fail "live-window pause supervision failed for a missing bound pane"
+  grep -F "paused " "$state/.subsuper-escalations" | grep -F "awaiting external" >/dev/null \
+    || fail "a missing bound pane suppressed the live window's pause recheck"
+  marker_epoch=$(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0)
+  [ "$marker_epoch" -gt "$old" ] \
+    || fail "a missing bound pane did not reset the live window's pause cadence"
+
+  rm -f "$state/.subsuper-escalations" "$state/.subsuper-escalations.since" \
+    "$state/.subsuper-paused-$key"
+  printf 'working: waiting for the next turn\n' > "$state/$task.status"
+  printf '%s\n' "$old" > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='sess:fm-other-task' FM_STATE_OVERRIDE="$state" \
+    FM_STALE_ESCALATE_SECS=240 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "a missing lifecycle window retained its stale marker"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a missing lifecycle window escalated stale supervision"
+
+  printf 'paused: awaiting an external dependency\n' > "$state/$task.status"
+  printf '%s\n' "$old" > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='sess:fm-other-task' FM_STATE_OVERRIDE="$state" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ ! -e "$state/.subsuper-paused-$key" ] \
+    || fail "a missing lifecycle window retained its pause marker"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a missing lifecycle window escalated a pause recheck"
+  pass "missing bound panes preserve live-window supervision without monitor I/O"
+}
+
 test_housekeeping_declared_time_controls_pause_recheck() {
   local dir state fakebin task win pane key now future distant past escalations
   dir=$(make_supercase pause-until-cadence)
@@ -3479,6 +3536,7 @@ test_housekeeping_captain_held_resurfaces_and_resets
 test_housekeeping_captain_held_silenced_only_by_an_away_record
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
+test_housekeeping_missing_bound_pane_uses_window_lifecycle
 test_housekeeping_declared_time_controls_pause_recheck
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared

@@ -271,6 +271,7 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
+        *pane_id*) printf '%%9\n'; exit 0 ;;
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
@@ -278,7 +279,15 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  list-panes) printf '%%9\n'; exit 0 ;;
+  list-windows)
+    if [ -f "$D/windows" ]; then
+      case "$*" in
+        *'#{window_id}|#{window_index}|#{window_name}'*) sed 's/^/@9|0|/' "$D/windows" ;;
+        *) cat "$D/windows" ;;
+      esac
+    fi
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -311,6 +320,7 @@ test_relaunch_rebuilds_the_switch() {
     printf '%s' "$wt" > "$dir/fake/cwd"
     {
       echo "window=fmses:fm-$id"
+      echo "tmux_pane_id=%9"
       echo "endpoint_task_id=$id"
       echo "worktree=$wt"
       echo "project=$proj"

@@ -12,6 +12,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-fixtures.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. Muse is
 # markerless, so an inherited Cursor/Claude/Pi/Grok marker would outrank the
@@ -122,6 +124,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_test_tmux_protocol "$fakebin/tmux"
   cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
   cat > "$fakebin/muse" <<'SH'
 #!/usr/bin/env bash

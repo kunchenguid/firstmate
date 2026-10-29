@@ -1791,10 +1791,10 @@ spawn_abort_cleanup() {
       SPAWN_FRESH_ENDPOINT_OPENED=0
       local abort_tab_id=
       [ "$BACKEND" != zellij ] || abort_tab_id=${ZELLIJ_TAB_ID:-}
-      if fm_backend_kill "$BACKEND" "$T" "$abort_tab_id" "fm-$ID" 2>/dev/null; then
+      if fm_backend_kill "$BACKEND" "${TMUX_WINDOW_TARGET:-$T}" "$abort_tab_id" "fm-$ID" 2>/dev/null; then
         SPAWN_ENDPOINT_CLOSED=1
       else
-        echo "warning: could not close endpoint $T after the failed spawn of $ID; close it by hand so its slot returns to the pool" >&2
+        echo "warning: could not close endpoint ${TMUX_WINDOW_TARGET:-$T} after the failed spawn of $ID; close it by hand so its slot returns to the pool" >&2
       fi
     fi
     # These paths are per task id, so the per-id spawn lock is retaken for them
@@ -2203,7 +2203,7 @@ fi
 # non-spawn-capable backends. The resolved value is
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
+# preserving the optional backend field on the default path.
 if [ "$RELAUNCH" -eq 0 ]; then
   if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
@@ -2267,6 +2267,8 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
+TMUX_WINDOW_TARGET=
+TMUX_PANE_ID=
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -4221,18 +4223,16 @@ spawn_worktree_isolated() { # <path>
   return 0
 }
 
-# spawn_endpoint_hint: the operator pointer for a pre-launch refusal. Only a
-# fresh polytoken spawn closes its endpoint on abort, so only it points away
-# from the window; every other harness keeps the plain inspect pointer.
+# spawn_endpoint_hint: the operator pointer for a pre-launch refusal.
 spawn_endpoint_closes_on_abort() {
   [ "$SPAWN_FRESH_ENDPOINT_OPENED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]
 }
 
 spawn_endpoint_hint() {
   if spawn_endpoint_closes_on_abort; then
-    printf 'window %s is closed on exit, returning any pool slot it held' "$T"
+    printf 'window %s is closed on exit, returning any pool slot it held' "${TMUX_WINDOW_TARGET:-$T}"
   else
-    printf 'inspect window %s' "$T"
+    printf 'inspect window %s' "${TMUX_WINDOW_TARGET:-$T}"
   fi
 }
 
@@ -4529,7 +4529,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # where the previous agent left it.
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
-    SES=${T%%:*}
+    SES=${RELAUNCH_TARGET%%:*}
+    if [ "$BACKEND" = tmux ]; then
+      TMUX_WINDOW_TARGET=$RELAUNCH_TARGET
+    fi
   elif [ "$BACKEND" = rex ]; then
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -4651,11 +4654,15 @@ else
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's
     # non-default tmux config cannot rename the window away from fm-<id> once
-    # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
-    # rename-critical worktree-detection steps below; the persisted window= handle
-    # stays $T (the name form), which is safe now that rename is disabled.
+    # treehouse cd's into the worktree. Bind its sole initial pane before sending
+    # anything; later splits must never change the launch or task I/O target.
+    # Keep the named window separately for metadata and whole-window cleanup.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
-    WT_TARGET="$WID"
+    TMUX_WINDOW_TARGET=$T
+    [ "$HARNESS" != polytoken ] || SPAWN_FRESH_ENDPOINT_OPENED=1
+    TMUX_PANE_ID=$(fm_backend_tmux_task_pane "$SES:$WID") || exit 1
+    T=$TMUX_PANE_ID
+    WT_TARGET=$T
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -5014,9 +5021,7 @@ EOF
     T3CODE_ABORT_CLEANUP=1
     ;;
   esac
-  # Orca and the Herdr projection own their own abort cleanup above; every other
-  # endpoint a fresh polytoken spawn opened is closed by spawn_abort_cleanup when
-  # the spawn ends with no record before its launch is delivered.
+  # Orca and the Herdr projection own their own abort cleanup above.
   if [ "$HARNESS" = polytoken ] && [ "$BACKEND" != orca ] && [ "${HERDR_PROJECTED:-0}" -ne 1 ]; then
     SPAWN_FRESH_ENDPOINT_OPENED=1
   fi
@@ -5026,11 +5031,9 @@ if [ "$KIND" = secondmate ]; then
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" ||
     echo "warning: secondmate $ID trace-context inheritance failed for $PROJ_ABS" >&2
 fi
-# #134 robustness: only tmux needs a worktree-detection target distinct from $T -
-# its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
-# Every other backend addresses its pane/surface by the id already in $T, so default
-# WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
-# worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
+# Each backend addresses worktree discovery through the same pane/surface as
+# launch I/O. Default WT_TARGET to $T for branches that have not set it, so the
+# shared worktree-discovery steps never reference an unbound value under set -u.
 : "${WT_TARGET:=$T}"
 spawn_send_text_line() { # <target> <text>
   case "$BACKEND" in
@@ -5266,7 +5269,7 @@ kimi_wait_for_delivery() {
 
 kimi_spawn_fail() { # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
+  echo "error: $1; inspect window ${TMUX_WINDOW_TARGET:-$T}" >&2
 }
 
 # rovo mirrors kimi's launch-then-send shape exactly: a positional brief is
@@ -5334,7 +5337,7 @@ rovo_wait_for_delivery() {
 
 rovo_spawn_fail() { # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
+  echo "error: $1; inspect window ${TMUX_WINDOW_TARGET:-$T}" >&2
   rovo_endpoint_cleanup
 }
 
@@ -5352,7 +5355,7 @@ rovo_endpoint_cleanup() {
   fi
   local tab_id=
   [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
-  fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
+  fm_backend_kill "$BACKEND" "${TMUX_WINDOW_TARGET:-$T}" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
 }
 
 # OpenCode 2 takes its brief on the launch command (--prompt), but some 2.x
@@ -5451,7 +5454,7 @@ agy_wait_for_working() {
 
 agy_spawn_fail() {  # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
+  echo "error: $1; inspect window ${TMUX_WINDOW_TARGET:-$T}" >&2
   rovo_endpoint_cleanup
 }
 
@@ -5536,7 +5539,7 @@ spawn_record_polytoken_session() {
 
 polytoken_spawn_fail() {  # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
+  echo "error: $1; inspect window ${TMUX_WINDOW_TARGET:-$T}" >&2
   # A failed gate leaves nothing running or recorded: reap this launch's exact
   # session daemon (scoped to this task's sessions root), retire the per-task
   # wiring (the sessions roots, config dir, worktree hook layer, facet, and
@@ -5650,7 +5653,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     if spawn_endpoint_closes_on_abort; then
       validate_spawn_worktree "treehouse get" "$WT ($(spawn_endpoint_hint))"
     else
-      validate_spawn_worktree "treehouse get" "$T"
+      validate_spawn_worktree "treehouse get" "${TMUX_WINDOW_TARGET:-$T}"
     fi
   fi
 
@@ -5727,7 +5730,7 @@ agy)
     if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
       AGY_TRUST_PREREGISTERED=1
     else
-      echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
+      echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window ${TMUX_WINDOW_TARGET:-$T} instead" >&2
     fi
   fi
   ;;
@@ -6629,7 +6632,7 @@ else
   fi
 fi
 
-META_WINDOW=$T
+META_WINDOW=${TMUX_WINDOW_TARGET:-$T}
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
@@ -6657,6 +6660,11 @@ preserve_relaunch_meta() {
 }
 {
   echo "window=$META_WINDOW"
+  # Relaunch preserves the existing field through preserve_relaunch_meta.
+  # Lifecycle actions retain their window target; only fresh spawn binds I/O.
+  if [ "$BACKEND" = tmux ] && [ "$RELAUNCH" -eq 0 ]; then
+    echo "tmux_pane_id=$TMUX_PANE_ID"
+  fi
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
@@ -6695,7 +6703,7 @@ preserve_relaunch_meta() {
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
+  # default path keeps the optional backend field (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
@@ -7382,7 +7390,7 @@ if [ "$HARNESS" = kimi ]; then
 fi
 if [ "$HARNESS" = rovo ]; then
   if ! rovo_wait_for_ready; then
-    rovo_spawn_fail "rovo did not show a verified ready signal before brief delivery in window $T"
+    rovo_spawn_fail "rovo did not show a verified ready signal before brief delivery in window ${TMUX_WINDOW_TARGET:-$T}"
     exit 1
   fi
   ROVO_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
@@ -7392,15 +7400,15 @@ if [ "$HARNESS" = rovo ]; then
   if ! ROVO_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$ROVO_POINTER" "$ROVO_SUBMIT_RETRIES" \
     "$ROVO_SUBMIT_SLEEP" "$ROVO_SUBMIT_SETTLE" "$W"); then
-    rovo_spawn_fail "rovo brief pointer could not be submitted into window $T"
+    rovo_spawn_fail "rovo brief pointer could not be submitted into window ${TMUX_WINDOW_TARGET:-$T}"
     exit 1
   fi
   if [ "$ROVO_SUBMIT_VERDICT" = send-failed ]; then
-    rovo_spawn_fail "rovo brief pointer could not be submitted into window $T"
+    rovo_spawn_fail "rovo brief pointer could not be submitted into window ${TMUX_WINDOW_TARGET:-$T}"
     exit 1
   fi
   if ! rovo_wait_for_delivery; then
-    rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window ${TMUX_WINDOW_TARGET:-$T}"
     exit 1
   fi
 fi
@@ -7415,11 +7423,11 @@ fi
 if [ "$HARNESS" = agy ]; then
   if ! agy_wait_for_working; then
     if [ "$AGY_TRUST_ANSWERED" -eq 1 ]; then
-      agy_spawn_fail "agy did not start processing its brief after the folder-trust dialog was answered in window $T"
+      agy_spawn_fail "agy did not start processing its brief after the folder-trust dialog was answered in window ${TMUX_WINDOW_TARGET:-$T}"
     elif [ "$AGY_TRUST_PREREGISTERED" -eq 1 ]; then
-      agy_spawn_fail "agy did not start processing its brief in the pre-trusted worktree in window $T"
+      agy_spawn_fail "agy did not start processing its brief in the pre-trusted worktree in window ${TMUX_WINDOW_TARGET:-$T}"
     else
-      agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window $T, so the brief could not be confirmed to run there"
+      agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window ${TMUX_WINDOW_TARGET:-$T}, so the brief could not be confirmed to run there"
     fi
     exit 1
   fi
@@ -7431,7 +7439,7 @@ fi
 # blocked launch from a wedged one.
 if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   if ! polytoken_wait_for_ready; then
-    polytoken_spawn_fail "polytoken did not start processing its brief in window $T (a first-start license dialog is the one known blocker; it is never auto-accepted)"
+    polytoken_spawn_fail "polytoken did not start processing its brief in window ${TMUX_WINDOW_TARGET:-$T} (a first-start license dialog is the one known blocker; it is never auto-accepted)"
     exit 1
   fi
   if ! spawn_record_polytoken_session; then
@@ -7485,9 +7493,9 @@ fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
     if spawn_fresh_commit_rollback; then
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint ${TMUX_WINDOW_TARGET:-$T} and local copy $WT by hand, then re-run the spawn" >&2
     else
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint ${TMUX_WINDOW_TARGET:-$T} and local copy $WT by hand, then remove the record and busy state before retrying" >&2
     fi
   else
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2

@@ -36,6 +36,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-fixtures.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
 # from inside another harness inherits those markers, which outrank the fake
@@ -543,6 +545,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_test_tmux_protocol "$fakebin/tmux"
   cat > "$fakebin/agy" <<'SH'
 #!/usr/bin/env bash
 set -u

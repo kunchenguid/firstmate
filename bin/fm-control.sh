@@ -405,7 +405,7 @@ agent_state() {
 }
 
 busy_verdict() {
-  fm_busy_classify_meta "$META" "$ID" "$STATE"
+  fm_busy_classify "$BACKEND" "$T" "$RECORDED_HARNESS" "$ID" "$STATE"
 }
 
 # wait_agent_state <wanted...> <timeout>: poll until agent_state prints one of

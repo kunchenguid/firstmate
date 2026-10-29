@@ -54,8 +54,16 @@ case "$*" in
     ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
+  display-message)
+    case "$*" in *'#{pane_id}'*) printf '%%1\n' ;; *) printf 'firstmate\n' ;; esac
+    exit 0 ;;
+  list-panes) [ ! -s "$window_file" ] || printf '%%1\n'; exit 0 ;;
+  list-windows) if [ -s "$window_file" ]; then
+      case "$*" in
+        *'#{window_id}|#{window_index}|#{window_name}'*) printf '@1|0|%s\n' "$(cat "$window_file")" ;;
+        *) cat "$window_file" ;;
+      esac
+    fi; exit 0 ;;
   new-window)
     name=
     previous=
@@ -64,6 +72,7 @@ case "${1:-}" in
       previous=$arg
     done
     printf '%s\n' "$name" > "$window_file"
+    printf '@1\n'
     exit 0 ;;
   kill-window) : > "$window_file"; exit 0 ;;
   has-session|new-session) exit 0 ;;
@@ -142,6 +151,8 @@ test_single_stale_first_read_is_not_accepted() {
     "meta did not record the settled worktree"
   assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
     "meta wrongly recorded the transient stale path as the worktree"
+  [ "$(sed -n 's/^tmux_pane_id=//p' "$HOME_DIR/state/$id.meta")" = '%1' ] \
+    || fail "a fresh spawn must record the pane used for launch"
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
 

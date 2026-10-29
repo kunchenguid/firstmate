@@ -7,6 +7,8 @@
 #   target. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
+# Task pane binding and legacy compatibility are owned by
+# fm_backend_io_target_of_meta in bin/fm-backend.sh.
 # The text must be nonempty: an empty or whitespace-only message is refused
 # before anything is marked, recorded, or submitted, because an empty marked
 # secondmate request delivers only marker and correlation bytes and leaves the
@@ -372,7 +374,7 @@ fm_send_resolve_target() { # <raw-target>
       return 0
     fi
     RESOLUTION_TRIED="meta=$meta; backend=from-meta"
-    target=$(fm_backend_target_of_meta "$meta")
+    target=$(fm_backend_io_target_of_meta "$meta")
     if [ -z "$target" ]; then
       echo "error: no backend target recorded in $meta (tried $RESOLUTION_TRIED)" >&2
       return 1
@@ -411,7 +413,7 @@ fm_send_resolve_target() { # <raw-target>
 
   meta=$(fm_backend_meta_for_window "$raw" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then
-    target=$(fm_backend_target_of_meta "$meta")
+    target=$(fm_backend_io_target_of_meta "$meta")
     if [ -z "$target" ]; then
       echo "error: no backend target recorded in $meta (tried explicit target '$raw' via recorded window/terminal; backend=from-meta)" >&2
       return 1
@@ -1025,7 +1027,7 @@ else
     CURRENT_INBOX_BACKEND=
     CURRENT_INBOX_SPAWN_GEN=
     if [ -f "$TARGET_META" ]; then
-      CURRENT_INBOX_TARGET=$(fm_backend_target_of_meta "$TARGET_META")
+      CURRENT_INBOX_TARGET=$(fm_backend_io_target_of_meta "$TARGET_META") || CURRENT_INBOX_TARGET=
       CURRENT_INBOX_BACKEND=$(fm_backend_of_meta "$TARGET_META")
       CURRENT_INBOX_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
     fi

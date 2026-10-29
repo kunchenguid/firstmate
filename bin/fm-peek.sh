@@ -38,7 +38,13 @@ if [ -n "$REMOTE_META" ] && [ -n "$(fm_meta_get "$REMOTE_META" remote_host)" ]; 
   exit 0
 fi
 
-T=$(fm_backend_resolve_selector "$RAW_TARGET" "$STATE")
+META=$(fm_backend_meta_for_selector "$RAW_TARGET" "$STATE" 2>/dev/null || true)
+[ -n "$META" ] || META=$(fm_backend_meta_for_window "$RAW_TARGET" "$STATE" 2>/dev/null || true)
+if [ -n "$META" ]; then
+  T=$(fm_backend_io_target_of_meta "$META")
+else
+  T=$(fm_backend_resolve_selector "$RAW_TARGET" "$STATE")
+fi
 
 BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")

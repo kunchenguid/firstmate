@@ -6,6 +6,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
@@ -114,6 +116,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_test_tmux_protocol "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }

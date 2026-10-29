@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-fixtures.sh"
 
 # bin/fm-harness.sh answers from environment markers and process ancestry. A
 # suite run from inside Cursor, Claude, Pi, or Grok inherits those markers and
@@ -255,6 +257,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_test_tmux_protocol "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
@@ -693,8 +696,13 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
   HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_FAKE_KIMI_STATE="$CASE_DIR/kimi.state" \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" \
     FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
-    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "Kimi teardown failed"
+    "$TEARDOWN" "$id" --force >"$CASE_DIR/teardown.log" 2>&1 || {
+      cat "$CASE_DIR/teardown.log" >&2
+      fail "Kimi teardown failed"
+    }
   assert_absent "$WT_DIR/.fm-kimi-turnend" "Kimi token pointer survived teardown"
   assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "Kimi registry token survived teardown"
   assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "Kimi token state survived teardown"
@@ -1130,6 +1138,10 @@ test_watcher_never_classifies_kimi_from_its_spinner() (
   export FM_HOME FM_STATE_OVERRIDE
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-watch.sh"
+  # This classifier unit supplies a resolved endpoint and rendered content.
+  # Pane membership is exercised by the transport and watcher integration tests.
+  # shellcheck disable=SC2329
+  fm_backend_io_target_of_meta() { printf 'fake'; }
   # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
   fm_backend_busy_state() { printf 'unknown'; }
   # Standalone Kimi has no verified semantic busy source, so it classifies

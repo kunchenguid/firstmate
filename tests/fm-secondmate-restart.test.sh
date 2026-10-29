@@ -29,6 +29,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-fixtures.sh"
 # shellcheck source=tests/t3-fake-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
 
@@ -127,6 +129,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  fm_test_tmux_protocol "$fb/tmux"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in

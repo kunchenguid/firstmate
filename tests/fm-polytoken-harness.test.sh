@@ -814,9 +814,15 @@ window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
-    [ ! -s "$window_file" ] || cat "$window_file"
+    if [ -s "$window_file" ]; then
+      case "$*" in
+        *'#{window_id}|#{window_index}|#{window_name}'*) printf '@1|0|%s\n' "$(cat "$window_file")" ;;
+        *) cat "$window_file" ;;
+      esac
+    fi
     exit 0
     ;;
+  list-panes) printf '%%1\n'; exit 0 ;;
   new-window)
     name=
     previous=
@@ -825,6 +831,7 @@ case "${1:-}" in
       previous=$arg
     done
     printf '%s\n' "$name" > "$window_file"
+    printf '@1\n'
     exit 0
     ;;
   kill-window)
@@ -911,6 +918,12 @@ test_polytoken_launch_carries_the_hybrid_contract() {
     --model zai/glm-5.3-flash --effort low)
   rc=$?
   expect_code 0 "$rc" "polytoken spawn should succeed (output: $out)"
+  grep -qx 'tmux_pane_id=%1' "$HOME_DIR/state/$id.meta" || fail "fresh spawn did not record its pane"
+  grep -qx "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" || fail "fresh spawn lost its lifecycle window"
+  grep -q '^send-keys -t %1 ' "$CASE_DIR/tmux-calls.log" || fail "fresh spawn did not send to its pane"
+  if grep '^send-keys ' "$CASE_DIR/tmux-calls.log" | grep -v '^send-keys -t %1 '; then
+    fail "fresh spawn sent keys outside its bound pane"
+  fi
   # The raw launch line (what the pane shell was told to run) carries the
   # launch-boundary contract; the fake polytoken's argv (launch.log) carries
   # what the command actually received after the shell consumed the quoting.

@@ -90,6 +90,7 @@ make_tmux_stub() {  # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+printf '%s\n' "$*" >> "$D/calls"
 # The rows devin 3000.11.1 renders for each modelled screen (live capture).
 devin_screen() {  # <running|armed|cancelled|idle|picker>
   # The idle placeholder is dark truecolor text, as Devin draws it.
@@ -288,6 +289,31 @@ keys_sent() {  # <case-dir>
 }
 
 # --- 1. adapter contract across every verified harness -----------------------
+
+test_pane_metadata_does_not_change_lifecycle_control() {
+  local dir out rc binding verb
+  for binding in absent %1 %999999 invalid empty duplicate; do
+    for verb in interrupt exit; do
+      dir=$(new_case "pane-parity-$binding-$verb")
+      add_task "$dir" t1 claude
+      alive_as "$dir" claude
+      case "$binding" in
+        absent) ;;
+        empty) printf 'tmux_pane_id=\n' >> "$dir/home/state/t1.meta" ;;
+        duplicate) printf 'tmux_pane_id=%%1\ntmux_pane_id=%%2\n' >> "$dir/home/state/t1.meta" ;;
+        *) printf 'tmux_pane_id=%s\n' "$binding" >> "$dir/home/state/t1.meta" ;;
+      esac
+      out=$(run_control "$dir" t1 "$verb"); rc=$?
+      expect_code 0 "$rc" "$verb changed with $binding pane metadata"$'\n'"$out"
+      grep -q '^send-keys -t .*:fm-t1 ' "$dir/fake/calls" \
+        || fail "$verb lost its existing window target with $binding metadata"
+      if grep -E '^send-keys -t %' "$dir/fake/calls"; then
+        fail "$verb introduced pane-bound lifecycle behavior"
+      fi
+    done
+  done
+  pass "fm-control: pane metadata does not change window-based interrupt or exit"
+}
 
 test_exit_types_each_harness_verified_command() {
   local dir out rc harness expected key repeat clear
@@ -1349,3 +1375,5 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
+
+test_pane_metadata_does_not_change_lifecycle_control
