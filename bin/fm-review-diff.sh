@@ -38,6 +38,9 @@
 # valid git branch name is refused instead of taking that fallback, the same
 # refusal fm-merge-local.sh applies, so a corrupt meta record can never turn a
 # review into a diff of the wrong content.
+# A task whose project has per-project captain preferences
+# (data/captain-projects/<project>.md, bin/fm-project-prefs.sh) prints them first,
+# so a review is judged against the project's own rules.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -231,6 +234,11 @@ fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
+
+"$FM_ROOT/bin/fm-project-prefs.sh" show "$(basename -- "$PROJ")" || {
+  echo "error: could not read the per-project captain preferences for $(basename -- "$PROJ")" >&2
+  exit 1
+}
 
 echo "diff base: $BASE"
 if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then

@@ -740,6 +740,55 @@ test_verified_merge_records_pr_and_head() {
   pass "fm-pr-merge records pr= and pr_head= for a verified GitHub merge"
 }
 
+# The project's own captain preferences are not in any startup digest, so the
+# merge itself prints them to stderr; an unreadable file only warns and never
+# changes the merge or its stdout.
+test_merge_prints_project_prefs_to_stderr() {
+  local case_dir rc
+  case_dir=$(make_case prefs-printed)
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  : > "$case_dir/gh-axi.log"
+  mkdir -p "$case_dir/home/data/captain-projects"
+  printf '%s\n' '- Publish the dashboards before merging.' > "$case_dir/home/data/captain-projects/project.md"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "prefs-printed: fm-pr-merge should succeed"
+  assert_grep 'Publish the dashboards before merging.' "$case_dir/stderr" \
+    "prefs-printed: the project's preferences were not printed to stderr"
+  if grep -q 'Publish the dashboards' "$case_dir/stdout"; then
+    fail "prefs-printed: the preferences must stay off stdout"
+  fi
+  assert_logged_gh_merge "$case_dir" 9 example/repo --squash
+  pass "fm-pr-merge prints the project's captain preferences to stderr before merging"
+}
+
+test_merge_with_unreadable_project_prefs_warns_and_still_merges() {
+  local case_dir rc
+  case_dir=$(make_case prefs-unreadable)
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  : > "$case_dir/gh-axi.log"
+  mkdir -p "$case_dir/home/data/captain-projects"
+  printf 'x\n' > "$case_dir/prefs-target.md"
+  ln -s "$case_dir/prefs-target.md" "$case_dir/home/data/captain-projects/project.md"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "prefs-unreadable: an unreadable preferences file must not block the merge"
+  assert_grep 'could not read the per-project captain preferences for task task-x1' "$case_dir/stderr" \
+    "prefs-unreadable: the failed read was not reported"
+  assert_logged_gh_merge "$case_dir" 9 example/repo --squash
+  pass "fm-pr-merge warns about an unreadable preferences file and still merges"
+}
+
 # The forge call is the point of no return: once gh-axi has merged, nothing this
 # script does afterwards can un-merge it. Proving pr= is already in the task's
 # meta at that moment is what makes a later failure unable to lose the merge.
@@ -2927,6 +2976,8 @@ test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
 test_github_conflicting_queue_rules_report_ambiguity
 test_verified_merge_records_pr_and_head
+test_merge_prints_project_prefs_to_stderr
+test_merge_with_unreadable_project_prefs_warns_and_still_merges
 test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses

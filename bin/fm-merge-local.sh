@@ -21,6 +21,8 @@
 # A per-checkout lock in the project's Git directory serializes different
 # tasks across the checks, checkout update, ref transaction, and rollback.
 # tests/fm-merge-local.test.sh covers pinned-head landing and race refusals.
+# The project's own captain preferences (bin/fm-project-prefs.sh) are printed to
+# stderr first, since no startup digest carries them; a failed read only warns.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -103,6 +105,7 @@ MERGE_HEAD=$(fm_dod_local_done_head "$META") || {
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
+fm_pr_print_project_prefs "$ID" "$FM_HOME" "$STATE"
 
 default_branch() {
   local ref branch
