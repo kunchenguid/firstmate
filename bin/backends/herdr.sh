@@ -1866,7 +1866,7 @@ fm_backend_herdr_launcher_identity() {  # <session>
   fi
 
   pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || {
-    echo "error: herdr launcher pane '$pane' could not be read in session '$session'; refusing to place a worker without its exact parent workspace" >&2
+    echo "error: herdr launcher pane '$pane' is stale - it could not be read in session '$session' and no longer exists; refresh HERDR_PANE_ID, HERDR_TAB_ID and HERDR_WORKSPACE_ID in this shell to the current pane's values; refusing to place a worker without its exact parent workspace" >&2
     return 1
   }
   tab=$(printf '%s' "$pane_out" | jq -r --arg pane "$pane" '
