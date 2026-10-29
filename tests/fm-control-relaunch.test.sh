@@ -3531,6 +3531,14 @@ test_host_prelaunch_refusal_releases_candidate_for_corrected_launch() {
   out=$(run_existing_host "$dir" disposition sm69 --operation rejected.op)
   assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/.*\"disposition\":\"\([^\"]*\)\".*/\1/p' | tail -1)" \
     "later disposition did not preserve the prelaunch refusal"
+  printf '%s\n' invalid > "$dir/smhome/config/codex-permission-mode"
+  out=$(run_existing_host "$dir" launch sm69 claude pool-model-a medium herdr --operation rejected.config); rc=$?
+  expect_code 1 "$rc" "host spawn configuration refusal: $out"
+  assert_equals prelaunch "$(sed -n 's/^phase=//p' "$dir/smhome/state/parent-route/sm69.seat-operation.rejected.config")" "spawn preflight refusal was not persisted"
+  out=$(run_existing_host "$dir" disposition sm69 --operation rejected.config)
+  assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "spawn refusal replay became unknown"
+  [ ! -e "$dir/smhome/state/parent-route/sm69.meta" ] || fail "refused spawn published endpoint metadata"
+  printf '%s\n' bypass > "$dir/smhome/config/codex-permission-mode"
   out=$(run_existing_host "$dir" launch sm69 claude pool-model-a medium herdr --operation corrected.op); rc=$?
   expect_code 0 "$rc" "corrected host launch after prelaunch refusal: $out"
   assert_equals corrected.op "$(sed -n 's/^spawn_gen=//p' "$dir/smhome/state/parent-route/sm69.meta")" \
