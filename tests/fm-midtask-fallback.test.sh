@@ -476,7 +476,8 @@ ok "a broken config does not relaunch and exits non-zero"
 begin pi-prefixed-scope
 write_rules true
 write_meta
-sed -i 's/^harness=claude$/harness=pi/; s|^model=claude-sonnet-5$|model=anthropic/claude-sonnet-5|' "$CASE/state/$ID.meta"
+sed 's/^harness=claude$/harness=pi/; s|^model=claude-sonnet-5$|model=anthropic/claude-sonnet-5|' "$CASE/state/$ID.meta" > "$CASE/state/$ID.meta.next"
+mv "$CASE/state/$ID.meta.next" "$CASE/state/$ID.meta"
 jq '.rules[0].use[0] = {harness:"pi", provider:"anthropic", model:"anthropic/claude-sonnet-5", effort:"high"}' \
   "$CASE/config/crew-dispatch.json" > "$CASE/config/next.json"
 mv "$CASE/config/next.json" "$CASE/config/crew-dispatch.json"
@@ -489,3 +490,34 @@ jq -n '{schemaVersion:5, providers:[
 invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null 2>&1
 [ -s "$CASE/control-calls" ] || fail "prefixed pi model did not match its scope"
 ok "a prefixed pi model matches a bare model scope"
+
+# An open decision from another key keeps the worker parked even after a later paused line.
+begin open-decision-parks
+write_rules true
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+printf 'needs-decision [at=100] [key=approval]: pick a schema\npaused [at=101]: out of credits\n' > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 grok exhausted_now 0 codex through_reset 40
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null
+assert_no_control "open decision then paused"
+ok "an open decision keeps the worker from relaunching"
+
+# An agy profile without a provider field uses the agy quota provider.
+begin agy-provider
+jq -n '{mid_task_fallback:true, rules:[{when:"work", use:[
+  {harness:"agy", model:"default", effort:"high"},
+  {harness:"codex", model:"gpt-5.5", effort:"high"}]}]}' > "$CASE/config/crew-dispatch.json"
+cat > "$CASE/state/$ID.meta" <<EOF
+kind=ship
+harness=agy
+model=default
+effort=high
+worktree=$CASE/work
+EOF
+invoke bind "$ID" --rule 0 >/dev/null
+printf 'paused [at=100]: out of credits\n' > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" agy exhausted_now 0 codex through_reset 40
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null || fail "agy switch failed"
+[ -s "$CASE/control-calls" ] || fail "exhausted agy worker did not relaunch"
+grep -Eq '^switched .*agy default high -> codex gpt-5.5 high' "$CASE/state/$ID.status" || fail "missing agy switch outcome"
+ok "an exhausted agy worker switches by its agy quota provider"

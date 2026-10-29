@@ -196,6 +196,11 @@ quota_exhausted() {
   printf '%s\n' "$evidence" | jq -e '(.runway.status // "") == "exhausted_now"' >/dev/null 2>&1
 }
 
+default_provider() {
+  fm_quota_single_provider_for_harness "$1" 2>/dev/null \
+    || fm_quota_provider_for_harness "$1" "$2" 2>/dev/null || true
+}
+
 current_exhausted() {
   local array_json=$1 snapshot=$2 harness=$3 model=$4 effort=$5 provider
   provider=$(printf '%s\n' "$array_json" | jq -r \
@@ -207,9 +212,7 @@ current_exhausted() {
        else [.[] | select((.m == "default" or .m == $m) and (.e == "default" or .e == $e))] end)
     | last.p // ""
   ' 2>/dev/null) || return 1
-  if [ -z "$provider" ]; then
-    provider=$(fm_quota_provider_for_harness "$harness" "$model" 2>/dev/null || true)
-  fi
+  [ -n "$provider" ] || provider=$(default_provider "$harness" "$model")
   quota_exhausted "$snapshot" "$provider" "$harness" "$model"
 }
 
@@ -275,6 +278,9 @@ status_has_key() {
 
 worker_finished_or_waiting() {
   local line verb
+  if status_open_decisions "$(status_path "$1")" | cut -f1 | grep -vx 'midtask-fallback' | grep -q .; then
+    return 0
+  fi
   line=$(last_status_line "$(status_path "$1")")
   case "$line" in
     *"[key=midtask-fallback]"*) return 1 ;;
@@ -427,9 +433,7 @@ cmd_consider() {
     fm_control_harness_supports_kind "$harness" "$kind" || continue
     failed_candidate "$meta" "$harness" "$model" "$effort" && continue
     if [ -n "$snapshot" ]; then
-      if [ -z "$provider" ]; then
-        provider=$(fm_quota_provider_for_harness "$harness" "$model" 2>/dev/null || true)
-      fi
+      [ -n "$provider" ] || provider=$(default_provider "$harness" "$model")
       if [ -n "$provider" ]; then
         quota_exhausted "$snapshot" "$provider" "$harness" "$model"
         rc=$?
