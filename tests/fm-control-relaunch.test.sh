@@ -3567,6 +3567,21 @@ SH
   out=$(run_existing_host "$dir" relaunch sm69 claude pool-model-a medium --operation corrected.relaunch --previous corrected.op); rc=$?
   expect_code 0 "$rc" "corrected host relaunch after effort refusal: $out"
   assert_equals corrected.relaunch "$(sed -n 's/^spawn_gen=//p' "$dir/smhome/state/parent-route/sm69.meta")" "corrected relaunch did not publish its generation"
+  jq '.typed={} | .working={}' "$dir/herdr-state" > "$dir/herdr-dead"
+  mv "$dir/herdr-dead" "$dir/herdr-state"
+  printf '%s\n' invalid > "$dir/smhome/config/codex-permission-mode"
+  out=$(run_existing_host "$dir" launch sm69 claude pool-model-a medium herdr --operation rejected.recovery --previous corrected.relaunch); rc=$?
+  expect_code 1 "$rc" "dead predecessor recovery spawn refusal: $out"
+  receipt="$dir/smhome/state/parent-route/sm69.seat-operation.rejected.recovery"
+  assert_equals prelaunch "$(sed -n 's/^phase=//p' "$receipt")" "recovery refusal was not persisted"
+  assert_equals true "$(sed -n 's/^old_destroyed=//p' "$receipt")" "recovery lost predecessor destruction evidence"
+  out=$(run_existing_host "$dir" disposition sm69 --operation rejected.recovery)
+  assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "recovery refusal replay became unknown"
+  assert_equals true "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .old_destroyed)" "replay lost predecessor destruction evidence"
+  printf '%s\n' bypass > "$dir/smhome/config/codex-permission-mode"
+  out=$(run_existing_host "$dir" launch sm69 claude pool-model-a medium herdr --operation corrected.recovery --previous corrected.relaunch); rc=$?
+  expect_code 0 "$rc" "corrected recovery launch after prelaunch refusal: $out"
+  assert_equals corrected.recovery "$(sed -n 's/^spawn_gen=//p' "$dir/smhome/state/parent-route/sm69.meta")" "corrected recovery did not publish its generation"
   pass "a definitive host-side prelaunch refusal releases its candidate and accepts a corrected launch"
 }
 
