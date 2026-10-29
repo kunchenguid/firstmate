@@ -234,8 +234,8 @@ fm_worker_account_describe() {
 # else the ordinary account for Claude. An unpinned Pi replacement explicitly
 # keeps the recorded root rather than inheriting the destination pane's
 # PI_CODING_AGENT_DIR. Otherwise prints one refusal naming the
-# recorded account, the account the relaunch would use, and both ways
-# forward, and returns 1. Runs before the sign-in check, so a pin pointing
+# recorded account, the account the pin now selects or, with no pin, the
+# account firstmate is currently running with, and both ways forward, and returns 1. Runs before the sign-in check, so a pin pointing
 # somewhere else is reported as the move it is rather than as whatever that
 # other account's login happens to say.
 # A secondmate is passed as <secondmate-id> and is not guarded: its
@@ -263,9 +263,9 @@ fm_worker_account_relaunch_guard() {
     *) root=$recorded_root ;;
     esac
     if [ -n "$root" ]; then
-      now="config/$file is now absent, so the relaunch would use the ambient account $root"
+      now="config/$file is now absent, so no pin selects an account, and the recorded account differs from the account firstmate is currently running with, account $root"
     else
-      now="config/$file is now absent, so the relaunch would use $(fm_worker_account_describe "$harness" ordinary)"
+      now="config/$file is now absent, so no pin selects an account, and the recorded account differs from the account firstmate is currently running with, $(fm_worker_account_describe "$harness" ordinary)"
     fi
   fi
   ! fm_worker_account_same_root "$root" "$recorded_root" || return 0

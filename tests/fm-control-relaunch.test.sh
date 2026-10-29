@@ -1009,8 +1009,8 @@ test_worker_account_pin_removed_refuses() {
   : > "$dir/fake/literal"
   out=$(run_control "$dir" "$id" relaunch --note "pin removed"); rc=$?
   expect_code 1 "$rc" "a relaunch after the pin is removed must refuse"
-  assert_contains "$out" "task $id was launched on account $dir/work, but config/claude-account is now absent, so the relaunch would use the ordinary account" \
-    "the refusal should name the recorded account and the one an unpinned relaunch would use"
+  assert_contains "$out" "task $id was launched on account $dir/work, but config/claude-account is now absent, so no pin selects an account, and the recorded account differs from the account firstmate is currently running with, the ordinary account" \
+    "the refusal should name the recorded account and the one firstmate is currently running with"
   assert_contains "$out" "Set config/claude-account back to '$dir/work'" \
     "the refusal should say how to proceed"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "a removed pin must refuse before the running agent stops"

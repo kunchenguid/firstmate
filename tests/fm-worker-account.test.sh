@@ -429,12 +429,12 @@ test_relaunch_guard_keeps_a_task_on_its_recorded_account() {
   rm "$cfg/claude-account"
   CLAUDE_CONFIG_DIR='' guard_says 1 "a removed pin that would move the task to the ordinary account must refuse" \
     claude "$cfg" g1 claude "$b"
-  assert_contains "$GUARD_OUT" "config/claude-account is now absent, so the relaunch would use the ordinary account (~/.claude with CLAUDE_CONFIG_DIR unset)" \
-    "the refusal should name the account an unpinned relaunch would use"
+  assert_contains "$GUARD_OUT" "config/claude-account is now absent, so no pin selects an account, and the recorded account differs from the account firstmate is currently running with, the ordinary account (~/.claude with CLAUDE_CONFIG_DIR unset)" \
+    "the refusal should name the account firstmate is currently running with"
   assert_contains "$GUARD_OUT" "Set config/claude-account back to '$b'" "the refusal should say how to proceed"
   CLAUDE_CONFIG_DIR=$a guard_says 1 "a removed pin that would move the task to the ambient root must refuse" \
     claude "$cfg" g1 claude "$b"
-  assert_contains "$GUARD_OUT" "would use the ambient account $a" "the refusal should name the ambient root"
+  assert_contains "$GUARD_OUT" "the account firstmate is currently running with, account $a" "the refusal should name the root firstmate is currently running with"
   CLAUDE_CONFIG_DIR=$b guard_says 0 "a removed pin whose ambient root is the recorded account must not refuse" \
     claude "$cfg" g1 claude "$b"
   CLAUDE_CONFIG_DIR='' guard_says 0 "a removed pin on the recorded ordinary account must not refuse" \
