@@ -288,7 +288,7 @@ Handle actionable wakes as follows:
    When the note needs a durable answer the submitter can read, publish it with `bin/fm-inbox.sh reply <id>` (the script header owns the reply contract) rather than leaving the answer only in this transcript.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
-When a worker stops on a rate limit or exhausted credits, load `midtask-fallback` before reporting that stall.
+When `config/crew-dispatch.json` sets `mid_task_fallback` and a worker stops on a rate limit or exhausted credits, load `midtask-fallback` before reporting that stall.
 
 Load `bearings` on a contributions check wake or when filing work linked to an upstream issue; its contribution-follow-up section owns triage and exact signal acknowledgement.
 
