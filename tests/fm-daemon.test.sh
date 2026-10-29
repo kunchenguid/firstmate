@@ -3561,6 +3561,60 @@ test_dialog_name_joins_unseen_status_escalation() {
 }
 
 
+test_t3_bounded_digest_snapshot_retention() (
+  local mode dir state item i count
+  local -a snapshots
+  shopt -s nullglob
+  for mode in refused deferred encode freeze; do
+    (
+      dir=$(make_bordered_case "t3-digest-$mode")
+      state="$dir/state"
+      ESCALATE_KEPT_FULL=''
+      FM_SUPERVISOR_BACKEND=t3code
+      item='event: '
+      while [ "${#item}" -lt 6000 ]; do item+='blocked waiting for review ; '; done
+      escalate_add "$state" "$item"
+      inject_msg() {
+        INJECT_SUBMIT_ATTEMPTED=1
+        INJECT_LAST_VERDICT=send-failed
+        if [ "$mode" = deferred ]; then
+          INJECT_SUBMIT_ATTEMPTED=0
+          INJECT_LAST_VERDICT=deferred
+        fi
+        return 1
+      }
+      if [ "$mode" = encode ]; then
+        fm_operational_input_encode() { return 1; }
+      elif [ "$mode" = freeze ]; then
+        mv() {
+          case "${!#}" in *.frozen) return 1 ;; esac
+          command mv "$@"
+        }
+      fi
+      for i in 1 2 3; do
+        if escalate_flush "$state"; then fail "injected $mode unexpectedly delivered"; fi
+        snapshots=("$state/.subsuper-digests/"*)
+        count=${#snapshots[@]}
+        case "$mode" in
+          encode|freeze) [ "$count" = 0 ] || fail "$mode leaked $count snapshots" ;;
+          *)
+            [ "$count" = 1 ] || fail "$mode retry retained $count snapshots"
+            cmp -s "${snapshots[0]}" "$state/.subsuper-escalations" || fail "snapshot changed buffered events"
+            ;;
+        esac
+      done
+      if [ "$mode" = refused ] || [ "$mode" = deferred ]; then
+        inject_msg() { return 0; }
+        escalate_flush "$state" || fail "$mode could not deliver on retry"
+        [ ! -s "$state/.subsuper-escalations" ] || fail "delivered retry retained events"
+        snapshots=("$state/.subsuper-digests/"*)
+        [ "${#snapshots[@]}" = 1 ] || fail "successful retry changed retained snapshot count"
+      fi
+    ) || return 1
+  done
+  pass "T3 bounded retries reuse snapshots and preparation failures remove allocations"
+)
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -3721,3 +3775,5 @@ test_dialog_name_survives_away_self_handle
 test_seen_terminal_dialog_stale_clears_like_a_plain_stale
 test_dialog_name_joins_unseen_status_escalation
 test_dialog_name_after_demand_deep_inspection_still_escalates
+
+test_t3_bounded_digest_snapshot_retention
