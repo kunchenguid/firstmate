@@ -495,7 +495,7 @@ test_lock_steals_dead_pid_lock() {
 
 test_lock_reclaims_reused_pid_but_not_a_live_owner() {
   local dir state lockdir recorded owner_pid rc newpid
-  dir=$(make_case lock-reused-pid)
+  dir=$(make_case lock-reused-pid-live-owner)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   mkdir "$lockdir"
@@ -509,7 +509,7 @@ test_lock_reclaims_reused_pid_but_not_a_live_owner() {
   [ "$rc" -ne 0 ] || fail "a live owner was evicted"
   printf '%sX\n' "$recorded" > "$lockdir/pid-start"
   rc=0
-  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2" || exit 7; cat "$2/pid"' _ "$LIB" "$lockdir") || rc=$?
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2" || exit 7; cat "$2/pid"; fm_lock_release "$2"' _ "$LIB" "$lockdir") || rc=$?
   [ "$rc" -eq 0 ] || fail "a recycled-pid lock was not reclaimed (rc=$rc)"
   [ "$newpid" != "$owner_pid" ] || fail "reclaimed lock still names the recycled owner"
   pass "a live owner remains protected while a mismatched start token is reclaimed"
@@ -935,8 +935,8 @@ test_lock_reclaims_reused_pid_lock() {
     *) fail "lock whose live pid no longer answers to its recorded holder was refused: $out" ;;
   esac
   case "$out" in
-    *"recovered="* ) ;;
-    *) fail "reused-pid takeover did not report a displaced pid: $out" ;;
+    *"recovered=$unrelated "*) ;;
+    *) fail "reused-pid takeover did not report the pid it took over: $out" ;;
   esac
   lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ -z "$lockpid" ] || fail "reused-pid takeover left a lock behind after release (pid '$lockpid')"
