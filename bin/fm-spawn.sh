@@ -59,8 +59,8 @@
 #   nothing changes.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
-#   steering inbox, status log, and report directory. This never rewrites a project's instruction files or a
-#   secondmate's charter.
+#   steering inbox, status log, and report directory. This never rewrites a
+#   project's instruction files or a secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
