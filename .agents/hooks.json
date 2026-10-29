@@ -3,7 +3,7 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "sh -c '[ -x ./bin/fm-sessionstart-agy.sh ] && exec ./bin/fm-sessionstart-agy.sh || exec ../bin/fm-sessionstart-agy.sh'",
+        "command": "sh -c \"[ -x ./bin/fm-sessionstart-agy.sh ] && exec ./bin/fm-sessionstart-agy.sh || exec ../bin/fm-sessionstart-agy.sh\" || cd .",
         "timeout": 30
       }
     ],
@@ -13,12 +13,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c '[ -x ./bin/fm-arm-pretool-check.sh ] && exec ./bin/fm-arm-pretool-check.sh --agy || exec ../bin/fm-arm-pretool-check.sh --agy'",
+            "command": "sh -c \"[ -x ./bin/fm-arm-pretool-check.sh ] && exec ./bin/fm-arm-pretool-check.sh --agy || exec ../bin/fm-arm-pretool-check.sh --agy\" || cd .",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "sh -c '[ -x ./bin/fm-cd-pretool-check.sh ] && exec ./bin/fm-cd-pretool-check.sh --agy || exec ../bin/fm-cd-pretool-check.sh --agy'",
+            "command": "sh -c \"[ -x ./bin/fm-cd-pretool-check.sh ] && exec ./bin/fm-cd-pretool-check.sh --agy || exec ../bin/fm-cd-pretool-check.sh --agy\" || cd .",
             "timeout": 5
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c '[ -x ./bin/fm-subagent-pretool-check.sh ] && exec ./bin/fm-subagent-pretool-check.sh --agy || exec ../bin/fm-subagent-pretool-check.sh --agy'",
+            "command": "sh -c \"[ -x ./bin/fm-subagent-pretool-check.sh ] && exec ./bin/fm-subagent-pretool-check.sh --agy || exec ../bin/fm-subagent-pretool-check.sh --agy\" || cd .",
             "timeout": 5
           }
         ]
@@ -37,7 +37,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "sh -c '[ -x ./bin/fm-turnend-guard-agy.sh ] && exec ./bin/fm-turnend-guard-agy.sh || exec ../bin/fm-turnend-guard-agy.sh'",
+        "command": "sh -c \"[ -x ./bin/fm-turnend-guard-agy.sh ] && exec ./bin/fm-turnend-guard-agy.sh || exec ../bin/fm-turnend-guard-agy.sh\" || cd .",
         "timeout": 28800
       }
     ]

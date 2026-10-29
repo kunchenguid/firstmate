@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Render the primary-harness supervision operating block for session start and
 # the short repair line used by guards and turn-end hooks. On a non-Pi primary
-# with a supervision protocol (claude, cursor, opencode, omp, grok, codex) whose
+# with a supervision protocol (claude, cursor, opencode, omp, grok, codex, agy) whose
 # home runs the supervision host (fm_supervision_host_enabled in
 # bin/fm-supervision-engine-lib.sh: by default on Claude, by
 # config/supervision-host elsewhere, never with config/supervision-host-off), the block

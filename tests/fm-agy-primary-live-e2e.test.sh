@@ -96,17 +96,45 @@ assert_contains "$OUT" "watcher-direct" \
 pass "agy primary live: PreToolUse --agy deny blocks a direct watcher command"
 
 # --- Stop-hook park -----------------------------------------------------------
-# An in-flight task makes supervision needed, so the turn end must park; a short
-# park bound keeps the live run inside its timeout.
-rm -f "$HOME_DIR/state/.lock" "$HOME_DIR/state/.agy-park-owner"
+# An in-flight task makes supervision needed, so the turn end must park on a
+# real watcher. Once the watcher beats, a task status line wakes it, and the
+# wake must reach a follow-up turn; a short park bound keeps the run bounded.
+rm -f "$HOME_DIR/state/.lock" "$HOME_DIR/state/.agy-park-owner" \
+  "$HOME_DIR/state/.last-watcher-beat" "$HOME_DIR/state/live-watcher-started" \
+  "$HOME_DIR/state/live-task.status" "$HOME_DIR/state/.wake-queue"
 : > "$HOME_DIR/state/live-task.meta"
-OUT=$(run_agy "$HOME_DIR" "Reply with the single word READY and end your turn. If you are later handed a supervision follow-up, reply with the single word DONE and end your turn without running any command." \
-  FM_AGY_PARK_TIMEOUT=5 FM_AGY_TURNEND_LOOP_CEILING=2)
+(
+  i=0
+  while [ "$i" -lt 240 ]; do
+    if [ -s "$HOME_DIR/state/.agy-park-owner" ] && [ -e "$HOME_DIR/state/.last-watcher-beat" ]; then
+      : > "$HOME_DIR/state/live-watcher-started"
+      sleep 1
+      printf 'done: live-park-wake\n' >> "$HOME_DIR/state/live-task.status"
+      j=0
+      while [ "$j" -lt 80 ] && [ -d "$HOME_DIR/state/.watch.lock" ]; do
+        sleep 0.25
+        j=$((j + 1))
+      done
+      sleep 2
+      rm -f "$HOME_DIR/state/live-task.meta" "$HOME_DIR/state/.wake-queue" "$HOME_DIR/state/live-task.status"
+      exit 0
+    fi
+    sleep 0.25
+    i=$((i + 1))
+  done
+) &
+WAKE_PID=$!
+OUT=$(run_agy "$HOME_DIR" "If you have not yet seen a firstmate watcher wake message in this conversation, reply with the single word READY and end your turn without running any command. Once you receive a firstmate watcher wake message, reply with the single word DONE and end your turn without running any command." \
+  FM_POLL=1 FM_SIGNAL_GRACE=0 FM_AGY_PARK_TIMEOUT=30 FM_AGY_TURNEND_LOOP_CEILING=2)
+wait "$WAKE_PID" 2>/dev/null || true
 [ -s "$HOME_DIR/state/.agy-park-owner" ] \
   || fail "Stop hook never claimed a park in state/.agy-park-owner in live agy run: $OUT"
-rm -f "$HOME_DIR/state/live-task.meta"
+[ -e "$HOME_DIR/state/live-watcher-started" ] \
+  || fail "Stop hook never started a real watcher with state/.last-watcher-beat in live agy run: $OUT"
+assert_contains "$OUT" "DONE" "Stop hook watcher wake did not reach a follow-up turn in live agy run"
+rm -f "$HOME_DIR/state/live-task.meta" "$HOME_DIR/state/.wake-queue" "$HOME_DIR/state/live-task.status"
 stop_watchers
-pass "agy primary live: Stop hook parks the turn boundary while supervision is needed"
+pass "agy primary live: Stop hook parks on a real watcher and delivers its wake to a follow-up turn"
 
 # --- --secondmate agy trust pre-seeding and launch -----------------------------
 git -C "$HOME_DIR" worktree add -q -b "fm/$SM_ID" "$SM_HOME" >/dev/null 2>&1 \
