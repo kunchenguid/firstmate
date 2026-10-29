@@ -19,6 +19,7 @@ FAKE_BOT_ID=bot-mac
 FAKE_GROUP_ID=zgr-private-test
 FAKE_DRIVE_ID=graph-drive-private
 FAKE_FOLDER_ID=graph-folder-private
+FAKE_MAX_SEEN_RECEIPTS=100
 FAKE_GRAPH_MODE=exact
 FAKE_BOT_MODE=exact
 FAKE_SEND_MODE=exact
@@ -67,9 +68,13 @@ case "$*" in
     case "$url" in
       */getMe)
         case "$FAKE_BOT_MODE" in
-          mismatch) jq -n '{ok:true,result:{id:"another-bot"}}' ;;
+          mismatch) jq -n '{ok:true,result:{id:"another-bot",can_join_groups:true}}' ;;
+          incapable) jq -n --arg id "$FAKE_BOT_ID" '{ok:true,result:{id:$id,can_join_groups:false}}' ;;
+          missing-capability) jq -n --arg id "$FAKE_BOT_ID" '{ok:true,result:{id:$id}}' ;;
+          legacy-alias) jq -n --arg id "$FAKE_BOT_ID" '{ok:true,result:{bot_id:$id,can_join_groups:true}}' ;;
+          numeric-id) jq -n '{ok:true,result:{id:123,can_join_groups:true}}' ;;
           malformed) printf '%s\n' '{bad-json' ;;
-          *) jq -n --arg id "$FAKE_BOT_ID" '{ok:true,result:{id:$id}}' ;;
+          *) jq -n --arg id "$FAKE_BOT_ID" '{ok:true,result:{id:$id,can_join_groups:true}}' ;;
         esac
         ;;
       */getUpdates)
@@ -113,14 +118,17 @@ SH
 printf '%s\n' "$apply_fake_curl" >> "$FAKEBIN/curl"
 unset apply_fake_curl
 
-write_config() { # <group-id> <drive-id> <folder-id> [refresh-file]
+write_config() { # <group-id> <drive-id> <folder-id> [refresh-file] [max-seen]
+  local max_seen=$FAKE_MAX_SEEN_RECEIPTS
+  [ "$#" -lt 5 ] || max_seen=$5
   printf '%s\n' \
     "ZALO_BOT_TOKEN=$FAKE_ZALO_TOKEN" \
     "ZALO_BOT_ID=$FAKE_BOT_ID" \
     "ZALO_GROUP_ID=$1" \
     "GRAPH_DRIVE_ID=$2" \
     "GRAPH_FOLDER_ID=$3" \
-    "GRAPH_REFRESH_TOKEN_FILE=${4:-$REFRESH_FILE}" > "$CONFIG_FILE"
+    "GRAPH_REFRESH_TOKEN_FILE=${4:-$REFRESH_FILE}" \
+    "MAX_SEEN_RECEIPTS=$max_seen" > "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE"
 }
 
@@ -207,6 +215,15 @@ send_body() {
   return 1
 }
 
+receipt_count() {
+  local count=0 receipt
+  for receipt in "$HOME_DIR/state/zalo-folder-qa/seen"/*; do
+    [ -e "$receipt" ] || [ -L "$receipt" ] || continue
+    count=$((count + 1))
+  done
+  printf '%s\n' "$count"
+}
+
 test_required_private_pins_fail_closed() {
   write_config '' "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
   assert_check_fails 'missing exact group ID'
@@ -215,6 +232,20 @@ test_required_private_pins_fail_closed() {
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" ''
   assert_check_fails 'missing exact Graph folder ID'
   pass 'exact group, drive, and folder pins are required without exposing tokens'
+}
+
+test_seen_receipt_capacity_is_required_and_bounded() {
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  sed -i '/^MAX_SEEN_RECEIPTS=/d' "$CONFIG_FILE"
+  assert_check_fails 'missing receipt capacity'
+
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID" "$REFRESH_FILE" 0
+  assert_check_fails 'zero receipt capacity'
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID" "$REFRESH_FILE" many
+  assert_check_fails 'non-numeric receipt capacity'
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID" "$REFRESH_FILE" 1000001
+  assert_check_fails 'out-of-range receipt capacity'
+  pass 'receipt capacity is required, positive, and bounded'
 }
 
 test_private_files_reject_mode_symlink_hardlink_and_nonregular() {
@@ -298,6 +329,51 @@ test_handle_rejects_non_group_paths_without_network() {
   pass 'DMs, other groups, bot messages, and malformed events stay offline'
 }
 
+assert_run_ignores_event() { # <event-json> <label>
+  local output rc
+  reset_runtime
+  queue_event "$1"
+  output=$(run_tool run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "$2 did not reach the terminal fake poll"
+  [ "$(call_count '/sendMessage')" -eq 0 ] || fail "$2 caused a send"
+  [ "$(receipt_count)" -eq 0 ] || fail "$2 reserved a receipt"
+  case "$output" in *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) fail "$2 exposed a private value" ;; esac
+}
+
+test_run_rejects_malformed_event_field_types() {
+  local base event
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  base=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' typed-1)
+
+  event=$(printf '%s' "$base" | jq -c 'del(.message.from.is_bot)')
+  assert_run_ignores_event "$event" 'missing is_bot'
+  event=$(printf '%s' "$base" | jq -c '.message.from.is_bot = "false"')
+  assert_run_ignores_event "$event" 'string is_bot'
+  event=$(printf '%s' "$base" | jq -c '.message.from.is_bot = true')
+  assert_run_ignores_event "$event" 'true is_bot'
+  event=$(printf '%s' "$base" | jq -c '.message.message_id = {value:"typed-1"}')
+  assert_run_ignores_event "$event" 'object message ID'
+  event=$(printf '%s' "$base" | jq -c '.message.text = 17')
+  assert_run_ignores_event "$event" 'numeric message text'
+  event=$(printf '%s' "$base" | jq -c '.message = []')
+  assert_run_ignores_event "$event" 'array message'
+  event=$(printf '%s' "$base" | jq -c '.message.chat = []')
+  assert_run_ignores_event "$event" 'array chat'
+  event=$(printf '%s' "$base" | jq -c '.message.chat.chat_type = 17')
+  assert_run_ignores_event "$event" 'numeric chat type'
+  event=$(printf '%s' "$base" | jq -c '.message.from = []')
+  assert_run_ignores_event "$event" 'array sender'
+  event=$(printf '%s' "$base" | jq -c '.event_name = 17')
+  assert_run_ignores_event "$event" 'numeric event name'
+
+  write_config 123 "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  event=$(event_json GROUP 123 'Tồn kho hiện tại là bao nhiêu?' typed-2)
+  event=$(printf '%s' "$event" | jq -c '.message.chat.id = 123')
+  assert_run_ignores_event "$event" 'numeric chat ID'
+  pass 'run rejects malformed event types before reserving or sending'
+}
+
 test_every_exact_group_question_is_unavailable_offline() {
   local question event output
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
@@ -351,19 +427,34 @@ test_source_status_rejects_drive_folder_and_malformed_responses() {
 }
 
 test_run_rejects_bot_identity_before_polling() {
-  local output rc
+  local output rc mode
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  for mode in mismatch incapable missing-capability legacy-alias malformed; do
+    reset_runtime
+    FAKE_BOT_MODE=$mode
+    export FAKE_BOT_MODE
+    output=$(run_tool run 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "run accepted $mode bot identity"
+    [ "$(call_count '/getMe')" -eq 1 ] || fail "$mode did not verify bot identity exactly once"
+    [ "$(call_count '/getUpdates')" -eq 0 ] || fail "$mode reached polling"
+    [ "$(call_count '/sendMessage')" -eq 0 ] || fail "$mode sent a message"
+    case "$output" in *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) fail "$mode exposed a private value" ;; esac
+  done
+
+  FAKE_BOT_ID=123
+  export FAKE_BOT_ID
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
   reset_runtime
-  FAKE_BOT_MODE=mismatch
+  FAKE_BOT_MODE=numeric-id
   export FAKE_BOT_MODE
   output=$(run_tool run 2>&1)
   rc=$?
-  [ "$rc" -ne 0 ] || fail 'run accepted a mismatched bot identity'
-  [ "$(call_count '/getMe')" -eq 1 ] || fail 'run did not verify bot identity exactly once'
-  [ "$(call_count '/getUpdates')" -eq 0 ] || fail 'bot mismatch reached polling'
-  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'bot mismatch sent a message'
-  case "$output" in *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) fail 'bot mismatch exposed a private value' ;; esac
-  pass 'bot identity mismatch stops before polling or sending'
+  [ "$rc" -ne 0 ] || fail 'run coerced a numeric bot ID'
+  [ "$(call_count '/getUpdates')" -eq 0 ] || fail 'numeric bot ID reached polling'
+  FAKE_BOT_ID=bot-mac
+  export FAKE_BOT_ID
+  pass 'run requires exact string bot identity and group capability'
 }
 
 test_run_never_sends_for_dm_wrong_group_or_malformed_poll() {
@@ -415,6 +506,26 @@ test_run_sends_only_fixed_unavailable_once_and_deduplicates() {
   pass 'integrated run sends only the fixed response and deduplicates across restarts'
 }
 
+test_run_stops_before_receipt_capacity_overflow() {
+  local output rc event
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID" "$REFRESH_FILE" 1
+  reset_runtime
+  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' cap-1)
+  queue_event "$event"
+  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho lần nữa là bao nhiêu?' cap-2)
+  queue_event "$event"
+  output=$(run_tool run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'receipt capacity overflow did not stop run'
+  case "$output" in
+    *'seen receipt capacity reached'*) ;;
+    *) fail 'receipt capacity overflow did not report the fail-closed stop' ;;
+  esac
+  [ "$(call_count '/sendMessage')" -eq 1 ] || fail 'capacity overflow sent or retried the second message'
+  [ "$(receipt_count)" -eq 1 ] || fail 'capacity overflow created an extra receipt'
+  pass 'run stops before exceeding the configured receipt capacity'
+}
+
 test_run_fails_closed_on_malformed_send_and_has_no_reply_command() {
   local output rc event
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
@@ -438,13 +549,16 @@ test_run_fails_closed_on_malformed_send_and_has_no_reply_command() {
 
 fm_test_run \
   test_required_private_pins_fail_closed \
+  test_seen_receipt_capacity_is_required_and_bounded \
   test_private_files_reject_mode_symlink_hardlink_and_nonregular \
   test_check_is_offline_and_rejects_removed_handler_configuration \
   test_handle_rejects_non_group_paths_without_network \
+  test_run_rejects_malformed_event_field_types \
   test_every_exact_group_question_is_unavailable_offline \
   test_source_status_pins_drive_and_folder_without_freshness_claim \
   test_source_status_rejects_drive_folder_and_malformed_responses \
   test_run_rejects_bot_identity_before_polling \
   test_run_never_sends_for_dm_wrong_group_or_malformed_poll \
   test_run_sends_only_fixed_unavailable_once_and_deduplicates \
+  test_run_stops_before_receipt_capacity_overflow \
   test_run_fails_closed_on_malformed_send_and_has_no_reply_command

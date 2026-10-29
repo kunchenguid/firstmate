@@ -23,6 +23,7 @@
 #   GRAPH_DRIVE_ID=<exact private Graph drive ID>
 #   GRAPH_FOLDER_ID=<exact private Graph item ID for Check tồn kho âm>
 #   GRAPH_REFRESH_TOKEN_FILE=<absolute mode-600 Files.Read refresh-token file>
+#   MAX_SEEN_RECEIPTS=<required integer from 1 through 1000000>
 #
 # source-status verifies only the configured drive/folder identity.
 # It always reports unavailable because no freshness or evidence policy exists.
@@ -43,6 +44,7 @@ GRAPH_API_ORIGIN=https://graph.microsoft.com/v1.0
 GRAPH_TOKEN_URL=https://login.microsoftonline.com/organizations/oauth2/v2.0/token
 GRAPH_CLIENT_ID=14d82eec-204b-4c2f-b7e8-296a70dab67e
 EXPECTED_FOLDER_NAME='Check tồn kho âm'
+MAX_SEEN_RECEIPTS_LIMIT=1000000
 
 ZALO_BOT_TOKEN=
 ZALO_BOT_ID=
@@ -50,6 +52,7 @@ ZALO_GROUP_ID=
 GRAPH_DRIVE_ID=
 GRAPH_FOLDER_ID=
 GRAPH_REFRESH_TOKEN_FILE=
+MAX_SEEN_RECEIPTS=
 GRAPH_ACCESS_TOKEN=
 SOURCE_STATUS_JSON=
 
@@ -128,6 +131,7 @@ load_config() {
       GRAPH_DRIVE_ID) GRAPH_DRIVE_ID=$value ;;
       GRAPH_FOLDER_ID) GRAPH_FOLDER_ID=$value ;;
       GRAPH_REFRESH_TOKEN_FILE) GRAPH_REFRESH_TOKEN_FILE=$value ;;
+      MAX_SEEN_RECEIPTS) MAX_SEEN_RECEIPTS=$value ;;
       *) die "unknown configuration key: $key" ;;
     esac
   done < "$CONFIG_FILE"
@@ -145,6 +149,13 @@ load_config() {
     /*) ;;
     *) die 'GRAPH_REFRESH_TOKEN_FILE must be an absolute path' ;;
   esac
+  case "$MAX_SEEN_RECEIPTS" in
+    ''|*[!0-9]*) die 'MAX_SEEN_RECEIPTS must be a positive integer' ;;
+  esac
+  [ "${#MAX_SEEN_RECEIPTS}" -le "${#MAX_SEEN_RECEIPTS_LIMIT}" ] \
+    && [ "$MAX_SEEN_RECEIPTS" -ge 1 ] \
+    && [ "$MAX_SEEN_RECEIPTS" -le "$MAX_SEEN_RECEIPTS_LIMIT" ] \
+    || die "MAX_SEEN_RECEIPTS must be between 1 and $MAX_SEEN_RECEIPTS_LIMIT"
   validate_private_file "$GRAPH_REFRESH_TOKEN_FILE" 'Graph refresh-token file'
 }
 
@@ -237,40 +248,45 @@ source_status() {
 }
 
 parse_event() { # <json>; sets EVENT_* globals
-  local event=$1 chat_type chat_id is_bot text_type text_length
+  local event=$1 chat_type chat_id is_bot text_length
   EVENT_ACTION=ignore
   EVENT_REASON=malformed-event
   EVENT_MESSAGE_ID=
-  printf '%s' "$event" | jq -e 'type == "object"' >/dev/null 2>&1 || return 0
-  [ "$(printf '%s' "$event" | jq -r '.event_name // empty')" = message.text.received ] || {
+  printf '%s' "$event" | jq -e 'type == "object" and (.event_name | type == "string")' >/dev/null 2>&1 \
+    || return 0
+  [ "$(printf '%s' "$event" | jq -r '.event_name')" = message.text.received ] || {
     EVENT_REASON=unsupported-event
     return 0
   }
-  chat_type=$(printf '%s' "$event" | jq -r '.message.chat.chat_type // empty')
+  if ! printf '%s' "$event" | jq -e '
+      (.message | type == "object")
+      and (.message.chat | type == "object")
+      and (.message.chat.chat_type | type == "string")
+      and (.message.chat.id | type == "string")
+      and (.message.from | type == "object")
+      and (.message.from.is_bot | type == "boolean")
+      and (.message.text | type == "string")
+      and (.message.message_id | type == "string")
+    ' >/dev/null 2>&1; then
+    return 0
+  fi
+  chat_type=$(printf '%s' "$event" | jq -r '.message.chat.chat_type')
   [ "$chat_type" = GROUP ] || {
     EVENT_REASON=direct-message
     return 0
   }
-  chat_id=$(printf '%s' "$event" | jq -r '.message.chat.id // empty')
+  chat_id=$(printf '%s' "$event" | jq -r '.message.chat.id')
   [ "$chat_id" = "$ZALO_GROUP_ID" ] || {
     EVENT_REASON=wrong-group
     return 0
   }
-  is_bot=$(printf '%s' "$event" | jq -r '.message.from.is_bot // false')
-  [ "$is_bot" != true ] || {
+  is_bot=$(printf '%s' "$event" | jq -r '.message.from.is_bot')
+  [ "$is_bot" = false ] || {
     EVENT_REASON=bot-message
     return 0
   }
-  text_type=$(printf '%s' "$event" | jq -r '.message.text | type' 2>/dev/null || true)
-  [ "$text_type" = string ] || {
-    EVENT_REASON=unsupported-message
-    return 0
-  }
-  text_length=$(printf '%s' "$event" | jq '.message.text | length' 2>/dev/null || true)
-  EVENT_MESSAGE_ID=$(printf '%s' "$event" | jq -r '.message.message_id // empty')
-  case "$text_length" in
-    ''|*[!0-9]*) EVENT_REASON=invalid-message; return 0 ;;
-  esac
+  text_length=$(printf '%s' "$event" | jq '.message.text | length')
+  EVENT_MESSAGE_ID=$(printf '%s' "$event" | jq -r '.message.message_id')
   [ "$text_length" -gt 0 ] && [ "$text_length" -le 2000 ] && [ -n "$EVENT_MESSAGE_ID" ] || {
     EVENT_REASON=invalid-message
     return 0
@@ -292,7 +308,12 @@ verify_bot() {
   local raw
   raw=$(zalo_request getMe '{}' 20) || return 1
   printf '%s' "$raw" | jq -e --arg id "$ZALO_BOT_ID" \
-    '.ok == true and ((.result.id // .result.bot_id // "") | tostring) == $id' >/dev/null 2>&1
+    '.ok == true
+      and (.result | type == "object")
+      and (.result.id | type == "string")
+      and .result.id == $id
+      and (.result.can_join_groups | type == "boolean")
+      and .result.can_join_groups == true' >/dev/null 2>&1
 }
 
 send_unavailable_reply() {
@@ -313,10 +334,16 @@ message_digest() {
 }
 
 seen_or_reserve() { # <message-id>; 0=newly reserved, 1=already seen
-  local digest receipt tmp
+  local digest receipt tmp existing receipt_count=0
   digest=$(printf '%s' "$1" | message_digest) || die 'sha256 tool not found'
   receipt=$SEEN_DIR/$digest
   [ ! -e "$receipt" ] || return 1
+  for existing in "$SEEN_DIR"/*; do
+    [ -e "$existing" ] || [ -L "$existing" ] || continue
+    receipt_count=$((receipt_count + 1))
+    [ "$receipt_count" -lt "$MAX_SEEN_RECEIPTS" ] \
+      || die 'seen receipt capacity reached; refusing a new message'
+  done
   tmp=$(mktemp "$SEEN_DIR/.seen.XXXXXX")
   printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
   if ln "$tmp" "$receipt" 2>/dev/null; then
