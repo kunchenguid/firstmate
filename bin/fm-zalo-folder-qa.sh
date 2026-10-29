@@ -320,7 +320,12 @@ send_unavailable_reply() {
   local payload raw
   payload=$(jq -n --arg chat "$ZALO_GROUP_ID" --arg text "$UNAVAILABLE_TEXT" '{chat_id:$chat, text:$text}')
   raw=$(zalo_request sendMessage "$payload" 30) || return 1
-  printf '%s' "$raw" | jq -e '.ok == true and ((.result.message_id // "") | tostring | length > 0)' >/dev/null 2>&1
+  printf '%s' "$raw" | jq -e '
+    .ok == true
+    and (.result | type == "object")
+    and (.result.message_id | type == "string")
+    and (.result.message_id | length > 0)
+  ' >/dev/null 2>&1
 }
 
 message_digest() {
@@ -333,25 +338,38 @@ message_digest() {
   fi
 }
 
-seen_or_reserve() { # <message-id>; 0=newly reserved, 1=already seen
+seen_or_reserve() { # <message-id>; 0=newly reserved, 1=already seen, 2=error
   local digest receipt tmp existing receipt_count=0
-  digest=$(printf '%s' "$1" | message_digest) || die 'sha256 tool not found'
+  digest=$(printf '%s' "$1" | message_digest) || return 2
   receipt=$SEEN_DIR/$digest
-  [ ! -e "$receipt" ] || return 1
+  for existing in "$SEEN_DIR"/.seen.*; do
+    [ -e "$existing" ] || [ -L "$existing" ] || continue
+    return 2
+  done
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 2
+    return 1
+  fi
   for existing in "$SEEN_DIR"/*; do
     [ -e "$existing" ] || [ -L "$existing" ] || continue
     receipt_count=$((receipt_count + 1))
     [ "$receipt_count" -lt "$MAX_SEEN_RECEIPTS" ] \
-      || die 'seen receipt capacity reached; refusing a new message'
+      || return 2
   done
-  tmp=$(mktemp "$SEEN_DIR/.seen.XXXXXX")
-  printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
+  tmp=$(mktemp "$SEEN_DIR/.seen.XXXXXX") || return 2
+  if ! printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"; then
+    rm -f -- "$tmp" || return 2
+    return 2
+  fi
   if ln "$tmp" "$receipt" 2>/dev/null; then
-    rm -f -- "$tmp"
+    rm -f -- "$tmp" || return 2
     return 0
   fi
-  rm -f -- "$tmp"
-  return 1
+  rm -f -- "$tmp" || return 2
+  if [ -f "$receipt" ] && [ ! -L "$receipt" ]; then
+    return 1
+  fi
+  return 2
 }
 
 cmd_check() {
@@ -377,7 +395,7 @@ cmd_handle() {
 }
 
 cmd_run() {
-  local raw event code
+  local raw event code reserve_status
   load_config
   need jq
   need curl
@@ -397,7 +415,13 @@ cmd_run() {
     event=$(printf '%s' "$raw" | jq -c '.result')
     parse_event "$event"
     [ "$EVENT_ACTION" = query ] || continue
-    seen_or_reserve "$EVENT_MESSAGE_ID" || continue
+    if seen_or_reserve "$EVENT_MESSAGE_ID"; then
+      :
+    else
+      reserve_status=$?
+      [ "$reserve_status" -eq 1 ] && continue
+      die 'receipt reservation failed; refusing a new message'
+    fi
     if ! send_unavailable_reply; then
       die 'fixed unavailable reply failed or had an unknown outcome; duplicate replay is suppressed'
     fi

@@ -23,8 +23,10 @@ FAKE_MAX_SEEN_RECEIPTS=100
 FAKE_GRAPH_MODE=exact
 FAKE_BOT_MODE=exact
 FAKE_SEND_MODE=exact
+FAKE_RECEIPT_IO_MODE=exact
 UNAVAILABLE_TEXT='Nguồn dữ liệu Check tồn kho âm hiện chưa khả dụng; tôi chưa thể trả lời từ dữ liệu đã xác minh.'
-export FAKE_LOG_DIR UPDATE_QUEUE FAKE_GRAPH_MODE FAKE_BOT_MODE FAKE_SEND_MODE
+export ORIGINAL_PATH FAKE_LOG_DIR UPDATE_QUEUE FAKE_GRAPH_MODE FAKE_BOT_MODE FAKE_SEND_MODE
+export FAKE_RECEIPT_IO_MODE
 export FAKE_BOT_ID FAKE_DRIVE_ID FAKE_FOLDER_ID
 
 mkdir -p "$HOME_DIR/config" "$HOME_DIR/state" "$FAKEBIN" "$FAKE_LOG_DIR"
@@ -89,6 +91,9 @@ case "$*" in
       */sendMessage)
         case "$FAKE_SEND_MODE" in
           malformed) printf '%s\n' '{bad-json' ;;
+          result-array) jq -n '{ok:true,result:[]}' ;;
+          message-id-object) jq -n '{ok:true,result:{message_id:{value:"out-1"}}}' ;;
+          empty-message-id) jq -n '{ok:true,result:{message_id:""}}' ;;
           *) jq -n '{ok:true,result:{message_id:"out-1"}}' ;;
         esac
         ;;
@@ -118,6 +123,39 @@ SH
 printf '%s\n' "$apply_fake_curl" >> "$FAKEBIN/curl"
 unset apply_fake_curl
 
+cat > "$FAKEBIN/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$FAKE_RECEIPT_IO_MODE" in
+  mktemp-fail) exit 1 ;;
+  write-fail)
+    path=${1%XXXXXX}write-fail
+    PATH=$ORIGINAL_PATH mkdir "$path" || exit 1
+    printf '%s\n' "$path"
+    ;;
+  *) PATH=$ORIGINAL_PATH exec mktemp "$@" ;;
+esac
+SH
+
+cat > "$FAKEBIN/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$FAKE_RECEIPT_IO_MODE" in
+  ln-fail) exit 1 ;;
+  *) PATH=$ORIGINAL_PATH exec ln "$@" ;;
+esac
+SH
+
+cat > "$FAKEBIN/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$FAKE_RECEIPT_IO_MODE:$*" in
+  rm-fail:*'/.seen.'*) exit 1 ;;
+  *) PATH=$ORIGINAL_PATH exec rm "$@" ;;
+esac
+SH
+chmod 700 "$FAKEBIN/mktemp" "$FAKEBIN/ln" "$FAKEBIN/rm"
+
 write_config() { # <group-id> <drive-id> <folder-id> [refresh-file] [max-seen]
   local max_seen=$FAKE_MAX_SEEN_RECEIPTS
   [ "$#" -lt 5 ] || max_seen=$5
@@ -139,7 +177,8 @@ reset_runtime() {
   FAKE_GRAPH_MODE=exact
   FAKE_BOT_MODE=exact
   FAKE_SEND_MODE=exact
-  export FAKE_GRAPH_MODE FAKE_BOT_MODE FAKE_SEND_MODE
+  FAKE_RECEIPT_IO_MODE=exact
+  export FAKE_GRAPH_MODE FAKE_BOT_MODE FAKE_SEND_MODE FAKE_RECEIPT_IO_MODE
 }
 
 event_json() { # <chat-type> <chat-id> <text> [message-id] [is-bot]
@@ -336,6 +375,7 @@ assert_run_ignores_event() { # <event-json> <label>
   output=$(run_tool run 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "$2 did not reach the terminal fake poll"
+  [ "$(call_count '/getUpdates')" -eq 2 ] || fail "$2 did not continue to the terminal poll"
   [ "$(call_count '/sendMessage')" -eq 0 ] || fail "$2 caused a send"
   [ "$(receipt_count)" -eq 0 ] || fail "$2 reserved a receipt"
   case "$output" in *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) fail "$2 exposed a private value" ;; esac
@@ -518,7 +558,7 @@ test_run_stops_before_receipt_capacity_overflow() {
   rc=$?
   [ "$rc" -ne 0 ] || fail 'receipt capacity overflow did not stop run'
   case "$output" in
-    *'seen receipt capacity reached'*) ;;
+    *'receipt reservation failed'*) ;;
     *) fail 'receipt capacity overflow did not report the fail-closed stop' ;;
   esac
   [ "$(call_count '/sendMessage')" -eq 1 ] || fail 'capacity overflow sent or retried the second message'
@@ -526,18 +566,61 @@ test_run_stops_before_receipt_capacity_overflow() {
   pass 'run stops before exceeding the configured receipt capacity'
 }
 
-test_run_fails_closed_on_malformed_send_and_has_no_reply_command() {
-  local output rc event
+test_run_stops_on_receipt_io_errors() {
+  local output rc event mode expected_receipts
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' io-1)
+  for mode in mktemp-fail write-fail ln-fail rm-fail; do
+    reset_runtime
+    queue_event "$event"
+    FAKE_RECEIPT_IO_MODE=$mode
+    export FAKE_RECEIPT_IO_MODE
+    output=$(run_tool run 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "$mode receipt error did not stop run"
+    case "$output" in
+      *'receipt reservation failed'*) ;;
+      *) fail "$mode receipt error did not report the fail-closed stop" ;;
+    esac
+    [ "$(call_count '/getUpdates')" -eq 1 ] || fail "$mode receipt error continued polling"
+    [ "$(call_count '/sendMessage')" -eq 0 ] || fail "$mode receipt error sent a message"
+    expected_receipts=0
+    [ "$mode" != rm-fail ] || expected_receipts=1
+    [ "$(receipt_count)" -eq "$expected_receipts" ] || fail "$mode left an unexpected receipt state"
+  done
+
   reset_runtime
-  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' send-1)
+  mkdir -p "$HOME_DIR/state/zalo-folder-qa/seen"
+  printf '%s\n' stale > "$HOME_DIR/state/zalo-folder-qa/seen/.seen.stale"
   queue_event "$event"
-  FAKE_SEND_MODE=malformed
-  export FAKE_SEND_MODE
   output=$(run_tool run 2>&1)
   rc=$?
-  [ "$rc" -ne 0 ] || fail 'malformed send response was accepted'
-  [ "$(call_count '/sendMessage')" -eq 1 ] || fail 'malformed send outcome was retried'
+  [ "$rc" -ne 0 ] || fail 'stale receipt temporary did not stop run'
+  case "$output" in
+    *'receipt reservation failed'*) ;;
+    *) fail 'stale receipt temporary did not report the fail-closed stop' ;;
+  esac
+  [ "$(call_count '/getUpdates')" -eq 1 ] || fail 'stale receipt temporary continued polling'
+  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'stale receipt temporary sent a message'
+  pass 'receipt I/O and cleanup errors stop without sending or masquerading as duplicates'
+}
+
+test_run_fails_closed_on_malformed_send_and_has_no_reply_command() {
+  local output rc event mode
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' send-1)
+  for mode in malformed result-array message-id-object empty-message-id; do
+    reset_runtime
+    queue_event "$event"
+    FAKE_SEND_MODE=$mode
+    export FAKE_SEND_MODE
+    output=$(run_tool run 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "$mode send response was accepted"
+    [ "$(call_count '/getUpdates')" -eq 1 ] || fail "$mode send outcome continued polling"
+    [ "$(call_count '/sendMessage')" -eq 1 ] || fail "$mode send outcome was retried"
+    [ "$(receipt_count)" -eq 1 ] || fail "$mode send outcome lost its reserved receipt"
+  done
 
   reset_runtime
   output=$(printf '%s' 'arbitrary reply' | run_tool reply 2>&1)
@@ -561,4 +644,5 @@ fm_test_run \
   test_run_never_sends_for_dm_wrong_group_or_malformed_poll \
   test_run_sends_only_fixed_unavailable_once_and_deduplicates \
   test_run_stops_before_receipt_capacity_overflow \
+  test_run_stops_on_receipt_io_errors \
   test_run_fails_closed_on_malformed_send_and_has_no_reply_command
