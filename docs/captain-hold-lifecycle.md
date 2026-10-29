@@ -63,6 +63,8 @@ Repeat and edge cases:
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
+- `--link` appends one http(s) URL, such as the review board the captain answers on, to the line a mate home publishes to its parent, so the call stays under its one hold key instead of gaining a second keyed line that no answer closes.
+  A link that is not a single-line http(s) URL, or that would not survive the parent line's length bound after the reason, is refused before any hold is created; the link is not stored in the task.
 - Before the backend hold runs, `--origin` records the origin the call is held for on its own `Captain hold origin:` body line, which `complete` and `verify` check using backend identities rather than alias spellings.
   If that write fails, the backend hold is not attempted.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.

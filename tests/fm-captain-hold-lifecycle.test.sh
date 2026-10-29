@@ -1474,6 +1474,58 @@ EOF
   pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
 }
 
+# --link rides the hold's own parent line, whole, and a link that cannot fit the
+# bounded parent note or is not a one-line http(s) URL is refused before any
+# hold is created.
+test_hold_link_rides_the_parent_hold_line_or_is_refused() {
+  local parent mate fakebin channel long show
+  parent=$(make_home link-parent-channel)
+  mate="$TMP_ROOT/link-mate-home"
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  fm_test_tasks_toml "$mate/.tasks.toml"
+  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
+  printf 'link-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  cat > "$mate/data/backlog.md" <<'EOF2'
+## In flight
+
+## Queued
+
+## Done
+EOF2
+  fakebin=$(fm_fakebin "$mate")
+  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  channel="$parent/state/link-mate.status"
+
+  run_captain "$mate" hold link-call --title "Review the board" --repo sample \
+    --reason "board review pending" --link "https://example.test/session/abc" >/dev/null \
+    || fail "hold with a link failed"
+  assert_grep 'needs-decision [key=captain-hold-link-call-1]: captain hold link-call: board review pending - https://example.test/session/abc' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "the link did not ride the hold's parent line"
+  [ "$(grep -c 'needs-decision' "$channel")" = 1 ] || fail "a link added a second keyed line: $(cat "$channel")"
+
+  if run_captain "$mate" hold bad-scheme-call --title "Bad scheme" --repo sample \
+    --reason "pending" --link "ftp://example.test/x" >/dev/null 2>&1; then
+    fail "a non-http(s) link was accepted"
+  fi
+  if run_captain "$mate" hold multi-line-call --title "Multi line" --repo sample \
+    --reason "pending" --link $'https://example.test/a\nhttps://example.test/b' >/dev/null 2>&1; then
+    fail "a multi-line link was accepted"
+  fi
+  long=$(printf 'x%.0s' $(seq 1 1300))
+  if run_captain "$mate" hold long-call --title "Long reason" --repo sample \
+    --reason "$long" --link "https://example.test/session/abc" >/dev/null 2>&1; then
+    fail "a link that cannot fit the parent line was accepted"
+  fi
+  for id in bad-scheme-call multi-line-call long-call; do
+    show=$(tasks_in "$mate" show "$id" 2>&1 || true)
+    assert_not_contains "$show" "held: yes" "a refused link left $id held"
+    assert_no_grep "captain-hold-$id" "$channel" "a refused link published $id"
+  done
+  pass "a hold link rides the parent hold line whole and refused links create no hold"
+}
+
 test_secondmate_reconcile_publishes_before_request_retirement() {
   local parent mate channel evidence out show rc request
   parent=$(make_home reconcile-parent-channel)
@@ -4788,6 +4840,7 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
+test_hold_link_rides_the_parent_hold_line_or_is_refused
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
