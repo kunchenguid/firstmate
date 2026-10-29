@@ -306,17 +306,38 @@ WINDOW_CLOSED_EMPTY=75
 JOB_PREEMPTED=76
 
 cmd_source() {
-  local id=${1:-} started rc=0
+  local id=${1:-} started rc=0 output class
   validate_id "$id"
   read_cursor "$id"
   started=$(fm_pending_reply_now)
+  output=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-reply-source.XXXXXX") \
+    || die "cannot stage remote reply source output"
   "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
-    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
+    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" \
+    < /dev/null > "$output" || rc=$?
   if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
+    rm -f -- "$output"
     fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
+    return "$WINDOW_CLOSED_EMPTY"
   elif [ "$rc" -eq "$JOB_PREEMPTED" ]; then
-    rc=$WINDOW_CLOSED_EMPTY
+    rm -f -- "$output"
+    return "$WINDOW_CLOSED_EMPTY"
   fi
+  # A remote transport failure can leave diagnostic bytes on stdout, especially
+  # when the remote OpenSSH shell is a Windows WSL wrapper. Such bytes are not a
+  # delta and must never reach the runner as a malformed capture. Never pass a
+  # failed or non-schema leg to the runner. Returning a nonzero status with no
+  # output leaves the registration available for reconciliation without
+  # advancing the cursor or ingesting transport diagnostics.
+  class=$(classify_result "$output")
+  if [ "$rc" -ne 0 ] || [ "$class" = malformed ]; then
+    rm -f -- "$output"
+    [ "$rc" -ne 0 ] && return "$rc"
+    return 1
+  fi
+  cat "$output"
+  rc=$?
+  rm -f -- "$output"
   return "$rc"
 }
 

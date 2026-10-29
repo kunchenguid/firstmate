@@ -74,7 +74,6 @@ make_remote_ssh_stub() {  # <dir> -> echoes fakebin dir
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
-cat > /dev/null
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
