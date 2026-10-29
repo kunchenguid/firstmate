@@ -2843,6 +2843,60 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner() {
   pass "reclaim: a herdr secondmate whose endpoint is gone is sent to its own respawn owner"
 }
 
+# A fresh Herdr task leases its slot before its pane exists, and abort cleanup
+# force-returns that lease, which discards what the slot holds. A slot whose
+# status Git cannot read was never proven clean, so it must stay leased.
+test_herdr_fresh_spawn_keeps_an_uninspectable_leased_slot() {
+  local dir out rc real_git wt
+  command -v jq >/dev/null 2>&1 || {
+    echo "skip - herdr spawn needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  real_git=$(command -v git)
+  dir=$(new_case herdr-uninspectable rl78)
+  make_herdr_stub "$dir"
+  : > "$dir/fake/herdr-log"
+  wt="$dir/wt"
+  fm_git_worktree "$dir/proj" "$wt" "fm/rl78"
+  mkdir -p "$dir/home/data/rl78"
+  cat > "$dir/home/data/rl78/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise a fresh herdr spawn whose leased slot cannot be inspected.
+
+## Firstmate spec
+Keep the slot leased.
+EOF
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_DIR/treehouse-log"
+[ "${1:-}" != get ] || printf '%s\n' "$FM_FAKE_LEASED_WT"
+exit 0
+SH
+  cat > "$dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-C $FM_FAKE_LEASED_WT "*' status --porcelain') exit 128 ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$dir/fakebin/treehouse" "$dir/fakebin/git"
+
+  out=$(FM_REAL_GIT="$real_git" FM_FAKE_LEASED_WT="$wt" \
+    run_spawn "$dir" rl78 "$dir/proj" --scout --harness claude --backend herdr); rc=$?
+  expect_code 1 "$rc" "a leased slot that cannot be inspected must refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "could not inspect pooled worktree" "the refusal should name the failed inspection"
+  assert_contains "$out" "stays leased to rl78" "the refusal should say the slot was kept"
+  assert_contains "$(cat "$dir/fake/treehouse-log")" "get --lease --lease-holder rl78" \
+    "the spawn should have leased the slot before inspecting it"
+  assert_not_contains "$(cat "$dir/fake/treehouse-log")" "return" \
+    "a slot never proven clean must not be force-returned"
+  assert_not_contains "$(cat "$dir/fake/herdr-log")" "tab create" \
+    "no pane may be opened in a slot that was never proven clean"
+  assert_absent "$dir/home/state/rl78.meta" "a refused spawn records nothing"
+  pass "fm-spawn herdr: a fresh spawn keeps a leased slot it could not inspect instead of force-returning it"
+}
+
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
   local dir out rc=0
   command -v tasks-axi >/dev/null 2>&1 || {
@@ -3051,6 +3105,7 @@ test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
+test_herdr_fresh_spawn_keeps_an_uninspectable_leased_slot
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items

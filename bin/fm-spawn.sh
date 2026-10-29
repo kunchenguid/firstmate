@@ -4353,11 +4353,11 @@ spawn_base_from_primary_checkout() { # <worktree> <project> <default> <origin-re
   return 1
 }
 
-freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 when the worktree is not clean
+freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 when the worktree is not clean, 3 when it cannot be inspected
   local worktree=$1 base=${2:-} project=${3:-} mode=${4:-} default target expected reset_ref actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
-    return 1
+    return 3
   }
   if [ -n "$status" ]; then
     if describe_stale_submodule_pins "$worktree" "$status"; then
@@ -4760,11 +4760,14 @@ else
         [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
         validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
         HERDR_WT_LEASED=1
+        # Abort cleanup force-returns the lease, so only a slot proven clean
+        # may go back; one that is dirty or could not be inspected stays.
         freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || {
-          if [ "$?" -eq 2 ]; then
-            HERDR_WT_LEASED=0
-            echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2
-          fi
+          case $? in
+            2|3)
+              HERDR_WT_LEASED=0
+              echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2 ;;
+          esac
           exit 1
         }
       fi
