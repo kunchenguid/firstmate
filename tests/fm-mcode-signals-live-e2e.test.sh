@@ -64,7 +64,7 @@ case "$BACKEND" in
 esac
 # A guard that cannot launch checks nothing: an unready account is a failure
 # naming the fix, never a pass.
-"$ROOT/bin/fm-mcode-config.sh" preflight "$MODEL" || fail 'the mcode launch preflight refused'
+"$ROOT/bin/fm-mcode-config.sh" preflight "$MODEL" >/dev/null || fail 'the mcode launch preflight refused'
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-mcode-live.XXXXXX") || fail 'could not create the lab'
 LAB=$(cd "$LAB" && pwd -P)

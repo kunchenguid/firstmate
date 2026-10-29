@@ -86,6 +86,18 @@ done
 # only the exact colour does.
 [ "$(FM_COMPOSER_GHOST_LUMA_MAX=174 fm_composer_classify_screen "$caps" "$slash" 4 probe-absent)" != pending ] \
   || fail 'the luminance trap the exact colour avoids has vanished; re-check the mcode ghost rule'
+# Negative paths: a placeholder in a colour this adapter never recorded (a
+# theme or release change) stays typed text, and mcode's approval modal, whose
+# options lead with `›`, is never a free composer.
+other=$(screen Message "$glyph ${esc}[7m${esc}[38;2;200;200;200mA${esc}[0m${esc}[38;2;200;200;200msk Mcode to do anything${esc}[39m")
+[ "$(fm_composer_classify_screen "$caps" "$other" 4 $'mcode\tidle')" = pending ] || fail 'an unrecorded placeholder colour read empty'
+modal=$(printf '%s\n' '  ● Running' '  ╭─ ◆ Approval required ──────────────────── Bash ─╮' '  │ Run this command?                             │' \
+  '  │ › › 1 Allow for this conversation             │' '  │   2 Always allow matching actions             │' '  │   3 Deny and guide MCode                      │' \
+  '  ├───────────────────────────────────────────────┤' '  │ ↑/↓ choose · Enter confirm · Esc deny · Ctrl+C stop │' '  ╰───────────────────────────────────────────────╯')
+for cy in 3 7; do
+  [ "$(fm_composer_classify_screen "$caps" "$modal" "$cy" $'mcode\tidle')" != empty ] || fail "the approval modal read empty at row $cy"
+done
+[ "$(fm_composer_classify_screen "$cursorless" "$modal" '' $'mcode\tunknown')" != empty ] || fail 'the approval modal read empty cursorless'
 asked=$'styled=1\ncursor=0\nidentity=1\nmcode=ask'
 [ "$(fm_composer_classify_screen "$asked" "$idle")" = need-identity ] || fail 'a non-empty bare › read must ask for the mcode identity'
 [ "$(fm_composer_classify_screen "$asked" "$idle" '' $'mcode\tunknown')" = empty ] || fail 'the mcode identity answer was not applied'
@@ -147,6 +159,11 @@ classify() { FAKE_TITLE=$1 FAKE_TAIL=$2; fm_busy_classify tmux fake:w mcode work
 [ "$(classify 'Done | wt | MCode' "$echo_tail")" = 'idle mcode-title' ] || fail 'quoted spinner text in the transcript faked a running turn'
 [ "$(classify '' "$idle_tail")" = 'unknown mcode-title' ] || fail 'no title must never read idle'
 [ "$(classify 'Needs approval | wt | MCode' "$idle_tail")" = 'unknown mcode-title' ] || fail 'a parked worker must not read idle'
+# An unreadable pane leaves only the title: busy still proves busy, and a
+# settled title alone is not enough to claim idle without the tail.
+fm_backend_capture() { return 1; }
+[ "$(classify 'Working | wt | MCode' '')" = 'busy mcode-title' ] || fail 'an unreadable pane hid the busy title'
+[ "$(classify 'Done | wt | MCode' '')" = 'unknown capture-failed' ] || fail 'an unreadable pane claimed idle'
 unset -f fm_backend_mcode_title fm_backend_capture fm_backend_busy_state
 printf '%s\n' "$busy_tail" | fm_busy_lines_match mcode || fail 'mcode delivery signal lost'
 for slot in '  ⠏ Loading · Option+Enter queue · Enter steer · Ctrl+O de' '    ⠏ Loading 4min37s · Option+Enter queue · Enter steer · Ctrl+O details · Esc stop'; do
