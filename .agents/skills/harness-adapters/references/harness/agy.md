@@ -50,9 +50,11 @@ Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
 ## Primary and secondmate integration
 
-Antigravity CLI loads `<workspace>/.agents/hooks.json` for hook lifecycle events.
+Antigravity CLI loads `<workspace>/.agents/hooks.json` for hook lifecycle events, running each command from `.agents/` itself.
+agy 1.4.9 reads every top-level key as a named hook spec (firstmate ships one, `firstmate`), with flat `SessionStart` and `Stop` handler lists and `PreToolUse` grouped under `matcher` and `hooks`; any other top-level key, such as a `version` field, silently disables the whole file (verified live).
+A PreToolUse handler that prints nothing allows the call, while a printed object without a `decision` denies it, so the seatbelts print only on deny.
 SessionStart executes `bin/fm-sessionstart-agy.sh` to inject the session-start digest into model context.
 PreToolUse invokes `bin/fm-arm-pretool-check.sh --agy`, `bin/fm-cd-pretool-check.sh --agy`, and `bin/fm-subagent-pretool-check.sh --agy`.
-Stop executes `bin/fm-turnend-guard-agy.sh`, which parks on a home-scoped watcher cycle running `bin/fm-watch.sh` and re-arms via `{"decision":"continue","reason":"..."}` with `[supervision-park]` on timeout, or delivers actionable wake output.
+Stop executes `bin/fm-turnend-guard-agy.sh`, which parks on a home-scoped watcher cycle through `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park` on a home that runs the host) and re-arms via `{"decision":"continue","reason":"..."}` with `[supervision-park]` on timeout, or delivers actionable wake output.
 A bounded 3-block repair nag is enforced via `bin/fm-turnend-guard.sh --agy` before failing open with `{}`.
 See `../../../../../docs/supervision-protocols/agy.md` for the complete supervision protocol.

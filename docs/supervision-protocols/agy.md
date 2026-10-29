@@ -10,10 +10,10 @@ When this session owns supervision and away mode is not active:
    On that wake, run `bin/fm-wake-drain.sh` first and handle it.
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end parks again automatically when supervision is still needed.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records, the drain's `OPEN DECISIONS` entries, or a real watcher reason line.
-4. The Stop-hook park polls at `FM_AGY_PARK_POLL` seconds up to `FM_AGY_PARK_TIMEOUT` (default 330 seconds).
-   When a park timeout occurs without a wake, it returns `{"decision":"continue","reason":"..."}` carrying `[supervision-park]` to re-arm the park silently.
-   When the fleet is empty or `fm-watch.sh` exits 3, the hook returns `{}` and allows normal turn completion.
-   The loop ceiling is enforced when `.executionNum < 4` is exceeded, exiting with `{}` to avoid runaway turns.
+4. The Stop-hook park checks its tracked child every `FM_AGY_PARK_POLL` seconds (default 2) and bounds the park at `FM_AGY_PARK_TIMEOUT` seconds (default 330).
+   When the bound passes without a wake, it stops the child and returns `{"decision":"continue","reason":"..."}` carrying `[supervision-park]`; end the turn briefly so the next turn boundary parks again.
+   When nothing needs supervision, or the park closed beside a verified healthy watcher, the hook returns `{}` and allows normal turn completion.
+   When `.executionNum` reaches the loop ceiling (default 4) while supervision is still needed, the hook returns one `FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED` notice; drain and handle queued wakes yourself, and past the ceiling the hook returns `{}`.
    Only normal turn completions with `.terminationReason == "NO_TOOL_CALL"` trigger a park; other termination reasons pass through with `{}`.
 5. The captain keeps control while the hook is parked.
    A message sent while parked supersedes the older park through `state/.agy-park-owner`, making the older park stand down cleanly with `{}` without emitting duplicate wakes.
@@ -25,7 +25,7 @@ When this session owns supervision and away mode is not active:
    [`watcher-continuity.md`](../watcher-continuity.md) owns the exact session-lock recovery boundary.
 9. Waiting on the hook-owned park is silent: do not send idle progress while the watcher is parked.
 
-The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` remains the verified arm wrapper that the Stop hook runs as its own tracked child.
+The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` remains the verified arm wrapper that the Stop hook runs as its own tracked child; a home that runs the supervision host parks on `bin/fm-supervision-host.sh park` in the arm's place.
 Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain.
 See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract.
 See [`turnend-guard.md`](../turnend-guard.md) for the bounded repair nag and supersession contract.

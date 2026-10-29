@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Opt-in live guard for Antigravity CLI (agy) as a firstmate PRIMARY.
+# Opt-in live guard for Antigravity CLI (agy) as a firstmate PRIMARY and
+# SECONDMATE.
 #
 # Exercises live agy CLI invocation with .agents/hooks.json in an isolated
-# temporary Firstmate home so SessionStart and Stop hooks run end-to-end
-# against the installed agy binary.
+# temporary Firstmate home so SessionStart, PreToolUse, and Stop hooks run
+# end-to-end against the installed agy binary, then pre-seeds workspace trust
+# for a --secondmate agy home and launches agy into it.
+# FM_AGY_LIVE_MODEL selects a model; without it agy uses its own default.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -17,13 +20,36 @@ AGY_BIN=${FM_AGY_BIN:-$(command -v agy 2>/dev/null || true)}
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-agy-primary-live.XXXXXX") || fail "could not create isolated agy lab"
 HOME_DIR="$LAB/home"
+SM_HOME="$LAB/sm-home"
+SM_ID="live-agy-sm"
 AGY_USER_HOME="$LAB/user-home"
 MARKER="FM_AGY_LIVE_MARKER_$$"
+SM_MARKER="FM_AGY_SM_LIVE_MARKER_$$"
+
+AGY_MODEL_ARGS=()
+[ -z "${FM_AGY_LIVE_MODEL:-}" ] || AGY_MODEL_ARGS=(--model "$FM_AGY_LIVE_MODEL")
+
+stop_watchers() {
+  local home
+  for home in "$HOME_DIR" "$SM_HOME"; do
+    [ -x "$home/bin/fm-watch-arm.sh" ] || continue
+    FM_HOME="$home" "$home/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  done
+}
 
 cleanup_all() {
+  stop_watchers
   [ -n "${LAB:-}" ] && rm -rf -- "$LAB"
 }
 trap cleanup_all EXIT
+
+run_agy() {  # <home> <prompt> [env...]
+  local home=$1 prompt=$2
+  shift 2
+  (cd "$home" && env HOME="$AGY_USER_HOME" FM_HOME="$home" "$@" \
+    timeout 600 "$AGY_BIN" -p "$prompt" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} \
+    --effort low --dangerously-skip-permissions 2>&1 || true)
+}
 
 mkdir -p "$HOME_DIR" "$AGY_USER_HOME/.gemini/antigravity-cli"
 for auth_file in antigravity-oauth-token installation_id jetski_state.pbtxt settings.json; do
@@ -50,13 +76,53 @@ printf '# Backlog\n\n- live probe\n' > "$HOME_DIR/data/backlog.md"
 
 HOME="$AGY_USER_HOME" "$HOME_DIR/bin/fm-agy-trust.sh" "$HOME_DIR" "live-primary" >/dev/null 2>&1 || true
 
-OUT=$(cd "$HOME_DIR" && HOME="$AGY_USER_HOME" FM_HOME="$HOME_DIR" \
-  "$AGY_BIN" -p "Reply with the exact live marker token from session start context and nothing else." \
-  --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions 2>&1 || true)
-
+# --- SessionStart -------------------------------------------------------------
+OUT=$(run_agy "$HOME_DIR" "Reply with the exact live marker token from session start context and nothing else.")
 [ -f "$HOME_DIR/state/.lock" ] || fail "SessionStart hook did not create state/.lock in live agy run"
 assert_contains "$OUT" "$MARKER" "SessionStart injectSteps systemMessage did not reach live agy context"
 pass "agy primary live: SessionStart hook acquires lock and injects digest into live model context"
+
+# --- PreToolUse deny ----------------------------------------------------------
+# A direct foreground watcher is denied by the shared arm-command policy, so the
+# whole command line never runs and its trailing touch leaves no marker.
+DENY_MARK="$HOME_DIR/state/live-deny-ran"
+rm -f "$HOME_DIR/state/.lock"
+OUT=$(run_agy "$HOME_DIR" "Run exactly this one shell command with your command tool: bin/fm-watch.sh; touch state/live-deny-ran
+If the command is blocked or denied, do not run any other command; reply with the word BLOCKED and the reason you were given.")
+[ ! -e "$DENY_MARK" ] || fail "PreToolUse did not deny a direct bin/fm-watch.sh command in live agy: $OUT"
+pass "agy primary live: PreToolUse --agy deny blocks a direct watcher command"
+
+# --- Stop-hook park -----------------------------------------------------------
+# An in-flight task makes supervision needed, so the turn end must park; a short
+# park bound keeps the live run inside its timeout.
+rm -f "$HOME_DIR/state/.lock" "$HOME_DIR/state/.agy-park-owner"
+: > "$HOME_DIR/state/live-task.meta"
+OUT=$(run_agy "$HOME_DIR" "Reply with the single word READY and end your turn. If you are later handed a supervision follow-up, reply with the single word DONE and end your turn without running any command." \
+  FM_AGY_PARK_TIMEOUT=5 FM_AGY_TURNEND_LOOP_CEILING=2)
+[ -s "$HOME_DIR/state/.agy-park-owner" ] \
+  || fail "Stop hook never claimed a park in state/.agy-park-owner in live agy run: $OUT"
+rm -f "$HOME_DIR/state/live-task.meta"
+stop_watchers
+pass "agy primary live: Stop hook parks the turn boundary while supervision is needed"
+
+# --- --secondmate agy trust pre-seeding and launch -----------------------------
+git -C "$HOME_DIR" worktree add -q -b "fm/$SM_ID" "$SM_HOME" >/dev/null 2>&1 \
+  || fail "could not create the secondmate home worktree"
+mkdir -p "$SM_HOME/state" "$SM_HOME/data" "$SM_HOME/config" "$SM_HOME/projects"
+printf '%s\n' "$SM_ID" > "$SM_HOME/.fm-secondmate-home"
+printf 'Live marker: %s\n' "$SM_MARKER" > "$SM_HOME/data/learnings.md"
+printf '# Charter\n\nLive secondmate charter.\n' > "$SM_HOME/data/charter.md"
+
+HOME="$AGY_USER_HOME" "$SM_HOME/bin/fm-agy-trust.sh" --secondmate-home "$SM_HOME" "$SM_ID" >/dev/null \
+  || fail "fm-agy-trust.sh --secondmate-home refused the seeded secondmate home"
+jq -e --arg p "$SM_HOME" '.trustedWorkspaces | index($p) != null' \
+  "$AGY_USER_HOME/.gemini/antigravity-cli/settings.json" >/dev/null 2>&1 \
+  || fail "secondmate home was not recorded in agy trustedWorkspaces"
+
+OUT=$(run_agy "$SM_HOME" "Reply with the exact live marker token from session start context and nothing else.")
+[ -f "$SM_HOME/state/.lock" ] || fail "SessionStart hook did not create state/.lock in the live secondmate home"
+assert_contains "$OUT" "$SM_MARKER" "a pre-trusted secondmate home did not reach its own SessionStart digest in live agy"
+pass "agy secondmate live: pre-seeded workspace trust launches straight into the secondmate home's digest"
 
 cleanup_all
 trap - EXIT

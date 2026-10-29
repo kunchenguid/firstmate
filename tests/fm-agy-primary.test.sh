@@ -100,45 +100,44 @@ SH
   chmod +x "$dir/bin/fm-session-start.sh"
 }
 
-write_watch_fixture() {
+# An arm fixture standing in for bin/fm-watch-arm.sh, speaking its real output
+# contract: a "watcher: ..." status line, then the watcher's reason line on an
+# actionable close, or a FAILED line and a nonzero exit.
+write_arm_fixture() {  # <dir> <kind>
   local dir=$1 kind=$2
   case "$kind" in
-    wake)
-      cat > "$dir/bin/fm-watch.sh" <<'SH'
+    actionable)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$$" >> "$FM_HOME/state/watch-ran"
+printf '%s\n' "$$" >> "$FM_HOME/state/arm-ran"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: state/task1.status\n'
 exit 0
 SH
       ;;
-    timeout)
-      cat > "$dir/bin/fm-watch.sh" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$$" >> "$FM_HOME/state/watch-ran"
-exit 2
-SH
-      ;;
-    empty)
-      cat > "$dir/bin/fm-watch.sh" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$$" >> "$FM_HOME/state/watch-ran"
-exit 3
-SH
-      ;;
     failed)
-      cat > "$dir/bin/fm-watch.sh" <<'SH'
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$$" >> "$FM_HOME/state/watch-ran"
-printf 'watcher: FAILED - no live watcher with a fresh beacon\n' >&2
+printf '%s\n' "$$" >> "$FM_HOME/state/arm-ran"
+printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
 exit 1
 SH
       ;;
-    slow)
-      cat > "$dir/bin/fm-watch.sh" <<'SH'
+    attached-close)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$$" >> "$FM_HOME/state/watch-ran"
+printf '%s\n' "$$" >> "$FM_HOME/state/arm-ran"
+printf 'watcher: attached pid=%s (beacon 1s)\n' "$$"
+exit 0
+SH
+      ;;
+    slow)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >> "$FM_HOME/state/arm-ran"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 i=0
-while [ ! -e "$FM_HOME/state/watch-release" ] && [ "$i" -lt 100 ]; do
+while [ ! -e "$FM_HOME/state/arm-release" ] && [ "$i" -lt 600 ]; do
   sleep 0.05
   i=$((i + 1))
 done
@@ -147,13 +146,29 @@ exit 0
 SH
       ;;
   esac
-  chmod +x "$dir/bin/fm-watch.sh"
-  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/fm-watch.sh" "$@"
-SH
   chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
+# A supervision host fixture standing in for bin/fm-supervision-host.sh: it
+# records its primary pin and arguments, then closes the way <kind> says.
+write_host_fixture() {  # <dir> <kind>
+  local dir=$1 kind=$2
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'printf "%%s\\t%%s\\n" "${FM_SUPERVISION_HOST_PRIMARY:-}" "$*" >> "$FM_HOME/state/host-ran"\n'
+    case "$kind" in
+      handback)
+        printf 'printf "watcher: started pid=%%s (beacon fresh)\\n" "$$"\n'
+        printf 'printf "stale: fixture-win needs a look\\n"\n'
+        printf 'printf "supervision-host: the away session could not take this wake: fixture; this wake is yours\\n"\n'
+        ;;
+      stood-down)
+        printf 'printf "supervision-host stood down: this session no longer owns supervision\\n"\n'
+        ;;
+    esac
+    printf 'exit 0\n'
+  } > "$dir/bin/fm-supervision-host.sh"
+  chmod +x "$dir/bin/fm-supervision-host.sh"
 }
 
 make_healthy_watcher() {
@@ -177,13 +192,22 @@ test_agents_hooks_json_registration_and_cwd_contract() {
   local reg dir cmd out status
   reg="$ROOT/.agents/hooks.json"
   [ -f "$reg" ] || fail "firstmate must ship a tracked .agents/hooks.json"
-  jq -e '.hooks.SessionStart and .hooks.PreToolUse and .hooks.Stop' "$reg" >/dev/null 2>&1 \
-    || fail ".agents/hooks.json must define SessionStart, PreToolUse, and Stop hooks"
+  # agy 1.4.9 reads every top-level key as a named hook spec and silently drops
+  # the whole file on any other shape: SessionStart and Stop are flat handler
+  # lists, PreToolUse is grouped under matcher/hooks.
+  jq -e '
+    type == "object" and length > 0
+    and all(.[]; type == "object")
+    and ([.[] | .SessionStart // empty | .[] | (.command | type) == "string"] | length > 0 and all)
+    and ([.[] | .Stop // empty | .[] | (.command | type) == "string"] | length > 0 and all)
+    and ([.[] | .PreToolUse // empty | .[] | (.matcher | type) == "string" and ([.hooks[].command | type == "string"] | length > 0 and all)] | length > 0 and all)
+  ' "$reg" >/dev/null 2>&1 \
+    || fail ".agents/hooks.json must be agy named hook specs with flat SessionStart/Stop and grouped PreToolUse handlers"
 
   dir=$(make_primary_dir "$TMP_ROOT/hooks-cwd")
   install_digest_fixture "$dir"
 
-  cmd=$(jq -r '.hooks.SessionStart[0].hooks[0].command // .hooks.SessionStart[0].command // empty' "$reg")
+  cmd=$(jq -r '[.[] | .SessionStart // empty | .[].command][0] // empty' "$reg")
   [ -n "$cmd" ] || fail "SessionStart hook command missing from .agents/hooks.json"
 
   AGY_CHILD_CMD='cd "$FM_HOME/.agents" && eval "$HOOK_CMD"'
@@ -272,99 +296,144 @@ test_turnend_guard_agy_actionable_wake_followup() {
   [ -x "$dir/bin/fm-turnend-guard-agy.sh" ] || fail "bin/fm-turnend-guard-agy.sh is missing or not executable"
   : > "$dir/state/task1.meta"
   printf '2\n' > "$dir/state/.turnend-blocks"
-  write_watch_fixture "$dir" wake
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" handback
   payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":1,"terminationReason":"NO_TOOL_CALL"}'
   out=$(run_agy_stop "$dir" "$payload")
   decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
   reason=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null)
   assert_equals "continue" "$decision" "actionable wake must return decision=continue"
-  assert_contains "$reason" "signal: state/task1.status" "reason must include wake output"
-  [ ! -f "$dir/state/.turnend-blocks" ] || [ "$(cat "$dir/state/.turnend-blocks" 2>/dev/null || printf 0)" = "0" ] \
-    || fail "actionable wake must reset state/.turnend-blocks"
-  pass "fm-turnend-guard-agy: actionable wake returns continue decision and resets turnend-blocks"
+  assert_contains "$reason" "signal: state/task1.status" "reason must include the wake line"
+  assert_contains "$reason" "bin/fm-wake-drain.sh" "reason must carry the drain instruction"
+  [ -e "$dir/state/arm-ran" ] || fail "a home without config/supervision-host must park on bin/fm-watch-arm.sh"
+  [ ! -e "$dir/state/host-ran" ] || fail "a home without config/supervision-host ran the supervision host"
+  [ ! -e "$dir/state/.turnend-blocks" ] || fail "actionable wake must reset state/.turnend-blocks"
+  pass "fm-turnend-guard-agy: actionable arm close returns continue decision and resets turnend-blocks"
+}
+
+test_turnend_guard_agy_supervision_host_park() {
+  local dir payload out reason
+  payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":1,"terminationReason":"NO_TOOL_CALL"}'
+  dir=$(make_primary_dir "$TMP_ROOT/stop-host")
+  : > "$dir/state/task1.meta"
+  : > "$dir/config/supervision-host"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" handback
+  out=$(run_agy_stop "$dir" "$payload")
+  [ ! -e "$dir/state/arm-ran" ] || fail "an opted-in home ran the plain arm"
+  [ "$(cat "$dir/state/host-ran")" = "$(printf 'agy\tpark')" ] \
+    || fail "the park must run the host as 'park' with the agy primary pin: $(cat "$dir/state/host-ran")"
+  reason=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null)
+  assert_contains "$reason" "supervision-host: the away session could not take this wake" \
+    "a handed-back wake must carry the supervision-host line"
+  assert_contains "$reason" "stale: fixture-win needs a look" "a handed-back wake must carry the wake line"
+
+  dir=$(make_primary_dir "$TMP_ROOT/stop-host-down")
+  : > "$dir/state/task1.meta"
+  : > "$dir/config/supervision-host"
+  write_host_fixture "$dir" stood-down
+  out=$(run_agy_stop "$dir" "$payload")
+  assert_equals "{}" "$out" "a host that stood down must end the park with {}"
+  pass "fm-turnend-guard-agy: an opted-in home parks on the supervision host with the agy pin"
 }
 
 test_turnend_guard_agy_park_timeout_rearms() {
   local dir payload out decision reason
   dir=$(make_primary_dir "$TMP_ROOT/stop-timeout")
   : > "$dir/state/task1.meta"
-  write_watch_fixture "$dir" timeout
+  write_arm_fixture "$dir" slow
   payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":1,"terminationReason":"NO_TOOL_CALL"}'
-  out=$(run_agy_stop "$dir" "$payload")
+  out=$(FM_AGY_PARK_TIMEOUT=1 run_agy_stop "$dir" "$payload")
   decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
   reason=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null)
-  assert_equals "continue" "$decision" "park timeout (rc==2) must return decision=continue"
+  assert_equals "continue" "$decision" "park timeout must return decision=continue"
   assert_contains "$reason" "[supervision-park]" "park timeout reason must include [supervision-park]"
-  pass "fm-turnend-guard-agy: park timeout (rc==2) returns continue with [supervision-park]"
+  ! kill -0 "$(cat "$dir/state/arm-ran")" 2>/dev/null || fail "park timeout must stop the arm child"
+  pass "fm-turnend-guard-agy: park timeout stops the arm and returns continue with [supervision-park]"
 }
 
-test_turnend_guard_agy_fleet_empty() {
+test_turnend_guard_agy_fleet_empty_and_healthy_close() {
   local dir payload out status
-  dir=$(make_primary_dir "$TMP_ROOT/stop-empty")
-  write_watch_fixture "$dir" empty
   payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":1,"terminationReason":"NO_TOOL_CALL"}'
+  dir=$(make_primary_dir "$TMP_ROOT/stop-empty")
+  write_arm_fixture "$dir" actionable
   out=$(run_agy_stop "$dir" "$payload")
   status=$?
   expect_code 0 "$status" "empty fleet must exit 0"
   assert_equals "{}" "$out" "empty fleet must return {}"
+  [ ! -e "$dir/state/arm-ran" ] || fail "empty fleet must not park"
 
+  dir=$(make_primary_dir "$TMP_ROOT/stop-healthy")
   : > "$dir/state/task1.meta"
+  printf '2\n' > "$dir/state/.turnend-blocks"
+  write_arm_fixture "$dir" attached-close
+  make_healthy_watcher "$dir" "$$"
   out=$(run_agy_stop "$dir" "$payload")
-  status=$?
-  expect_code 0 "$status" "fm-watch rc==3 must exit 0"
-  assert_equals "{}" "$out" "fm-watch rc==3 must return {}"
-  pass "fm-turnend-guard-agy: returns {} when fleet is empty or fm-watch exits 3"
+  assert_equals "{}" "$out" "a non-actionable close beside a healthy watcher must return {}"
+  [ ! -e "$dir/state/.turnend-blocks" ] || fail "a healthy close must reset state/.turnend-blocks"
+  pass "fm-turnend-guard-agy: returns {} when the fleet is empty or a healthy watcher owns the home"
 }
 
 test_turnend_guard_agy_non_normal_termination_reasons() {
   local dir reason_code payload out status
   dir=$(make_primary_dir "$TMP_ROOT/stop-reasons")
   : > "$dir/state/task1.meta"
-  write_watch_fixture "$dir" wake
+  write_arm_fixture "$dir" actionable
   for reason_code in USER_CANCELED ERROR MAX_INVOCATIONS MAX_FORCED_INVOCATIONS MAX_TOKEN_BUDGET_EXCEEDED; do
     payload=$(printf '{"sessionId":"s-1","conversationId":"c-1","executionNum":1,"terminationReason":"%s"}' "$reason_code")
     out=$(run_agy_stop "$dir" "$payload")
     status=$?
     expect_code 0 "$status" "terminationReason=$reason_code must exit 0"
     assert_equals "{}" "$out" "terminationReason=$reason_code must return {}"
-    [ ! -e "$dir/state/watch-ran" ] || fail "terminationReason=$reason_code must not invoke fm-watch.sh"
+    [ ! -e "$dir/state/arm-ran" ] || fail "terminationReason=$reason_code must not park"
   done
   pass "fm-turnend-guard-agy: non-normal terminationReason values pass through with {}"
 }
 
 test_turnend_guard_agy_loop_ceiling() {
-  local dir payload out status
+  local dir payload out decision reason
   dir=$(make_primary_dir "$TMP_ROOT/stop-ceiling")
   : > "$dir/state/task1.meta"
-  write_watch_fixture "$dir" wake
+  write_arm_fixture "$dir" actionable
   payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":4,"terminationReason":"NO_TOOL_CALL"}'
   out=$(run_agy_stop "$dir" "$payload")
-  status=$?
-  expect_code 0 "$status" "executionNum>=4 must exit 0"
-  assert_equals "{}" "$out" "executionNum>=4 must return {}"
-  [ ! -e "$dir/state/watch-ran" ] || fail "executionNum>=4 must not invoke fm-watch.sh"
-  pass "fm-turnend-guard-agy: executionNum>=4 loop ceiling passes through with {}"
+  decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
+  reason=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null)
+  assert_equals "continue" "$decision" "reaching the ceiling with work in flight must notify once"
+  assert_contains "$reason" "CEILING REACHED" "the ceiling notice must name the ceiling"
+  [ ! -e "$dir/state/arm-ran" ] || fail "the ceiling must not park"
+
+  payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":5,"terminationReason":"NO_TOOL_CALL"}'
+  out=$(run_agy_stop "$dir" "$payload")
+  assert_equals "{}" "$out" "past the ceiling must return {}"
+  [ ! -e "$dir/state/arm-ran" ] || fail "past the ceiling must not park"
+
+  rm -f "$dir/state/task1.meta"
+  payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":4,"terminationReason":"NO_TOOL_CALL"}'
+  out=$(run_agy_stop "$dir" "$payload")
+  assert_equals "{}" "$out" "reaching the ceiling with nothing to supervise must return {}"
+  pass "fm-turnend-guard-agy: the loop ceiling notifies once while supervision is needed, then passes through"
 }
 
 test_turnend_guard_agy_supersession() {
   local dir payload first_pid waited first_out
   dir=$(make_primary_dir "$TMP_ROOT/stop-supersede")
   : > "$dir/state/task1.meta"
-  write_watch_fixture "$dir" slow
+  write_arm_fixture "$dir" slow
   payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":1,"terminationReason":"NO_TOOL_CALL"}'
   ( run_agy_stop "$dir" "$payload" > "$dir/state/first-out" ) &
   first_pid=$!
   waited=0
-  while [ ! -s "$dir/state/.agy-park-owner" ] || [ ! -e "$dir/state/watch-ran" ]; do
+  while [ ! -s "$dir/state/.agy-park-owner" ] || [ ! -e "$dir/state/arm-ran" ]; do
     sleep 0.05
     waited=$((waited + 1))
     [ "$waited" -lt 100 ] || fail "first park never wrote state/.agy-park-owner"
   done
   printf 'superseded-owner\n' > "$dir/state/.agy-park-owner"
-  : > "$dir/state/watch-release"
   wait "$first_pid" 2>/dev/null || true
   first_out=$(cat "$dir/state/first-out" 2>/dev/null || true)
   assert_equals "{}" "$first_out" "superseded park must return {}"
+  ! kill -0 "$(cat "$dir/state/arm-ran")" 2>/dev/null || fail "a superseded park must stop its arm child"
   pass "fm-turnend-guard-agy: superseded park owner returns {}"
 }
 
@@ -383,12 +452,13 @@ test_turnend_guard_agy_bounded_repair_nag() {
 
   dir=$(make_primary_dir "$TMP_ROOT/stop-park-nag")
   : > "$dir/state/task1.meta"
-  write_watch_fixture "$dir" failed
+  write_arm_fixture "$dir" failed
   for i in 1 2 3; do
     out=$(run_agy_stop "$dir" "$payload")
     decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
     assert_equals "continue" "$decision" "repair nag $i from fm-turnend-guard-agy.sh must return decision=continue"
   done
+  [ "$(wc -l < "$dir/state/arm-ran")" -eq 6 ] || fail "each failed park must make two bounded arm attempts"
   out=$(run_agy_stop "$dir" "$payload")
   assert_equals "{}" "$out" "4th block from fm-turnend-guard-agy.sh must fail open with {}"
   pass "fm-turnend-guard --agy & fm-turnend-guard-agy: bounded repair nag blocks 3 times then fails open with {}"
@@ -397,23 +467,27 @@ test_turnend_guard_agy_bounded_repair_nag() {
 # --- 4. PreToolUse seatbelts (--agy mode) ------------------------------------
 
 test_arm_pretool_check_agy() {
-  local dir payload out status decision
+  local dir payload out status decision reason cmd
   dir=$(make_primary_dir "$TMP_ROOT/pretool-arm")
-  make_healthy_watcher "$dir" "$$"
 
-  payload='{"toolCall":{"name":"run_command","args":{"CommandLine":"bin/fm-watch-arm.sh"}}}'
+  payload='{"toolCall":{"name":"run_command","args":{"CommandLine":"bin/fm-watch.sh"}}}'
   out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-arm-pretool-check.sh" --agy 2>/dev/null)
   status=$?
   expect_code 0 "$status" "fm-arm-pretool-check.sh --agy deny must exit 0"
   decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
-  assert_equals "deny" "$decision" "fm-arm-pretool-check.sh --agy must deny manual arm when supervision is healthy"
+  reason=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null)
+  assert_equals "deny" "$decision" "fm-arm-pretool-check.sh --agy must deny a direct foreground watcher"
+  assert_contains "$reason" "[watcher-direct]" "direct watcher deny must carry the shared policy code"
 
-  payload='{"toolCall":{"name":"run_command","args":{"CommandLine":"git status"}}}'
-  out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-arm-pretool-check.sh" --agy 2>/dev/null)
-  status=$?
-  expect_code 0 "$status" "fm-arm-pretool-check.sh --agy allow must exit 0"
-  [ -z "$out" ] || fail "fm-arm-pretool-check.sh --agy allow must produce empty stdout, got: $out"
-  pass "fm-arm-pretool-check --agy: denies manual arm when healthy and allows ordinary commands"
+  make_healthy_watcher "$dir" "$$"
+  for cmd in "git status" "bin/fm-watch-arm.sh --stop" "cat bin/fm-watch-arm.sh"; do
+    payload=$(jq -cn --arg c "$cmd" '{toolCall:{name:"run_command",args:{CommandLine:$c}}}')
+    out=$(printf '%s' "$payload" | FM_HOME="$dir" bash "$dir/bin/fm-arm-pretool-check.sh" --agy 2>/dev/null)
+    status=$?
+    expect_code 0 "$status" "fm-arm-pretool-check.sh --agy allow must exit 0 for: $cmd"
+    [ -z "$out" ] || fail "fm-arm-pretool-check.sh --agy must allow '$cmd', got: $out"
+  done
+  pass "fm-arm-pretool-check --agy: denies through the shared policy and allows ordinary commands"
 }
 
 test_cd_pretool_check_agy() {
@@ -526,8 +600,9 @@ fm_test_run \
   test_agents_hooks_json_registration_and_cwd_contract \
   test_sessionstart_agy_primary_secondmate_and_worktree_scope \
   test_turnend_guard_agy_actionable_wake_followup \
+  test_turnend_guard_agy_supervision_host_park \
   test_turnend_guard_agy_park_timeout_rearms \
-  test_turnend_guard_agy_fleet_empty \
+  test_turnend_guard_agy_fleet_empty_and_healthy_close \
   test_turnend_guard_agy_non_normal_termination_reasons \
   test_turnend_guard_agy_loop_ceiling \
   test_turnend_guard_agy_supersession \

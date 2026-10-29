@@ -5726,9 +5726,7 @@ agy)
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
-  agy_trust_bin="$FM_ROOT/bin/fm-agy-trust.sh"
-  [ -x "$agy_trust_bin" ] || agy_trust_bin="$SCRIPT_DIR/fm-agy-trust.sh"
-  if "$agy_trust_bin" "${spawn_trust_args[@]}" >/dev/null; then
+  if "$FM_ROOT/bin/fm-agy-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     AGY_TRUST_PREREGISTERED=1
   else
     echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
@@ -6581,9 +6579,7 @@ if [ "$EXTERNAL_REVIEW" = 1 ]; then
   }
   GIT_HOOKS_INSTALLED=1
 elif [ "$KEEP_AI_TRAILERS" = 0 ]; then
-  strip_bin="$FM_ROOT/bin/fm-git-strip-ai-trailers.sh"
-  [ -x "$strip_bin" ] || strip_bin="$SCRIPT_DIR/fm-git-strip-ai-trailers.sh"
-  "$strip_bin" install "$GIT_HOOKS_DIR" "$WT" || {
+  "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "$GIT_HOOKS_DIR" "$WT" || {
     echo "error: could not install the AI-trailer strip hooks for $ID" >&2
     exit 1
   }

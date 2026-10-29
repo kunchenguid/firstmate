@@ -1,15 +1,10 @@
 {
-  "version": 1,
-  "hooks": {
+  "firstmate": {
     "SessionStart": [
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c '[ -x ./bin/fm-sessionstart-agy.sh ] && exec ./bin/fm-sessionstart-agy.sh || exec ../bin/fm-sessionstart-agy.sh'",
-            "timeout": 30
-          }
-        ]
+        "type": "command",
+        "command": "sh -c '[ -x ./bin/fm-sessionstart-agy.sh ] && exec ./bin/fm-sessionstart-agy.sh || exec ../bin/fm-sessionstart-agy.sh'",
+        "timeout": 30
       }
     ],
     "PreToolUse": [
@@ -41,13 +36,9 @@
     ],
     "Stop": [
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c '[ -x ./bin/fm-turnend-guard-agy.sh ] && exec ./bin/fm-turnend-guard-agy.sh || exec ../bin/fm-turnend-guard-agy.sh'",
-            "timeout": 360
-          }
-        ]
+        "type": "command",
+        "command": "sh -c '[ -x ./bin/fm-turnend-guard-agy.sh ] && exec ./bin/fm-turnend-guard-agy.sh || exec ../bin/fm-turnend-guard-agy.sh'",
+        "timeout": 360
       }
     ]
   }

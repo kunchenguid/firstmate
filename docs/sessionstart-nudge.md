@@ -374,9 +374,9 @@ A later in-process `clear` re-emits only when this lock owner completed a full s
 
 Antigravity CLI is a run-tier harness.
 `.agents/hooks.json` registers `SessionStart`, anchored to the project root with a 30s timeout, invoking `bin/fm-sessionstart-agy.sh`.
-The wrapper drains stdin, sources `bin/fm-primary-scope-lib.sh`, and validates primary or persistent secondmate home scope.
-In linked crewmate worktrees or foreign checkouts, the wrapper stands down immediately with `{}`.
-In primary or secondmate homes, the wrapper captures the digest from `bin/fm-session-start.sh` and emits `{injectSteps:[{systemMessage:{systemMessage:$digest}}]}` on stdout with exit 0.
+The wrapper drains stdin for the payload's `source` and delegates to `bin/fm-sessionstart-run.sh`, which owns primary or persistent secondmate home scope, source routing, and the digest.
+In linked crewmate worktrees or foreign checkouts, `bin/fm-sessionstart-run.sh` stands down silently and the wrapper emits `{}`.
+In primary or secondmate homes, the wrapper emits the captured digest as `{injectSteps:[{systemMessage:{systemMessage:$digest}}]}` on stdout with exit 0.
 Native stdout context injection gates the ordered digest into model context before the first agent turn.
 
 ### Cursor compaction

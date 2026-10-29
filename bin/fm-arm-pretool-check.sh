@@ -178,35 +178,6 @@ ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
 ACTIVE_HOME=${FM_HOME:-$ROOT}
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
-json_escape() {
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
-}
-
-if [ "$AGY_MODE" -eq 1 ]; then
-  case "$CMD" in
-    *fm-watch-arm.sh*)
-      STATE="${FM_STATE_OVERRIDE:-$ACTIVE_HOME/state}"
-      WATCH_PATH="$ACTIVE_HOME/bin/fm-watch.sh"
-      if [ -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
-        # shellcheck source=bin/fm-wake-lib.sh
-        . "$SCRIPT_DIR/fm-wake-lib.sh"
-        if fm_watcher_healthy "$STATE" "$WATCH_PATH" "${FM_GUARD_GRACE:-300}" "$ACTIVE_HOME"; then
-          CODE="manual-arm-redundant"
-          REASON="manual watcher arm is denied because watcher supervision is already healthy; the Stop-hook park (bin/fm-turnend-guard-agy.sh) maintains continuity automatically"
-          DETAIL="[$CODE] $REASON"
-          if command -v jq >/dev/null 2>&1; then
-            jq -cn --arg r "$DETAIL" '{decision:"deny",reason:$r}'
-          else
-            ESCAPED=$(json_escape "$DETAIL")
-            printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
-          fi
-          exit 0
-        fi
-      fi
-      ;;
-  esac
-fi
-
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
@@ -221,6 +192,10 @@ REST=${POLICY_OUTPUT#*"$TAB"}
 CODE=${REST%%"$TAB"*}
 REASON=${REST#*"$TAB"}
 [ -n "$CODE" ] && [ -n "$REASON" ] && [ "$REASON" != "$REST" ] || exit 0
+
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
+}
 
 DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
