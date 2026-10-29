@@ -2659,11 +2659,11 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
         echo "error: could not read root panes for herdr tab '$label' in workspace $wsid (session $session)" >&2
         return 1
       }
-      dup_tab_pane_ids=$(printf '%s' "$dup_panes" | jq -r --arg tab "$dup" \
-        '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null) || {
+      if ! printf '%s' "$dup_panes" | jq -e '.result.panes | type == "array"' >/dev/null 2>&1; then
         echo "error: could not read root panes for herdr tab '$label' in workspace $wsid (session $session)" >&2
         return 1
-      }
+      fi
+      dup_tab_pane_ids=$(printf '%s' "$dup_panes" | fm_backend_herdr_root_pane_ids "" "$dup")
       dup_pane=""
       dup_pane_count=0
       while IFS= read -r dup_pane_id; do

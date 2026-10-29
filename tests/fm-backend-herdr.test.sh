@@ -1264,8 +1264,8 @@ test_create_task_closes_and_replaces_sidebar_only_husk() {
   local dir log resp fb out status tab pane
   dir="$TMP_ROOT/husk-sidebar"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-sidebar-husk","workspace_id":"w1"}]}}\n' > "$resp/1.out"
-  # 2: pane list -> empty pane list (sidebar-only tab on Herdr 0.9.x)
-  printf '{"result":{"panes":[]}}\n' > "$resp/2.out"
+  # 2: pane list -> only a sidebar chrome pane, no root pane (Herdr 0.9.x sidebar-only husk)
+  printf '{"result":{"panes":[{"pane_id":"w1:s2","tab_id":"w1:t2","label":"Sidebar","tokens":{"herdr-sidebar-explorer":"a","herdr-sidebar-git":"b"}}]}}\n' > "$resp/2.out"
   # 3: tab create -> the replacement tab
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/3.out"
   printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-sidebar-husk","workspace_id":"w1"}]}}\n' > "$resp/5.out"
@@ -1301,6 +1301,24 @@ test_create_task_refuses_when_pane_list_unparseable() {
   assert_contains "$out" "could not read root panes" "create_task did not report the unparseable pane list"
   assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "create_task must not create a replacement tab on an unparseable pane list"
   pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than treating an unparseable pane list as a sidebar-only husk"
+}
+
+test_create_task_refuses_when_pane_list_is_missing() {
+  # An empty result with no .panes key at all must refuse rather than treat
+  # the tab as a sidebar-only husk.
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-missing-panes"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-missing-panes","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  # 2: pane list -> result has no .panes key (incomplete payload)
+  printf '{"result":{}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-missing-panes /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse when the pane list has no .panes key (fail-safe toward refusal)"
+  assert_contains "$out" "could not read root panes" "create_task did not report the missing pane list"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "create_task must not create a replacement tab on a missing pane list"
+  pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than treating a missing pane list as a sidebar-only husk"
 }
 
 # --- restored-layout husk close-and-replace (herdr session.json restore) -----
@@ -6374,6 +6392,7 @@ test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
 test_create_task_closes_and_replaces_sidebar_only_husk
 test_create_task_refuses_when_pane_list_unparseable
+test_create_task_refuses_when_pane_list_is_missing
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
