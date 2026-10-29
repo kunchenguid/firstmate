@@ -1042,6 +1042,7 @@ fm_backend_rex_kill() {  # <target> [unused] [expected-label]
 # empty check and the kill.
 fm_backend_rex_retire_session() {  # <session-id>
   local sid=$1 view
+  [ -d "$FM_HOME" ] || return 0
   [ -n "$sid" ] || return 0
   [ "$sid" != "${REX_SESSION:-}" ] || return 0
   fm_backend_rex_session_lock || return 0
