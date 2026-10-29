@@ -3539,6 +3539,22 @@ test_host_prelaunch_refusal_releases_candidate_for_corrected_launch() {
   assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "spawn refusal replay became unknown"
   [ ! -e "$dir/smhome/state/parent-route/sm69.meta" ] || fail "refused spawn published endpoint metadata"
   printf '%s\n' bypass > "$dir/smhome/config/codex-permission-mode"
+  cat > "$dir/fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  --help) printf '%s\n' 'Cursor Agent CLI' ;;
+  --list-models) printf '%s\n' 'different-model' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/cursor-agent"
+  out=$(run_existing_host "$dir" launch sm69 cursor pool-model-a medium herdr --operation rejected.cursor); rc=$?
+  expect_code 1 "$rc" "later host spawn model refusal: $out"
+  assert_contains "$out" "Cursor model 'pool-model-a' is not available" "fixture did not reach later spawn validation"
+  assert_equals prelaunch "$(sed -n 's/^phase=//p' "$dir/smhome/state/parent-route/sm69.seat-operation.rejected.cursor")" "later spawn refusal was not persisted"
+  out=$(run_existing_host "$dir" disposition sm69 --operation rejected.cursor)
+  assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "later spawn refusal replay became unknown"
+  [ ! -e "$dir/smhome/state/parent-route/sm69.meta" ] || fail "later refused spawn published endpoint metadata"
   out=$(run_existing_host "$dir" launch sm69 claude pool-model-a medium herdr --operation corrected.op); rc=$?
   expect_code 0 "$rc" "corrected host launch after prelaunch refusal: $out"
   assert_equals corrected.op "$(sed -n 's/^spawn_gen=//p' "$dir/smhome/state/parent-route/sm69.meta")" \
