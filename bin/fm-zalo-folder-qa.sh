@@ -356,6 +356,31 @@ read_receipt_state() {
   esac
 }
 
+sync_receipt_path() {
+  python3 - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+
+kind, path = sys.argv[1:]
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+if kind == "directory":
+    flags |= getattr(os, "O_DIRECTORY", 0)
+elif kind != "file":
+    raise ValueError("invalid synchronization target")
+fd = os.open(path, flags)
+try:
+    mode = os.fstat(fd).st_mode
+    if kind == "file" and not stat.S_ISREG(mode):
+        raise OSError("synchronization target is not a regular file")
+    if kind == "directory" and not stat.S_ISDIR(mode):
+        raise OSError("synchronization target is not a directory")
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
+
 initialize_receipts() {
   local receipt state count=0 invalid=0 pending=0
   for receipt in "$SEEN_DIR"/*; do
@@ -390,7 +415,15 @@ reserve_pending_receipt() {
     rm -f -- "$tmp" || return 2
     return 2
   fi
+  if ! sync_receipt_path file "$tmp"; then
+    rm -f -- "$tmp" || return 2
+    return 2
+  fi
   if ln "$tmp" "$receipt" 2>/dev/null; then
+    if ! sync_receipt_path directory "$SEEN_DIR"; then
+      rm -f -- "$tmp" || return 2
+      return 2
+    fi
     rm -f -- "$tmp" || return 2
     RECEIPT_COUNT=$((RECEIPT_COUNT + 1))
     return 0
@@ -409,10 +442,15 @@ mark_receipt_sent() {
     rm -f -- "$tmp" || return 1
     return 1
   fi
+  if ! sync_receipt_path file "$tmp"; then
+    rm -f -- "$tmp" || return 1
+    return 1
+  fi
   if ! mv -f "$tmp" "$receipt"; then
     rm -f -- "$tmp" || return 1
     return 1
   fi
+  sync_receipt_path directory "$SEEN_DIR" || return 1
   state=$(read_receipt_state "$receipt") || return 1
   [ "$state" = sent ]
 }
@@ -444,6 +482,7 @@ cmd_run() {
   load_config
   need jq
   need curl
+  need python3
   init_state
   # shellcheck source=bin/fm-wake-lib.sh
   FM_STATE_OVERRIDE="$STATE_DIR" . "$SELF_DIR/fm-wake-lib.sh"

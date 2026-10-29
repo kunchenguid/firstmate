@@ -25,9 +25,11 @@ FAKE_GRAPH_MODE=exact
 FAKE_BOT_MODE=exact
 FAKE_SEND_MODE=exact
 FAKE_RECEIPT_IO_MODE=exact
+FAKE_RECEIPT_SYNC_FAIL_AT=0
+RECEIPT_SYNC_COUNTER="$TMP_ROOT/receipt-sync-counter"
 UNAVAILABLE_TEXT='Nguồn dữ liệu Check tồn kho âm hiện chưa khả dụng; tôi chưa thể trả lời từ dữ liệu đã xác minh.'
 export ORIGINAL_PATH FAKE_LOG_DIR UPDATE_QUEUE FAKE_GRAPH_MODE FAKE_BOT_MODE FAKE_SEND_MODE
-export FAKE_RECEIPT_IO_MODE
+export FAKE_RECEIPT_IO_MODE FAKE_RECEIPT_SYNC_FAIL_AT RECEIPT_SYNC_COUNTER
 export FAKE_BOT_ID FAKE_DRIVE_ID FAKE_FOLDER_ID
 
 mkdir -p "$HOME_DIR/config" "$HOME_DIR/state" "$FAKEBIN" "$FAKE_LOG_DIR"
@@ -161,7 +163,22 @@ case "$FAKE_RECEIPT_IO_MODE:$*" in
   *) PATH=$ORIGINAL_PATH exec rm "$@" ;;
 esac
 SH
-chmod 700 "$FAKEBIN/mktemp" "$FAKEBIN/ln" "$FAKEBIN/rm"
+
+cat > "$FAKEBIN/python3" <<'SH'
+#!/usr/bin/env bash
+set -u
+counter=0
+if [ -f "$RECEIPT_SYNC_COUNTER" ]; then
+  IFS= read -r counter < "$RECEIPT_SYNC_COUNTER"
+fi
+counter=$((counter + 1))
+printf '%s\n' "$counter" > "$RECEIPT_SYNC_COUNTER"
+if [ "$FAKE_RECEIPT_SYNC_FAIL_AT" -eq "$counter" ]; then
+  exit 1
+fi
+PATH=$ORIGINAL_PATH exec python3 "$@"
+SH
+chmod 700 "$FAKEBIN/mktemp" "$FAKEBIN/ln" "$FAKEBIN/rm" "$FAKEBIN/python3"
 
 write_config() { # <group-id> <drive-id> <folder-id> [refresh-file] [max-seen]
   local max_seen=$FAKE_MAX_SEEN_RECEIPTS
@@ -179,13 +196,16 @@ write_config() { # <group-id> <drive-id> <folder-id> [refresh-file] [max-seen]
 
 reset_runtime() {
   rm -rf "$FAKE_LOG_DIR" "$HOME_DIR/state/zalo-folder-qa"
+  rm -f "$RECEIPT_SYNC_COUNTER"
   mkdir -m 700 "$FAKE_LOG_DIR"
   : > "$UPDATE_QUEUE"
   FAKE_GRAPH_MODE=exact
   FAKE_BOT_MODE=exact
   FAKE_SEND_MODE=exact
   FAKE_RECEIPT_IO_MODE=exact
+  FAKE_RECEIPT_SYNC_FAIL_AT=0
   export FAKE_GRAPH_MODE FAKE_BOT_MODE FAKE_SEND_MODE FAKE_RECEIPT_IO_MODE
+  export FAKE_RECEIPT_SYNC_FAIL_AT
 }
 
 event_json() { # <chat-type> <chat-id> <text> [message-id] [is-bot]
@@ -699,6 +719,50 @@ test_run_stops_on_receipt_io_errors() {
   pass 'receipt I/O and cleanup errors stop without sending or masquerading as duplicates'
 }
 
+test_run_stops_on_receipt_sync_errors() {
+  local output rc event fail_at expected_sends expected_state
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' sync-1)
+  for fail_at in 1 2 3 4; do
+    reset_runtime
+    queue_event "$event"
+    FAKE_RECEIPT_SYNC_FAIL_AT=$fail_at
+    export FAKE_RECEIPT_SYNC_FAIL_AT
+    output=$(run_tool run 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "receipt sync failure $fail_at did not stop run"
+    [ "$(call_count '/getUpdates')" -eq 1 ] || fail "receipt sync failure $fail_at continued polling"
+    [ "$(cat "$RECEIPT_SYNC_COUNTER")" -eq "$fail_at" ] \
+      || fail "receipt sync failure $fail_at did not stop at its failing synchronization"
+    expected_sends=0
+    expected_state=
+    case "$fail_at" in
+      1) ;;
+      2) expected_state=pending ;;
+      3) expected_sends=1; expected_state=pending ;;
+      4) expected_sends=1; expected_state=sent ;;
+    esac
+    [ "$(call_count '/sendMessage')" -eq "$expected_sends" ] \
+      || fail "receipt sync failure $fail_at crossed the wrong send boundary"
+    if [ -n "$expected_state" ]; then
+      [ "$(receipt_state)" = "$expected_state" ] \
+        || fail "receipt sync failure $fail_at left the wrong durable state"
+    else
+      [ "$(receipt_count)" -eq 0 ] \
+        || fail "receipt sync failure $fail_at published an unsynchronized receipt"
+    fi
+    case "$fail_at:$output" in
+      1:*'receipt reservation failed'*|2:*'receipt reservation failed'*) ;;
+      3:*'receipt transition failed'*|4:*'receipt transition failed'*) ;;
+      *) fail "receipt sync failure $fail_at did not report its fail-closed stop" ;;
+    esac
+    case "$output" in
+      *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) fail "receipt sync failure $fail_at exposed a private value" ;;
+    esac
+  done
+  pass 'file and directory sync failures stop at both receipt transitions'
+}
+
 test_run_fails_closed_on_malformed_send_and_has_no_reply_command() {
   local output rc event mode
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
@@ -742,4 +806,5 @@ fm_test_run \
   test_run_stops_for_crash_window_pending_receipt \
   test_run_stops_before_receipt_capacity_overflow \
   test_run_stops_on_receipt_io_errors \
+  test_run_stops_on_receipt_sync_errors \
   test_run_fails_closed_on_malformed_send_and_has_no_reply_command
