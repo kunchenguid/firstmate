@@ -11,6 +11,9 @@
 # default output stays the same two words for every project, bound or not.
 # With --pr it prints one word: the project's registered PR-text posture,
 # auto|manual, "auto" when the project registers none.
+# With --best-practices it prints one word: the project's registered
+# best-practices pack, an <owner>/<repo> this firstmate carries an adapter for,
+# or none. This script is the one parser of that token.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode,
@@ -23,7 +26,10 @@
 # and --forge for bin/fm-spawn.sh's forge agreement and yolo refusal and for
 # bin/fm-promote.sh, which takes the forge binding from here because it is a
 # project fact rather than a task choice. --pr is read the same way by
-# bin/fm-spawn.sh's PR-text agreement and by bin/fm-promote.sh.
+# bin/fm-spawn.sh's PR-text agreement and by bin/fm-promote.sh, and
+# --best-practices by firstmate's intake (it passes the value to
+# bin/fm-brief.sh --best-practices) and by bin/fm-spawn.sh's best-practices
+# agreement and its pack exports.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                                 -> no-mistakes off fm/  (legacy default)
@@ -34,10 +40,11 @@
 #   - <name> [<mode> forge=forgejo] - <desc> (added <date>)          -> <mode> <yolo>, --forge forgejo
 #   - <name> [direct-PR forge=external] - <desc> (added <date>)      -> direct-PR off, --forge external
 #   - <name> [no-mistakes pr=manual] - <desc> (added <date>)         -> no-mistakes off, --pr manual
+#   - <name> [local-only best-practices=<owner>/<repo>] - <desc> ...  -> local-only off, --best-practices <owner>/<repo>
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
-#   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>, and
-#   pr=<value> are recognized by their own shape wherever they appear, and whichever token is
-#   left over is the mode. <prefix> must not contain a space; an empty override
+#   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>,
+#   pr=<value>, and best-practices=<owner>/<repo> are recognized by their own
+#   shape wherever they appear, and whichever token is left over is the mode. <prefix> must not contain a space; an empty override
 #   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
 #   legacy "fm/<task-id>".
 #
@@ -99,6 +106,21 @@
 #   nothing on stdout, exit status 3, the token named. --branch-prefix and
 #   --forge do not make these checks.
 #
+# best-practices (orthogonal to the mode, the forge, pr, and yolo) = which
+#   best-practices pack the project's work follows, named by the pack's
+#   repository rather than its plugin name, because two packs can share a
+#   plugin name. One value per project. Unlike a forge it composes with every
+#   mode, local-only included, because it says how the work is engineered
+#   rather than how it is published. Only --best-practices reads or checks it:
+#   the default, --raw, --forge, --pr, and --branch-prefix outputs are
+#   unchanged by it. A value is refused - nothing on stdout, exit status 3, the
+#   token named - when it is empty, not an <owner>/<repo>, registered twice, or
+#   a repository this firstmate carries no adapter for (the carried list is the
+#   routing object in .agents/skills/best-practices-adapters/SKILL.md);
+#   resolving it to none would quietly drop the pack the captain confirmed.
+#   bin/fm-best-practices.sh proposes and checks it at project-add intake
+#   (docs/best-practices-adapters.md owns the design).
+#
 # A registered `forge=gerrit` project reports yolo=off with an explicit stderr
 # refusal, on the captain's decision of 2026-09-15: a Gerrit Code-Review+2 is a
 # positive attributed claim that a named human approved, read by colleagues and
@@ -128,7 +150,7 @@
 # to the forge binding, so it prints even when the forge token is malformed;
 # every path that reads the forge binding (default, --forge, and spawn's
 # forge-agreement check) still refuses.
-# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>
+# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr|--best-practices] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -140,29 +162,32 @@ RAW=0
 BRANCH_PREFIX_QUERY=0
 WANT_FORGE=0
 WANT_PR=0
+WANT_BEST_PRACTICES=0
 case "${1:-}" in
   --raw) RAW=1; shift ;;
   --branch-prefix) BRANCH_PREFIX_QUERY=1; shift ;;
   --forge) WANT_FORGE=1; shift ;;
   --pr) WANT_PR=1; shift ;;
+  --best-practices) WANT_BEST_PRACTICES=1; shift ;;
 esac
-NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>}
+NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr|--best-practices] <project-name>}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
-  elif [ "$WANT_FORGE" -eq 1 ]; then echo none
+  elif [ "$WANT_FORGE" -eq 1 ] || [ "$WANT_BEST_PRACTICES" -eq 1 ]; then echo none
   elif [ "$WANT_PR" -eq 1 ]; then echo auto; else echo "no-mistakes off"; fi
   exit 0
 fi
 
 # awk emits one "near <token>" line per keyed token whose key is a near miss of
-# `forge`, then "posture <mode> <yolo> <forge> <pr> <branch-prefix>" (branch-prefix
-# is the raw prefix, defaulting to "fm/"; forge is `none` or the whole
-# `forge=<value>` token and pr is `auto` or the whole `pr=<value>` token, so an
-# empty value survives the split), or nothing if the project is
-# absent. Every other token beside the mode is ignored, exactly as before either
+# `forge`, then "posture <mode> <yolo> <forge> <pr> <best-practices>
+# <branch-prefix>" (branch-prefix is the raw prefix, defaulting to "fm/"; forge
+# is `none` or the whole `forge=<value>` token, pr is `auto` or the whole
+# `pr=<value>` token, and best-practices is `none`, the whole
+# `best-practices=<value>` token, or `multiple` when it appears twice, so an
+# empty value survives the split), or nothing if the project is absent. Every other token beside the mode is ignored, exactly as before either
 # annotation existed.
 parsed=$(awk -v n="$NAME" '
   function dist(x, y,   i, j, lx, ly, d, c, v) {
@@ -188,7 +213,7 @@ parsed=$(awk -v n="$NAME" '
     if (substr($0, 1, plen) != prefix) next
     after = substr($0, plen + 1);
     if (after != "" && substr(after, 1, 2) != " [" && substr(after, 1, 3) != " - ") next
-    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none"; pr="auto";
+    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none"; pr="auto"; bp="none";
     if (substr(after, 1, 2) == " [") {
       s="";
       nk = split(after, rest, " ");
@@ -205,6 +230,7 @@ parsed=$(awk -v n="$NAME" '
         if (a[j] ~ /^branch=/) { branch = substr(a[j], 8); continue }
         if (a[j] ~ /^forge=/) { forge = a[j]; continue }
         if (a[j] ~ /^pr=/) { pr = a[j]; continue }
+        if (a[j] ~ /^best-practices=/) { bp = (bp == "none" ? a[j] : "multiple"); continue }
         if (a[j] ~ /^[^=]+=/) {
           key = substr(a[j], 1, index(a[j], "=") - 1);
           e = dist(key, "forge");
@@ -217,7 +243,7 @@ parsed=$(awk -v n="$NAME" '
     }
     # branch is printed LAST: an empty branch= override must survive as an
     # empty final field, which only holds when nothing follows it.
-    print "posture", mode, yolo, forge, pr, branch; exit
+    print "posture", mode, yolo, forge, pr, bp, branch; exit
   }
 ' "$REG")
 
@@ -225,7 +251,7 @@ if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
-  elif [ "$WANT_FORGE" -eq 1 ]; then echo none
+  elif [ "$WANT_FORGE" -eq 1 ] || [ "$WANT_BEST_PRACTICES" -eq 1 ]; then echo none
   elif [ "$WANT_PR" -eq 1 ]; then echo auto; else echo "no-mistakes off"; fi
   exit 0
 fi
@@ -239,8 +265,8 @@ while IFS=' ' read -r kind rest; do
 done <<EOF
 $parsed
 EOF
-while IFS=' ' read -r m y f p b; do
-  mode=$m; yolo=$y; rest_forge=$f; rest_pr=$p; branch=$b
+while IFS=' ' read -r m y f p bp b; do
+  mode=$m; yolo=$y; rest_forge=$f; rest_pr=$p; best_practices=$bp; branch=$b
 done <<EOF
 $posture
 EOF
@@ -253,6 +279,27 @@ esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
 if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
   echo "$branch"
+  exit 0
+fi
+if [ "$WANT_BEST_PRACTICES" -eq 1 ]; then
+  case "$best_practices" in
+    none) echo none; exit 0 ;;
+    multiple)
+      echo "refused: more than one best-practices= token is registered for $NAME in $REG; a project follows one pack, so keep exactly one" >&2
+      exit 3 ;;
+  esac
+  bp_value=${best_practices#best-practices=}
+  # shellcheck source=bin/fm-best-practices-lib.sh
+  . "$SCRIPT_DIR/fm-best-practices-lib.sh"
+  if [ -z "$bp_value" ] || ! fm_bp_token_shape "$bp_value"; then
+    echo "refused: malformed best-practices binding \"$best_practices\" registered for $NAME in $REG; the value is the pack's repository as <owner>/<repo>, such as best-practices=addyosmani/agent-skills; correct the registry entry" >&2
+    exit 3
+  fi
+  if ! fm_bp_known "$bp_value"; then
+    echo "refused: unknown best-practices pack \"$bp_value\" registered for $NAME in $REG; this firstmate carries adapters for: $(fm_bp_adapter_list_words); correct the registry entry or drop the token" >&2
+    exit 3
+  fi
+  echo "$bp_value"
   exit 0
 fi
 
