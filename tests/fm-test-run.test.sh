@@ -55,6 +55,19 @@ test_family_selection() {
   fam_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
   [ "$fam_count" -lt "$all_count" ] \
     || fail "pure-contract-unit must be a proper subset of --all"
+  local spec family script
+  for spec in \
+    pure-contract-unit:fm-merge-local.test.sh \
+    pure-contract-unit:fm-read-repetition.test.sh \
+    live-harness-optin:fm-read-repetition-live.test.sh \
+    standalone:fm-procevent-extension-errors.test.sh
+  do
+    family=${spec%%:*}
+    script=${spec#*:}
+    listed=$("$RUNNER" --list --family "$family") || fail "family selection failed for $family"
+    printf '%s\n' "$listed" | grep -Fxq "tests/$script" \
+      || fail "$family omitted $script"
+  done
   pass "family selection returns a proper subset of the suite"
 }
 
