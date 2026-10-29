@@ -151,7 +151,7 @@ fm_control_interrupt_transport() {  # <harness>
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
 # through Herdr). kiro cancels on a single Escape, printing a `Cancelled ...`
 # row with an idle composer and no repollution (verified live, kiro-cli 2.21.4).
-# through Herdr). cortex cancels on a single Escape, printing the Interrupted row
+# cortex cancels on a single Escape, printing the Interrupted row
 # with an idle composer and firing its Stop hook; an Escape pressed on an idle
 # composer does nothing (verified live, cortex 1.1.104).
 fm_control_interrupt_key() {  # <harness>
