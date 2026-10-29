@@ -1139,8 +1139,9 @@ test_legacy_t3_record_refuses_cleanup_without_creation_server() {
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
     backend=t3code "t3_thread_id=$thread" t3_project_id=proj-1 harness=codex
 
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
-  t3_fake_stop
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
 
   [ "$rc" -ne 0 ] || fail "teardown adopted the selected T3 credential for a legacy record"
   assert_present "$dir/home/state/$id.meta" "legacy T3 refusal removed the task record"
@@ -1148,7 +1149,14 @@ test_legacy_t3_record_refuses_cleanup_without_creation_server() {
   [ ! -s "$dir/runtime.log" ] || fail "legacy T3 refusal invoked a runtime command"
   assert_contains "$(cat "$dir/stderr")" 'creation server identity is missing' \
     "legacy T3 refusal did not explain the missing server evidence"
-  pass "fm-teardown: a legacy T3 record without creation-server evidence is preserved"
+  rc=0
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  t3_fake_stop
+  [ "$rc" -eq 0 ] || fail "forced legacy T3 cleanup refused: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "forced legacy T3 cleanup retained the task record"
+  assert_contains "$(cat "$dir/runtime.log")" treehouse "forced legacy T3 cleanup did not return its worktree"
+  assert_contains "$(cat "$dir/stderr")" '--force authorizes cleanup' "forced cleanup omitted the origin-risk diagnostic"
+  pass "fm-teardown: legacy T3 origin refuses ordinary cleanup and permits explicit force"
 }
 
 # A T3 task whose pool slot was reassigned still archives its own thread, but
