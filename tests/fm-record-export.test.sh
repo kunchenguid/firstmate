@@ -25,6 +25,27 @@ run_export() {  # <home> <args...>
   FM_HOME="$home" "$EXPORTER" "$@"
 }
 
+test_empty_path_overrides_use_defaults() {
+  local home export_root mode root_override home_override
+  for mode in root home; do
+    home=$(make_home "empty-overrides-$mode")
+    export_root="$TMP_ROOT/export-empty-$mode"
+    printf '%s\n' "$export_root" >"$home/config/record-export-root"
+    printf 'projects\n' >"$home/data/projects.md"
+    write_archive_fixture "$home" empty-generation
+    root_override=''
+    home_override=$home
+    if [ "$mode" = home ]; then root_override=$home; home_override=''; fi
+    env FM_ROOT_OVERRIDE="$root_override" FM_HOME="$home_override" FM_CONFIG_OVERRIDE='' FM_DATA_OVERRIDE='' FM_STATE_OVERRIDE='' \
+      "$EXPORTER" sync || fail "sync rejected empty $mode overrides"
+    cmp "$home/data/projects.md" "$export_root/live/data/projects.md" || fail "sync used wrong defaults"
+    env FM_ROOT_OVERRIDE="$root_override" FM_HOME="$home_override" FM_CONFIG_OVERRIDE='' FM_DATA_OVERRIDE='' FM_STATE_OVERRIDE='' \
+      "$EXPORTER" archive-task task-a || fail "archive rejected empty $mode overrides"
+    cmp "$home/state/task-a.meta" "$export_root/archive/task-a/empty-generation/meta" || fail "archive used wrong defaults"
+  done
+  pass "empty path overrides use shell defaults for sync and archive"
+}
+
 test_sync_is_off_when_config_is_absent() {
   local home rc=0
   home=$(make_home sync-off)
@@ -854,3 +875,5 @@ echo "ALL TESTS PASSED"
 
 test_large_collection_uses_bounded_descriptors
 test_archive_retry_preserves_its_required_capture
+
+test_empty_path_overrides_use_defaults
