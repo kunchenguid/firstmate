@@ -463,6 +463,9 @@ cmd_consider() {
   fi
   printf 'midtask_switch=%s\n' \
     "$(switch_object "$cur_h" "$cur_m" "$cur_e" "$ch" "$cm" "$ce" "$reason" "$epoch")" >> "$meta"
+  if status_open_decisions "$(status_path "$id")" | cut -f1 | grep -qx 'midtask-fallback'; then
+    append_status "$id" "resolved [at=$epoch] [key=midtask-fallback]: relaunched on the next eligible profile"
+  fi
   append_status "$id" "switched [at=$epoch]: $cur_h $cur_m $cur_e -> $ch $cm $ce because a usage limit stopped the worker"
   printf 'relaunched: %s %s %s\n' "$ch" "$cm" "$ce"
 }
