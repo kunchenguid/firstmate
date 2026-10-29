@@ -276,6 +276,107 @@ test_missing_jq_stdin_transport_fails_open() {
   pass "missing jq for stdin transport fails open rather than denying every tool call"
 }
 
+run_tool_stdin() {  # <tool> [env...]
+  local tool=$1 rc=0
+  shift
+  : > "$OUT"
+  : > "$ERR"
+  printf '%s' "{\"tool_name\":\"$tool\"}" \
+    | env FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" "$@" \
+      "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+  return "$rc"
+}
+
+expect_allow_stdin() {
+  local label=$1 tool=$2 rc=0
+  shift 2
+  run_tool_stdin "$tool" "$@" || rc=$?
+  [ "$rc" -eq 0 ] || fail "$label ($tool via stdin) must allow, got exit $rc: $(cat "$ERR")"
+  [ ! -s "$OUT" ] || fail "$label ($tool via stdin) allow wrote stdout: $(cat "$OUT")"
+  [ ! -s "$ERR" ] || fail "$label ($tool via stdin) allow wrote stderr: $(cat "$ERR")"
+}
+
+expect_deny_stdin() {
+  local label=$1 tool=$2 rc=0
+  run_tool_stdin "$tool" || rc=$?
+  [ "$rc" -eq 2 ] || fail "$label ($tool via stdin) must deny with exit 2, got $rc"
+  [ ! -s "$OUT" ] || fail "$label ($tool via stdin) deny wrote stdout: $(cat "$OUT")"
+  jq -e '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny"' "$ERR" >/dev/null 2>&1 \
+    || fail "$label ($tool via stdin) deny omitted Claude's permission decision: $(cat "$ERR")"
+}
+
+# ---------------------------------------------------------------------------
+# Builtin-only stdin prefilter (fm-subagent-pretool-check.sh's jq/tr
+# fast-path). The prefilter must never change the verdict the real jq+tr
+# path would reach: these tests drive the same fixtures the CLI-mode tests
+# above use, but through the stdin transport the prefilter actually guards.
+# ---------------------------------------------------------------------------
+
+test_builtin_prefilter_preserves_stdin_classification() {
+  local tool
+  for tool in $DELEGATION_TOOLS; do
+    case "$tool" in
+      TaskOutput|TaskStop|TaskGet|TaskList|CronList) continue ;;
+      TaskCreate|TaskUpdate) continue ;;
+    esac
+    expect_deny_stdin "known delegation tool" "$tool"
+  done
+  for tool in $PRESERVED_TOOLS; do
+    expect_allow_stdin "ordinary tool" "$tool"
+  done
+  for tool in TaskOutput TaskStop TaskGet TaskList CronList BashOutput KillShell; do
+    expect_allow_stdin "observe-or-stop tool" "$tool"
+  done
+  for tool in $PLAN_ONLY_TOOLS; do
+    expect_allow_stdin "session-local todo tool" "$tool"
+  done
+  for tool in $PLAN_ONLY_NEAR_MISSES; do
+    expect_deny_stdin "plan-only near miss" "$tool"
+  done
+  pass "the builtin stdin prefilter never changes the delegation-shape verdict for any known fixture"
+}
+
+test_builtin_prefilter_is_a_strict_superset() {
+  # The prefilter strips everything but letters and digits from the raw
+  # payload before testing for a stem, exactly mirroring the real
+  # lower-case-and-strip normalization below it (minus the lower-casing,
+  # which nocasematch substitutes for). A stem disguised by punctuation or
+  # unusual casing must still reach the real jq+tr classifier and deny -
+  # proving the prefilter adds no bypass the original classifier lacked.
+  local tool
+  for tool in 'Sp-awn' 'De.leg.ate' 'TASK_CREATE_AGENT' 'wORKfLOW' 'mon-itor' 'ta_sk' 'cr_on'; do
+    expect_deny_stdin "punctuation/case-obscured delegation tool" "$tool"
+  done
+  pass "the builtin prefilter is a strict superset of the real stem match, including through punctuation and case"
+}
+
+test_large_stdin_payload_is_classified_promptly() {
+  # A big Write or Edit carries a large, punctuation-heavy tool_input. Such a
+  # payload must still reach the right verdict, and must do so in roughly
+  # linear time rather than stalling the tool call.
+  local filler tool rc start elapsed
+  filler=$(printf '%.0s{[(\\";:,.)]}-+=*&^%%$#@!~ ' $(seq 1 8192))
+  for tool in Write Agent; do
+    rc=0
+    : > "$OUT"
+    : > "$ERR"
+    start=$SECONDS
+    # The filler goes through stdin, not --arg: Linux caps one argv string at
+    # 128KB, so a --arg this large never reaches jq there.
+    printf '%s' "$filler" \
+      | jq -cRs --arg tool "$tool" '{tool_name: $tool, tool_input: {content: .}}' \
+      | env FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+        "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+    elapsed=$((SECONDS - start))
+    [ "$elapsed" -le 5 ] || fail "a large $tool payload took ${elapsed}s to classify"
+    case "$tool" in
+      Write) [ "$rc" -eq 0 ] && [ ! -s "$ERR" ] || fail "a large Write payload must allow, got exit $rc: $(cat "$ERR")" ;;
+      Agent) [ "$rc" -eq 2 ] || fail "a large Agent payload must deny with exit 2, got $rc" ;;
+    esac
+  done
+  pass "a large stdin payload is classified correctly without a superlinear stall"
+}
+
 test_guard_denies_every_currently_known_delegation_tool
 test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
@@ -289,3 +390,6 @@ test_secondmate_home_is_in_scope
 test_stdin_transports_and_output_shapes
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open
+test_builtin_prefilter_preserves_stdin_classification
+test_builtin_prefilter_is_a_strict_superset
+test_large_stdin_payload_is_classified_promptly

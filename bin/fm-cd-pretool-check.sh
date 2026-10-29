@@ -99,8 +99,18 @@ if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
+  # Resolve this script's directory without forking `dirname` on the common
+  # path: Claude always invokes hooks with the absolute
+  # "$CLAUDE_PROJECT_DIR"/bin/... path, so a leading "/" lets a pure
+  # parameter expansion stand in for it. A relative invocation (manual runs,
+  # tests) falls back to the original dirname-based resolution unchanged.
+  case "${BASH_SOURCE[0]}" in
+    /*) _HOOK_LIB_DIR=${BASH_SOURCE[0]%/*}; [ -n "$_HOOK_LIB_DIR" ] || _HOOK_LIB_DIR=/ ;;
+    *) _HOOK_LIB_DIR=$(dirname -- "${BASH_SOURCE[0]}") || exit 0 ;;
+  esac
   # shellcheck source=bin/fm-hook-host-lib.sh
-  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
+  . "$(cd -- "$_HOOK_LIB_DIR" && pwd)/fm-hook-host-lib.sh"
+  unset _HOOK_LIB_DIR
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
