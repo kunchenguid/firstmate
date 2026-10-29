@@ -237,6 +237,37 @@ test_unpushed_ci_ready_done_is_not_published() {
   pass "unpushed CI-ready ship done: is not published upstream"
 }
 
+# Local readiness is recorded by the real ledger pass while it owns metadata.
+test_local_done_head_is_pinned_before_parent_delivery() {
+  local project worker sha
+  make_world local-done-head
+  bind_secondmate local
+  project="$MATE/projects/local"
+  worker="$WORLD/worker"
+  fm_git_worktree "$project" "$worker" fm/child
+  git -C "$worker" commit -q --allow-empty -m approved
+  sha=$(git -C "$worker" rev-parse HEAD)
+  fm_write_meta "$MATE/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$worker" "project=$project" \
+    'harness=codex' 'kind=ship' 'mode=local-only' 'yolo=off' 'spawn_gen=local-one'
+  printf 'done: approved local work\n' > "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE=busy run_reconcile "$MATE"
+  [ "$(sed -n 's/^local_done_head=//p' "$MATE/state/child.meta")" = "$sha" ] \
+    || fail 'the ledger scan did not pin the local done head'
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail 'local done report was not delivered'
+  grep -Fq 'child child done: approved local work' "$MAIN/state/mate.status" \
+    || fail 'the parent did not receive the local done report'
+  run_report "$MATE" child || fail 'repeated locked report failed'
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail 'the same done report was delivered twice'
+  git -C "$worker" commit -q --allow-empty -m later
+  printf 'done: later local work\n' >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE=busy run_reconcile "$MATE"
+  [ "$(sed -n 's/^local_done_head=//p' "$MATE/state/child.meta")" = "$sha" ] \
+    || fail 'a later head replaced the first readiness pin'
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail 'an unapproved later head was reported'
+  pass 'inactive reconciliation pins local readiness under its existing lock before one parent delivery'
+}
+
 # The ledger pass runs on every poll, so a ship done: already delivered does
 # not pay for the git reachability check again.
 test_delivered_ledger_done_skips_git_gate() {
@@ -1041,6 +1072,7 @@ SH
 test_main_direct_terminal_presentation_receipt
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
+test_local_done_head_is_pinned_before_parent_delivery
 test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once

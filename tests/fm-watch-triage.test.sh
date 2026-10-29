@@ -4537,12 +4537,18 @@ test_heartbeat_backstop_surfaces_a_masked_status() {
   printf 'working: setup\nneeds-decision: pick A or B\nworking: tidying the branch\n' \
     > "$state/miss.status"
   sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
+  printf '3\n' > "$state/.heartbeat-streak"
+  touch "$state/.last-heartbeat"
+  set_mtime "$(( $(date +%s) - 30 ))" "$state/.last-heartbeat"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 \
     || fail "heartbeat backstop missed a decision hidden behind a later working: line"
-  grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
+  [ "$(cat "$state/.heartbeat-streak")" = 0 ] || fail "actionable backstop did not reset idle heartbeat backoff"
+  awk -F '\t' '$3 == "heartbeat" && $4 == "heartbeat" { found=1 } END { exit !found }' \
+    "$state/.wake-queue" || fail "actionable backstop did not preserve the heartbeat wake"
+  grep -Fx heartbeat "$out" >/dev/null || fail "backstop did not preserve its heartbeat wake reason"
   [ "$(status_presentation_marker_offset "$state/.hb-surfaced-miss" "$state/miss.status")" = \
     "$(size_of "$state/miss.status")" ] \
     || fail "backstop did not record the masked status as surfaced through its end"
@@ -4559,17 +4565,42 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   # fleet-scan backstop must catch it and wake firstmate.
   printf 'done: PR https://example.test/pr/5\n' > "$state/miss.status"
   sig=$(seen_sig "$state/miss.status"); printf '%s' "$sig" > "$state/.seen-miss_status"
+  printf '3\n' > "$state/.heartbeat-streak"
+  touch "$state/.last-heartbeat"
+  set_mtime "$(( $(date +%s) - 30 ))" "$state/.last-heartbeat"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "heartbeat backstop did not surface an unsurfaced captain-relevant status"
-  grep -Fx "heartbeat" "$out" >/dev/null || fail "backstop did not exit with a heartbeat wake"
+  [ "$(cat "$state/.heartbeat-streak")" = 0 ] || fail "actionable backstop did not reset idle heartbeat backoff"
+  awk -F '\t' '$3 == "heartbeat" && $4 == "heartbeat" { found=1 } END { exit !found }' \
+    "$state/.wake-queue" || fail "actionable backstop did not preserve the heartbeat wake"
+  grep -Fx heartbeat "$out" >/dev/null || fail "backstop did not preserve its heartbeat wake reason"
   [ "$(status_presentation_marker_offset "$state/.hb-surfaced-miss" "$state/miss.status")" = \
     "$(size_of "$state/miss.status")" ] \
     || fail "backstop did not record the status as surfaced through its end (would re-fire next heartbeat)"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the backstop heartbeat failed"
-  grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not queued"
+  grep "$(printf '\theartbeat\theartbeat\t')" "$drain_out" >/dev/null || fail "backstop heartbeat was not drained"
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
+}
+
+test_afk_heartbeat_preserves_idle_accounting() {
+  local dir state fakebin out pid
+  dir=$(make_case afk-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  date '+%s' > "$state/.afk"
+  printf '3\n' > "$state/.heartbeat-streak"
+  touch "$state/.last-heartbeat"
+  set_mtime "$(( $(date +%s) - 30 ))" "$state/.last-heartbeat"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "away-mode heartbeat did not hand off to daemon triage"
+  [ "$(cat "$state/.heartbeat-streak")" = 4 ] || fail "away-mode heartbeat did not preserve idle backoff accounting"
+  awk -F '\t' '$3 == "heartbeat" && $4 == "heartbeat" { found=1 } END { exit !found }' \
+    "$state/.wake-queue" || fail "away-mode heartbeat did not enqueue a heartbeat wake"
+  grep -Fx heartbeat "$out" >/dev/null || fail "away-mode heartbeat lost its transport wake reason"
+  pass "away-mode heartbeat keeps daemon triage and idle backoff accounting"
 }
 
 # --- beacon stays fresh while absorbing -------------------------------------
@@ -4985,6 +5016,7 @@ fm_test_run \
   test_heartbeat_no_change_absorbed \
   test_heartbeat_backstop_surfaces_unsurfaced_status \
   test_heartbeat_backstop_surfaces_a_masked_status \
+  test_afk_heartbeat_preserves_idle_accounting \
   test_beacon_stays_fresh_while_absorbing \
   test_afk_signal_records_heartbeat_endpoint \
   test_afk_present_reverts_watcher_to_one_shot \

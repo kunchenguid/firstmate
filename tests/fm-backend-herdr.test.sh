@@ -168,6 +168,49 @@ SH
   printf '%s\n' "$fb"
 }
 
+# make_herdr_owned_server_fakebin: a stateful server stub for the ownership
+# markers. `status` reports its socket in $FM_HERDR_SESSION_DIR, reports running while $FM_HERDR_SERVER_MARKER exists and counts each
+# read in $FM_HERDR_STATUS_COUNT, and `server` records its launch in
+# $FM_HERDR_START_LOG. A `sleep` stub returns at once and counts each wait in
+# $FM_HERDR_SLEEP_COUNT; when $FM_HERDR_FLIP_AFTER is set, the wait with that
+# number applies $FM_HERDR_FLIP: `up` brings the server up and ends the
+# replacement, `clear` only ends the replacement, mimicking an owner that
+# finishes its work while Firstmate waits.
+make_herdr_owned_server_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json")
+    echo $(( $(cat "$FM_HERDR_STATUS_COUNT" 2>/dev/null || echo 0) + 1 )) > "$FM_HERDR_STATUS_COUNT"
+    if [ -e "$FM_HERDR_SERVER_MARKER" ]; then
+      printf '{"server":{"running":true,"socket":"%s/herdr.sock"}}\n' "$FM_HERDR_SESSION_DIR"
+    else
+      printf '{"server":{"running":false,"socket":"%s/herdr.sock"}}\n' "$FM_HERDR_SESSION_DIR"
+    fi
+    ;;
+  server*)
+    echo started >> "$FM_HERDR_START_LOG"
+    : > "$FM_HERDR_SERVER_MARKER"
+    ;;
+esac
+SH
+  cat > "$fb/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+n=$(( $(cat "$FM_HERDR_SLEEP_COUNT" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$FM_HERDR_SLEEP_COUNT"
+if [ -n "${FM_HERDR_FLIP_AFTER:-}" ] && [ "$n" -eq "$FM_HERDR_FLIP_AFTER" ]; then
+  rm -f "$FM_HERDR_SESSION_DIR/firstmate-server-replacing"
+  [ "${FM_HERDR_FLIP:-}" != up ] || : > "$FM_HERDR_SERVER_MARKER"
+fi
+SH
+  chmod +x "$fb/herdr" "$fb/sleep"
+  printf '%s\n' "$fb"
+}
+
 # make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
 # real container behavior the workspace-leak fix (and the default-tab-prune
 # safety fix) depend on, so a full spawn->teardown cycle can be replayed
@@ -1231,6 +1274,110 @@ test_server_ensure_scrubs_home_and_harness_identity() {
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
   pass "fm_backend_herdr_server_ensure: scrubs home and harness identity without disturbing unrelated environment or session routing"
+}
+
+# run_owned_server_ensure: run server_ensure for fmtest against
+# make_herdr_owned_server_fakebin rooted at <dir>, printing its output; any
+# extra NAME=value arguments are added to its environment.
+run_owned_server_ensure() {  # <dir> [NAME=value...]
+  local dir=$1 fb
+  shift
+  fb=$(make_herdr_owned_server_fakebin "$dir")
+  (
+    # shellcheck disable=SC2163 # each argument is a NAME=value assignment.
+    [ "$#" -eq 0 ] || export "$@"
+    PATH="$fb:$PATH" FM_HERDR_SESSION_DIR="$dir/session" FM_HERDR_SERVER_MARKER="$dir/running" \
+      FM_HERDR_STATUS_COUNT="$dir/status-count" FM_HERDR_SLEEP_COUNT="$dir/sleep-count" FM_HERDR_START_LOG="$dir/starts" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT" 2>&1
+  )
+}
+
+test_server_ensure_starts_a_firstmate_owned_server() {
+  local dir out status
+  dir="$TMP_ROOT/server-owned-default"; mkdir -p "$dir/session"
+  out=$(run_owned_server_ensure "$dir")
+  status=$?
+  expect_code 0 $status "server_ensure should start a stopped server the session directory does not mark as externally owned"
+  [ "$(cat "$dir/starts" 2>/dev/null)" = started ] || fail "server_ensure did not start exactly one Firstmate-owned server: $out"
+  pass "fm_backend_herdr_server_ensure: still starts a stopped server when no ownership marker is present"
+}
+
+test_server_ensure_never_starts_an_externally_managed_server() {
+  local dir out status
+  dir="$TMP_ROOT/server-owned-external"; mkdir -p "$dir/session"
+  printf 'systemd user unit herdr-fmtest.service\n' > "$dir/session/firstmate-server-owner"
+  out=$(run_owned_server_ensure "$dir")
+  status=$?
+  [ "$status" -ne 0 ] || fail "server_ensure must fail when an externally managed server stays down"
+  [ ! -e "$dir/starts" ] || fail "server_ensure started a server that an external owner manages"
+  [ "$(cat "$dir/sleep-count")" = 60 ] || fail "server_ensure should give up after its 60 bounded waits, got $(cat "$dir/sleep-count")"
+  [ "$(cat "$dir/status-count")" = 61 ] || fail "server_ensure should read status once plus once per bounded wait, got $(cat "$dir/status-count")"
+  assert_contains "$out" "managed by systemd user unit herdr-fmtest.service" "the error should name the owner from the marker"
+  assert_contains "$out" "will not start it" "the error should say Firstmate did not start the server"
+  pass "fm_backend_herdr_server_ensure: an externally managed server that stays down gets a bounded wait, no start, and an error naming its owner"
+}
+
+test_server_ensure_uses_a_running_externally_managed_server() {
+  local dir out status
+  dir="$TMP_ROOT/server-owned-external-up"; mkdir -p "$dir/session"
+  printf 'systemd user unit herdr-fmtest.service\n' > "$dir/session/firstmate-server-owner"
+  : > "$dir/running"
+  out=$(run_owned_server_ensure "$dir")
+  status=$?
+  expect_code 0 $status "server_ensure should use a running externally managed server: $out"
+  [ ! -e "$dir/sleep-count" ] || fail "server_ensure waited on a running externally managed server with no replacement in progress"
+  [ ! -e "$dir/starts" ] || fail "server_ensure started a server that an external owner manages"
+  pass "fm_backend_herdr_server_ensure: a running externally managed server is used at once"
+}
+
+test_server_ensure_waits_out_a_server_replacement() {
+  local dir out status
+  dir="$TMP_ROOT/server-owned-replacing"; mkdir -p "$dir/session"
+  : > "$dir/session/firstmate-server-replacing"
+  out=$(run_owned_server_ensure "$dir" FM_HERDR_FLIP_AFTER=3 FM_HERDR_FLIP=up)
+  status=$?
+  expect_code 0 $status "server_ensure should proceed once the replaced server reports running: $out"
+  [ ! -e "$dir/starts" ] || fail "server_ensure started a server during a replacement"
+  [ "$(cat "$dir/sleep-count")" = 3 ] || fail "server_ensure should have waited until the replacement ended on the third wait, got $(cat "$dir/sleep-count")"
+  pass "fm_backend_herdr_server_ensure: a replacement marker makes it wait without starting, then proceed once the server is running"
+}
+
+test_server_ensure_holds_callers_off_a_running_server_during_a_replacement() {
+  local dir out status
+  dir="$TMP_ROOT/server-owned-replacing-running"; mkdir -p "$dir/session"
+  : > "$dir/session/firstmate-server-replacing"
+  : > "$dir/running"
+  out=$(run_owned_server_ensure "$dir" FM_HERDR_FLIP_AFTER=4 FM_HERDR_FLIP=clear)
+  status=$?
+  expect_code 0 $status "server_ensure should proceed once the replacement marker clears: $out"
+  [ ! -e "$dir/starts" ] || fail "server_ensure started a server during a replacement"
+  [ "$(cat "$dir/sleep-count" 2>/dev/null)" = 4 ] || fail "server_ensure released its caller to a running server while the replacement marker remained: $(cat "$dir/sleep-count" 2>/dev/null) waits"
+  pass "fm_backend_herdr_server_ensure: a running server is not used while a replacement marker remains"
+}
+
+test_server_ensure_resumes_ownership_after_a_replacement_clears() {
+  local dir out status
+  dir="$TMP_ROOT/server-owned-replacing-cleared"; mkdir -p "$dir/session"
+  : > "$dir/session/firstmate-server-replacing"
+  out=$(run_owned_server_ensure "$dir" FM_HERDR_FLIP_AFTER=2 FM_HERDR_FLIP=clear)
+  status=$?
+  expect_code 0 $status "server_ensure should start its own server once a replacement ends with the server down: $out"
+  [ "$(cat "$dir/starts" 2>/dev/null)" = started ] || fail "server_ensure did not start its own server after the replacement marker cleared"
+  pass "fm_backend_herdr_server_ensure: with no owner marker, a cleared replacement hands back to the Firstmate-owned start"
+}
+
+test_server_ensure_reports_a_replacement_that_never_ends() {
+  local dir out status
+  dir="$TMP_ROOT/server-owned-replacing-stuck"; mkdir -p "$dir/session"
+  : > "$dir/session/firstmate-server-replacing"
+  : > "$dir/running"
+  out=$(run_owned_server_ensure "$dir")
+  status=$?
+  [ "$status" -ne 0 ] || fail "server_ensure must fail when a replacement never finishes, even with the server running"
+  [ ! -e "$dir/starts" ] || fail "server_ensure started a server while the replacement marker remained"
+  [ "$(cat "$dir/sleep-count")" = 60 ] || fail "server_ensure should give up after its 60 bounded waits, got $(cat "$dir/sleep-count")"
+  assert_contains "$out" "is being replaced ($dir/session/firstmate-server-replacing)" "the error should name the replacement marker"
+  pass "fm_backend_herdr_server_ensure: a replacement that never ends fails naming its marker instead of starting or using a server"
 }
 
 test_container_ensure_reuses_existing_workspace() {
@@ -6056,6 +6203,13 @@ test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_server_ensure_scrubs_home_and_harness_identity
+test_server_ensure_starts_a_firstmate_owned_server
+test_server_ensure_never_starts_an_externally_managed_server
+test_server_ensure_uses_a_running_externally_managed_server
+test_server_ensure_waits_out_a_server_replacement
+test_server_ensure_holds_callers_off_a_running_server_during_a_replacement
+test_server_ensure_resumes_ownership_after_a_replacement_clears
+test_server_ensure_reports_a_replacement_that_never_ends
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label

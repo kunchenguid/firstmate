@@ -27,6 +27,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 - `--command <exact string>` for OpenCode, Pi, pi-signed, and omp.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
+- `--agy` for Antigravity CLI, reading stdin JSON from `.toolCall.args.CommandLine`, `.toolCall.args.command`, `.toolInput.command`, or `.tool_input.command`, denying redundant manual arming when a watcher is healthy, and emitting `{"decision":"deny","reason":...}` on stdout with exit 0.
 
 The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
