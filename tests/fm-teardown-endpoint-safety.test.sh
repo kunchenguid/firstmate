@@ -1127,6 +1127,30 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+test_legacy_t3_record_refuses_cleanup_without_creation_server() {
+  local dir id=legacy-t3-task rc=0 thread=mcp:8c9d0e1f-2a3b-4c5d-8e6f-7a8b9c0d1e2f
+  command -v node >/dev/null 2>&1 || { printf 'note: %s skipped: node absent\n' "${FUNCNAME[0]}"; return 0; }
+  dir=$(make_case legacy-t3-server)
+  t3_fake_start "$dir/t3-server"
+  t3_fake_case "$dir/t3-case" '{}'
+  t3_fake_credential "$dir/home/config/t3code-token"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    backend=t3code "t3_thread_id=$thread" t3_project_id=proj-1 harness=codex
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  t3_fake_stop
+
+  [ "$rc" -ne 0 ] || fail "teardown adopted the selected T3 credential for a legacy record"
+  assert_present "$dir/home/state/$id.meta" "legacy T3 refusal removed the task record"
+  assert_present "$dir/worktree/sentinel" "legacy T3 refusal removed the worktree"
+  [ ! -s "$dir/runtime.log" ] || fail "legacy T3 refusal invoked a runtime command"
+  assert_contains "$(cat "$dir/stderr")" 'creation server identity is missing' \
+    "legacy T3 refusal did not explain the missing server evidence"
+  pass "fm-teardown: a legacy T3 record without creation-server evidence is preserved"
+}
+
 # A T3 task whose pool slot was reassigned still archives its own thread, but
 # T3's slot cleanup undoes a tracked Codex overlay, so only the slot's
 # ownership keeps it off the claimant's overlay.
@@ -1902,6 +1926,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_legacy_t3_record_refuses_cleanup_without_creation_server
 test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
