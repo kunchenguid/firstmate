@@ -192,11 +192,11 @@
 # state is retired with the home, and local removal failure restores that state
 # before preserving the route for retry. After a successful local or remote
 # secondmate retirement, every parent pending-reply record for that id (resolved
-# leftovers included) and its delivery confirmation is removed so retired mates
-# cannot leave durable reply expectations behind. Non-forced retirement refuses
-# while any of those records is still unresolved. Teardown then discards child
-# work, kills child runtime endpoints, and removes the retired home. Removing a
-# leased home releases its durable treehouse lease so the pool slot is freed,
+# leftovers included), its delivery confirmation, and its full-request sidecar
+# are removed so retired mates cannot leave durable reply expectations behind.
+# Non-forced retirement refuses while any of those records is still unresolved.
+# Teardown then discards child work, kills child runtime endpoints, and removes
+# the retired home. Removing a leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
@@ -1095,8 +1095,8 @@ remote_recovery_paths_validate() {
 }
 
 # Remove every parent pending-reply record for $ID, plus its delivery
-# confirmation when present. Shared by local and remote secondmate retirement
-# after the home/route is safely gone.
+# confirmation and full-request sidecar when present. Shared by local and remote
+# secondmate retirement after the home/route is safely gone.
 pending_replies_cleanup_for_task() {
   local pending_dir=$1 expected_real=${2-} rec base corr task_id request_path
   [ -d "$pending_dir" ] || return 0

@@ -35,10 +35,6 @@
 #   parent_status=          absolute path of parent state/<task_id>.status
 #   parent_status_scan_signature=
 #   request_summary=        short sanitized summary (no secrets by design)
-# The complete original request is kept in a sibling <corr_id>.request file
-# with mode 600, so recovery can identify it without putting it in the record's
-# key=value fields. It is removed once the record resolves. Legacy records
-# without that sibling fall back to the summary.
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
 #                           (empty until delivery; delivery never resolves)
@@ -75,6 +71,10 @@
 #                           missed-report escalation, are eligible - measured
 #                           from the relevant turn's completion (request or
 #                           recovery), never from delivery or send time
+# The complete original request is kept in a sibling .<corr_id>.request file
+# with mode 600, so recovery can identify it without putting it in the record's
+# key=value fields. It is removed once the record resolves. Legacy records
+# without that sibling fall back to request_summary.
 #
 # Escalation lifecycle: an escalation is not just a message, it OPENS a durable
 # keyed decision in the parent status log, and bin/fm-classify-lib.sh's fold is
