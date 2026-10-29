@@ -943,7 +943,8 @@ assert_equals released "$(ios_lifecycle "$GEN")" "the next remote handoff strand
 pass "remote terminal-holder readmission publishes its new binding and stays counted when policy returns"
 
 for VERB in launch relaunch; do
-  bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" ios 0 && : > "$3" && exec sleep 600' \
+  env FM_HOME="$HOST_HOME" FM_ROOT_OVERRIDE="$HOST_ROOT" STATE="$HOST_HOME/state/parent-route" \
+    FM_STATE_OVERRIDE="$HOST_HOME/state/parent-route" bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" ios 0 && : > "$3" && exec sleep 600' \
     _ "$ROOT" "$HOST_HOME/state/parent-route" "$TMP/unpooled-$VERB-episode" &
   HOST_BLOCKER=$!
   for _ in $(seq 1 50); do [ -e "$TMP/unpooled-$VERB-episode" ] && break; sleep 0.1; done
@@ -966,7 +967,9 @@ done
 
 for VERB in launch relaunch disposition; do
   # shellcheck disable=SC2016 # Variables expand in the child shell.
-  env ROOT="$ROOT" HOST_HOME="$HOST_HOME" VERB="$VERB" bash -c '
+  env ROOT="$ROOT" HOST_HOME="$HOST_HOME" VERB="$VERB" FM_HOME="$HOST_HOME" \
+    FM_ROOT_OVERRIDE="$HOST_ROOT" STATE="$HOST_HOME/state/parent-route" \
+    FM_STATE_OVERRIDE="$HOST_HOME/state/parent-route" bash -c '
     . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
     fm_supervisor_lifecycle_acquire "$HOST_HOME/state/parent-route" ios 0 || exit 1
     lock=$(fm_supervisor_lifecycle_lock_path "$HOST_HOME/state/parent-route" ios)
