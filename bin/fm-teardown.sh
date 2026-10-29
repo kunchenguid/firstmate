@@ -3051,6 +3051,10 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
     "$abs_home_path.retiring."*)
       retired=$FM_REMOTE_RETIRE_STAGE
       case "${retired#"$abs_home_path.retiring."}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+      if [ -e "$retired" ] || [ -L "$retired" ]; then
+        [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
+        rmdir "$retired" || return 1
+      fi
       mkdir -m 700 "$retired" || return 1 ;;
     *) retired=$(mktemp -d "${abs_home_path}.retiring.XXXXXX") || return 1 ;;
   esac
