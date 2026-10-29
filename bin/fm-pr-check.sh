@@ -24,6 +24,8 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
+# That merge-time re-record also skips the degraded baseline read below, so it
+# makes no forge read the merge's own live reads would duplicate.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
@@ -231,35 +233,37 @@ fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$N
 # control lock the watcher holds while it reads and dedupes, and before the
 # metadata is rewritten: a stalled or failed read fails registration with the
 # task metadata and the previously published poll unchanged. Lock order is
-# control -> meta -> publish (bin/fm-pr-merge.sh already holds control while it
-# runs this script, so a merge-time re-record skips taking it).
+# control -> meta -> publish. A merge-time re-record neither takes the lock
+# (bin/fm-pr-merge.sh already holds it) nor reads or rewrites the baseline: it
+# records before any forge call, and the marker it leaves is keyed to the PR
+# identity, so it can only ever match the PR it was written for.
 if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   CONTROL_LOCK="$STATE/.control-$ID.lock"
   fm_lock_acquire_wait "$CONTROL_LOCK" || exit 1
   CONTROL_LOCK_HELD=1
-fi
-# The read runs under the control lock the watcher waits on, so it is bounded
-# by the watcher's own check bound.
-BASELINE_RC=0
-BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
-if [ "$BASELINE_RC" != 0 ]; then
-  if [ "$BASELINE_RC" = 124 ]; then
-    echo "error: baseline read of the PR poll timed out" >&2
-  elif [ "$BASELINE_RC" = 3 ]; then
-    echo "error: baseline read of the PR poll could not read the forge" >&2
-  else
-    echo "error: baseline read of the PR poll failed" >&2
+  # The read runs under the control lock the watcher waits on, so it is
+  # bounded by the watcher's own check bound.
+  BASELINE_RC=0
+  BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
+  if [ "$BASELINE_RC" != 0 ]; then
+    if [ "$BASELINE_RC" = 124 ]; then
+      echo "error: baseline read of the PR poll timed out" >&2
+    elif [ "$BASELINE_RC" = 3 ]; then
+      echo "error: baseline read of the PR poll could not read the forge" >&2
+    else
+      echo "error: baseline read of the PR poll failed" >&2
+    fi
+    exit 1
   fi
-  exit 1
+  case $BASELINE in
+    'degraded head='*|'degraded pipeline='*)
+      BASELINE=${BASELINE#degraded }
+      BASELINE=${BASELINE%% *}
+      ;;
+    ontrain) BASELINE=train=on ;;
+    *) BASELINE= ;;
+  esac
 fi
-case $BASELINE in
-  'degraded head='*|'degraded pipeline='*)
-    BASELINE=${BASELINE#degraded }
-    BASELINE=${BASELINE%% *}
-    ;;
-  ontrain) BASELINE=train=on ;;
-  *) BASELINE= ;;
-esac
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
@@ -298,9 +302,11 @@ META_LOCK_HELD=0
 # The baseline read above replaces the marker of any watch this registration
 # replaces, just before the new poll is published and still under the control
 # lock, so no watcher read falls between them.
-if [ -z "$BASELINE" ] || ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
-    "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE"; then
-  rm -f -- "$STATE/$ID.pr-poll-degraded"
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  if [ -z "$BASELINE" ] || ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE"; then
+    rm -f -- "$STATE/$ID.pr-poll-degraded"
+  fi
 fi
 
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"

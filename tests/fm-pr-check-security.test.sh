@@ -1572,6 +1572,25 @@ test_arming_baselines_an_already_degraded_change() {
   grep -q 'could not read the forge' "$dir/unreadable.err" || fail "arming did not name the unreadable GitHub baseline read"
   [ ! -e "$state/task-a.check.sh" ] || fail "an unreadable GitHub baseline read published a poll"
   pass "an unreadable baseline read fails arming and keeps the previous watch"
+
+  # The merge-time re-record makes no forge read of its own, so an unreadable
+  # forge cannot fail it before the merge's own live reads, and the watch's
+  # marker for that same PR stays exactly as the watcher left it.
+  dir=$(make_case degraded-baseline-merge-record)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_task_meta "$dir" task-a
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "arming a GitLab watch with a failed head pipeline failed before the merge-time re-record"
+  "$REAL_CP" "$state/task-a.pr-poll-degraded" "$dir/marker.before"
+  : > "$dir/glab.log"
+  FM_PR_CHECK_MERGE=1 FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/merge-record.err" \
+    || fail "the merge-time re-record failed on an unreadable forge: $(cat "$dir/merge-record.err")"
+  [ ! -s "$dir/glab.log" ] || fail "the merge-time re-record read the forge: $(cat "$dir/glab.log")"
+  cmp -s "$dir/marker.before" "$state/task-a.pr-poll-degraded" \
+    || fail "the merge-time re-record changed the watch's degraded marker"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the merge-time re-record did not republish a valid poll"
+  pass "the merge-time re-record skips the baseline read and keeps the watch's marker"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -2977,7 +2996,6 @@ EOF
   set +e
   FM_TEST_GLAB_FAIL=1 run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
   rc=$?
-  set -e
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a GitLab merge request it could not read"
   grep -qF 'could not read the GitLab merge request state before merging' "$dir/merge-c.err" \
