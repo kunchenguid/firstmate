@@ -14,7 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
-| Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review-configpark-on-review-configauto-land) |
+| Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review-configpark-on-review-configno-auto-land) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -800,17 +800,18 @@ With the file absent, nothing is armed and an already armed check prints nothing
 Creating the flag takes effect at the next session start, or immediately after `bin/fm-pr-health.sh arm`.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
-## Park on review (config/park-on-review, config/auto-land)
+## Park on review (config/park-on-review, config/no-auto-land)
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review, while keeping its branch, PR, task record, instructions, and local copy.
 A lane parks only from a verified clean, ready-to-merge state: open and not a draft, no conflicts, CI green on the current head, no changes requested, zero unresolved review threads, and every automated reviewer (CodeRabbit, Greptile, or a login listed in `config/contribution-review-bots`) having posted on the current head, or a quiet window having passed since CI finished on it.
 Anything else keeps the worker working, and the verdict is re-read from the forge immediately before the agent is stopped, so a head that moved in between refuses the park.
 A parked lane's local copy is durably leased so the worktree pool never hands it out, and new comments, failing checks, requested changes, a conflict, an unresolved thread, or a new push relaunch a fresh worker in the same copy on the same branch with the trigger in its instructions.
+A branch that merely fell behind its base does not relaunch a parked lane.
 Without the flag, `bin/fm-park.sh park <task-id>` still parks one lane on request.
 
-The optional local, gitignored `config/auto-land` presence flag opts every ship lane into automatic cleanup when its merge poll sees the PR or merge request merged: the lane is torn down through `bin/fm-teardown.sh` and its local copy returned, and the outcome joins the merge notification.
-A parked lane is always cleaned up this way, flag or not, because no agent is left to do it.
-Either flag also reports a PR or merge request closed without merging, once.
+By default every ship lane is cleaned up automatically when its merge poll sees the PR or merge request merged, including squash and merge-train merges: the lane is torn down through `bin/fm-teardown.sh` (never forced, so unlanded or uncommitted work still refuses) and its local copy returned, and the outcome joins the merge notification.
+A PR or merge request closed without merging is reported once.
+The optional local, gitignored `config/no-auto-land` presence flag opts out of both for lanes that are not parked; a parked lane is always cleaned up, because no agent is left to do it.
 GitHub pull requests and GitLab merge requests are supported.
 Both flags are home-local preferences and are not inherited by secondmate homes.
 [`bin/fm-park.sh`](../bin/fm-park.sh) owns the clean-state predicate, the quiet window (`FM_PARK_QUIET_SECS`, default 900 seconds), the relaunch triggers, and the read bounds.

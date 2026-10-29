@@ -56,6 +56,7 @@ make_world() {
 # Serves gh.<n>.json for the n-th GraphQL read, repeating the last one.
 n=\$(( \$(cat "$world/gh.count" 2>/dev/null || echo 0) + 1 ))
 printf '%s\n' "\$n" > "$world/gh.count"
+[ ! -f "$world/gh.\$n.sh" ] || sh "$world/gh.\$n.sh"
 f="$world/gh.\$n.json"
 [ -f "\$f" ] || f=\$(ls "$world"/gh.*.json | sort -t. -k2 -n | tail -1)
 cat "\$f"
@@ -64,7 +65,10 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$world/glab.log"
 case "\$*" in
-  *"/discussions"*) cat "$world/gl.discussions.json" ;;
+  *"/discussions"*)
+    cat "$world/gl.discussions.json"
+    case "\$*" in *--paginate*) [ ! -f "$world/gl.discussions.2.json" ] || cat "$world/gl.discussions.2.json" ;; esac
+    ;;
   *) cat "$world/gl.mr.json" ;;
 esac
 SH
@@ -108,13 +112,15 @@ run_park() {  # <world> <args...>
 }
 
 # GitHub GraphQL fixture. Fields default to a clean PR whose only reviewer bot
-# reviewed the current head; key=value arguments override them.
+# reviewed the current head; key=value arguments override them. The head's one
+# check suite was created at pushed= (default: the committer time; none: no
+# check suite).
 gh_fixture() {  # <out> [key=value...]
   local out=$1 kv
   shift
   local state=OPEN draft=false head mergeable=MERGEABLE mss=BLOCKED decision=REVIEW_REQUIRED
   local rollup='"SUCCESS"' completed=$OLD_ISO committed=$OLD_ISO threads='[]' total=0
-  local review_oid bot_at=$OLD_ISO comments='[]' extra_reviews=''
+  local review_oid bot_at=$OLD_ISO comments='[]' extra_reviews='' pushed=''
   head=$(cat "$(dirname "$out")/head")
   review_oid=$head
   for kv in "$@"; do
@@ -124,15 +130,18 @@ gh_fixture() {  # <out> [key=value...]
       rollup=*) rollup=${kv#*=} ;; completed=*) completed=${kv#*=} ;; committed=*) committed=${kv#*=} ;;
       threads=*) threads=${kv#*=} ;; total=*) total=${kv#*=} ;; review_oid=*) review_oid=${kv#*=} ;;
       bot_at=*) bot_at=${kv#*=} ;; comments=*) comments=${kv#*=} ;; extra_reviews=*) extra_reviews=${kv#*=} ;;
+      pushed=*) pushed=${kv#*=} ;;
     esac
   done
+  local suites="[{\"createdAt\":\"${pushed:-$committed}\"}]"
+  [ "$pushed" != none ] || suites='[]'
   local rollup_obj=null
   [ "$rollup" = null ] || rollup_obj="{\"state\":$rollup,\"contexts\":{\"nodes\":[{\"__typename\":\"CheckRun\",\"completedAt\":\"$completed\"}]}}"
   cat > "$out" <<JSON
 {"data":{"repository":{"pullRequest":{
   "state":"$state","isDraft":$draft,"headRefOid":"$head","mergeable":"$mergeable",
   "mergeStateStatus":"$mss","reviewDecision":"$decision",
-  "commits":{"nodes":[{"commit":{"oid":"$head","committedDate":"$committed","statusCheckRollup":$rollup_obj}}]},
+  "commits":{"nodes":[{"commit":{"oid":"$head","committedDate":"$committed","checkSuites":{"nodes":$suites},"statusCheckRollup":$rollup_obj}}]},
   "reviewThreads":{"totalCount":$total,"nodes":$threads},
   "reviews":{"nodes":[{"author":{"login":"coderabbitai","__typename":"Bot"},"state":"COMMENTED","body":"lgtm",
     "submittedAt":"$bot_at","updatedAt":"$bot_at","commit":{"oid":"$review_oid"}}$extra_reviews]},
@@ -219,7 +228,17 @@ test_github_gate_waits_for_review_bots_or_quiet_window() {
     comments='[{"author":{"login":"greptile","__typename":"User"},"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}]'
   printf 'greptile\n' > "$w/config/contribution-review-bots"
   expect_unclean "$w" listed-bot "automated reviewers (coderabbitai, greptile)"
-  pass "github gate waits for every reviewer bot to post on the current head, or the quiet window"
+  rm -f "$w/config/contribution-review-bots"
+  # The head was committed before the bot's last edit on the previous head but
+  # pushed after it: the push, not the commit, decides.
+  gh_fixture "$w/gh.1.json" review_oid=0000000000000000000000000000000000000001 committed="$OLD_ISO" \
+    bot_at=2026-01-01T00:05:00Z pushed="$NOW_ISO" completed="$NOW_ISO"
+  expect_unclean "$w" committed-before-push "automated reviewers (coderabbitai) have not posted on this head"
+  # With no check suite on the head, the committer time stands in for the push.
+  gh_fixture "$w/gh.1.json" review_oid=0000000000000000000000000000000000000001 committed="$OLD_ISO" \
+    bot_at="$NOW_ISO" pushed=none completed="$NOW_ISO"
+  expect_clean "$w" no-check-suite
+  pass "github gate waits for every reviewer bot to post on the current head since it was pushed, or the quiet window"
 }
 
 test_gitlab_gate_clean_and_unclean_conditions() {
@@ -241,7 +260,16 @@ test_gitlab_gate_clean_and_unclean_conditions() {
   # CodeRabbit's group bot posted before this head's pipeline was created.
   gl_fixture "$w" created="$NOW_ISO" finished="$NOW_ISO"
   expect_unclean "$w" gl-bot-stale "automated reviewers (group_42_bot_abc) have not posted on this head"
-  pass "gitlab gate: clean MR parks, and draft, conflict, rebase, CI running/failed/absent, changes requested, other merge blockers, unresolved threads and a stale review bot each refuse"
+  # A full first page of system-note discussions: every page is read.
+  gl_fixture "$w" notes="$(jq -cn '[range(100) | {notes: [{author: {username: "root"}, system: true, created_at: "2026-01-01T00:00:00Z", resolvable: false}]}]')"
+  printf '%s\n' '[{"notes":[{"author":{"username":"group_42_bot_abc"},"system":false,"created_at":"2026-01-01T00:05:00Z","resolvable":false}]}]' \
+    > "$w/gl.discussions.2.json"
+  expect_clean "$w" gl-second-page
+  printf '%s\n' '[{"notes":[{"author":{"username":"bob"},"system":false,"created_at":"2026-01-01T00:06:00Z","resolvable":true,"resolved":false}]}]' \
+    > "$w/gl.discussions.2.json"
+  expect_unclean "$w" gl-second-page-thread "1 review thread(s) unresolved"
+  rm -f "$w/gl.discussions.2.json"
+  pass "gitlab gate: clean MR parks, and draft, conflict, rebase, CI running/failed/absent, changes requested, other merge blockers, unresolved threads and a stale review bot each refuse, across every page of discussions"
 }
 
 test_park_stops_agent_records_lane_and_leases_slot() {
@@ -278,6 +306,28 @@ test_park_refuses_when_head_moves_after_the_verdict() {
   [ ! -e "$w/state/lane.review-park" ] || fail "head-moved: a park record was left behind"
   ! grep -q "parked on review" "$w/state/lane.status" || fail "head-moved: a parked line was appended"
   pass "a head change between the verdict and the stop refuses the park and leaves the agent running"
+}
+
+test_park_refuses_when_the_lane_is_steered_before_the_stop() {
+  local w out rc
+  w=$(make_world park-steered "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  printf 'mkdir -p "%s/state/lane.inbox"; : > "%s/state/lane.inbox/001.msg"\n' "$w" "$w" > "$w/gh.2.sh"
+  rc=0; out=$(run_park "$w" park lane 2>&1) || rc=$?
+  case "$rc:$out" in 1:*"steering inbox"*) ;; *) fail "steered-inbox: $rc $out" ;; esac
+  [ ! -e "$w/control.log" ] || fail "steered-inbox: the agent was stopped: $(cat "$w/control.log")"
+  [ ! -e "$w/state/lane.review-park" ] || fail "steered-inbox: a park record was left behind"
+
+  rm -rf "$w/state/lane.inbox" "$w/gh.count"
+  cat > "$w/gh.2.sh" <<SH
+printf 'v1 gen=gen1 seq=9 state=busy source=claude-hook event=UserPromptSubmit ts=%s\\n' "\$(date +%s)" > "$w/state/lane.busy-state"
+SH
+  rc=0; out=$(run_park "$w" park lane 2>&1) || rc=$?
+  case "$rc:$out" in 1:*"the agent is not idle"*) ;; *) fail "steered-busy: $rc $out" ;; esac
+  [ ! -e "$w/control.log" ] || fail "steered-busy: the agent was stopped: $(cat "$w/control.log")"
+  [ ! -e "$w/state/lane.review-park" ] || fail "steered-busy: a park record was left behind"
+  ! grep -q "parked on review" "$w/state/lane.status" || fail "steered: a parked line was appended"
+  pass "an instruction or a new turn arriving after the preflight refuses the park before the agent is stopped"
 }
 
 test_park_preflight_refusals_leave_the_agent_running() {
@@ -406,6 +456,30 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   pass "head change, failing checks, changes requested, an unresolved thread, a conflict, and new GitHub or GitLab comments each relaunch a fresh worker with the trigger in its instructions"
 }
 
+test_behind_base_does_not_relaunch() {
+  local w out
+  w=$(make_world trig-behind "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" mss=BEHIND
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "behind: tick acted: $out"
+  [ -e "$w/state/lane.review-park" ] || fail "behind: park record lost"
+  pass "a parked branch that merely fell behind its base stays parked"
+}
+
+test_tick_starts_no_action_that_outlasts_its_budget() {
+  local w out
+  w=$(make_world tick-budget "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  printf 'sleep 2\n' > "$w/gh.1.sh"
+  out=$(FM_PARK_TICK_SECS=3 run_park "$w" tick 2>&1)
+  [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "budget: a relaunch started past the tick budget: $out"
+  [ -e "$w/state/lane.review-park" ] || fail "budget: the park record was lost"
+  ! grep -q '^resume_error=' "$w/state/lane.review-park" || fail "budget: the park record notes a failed relaunch"
+  rm -f "$w/gh.1.sh" "$w/gh.count"
+  expect_relaunch "$w" budget-next "checks are failing"
+  pass "a tick never starts a lane action its remaining budget cannot hold, and the next tick takes it"
+}
+
 test_quiet_parked_lane_and_approval_do_not_relaunch() {
   local w later out
   later=$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
@@ -444,21 +518,25 @@ test_closed_pr_is_reported_once() {
   [ -z "$out" ] || fail "closed: reported twice: $out"
   [ ! -e "$w/control.log" ] || fail "closed: a lifecycle call was made"
 
+  w=$(make_world closed-opted-out "$GL_URL"); gl_fixture "$w" state=closed
+  : > "$w/config/no-auto-land"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] && [ ! -e "$w/glab.log" ] || fail "closed-opted-out: tick acted under config/no-auto-land: $out"
+
   w=$(make_world closed-unparked "$GL_URL"); gl_fixture "$w" state=closed
   out=$(run_park "$w" tick 2>&1)
-  [ -z "$out" ] || fail "closed-unparked: tick acted with nothing configured: $out"
-  : > "$w/config/auto-land"
-  out=$(run_park "$w" tick 2>&1)
   [ "$out" = "closed lane: PR $GL_URL was closed without merging; the lane needs a decision" ] || fail "closed-unparked: $out"
-  pass "a PR or MR closed without merging is reported once, parked or not, and never relaunched"
+  pass "a PR or MR closed without merging is reported once by default, parked or not, never relaunched, and silent under config/no-auto-land"
 }
 
 test_tick_parks_clean_idle_lanes_only_when_opted_in() {
   local w out
   w=$(make_world auto-park "$GL_URL"); gl_fixture "$w"
   out=$(run_park "$w" tick 2>&1)
-  [ -z "$out" ] && [ ! -e "$w/control.log" ] && [ ! -e "$w/glab.log" ] \
-    || fail "auto-park: tick read or acted without config: $out"
+  [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "auto-park: tick parked without config/park-on-review: $out"
+  : > "$w/config/no-auto-land"; rm -f "$w/glab.log"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] && [ ! -e "$w/glab.log" ] || fail "auto-park: tick read under config/no-auto-land alone: $out"
   : > "$w/config/park-on-review"
   gl_fixture "$w" pstatus=running
   out=$(run_park "$w" tick 2>&1)
@@ -467,25 +545,27 @@ test_tick_parks_clean_idle_lanes_only_when_opted_in() {
   out=$(run_park "$w" tick 2>&1)
   case "$out" in "parked lane: PR $GL_URL clean at "*) ;; *) fail "auto-park: tick output $out" ;; esac
   [ -e "$w/state/lane.review-park" ] || fail "auto-park: no record"
-  pass "tick reads nothing without opt-in, never parks an unclean lane, and parks a clean idle one under config/park-on-review"
+  pass "tick parks nothing without opt-in, reads nothing when opted out of cleanup too, never parks an unclean lane, and parks a clean idle one under config/park-on-review"
 }
 
-test_land_cleans_up_parked_or_opted_in_lanes() {
+test_land_cleans_up_by_default_unless_opted_out() {
   local w out rc
   w=$(make_world land-off "$GH_URL")
+  : > "$w/config/no-auto-land"
   out=$(run_park "$w" land lane --if-eligible 2>&1)
-  [ -z "$out" ] && [ ! -e "$w/teardown.log" ] || fail "land: acted on an unparked lane without config/auto-land: $out"
-  : > "$w/config/auto-land"
+  [ -z "$out" ] && [ ! -e "$w/teardown.log" ] || fail "land: acted on an unparked lane under config/no-auto-land: $out"
+  rm -f "$w/config/no-auto-land"
   out=$(run_park "$w" land lane --if-eligible 2>&1)
   [ "$out" = "cleaned up: lane torn down and its working copy returned" ] || fail "land: $out"
   [ "$(cat "$w/teardown.log")" = lane ] || fail "land: teardown was not called exactly once without --force: $(cat "$w/teardown.log")"
 
   w=$(make_world land-parked "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  : > "$w/config/no-auto-land"
   : > "$w/teardown.refuse"
   rc=0; out=$(run_park "$w" land lane --if-eligible 2>&1) || rc=$?
   [ "$rc" = 1 ] || fail "land-refused: exit $rc"
   [ "$out" = "automatic cleanup refused: REFUSED: worktree has work not on any remote and not landed." ] || fail "land-refused: $out"
-  pass "merge-time cleanup tears down a parked lane or any lane under config/auto-land through teardown's own gates, and surfaces a refusal"
+  pass "merge-time cleanup tears down every lane by default and a parked lane even under config/no-auto-land, through teardown's own gates, and surfaces a refusal"
 }
 
 fm_test_run \
@@ -494,11 +574,14 @@ fm_test_run \
   test_gitlab_gate_clean_and_unclean_conditions \
   test_park_stops_agent_records_lane_and_leases_slot \
   test_park_refuses_when_head_moves_after_the_verdict \
+  test_park_refuses_when_the_lane_is_steered_before_the_stop \
   test_park_preflight_refusals_leave_the_agent_running \
   test_repark_reuses_its_own_lease_and_refuses_a_foreign_one \
   test_each_relaunch_trigger_relaunches_a_fresh_worker \
+  test_behind_base_does_not_relaunch \
+  test_tick_starts_no_action_that_outlasts_its_budget \
   test_quiet_parked_lane_and_approval_do_not_relaunch \
   test_failed_relaunch_keeps_record_and_stops_retrying \
   test_closed_pr_is_reported_once \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
-  test_land_cleans_up_parked_or_opted_in_lanes
+  test_land_cleans_up_by_default_unless_opted_out
