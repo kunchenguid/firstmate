@@ -321,10 +321,30 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
   *"#{cursor_y}"*) printf '4\n'; exit 0 ;;
 esac
+# The window this spawn created, so exact tmux target membership checks see it
+# while it lives and lose it once it is closed.
+window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows)
+    [ ! -s "$window_file" ] || cat "$window_file"
+    exit 0
+    ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    printf '%s\n' "$name" > "$window_file"
+    exit 0
+    ;;
+  kill-window)
+    : > "$window_file"
+    exit 0
+    ;;
+  has-session|new-session) exit 0 ;;
   send-keys)
     literal=; prev=
     for arg in "$@"; do
@@ -422,7 +442,9 @@ $1
 EOF
 }
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+NODE_BIN=$(command -v node) || fail "test needs node"
+NODE_BIN_DIR=$(dirname "$NODE_BIN")
+BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 run_kiro_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6

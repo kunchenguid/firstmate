@@ -15,6 +15,9 @@ Scope: V2 engine only (`--agent-engine v2`). The v3/KAS engine is out of scope a
 - Tool: `kiro-cli 2.21.4`, installed via toolbox at `~/.toolbox/bin/kiro-cli` (a bash sandbox shim that runs `aim sandbox --client kiro-cli`, whose descendant is the compiled bun/node binary).
 - Auth: a signed-in account. On this Amazon Linux 2 host auth state lives in the XDG data dir `~/.local/share/kiro-cli/data.sqlite3`, not under `KIRO_HOME`. That path does not exist on macOS, so both the location and the untouched-by-relocation premise resting on it are Amazon Linux 2 measurements only - see "What is NOT verified" for the macOS gap and what it costs.
 - Three measurements in this record rest on later builds: the idle composer's placeholder colour (`38;2;158;158;158`) and its 256-colour encoding (`38;5;247`) were measured on `kiro-cli 2.21.5` on macOS, and the default-foreground idle row with its `↵` hint was measured on `kiro-cli 2.28.0`. Every other claim here was measured on 2.21.4 on the Amazon Linux 2 host above.
+- Re-verification: 2026-10-29 on `kiro-cli 2.35.1` (native x86-64 ELF at `~/.local/bin/kiro-cli`, no toolbox wrapper) on WSL2 Linux 6.18, through tmux 3.6 and Herdr 0.9.5.
+  Auth is the signed-in account's state under `~/.local/share/kiro-cli`, untouched by `KIRO_HOME` relocation.
+  "2026-10-29 re-verification on kiro-cli 2.35.1" below owns that run, and where it disagrees with a 2.21.4 observation above it supersedes it.
 
 ## Agent-config hooks are claude-shaped (V2)
 
@@ -108,7 +111,68 @@ Its footer matcher now folds the captured screen and calls the delivery guard `f
 Its hook commands are now single-token absolute paths to generated scripts, the shape the spawn emits, where the recorded run used bare `touch` commands, so the trigger firing is what the markers now prove.
 It now reads the live pane's foreground process group while the turn is in flight and fails unless some comm or argv[0] basename in that group is exactly `kiro-cli`, `fm_backend_agent_state tmux` reads `alive`, and `fm-harness.sh ancestry` returns `comm kiro` for one of that group's pids.
 It deliberately does not assert `#{pane_current_command}`, which reports the launcher's name wherever kiro-cli sits behind a wrapper, and captures that field only as the `/quit` exit baseline, where the exit now requires a readable command that differs from the captured one instead of accepting any non-matching value.
-Re-running the guard on the Linux desk where the real tool lives is what would prove all four.
+The 2026-10-29 run on kiro-cli 2.35.1 exercised the guard as it stands today, so those four changes are now proven against the real tool: see "2026-10-29 re-verification on kiro-cli 2.35.1".
+
+## 2026-10-29 re-verification on kiro-cli 2.35.1
+
+Why: the adapter was first verified on 2.21.4 and 2.28.0.
+This run re-proves it on the installed 2.35.1 after bringing the branch up to date with a main that gained Command Code, Polytoken, and Cortex.
+Every step below drives the real Firstmate verbs (`bin/fm-spawn.sh`, `bin/fm-send.sh`, `bin/fm-control.sh`, `bin/fm-teardown.sh`) in a private tmux server with a throwaway home, project, and worktree.
+Only worktree allocation is a stand-in (a `treehouse` shim that enters a prepared clone), and each worker used its per-task `KIRO_HOME`, so nothing under the operator's real `~/.kiro` or account settings changed.
+
+Models used.
+The scout ran on Auto: no `--model` was passed, `--list-models` reports `"default_model":"auto"`, and the pane's status row read `firstmate · auto`.
+The ship ran on `--model glm-5 --effort low`: `--list-models` lists `glm-5` at a 0.5 rate multiplier against Auto's 1.0, the spawn validated it, `state/<id>.meta` recorded `model=glm-5`, and the pane's status row read `firstmate · glm-5`.
+The model catalog on this account also lists `claude-opus-5.5`, `claude-sonnet-5.5`, `claude-haiku-5.5`, `gpt-5.6-*`, `kimi-k3`, `claude-*-4.x`, `deepseek-3.2`, `minimax-m2.*`, and `qwen3-coder-next`.
+kiro prints a `Credits: turn <n> | session <n>` line after each turn; the trivial lab turns cost 0.24 to 0.42 credits each.
+
+| Step | Verb | Result on 2.35.1 |
+|---|---|---|
+| Scout launch on Auto | `fm-spawn --scout --harness kiro` | Launched with no key sent; the endpoint reads `alive`; the per-task `KIRO_HOME` holds `agents/firstmate.json`, both hook scripts, and `settings/cli.json` seeding `chat.disableTrustAllConfirmation`. |
+| Trust modal | `--trust-all-tools` | Suppressed by the seeded setting: the brief ran unattended. A control launch with an empty `KIRO_HOME` still stops on `Warning: Kiro is running in trust all tools mode` with `No, exit` preselected, so the setting is still required. |
+| Brief and detection | launch brief | The brief ran; `fm-harness.sh` run from kiro's own shell tool printed `kiro`. |
+| Busy and idle | hooks | `userPromptSubmit` opened `busy kiro-hook`; `stop` closed it to `idle kiro-hook` and touched `state/<id>.turn-ended`. |
+| Doorbell | `fm-send` | The durable message was read, acted on, and moved to `handled/`. |
+| Busy footer | delivery guard | A long turn rendered `› Kiro is working · 1s · Type to steer · Ctrl+S to queue`, and `fm_busy_lines_match kiro` matched it. |
+| Interrupt | `fm-control interrupt` | One Escape printed `• Cancelled streaming`, returned the idle composer, and left the worker `alive`. The command reported `cancel=unconfirmed`, as the adapter documents. |
+| Relaunch | `fm-control relaunch --note` | A replacement kiro worker started and acted on the note. |
+| Exit | `fm-control exit` | The worker stopped and the backend read it `dead`. |
+| Teardown | `fm-teardown` | The scout's task record and `state/<id>.kiro-home` were removed. |
+| Ship launch on glm-5 | `fm-spawn --mode local-only --yolo off --model glm-5 --effort low` | The brief ran, the busy record opened and closed, and the turn-ended marker was touched. |
+| Herdr composer probe | `herdr` lab session | See below. |
+
+Differences from 2.21.4 and 2.28.0, and what each cost.
+- The busy footer now carries an elapsed time: `› Kiro is working · 1s · Type to steer · Ctrl+S to queue`.
+  The delivery guard matches the `Kiro is working` literal, so nothing changed.
+- A running turn also renders `ᗤ Thinking... (esc to cancel)` above the composer, and the idle composer renders `/copy to clipboard` under its placeholder row.
+  Both were already handled, the second being the footer the cursorless composer read must not absorb.
+- The idle placeholder row is `›  ask a question or describe a task ↵` in the default foreground with a reverse-video cursor cell.
+  That is the hinted shape recorded for 2.28.0, so the hinted idle row is what reads it `empty`.
+- `--help` marks `--agent-engine v2` as the default engine and lists `--v3`, `--tui`, and `--legacy-ui` beside it.
+  The adapter still pins `--agent-engine v2` and the V2 TUI rendered as recorded, so those flags stay unused.
+- `stop` still does not fire on an Escape cancel.
+  A probe with a counting hook saw one `userPromptSubmit` at turn start and no `stop` in the 20 seconds after the cancel.
+  A cancelled turn therefore leaves the record `busy kiro-hook` until the next prompt, which is the limitation already listed under "What is NOT verified", now re-measured.
+- Nothing else in the adapter needed to change for 2.35.1.
+
+Herdr probe.
+A kiro worker launched in a pane of an isolated Herdr lab session (every call through `bin/fm-herdr-lab.sh`, teardown clean, default session untouched) read as follows.
+
+| Read | Result |
+|---|---|
+| Native agent detection | `agent: kiro`, `agent_status: idle` |
+| `fm_backend_herdr_composer_state`, harness named `kiro` | `empty` |
+| Same read, no harness named | `pending` |
+| Same read, harness named `claude` | `pending` |
+| `fm_backend_herdr_send_text_submit` with a steer, harness named `kiro` | `empty`, and the steered prompt produced its reply |
+| `fm_backend_herdr_send_text_submit '/quit'` | `empty`, and the backend then read the agent `dead` |
+
+The `pending` rows are the reason the composer scope exists: on the real Herdr read the kiro placeholder reads as typed input unless the caller names the recorded harness, and naming any other harness leaves every other adapter's read untouched.
+
+Commands that refresh this evidence after a kiro upgrade.
+- `FM_KIRO_SIGNALS_LIVE=1 tests/fm-kiro-signals-live-e2e.test.sh` passed on 2026-10-29 against kiro-cli 2.35.1 on Auto: the busy footer matched in flight, the foreground group carried the anchored `kiro-cli` name and read `alive`, the ancestry walk returned `comm kiro`, the launch prompt was answered, both hooks fired per turn, one Escape cancelled a long turn, and `/quit` stopped the process.
+- `tests/fm-kiro-harness.test.sh` and `tests/fm-composer-lib.test.sh` are the portable regressions CI enforces.
+- `kiro-cli chat --agent-engine v2 --list-models -f json` shows the live model catalog the spawn validates against.
 
 ## Steering a kiro worker: fixed
 
@@ -162,4 +226,4 @@ A settled-pane union negative also has to run after a tool-call turn settles, be
 - Whether kiro V2 hands a hook `command` string to a shell or splits it into argv. Nothing depends on it: both hook commands are single-token absolute paths to scripts the spawn generates under `state/<id>.kiro-home/hooks/`, so the same script runs either way, and the redirect, the `|| true` tolerance of a refused event and the turn-end `touch` all sit inside the script where the interpreter is fixed by its shebang. The portable regression executes each generated script directly rather than through `sh -c`, so a shape that only a shell could run cannot pass CI.
 - Whether a settled kiro pane can carry a stale `esc to cancel` row that the harness-less union matches. This is an inference from the token list and the delivery path, not an observation: kiro renders that token in its tool-call region, agy's `esc[[:space:]]+to[[:space:]]+cancel` alternative is in `FM_DELIVERY_BUSY_REGEX_DEFAULT`, both submit-core reads pass no harness, and a busy read is what lets `fm_composer_queued_enter_verdict` convert a proven `pending` composer to `empty` - so a stale row surviving into the folded tail would let an undelivered steer be recorded as delivered. No run has been observed doing this, and the guard's settled-pane negative runs against the harness-scoped signature rather than the union, so its recorded pass does not bear on it. Narrowing or harness-splitting the union would change agy's delivery semantics and is out of scope for this adapter.
 - Primary or secondmate operation: no supervision protocol exists, and `bin/fm-spawn.sh` refuses a secondmate launch.
-- Backends other than tmux for the rendered surface (the portable regression drives the signals apart with real processes; the live guard exercises tmux).
+- Backends other than tmux for the full lifecycle (the portable regression drives the signals apart with real processes; the live guards exercise tmux). A Herdr composer probe is recorded below, but a complete spawn, interrupt, relaunch, and teardown on Herdr was not run.
