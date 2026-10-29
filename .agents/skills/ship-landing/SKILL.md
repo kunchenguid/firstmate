@@ -21,7 +21,7 @@ A captain instruction to merge is explicit authority; `yolo` is the only standin
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
-A lane parked on review (`bin/fm-park.sh`; [`docs/configuration.md`](../../../docs/configuration.md#park-on-review-configpark-on-review-configauto-land) owns the opt-ins) has no agent: it relaunches itself on review activity and is cleaned up automatically when its merge poll sees the merge, so its merge notification already carries the cleanup outcome or the teardown refusal to investigate.
+A lane parked on review (`bin/fm-park.sh`; [`docs/configuration.md`](../../../docs/configuration.md#park-on-review-configpark-on-review-configno-auto-land) owns the opt-ins) has no agent: it relaunches itself on review activity and is cleaned up automatically when its merge poll sees the merge, so its merge notification already carries the cleanup outcome or the teardown refusal to investigate.
 `bin/fm-park.sh park <id>` parks one clean lane on request and `bin/fm-park.sh resume <id> --trigger <text>` relaunches one by hand.
 
 Tear down a ship task only after landing is confirmed.

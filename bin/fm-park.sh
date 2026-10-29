@@ -13,7 +13,7 @@
 #
 # gate is read-only: one fresh forge read of the task's recorded pr= (GitHub
 # through one gh GraphQL read, GitLab through glab api for the merge request and
-# its discussions), never a cached verdict. It prints "clean head=<sha>" and
+# all pages of its discussions), never a cached verdict. It prints "clean head=<sha>" and
 # exits 0, or prints one "unclean: <reason>" line per failing condition and
 # exits 3; an unreadable forge, an unsupported provider, or a missing pr= exits 1
 # and is never clean. Clean means ready to merge except for a human approval:
@@ -28,8 +28,9 @@
 #   - automated reviewers settled: every reviewer bot that has ever posted on
 #     the PR has posted on the current head (a review bound to the head, or any
 #     comment or review created or edited at or after the head was pushed), or
-#     the quiet window has elapsed since the anchor. The push time is the head
-#     commit's committer time on GitHub and the head pipeline's creation on
+#     the quiet window has elapsed since the anchor. The push time is the
+#     earliest check suite created on the head commit on GitHub (its committer
+#     time only when no check suite exists) and the head pipeline's creation on
 #     GitLab; the anchor is the later of that and the newest CI completion on
 #     the head, so the window never starts before CI finished. A reviewer bot is a GitHub Bot account or
 #     [bot] login, a GitLab group or project access-token bot
@@ -48,7 +49,8 @@
 # later get never hands the copy out and prune never removes it even if the
 # endpoint shell dies; bin/fm-teardown.sh's treehouse return releases it),
 # writes state/<id>.review-park, evaluates the gate again with --expect-head
-# immediately before the stop, stops the agent with bin/fm-control.sh exit
+# immediately before the stop, checks once more that the agent is idle and the
+# inbox empty, stops the agent with bin/fm-control.sh exit
 # (endpoint, branch, PR, task record, brief, and copy all stay), and appends a
 # declared paused: line to the task's status log (reported upward in a
 # secondmate home). A refusal at any step removes the record and leaves the
@@ -64,27 +66,33 @@
 #
 # land runs bin/fm-teardown.sh <task-id> (never --force), so every teardown
 # gate still applies, and prints one outcome line. With --if-eligible it does
-# nothing unless the task is parked or config/auto-land exists. bin/fm-watch.sh
-# calls it from its merged-poll path after the merge outcome is recorded.
+# nothing when config/no-auto-land exists and the task is not parked.
+# bin/fm-watch.sh calls it for every merged lane from its merged-poll path after
+# the merge outcome is recorded.
 #
-# tick is what bin/fm-watch.sh runs every check interval. With no
-# config/park-on-review, no config/auto-land, and no park record it exits after
-# those file tests. Otherwise, holding state/.review-park-tick.lock (a held
-# lock exits silently):
+# tick is what bin/fm-watch.sh runs every check interval. With
+# config/no-auto-land, no config/park-on-review, and no park record it exits
+# after those file tests. Otherwise, holding state/.review-park-tick.lock (a
+# held lock exits silently):
 #   - each parked lane gets one forge read; a trigger relaunches it, a merge is
 #     left to the merge poll, and a close without merge is reported once;
-#   - with either config file, each other idle ship lane with pr= and an armed
-#     merge poll gets one forge read: a close without merge is reported once
-#     (marker state/.review-park-closed-<id>), and with config/park-on-review a
-#     clean gate parks it.
+#   - unless config/no-auto-land exists without config/park-on-review, each
+#     other idle ship lane with pr= and an armed merge poll gets one forge read:
+#     a close without merge is reported once (marker
+#     state/.review-park-closed-<id>), and with config/park-on-review a clean
+#     gate parks it.
 # Relaunch triggers on a parked lane: the head moved, checks failing, changes
-# requested, a merge conflict or a base the branch fell behind, any unresolved
-# review thread, or any new comment, review or note created after the park
-# (an approval with no body is not a comment). It prints one line per action
-# taken, which the watcher turns into one wake; a quiet tick prints nothing.
-# Forge reads are bounded by FM_PARK_READ_SECS (default 15), actions by
-# FM_PARK_ACTION_SECS (default 300), and new reads stop once FM_PARK_TICK_SECS
-# (default 240) has elapsed.
+# requested, a merge conflict, any unresolved review thread, or any new
+# comment, review or note created after the park (an approval with no body is
+# not a comment). A branch merely behind its base is not a trigger. It prints
+# one line per action taken, which the watcher turns into one wake; a quiet
+# tick prints nothing.
+# Forge reads are bounded by FM_PARK_READ_SECS (default 15) and actions by
+# FM_PARK_ACTION_SECS (default 300). A whole tick, actions included, ends within
+# FM_PARK_TICK_SECS (default 180), well under the watcher's stale grace: every
+# timed step is cut to what the tick has left, an action from tick is bounded by
+# two thirds of that budget, and one starts (and a park stops its agent) only
+# while its full bound still fits.
 #
 # list prints each parked lane: id, PR, parked head, and when it parked.
 #
@@ -121,7 +129,7 @@ CREW_STATE_BIN="${FM_PARK_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 QUIET_SECS=${FM_PARK_QUIET_SECS:-900}
 READ_SECS=${FM_PARK_READ_SECS:-15}
 ACTION_SECS=${FM_PARK_ACTION_SECS:-300}
-TICK_SECS=${FM_PARK_TICK_SECS:-240}
+TICK_SECS=${FM_PARK_TICK_SECS:-180}
 for v in "$QUIET_SECS" "$READ_SECS" "$ACTION_SECS" "$TICK_SECS"; do
   case "$v" in ''|*[!0-9]*) printf 'fm-park: timing overrides must be whole seconds\n' >&2; exit 2 ;; esac
 done
@@ -147,9 +155,25 @@ lock_try() {  # <lock-path>
   fm_lock_try_acquire "$1" || return 1
   LOCKS_HELD="$LOCKS_HELD $1"
 }
+
+# The epoch second a tick must end by; empty outside tick.
+DEADLINE=
+# step_secs <secs> prints that bound cut to what the tick has left, and fails
+# once nothing is left.
+step_secs() {  # <secs>
+  local left
+  [ -n "$DEADLINE" ] || { printf '%s\n' "$1"; return 0; }
+  left=$(( DEADLINE - $(date +%s) ))
+  [ "$left" -gt 0 ] || return 1
+  if [ "$left" -lt "$1" ]; then printf '%s\n' "$left"; else printf '%s\n' "$1"; fi
+}
+# Succeeds while a whole lane action still fits in the tick.
+action_fits() { [ "$(step_secs "$ACTION_SECS" || true)" = "$ACTION_SECS" ]; }
+
 # One lane action run from tick, in a subshell so its refusal cannot end the
 # tick; the subshell releases only the locks it took itself.
 lane_action() {  # <command> <args...>
+  action_fits || return 0
   ( LOCKS_HELD=; trap release_locks EXIT; "$@" ) || true
 }
 
@@ -157,6 +181,15 @@ agent_idle() {  # <id>
   local verdict
   verdict=$(fm_busy_classify_meta "$STATE/$1.meta" "$1" "$STATE" 2>/dev/null || true)
   case "$verdict" in idle\ *) return 0 ;; *) return 1 ;; esac
+}
+
+# An idle agent with no instruction waiting for it; prints the refusal and
+# returns 1 otherwise.
+agent_quiet() {  # <id>
+  if find "$STATE/$1.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | grep -q .; then
+    echo "an instruction is waiting in the steering inbox"; return 1
+  fi
+  agent_idle "$1" || { echo "the agent is not idle ($(fm_busy_classify_meta "$STATE/$1.meta" "$1" "$STATE" 2>/dev/null || echo unknown))"; return 1; }
 }
 
 task_id_ok() { [ -n "$1" ] && fm_pr_task_id_valid "$1"; }
@@ -191,7 +224,7 @@ review_bots_json() {
 
 GITHUB_QUERY='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){
   state isDraft headRefOid mergeable mergeStateStatus reviewDecision
-  commits(last:1){nodes{commit{oid committedDate statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{completedAt} ... on StatusContext{createdAt}}}}}}}
+  commits(last:1){nodes{commit{oid committedDate checkSuites(first:100){nodes{createdAt}} statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{completedAt} ... on StatusContext{createdAt}}}}}}}
   reviewThreads(first:100){totalCount nodes{isResolved}}
   reviews(last:100){nodes{author{login __typename} state body submittedAt updatedAt commit{oid}}}
   comments(last:100){nodes{author{login __typename} createdAt updatedAt}}
@@ -218,7 +251,7 @@ GITHUB_NORMALIZE='
       ci: (if $r == null then "none" elif $r.state == "SUCCESS" then "success"
            elif ($r.state | IN("FAILURE","ERROR")) then "failure" else "pending" end),
       ci_done_at: ([$r.contexts.nodes[]? | (.completedAt // .createdAt)] | map(select(. != null)) | max),
-      pushed_at: $c.committedDate,
+      pushed_at: ([$c.checkSuites.nodes[]?.createdAt | select(. != null)] | min // $c.committedDate),
       changes_requested: ($p.reviewDecision == "CHANGES_REQUESTED"),
       threads_unresolved: ([$p.reviewThreads.nodes[] | select(.isResolved | not)] | length),
       threads_complete: ($p.reviewThreads.totalCount <= ($p.reviewThreads.nodes | length)),
@@ -256,30 +289,37 @@ GITLAB_NORMALIZE='
       pushed_at: ($mr.head_pipeline.created_at // null),
       changes_requested: ($s == "requested_changes"),
       threads_unresolved: ([$d[] | select(any(.notes[]?; .resolvable == true and .resolved != true))] | length),
-      threads_complete: (($d | length) < 100),
+      threads_complete: true,
       activity: [$d[] | .notes[]? | select(.system != true)
         | {author: (.author.username // "ghost"), bot: false, at: .created_at,
            touched: (.updated_at // .created_at), on_head: false, approval_only: false}]
     }'
 
 snapshot() {  # <pr-url>
-  local url=$1 raw mr discussions enc
+  local url=$1 raw mr discussions enc secs
   fm_pr_url_parse "$url" || return 1
   case "$FM_PR_PROVIDER" in
     github)
       command -v gh >/dev/null 2>&1 || return 1
       fm_pr_github_host_export "$FM_PR_HOST"
-      raw=$(fm_run_timed "$READ_SECS" gh api graphql -f query="$GITHUB_QUERY" \
+      secs=$(step_secs "$READ_SECS") || return 1
+      raw=$(fm_run_timed "$secs" gh api graphql -f query="$GITHUB_QUERY" \
         -F "owner=${FM_PR_PATH%%/*}" -F "repo=${FM_PR_PATH#*/}" -F "number=$FM_PR_NUMBER" 2>/dev/null) || return 1
       printf '%s' "$raw" | jq -c "$GITHUB_NORMALIZE" 2>/dev/null
       ;;
     gitlab)
       command -v glab >/dev/null 2>&1 || return 1
       enc=$(jq -rn --arg p "$FM_PR_PATH" '$p | @uri')
-      mr=$(fm_run_timed "$READ_SECS" glab api --hostname "$FM_PR_HOST" \
+      secs=$(step_secs "$READ_SECS") || return 1
+      mr=$(fm_run_timed "$secs" glab api --hostname "$FM_PR_HOST" \
         "projects/$enc/merge_requests/$FM_PR_NUMBER" 2>/dev/null) || return 1
-      discussions=$(fm_run_timed "$READ_SECS" glab api --hostname "$FM_PR_HOST" \
+      secs=$(step_secs "$READ_SECS") || return 1
+      discussions=$(fm_run_timed "$secs" glab api --paginate --hostname "$FM_PR_HOST" \
         "projects/$enc/merge_requests/$FM_PR_NUMBER/discussions?per_page=100" 2>/dev/null) || return 1
+      [ -n "$discussions" ] || return 1
+      # --paginate prints one JSON array per page; together they are one list.
+      discussions=$(printf '%s\n' "$discussions" \
+        | jq -cs '[.[] | if type == "array" then .[] else error("invalid discussions page") end]' 2>/dev/null) || return 1
       printf '%s\n%s\n' "$mr" "$discussions" | jq -cs "$GITLAB_NORMALIZE" 2>/dev/null
       ;;
     *) return 1 ;;
@@ -325,8 +365,7 @@ TRIGGER_PROGRAM="$JQ_TIME"'
         (if $s.head != $head then "the head moved to \($s.head[0:12])" else empty end),
         (if $s.ci == "failure" then "checks are failing on \($s.head[0:12])" else empty end),
         (if $s.changes_requested then "changes were requested" else empty end),
-        (if $s.conflict == "conflict" then "the PR has merge conflicts"
-         elif $s.conflict == "behind" then "the branch fell behind its base" else empty end),
+        (if $s.conflict == "conflict" then "the PR has merge conflicts" else empty end),
         (if $s.threads_unresolved > 0 then "\($s.threads_unresolved) review thread(s) unresolved" else empty end),
         ([$s.activity[] | select(((.at | ts) // 0) > $parked and (.approval_only | not)) | .author] | unique
          | if length > 0 then "new comments from \(join(", "))" else empty end)
@@ -374,7 +413,7 @@ cmd_gate() {
 # copy at the forge head, a worker that finished its turn and reported, and no
 # instruction waiting for it. Prints the first refusal and returns 1.
 park_preflight() {  # <id>
-  local id=$1 meta kind pr wt crew
+  local id=$1 meta kind pr wt crew secs
   meta="$STATE/$id.meta"
   [ -f "$meta" ] || { echo "no task record"; return 1; }
   kind=$(fm_meta_get "$meta" kind)
@@ -389,11 +428,9 @@ park_preflight() {  # <id>
   wt=$(fm_meta_get "$meta" worktree)
   [ -n "$wt" ] && [ -d "$wt" ] || { echo "the local copy is missing"; return 1; }
   [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || { echo "the local copy has uncommitted changes"; return 1; }
-  if find "$STATE/$id.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | grep -q .; then
-    echo "an instruction is waiting in the steering inbox"; return 1
-  fi
-  agent_idle "$id" || { echo "the agent is not idle ($(fm_busy_classify_meta "$meta" "$id" "$STATE" 2>/dev/null || echo unknown))"; return 1; }
-  crew=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE fm_run_timed 60 "$CREW_STATE_BIN" "$id" 2>/dev/null | head -1 || true)
+  agent_quiet "$id" || return 1
+  secs=$(step_secs 60) || { echo "the tick ran out of time"; return 1; }
+  crew=$(FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE fm_run_timed "$secs" "$CREW_STATE_BIN" "$id" 2>/dev/null | head -1 || true)
   case "$crew" in
     'state: done '*|'state: paused '*) ;;
     *) echo "the worker has not finished at a ready report (${crew:-crew state unreadable})"; return 1 ;;
@@ -403,7 +440,7 @@ park_preflight() {  # <id>
 # Durable Treehouse lease for a pool slot; prints yes when taken, no when the
 # copy is not a Treehouse slot, and fails when a slot cannot be leased.
 slot_lease() {  # <id>
-  local id=$1 meta project wt slot_dir pool slot leased holder
+  local id=$1 meta project wt slot_dir pool slot leased holder secs
   local -a root=()
   meta="$STATE/$id.meta"
   project=$(fm_meta_get "$meta" project)
@@ -421,14 +458,16 @@ slot_lease() {  # <id>
   [ "$(basename "$(dirname "$pool")")" != .treehouse ] || root=(--root "$(dirname "$(dirname "$pool")")")
   # A lane parked before and relaunched since still holds its lease, which
   # treehouse lease refuses to take again, so this task's own lease counts.
-  holder=$( (cd "$project" && fm_run_timed 60 treehouse status --json "${root[@]}") 2>/dev/null \
+  secs=$(step_secs 60) || return 1
+  holder=$( (cd "$project" && fm_run_timed "$secs" treehouse status --json "${root[@]}") 2>/dev/null \
     | jq -r --arg p "$(CDPATH='' cd -- "$wt" && pwd -P)" \
       '[.[] | select(.status == "leased" and .path == $p) | .lease_holder] | first // empty' 2>/dev/null) || holder=
   if [ "$holder" = "$id" ]; then
     printf 'yes\n'
     return 0
   fi
-  leased=$( (cd "$project" && fm_run_timed 60 treehouse lease "$slot" --lease-holder "$id" "${root[@]}") 2>/dev/null) || return 1
+  secs=$(step_secs 60) || return 1
+  leased=$( (cd "$project" && fm_run_timed "$secs" treehouse lease "$slot" --lease-holder "$id" "${root[@]}") 2>/dev/null) || return 1
   [ "$(CDPATH='' cd -- "$leased" 2>/dev/null && pwd -P)" = "$(CDPATH='' cd -- "$wt" && pwd -P)" ] || return 1
   printf 'yes\n'
 }
@@ -454,6 +493,14 @@ cmd_park() {
   if ! result=$(gate_eval "$id" "$head") || ! gate_print "$result" > "$PARK_TMP/gate"; then
     rm -f -- "$(record_path "$id")"
     die "refusing to park $id: the re-check before stopping was not clean ($(sed 's/^unclean: //' "$PARK_TMP/gate" 2>/dev/null | paste -sd ';' - | sed 's/;/; /g'))" 3
+  fi
+  if ! why=$(agent_quiet "$id"); then
+    rm -f -- "$(record_path "$id")"
+    die "refusing to park $id: $why"
+  fi
+  if ! action_fits; then
+    rm -f -- "$(record_path "$id")"
+    die "refusing to park $id: the tick ran out of time before the stop"
   fi
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$CONTROL_BIN" "$id" exit 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -504,7 +551,7 @@ cmd_resume() {
 cmd_land() {
   local id=${1-} out rc=0 why
   task_id_ok "$id" || die "usage: fm-park.sh land <task-id> [--if-eligible]" 2
-  if [ "${2-}" = --if-eligible ] && [ ! -e "$(record_path "$id")" ] && [ ! -e "$CONFIG/auto-land" ]; then
+  if [ "${2-}" = --if-eligible ] && [ ! -e "$(record_path "$id")" ] && [ -e "$CONFIG/no-auto-land" ]; then
     return 0
   fi
   [ -f "$STATE/$id.meta" ] || return 0
@@ -567,23 +614,24 @@ watch_unparked() {  # <id>
 }
 
 cmd_tick() {
-  local rec id meta deadline any=0
+  local rec id meta any=0
   for rec in "$STATE"/*.review-park; do [ -e "$rec" ] && any=1 && break; done
-  [ "$any" = 1 ] || [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ] || return 0
+  [ "$any" = 1 ] || [ -e "$CONFIG/park-on-review" ] || [ ! -e "$CONFIG/no-auto-land" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   lock_try "$STATE/.review-park-tick.lock" || return 0
-  deadline=$(( $(date +%s) + TICK_SECS ))
+  DEADLINE=$(( $(date +%s) + TICK_SECS ))
+  [ "$ACTION_SECS" -le $(( TICK_SECS * 2 / 3 )) ] || ACTION_SECS=$(( TICK_SECS * 2 / 3 ))
   for rec in "$STATE"/*.review-park; do
     [ -e "$rec" ] || continue
-    [ "$(date +%s)" -lt "$deadline" ] || return 0
+    [ "$(date +%s)" -lt "$DEADLINE" ] || return 0
     id=$(basename "$rec" .review-park)
     fm_pr_task_id_valid "$id" && [ -f "$STATE/$id.meta" ] || continue
     watch_parked "$id"
   done
-  [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ] || return 0
+  [ -e "$CONFIG/park-on-review" ] || [ ! -e "$CONFIG/no-auto-land" ] || return 0
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    [ "$(date +%s)" -lt "$deadline" ] || return 0
+    [ "$(date +%s)" -lt "$DEADLINE" ] || return 0
     id=$(basename "$meta" .meta)
     fm_pr_task_id_valid "$id" || continue
     watch_unparked "$id"
