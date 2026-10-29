@@ -150,8 +150,12 @@ host_lifecycle_release() {
   [ -z "$HOST_LIFECYCLE_LOCK" ] || fm_lock_release "$HOST_LIFECYCLE_LOCK" || true
 }
 prelaunch_die() {
+  local reason=$1 definitive=${2:-no} receipt
   if [ -n "$SEAT_OP" ]; then
-    if [ -e "$(receipt_path "$SEAT_LIFECYCLE_ID")" ] || [ -L "$(receipt_path "$SEAT_LIFECYCLE_ID")" ] \
+    receipt=$(receipt_path "$SEAT_LIFECYCLE_ID")
+    if [ "$definitive" = yes ] && seat_mark_prelaunch 2>/dev/null; then
+      seat_emit prelaunch false false
+    elif [ -e "$receipt" ] || [ -L "$receipt" ] \
       || [ -e "$CONTROL_STATE/$SEAT_LIFECYCLE_ID.seat-reservation.$SEAT_OP" ] \
       || [ -L "$CONTROL_STATE/$SEAT_LIFECYCLE_ID.seat-reservation.$SEAT_OP" ] \
       || [ -e "$FM_ROOT/state/remote-secondmate-history/$SEAT_LIFECYCLE_ID.operation.$SEAT_OP" ] \
@@ -163,7 +167,7 @@ prelaunch_die() {
     fi
   fi
   printf 'relaunch_failure=prelaunch\n' >&2
-  die "$1"
+  die "$reason"
 }
 
 validate_home() { # <id> [allow-absent]
@@ -254,6 +258,22 @@ seat_receipt_open() {
 
 seat_receipt_set() {  # <key=value>...
   fm_remote_seat_receipt_update "$(receipt_path "$SEAT_LIFECYCLE_ID")" "$SEAT_OP" "$SEAT_OP" "$@"
+}
+
+seat_mark_prelaunch() {
+  local receipt reservation history
+  receipt=$(receipt_path "$SEAT_LIFECYCLE_ID")
+  reservation="$CONTROL_STATE/$SEAT_LIFECYCLE_ID.seat-reservation.$SEAT_OP"
+  history="$FM_ROOT/state/remote-secondmate-history/$SEAT_LIFECYCLE_ID.operation.$SEAT_OP"
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] \
+    && [ "$(receipt_field "$receipt" schema)" = fm-remote-seat-receipt.v1 ] \
+    && [ "$(receipt_field "$receipt" operation)" = "$SEAT_OP" ] \
+    && [ "$(receipt_field "$receipt" requested_generation)" = "$SEAT_OP" ] \
+    && [ "$(receipt_field "$receipt" phase)" = received ] \
+    && [ -f "$reservation" ] && [ ! -L "$reservation" ] \
+    && [ -f "$history" ] && [ ! -L "$history" ] \
+    || return 1
+  seat_receipt_set phase=prelaunch
 }
 
 # seat_emit <disposition> <startup-confirmed> <old-stopped> [actual-gen] [backend] [target] [model]
@@ -639,12 +659,12 @@ cmd_launch() {
   fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
-    *) prelaunch_die "unverified remote secondmate harness: $harness" ;;
+    *) prelaunch_die "unverified remote secondmate harness: $harness" yes ;;
   esac
-  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" ;; esac
+  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" yes ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" \
-      || prelaunch_die "remote secondmate native effort validation failed"
+      || prelaunch_die "remote secondmate native effort validation failed" yes
   fi
   # The selected backend's session-provider server must survive every SSH
   # disconnection a remote route depends on: the herdr server belongs to the
@@ -747,13 +767,13 @@ cmd_relaunch() {
   fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
-    *) prelaunch_die "unverified remote secondmate harness: $harness" ;;
+    *) prelaunch_die "unverified remote secondmate harness: $harness" yes ;;
   esac
-  case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" ;; esac
-  case "$model" in *[[:space:]]*) prelaunch_die "invalid remote secondmate model: $model" ;; esac
+  case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" yes ;; esac
+  case "$model" in *[[:space:]]*) prelaunch_die "invalid remote secondmate model: $model" yes ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" \
-      || prelaunch_die "remote secondmate native effort validation failed"
+      || prelaunch_die "remote secondmate native effort validation failed" yes
   fi
   if [ -n "$EXPECT_GENERATION" ] && [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" != "$EXPECT_GENERATION" ]; then
     if [ -n "$SEAT_OP" ]; then
@@ -788,6 +808,12 @@ cmd_relaunch() {
     FM_SPAWN_SEAT_GENERATION="$SEAT_OP")
   [ "$REMOTE_ENDPOINT_BACKEND" != herdr ] || relaunch_env=("HERDR_SESSION=$REMOTE_HERDR_SESSION" "${relaunch_env[@]}")
   env "${relaunch_env[@]}" "$SCRIPT_DIR/fm-control.sh" "${control_args[@]}" || control_rc=$?
+  if [ "$control_rc" -eq 1 ] && [ -n "$SEAT_OP" ] \
+    && [ "$(sed -n 's/^seat_operation=//p' "$CONTROL_STATE/$id.control-relaunch" 2>/dev/null | tail -1)" != "$SEAT_OP" ]; then
+    # fm-control's pre-stop checkpoint refusals return normally without a
+    # relaunch journal for this operation; later or interrupted outcomes stay unknown.
+    seat_mark_prelaunch 2>/dev/null || true
+  fi
   [ -z "$SEAT_OP" ] || seat_decide "$id"
   [ "$control_rc" -eq 0 ] || exit "$control_rc"
   # A parent tracking this route needs the identity the relaunch actually

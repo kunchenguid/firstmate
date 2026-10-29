@@ -3499,6 +3499,29 @@ run_existing_host() {
     "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" <<< "$record" 2>&1
 }
 
+test_host_prelaunch_refusal_releases_candidate_for_corrected_launch() {
+  local dir out rc receipt
+  . "$ROOT/tests/remote-herdr-fixture.sh"
+  dir=$(new_case host-prelaunch-retry sm69)
+  sm_case "$dir" sm69
+  mkdir -p "$dir/smhome/data/.parent-route/sm69" "$dir/smhome/config"
+  cp "$dir/home/data/sm69/brief.md" "$dir/smhome/data/.parent-route/sm69/brief.md"
+  cp "$dir/home/config/fleet-seats" "$dir/smhome/config/fleet-seats"
+  install_remote_herdr_fixture "$dir/herdr" "$dir/herdr-state" "$dir/herdr-log" "$dir/herdr-fail" "$TMP_ROOT/prelaunch-retry.sock"
+  out=$(run_existing_host "$dir" launch sm69 invalid-harness pool-model-a medium herdr --operation rejected.op); rc=$?
+  expect_code 1 "$rc" "unverified host harness refusal: $out"
+  receipt="$dir/smhome/state/parent-route/sm69.seat-operation.rejected.op"
+  assert_equals prelaunch "$(sed -n 's/^phase=//p' "$receipt")" "definitive harness refusal was not persisted as prelaunch"
+  out=$(run_existing_host "$dir" disposition sm69 --operation rejected.op)
+  assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/.*\"disposition\":\"\([^\"]*\)\".*/\1/p' | tail -1)" \
+    "later disposition did not preserve the prelaunch refusal"
+  out=$(run_existing_host "$dir" launch sm69 claude pool-model-a medium herdr --operation corrected.op); rc=$?
+  expect_code 0 "$rc" "corrected host launch after prelaunch refusal: $out"
+  assert_equals corrected.op "$(sed -n 's/^spawn_gen=//p' "$dir/smhome/state/parent-route/sm69.meta")" \
+    "corrected launch did not publish its generation"
+  pass "a definitive host-side prelaunch refusal releases its candidate and accepts a corrected launch"
+}
+
 test_control_terminalizes_all_observing_predecessor_receipts() {
   local dir out rc op receipt
   dir=$(new_case host-alias-stop sm68)
@@ -3524,7 +3547,7 @@ test_control_terminalizes_all_observing_predecessor_receipts() {
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_fractional_supervisor_startup_timeout_retains_the_launch|test_unpooled_supervisor_spawn_keeps_prior_success_semantics|test_existing_host_generations_recover_through_observing_operations|test_control_terminalizes_all_observing_predecessor_receipts|test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
+      test_fractional_supervisor_startup_timeout_retains_the_launch|test_unpooled_supervisor_spawn_keeps_prior_success_semantics|test_existing_host_generations_recover_through_observing_operations|test_control_terminalizes_all_observing_predecessor_receipts|test_host_prelaunch_refusal_releases_candidate_for_corrected_launch|test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -3635,4 +3658,5 @@ test_fractional_supervisor_startup_timeout_retains_the_launch
 test_legacy_predecessors_remain_counted_without_socket_identity
 
 test_existing_host_generations_recover_through_observing_operations
+test_host_prelaunch_refusal_releases_candidate_for_corrected_launch
 test_control_terminalizes_all_observing_predecessor_receipts
