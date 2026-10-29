@@ -629,7 +629,7 @@ meta_state() {
           id=${id%.meta}
           endpoint_state=unreadable
           if fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1; then
-            endpoint_state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || endpoint_state=unreadable
+            endpoint_state=$(fm_control_endpoint_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$meta") || endpoint_state=unreadable
             if [ "$endpoint_state" = missing ]; then
               verdict=$(fm_control_endpoint_absence_verdict "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$meta")
               [ "${verdict%%$'\t'*}" != gone ] || { echo other; return; }
@@ -870,7 +870,7 @@ lifecycle_leave() {
 # route_local_state <generation>: recovery-grade state of the incarnation's
 # local route, "none" without one.
 route_local_state() {
-  local backend target socket
+  local backend target socket meta server
   backend=$(inc_get "$1" '.route.backend // empty')
   target=$(inc_get "$1" '.route.target // empty')
   if [ -z "$backend" ] || [ -z "$target" ]; then
@@ -883,7 +883,23 @@ route_local_state() {
     local TMUX="$socket,0,0"
     export TMUX
   fi
-  fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf 'unreadable'
+  server=$(inc_get "$1" '.route.server_identity // empty')
+  meta=
+  case "$backend" in
+    rex|t3code)
+      if [ -e "$HOLDER_STATE/$TASK.meta" ] || [ -L "$HOLDER_STATE/$TASK.meta" ]; then
+        meta="$HOLDER_STATE/$TASK.meta"
+        if [ "$(meta_generation "$meta")" != "$1" ] ||
+          ! fm_backend_validate_task_endpoint "$meta" "$TASK" >/dev/null 2>&1 ||
+          [ "$FM_BACKEND_VALIDATED_BACKEND" != "$backend" ] || [ "$FM_BACKEND_VALIDATED_TARGET" != "$target" ]; then
+          echo "error: endpoint metadata does not match the recorded generation and route" >&2
+          printf unreadable
+          return 0
+        fi
+      fi
+      ;;
+  esac
+  fm_control_endpoint_state "$backend" "$target" "$meta" "$server"
 }
 
 # route_local_gone <generation>: the incarnation's local endpoint is PROVEN
