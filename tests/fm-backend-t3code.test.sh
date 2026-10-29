@@ -2780,6 +2780,28 @@ test_refused_pooled_launch_reclaims_without_metadata() {
   pass "a refused pooled T3 launch is reclaimed from its durable route after metadata rollback"
 }
 
+test_legacy_control_adoption_survives_shared_checks() {
+  local id out rc thread=mcp:7a1b2c3d-4e5f-4a6b-8c7d-0123456789ab
+  id=$(t3_uid t3legacyshared)
+  make_t3_control_task legacy-shared "$id" "$thread" running
+  sed '/^t3_server=/d' "$CTRL_STATE/$id.meta" > "$CTRL_STATE/legacy-meta"
+  mv "$CTRL_STATE/legacy-meta" "$CTRL_STATE/$id.meta"
+  out=$(FM_CONFIG_OVERRIDE="$CONFIG" bash -c '
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-control-lib.sh"
+    fm_control_endpoint_state t3code "$2" "$3"
+  ' _ "$ROOT" "$thread" "$CTRL_STATE/$id.meta")
+  assert_equals alive "$out" "cold shared state reader rejected verified legacy adoption"
+  out=$(run_t3_control "$id" interrupt); rc=$?
+  expect_code 0 "$rc" "legacy interrupt failed after verified adoption: $out"
+  assert_contains "$out" cancel=confirmed "legacy interrupt was not confirmed"
+  t3_world_set 'w.threads = {}'
+  out=$(run_t3_control "$id" interrupt); rc=$?
+  expect_code 1 "$rc" "missing thread established legacy origin: $out"
+  assert_present "$CTRL_STATE/$id.meta" "unverifiable origin removed legacy metadata"
+  pass "legacy control adoption loads its backend, reads alive, interrupts, and refuses absent-thread evidence"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -2882,3 +2904,5 @@ test_fractional_poll_event_wait
 test_housekeeping_removes_the_iterated_stale_marker
 
 test_refused_pooled_launch_reclaims_without_metadata
+
+test_legacy_control_adoption_survives_shared_checks

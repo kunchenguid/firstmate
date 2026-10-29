@@ -28,6 +28,10 @@ printf '%s\n' '{"incarnations":[{"generation":"current","lifecycle":"confirmed",
 fm_remote_generation_resolve
 assert_equals current "$FM_REMOTE_GENERATION" 'authoritative generation replaces stale parent'
 assert_equals current "$(fm_meta_get "$META" remote_spawn_gen)" 'generation persisted before lifecycle operation'
+fm_write_meta "$META" remote_host=remote remote_root=/srv/fm home=/srv/home custom=preserved remote_target=session:p1 remote_spawn_gen=current
+cp "$META" "$TMP/current-meta"
+fm_remote_generation_resolve
+cmp -s "$META" "$TMP/current-meta" || fail 'current ledger metadata was reordered'
 jq '.incarnations += [{generation:"candidate", lifecycle:"reserved", route:{target:null,spawn_gen:null}}]' "$FM_GENERATION_FIXTURE" > "$TMP/candidate"
 mv "$TMP/candidate" "$FM_GENERATION_FIXTURE"
 if fm_remote_generation_resolve retire; then fail 'unresolved candidate permitted retirement'; fi
@@ -37,6 +41,9 @@ printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\nspawn_gen=legacy\
 fm_remote_generation_resolve
 assert_equals legacy "$FM_REMOTE_GENERATION" 'legacy predecessor resolved from host'
 assert_equals session:p2 "$(fm_meta_get "$META" remote_target)" 'legacy target persisted'
+cp "$META" "$TMP/legacy-meta"
+fm_remote_generation_resolve
+cmp -s "$META" "$TMP/legacy-meta" || fail 'current host metadata was reordered'
 rm "$FM_ROUTE_FIXTURE"
 fm_remote_generation_resolve retire
 assert_equals legacy "$FM_REMOTE_GENERATION" 'retirement retry retains fence'

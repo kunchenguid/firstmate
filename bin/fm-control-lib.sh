@@ -464,13 +464,16 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 fm_control_endpoint_server_matches() {
   local backend=$1 meta=${2:-} server=${3:-} recorded=
   case "$backend" in rex|t3code) ;; *) return 0 ;; esac
+  fm_backend_source "$backend" || return 1
   if [ -n "$meta" ] && [ -f "$meta" ]; then
     recorded=$(fm_meta_get "$meta" "${backend%code}_server")
+    if [ "$backend" = t3code ] && [ -z "$recorded" ]; then
+      recorded=$(fm_backend_t3code_adopt_server_for_thread "$(fm_backend_target_of_meta "$meta")") || return 1
+    fi
     [ -z "$server" ] || [ "$server" = "$recorded" ] || { echo "error: metadata and route name different creation servers" >&2; return 1; }
     [ -n "$server" ] || server=$recorded
   fi
   [ -n "$server" ] || { echo "error: endpoint lacks a creation-server identity" >&2; return 1; }
-  fm_backend_source "$backend" || return 1
   case "$backend" in
     rex) [ "$(fm_backend_rex_server_endpoint)" = "$server" ] ;;
     t3code) fm_backend_t3code_server_matches "$server" ;;
@@ -479,6 +482,7 @@ fm_control_endpoint_server_matches() {
 
 fm_control_endpoint_state() {
   local state server=${4:-}
+  fm_backend_source "$1" || { printf unreadable; return 0; }
   case "$1" in
     rex|t3code) [ -n "$server" ] || server=$(fm_meta_get "${3:-}" "${1%code}_server") ;;
   esac

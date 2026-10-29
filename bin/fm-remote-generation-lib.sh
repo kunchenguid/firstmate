@@ -36,6 +36,10 @@ fm_remote_generation_resolve() {
   fi
   case "$FM_REMOTE_GENERATION" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   [ -n "$FM_REMOTE_TARGET" ] || return 1
+  if [ "$(sed -n 's/^remote_spawn_gen=//p' "$META")" = "$FM_REMOTE_GENERATION" ] &&
+    [ "$(sed -n 's/^remote_target=//p' "$META")" = "$FM_REMOTE_TARGET" ]; then
+    return 0
+  fi
   tmp=$(umask 077; mktemp "$STATE/.remote-generation-$ID.XXXXXX") || return 1
   {
     printf 'remote_spawn_gen=%s\nremote_target=%s\n' "$FM_REMOTE_GENERATION" "$FM_REMOTE_TARGET"
