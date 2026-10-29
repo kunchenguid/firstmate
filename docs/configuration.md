@@ -1476,6 +1476,8 @@ This replaces the earlier behaviour, in which a relaunch followed the home's cur
 A removed Claude file is measured against firstmate's own `CLAUDE_CONFIG_DIR` when set, otherwise the ordinary account, and the relaunch refuses when that differs from the recorded account directory.
 An unpinned Pi replacement explicitly selects its recorded root, so neither the caller's nor the destination pane's ambient account can move it.
 A successful relaunch after unpinning keeps the recorded account, so a later pin change is still guarded.
+That kept account gets the same existence and sign-in checks as a pin, before the old agent stops; a Pi launch model without a provider is checked against the recorded `account_provider`.
+A missing or signed-out recorded account refuses the relaunch, naming that account, rather than falling back to the ambient one.
 A pin change therefore reaches new ship and scout work immediately and existing ships and scouts that recorded an account never; the same recorded account, a relaunch onto a harness that reads the other pin file, and a task with no recorded account in a home with no pin each relaunch exactly as before.
 A ship or scout launched while the home had no pin records no account, so the guard has nothing to measure it against: a pin added afterwards reaches that task on its next relaunch, which moves it to the pinned account directory and records that account from then on.
 A secondmate agent is not measured against its recorded account, because its replacement reconciles its own home's durable records at startup instead of continuing the outgoing agent's conversation; its home-wide or [per-secondmate pin](#per-secondmate-account-pins) is re-read on every relaunch as before.

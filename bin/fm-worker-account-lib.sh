@@ -340,7 +340,7 @@ fm_worker_account_check() {
 }
 
 # fm_worker_account_select <harness> <config-dir> <model> <executable> [<raw-command>] [<secondmate-id>] \
-#   [<relaunch-id> <recorded-harness> <recorded-account>]
+#   [<relaunch-id> <recorded-harness> <recorded-account> <recorded-provider>]
 # The whole launch-time decision. Prints nothing for a fresh unpinned runner, so
 # the caller keeps today's launch unchanged. For a pinned one prints
 # "declared<TAB>root<TAB>provider", where provider is the Pi launch model's
@@ -349,10 +349,12 @@ fm_worker_account_check() {
 # endpoint exists, and bin/fm-control.sh before a relaunch stops the live
 # agent. A relaunch guards this exact resolved selection before checking login.
 # When the pin is absent and the guard passes, carry a matching recorded account
-# into the launch and the next record, so another relaunch remains guarded.
+# into the launch and the next record, so another relaunch remains guarded; it
+# must still exist and pass the same sign-in check a pin gets, for Pi under the
+# launch model's provider or else the recorded one.
 fm_worker_account_select() {
   local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} mate=${6:-}
-  local relaunch_id=${7:-} recorded_harness=${8:-} recorded=${9:-}
+  local relaunch_id=${7:-} recorded_harness=${8:-} recorded=${9:-} recorded_provider=${10:-}
   local selection declared root providers word provider='' selected_config setting
   selected_config=$(fm_worker_account_config "$harness" "$config" "$mate") || return 1
   setting="config/$(fm_worker_account_file "$harness")"
@@ -367,9 +369,15 @@ fm_worker_account_select() {
       fm_worker_account_file "$harness" >/dev/null &&
       [ "$(fm_worker_account_file "$harness")" = "$(fm_worker_account_file "$recorded_harness")" ]; then
       root=$(fm_worker_account_root "$harness" "$recorded") || return 1
+      setting="task $relaunch_id's recorded account, kept while $setting is absent,"
+      if [ -n "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; then
+        echo "error: $setting must be a readable, searchable existing directory: $root" >&2
+        return 1
+      fi
       case "$harness" in
-      pi | pi-signed) provider=$(fm_worker_account_pi_provider "$model") || provider= ;;
+      pi | pi-signed) provider=$(fm_worker_account_pi_provider "$model") || provider=$recorded_provider ;;
       esac
+      fm_worker_account_check "$harness" "$recorded" "$root" "$executable" "$provider" "$setting" || return 1
       printf '%s\t%s\t%s\n' "$recorded" "$root" "$provider"
       return 0
     fi

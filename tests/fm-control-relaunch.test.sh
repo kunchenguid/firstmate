@@ -1035,7 +1035,9 @@ test_worker_account_survives_two_relaunches_after_unpinning() {
   local dir out rc id=rl-acct-twice
   dir=$(new_case acct-twice "$id")
   add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
   mkdir -p "$dir/work" "$dir/other" "$dir/home/config"
+  : > "$dir/work/.credentials.json"
   printf 'account=%s\n' "$dir/work" >> "$dir/home/state/$id.meta"
 
   out=$(FM_TEST_CLAUDE_CONFIG_DIR="$dir/work" run_control "$dir" "$id" relaunch \
@@ -1058,6 +1060,33 @@ test_worker_account_survives_two_relaunches_after_unpinning() {
   pass "two relaunches: an unpinned same-account replacement preserves protection against a later pin change"
 }
 
+test_unpinned_relaunch_refuses_a_missing_recorded_root_before_stop() {
+  local dir out rc id=rl-acct-missing
+  dir=$(new_case acct-missing "$id")
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  printf 'account=%s\n' "$dir/retired" >> "$dir/home/state/$id.meta"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$dir/retired" run_control "$dir" "$id" relaunch \
+    --note "recorded root retired"); rc=$?
+  expect_code 1 "$rc" "an unpinned relaunch whose recorded root is gone must refuse"
+  assert_contains "$out" "task $id's recorded account, kept while config/claude-account is absent, must be a readable, searchable existing directory: $dir/retired" \
+    "the refusal should name the recorded account"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a missing recorded root must refuse before the running agent stops"
+  [ ! -s "$dir/fake/literal" ] || fail "a missing recorded root must refuse before any replacement is launched"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "a refused relaunch must leave the task record untouched"
+
+  mkdir -p "$dir/retired"
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$dir/retired" run_control "$dir" "$id" relaunch \
+    --note "recorded root signed out"); rc=$?
+  expect_code 1 "$rc" "an unpinned relaunch whose recorded root is signed out must refuse"
+  assert_contains "$out" "pins Claude workers to $dir/retired, which is not signed in" \
+    "the refusal should name the signed-out recorded account"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a signed-out recorded root must refuse before the running agent stops"
+  [ ! -s "$dir/fake/literal" ] || fail "a signed-out recorded root must refuse before any replacement is launched"
+  pass "fm-control relaunch: an unpinned relaunch refuses a missing or signed-out recorded account before stop"
+}
+
 test_unpinned_pi_relaunch_keeps_the_recorded_root_in_a_different_pane_environment() {
   local dir out rc id=rl-pi-unpinned harness account root launch provider
   for harness in pi pi-signed; do
@@ -1077,6 +1106,7 @@ test_unpinned_pi_relaunch_keeps_the_recorded_root_in_a_different_pane_environmen
     cat > "$dir/fakebin/$harness" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = --help ]; then printf 'Options: --tui-mode\\n'; exit 0; fi
+if [ "\${1:-}" = auth ]; then printf '{"status":"ready"}\\n'; exit 0; fi
 printf '%s\\n' "\${PI_CODING_AGENT_DIR:-\$HOME/.pi/agent}" > '$dir/worker-root'
 SH
     chmod +x "$dir/fakebin/$harness"
@@ -3173,6 +3203,7 @@ test_worker_account_pin_on_the_recorded_account_relaunches
 test_worker_account_pin_removed_refuses
 test_worker_account_never_pinned_relaunches_unchanged
 test_worker_account_survives_two_relaunches_after_unpinning
+test_unpinned_relaunch_refuses_a_missing_recorded_root_before_stop
 test_unpinned_pi_relaunch_keeps_the_recorded_root_in_a_different_pane_environment
 test_spawn_relaunch_checks_the_same_pin_selection_it_launches
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop

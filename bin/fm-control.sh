@@ -1063,7 +1063,8 @@ resolve_relaunch_profile() {
   account_config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   fm_worker_account_select "$TARGET_HARNESS" "$account_config" \
     "$account_model" "$TARGET_HARNESS" "" "$account_mate" \
-    "$ID" "$PRIOR_HARNESS" "$(fm_meta_get "$META" account)" >/dev/null || return 1
+    "$ID" "$PRIOR_HARNESS" "$(fm_meta_get "$META" account)" \
+    "$(fm_meta_get "$META" account_provider)" >/dev/null || return 1
   fm_omp_profile_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_mate" >/dev/null || return 1
   # Likewise polytoken's launch profile and wiring refusals
