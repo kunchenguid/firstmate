@@ -360,7 +360,7 @@ seat_decide() {
             prior-record-kept-agent-dead) [ "$previous_phase" != started ] || old_stopped=true ;;
             instructions-restored-agent-alive) ;;
             *)
-              if [ "$phase" = received ] || [ "$phase" = prelaunch ]; then
+              if [ "$phase" = received ]; then
                 SEAT_DECIDED=unknown
                 seat_emit unknown false false
                 return 0

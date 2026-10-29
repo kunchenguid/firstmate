@@ -229,6 +229,9 @@ LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
 
 die() {  # <message>
+  if [ "${CONTROL_PREDELIVERY:-0}" = 1 ]; then
+    relaunch_record_prelaunch_refusal
+  fi
   echo "error: $1" >&2
   exit 1
 }
@@ -751,7 +754,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
-  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
+  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog CONTROL_PREDELIVERY=1
   require_state_verified_backend exit
   fm_control_backend_exit_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, whose T3 Orchestrator V2 tools have no session stop, so 'exit' cannot stop its agent; 'interrupt' ends the running turn and teardown archives the thread"
@@ -812,6 +815,7 @@ do_exit() {
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
+      CONTROL_PREDELIVERY=0
       cancel=$(deliver_interrupt) || return $?
       state=$(agent_state)
       case "$state" in
@@ -861,6 +865,7 @@ do_exit() {
   # interacting with the typed submit verification. A Ctrl-C over leftover
   # composer text only clears it, so Ctrl-U clears the composer first and one
   # more Ctrl-C follows if the agent is still alive.
+  CONTROL_PREDELIVERY=0
   case "$cmd" in
     C-c)
       fm_backend_send_key "$BACKEND" "$T" C-u "$LABEL" \
@@ -988,6 +993,15 @@ relaunch_seat_rollback() {
   fi
 }
 
+relaunch_record_prelaunch_refusal() {
+  if [ "${VERB:-}" = relaunch ] && [ "${FM_REMOTE_SEAT_FRESH:-0}" = 1 ] && [ -n "$SEAT_OPERATION" ] \
+    && [ "$(fm_meta_get "$STATE/$ID.seat-operation.$SEAT_OPERATION" phase)" = received ] \
+    && [ "$(fm_meta_get "$STATE/$ID.seat-operation.$SEAT_OPERATION" old_stopped)" != true ]; then
+    fm_remote_seat_receipt_update "$STATE/$ID.seat-operation.$SEAT_OPERATION" "$SEAT_OPERATION" "$SEAT_GEN" \
+      phase=prelaunch || echo "error: could not retain the pre-stop refusal for $ID" >&2
+  fi
+}
+
 relaunch_rollback() {
   local state
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
@@ -1002,12 +1016,7 @@ relaunch_rollback() {
         cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
       fi
       journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
-      if [ "$1" -eq 1 ] && [ "${FM_REMOTE_SEAT_FRESH:-0}" = 1 ] && [ -n "$SEAT_OPERATION" ] \
-        && [ "$(fm_meta_get "$STATE/$ID.seat-operation.$SEAT_OPERATION" phase)" = received ] \
-        && [ "$(fm_meta_get "$STATE/$ID.seat-operation.$SEAT_OPERATION" old_stopped)" != true ]; then
-        fm_remote_seat_receipt_update "$STATE/$ID.seat-operation.$SEAT_OPERATION" "$SEAT_OPERATION" "$SEAT_GEN" \
-          phase=prelaunch || echo "error: could not retain the pre-stop refusal for $ID" >&2
-      fi
+      [ "$1" -ne 1 ] || relaunch_record_prelaunch_refusal
       echo 'relaunch_failure=prelaunch' >&2
       echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       ;;
