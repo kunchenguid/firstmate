@@ -51,10 +51,12 @@
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
 #   --base-branch is the optional branch selected at intake for a ship or scout
-#   to start from and target instead of origin's default branch. A fresh launch
-#   resets its pooled copy to origin/<branch>, refusing when the project has no
-#   origin or origin lacks that branch, or when the project's registered forge
-#   cannot carry it. It must agree with every Setup "Base branch:" line in the
+#   to start from and land on instead of origin's default branch (a pull request
+#   targets it; a local-only ship has bin/fm-merge-local.sh fast-forward it). A
+#   fresh launch resets its pooled copy to origin/<branch> and leaves the copy's
+#   origin/HEAD record untouched, refusing when the project has no origin or
+#   origin lacks that branch, or when the project's registered forge cannot
+#   carry it. It must agree with every Setup "Base branch:" line in the
 #   brief (bin/fm-brief.sh --base-branch writes one; other such lines are prose),
 #   and a brief with such a line refuses a spawn without the flag. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
@@ -345,8 +347,9 @@
 #   branch in the primary checkout when it strictly contains origin's tip: a
 #   local-only project lands work there through bin/fm-merge-local.sh and never
 #   pushes, so origin stays frozen at the last push. A publishing mode
-#   (bin/fm-dod-lib.sh fm_mode_publishes) and a named base branch keep origin's
-#   tip, because that work is delivered against origin. Two branches that have
+#   (bin/fm-dod-lib.sh fm_mode_publishes) keeps origin's tip, because that work
+#   is delivered against origin, and a named base branch, local-only included,
+#   always starts from origin/<branch> as above. Two branches that have
 #   diverged also keep origin's tip, with a note counting both sides. The
 #   primary's commit is read from the local object store, so nothing more is
 #   fetched, and every base this picks contains origin's tip, so the reset

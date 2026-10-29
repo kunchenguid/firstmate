@@ -18,8 +18,10 @@
 # and is the immutable task branch rendered in every delivery contract.
 # The optional fifth argument is the task's base branch from bin/fm-brief.sh
 # --base-branch; empty means the repository default. A named base is the branch
-# the worker starts from, never pushes to, and targets with its pull request, and
-# fm_base_branch_valid refuses it where no pull request carries the work.
+# the worker starts from and never pushes to: a pull-request mode targets it
+# with the pull request, and local-only lands by fast-forwarding that branch in
+# the project's local copy (bin/fm-merge-local.sh), never the branch the clone's
+# origin/HEAD record names. fm_base_branch_valid refuses it only on a forge.
 # The optional seventh argument is the task's PR-text posture, auto|manual,
 # defaulting to auto: `manual` is bin/fm-brief.sh --pr manual, the registry's
 # `pr=manual` token (bin/fm-project-mode.sh owns what the binding means). It
@@ -237,22 +239,19 @@ fm_ship_branch_prefix() {  # <branch> <task-id>
 }
 
 # A task's optional base branch replaces the repository default as the branch
-# its copy starts from and its pull request targets. bin/fm-brief.sh records it
-# as a "Base branch: <name>" line under the brief's `# Setup` heading,
-# bin/fm-spawn.sh takes it as --base-branch, refuses a brief whose Base branch
-# lines (fm_brief_base_branches) disagree, and records base_branch= in the task
-# metadata, and every later consumer reads that metadata field. It is
-# refused on local-only, whose landing fast-forwards local main, and on a Gerrit
-# forge, whose publish path targets the change's own branch.
+# its copy starts from and its delivery lands on: the pull request's base for
+# no-mistakes and direct-PR, the locally fast-forwarded branch for local-only.
+# bin/fm-brief.sh records it as a "Base branch: <name>" line under the brief's
+# `# Setup` heading, bin/fm-spawn.sh takes it as --base-branch, refuses a brief
+# whose Base branch lines (fm_brief_base_branches) disagree, and records
+# base_branch= in the task metadata, and every later consumer reads that
+# metadata field rather than the clone's origin/HEAD record. It is refused on a
+# Gerrit forge, whose publish path targets the change's own branch.
 fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   local base=$1 mode=$2 forge=$3 caller=$4
   [ -n "$base" ] || return 0
   if [ "${base#-}" != "$base" ] || ! git check-ref-format --branch "$base" >/dev/null 2>&1; then
     echo "error: $caller: base branch '$base' is not a valid git branch name" >&2
-    return 1
-  fi
-  if [ "$mode" = local-only ]; then
-    echo "error: $caller: a base branch cannot ship mode=local-only, whose landing fast-forwards local main; ship no-mistakes or direct-PR, which open a pull request against the base" >&2
     return 1
   fi
   if [ "$forge" != none ]; then
@@ -275,10 +274,14 @@ fm_brief_base_branches() {  # <brief>
 
 fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-}
-  local branch=${3:-fm/$id} target='the default branch'
+  # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
+  local branch=${3:-fm/$id} target='the default branch' landing='the merge into local `main`'
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_ship_rule_one || return 1
-  [ -z "$base" ] || target="the base branch \`$base\` or the default branch"
+  if [ -n "$base" ]; then
+    target="the base branch \`$base\` or the default branch"
+    landing="the fast-forward of the local base branch \`$base\`"
+  fi
   if [ "$forge" = gerrit ]; then
     printf '%s\n' "1. Never push with git and never create a change except through the one \`gerrit-axi publish --squash\` your Definition of done names. Never run \`gerrit-axi submit\`, never vote or review a change by any path, including \`gerrit review\` or a label option on a push, and never abandon one: a human reviewer approves and submits it on the server."
     return 0
@@ -300,7 +303,7 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
       printf '%s\n' "1. Never push to $target (push only your \`$branch\` branch). Never merge a PR."
       ;;
     local-only)
-      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
+      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles $landing."
       ;;
     no-mistakes)
       printf '%s\n' "1. Never push to $target. Never merge a PR."
@@ -538,6 +541,10 @@ EOF
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
+  # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
+  local lo_track='Keep your branch a clean fast-forward onto the current default branch - if `main` has advanced, rebase onto it so the eventual merge stays a fast-forward.'
+  # shellcheck disable=SC2016
+  local lo_land='The configured merge authority approves the ready branch, then firstmate merges it into local `main` through the guarded fast-forward path.'
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   fm_pr_text_valid "$pr" "$mode" "$forge" fm_dod_block || return 1
@@ -556,6 +563,8 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
   fi
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"
+    lo_track="This task's base branch is \`$base\`, not the repository default: keep your branch a clean fast-forward onto it - if \`$base\` has advanced, rebase onto it so the eventual landing stays a fast-forward - and never rebase onto the default branch."
+    lo_land="The configured merge authority approves the ready branch, then firstmate fast-forwards the local base branch \`$base\` to it through the guarded landing path; the clone's default-branch record plays no part."
     pr_base=", against the base branch \`$base\` (\`--base $base_q\`), not the repository default"
     nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto, opens its PR against, and watches CI for that branch.
 "
@@ -662,9 +671,9 @@ Ship branch: $branch
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 A \`done:\` is accepted when the named head is on this project's shared local branch, not only on a detached copy; the check tests that head, not merely that a branch moved.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+$lo_track
 When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+$lo_land
 EOF
       ;;
     no-mistakes:*)

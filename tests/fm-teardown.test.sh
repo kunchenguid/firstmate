@@ -899,6 +899,56 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# A local-only task that recorded a base branch is judged landed against that
+# local branch - the one bin/fm-merge-local.sh fast-forwarded - never against
+# the default branch the clone's origin/HEAD record names, and a recorded base
+# the project no longer carries refuses by name.
+test_local_only_landed_check_uses_recorded_base_branch() {
+  local case_dir rc landed wt_head
+  for landed in base default; do
+    case_dir=$(make_case "local-base-$landed")
+    write_meta "$case_dir" local-only ship
+    printf 'base_branch=feature/hub\n' >> "$case_dir/state/task-x1.meta"
+    git -C "$case_dir/project" branch feature/hub main
+    wt_commit "$case_dir" "work on the base"
+    wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    if [ "$landed" = base ]; then
+      git -C "$case_dir/project" update-ref refs/heads/feature/hub "$wt_head"
+    else
+      git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+    fi
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    if [ "$landed" = base ]; then
+      expect_code 0 "$rc" "local-base: work fast-forwarded onto the recorded base branch should count as landed"
+      ! grep -q REFUSED "$case_dir/stderr" || fail "local-base: teardown printed a REFUSED line"
+      assert_absent "$case_dir/state/task-x1.meta" "local-base: teardown kept the record of landed work"
+    else
+      expect_code 1 "$rc" "local-base: work only on the default branch should not count as landed for a task based on feature/hub"
+      grep -q 'not yet merged into feature/hub' "$case_dir/stderr" \
+        || fail "local-base: the refusal did not name the recorded base branch: $(cat "$case_dir/stderr")"
+      assert_present "$case_dir/state/task-x1.meta" "local-base: a refused teardown removed the task record"
+    fi
+  done
+
+  case_dir=$(make_case local-base-missing)
+  write_meta "$case_dir" local-only ship
+  printf 'base_branch=feature/gone\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "work on a vanished base"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "local-base-missing: teardown should refuse when the recorded base branch is gone"
+  grep -q 'no local branch of that name' "$case_dir/stderr" \
+    || fail "local-base-missing: the refusal did not explain the missing base: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.meta" "local-base-missing: a refused teardown removed the task record"
+  pass "local-only landed check reads the recorded base branch, not the clone's default-branch record"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -5974,6 +6024,7 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_landed_check_uses_recorded_base_branch
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

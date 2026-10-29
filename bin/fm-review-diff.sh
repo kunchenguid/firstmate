@@ -21,6 +21,9 @@
 # it. Equal merge bases anchor on the local <default>, as does a local <default>
 # that already contains the branch, whose empty review says why; two unrelated
 # merge bases are reported and anchor there too.
+# The same opt-in anchors a local-only ship with a recorded base_branch= that
+# way on <base_branch>, the local branch bin/fm-merge-local.sh lands it on; any
+# other task with a recorded base keeps origin/<base_branch>.
 # When state/<id>.meta records pr= as a GitHub pull-request URL, a Forgejo
 # pull-request URL (addressed /pulls/<n> but served by the instance as the
 # same refs/pull/<n>/head ref), or a bare number for an open PR, the compare
@@ -219,11 +222,13 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
   BASE="origin/$DEFAULT"
-  if [ -z "$RECORDED_BASE" ] && [ -e "$CONFIG/spawn-base-primary-checkout" ]; then
-    # shellcheck source=bin/fm-dod-lib.sh
-    . "$SCRIPT_DIR/fm-dod-lib.sh"
+  if [ -e "$CONFIG/spawn-base-primary-checkout" ]; then
     MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
-    BASE=$(resolve_review_base)
+    if [ -z "$RECORDED_BASE" ] || [ "$MODE" = local-only ]; then
+      # shellcheck source=bin/fm-dod-lib.sh
+      . "$SCRIPT_DIR/fm-dod-lib.sh"
+      BASE=$(resolve_review_base)
+    fi
   fi
 else
   BASE="$DEFAULT"
