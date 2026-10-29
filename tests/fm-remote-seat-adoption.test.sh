@@ -180,7 +180,7 @@ for VERB in launch relaunch; do
   RECORD=$(payload "$OP" | jq '.incarnations[0].previous_generation = "predecessor"')
   OUT=$(host "${ARGS[@]}" --operation "$OP" --previous predecessor <<< "$RECORD"); RC=$?
   expect_code 6 "$RC" "captured stale $VERB reached its successor: $OUT"
-  assert_equals unknown "$(printf '%s\n' "$OUT" | disposition | jq -r .disposition)" "a stale predecessor freed its candidate"
+  assert_equals prelaunch "$(printf '%s\n' "$OUT" | disposition | jq -r .disposition)" "a verified fresh predecessor refusal was not classified as prelaunch"
   assert_grep 'spawn_gen=legacy' "$HOST/state/parent-route/ios.meta" "a stale predecessor changed the successor"
 done
 assert_absent "$TMP/effect-log" "a stale predecessor changed an endpoint"
