@@ -1418,6 +1418,61 @@ test_squash_merged_forgejo_pr_allows_when_main_moved_on() {
   pass "teardown proves a Forgejo task landed from the merged pull request when the content check is inconclusive"
 }
 
+# Override glab to answer one merge request view with the supplied state and
+# head sha, logging each invocation.
+add_glab_mr_for_head() {
+  local case_dir=$1 state=$2 head=$3
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/glab.log"
+[ "\${1:-} \${2:-}" = "mr view" ] || exit 1
+printf '{"state":"%s","sha":"%s"}\n' '$state' '$head'
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
+# A pushed GitLab task whose default branch moved on after the squash merge,
+# editing the same lines, leaves the content check conflicting, so only the
+# merge request record can prove the work landed. A merged record tears down,
+# an open one keeps the open-PR allowance, and a closed-unmerged one refuses.
+test_pushed_gitlab_task_with_merged_mr_allows_when_main_moved_on() {
+  local case_dir rc pr_head tmp state expected
+  for state in merged opened closed; do
+    case_dir=$(make_case "gitlab-mr-$state")
+    write_meta "$case_dir" no-mistakes ship
+    pr_head=$(setup_squash_rebased_history "$case_dir" rebased)
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+    tmp="$case_dir/_main_later"
+    git clone -q "$case_dir/origin.git" "$tmp"
+    printf '%s\n' base main-edit feature-edit-reworded > "$tmp/shared.txt"
+    git -C "$tmp" add -- shared.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "main rewords shared"
+    git -C "$tmp" push -q origin main
+    rm -rf "$tmp"
+    printf '%s\n' 'pr=https://gitlab.example.com/team/repo/-/merge_requests/7' \
+      >> "$case_dir/state/task-x1.meta"
+    add_gh_axi_error "$case_dir"
+    add_glab_mr_for_head "$case_dir" "$state" "$pr_head"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expected=0
+    [ "$state" != closed ] || expected=1
+    expect_code "$expected" "$rc" "gitlab-mr-$state: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    grep -qF -- 'mr view 7 -R https://gitlab.example.com/team/repo -F json' "$case_dir/glab.log" \
+      || fail "gitlab-mr-$state: teardown did not read the GitLab merge request through glab"
+    if [ "$expected" = 1 ]; then
+      grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-$state: no REFUSED line in stderr"
+      assert_refusal_retained_task_state "$case_dir" "gitlab-mr-$state" "$pr_head"
+    fi
+  done
+  pass "teardown proves a pushed GitLab task landed from the merged merge request when the content check conflicts"
+}
+
 test_squash_merged_same_file_different_content_refuses() {
   local case_dir rc pr_head local_head
   case_dir=$(make_case squash-same-path-diverged)
@@ -6247,6 +6302,7 @@ test_merged_pr_patch_matching_preserves_indentation
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_forgejo_pr_allows_when_main_moved_on
+test_pushed_gitlab_task_with_merged_mr_allows_when_main_moved_on
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable
