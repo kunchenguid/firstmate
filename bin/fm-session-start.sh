@@ -225,6 +225,33 @@
 #             first, so a harness that spills a large output and shows only its
 #             head still tells the model to read the saved full output.
 #
+#             A `--source compact` re-emit prints the COMPACT DIGEST instead,
+#             with a one-line SPILL CUE in place of the RE-EMIT CUE: it asks for
+#             the saved file only when the output was actually cut to a preview,
+#             never on a compaction that arrived inline. Compaction recurs all
+#             session long, and a
+#             full digest there was persisted by Claude's 10,000-character hook
+#             cap and then read back whole by the cue, refilling the context the
+#             compaction had just freed. The compact digest keeps the lock,
+#             home-role, bootstrap, wake-queue (in full: it is this turn's work),
+#             AFK, public-commitment, and network-check sections unchanged, and
+#             renders the rest as headings, counts, and on-demand paths: the
+#             supervision block as its repair line, labeled as applying only
+#             when a guard or hook reports a fault, plus the exact command that
+#             re-renders it, backlog group counts, one line per recorded task
+#             (kind, endpoint liveness, PR, capped last status), orphan status
+#             ids, and each context file's path and size. Its read-once
+#             contract still asks for one read of data/captain.md and
+#             data/captain-shared.md before the first captain-facing reply or
+#             mutating action, and its NEXT STEP points at the re-render
+#             command and calls the digest partial rather than complete. A
+#             typical fleet's compact digest stays under that cap so it arrives
+#             inline. It is not bounded, though: the wake queue and the Pi
+#             instruction refresh below may not be cut, and the per-task lines,
+#             orphan status ids, and public commitments grow with the fleet, so
+#             a large fleet or a wake burst can still spill and relies on the
+#             SPILL CUE. Other sources keep the full re-emit.
+#
 #   --source  The native session-open source, supplied only by
 #             fm-sessionstart-run.sh. A genuine `startup` that owns the active
 #             session lock records AGENTS.md's SHA-256 baseline only after the
@@ -274,6 +301,8 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+COMPACT_REEMIT=0
+[ "$REEMIT" -eq 1 ] && [ "$SESSION_SOURCE" = compact ] && COMPACT_REEMIT=1
 
 # --- 0. runtime bound ---------------------------------------------------------
 # The ordered stage list is the contract behind the truncation banner: the child
@@ -596,6 +625,245 @@ fm_session_start_endpoint_read() {  # <backend> <target> [expected-label]
   ' _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$label"
 }
 
+# read_task_endpoint <meta> <id>: one bounded endpoint-liveness read for a
+# recorded task, leaving ENDPOINT_STATE (alive, dead, error, or unknown when no
+# window is recorded), ENDPOINT_BACKEND, and ENDPOINT_WINDOW for either digest
+# shape to render.
+read_task_endpoint() {
+  local meta=$1 id=$2 target endpoint_rc=0
+  ENDPOINT_WINDOW=$(fm_meta_get "$meta" window)
+  ENDPOINT_BACKEND=
+  target=$(fm_backend_target_of_meta "$meta")
+  if [ -z "$ENDPOINT_WINDOW" ]; then
+    ENDPOINT_STATE=unknown
+    return 0
+  fi
+  ENDPOINT_BACKEND=$(fm_backend_of_meta "$meta")
+  fm_session_start_endpoint_read "$ENDPOINT_BACKEND" "${target:-$ENDPOINT_WINDOW}" "fm-$id" || endpoint_rc=$?
+  # Only the timeout owner's own statuses mean the read itself failed: 124 is
+  # the bound firing and >=128 is a signal death. Every other nonzero status
+  # is the probe's own verdict that the endpoint is gone.
+  if [ "$endpoint_rc" -eq 0 ]; then
+    ENDPOINT_STATE=alive
+  elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
+    ENDPOINT_STATE=error
+  else
+    ENDPOINT_STATE=dead
+  fi
+}
+
+print_work_under_way_full() {
+  local meta id status found=0
+  subsection "Work under way (state/*.meta)"
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    found=1
+    id=$(basename "$meta" .meta)
+    printf '\n--- %s ---\n' "$id"
+    cat "$meta"
+
+    read_task_endpoint "$meta" "$id"
+    case "$ENDPOINT_STATE" in
+      alive)
+        printf 'endpoint: alive (backend=%s window=%s)\n' "$ENDPOINT_BACKEND" "$ENDPOINT_WINDOW" ;;
+      error)
+        printf 'endpoint: error (backend=%s window=%s - the endpoint read died or hit its %ss bound; the digest continued past it)\n' \
+          "$ENDPOINT_BACKEND" "$ENDPOINT_WINDOW" "$ENDPOINT_TIMEOUT" ;;
+      dead)
+        printf 'endpoint: dead (backend=%s window=%s)\n' "$ENDPOINT_BACKEND" "$ENDPOINT_WINDOW" ;;
+      *)
+        printf 'endpoint: unknown (no window recorded)\n' ;;
+    esac
+
+    status="$STATE/$id.status"
+    if [ -f "$status" ]; then
+      print_status_tail "$status"
+    else
+      printf 'status tail: (no status file yet: %s)\n' "$status"
+    fi
+  done
+  [ "$found" -eq 1 ] || printf '(none)\n'
+}
+
+# One line per recorded task, plus its capped last status line: enough to see
+# what is live and what last happened, with the meta and full log on demand.
+print_work_under_way_compact() {
+  local meta id kind pr status last found=0
+  subsection "Work under way (one line per state/*.meta; full records under $STATE)"
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    found=1
+    id=$(basename "$meta" .meta)
+    kind=$(fm_meta_get "$meta" kind)
+    pr=$(fm_meta_get "$meta" pr)
+    read_task_endpoint "$meta" "$id"
+    if [ -n "$ENDPOINT_BACKEND" ]; then
+      printf -- '- %s (%s): endpoint %s (%s %s)' "$id" "${kind:-task}" "$ENDPOINT_STATE" "$ENDPOINT_BACKEND" "$ENDPOINT_WINDOW"
+    else
+      printf -- '- %s (%s): endpoint %s' "$id" "${kind:-task}" "$ENDPOINT_STATE"
+    fi
+    [ -z "$pr" ] || printf '; pr=%s' "$pr"
+    printf '\n'
+    status="$STATE/$id.status"
+    if [ -f "$status" ]; then
+      last=$(tail -n 1 "$status")
+      fm_cap_line "  last status: $last" 160
+    else
+      printf '  last status: (no status file yet)\n'
+    fi
+  done
+  [ "$found" -eq 1 ] || printf '(none)\n'
+}
+
+print_orphan_status_tails() {
+  local status id found=0
+  subsection "Orphan status logs (state/*.status without matching .meta)"
+  for status in "$STATE"/*.status; do
+    [ -f "$status" ] || continue
+    id=$(basename "$status" .status)
+    [ -f "$STATE/$id.meta" ] && continue
+    found=1
+    printf '\n--- %s ---\n' "$id"
+    print_status_tail "$status"
+  done
+  [ "$found" -eq 1 ] || printf '(none)\n'
+}
+
+print_orphan_status_ids() {
+  local status id ids=
+  subsection "Orphan status logs (state/*.status without matching .meta)"
+  for status in "$STATE"/*.status; do
+    [ -f "$status" ] || continue
+    id=$(basename "$status" .status)
+    [ -f "$STATE/$id.meta" ] && continue
+    ids="$ids $id"
+  done
+  if [ -n "$ids" ]; then
+    printf '%s\n' "${ids# }"
+  else
+    printf '(none)\n'
+  fi
+}
+
+# backlog_count <tasks-axi listing>: the tool's own `count: N` header line.
+backlog_count() {
+  printf '%s\n' "$1" | awk '/^count: / { print $2; found = 1; exit } END { if (!found) print "?" }'
+}
+
+print_backlog_counts_manual() {
+  local path=$1
+  awk -v keep_re="$MANUAL_KEEP_RE" '
+    /^##[[:space:]]+/ {
+      heading = $0
+      sub(/^##[[:space:]]+/, "", heading)
+      sub(/[[:space:]]+$/, "", heading)
+      state = heading
+      next
+    }
+    state == "In flight" && /^[-*][[:space:]]+/ { in_flight++ }
+    state == "Queued" && /^[-*][[:space:]]+/ { if ($0 ~ keep_re) gated++; else plain++ }
+    END {
+      printf "%d in flight, %d held or blocked queued, %d other queued (title-line counts; done rows omitted)\n", \
+        in_flight, gated, plain
+    }
+  ' "$path"
+}
+
+print_backlog_counts() {
+  local path=$1 label=$2 in_flight held blocked ready
+  subsection "$label"
+  if [ ! -f "$path" ]; then
+    printf 'ABSENT\n'
+    return 0
+  fi
+  if [ ! -s "$path" ]; then
+    printf '(present, empty)\n'
+    return 0
+  fi
+  if fm_tasks_axi_backend_available "$CONFIG" \
+    && in_flight=$(tasks-axi list --file "$path" --state in_flight --fields "$BACKLOG_FIELDS" 2>&1) \
+    && held=$(tasks-axi list --file "$path" --state held --fields "$BACKLOG_FIELDS" 2>&1) \
+    && blocked=$(tasks-axi list --file "$path" --state queued --blocked --fields "$BACKLOG_FIELDS" 2>&1) \
+    && ready=$(tasks-axi ready --file "$path" 2>&1); then
+    printf '%s in flight, %s held, %s blocked queued, %s ready queued (tasks-axi counts; done rows omitted)\n' \
+      "$(backlog_count "$in_flight")" "$(backlog_count "$held")" \
+      "$(backlog_count "$blocked")" "$(backlog_count "$ready")"
+  else
+    print_backlog_counts_manual "$path"
+  fi
+  printf 'Rows on demand: bin/fm-tasks-axi.sh list --state <in_flight|held|queued>, bin/fm-tasks-axi.sh ready, or %s.\n' "$path"
+}
+
+# print_context_pointer <path> <label>: the compact CONTEXT line for one file,
+# keeping the ABSENT and empty markers the full digest prints (AGENTS.md
+# section 3 gives absence its own meaning).
+print_context_pointer() {
+  local path=$1 label=$2
+  if [ -f "$path" ]; then
+    if [ -s "$path" ]; then
+      printf -- '- %s: present, %s bytes - %s\n' "$label" "$(wc -c < "$path" | tr -d ' ')" "$path"
+    else
+      printf -- '- %s: present, empty\n' "$label"
+    fi
+  else
+    printf -- '- %s: ABSENT\n' "$label"
+  fi
+}
+
+print_afk_posture() {
+  subsection "AFK"
+  # The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
+  # still marks a running daemon on the harnesses that launch one.
+  # A quiet record (bin/fm-afk-contract.sh mode) is a present captain: it holds
+  # nothing for a return.
+  if [ -f "$STATE/.afk-contract" ]; then
+    if [ "$("$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" = quiet ]; then
+      printf 'present - quiet mode recorded at %s (the captain is present and nothing is held for a return: requested actions proceed under ordinary attended authority; only an explicit /quiet off exits it)' \
+        "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
+    else
+      printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
+        "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
+    fi
+    if [ -e "$STATE/.afk" ]; then
+      if [ "$AFK_MODE" = quiet ]; then
+        printf '; the quiet daemon owns the watcher.\n'
+      else
+        printf '; the away daemon owns the watcher.\n'
+      fi
+    else
+      printf '; no daemon runs, the ordinary supervision session continues.\n'
+    fi
+  elif [ -e "$STATE/.afk" ]; then
+    if [ "$AFK_MODE" = quiet ]; then
+      printf 'present - quiet-mode supervision is active; the daemon owns the watcher, only an explicit /quiet off exits it (legacy flag with no posture record).\n'
+    else
+      printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
+    fi
+  else
+    printf 'absent\n'
+  fi
+}
+
+# Public commitments made through the myfirstmate relay. A promise to reply in a
+# public thread must survive compaction and restart, so it is surfaced from disk
+# here rather than from conversation memory. fm-public-followup-lib.sh owns both
+# gates: a home that never opted into the relay runs one [ -f ] test, prints no
+# subsection, and never reaches fm-public-followup.sh.
+print_public_commitments() {
+  if fm_pf_relay_active "$FM_HOME" \
+    && { fm_pf_has_registrations "$STATE" || fm_pf_has_events "$STATE"; }; then
+    PUBLIC_FOLLOWUP=$("$SCRIPT_DIR/fm-public-followup.sh" pending 2>/dev/null) || PUBLIC_FOLLOWUP=
+    if [ -n "$PUBLIC_FOLLOWUP" ]; then
+      subsection "Public commitments"
+      printf '%s\n' "$PUBLIC_FOLLOWUP"
+      printf '\nEach line is a public loop this home still holds: a reply still owed, or an open loop with nothing owed.\n'
+      printf 'Reconcile terminal results with %s/bin/fm-public-followup.sh consume, then deliver a ready one with\n' "$FM_ROOT"
+      printf '%s/bin/fm-public-followup.sh deliver <id>. Hand a delivered loop on with rechain, or close it with\n' "$FM_ROOT"
+      printf '%s/bin/fm-public-followup.sh retire <id> --reason "...". Load fmx-respond for the procedure.\n' "$FM_ROOT"
+    fi
+  fi
+}
+
 hash_file_sha256() {
   local file=$1 digest
   [ -f "$file" ] || return 1
@@ -673,7 +941,15 @@ if [ "$REEMIT" -eq 0 ] && [ "$SESSION_SOURCE" = startup ]; then
   AGENTS_START_HASH=$(hash_file_sha256 "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
 fi
 
-if [ "$REEMIT" -eq 1 ]; then
+if [ "$COMPACT_REEMIT" -eq 1 ]; then
+  printf 'SPILL CUE: only if this output was cut to a preview with "Full output saved to <path>", read that file now.\n'
+  section "SESSION START (CONTEXT RE-EMIT) - $FM_HOME"
+  printf 'This session already took the helm at its own startup and has only been\n'
+  printf 'compacted. Lock ownership is re-verified, and the startup sweeps are NOT repeated.\n'
+  printf 'Queued wakes ARE still drained, in full: they arrived after startup and are this\n'
+  printf 'turn work. The durable records are summarized as counts and paths (compact\n'
+  printf 'digest) so this reload does not refill the context it just freed.\n'
+elif [ "$REEMIT" -eq 1 ]; then
   # First in the output on purpose: a harness that spills a large hook output
   # delivers only a short head inline (Claude: about 2,000 characters), and
   # CONTEXT prints last, so this cue is the part that must survive the spill.
@@ -878,12 +1154,26 @@ if [ "$PRIMARY_HARNESS" = omp ]; then
     fi
   fi
 fi
-"$SCRIPT_DIR/fm-supervision-instructions.sh" \
-  --harness "$PRIMARY_HARNESS" \
-  --read-only "$READ_ONLY" \
-  --afk "$AFK_PRESENT" \
-  --afk-mode "$AFK_MODE" \
-  --x-mode "$X_MODE_PRESENT"
+if [ "$COMPACT_REEMIT" -eq 1 ]; then
+  # The full block is about 8KB, most of the compact digest's inline budget, so
+  # it becomes its repair line plus the exact command that re-renders it.
+  section "SUPERVISION OPERATING INSTRUCTIONS - primary harness: $PRIMARY_HARNESS (compact)"
+  SUPERVISION_REPAIR_LINE=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
+    --harness "$PRIMARY_HARNESS" --read-only "$READ_ONLY" --afk "$AFK_PRESENT" \
+    --afk-mode "$AFK_MODE" --x-mode "$X_MODE_PRESENT" --repair-line 2>/dev/null || true)
+  [ -z "$SUPERVISION_REPAIR_LINE" ] \
+    || printf 'If a guard or hook reports supervision missing or failed: %s\n' "$SUPERVISION_REPAIR_LINE"
+  printf 'Full operating block, before arming, repairing, or handling a wake whose protocol this context no longer holds:\n'
+  printf '%s/fm-supervision-instructions.sh --harness %s --read-only %s --afk %s --afk-mode %s --x-mode %s\n' \
+    "$SCRIPT_DIR" "$PRIMARY_HARNESS" "$READ_ONLY" "$AFK_PRESENT" "$AFK_MODE" "$X_MODE_PRESENT"
+else
+  "$SCRIPT_DIR/fm-supervision-instructions.sh" \
+    --harness "$PRIMARY_HARNESS" \
+    --read-only "$READ_ONLY" \
+    --afk "$AFK_PRESENT" \
+    --afk-mode "$AFK_MODE" \
+    --x-mode "$X_MODE_PRESENT"
+fi
 
 # --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
@@ -893,6 +1183,23 @@ fi
 # a stage that never ran, which the truncation banner names by stage.
 stage read-once
 section "READ-ONCE CONTRACT"
+if [ "$COMPACT_REEMIT" -eq 1 ]; then
+  cat <<'EOF'
+This compact digest prints counts, one line per recorded task, and source paths
+instead of full sources. Do NOT bulk-read the sources back: that refills the
+context the compaction just freed. One exception: after a compaction, read
+data/captain.md and data/captain-shared.md (when present) once before the first
+captain-facing reply or any mutating action, regardless of whether the summary
+seems to need them. Read any other source only when this turn's work needs it:
+  - a task's meta or full status log: state/<id>.meta, state/<id>.status,
+    or its current state: bin/fm-crew-state.sh <id>,
+  - backlog rows: bin/fm-tasks-axi.sh list --state <state>, bin/fm-tasks-axi.sh
+    ready, bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md,
+  - a context file listed under CONTEXT, when a decision or reply depends on it,
+  - the NETWORK CHECKS verdict if still IN PROGRESS (bin/fm-startup-network.sh report),
+  - or the stages a STARTUP TRUNCATED banner names.
+EOF
+else
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
@@ -917,114 +1224,24 @@ Go to a source directly only when:
   - or a context re-emit opened with a read cue because the
     harness cut the digest short.
 EOF
+fi
 
 # --- 6. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
 # truncated tail must never take.
 stage fleet-state
 section "FLEET STATE"
-print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
-
-subsection "Work under way (state/*.meta)"
-META_FOUND=0
-for meta in "$STATE"/*.meta; do
-  [ -f "$meta" ] || continue
-  META_FOUND=1
-  id=$(basename "$meta" .meta)
-  printf '\n--- %s ---\n' "$id"
-  cat "$meta"
-
-  window=$(fm_meta_get "$meta" window)
-  target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
-    backend=$(fm_backend_of_meta "$meta")
-    endpoint_rc=0
-    fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" || endpoint_rc=$?
-    # Only the timeout owner's own statuses mean the read itself failed: 124 is
-    # the bound firing and >=128 is a signal death. Every other nonzero status
-    # is the probe's own verdict that the endpoint is gone.
-    if [ "$endpoint_rc" -eq 0 ]; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
-    elif [ "$endpoint_rc" -eq 124 ] || [ "$endpoint_rc" -ge 128 ]; then
-      printf 'endpoint: error (backend=%s window=%s - the endpoint read died or hit its %ss bound; the digest continued past it)\n' \
-        "$backend" "$window" "$ENDPOINT_TIMEOUT"
-    else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
-    fi
-  else
-    printf 'endpoint: unknown (no window recorded)\n'
-  fi
-
-  status="$STATE/$id.status"
-  if [ -f "$status" ]; then
-    print_status_tail "$status"
-  else
-    printf 'status tail: (no status file yet: %s)\n' "$status"
-  fi
-done
-[ "$META_FOUND" -eq 1 ] || printf '(none)\n'
-
-subsection "Orphan status logs (state/*.status without matching .meta)"
-ORPHAN_STATUS_FOUND=0
-for status in "$STATE"/*.status; do
-  [ -f "$status" ] || continue
-  id=$(basename "$status" .status)
-  [ -f "$STATE/$id.meta" ] && continue
-  ORPHAN_STATUS_FOUND=1
-  printf '\n--- %s ---\n' "$id"
-  print_status_tail "$status"
-done
-[ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
-
-subsection "AFK"
-# The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
-# still marks a running daemon on the harnesses that launch one.
-# A quiet record (bin/fm-afk-contract.sh mode) is a present captain: it holds
-# nothing for a return.
-if [ -f "$STATE/.afk-contract" ]; then
-  if [ "$("$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" = quiet ]; then
-    printf 'present - quiet mode recorded at %s (the captain is present and nothing is held for a return: requested actions proceed under ordinary attended authority; only an explicit /quiet off exits it)' \
-      "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
-  else
-    printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
-      "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
-  fi
-  if [ -e "$STATE/.afk" ]; then
-    if [ "$AFK_MODE" = quiet ]; then
-      printf '; the quiet daemon owns the watcher.\n'
-    else
-      printf '; the away daemon owns the watcher.\n'
-    fi
-  else
-    printf '; no daemon runs, the ordinary supervision session continues.\n'
-  fi
-elif [ -e "$STATE/.afk" ]; then
-  if [ "$AFK_MODE" = quiet ]; then
-    printf 'present - quiet-mode supervision is active; the daemon owns the watcher, only an explicit /quiet off exits it (legacy flag with no posture record).\n'
-  else
-    printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
-  fi
+if [ "$COMPACT_REEMIT" -eq 1 ]; then
+  print_backlog_counts "$DATA/backlog.md" "data/backlog.md (counts)"
+  print_work_under_way_compact
+  print_orphan_status_ids
 else
-  printf 'absent\n'
+  print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
+  print_work_under_way_full
+  print_orphan_status_tails
 fi
-
-# Public commitments made through the myfirstmate relay. A promise to reply in a
-# public thread must survive compaction and restart, so it is surfaced from disk
-# here rather than from conversation memory. fm-public-followup-lib.sh owns both
-# gates: a home that never opted into the relay runs one [ -f ] test, prints no
-# subsection, and never reaches fm-public-followup.sh.
-if fm_pf_relay_active "$FM_HOME" \
-  && { fm_pf_has_registrations "$STATE" || fm_pf_has_events "$STATE"; }; then
-  PUBLIC_FOLLOWUP=$("$SCRIPT_DIR/fm-public-followup.sh" pending 2>/dev/null) || PUBLIC_FOLLOWUP=
-  if [ -n "$PUBLIC_FOLLOWUP" ]; then
-    subsection "Public commitments"
-    printf '%s\n' "$PUBLIC_FOLLOWUP"
-    printf '\nEach line is a public loop this home still holds: a reply still owed, or an open loop with nothing owed.\n'
-    printf 'Reconcile terminal results with %s/bin/fm-public-followup.sh consume, then deliver a ready one with\n' "$FM_ROOT"
-    printf '%s/bin/fm-public-followup.sh deliver <id>. Hand a delivered loop on with rechain, or close it with\n' "$FM_ROOT"
-    printf '%s/bin/fm-public-followup.sh retire <id> --reason "...". Load fmx-respond for the procedure.\n' "$FM_ROOT"
-  fi
-fi
+print_afk_posture
+print_public_commitments
 
 # --- 7. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
@@ -1051,16 +1268,34 @@ fi
 # with one targeted read, so it is the cheapest thing for a truncated tail to
 # take (see this file's ORDERING note).
 stage context
-section "CONTEXT"
-print_file_or_absent "$DATA/projects.md" "data/projects.md"
-print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
-print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+if [ "$COMPACT_REEMIT" -eq 1 ]; then
+  section "CONTEXT (paths only - read a file when this turn's work depends on it)"
+  print_context_pointer "$DATA/projects.md" "data/projects.md"
+  print_context_pointer "$DATA/secondmates.md" "data/secondmates.md"
+  print_context_pointer "$DATA/captain.md" "data/captain.md"
+  print_context_pointer "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+  print_context_pointer "$DATA/learnings.md" "data/learnings.md"
+else
+  section "CONTEXT"
+  print_file_or_absent "$DATA/projects.md" "data/projects.md"
+  print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+  print_file_or_absent "$DATA/captain.md" "data/captain.md"
+  print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+  print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step
 section "NEXT STEP"
+if [ "$COMPACT_REEMIT" -eq 1 ]; then
+  SUPERVISION_REF="the full operating block printed by the re-render command above"
+  SUPERVISION_REF_WRAPPED="the full operating block printed by the re-render
+command above"
+else
+  SUPERVISION_REF="the supervision operating instructions block above"
+  SUPERVISION_REF_WRAPPED="the supervision operating instructions block
+above"
+fi
 if [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'
 This session did not acquire the fleet lock. Stay read-only: do not arm,
@@ -1069,38 +1304,44 @@ with verified fleet-lock ownership may perform mutable follow-up.
 
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ] && [ "$AFK_MODE" = quiet ]; then
-  cat <<'EOF'
-Quiet mode is active. Follow the supervision operating instructions block
-above: load /quiet and ensure the daemon is running, because the daemon owns
+  cat <<EOF
+Quiet mode is active. Follow $SUPERVISION_REF_WRAPPED: load /quiet and ensure the daemon is running, because the daemon owns
 watcher supervision. Ordinary captain chat does not exit it; only an
 explicit /quiet off does.
 
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then
-  cat <<'EOF'
-Away mode is active. Follow the supervision operating instructions block above:
+  cat <<EOF
+Away mode is active. Follow $SUPERVISION_REF:
 load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
 elif [ -f "$CONFIG/x-mode.env" ]; then
   cat <<EOF
-Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
+Follow $SUPERVISION_REF for harness '$PRIMARY_HARNESS'.
 X mode is active, so the emitted block's cadence instruction applies.
 This script never starts supervision itself.
 
 EOF
 else
 cat <<EOF
-Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
+Follow $SUPERVISION_REF for harness '$PRIMARY_HARNESS'.
 This script never starts supervision itself.
 
 EOF
 fi
+if [ "$COMPACT_REEMIT" -eq 1 ]; then
+  cat <<'EOF'
+This compact digest is deliberately partial. The READ-ONCE CONTRACT section
+near the top of it governs what may still be read from disk.
+EOF
+else
 cat <<'EOF'
 The digest above is complete for this session start. The READ-ONCE CONTRACT
 section near the top of it governs what may still be read from disk.
 EOF
+fi
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   COMPLETION_RECORDED=0

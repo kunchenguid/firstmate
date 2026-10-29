@@ -2428,6 +2428,91 @@ FIXTURE
   pass "--reemit puts its read cue in the first 2000 characters and a normal start omits it"
 }
 
+# Claude caps one hook output string at 10,000 characters and above it delivers
+# only a 2,000-character preview (docs/sessionstart-nudge.md), so a compact
+# re-emit must fit inline: compaction recurs all session, and a spilled digest
+# either loses its tail or costs a whole-file read that refills the context.
+test_compact_reemit_digest_fits_the_hook_output_cap() {
+  local rec root home fakebin i compact clear_out sequence
+  rec=$(new_world compact-reemit)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:task-01"
+  awk 'BEGIN { for (i = 0; i < 400; i++) printf "CAPTAIN_PREF_%04d keep this preference in mind padding\n", i }' > "$home/data/captain.md"
+  awk 'BEGIN { for (i = 0; i < 150; i++) printf "LEARNING_%04d a curated fleet fact padding padding\n", i }' > "$home/data/learnings.md"
+  {
+    printf '## In flight\n'
+    for i in $(seq -w 1 12); do printf -- '- [ ] task-%s - in-flight work item %s\n  BACKLOG_BODY_%s indented body\n' "$i" "$i" "$i"; done
+    printf '## Queued\n'
+    for i in $(seq -w 1 40); do printf -- '- [ ] queued-%s - queued work item %s\n' "$i" "$i"; done
+    printf -- '- [ ] held-01 (hold: captain) - a captain decision\n'
+  } > "$home/data/backlog.md"
+  for i in $(seq -w 1 12); do
+    printf 'window=fm-sess:task-%s\nkind=ship\nworktree=/tmp/wt/task-%s\npr=https://example.invalid/pull/%s\n' "$i" "$i" "$i" \
+      > "$home/state/task-$i.meta"
+    awk -v id="$i" 'BEGIN { for (n = 0; n < 6; n++) { printf "working [at=%d]: task %s step %d", n, id, n; for (p = 0; p < 30; p++) printf " padding"; printf "\n" } }' \
+      > "$home/state/task-$i.status"
+  done
+
+  FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  append_wake "$home/state" signal task-01 "done: queued after the compaction" || fail "seed wake failed"
+  compact=$(FM_FAKE_HARNESS_PID=$$ run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" \
+    --reemit --source compact)
+
+  [ "${#compact}" -lt 10000 ] \
+    || fail "the compact re-emit is ${#compact} characters, over Claude's 10,000-character hook output cap"
+  [ "$(printf '%s' "$compact" | wc -c)" -lt 16384 ] || fail "the compact re-emit exceeds 16 KB"
+  assert_not_contains "$compact" "RE-EMIT CUE" "the compact re-emit still asks for a whole-file read"
+  assert_contains "$(printf '%s\n' "$compact" | head -n 1)" \
+    'SPILL CUE: only if this output was cut to a preview with "Full output saved to <path>", read that file now.' \
+    "the compact re-emit does not open with its conditional spill cue"
+  assert_contains "$compact" "SESSION START (CONTEXT RE-EMIT) - $home" "the compact re-emit did not label itself"
+  assert_not_contains "$compact" "CAPTAIN_PREF_0001" "the compact re-emit printed data/captain.md in full"
+  assert_contains "$(printf '%s\n' "$compact" | tr '\n' ' ')" \
+    "after a compaction, read data/captain.md and data/captain-shared.md (when present) once before the first captain-facing reply or any mutating action, regardless of whether the summary seems to need them." \
+    "the compact re-emit did not require a captain preference re-read before acting"
+  assert_not_contains "$compact" "LEARNING_0001" "the compact re-emit printed data/learnings.md in full"
+  assert_not_contains "$compact" "BACKLOG_BODY_01" "the compact re-emit printed backlog bodies"
+  assert_contains "$compact" "data/captain.md: present" "the compact re-emit dropped the captain.md pointer"
+  assert_contains "$compact" "$home/data/learnings.md" "the compact re-emit dropped the learnings.md path"
+  assert_contains "$compact" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes): ABSENT" \
+    "the compact re-emit lost the ABSENT marker"
+  assert_contains "$compact" "12 in flight, 1 held or blocked queued, 40 other queued" \
+    "the compact re-emit did not count the backlog"
+  for i in $(seq -w 1 12); do
+    assert_contains "$compact" "- task-$i (ship): endpoint" "the compact re-emit omitted recorded task task-$i"
+  done
+  assert_contains "$compact" "- task-01 (ship): endpoint alive (tmux fm-sess:task-01); pr=https://example.invalid/pull/01" \
+    "the compact re-emit lost a task's liveness or PR"
+  assert_contains "$compact" "last status: working [at=5]: task 01 step 5" "the compact re-emit lost the last status line"
+  assert_contains "$compact" "done: queued after the compaction" "the compact re-emit did not drain the wake queue"
+  sequence=$(printf '%s\n' "$compact" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) .*$/\1/p' | tail -1)
+  [ -n "$sequence" ] || fail "the compact re-emit omitted the wake acknowledgement"
+  assert_contains "$compact" "fm-supervision-instructions.sh --harness claude --read-only 0" \
+    "the compact re-emit did not point at the full supervision block"
+  assert_contains "$compact" "NEXT STEP" "the compact re-emit dropped the closing reminder"
+  assert_contains "$compact" "If a guard or hook reports supervision missing or failed: watcher supervision needs Stop-owned automatic recovery" \
+    "the compact re-emit printed the supervision repair line as an unconditional fault"
+  assert_contains "$compact" "Follow the full operating block printed by the re-render command above for harness 'claude'." \
+    "the compact NEXT STEP did not point at the re-render command"
+  assert_not_contains "$compact" "supervision operating instructions block above" \
+    "the compact NEXT STEP pointed at a supervision block it did not print"
+  assert_not_contains "$compact" "The digest above is complete" "the compact NEXT STEP called the partial digest complete"
+
+  clear_out=$(FM_FAKE_HARNESS_PID=$$ run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" \
+    --reemit --source clear)
+  assert_contains "$clear_out" "RE-EMIT CUE" "a clear re-emit lost its read cue"
+  assert_not_contains "$clear_out" "SPILL CUE" "a clear re-emit printed the compact spill cue"
+  assert_contains "$clear_out" "CAPTAIN_PREF_0001" "a clear re-emit stopped printing the full context"
+  assert_contains "$clear_out" "The digest above is complete for this session start." \
+    "a clear re-emit lost its complete-digest closing line"
+
+  pass "a compact re-emit stays under the hook output cap with counts, task lines, paths, and the full wake queue"
+}
+
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
   local rec root home fakebin network_report reemit sequence generation
   rec=$(new_world reemit)
@@ -3151,6 +3236,7 @@ test_runtime_bound_truncates_loudly_and_exits_zero
 test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
+test_compact_reemit_digest_fits_the_hook_output_cap
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_reemit_cue_survives_the_hook_output_preview
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact

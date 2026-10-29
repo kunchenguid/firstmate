@@ -227,7 +227,7 @@ The watcher's `.seen-*` and `.hb-surfaced-<task>` markers and the daemon's `.sub
 A keyed `needs-decision` or `blocked` transition accepted by the whole-file decision fold is retired only when that fold retires it - an explicit close for its exact key, or a terminal declaration by the ship or scout that owns the log - while a reserved-key transition the fold rejects surfaces as a reconciliation signal without becoming an open decision.
 The fold remains the sole owner of open/closed semantics, including same-key reopening and reserved-key handling, shared with the durable OPEN DECISIONS surface.
 The always-on watcher also uses that library's absorb classification on no-verb signals and first-sighting stale panes before status-log terminality is trusted, while the daemon maintains distinct wedge and declared-wait recheck cadences.
-The daemon's stale-routing precedence, declared-wait aging, and steering-inbox exception are owned by [Classification policy](../.agents/skills/afk/SKILL.md#classification-policy).
+The daemon's stale-routing precedence, declared-wait aging, and steering-inbox exception are owned by [Classification policy](../.agents/skills/afk/references/daemon.md#classification-policy).
 In away mode, seen-status dedupe does not clear possible-wedge aging for nonterminal progress, so housekeeping still re-escalates an unchanged idle pane at the configured bound.
 For T3 native uncertainty, [`t3code-backend.md`](t3code-backend.md#away-mode) owns stale-alert retention and re-arming.
 Away-mode housekeeping has no worktree-write or validating-run deferral of its own, so while `state/.afk` exists a quiet crew that is writing its own worktree or waiting on its own running validation still escalates as a possible wedge at that bound.
@@ -238,7 +238,7 @@ Pane existence, busy checks, composer checks, capture, and verified submit route
 The retries-exhausted queued-Enter decision is owned by `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh`; the adapters provide only their backend-specific busy signals.
 Composer classification has one shared owner, `bin/fm-composer-lib.sh`: tmux, herdr, Zellij, Orca, cmux, Paseo, Rex, and tern contribute only a screen capture plus declarative styled, cursor, identity, and row capabilities, while the shared classifier owns every shape and the `empty`/`pending`/`pending-unproven`/`unknown` verdict.
 `fm-spawn.sh` also routes Kimi launch readiness through that classifier instead of carrying another shape copy.
-The daemon's pane input guard is owned by [Busy-guard and composer guard](../.agents/skills/afk/SKILL.md#busy-guard-and-composer-guard), with backend details in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
+The daemon's pane input guard is owned by [Busy-guard and composer guard](../.agents/skills/afk/references/daemon.md#busy-guard-and-composer-guard), with backend details in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, the record archive, durable catch-up evidence, the return brief, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker the away session could not fix.

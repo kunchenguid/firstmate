@@ -116,6 +116,7 @@ The requested session start remains idempotent.
 `bin/fm-session-start.sh --reemit` owns these re-emit details:
 
 - Which work a re-emit skips.
+- The compact digest a `compact` re-emit prints in place of the full one.
 - Its true-start AGENTS.md baseline.
 - Its supported stale-instruction refresh pairs.
 
@@ -242,7 +243,9 @@ The wrapper reads `source` from the hook payload.
 Native stdout context injection is supported.
 Claude caps one hook output string at 10,000 characters.
 Above the cap the model receives a preview of the first 2,000 characters plus the path of a saved file, and is not asked to read that file.
-A context re-emit therefore prints a short `RE-EMIT CUE` first, which tells the model to read the saved file.
+A `clear` re-emit therefore prints a short `RE-EMIT CUE` first, which tells the model to read the saved file.
+A `compact` re-emit instead prints a compact digest of counts, task lines, and on-demand paths that fits under the cap for a typical fleet, because compaction recurs and a whole-file read would refill the context it just freed.
+Its first line is a one-line `SPILL CUE` that asks for the saved file only when the output was actually cut to a preview, since the wake queue, per-task lines, and public commitments grow without a bound.
 
 ### Codex exec
 

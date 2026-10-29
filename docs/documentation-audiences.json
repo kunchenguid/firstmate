@@ -125,6 +125,18 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/afk/references/daemon.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/afk/references/launch.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/afk/references/return.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/ahoy/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -270,6 +282,18 @@
     },
     {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-provisioning/references/backlog-handoff.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-provisioning/references/charter-and-seed.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/secondmate-provisioning/references/sync-and-inheritance.md",
       "audience": "agent-runtime"
     },
     {
