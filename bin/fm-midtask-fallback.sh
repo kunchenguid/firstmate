@@ -175,7 +175,7 @@ quota_exhausted() {
   local snapshot=$1 provider=$2 harness=$3 model=$4 evidence
   [ -n "$provider" ] || return 1
   evidence=$(jq -c --arg provider "$provider" --arg harness "$harness" --arg model "$model" "$FM_QUOTA_ROW_JQ"'
-    (if $harness == "omp" then ($model | sub("^[^/]*/"; "")) else ($model | sub("^model:"; "")) end) as $scope_model |
+    (($model | split("/") | last) // "") as $scope_model |
     quota_lane($harness; $model) as $lane |
     quota_row(.; $provider; $lane) as $p |
     if $p == null then {status: "unknown"}
@@ -320,7 +320,7 @@ cmd_bind() {
   [ "$source" != rule ] || [ -n "$rule" ] || usage
   meta=$(meta_path "$id")
   [ -f "$meta" ] || die "no task record for $id"
-  mode=$(fallback_mode)
+  mode=$(fallback_mode) || return 1
   if [ "$mode" = off ]; then
     printf '%s\n' 'mid-task fallback: off'
     return 0
@@ -370,7 +370,7 @@ cmd_consider() {
       *) usage ;;
     esac
   done
-  mode=$(fallback_mode)
+  mode=$(fallback_mode) || return 1
   [ "$mode" != off ] || return 0
   meta=$(meta_path "$id")
   [ -f "$meta" ] || return 0

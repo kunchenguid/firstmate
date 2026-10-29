@@ -457,3 +457,35 @@ rc=$?
 [ "$(wc -l < "$CASE/control-calls" | tr -d '[:space:]')" = 11 ] || fail "recorded switch relaunched again"
 assert_kept "recorded switch"
 ok "a recorded switch does not relaunch again"
+
+# A broken config with an exhausted snapshot neither relaunches nor exits 0.
+begin broken-config
+write_rules true
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+printf '{ not json\n' > "$CASE/config/crew-dispatch.json"
+: > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 grok through_reset 40 codex through_reset 40
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null 2>&1
+rc=$?
+[ "$rc" -ne 0 ] || fail "broken config exited 0"
+assert_no_control "broken config"
+ok "a broken config does not relaunch and exits non-zero"
+
+# A pi profile with a provider prefix matches a bare model scope.
+begin pi-prefixed-scope
+write_rules true
+write_meta
+sed -i 's/^harness=claude$/harness=pi/; s|^model=claude-sonnet-5$|model=anthropic/claude-sonnet-5|' "$CASE/state/$ID.meta"
+jq '.rules[0].use[0] = {harness:"pi", provider:"anthropic", model:"anthropic/claude-sonnet-5", effort:"high"}' \
+  "$CASE/config/crew-dispatch.json" > "$CASE/config/next.json"
+mv "$CASE/config/next.json" "$CASE/config/crew-dispatch.json"
+invoke bind "$ID" --rule 0 >/dev/null
+: > "$CASE/state/$ID.status"
+jq -n '{schemaVersion:5, providers:[
+  {provider:"anthropic", quotaSemantics:{status:"known", effectiveAvailability:[{scope:"model:claude-sonnet-5", status:"known", effectivePercentRemaining:0, runway:{status:"exhausted_now"}}]}},
+  {provider:"xai", quotaSemantics:{status:"known", effectiveAvailability:[{scope:"all_models", status:"known", effectivePercentRemaining:40, runway:{status:"through_reset"}}]}},
+  {provider:"openai", quotaSemantics:{status:"known", effectiveAvailability:[{scope:"all_models", status:"known", effectivePercentRemaining:40, runway:{status:"through_reset"}}]}}]}' > "$CASE/snap.json"
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null 2>&1
+[ -s "$CASE/control-calls" ] || fail "prefixed pi model did not match its scope"
+ok "a prefixed pi model matches a bare model scope"
