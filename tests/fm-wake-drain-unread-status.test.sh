@@ -357,6 +357,34 @@ test_weak_identity_still_presents_and_advances() {
   pass "fallback identity still presents and advances status state"
 }
 
+# One structurally malformed row in the shared presentation cursor belongs to
+# one task. It must fail only that task's lookup, never every other task's.
+test_malformed_cursor_row_fails_only_its_own_task() {
+  local dir state out status row cursor
+  dir=$(make_case malformed-cursor-row); state="$dir/state"; out="$dir/drain.out"
+  status="$state/healthy.status"
+  prime_cursor "$state" "$status"
+  cursor="$state/.status-presentation-cursor"
+  for row in $'ghost\tident\t0\t0\textra' $'ghost\tident\tNaN\t0' $'ghost\t\t0\t0'; do
+    printf '%s\n' "$row" >> "$cursor"
+    printf 'note: still visible past a malformed row\n' >> "$status"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+      || fail "drain failed past a malformed row for another task: $(cat "$out")"
+    grep -F 'healthy note: still visible past a malformed row' "$out" >/dev/null \
+      || fail "a malformed row for another task hid this task's unread status: $(cat "$out")"
+  done
+  # The malformed row still fails its own task's lookup.
+  printf 'note: unpresented\n' > "$state/other.status"
+  printf '%s\n' $'other\tident\tNaN\t0' >> "$cursor"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-classify-lib.sh"; status_presentation_cursor_offset "$2"' \
+    _ "$ROOT" "$state/other.status" >/dev/null 2>&1 \
+    && fail "a malformed row did not fail its own task's cursor lookup"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1/bin/fm-classify-lib.sh"; status_presentation_cursor_offset "$2"' \
+    _ "$ROOT" "$status" >/dev/null 2>&1 \
+    || fail "another task's malformed row failed this task's cursor lookup"
+  pass "a malformed presentation-cursor row fails only its own task"
+}
+
 test_snapshot_failure_is_visible() {
   local dir state out reader
   dir=$(make_case snapshot-failure); state="$dir/state"; out="$dir/drain.out"; reader="$dir/identity-reader"
@@ -459,6 +487,7 @@ test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_weak_identity_still_presents_and_advances
+test_malformed_cursor_row_fails_only_its_own_task
 test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
