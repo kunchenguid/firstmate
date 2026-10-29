@@ -234,9 +234,8 @@ WEDGE_ALARM_NOTIFIER_PID=
 INJECT_LAST_FAILURE=
 # 1 once the latest delivery attempt reached the submit primitive.
 INJECT_SUBMIT_ATTEMPTED=0
-# The latest submit's verdict and the exact text it submitted.
+# The latest submit's verdict.
 INJECT_LAST_VERDICT=
-INJECT_SENT_MSG=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, and the status-span reader) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -1612,7 +1611,6 @@ inject_msg() {  # <message> [state] [exact] [request-id]
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
   INJECT_LAST_FAILURE=
   INJECT_LAST_VERDICT=
-  INJECT_SENT_MSG=
   INJECT_SUBMIT_ATTEMPTED=0
   afk_active "$state" || { INJECT_LAST_FAILURE="deferred: afk inactive"; log "inject $INJECT_LAST_FAILURE"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
@@ -1692,7 +1690,6 @@ inject_msg() {  # <message> [state] [exact] [request-id]
   bytes=$(LC_ALL=C; printf '%s' "${#msg}")
   errf=$(mktemp "$state/.subsuper-inject-err.XXXXXX" 2>/dev/null) || errf=
   INJECT_SUBMIT_ATTEMPTED=1
-  INJECT_SENT_MSG=$msg
   verdict=$(FM_T3CODE_CLIENT_REQUEST_ID=$request_id fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" 2>"${errf:-/dev/null}")
   INJECT_LAST_VERDICT=$verdict
   if [ -n "$errf" ]; then
