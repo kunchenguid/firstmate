@@ -1146,3 +1146,15 @@ expect_code 8 "$RC" "intact retry must still honor normal teardown refusals"
 assert_present "$RETIRE_HOME" "pending evidence bypassed intact-home teardown checks"
 assert_absent "$RETIRE_PROOF" "intact-home refusal published completion"
 pass "pending evidence does not bypass teardown checks for intact homes"
+
+retirement_reset retire-replay retirement.replay replay
+OUT=$(FM_TEST_RETIRE_EXIT=4 host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 4 "$RC" "lost-slot retirement fixture"
+assert_absent "$RETIRE_HOME" "initial retirement retained its home"
+OUT=$(host_retirement retire "$RETIRE_ID" --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 4 "$RC" "completed retirement must replay its retained exit"
+assert_absent "$RETIRE_HOME" "proof replay recreated the deleted home"
+OUT=$(host_retirement retire "$RETIRE_ID" --invalid-option); RC=$?
+expect_code 2 "$RC" "invalid retirement option must fail before mutation"
+assert_absent "$RETIRE_HOME" "invalid retirement option recreated the deleted home"
+pass "retirement proof replay and invalid arguments keep the retired home absent"

@@ -133,6 +133,13 @@ SEAT_PREV=-
 EXPECT_GENERATION=
 SEAT_LIFECYCLE_ID=
 HOST_LIFECYCLE_LOCK=
+host_lifecycle_enter() {
+  host_history_require
+  FM_WAKE_LIB_NO_STATE_CREATE=1 fm_sm_live_require_locks || die "remote lifecycle locks are unavailable"
+  HOST_LIFECYCLE_LOCK="$HOST_HISTORY/$1.lifecycle.lock"
+  fm_lock_acquire_wait_max "$HOST_LIFECYCLE_LOCK" 30 || die "remote host lifecycle is busy"
+  trap 'host_lifecycle_release' EXIT
+}
 host_lifecycle_release() {
   [ -z "$HOST_LIFECYCLE_LOCK" ] || fm_lock_release "$HOST_LIFECYCLE_LOCK" || true
 }
@@ -909,7 +916,7 @@ cmd_retire() {
     esac
   done
   validate_id "$id"
-  host_history_require
+  host_lifecycle_enter "$id"
   if [ -n "$expected" ]; then
     proof="$HOST_HISTORY/$id.retirement.$expected.json"
     if [ -e "$proof" ] || [ -L "$proof" ]; then
@@ -1085,27 +1092,20 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch|relaunch|retire)
-    validate_id "${2:-}"
-    host_history_require
-    fm_sm_live_require_locks || die "remote lifecycle locks are unavailable"
-    HOST_LIFECYCLE_LOCK="$HOST_HISTORY/$2.lifecycle.lock"
-    fm_lock_acquire_wait_max "$HOST_LIFECYCLE_LOCK" 30 || die "remote host lifecycle is busy"
-    trap 'host_lifecycle_release' EXIT
-    ;;
-esac
-
-case "${1:-}" in
   launch)
     shift
     seat_parse_operation "$@"
     [ "${#SEAT_ARGS[@]}" -ge 5 ] && [ "${#SEAT_ARGS[@]}" -le 6 ] || usage
+    validate_id "${SEAT_ARGS[0]}"
+    host_lifecycle_enter "${SEAT_ARGS[0]}"
     cmd_launch "${SEAT_ARGS[@]}"
     ;;
   relaunch)
     shift
     seat_parse_operation "$@"
     [ "${#SEAT_ARGS[@]}" -eq 4 ] || usage
+    validate_id "${SEAT_ARGS[0]}"
+    host_lifecycle_enter "${SEAT_ARGS[0]}"
     cmd_relaunch "${SEAT_ARGS[@]}"
     ;;
   disposition) shift; [ "$#" -eq 3 ] || usage; cmd_disposition "$@" ;;

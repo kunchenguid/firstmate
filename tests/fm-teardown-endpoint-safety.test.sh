@@ -1603,6 +1603,49 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+test_retirement_reuses_only_empty_staging() {
+  local shape dir mate stage rc force
+  for shape in ordinary forced nonempty linked; do
+    dir=$(make_case "retire-stage-$shape")
+    mate="$dir/mate"
+    stage="$mate.retiring.g1"
+    mkdir -p "$mate/state" "$mate/data" "$mate/config"
+    printf 'mate\n' >"$mate/.fm-secondmate-home"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$dir/home" >"$mate/.fm-secondmate-parent"
+    printf 'manual\n' >"$dir/home/config/backlog-backend"
+    fm_write_meta "$dir/home/state/mate.meta" \
+      "window=isolated:fm-mate" "endpoint_task_id=mate" "backend=tmux" \
+      "kind=secondmate" "home=$mate" "worktree=$mate" "project=$dir/project" "spawn_gen=g1"
+    cat >"$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+SH
+    mkdir "$stage"
+    case "$shape" in
+      nonempty) printf keep >"$stage/sentinel" ;;
+      linked) rmdir "$stage"; mkdir "$dir/outside"; ln -s "$dir/outside" "$stage" ;;
+    esac
+    force=''
+    [ "$shape" != forced ] || force=--force
+    rc=0
+    env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_RETIRE_STAGE="$stage" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" mate ${force:+"$force"} >"$dir/out" 2>"$dir/err" || rc=$?
+    case "$shape" in
+      ordinary|forced)
+        expect_code 0 "$rc" "empty retirement staging retry: $(cat "$dir/err")"
+        assert_absent "$mate" "staging retry retained the home"
+        assert_absent "$stage" "staging retry retained the staging directory" ;;
+      *)
+        [ "$rc" -ne 0 ] || fail "unsafe staging was accepted: $shape"
+        assert_present "$mate" "unsafe staging refusal removed the home"
+        assert_present "$stage" "unsafe staging refusal removed the stage" ;;
+    esac
+  done
+  pass "retirement adopts empty staging after normal checks and refuses nonempty or linked staging"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -1637,3 +1680,5 @@ test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
+
+test_retirement_reuses_only_empty_staging
