@@ -461,6 +461,33 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
+fm_control_endpoint_server_matches() {
+  local backend=$1 meta=${2:-} server=${3:-} recorded=
+  case "$backend" in rex|t3code) ;; *) return 0 ;; esac
+  if [ -n "$meta" ] && [ -f "$meta" ]; then
+    recorded=$(fm_meta_get "$meta" "${backend%code}_server")
+    [ -z "$server" ] || [ "$server" = "$recorded" ] || { echo "error: metadata and route name different creation servers" >&2; return 1; }
+    [ -n "$server" ] || server=$recorded
+  fi
+  [ -n "$server" ] || { echo "error: endpoint lacks a creation-server identity" >&2; return 1; }
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    rex) [ "$(fm_backend_rex_server_endpoint)" = "$server" ] ;;
+    t3code) fm_backend_t3code_server_matches "$server" ;;
+  esac || { echo "error: $backend creation server does not match the selected server" >&2; return 1; }
+}
+
+fm_control_endpoint_state() {
+  local state server=${4:-}
+  case "$1" in
+    rex|t3code) [ -n "$server" ] || server=$(fm_meta_get "${3:-}" "${1%code}_server") ;;
+  esac
+  fm_control_endpoint_server_matches "$1" "${3:-}" "$server" || { printf unreadable; return 0; }
+  state=$(fm_backend_agent_state "$1" "$2") || state=unreadable
+  fm_control_endpoint_server_matches "$1" "${3:-}" "$server" || { printf unreadable; return 0; }
+  printf '%s' "$state"
+}
+
 fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta] [server-identity]
   local backend=${1-} target=${2-} meta=${3-}
   fm_backend_source "$backend" \

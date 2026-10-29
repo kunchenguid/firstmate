@@ -1073,6 +1073,7 @@ fm_backend_rex_endpoint_absence_recheck() {  # <target> <recorded-server>
     missing) printf 'missing' ;;
     present)
       state=$(fm_backend_rex_agent_state "$target")
+      [ "$(fm_backend_rex_server_endpoint)" = "$recorded" ] || { printf 'unproven'; return 0; }
       case "$state" in
         dead|alive) printf '%s' "$state" ;;
         *) printf 'unproven' ;;

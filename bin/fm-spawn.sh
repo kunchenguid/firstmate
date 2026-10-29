@@ -2638,7 +2638,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # owns that vocabulary). The proof itself lives in one place for the whole
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  RELAUNCH_STATE=$(fm_control_endpoint_state "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
   if fm_control_absence_recheck_applies "$BACKEND" "$RELAUNCH_STATE"; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
@@ -8184,7 +8184,7 @@ if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_POOLED" = 1 ] || [ -n "$SPAWN_RE
   if fm_control_backend_state_verified "$BACKEND"; then
     spawn_startup_elapsed=0
     while :; do
-      spawn_startup_state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null || printf unreadable)
+      spawn_startup_state=$(fm_control_endpoint_state "$BACKEND" "$T" "$STATE/$ID.meta" "${SPAWN_SEAT_SERVER:-}" || printf unreadable)
       [ "$spawn_startup_state" != alive ] || break
       awk -v e="$spawn_startup_elapsed" -v t="${FM_CONTROL_LAUNCH_WAIT:-90}" 'BEGIN{exit !(e < t)}' || break
       sleep "${FM_CONTROL_POLL:-0.5}"

@@ -75,6 +75,7 @@ FM_SM_LIVE_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_SM_LIVE_LIB_DIR/fm-backend.sh"
+. "$FM_SM_LIVE_LIB_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$FM_SM_LIVE_LIB_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -352,7 +353,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   local meta=$1 id=$2 mode=$3
   FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_STATE=unknown FM_SM_LIVE_KILL=0 FM_SM_LIVE_RESUME=0
   FM_SM_LIVE_CAUSE='' FM_SM_LIVE_WHERE='' FM_SM_LIVE_REASON='' FM_SM_LIVE_LINE=''
-  FM_SM_LIVE_GENERATION='' FM_SM_LIVE_ROUTE='' FM_SM_LIVE_BACKEND='' FM_SM_LIVE_TARGET='' FM_SM_LIVE_SOCKET=''
+  FM_SM_LIVE_GENERATION='' FM_SM_LIVE_ROUTE='' FM_SM_LIVE_BACKEND='' FM_SM_LIVE_TARGET='' FM_SM_LIVE_SOCKET='' FM_SM_LIVE_SERVER=''
   local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend seat_record incarnation backend target
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || { FM_SM_LIVE_STATUS=silent; return 0; }
@@ -480,7 +481,13 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
     local TMUX="$FM_SM_LIVE_SOCKET,0,0"
     export TMUX
   fi
-  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+  local creation_server=
+  if [ -n "${incarnation:-}" ]; then
+    creation_server=$(printf '%s\n' "$incarnation" | jq -r '.route.server_identity // empty')
+  fi
+  [ -n "$creation_server" ] || creation_server=$(fm_meta_get "$meta" "${backend%code}_server")
+  FM_SM_LIVE_SERVER=$creation_server
+  agent_state=$(fm_control_endpoint_state "$backend" "$target" "$meta" "$creation_server") || agent_state=unreadable
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;
     *)
@@ -653,7 +660,9 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     local target
     target=$FM_SM_LIVE_TARGET
     [ -n "$target" ] || target=$(fm_backend_target_of_meta "$meta")
-    if fm_backend_source t3code && FM_SM_LIVE_OUT=$(fm_backend_t3code_resume_failed "$target" 2>&1); then
+    if fm_control_endpoint_server_matches t3code "$meta" "$FM_SM_LIVE_SERVER" &&
+      FM_SM_LIVE_OUT=$(fm_backend_t3code_resume_failed "$target" 2>&1) &&
+      fm_control_endpoint_server_matches t3code "$meta" "$FM_SM_LIVE_SERVER"; then
       fm_secondmate_liveness_ledger_add "$id" relaunched || true
     else
       rc=$?

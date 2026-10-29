@@ -1948,10 +1948,53 @@ REX
   pass "metadata-free Rex reclaim and releases require durable server evidence and proven absence"
 }
 
+test_live_and_dead_routes_require_creation_server() {
+  local action shape home fb out rc
+  for action in confirm reclaim replaced teardown; do
+    for shape in foreign switched; do
+      home="$TMP_ROOT/server-$action-$shape"
+      make_home "$home"
+      pools "$home" 2
+      fb=$(fm_fakebin "$home")
+      cat > "$fb/rex" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *whoami*)
+    if [ -e "$FM_HOME/foreign" ]; then printf '{"endpoint":"unix:/foreign"}'; else printf '{"endpoint":"unix:/origin"}'; fi ;;
+  *process*)
+    [ ! -e "$FM_HOME/switch" ] || touch "$FM_HOME/foreign"
+    if [ -e "$FM_HOME/dead" ]; then printf '{"last_exit":0}'; else printf '{"foreground":{"pid":999999,"name":"claude","argv0":"claude"}}'; fi ;;
+  *) exit 1 ;;
+esac
+SH
+      chmod +x "$fb/rex"
+      (umask 077; jq -cn '{placement:"local",backend:"rex",target:"00000001-0000-7000-8000-000000000001:00000002-0000-7000-8000-000000000002",spawn_gen:"g",server_identity:"unix:/origin",host:null,remote_root:null}' > "$home/route")
+      FM_HOME="$home" SEATS="$SEATS" PATH="$fb:$PATH" ACTION="$action" bash -c '
+        "$SEATS" reserve sm --generation g --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" >/dev/null || exit
+        "$SEATS" dispatch sm --generation g --route-file "$FM_HOME/route" >/dev/null || exit
+        [ "$ACTION" = confirm ] || "$SEATS" confirm sm --generation g >/dev/null || exit
+        [ "$ACTION" != replaced ] || "$SEATS" reserve sm --generation next --previous-generation g --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" >/dev/null
+      ' || fail "server ownership setup failed"
+      [ "$action" = confirm ] || touch "$home/dead"
+      if [ "$shape" = foreign ]; then touch "$home/foreign"; else touch "$home/switch"; fi
+      rc=0
+      case "$action" in
+        confirm|reclaim) out=$(PATH="$fb:$PATH" seats "$home" "$action" sm --generation g 2>&1) || rc=$? ;;
+        *) out=$(PATH="$fb:$PATH" seats "$home" release sm --generation g --reason "$action" 2>&1) || rc=$? ;;
+      esac
+      expect_code 3 "$rc" "$action accepted $shape server observation: $out"
+      assert_contains "$out" 'creation server' 'server refusal lacks a concrete diagnostic'
+      [ "$action" != confirm ] || assert_equals reserved "$(lifecycle_of "$home" sm g)" "foreign alive confirmed startup"
+      [ "$action" = confirm ] || assert_equals confirmed "$(lifecycle_of "$home" sm g)" "foreign dead released capacity"
+    done
+  done
+  pass "alive and dead observations require the same creation server before and after the read"
+}
+
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -2013,3 +2056,5 @@ test_nested_remote_serve_uses_registry_owner
 test_rex_absence_uses_matching_metadata
 
 test_metadata_free_rex_routes_prove_destruction
+
+test_live_and_dead_routes_require_creation_server
