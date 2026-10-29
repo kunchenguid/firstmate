@@ -50,7 +50,9 @@
 # that contains the current local work, or its content is already present in the
 # up-to-date default branch. This recognizes the common squash-merge-then-delete-
 # branch flow, where the branch's own commits live nowhere on a remote yet the
-# change is fully in main. Local-only delivery retains its existing boundary where
+# change is fully in main. A forge=external task whose HEAD is on its recorded
+# personal backup remote's namespace may be cleaned up while its review is
+# unmerged. Local-only delivery retains its existing boundary where
 # publishing the branch to a remote is sufficient. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
 # its base branch instead of the default branch.
@@ -1831,6 +1833,24 @@ pr_is_open() {
   esac
 }
 
+# Is HEAD on the personal backup remote's namespace? A forge=external task
+# with a recorded backup_remote= and backup_prefix= keeps its durable copy
+# there, so that copy is the retention proof while the review is unmerged.
+external_backup_retains_head() {
+  local remote prefix sha repo hit
+  [ "$(fm_meta_get "$META" forge)" = external ] || return 1
+  remote=$(fm_meta_get "$META" backup_remote)
+  prefix=$(fm_meta_get "$META" backup_prefix)
+  [ -n "$remote" ] && [ -n "$prefix" ] || return 1
+  sha=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  for repo in "$WT" "$PROJ"; do
+    [ -n "$repo" ] && [ -d "$repo" ] || continue
+    hit=$(git -C "$repo" for-each-ref --format='%(refname)' --contains="$sha" --count=1 "refs/remotes/$remote/$prefix*" 2>/dev/null) || continue
+    [ -n "$hit" ] && return 0
+  done
+  return 1
+}
+
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
 # other ship carries the PR recorded on its own record.
@@ -2199,7 +2219,7 @@ validate_worktree_teardown_safety() {
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || [ -z "$PR_URL" ] || ! pr_is_open; }; then
+    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || { ! external_backup_retains_head && { [ -z "$PR_URL" ] || ! pr_is_open; }; }; }; then
       if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
         echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
         echo "Restore or upgrade Git and retry the content check." >&2

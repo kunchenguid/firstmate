@@ -999,6 +999,60 @@ test_no_mistakes_pushed_with_open_pr_allowed() {
   pass "pushed work with a recorded open PR is not refused"
 }
 
+# A forge=external ship never pushes its task branch and records review=, not
+# pr=. With a personal backup remote recorded, HEAD on that remote's backup
+# namespace is the retention proof while the review is unmerged; without that
+# push the same task is refused.
+external_backup_case() {  # <case-dir> <push-backup:0|1>
+  local case_dir=$1 push=$2
+  write_meta "$case_dir" direct-PR ship
+  printf '%s\n' forge=external backup_remote=backup backup_prefix=backup/ \
+    'review=https://review.example.com/c/42' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "reviewed work"
+  seed_backlog_in_flight "$case_dir"
+  git init -q --bare "$case_dir/backup.git"
+  git -C "$case_dir/project" remote add backup "$case_dir/backup.git"
+  if [ "$push" = 1 ]; then
+    git -C "$case_dir/wt" push -q backup HEAD:refs/heads/backup/task-x1
+    git -C "$case_dir/project" fetch -q backup
+  fi
+}
+
+test_external_forge_backup_copy_allows_unmerged_review() {
+  local case_dir rc
+  case_dir=$(make_case ext-backup-allow)
+  external_backup_case "$case_dir" 1
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ext-backup-allow: teardown should proceed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "ext-backup-allow: teardown printed a REFUSED line"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "ext-backup-allow: teardown kept the task record"
+  pass "forge=external work on the personal backup remote is torn down while its review is unmerged"
+}
+
+test_external_forge_without_backup_copy_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case ext-backup-refuse)
+  external_backup_case "$case_dir" 0
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ext-backup-refuse: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "ext-backup-refuse: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" ext-backup-refuse "$head"
+  pass "forge=external work missing from the personal backup remote is refused"
+}
+
 test_no_mistakes_pushed_with_closed_unmerged_pr_refuses() {
   local case_dir rc head
   case_dir=$(make_case nm-pushed-closed-pr)
@@ -6152,6 +6206,8 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_pushed_unmerged_refuses
 test_no_mistakes_pushed_with_open_pr_allowed
 test_no_mistakes_pushed_with_closed_unmerged_pr_refuses
+test_external_forge_backup_copy_allows_unmerged_review
+test_external_forge_without_backup_copy_refuses
 test_pushed_followup_after_merged_pr_refuses
 test_no_mistakes_pushed_with_open_forgejo_pr_allowed
 test_no_mistakes_pushed_with_closed_unmerged_forgejo_pr_refuses
