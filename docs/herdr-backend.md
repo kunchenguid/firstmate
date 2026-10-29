@@ -347,6 +347,7 @@ Ordinary non-projected task removal:
 
 Task cleanup acquires that session lock before the task's isolated copy is returned.
 So a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
+Because a task pane's top-level shell sits in its worktree, cleanup closes that pane under the lock before it reaps the worktree's processes or returns the copy, so the reap never removes the pane outside the focus-preserving close.
 
 Forced secondmate cleanup recursively preflights every Herdr child endpoint and acquires every affected named-session lock before mutating any child.
 It then retains each child's durable identity unless that exact pane returns structured not-found after its close.
