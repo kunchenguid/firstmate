@@ -1392,6 +1392,71 @@ test_take_over_confirms_a_watcher_stopped_inside_its_event_wait() {
   pass "watch-arm: --take-over of a watcher inside its herdr event wait confirms the stop and resurfaces nothing"
 }
 
+# A stopped watcher honors TERM only at its next safe point, and a busy cycle
+# step (bash 3.2 holds TERM for a running command substitution) can put that
+# past any short fixed stop bound. The take-over must still confirm that slow
+# stop and put back the acknowledgement main already made. Otherwise the stop
+# opens a fresh downtime, the next cycle resurfaces it, the supervision host
+# passes it to main, and main's next park takes over again: an empty
+# rearm-resurface wake about every 30 seconds. The one-shot shim delays only the
+# stopped watcher's close, past the old 5-second stop bound.
+test_take_over_confirms_a_watcher_slow_to_honor_its_stop() {
+  local dir state fakebin armout owner watcher acknowledged fresh real_mktemp i
+  dir=$(make_case take-over-slow-stop)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  real_mktemp=$(command -v mktemp)
+  cat > "$fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  */.watcher-down.tmp.XXXXXX) ! rm "$dir/slow-close" 2>/dev/null || sleep 8 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$fakebin/mktemp"
+  start_rearm_arm "$dir" "$state" "$fakebin" "$dir/owner.out" "$$"
+  owner=$ARM_PID
+  watcher=$(cat "$state/.watch.lock/pid")
+  append_wake "$state" signal take-over "signal: fixture handled by main"
+  ack_wakes "$state" >/dev/null || fail "fixture: main could not acknowledge the handled wake"
+  acknowledged=$(cat "$state/.watcher-down")
+  case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
+  touch "$dir/slow-close"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" FM_ARM_ATTACH_POLL=0.1 \
+    "$WATCH_ARM" --take-over "$owner" > "$armout" &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt "$REARM_REPORT_POLLS" ] && ! grep -q '^watcher: started pid=' "$armout" 2>/dev/null; do
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ ! -e "$dir/slow-close" ] || fail "fixture: the stopped watcher never reached its slow close"
+  grep -q '^watcher: started pid=' "$armout" \
+    || fail "the take-over did not own a fresh cycle after a slow stop: $(cat "$armout")"
+  ! is_live_non_zombie "$watcher" || fail "the take-over left the watcher it stopped running"
+  grep -q "^arm_pid=$ARM_PID	watcher_pid=$watcher	.*reason=taken-over	" "$state/.watch-cycle-exits.log" \
+    || fail "the take-over did not confirm its slow stop: $(cat "$state/.watch-cycle-exits.log")"
+  [ "$(cat "$state/.watcher-down")" = "$acknowledged" ] \
+    || fail "the slow stop reopened an acknowledged episode: $(cat "$state/.watcher-down")"
+  fresh=$(cat "$state/.watch.lock/pid")
+  sleep 3
+  is_live_non_zombie "$ARM_PID" || fail "the fresh cycle closed with no new work: $(cat "$armout")"
+  ! grep -q '^check: rearm-resurface' "$armout" || fail "the fresh cycle resurfaced an acknowledged episode"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+  wait_for_exit "$owner" 50 >/dev/null 2>&1 || true
+  i=0
+  while [ "$i" -lt 50 ] && is_live_non_zombie "$fresh"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  pass "watch-arm: --take-over confirms a watcher slow to honor its stop and resurfaces nothing"
+}
+
 # Pause just after handover releases its snapshot locks, then fail the old
 # watcher's secondmate tick write so it exits through cleanup before TERM lands.
 # The ledger and recovery wake are public output contracts, not source probes.
@@ -1987,4 +2052,5 @@ test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
 test_take_over_confirms_a_watcher_stopped_inside_its_event_wait
+test_take_over_confirms_a_watcher_slow_to_honor_its_stop
 test_opencode_arm_plugin_decides_with_the_shared_predicate
