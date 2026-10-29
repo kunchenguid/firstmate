@@ -1503,8 +1503,8 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
     # before the first forge call, so nothing is ever observed.
     /bin/date +%s > "$home/forge/clock"
     printf 'hang\n' > "$home/forge/fault"
-    # Freeze the clock. An unfrozen one-second budget can tick past before the
-    # first forge call, so the generated check never writes forge/calls.
+    # Freeze the clock so a one-second budget cannot expire between deadline
+    # and the first read; the read is still bounded by its real timeout.
     /bin/date +%s > "$home/forge/clock"
     if [ "$mode" = configured ]; then
       with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
