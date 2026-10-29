@@ -556,6 +556,29 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Claude first-run onboarding
+
+Verified 2026-10-28 on Claude Code 2.1.154.
+Separate from workspace trust, Claude Code gates a host where it has never run interactively behind a first-run onboarding (the theme picker); a launch there stalls on it before reading its instructions, and Firstmate's key plane cannot answer it.
+Claude records completion in the `hasCompletedOnboarding` key of `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`, so `bin/fm-remote-doctor.sh`'s `claude-onboarding` check reads that key and reports an incomplete host as a human gap rather than calling it ready.
+
+```sh
+claude --version
+jq '{hasCompletedOnboarding, theme}' "$HOME/.claude.json"
+```
+
+```
+2.1.154 (Claude Code)
+{
+  "hasCompletedOnboarding": true,
+  "theme": null
+}
+```
+
+`theme` is `null` on this fully onboarded account, so it is not a reliable completion signal; `hasCompletedOnboarding` is.
+The check fires only where `claude` resolves on the host PATH, because the doctor does not know a secondmate's chosen harness and a host running another harness must not be blocked on Claude's onboarding.
+`tests/fm-remote-doctor.test.sh` pins the verdict against controlled account fixtures: a completed record is ready, and a false flag or a missing `.claude.json` is a human gap that `--fix` never answers and never creates.
+
 ## Pi seeded-secondmate project trust
 
 [`fm-spawn.sh --help`](../../bin/fm-spawn.sh) owns the seeded-secondmate project-trust approval contract and compatibility fallback.

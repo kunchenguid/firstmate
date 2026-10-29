@@ -698,6 +698,25 @@ check_herdr_server() {
     "rerun this command with --fix to start it"
 }
 
+check_claude_onboarding() {
+  local resolved config completed
+  resolved=$(command -v claude 2>/dev/null || true)
+  if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+    record claude-onboarding "skip: claude is not installed on this host, so its first-run onboarding does not apply"
+    return 0
+  fi
+  config="${CLAUDE_CONFIG_DIR:-${HOME:-}}/.claude.json"
+  if command -v jq >/dev/null 2>&1 && [ -f "$config" ]; then
+    completed=$(jq -r '.hasCompletedOnboarding // false' "$config" 2>/dev/null || true)
+    if [ "$completed" = true ]; then
+      record claude-onboarding "ok: Claude Code first-run onboarding is complete"
+      return 0
+    fi
+  fi
+  record claude-onboarding "human: Claude Code's first-run onboarding is not complete on this host, so a launch stalls on the theme picker before it reads its instructions" \
+    "run 'claude' once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
+}
+
 check_entrypoint_link() {
   local want
   if [ -z "${FM_ROOT_OVERRIDE:-}" ]; then
@@ -729,6 +748,7 @@ run_checks() { # <resolved-login-shell>
   check_launch_agent "$shell"
   check_herdr_server
   check_entrypoint_link
+  check_claude_onboarding
 }
 
 # --- repairs ----------------------------------------------------------------

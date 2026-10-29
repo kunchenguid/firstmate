@@ -287,6 +287,9 @@ SH
 exit 0
 SH
   chmod +x "$CASE_BIN/uname" "$CASE_BIN/launchctl" "$CASE_BIN/dscl" "$CASE_BIN/tasks-axi" "$CASE_BIN/treehouse" "$CASE_BIN/claude"
+  # A ready account has completed Claude Code's first-run onboarding; the
+  # onboarding-gate cases below override or remove this.
+  printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
   cat > "$CASE_BIN/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -300,6 +303,7 @@ doctor() {
   set +e
   DOCTOR_OUT=$(
     HOME="$CASE_HOME" \
+    CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_HOME="$CASE_PROJECT_HOME" \
     PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH" \
     FM_FAKE_STATE="$CASE_STATE" \
@@ -895,4 +899,48 @@ assert_contains "$DOCTOR_OUT" 'check entrypoint-link=human:' "an operator-owned 
   || fail "--fix overwrote a file it did not create"
 unset FM_ROOT_OVERRIDE
 pass "the entrypoint symlink is recreated when absent and never overwritten when operator-owned"
+
+# --- Claude Code first-run onboarding gates readiness ------------------------
+
+new_case Darwin with-herdr gui
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a host with completed Claude onboarding was left unready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=ok:' "completed Claude onboarding was not recognized"
+pass "a completed Claude Code onboarding is recognized as ready"
+
+# An incomplete onboarding is a human gap --fix must never answer, even on an
+# otherwise-ready host.
+new_case Darwin with-herdr gui
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "incomplete Claude onboarding was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "incomplete Claude onboarding was not tagged human"
+assert_contains "$DOCTOR_OUT" 'action: claude-onboarding:' "the onboarding gap came with no operator action"
+assert_contains "$DOCTOR_OUT" "run 'claude'" "the onboarding action did not name the interactive step"
+assert_not_contains "$DOCTOR_OUT" 'fix claude-onboarding=applied' "--fix answered Claude onboarding for the operator"
+[ "$(cat "$CASE_HOME/.claude.json")" = '{"hasCompletedOnboarding": false}' ] \
+  || fail "the doctor rewrote the Claude onboarding config"
+assert_no_dangerous_calls "the onboarding gap reached for auto-login, FileVault, or the keychain"
+pass "incomplete Claude onboarding is a human gap --fix never answers"
+
+# A fresh host that never ran claude has no record at all; the doctor reports it
+# and never creates the record on the operator's behalf.
+new_case Darwin with-herdr gui
+rm -f "$CASE_HOME/.claude.json"
+doctor
+expect_code 1 "$DOCTOR_RC" "a host with no Claude onboarding record was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a missing onboarding record was not tagged human"
+assert_absent "$CASE_HOME/.claude.json" "the doctor created a Claude onboarding record"
+pass "a missing Claude onboarding record is a human gap the doctor never creates"
+
+# Claude onboarding gates readiness only where claude is the installed harness;
+# a host running another harness is not blocked on it.
+new_case Darwin with-herdr gui
+rm -f "$CASE_BIN/claude" "$CASE_HOME/.claude.json"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE_BIN/codex"
+chmod +x "$CASE_BIN/codex"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a host running a non-claude harness was blocked on claude onboarding"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "claude onboarding was checked when claude was not installed"
+pass "claude onboarding does not gate a host whose harness is not claude"
 
