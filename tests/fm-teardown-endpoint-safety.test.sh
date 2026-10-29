@@ -1756,6 +1756,126 @@ SH
   pass "local retirement resumes top-level and descendant staged deletion and fences successors"
 }
 
+test_retirement_rollback_rearms_on_failure() {
+  local mode dir mate stage rc
+  for mode in rename sweep signal; do
+    dir=$(make_case "retire-rollback-$mode")
+    mate="$dir/mate"
+    stage="$mate.retiring.g1"
+    mkdir -p "$mate/state/procevent" "$mate/data" "$mate/config" "$mate/bin"
+    printf 'mate\n' >"$mate/.fm-secondmate-home"
+    printf 'manual\n' >"$dir/home/config/backlog-backend"
+    printf 'registration\n' >"$mate/state/procevent/wait.source"
+    fm_write_meta "$dir/home/state/mate.meta" \
+      window=isolated:fm-mate endpoint_task_id=mate backend=tmux kind=secondmate \
+      "home=$mate" "worktree=$mate" "project=$dir/project" spawn_gen=g1
+    cat >"$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+SH
+    cat >"$mate/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  sweep-home)
+    [ "${2:-}" != --preflight ] || exit 0
+    rm -f "$FM_HOME/state/procevent/wait.source"
+    case "$FM_TEST_ROLLBACK" in
+      sweep) exit 1 ;;
+      signal) kill -TERM "$PPID"; exit 1 ;;
+    esac ;;
+  reconcile) touch "$FM_TEST_REARMED" ;;
+esac
+SH
+    cat >"$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+[ "${!#}" != "$FM_TEST_STAGE/home" ] || exit 1
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+    chmod +x "$mate/bin/fm-procevent.sh" "$dir/fakebin/mv"
+    rc=0
+    FM_TEST_REAL_MV="$(command -v mv)" FM_TEST_STAGE="$stage" FM_REMOTE_RETIRE_STAGE="$stage" \
+      FM_TEST_ROLLBACK="$mode" FM_TEST_REARMED="$dir/rearmed" \
+      run_case "$dir" mate >"$dir/out" 2>"$dir/err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "rollback injection succeeded: $mode"
+    assert_grep registration "$mate/state/procevent/wait.source" "rollback lost registrations: $mode"
+    assert_present "$dir/rearmed" "rollback did not rearm: $mode"
+    assert_absent "$stage" "rollback retained empty stage: $mode"
+  done
+  pass "retirement restores registrations and rearms after sweep, rename, and signal failures"
+}
+
+test_retirement_retains_child_loss_before_metadata_removal() {
+  local depth dir mate owner nested child_meta rc real_rm
+  real_rm=$(command -v rm)
+  for depth in direct recursive; do
+    dir=$(make_case "retire-child-loss-$depth")
+    mark_case_as_treehouse_pool "$dir"
+    mate="$dir/mate"
+    owner="$mate"
+    mkdir -p "$mate/state" "$mate/data" "$mate/config"
+    printf 'mate\n' >"$mate/.fm-secondmate-home"
+    printf 'manual\n' >"$dir/home/config/backlog-backend"
+    fm_write_meta "$dir/home/state/mate.meta" \
+      window=isolated:fm-mate endpoint_task_id=mate backend=tmux kind=secondmate \
+      "home=$mate" "worktree=$mate" "project=$dir/project" spawn_gen=g1
+    if [ "$depth" = recursive ]; then
+      nested="$mate/nested"
+      mkdir -p "$nested/state" "$nested/data" "$nested/config"
+      printf 'nested\n' >"$nested/.fm-secondmate-home"
+      fm_write_meta "$mate/state/nested.meta" \
+        window=isolated:fm-nested endpoint_task_id=nested backend=tmux kind=secondmate \
+        "home=$nested" "worktree=$nested" "project=$dir/project" spawn_gen=g-nested
+      owner="$nested"
+    fi
+    child_meta="$owner/state/scout.meta"
+    fm_write_meta "$child_meta" \
+      window=isolated:fm-scout endpoint_task_id=scout backend=tmux kind=scout \
+      "worktree=$dir/pool/1/project" "project=$dir/project" spawn_gen=g-child
+    jq -n --arg h "$mate" '{schema:"fm-remote-retirement-pending.v1",task:"mate",home:$h,generation:"g1",target:"isolated:fm-mate",backend:"herdr",phase:"pending",destroyed:false,exit_code:null}' >"$dir/pending.json"
+    cat >"$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+SH
+    cat >"$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+for wt in "$@"; do :; done
+printf 'lost residue\n' >"$wt/residue"
+exit 0
+SH
+    cat >"$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "$FM_TEST_CHILD_META" ] && [ -e "$FM_TEST_INTERRUPT" ]; then
+    "$FM_TEST_REAL_RM" "$@" || exit 1
+    exit 1
+  fi
+done
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+    chmod +x "$dir/fakebin/rm"
+    touch "$dir/interrupt"
+    rc=0
+    FM_REMOTE_RETIRE_PENDING="$dir/pending.json" FM_TEST_REAL_RM="$real_rm" \
+      FM_TEST_CHILD_META="$child_meta" FM_TEST_INTERRUPT="$dir/interrupt" \
+      run_case "$dir" mate >"$dir/first.out" 2>"$dir/first.err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "child-removal interruption was ignored: $depth"
+    assert_absent "$child_meta" "interruption did not reach child removal: $(cat "$dir/first.err")"
+    assert_present "$mate" "interruption removed parent home"
+    jq -e '.exit_code == 4' "$dir/pending.json" >/dev/null || fail "child removal lost known outcome: $depth"
+    rm "$dir/interrupt"
+    rc=0
+    FM_REMOTE_RETIRE_PENDING="$dir/pending.json" FM_TEST_REAL_RM="$real_rm" \
+      FM_TEST_CHILD_META="$child_meta" FM_TEST_INTERRUPT="$dir/interrupt" \
+      run_case "$dir" mate >"$dir/retry.out" 2>"$dir/retry.err" || rc=$?
+    expect_code 0 "$rc" "retained child outcome retry: $(cat "$dir/retry.err")"
+    assert_absent "$mate" "retry retained home"
+    jq -e '.exit_code == 4' "$dir/pending.json" >/dev/null || fail "retry lowered known outcome: $depth"
+  done
+  pass "direct and recursive retirement retain lost-slot outcomes before child evidence disappears"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -1794,3 +1914,6 @@ test_remote_layout_homes_serialize_on_one_project_lock
 test_retirement_reuses_only_empty_staging
 
 test_local_retirement_resumes_recorded_staging
+
+test_retirement_rollback_rearms_on_failure
+test_retirement_retains_child_loss_before_metadata_removal

@@ -2228,6 +2228,26 @@ teardown_scrub_scratch_copy() {
   }
 }
 
+teardown_retain_remote_retirement_outcome() {
+  local retirement_tmp retirement_rc
+  [ -n "${FM_REMOTE_RETIRE_PENDING:-}" ] || return 0
+  [ -f "$FM_REMOTE_RETIRE_PENDING" ] && [ ! -L "$FM_REMOTE_RETIRE_PENDING" ] || return 1
+  retirement_tmp=$(umask 077; mktemp "${FM_REMOTE_RETIRE_PENDING}.XXXXXX") || return 1
+  retirement_rc=0
+  [ "$TEARDOWN_POOL_SLOT_LOST" = 0 ] || retirement_rc=$TEARDOWN_LOST_SLOT_EXIT
+  if ! jq -e --arg id "$ID" --arg home "${HOME_PATH:-$WT}" --arg gen "$(meta_value "$META" spawn_gen)" \
+    --arg target "$T" --argjson rc "$retirement_rc" '
+    select(.schema == "fm-remote-retirement-pending.v1" and .task == $id and .home == $home
+      and .generation == $gen and .target == $target and .backend == "herdr"
+      and .phase == "pending" and .destroyed == false
+      and (.exit_code == null or .exit_code == 0 or .exit_code == 4))
+    | .exit_code = (if .exit_code == 4 then 4 else $rc end)' "$FM_REMOTE_RETIRE_PENDING" > "$retirement_tmp" \
+    || ! mv -f -- "$retirement_tmp" "$FM_REMOTE_RETIRE_PENDING"; then
+    rm -f -- "$retirement_tmp"
+    return 1
+  fi
+}
+
 # Callers run this only for a copy that was a Treehouse pool slot before the
 # return; a return removes any other copy, and the pool cannot lose it.
 teardown_note_dirty_return() {
@@ -2244,6 +2264,7 @@ teardown_note_dirty_return() {
   [ "$residue_rc" -eq 0 ] || residue="cannot verify: the copy is missing or not a readable git worktree after return"
   echo "warning: treehouse return left pool slot $slot_label ($wt) dirty or unverified; the pool lost this slot. Remaining paths:" >&2
   printf '%s\n' "$residue" | sed 's/^/  /' >&2
+  teardown_retain_remote_retirement_outcome
 }
 
 validate_worktree_teardown_safety() {
@@ -3009,8 +3030,34 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
   reap_task_worktree_processes "secondmate home" "$1"
 }
 
-remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} meta=${5:-$META} abs_home_path process_event_backup backup_root retired recorded tmp generation evidence
+finish_firstmate_home_removal() {
+  local rc=$1 restore_rc=0
+  trap - EXIT
+  if [ "$removal_committed" = 0 ] && [ -n "$process_event_backup" ]; then
+    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || restore_rc=$?
+  elif [ "$removal_committed" = 1 ] && [ -n "$process_event_backup" ]; then
+    if [ -n "$retired" ]; then
+      process_event_backup="$retired/home/${process_event_backup##*/}"
+    fi
+    rm -rf -- "$process_event_backup" || restore_rc=1
+  fi
+  [ -z "$tmp" ] || rm -f -- "$tmp" || restore_rc=1
+  if [ "$removal_committed" = 0 ] && [ -n "$retired" ]; then
+    rmdir "$retired" 2>/dev/null || true
+  fi
+  [ "$restore_rc" = 0 ] || rc=$restore_rc
+  exit "$rc"
+}
+
+remove_firstmate_home() (  # <home> <label> <task-id> <backend>
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} meta=${5:-$META} abs_home_path process_event_backup backup_root retired recorded tmp generation evidence removal_committed=0
+  process_event_backup=''
+  retired=''
+  tmp=''
+  trap 'finish_firstmate_home_removal "$?"' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
   [ -n "$home" ] || return 0
   evidence="${meta%.meta}.home-removal"
   if [ -e "$evidence" ] || [ -L "$evidence" ]; then
@@ -3071,11 +3118,9 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
           mkdir -m 700 "$retired" || return 1
         else
           retired=$(mktemp -d "${abs_home_path}.retiring.XXXXXX") || return 1
-          tmp=$(umask 077; mktemp "${evidence}.XXXXXX") || { rmdir "$retired"; return 1; }
+          tmp=$(umask 077; mktemp "${evidence}.XXXXXX") || return 1
           if ! printf 'home_removal_source=%s\nhome_removal_generation=%s\nhome_removal_stage=%s\n' "$home" "$generation" "$retired" >"$tmp" \
             || ! mv -f -- "$tmp" "$evidence"; then
-            rm -f -- "$tmp"
-            rmdir "$retired" 2>/dev/null || true
             return 1
           fi
         fi ;;
@@ -3085,12 +3130,10 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
   [ -z "$retired" ] || backup_root=$abs_home_path
   process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label" "$backup_root") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
-    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
   if [ "$backend" = t3code ] \
     && ! t3code_secondmate_home_shutdown_barrier "$abs_home_path" "$expected_id"; then
-    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
   # Read-only strip dirs sit at state/<id>.git-hooks, and a remote secondmate's
@@ -3099,27 +3142,23 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
   if firstmate_home_has_treehouse_slot "$abs_home_path"; then
     command -v treehouse >/dev/null 2>&1 || {
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
-      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
-      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+    removal_committed=1
     return 0
   fi
   if mv -- "$abs_home_path" "$retired/home"; then
-    [ -z "$process_event_backup" ] || rm -rf -- "$retired/home/${process_event_backup##*/}" || return 1
+    removal_committed=1
     rm -rf -- "$retired" || return 1
     rm -f -- "$evidence" || return 1
     return 0
   fi
-  restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
-  rmdir "$retired" 2>/dev/null || true
   return 1
-}
+)
 
 firstmate_home_has_process_events() {
   local home=$1 path owner claim_root
@@ -3806,7 +3845,7 @@ cleanup_firstmate_home_children() {
           child_pool_slot=0
           fm_treehouse_pool_slot "$child_proj" "$child_wt" && child_pool_slot=1
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
-            [ "$child_pool_slot" = 0 ] || teardown_note_dirty_return "$child_wt"
+            [ "$child_pool_slot" = 0 ] || teardown_note_dirty_return "$child_wt" || return $?
             fm_treehouse_slot_owner_release "$child_wt" "$child_id"
           else
             child_return_rc=$?
@@ -4190,7 +4229,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
-  [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
+  [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT" || exit $?
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
@@ -4310,23 +4349,7 @@ teardown_export_records "$STATE" "$ID" || exit 1
 teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
-  if [ -n "${FM_REMOTE_RETIRE_PENDING:-}" ]; then
-    [ -f "$FM_REMOTE_RETIRE_PENDING" ] && [ ! -L "$FM_REMOTE_RETIRE_PENDING" ] || exit 1
-    retirement_tmp=$(umask 077; mktemp "${FM_REMOTE_RETIRE_PENDING}.XXXXXX") || exit 1
-    retirement_rc=0
-    [ "$TEARDOWN_POOL_SLOT_LOST" = 0 ] || retirement_rc=$TEARDOWN_LOST_SLOT_EXIT
-    if ! jq -e --arg id "$ID" --arg home "$HOME_PATH" --arg gen "$(meta_value "$META" spawn_gen)" \
-      --arg target "$T" --argjson rc "$retirement_rc" '
-      select(.schema == "fm-remote-retirement-pending.v1" and .task == $id and .home == $home
-        and .generation == $gen and .target == $target and .backend == "herdr"
-        and .phase == "pending" and .destroyed == false
-        and (.exit_code == null or .exit_code == 0 or .exit_code == 4))
-      | .exit_code = (if .exit_code == 4 then 4 else $rc end)' "$FM_REMOTE_RETIRE_PENDING" > "$retirement_tmp" \
-      || ! mv -f -- "$retirement_tmp" "$FM_REMOTE_RETIRE_PENDING"; then
-      rm -f -- "$retirement_tmp"
-      exit 1
-    fi
-  fi
+  teardown_retain_remote_retirement_outcome || exit $?
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
