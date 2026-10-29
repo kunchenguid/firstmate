@@ -781,7 +781,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 SPAWN_PREFLIGHT_ID=${1:-}
 spawn_preflight_cleanup() {
-  local status=$? receipt="$STATE/$SPAWN_PREFLIGHT_ID.seat-operation.${FM_REMOTE_SEAT_OPERATION:-}"
+  local status=${1:-$?} receipt="$STATE/$SPAWN_PREFLIGHT_ID.seat-operation.${FM_REMOTE_SEAT_OPERATION:-}"
   if [ "$status" = 1 ] && [ "${FM_REMOTE_SEAT_FRESH:-0}" = 1 ] &&
     [ -n "${FM_REMOTE_SEAT_OPERATION:-}" ] &&
     fm_supervisor_lifecycle_adopt "$STATE" "$SPAWN_PREFLIGHT_ID" &&
@@ -1833,6 +1833,7 @@ spawn_orca_reclaim_launch_file() {
 
 spawn_abort_cleanup() {
   local status=$?
+  spawn_preflight_cleanup "$status" || true
   if [ "$status" -ne 0 ]; then
     spawn_seat_abort_custody || true
   fi
