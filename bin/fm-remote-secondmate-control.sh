@@ -681,7 +681,7 @@ cmd_launch() {
 # re-resolve it here would silently drift the mate onto another runtime. `default`
 # explicitly clears an absent parent pin; `-` remains its compatibility spelling.
 cmd_relaunch() {
-  local id=$1 harness=$2 model=$3 effort=$4 enter_rc=0 control_rc=0
+  local id=$1 harness=$2 model=$3 effort=$4 enter_rc=0 control_rc=0 control_fresh=0
   local -a control_args
 
   validate_id "$id"
@@ -730,12 +730,13 @@ cmd_relaunch() {
   # the dedicated fm-remote session, and the parent already owns both convergence
   # legs, so the host-local spawn must not re-sync or re-inherit against this
   # host's own Firstmate copy.
+  control_fresh=$SEAT_FRESH
   SEAT_FRESH=0
   HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
     FM_SKIP_SECONDMATE_SYNC=1 FM_REMOTE_SEAT_OPERATION="$SEAT_OP" \
-    FM_SPAWN_SEAT_GENERATION="$SEAT_OP" \
+    FM_SPAWN_SEAT_GENERATION="$SEAT_OP" FM_REMOTE_SEAT_FRESH="$control_fresh" \
     "$SCRIPT_DIR/fm-control.sh" "${control_args[@]}" || control_rc=$?
   if [ "$control_rc" -eq 1 ] && [ -n "$SEAT_OP" ] \
     && [ "$(sed -n 's/^seat_operation=//p' "$CONTROL_STATE/$id.control-relaunch" 2>/dev/null | tail -1)" != "$SEAT_OP" ]; then
