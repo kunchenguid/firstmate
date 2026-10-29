@@ -398,10 +398,19 @@ test_lock_reclaims_reused_pid_but_not_a_live_owner() {
 test_mac_ps_start_token_normalizes_whitespace() {
   local dir token_again token
   dir=$(make_case lock-mac-start-token)
-  token=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start_token "$$"' _ "$LIB") \
-    || fail "portable start-token fallback failed"
-  token_again=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start_token "$$"' _ "$LIB") \
-    || fail "second portable start-token fallback failed"
+  token=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    first=$(fm_pid_start_token "$$") || exit 1
+    second=$(fm_pid_start_token "$$") || exit 1
+    [ "$first" = "$second" ] || exit 2
+    printf "%s\n%s" "$first" "$second"
+  ' _ "$LIB") || {
+    rc=$?
+    [ "$rc" -eq 2 ] && fail "portable start token changed between reads"
+    fail "portable start-token fallback failed"
+  }
+  token=${token%%$'\n'*}
+  token_again=${token#*$'\n'}
   [ "$token" = "$token_again" ] || fail "portable start token changed between reads"
   case "$token" in
     ps-lstart=*) ;;
