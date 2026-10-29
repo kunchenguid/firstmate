@@ -2522,16 +2522,19 @@ test_merged_poll_reregistration_after_notification_is_absorbed() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "second watcher cycle failed: $(cat "$dir/watch-2.err")"
+  # The lane still holds a task record whose teardown refuses (it names no
+  # project), so the re-armed poll surfaces that refusal again: a merged lane
+  # whose cleanup is refused still needs a decision.
   case "$(cat "$dir/watch-2.out")" in
-    check:*z-stop.check.sh:*stop-cycle) ;;
-    *) fail "the re-registered duplicate did not fall through to the next check: $(cat "$dir/watch-2.out")" ;;
+    "check: task-a merged https://github.com/o/r/pull/1 - automatic cleanup refused: "*) ;;
+    *) fail "the re-armed poll did not surface the refused cleanup: $(cat "$dir/watch-2.out")" ;;
   esac
   ! grep -F 'task-a.check.sh: merged' "$dir/watch-2.out" >/dev/null \
     || fail "a repeat identical merged poll opened a main-blocking row: $(cat "$dir/watch-2.out")"
   ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
     || fail "the absorbed duplicate merge notice was queued as a main-blocking row"
   assert_poll_absent "$state" task-a
-  pass "a repeat identical merged poll for an already-notified task is absorbed, never queued as a main-blocking row"
+  pass "a repeat identical merged poll for an already-notified task does not repeat the merge notice, and surfaces its refused cleanup"
 }
 
 # The captain merging a PR himself on the forge is the same outcome as a merge
@@ -2615,6 +2618,13 @@ test_self_merged_lane_is_still_cleaned_up_by_the_poll() {
   chmod +x "$dir/teardown-stub"
   retire_contributions_observer "$dir"
   add_stop_custom_check "$dir"
+  # The merge entrypoint's queued outcome surfaces as a recovery wake first.
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" >"$dir/recovery.out" 2>"$dir/recovery.err" \
+    || fail "self-merge-cleanup: recovery cycle failed: $(cat "$dir/recovery.err")"
+  grep -F 'check: rearm-resurface' "$dir/recovery.out" >/dev/null \
+    || fail "self-merge-cleanup: the recorded merge did not surface as a recovery wake: $(cat "$dir/recovery.out")"
+  ack_watcher_cycle "$state" || fail "self-merge-cleanup: recovery acknowledgement failed"
+  rm -f "$state/.last-check"
   set +e
   FM_PARK_TEARDOWN_BIN="$dir/teardown-stub" FM_TEST_GH_STATE=MERGED \
     run_watcher_bounded "$dir/home" "$dir/fakebin" >"$dir/watch.out" 2>"$dir/watch.err"

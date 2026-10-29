@@ -807,6 +807,7 @@ A lane parks only from a verified clean, ready-to-merge state: open and not a dr
 Anything else keeps the worker working, and the verdict is re-read from the forge immediately before the agent is stopped, so a head that moved in between refuses the park.
 A parked lane's local copy is durably leased so the worktree pool never hands it out, and new or edited comments, failing checks, requested changes, a conflict, an unresolved thread, or a new push relaunch a fresh worker in the same copy on the same branch with the trigger in its instructions.
 A branch that merely fell behind its base does not relaunch a parked lane.
+The park record is written as pending before the agent is stopped and marked parked once the stop is confirmed, so a park that dies midway is still watched and relaunched on feedback, reads as parking rather than stopped, and is settled on the next check: promoted to parked once its agent is confirmed dead, or dropped while the agent still runs.
 Without the flag, `bin/fm-park.sh park <task-id>` still parks one lane on request.
 
 By default every ship lane is cleaned up automatically when its merge poll sees the PR or merge request merged, including squash and merge-train merges: the lane is torn down through `bin/fm-teardown.sh` (never forced, so unlanded or uncommitted work still refuses) and its local copy returned, and the outcome joins the merge notification.

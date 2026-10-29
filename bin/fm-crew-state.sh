@@ -257,6 +257,9 @@ if [ -f "$PARK_RECORD" ]; then
   if [ -n "$(fm_meta_get "$PARK_RECORD" resume_error)" ]; then
     emit blocked review-park "parked on review: PR $PARK_PR at ${PARK_HEAD:0:12}; the relaunch on review activity failed - run bin/fm-park.sh resume"
   fi
+  if [ -n "$(fm_meta_get "$PARK_RECORD" pending)" ]; then
+    emit paused review-park "parking on review: PR $PARK_PR at ${PARK_HEAD:0:12} since $PARK_WHEN; the agent's stop is not yet confirmed"
+  fi
   emit paused review-park "parked on review: PR $PARK_PR at ${PARK_HEAD:0:12} since $PARK_WHEN; agent stopped, relaunches on review activity"
 fi
 

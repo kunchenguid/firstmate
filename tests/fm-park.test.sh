@@ -92,6 +92,22 @@ printf '%s\n' "\$*" >> "$world/teardown.log"
 if [ -e "$world/teardown.refuse" ]; then echo "REFUSED: worktree has work not on any remote and not landed." >&2; exit 1; fi
 echo "Torn down \$1"
 SH
+  # The lane's tmux window: no server by default (the agent is dead), and a
+  # live claude in the foreground while $world/agent.alive exists.
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+[ -e "$world/agent.alive" ] || { echo "no server running on /tmp/tmux-fake/default" >&2; exit 1; }
+case "\$1" in
+  list-windows) echo fm-lane ;;
+  display-message) echo /dev/ttysfake ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case " \$* " in *" -t ttysfake "*) echo "1 1 1 claude"; exit 0 ;; esac
+exec /bin/ps "\$@"
+SH
   cat > "$fakebin/fm-crew-state.sh" <<SH
 #!/usr/bin/env bash
 cat "$world/crew-state" 2>/dev/null || echo 'state: done · source: status-log · PR ready'
@@ -340,21 +356,67 @@ SH
   pass "an instruction or a new turn arriving after the preflight refuses the park before the agent is stopped"
 }
 
-test_interrupted_park_never_reads_as_parked() {
-  local w pid i
-  w=$(make_world park-interrupted "$GH_URL")
-  gh_fixture "$w/gh.1.json"
-  # The stop hangs; the park is killed outright in the middle of it.
+# Starts a park whose stop hangs and kills it outright in the middle of it.
+kill_park_during_stop() {  # <world>
+  local w=$1 pid
+  cp "$w/fakebin/fm-control.sh" "$w/fm-control.sh.orig"
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/control.log"\nsleep 5\n' "$w" > "$w/fakebin/fm-control.sh"
   TMPDIR="$w" run_park "$w" park lane >/dev/null 2>&1 &
   pid=$!
-  for i in $(seq 1 100); do [ -s "$w/control.log" ] && break; sleep 0.1; done
+  for _ in $(seq 1 100); do [ -s "$w/control.log" ] && break; sleep 0.1; done
   [ -s "$w/control.log" ] || fail "interrupted: the stop never started"
   kill -KILL "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  [ ! -e "$w/state/lane.review-park" ] || fail "interrupted: a park record was published before the stop was confirmed"
-  [ -z "$(run_park "$w" list)" ] || fail "interrupted: list reports the lane as parked"
-  pass "a park interrupted during the stop leaves no park record behind"
+  mv "$w/fm-control.sh.orig" "$w/fakebin/fm-control.sh"
+  rm -f "$w/control.log" "$w/gh.count"
+}
+
+test_interrupted_park_reads_as_parking_and_the_tick_settles_it() {
+  local w out
+  w=$(make_world park-interrupted "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  kill_park_during_stop "$w"
+  grep -qx 'pending=1' "$w/state/lane.review-park" || fail "interrupted: no pending park record"
+  out=$(FM_HOME="$w" FM_STATE_OVERRIDE="$w/state" "$ROOT/bin/fm-crew-state.sh" lane 2>&1 | head -1)
+  case "$out" in *"parking on review"*) ;; *) fail "interrupted: crew state does not read parking: $out" ;; esac
+  case "$out" in *"agent stopped"*) fail "interrupted: crew state claims the agent stopped: $out" ;; esac
+  case "$(run_park "$w" list)" in *"parking; stop not yet confirmed"*) ;; *) fail "interrupted: list: $(run_park "$w" list)" ;; esac
+  # Feedback after the crash still relaunches the lane, and the tick first
+  # promotes the record because the agent is confirmed dead.
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  expect_relaunch "$w" interrupted-dead "checks are failing"
+
+  w=$(make_world park-interrupted-quiet "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  kill_park_during_stop "$w"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "interrupted-quiet: tick acted: $out"
+  [ -e "$w/state/lane.review-park" ] || fail "interrupted-quiet: the record of a stopped agent was dropped"
+  ! grep -q '^pending=' "$w/state/lane.review-park" || fail "interrupted-quiet: the record of a stopped agent was not promoted to parked"
+
+  w=$(make_world park-interrupted-alive "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  kill_park_during_stop "$w"
+  : > "$w/agent.alive"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "interrupted-alive: tick acted: $out"
+  [ ! -e "$w/state/lane.review-park" ] || fail "interrupted-alive: the record of a running agent was kept"
+  pass "a park killed during the stop reads as parking, still relaunches on feedback, and the next tick parks it once the agent is dead or drops it while the agent runs"
+}
+
+test_failed_park_record_write_leaves_the_agent_running() {
+  local w out rc=0
+  w=$(make_world park-record-fail "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  printf 'chmod a-w "%s/state"\n' "$w" > "$w/gh.2.sh"
+  out=$(run_park "$w" park lane 2>&1) || rc=$?
+  chmod u+w "$w/state"
+  case "$rc:$out" in 1:*"its park record could not be written"*) ;; *) fail "record-fail: $rc $out" ;; esac
+  [ ! -e "$w/control.log" ] || fail "record-fail: the agent was stopped: $(cat "$w/control.log")"
+  [ ! -e "$w/state/lane.review-park" ] || fail "record-fail: a park record was left behind"
+  ! grep -q "parked on review" "$w/state/lane.status" || fail "record-fail: a parked line was appended"
+  pass "a park whose record cannot be written refuses before the agent is stopped"
 }
 
 test_park_preflight_refusals_leave_the_agent_running() {
@@ -400,7 +462,12 @@ test_park_preflight_refusals_leave_the_agent_running() {
   : > "$w/control.fail"
   rc=0; out=$(run_park "$w" park lane 2>&1) || rc=$?
   case "$rc:$out" in 1:*"the agent could not be stopped"*) ;; *) fail "control-fail: $rc $out" ;; esac
-  [ ! -e "$w/state/lane.review-park" ] || fail "control-fail: record left behind"
+  grep -qx 'pending=1' "$w/state/lane.review-park" || fail "control-fail: no pending record for the tick to settle"
+  rm -f "$w/control.fail" "$w/control.log"
+  : > "$w/agent.alive"
+  run_park "$w" tick >/dev/null 2>&1
+  [ ! -e "$w/state/lane.review-park" ] || fail "control-fail: the tick kept the record of a running agent"
+  [ ! -e "$w/control.log" ] || fail "control-fail: the tick acted on the lane: $(cat "$w/control.log")"
 
   ! grep -q "parked on review" "$w/state/lane.status" || fail "preflight: a parked line was appended"
   pass "park refuses a busy or unfinished worker, a waiting instruction, a dirty or lagging copy, an unarmed merge poll, an unleasable slot, and a failed stop"
@@ -629,7 +696,8 @@ fm_test_run \
   test_park_stops_agent_records_lane_and_leases_slot \
   test_park_refuses_when_head_moves_after_the_verdict \
   test_park_refuses_when_the_lane_is_steered_before_the_stop \
-  test_interrupted_park_never_reads_as_parked \
+  test_interrupted_park_reads_as_parking_and_the_tick_settles_it \
+  test_failed_park_record_write_leaves_the_agent_running \
   test_park_preflight_refusals_leave_the_agent_running \
   test_repark_reuses_its_own_lease_and_refuses_a_foreign_one \
   test_each_relaunch_trigger_relaunches_a_fresh_worker \

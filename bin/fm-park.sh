@@ -50,12 +50,17 @@
 # later get never hands the copy out and prune never removes it even if the
 # endpoint shell dies; bin/fm-teardown.sh's treehouse return releases it),
 # evaluates the gate again with --expect-head immediately before the stop,
-# checks once more that the agent is idle and the inbox empty, stops the agent
-# with bin/fm-control.sh exit (endpoint, branch, PR, task record, brief, and
-# copy all stay), writes state/<id>.review-park only once the stop is confirmed,
-# and appends a declared paused: line to the task's status log (reported upward
-# in a secondmate home). A refusal at any step leaves no record and the agent
-# running; a lease already taken stays until teardown, which is harmless.
+# checks once more that the agent is idle and the inbox empty, writes
+# state/<id>.review-park marked pending=1, stops the agent with
+# bin/fm-control.sh exit (endpoint, branch, PR, task record, brief, and copy all
+# stay), rewrites the record without pending once the stop is confirmed, and
+# appends a declared paused: line to the task's status log (reported upward in a
+# secondmate home). A refusal before the pending record leaves no record and the
+# agent running; a lease already taken stays until teardown, which is harmless.
+# A pending record is watched and resumed like a parked one, so feedback still
+# relaunches a lane whose park died after the stop, and crew state reads it as
+# parking. Each tick promotes a pending record to parked once its agent is
+# confirmed dead and drops it while the agent is still alive.
 #
 # resume writes a note naming the PR, the parked head and the trigger, then runs
 # bin/fm-control.sh relaunch --note-file, which starts a fresh agent of the
@@ -99,8 +104,9 @@
 #
 # list prints each parked lane: id, PR, parked head, and when it parked.
 #
-# The record is key=value lines (pr, head, parked_at, slot_leased, and
-# resume_error after a failed relaunch), mode 0600, published by rename.
+# The record is key=value lines (pr, head, parked_at, slot_leased, pending
+# until the stop is confirmed, and resume_error after a failed relaunch), mode
+# 0600, published by rename.
 # GraphQL and jq programs below are literal, not shell expressions.
 # shellcheck disable=SC2016
 set -eu
@@ -502,14 +508,16 @@ cmd_park() {
   if ! action_fits; then
     die "refusing to park $id: the tick ran out of time before the stop"
   fi
+  # Written before the stop and marked pending, so a park that dies after the
+  # stop still leaves the lane watched; the next tick settles a pending record.
+  record_write "$id" "pr=$pr" "head=$head" "parked_at=$parked_at" "slot_leased=$lease" "pending=1" \
+    || die "refusing to park $id: its park record could not be written"
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$CONTROL_BIN" "$id" exit 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
-    die "refusing to park $id: the agent could not be stopped: $(printf '%s\n' "$out" | tail -1)"
+    die "refusing to park $id: the agent could not be stopped: $(printf '%s\n' "$out" | tail -1); the next tick settles its pending park record"
   fi
-  # Published only once the stop is confirmed, so an interrupted park never
-  # reads as parked.
   record_write "$id" "pr=$pr" "head=$head" "parked_at=$parked_at" "slot_leased=$lease" \
-    || die "$id: the agent was stopped but its park record could not be written"
+    || die "$id: the agent was stopped but its park record could not be marked parked; the next tick settles it"
   line="paused [at=$(date +%s)]: parked on review: PR $pr clean at ${head:0:12}; agent stopped, relaunches on review activity"
   status_append "$id" "$line"
   fm_parent_channel_report "$FM_HOME" "$STATE" "$line" >/dev/null 2>&1 || true
@@ -616,6 +624,22 @@ watch_unparked() {  # <id>
   lane_action cmd_park "$id" 2>/dev/null
 }
 
+# A pending record is a park that did not confirm its stop. Once its agent is
+# confirmed dead it is promoted to parked; while the agent is still alive the
+# park did not happen and the record is dropped; otherwise it stays pending.
+settle_pending() {  # <id>
+  local id=$1 meta
+  lock_try "$STATE/.review-park-$id.lock" || return 0
+  [ -n "$(record_get "$id" pending)" ] || return 0
+  meta="$STATE/$id.meta"
+  case "$(fm_backend_agent_alive "$(fm_backend_of_meta "$meta")" "$(fm_backend_target_of_meta "$meta")")" in
+    dead)
+      record_write "$id" "pr=$(record_get "$id" pr)" "head=$(record_get "$id" head)" \
+        "parked_at=$(record_get "$id" parked_at)" "slot_leased=$(record_get "$id" slot_leased)" ;;
+    alive) rm -f -- "$(record_path "$id")" ;;
+  esac
+}
+
 # visit_lanes <cursor> <visit> <id>... runs <visit> on each lane, starting at
 # the lane saved in <cursor> and wrapping around. When the tick runs out of time
 # it saves the next lane there, so a slow early lane cannot starve later ones.
@@ -650,6 +674,10 @@ cmd_tick() {
     [ -e "$rec" ] || continue
     id=$(basename "$rec" .review-park)
     fm_pr_task_id_valid "$id" && [ -f "$STATE/$id.meta" ] || continue
+    if [ -n "$(record_get "$id" pending)" ]; then
+      ( LOCKS_HELD=; trap release_locks EXIT; settle_pending "$id" ) || true
+      [ -e "$rec" ] || continue
+    fi
     parked+=("$id")
   done
   visit_lanes "$STATE/.review-park-tick-next" watch_parked ${parked[@]+"${parked[@]}"} || return 0
@@ -671,7 +699,7 @@ cmd_list() {
     printf '%s\tPR %s\thead %s\tparked %s%s\n' "$id" "$(record_get "$id" pr)" \
       "$(record_get "$id" head | cut -c1-12)" \
       "$(date -u -r "$(record_get "$id" parked_at)" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "@$(record_get "$id" parked_at)" +%Y-%m-%dT%H:%MZ 2>/dev/null || record_get "$id" parked_at)" \
-      "$([ -z "$(record_get "$id" resume_error)" ] || printf '\trelaunch failed; run fm-park.sh resume by hand')"
+      "$([ -z "$(record_get "$id" pending)" ] || printf '\tparking; stop not yet confirmed')$([ -z "$(record_get "$id" resume_error)" ] || printf '\trelaunch failed; run fm-park.sh resume by hand')"
   done
 }
 
