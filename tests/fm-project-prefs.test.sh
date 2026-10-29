@@ -79,6 +79,9 @@ test_unusual_names_never_refuse_work() {
   out=$(LC_ALL=C FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" brief-dot-s6 .dotproj --mode no-mistakes 2>&1); rc=$?
   expect_code 0 "$rc" "a scaffold for a leading-dot project should exit 0"$'\n'"$out"
   assert_contains "$out" "Dot project rule." "a scaffold must print a leading-dot project's preferences"
+  out=$(LC_ALL=C FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" brief-dash-s9 -dashproj --mode no-mistakes 2>&1); rc=$?
+  expect_code 0 "$rc" "a scaffold for a leading-dash project should exit 0"$'\n'"$out"
+  assert_contains "$out" "Dash project rule." "a scaffold must print a leading-dash project's preferences"
   out=$(LC_ALL=C FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" brief-nonascii-s7 "n"$'\303\251' --mode no-mistakes 2>&1); rc=$?
   expect_code 0 "$rc" "a scaffold for a non-ASCII project without a file should exit 0"$'\n'"$out"
   rm -f "$PREFS_DIR/.dotproj.md" "$PREFS_DIR/-dashproj.md" "$PREFS_DIR/caf"$'\303\251'".md"
@@ -117,6 +120,28 @@ test_unsafe_files_are_refused_loudly() {
   run_prefs list >/dev/null 2>&1; rc=$?
   expect_code 2 "$rc" "list is not a subcommand"
   pass "fm-project-prefs.sh: non-regular files are refused loudly"
+}
+
+test_unsearchable_prefs_dir_is_refused_loudly() {
+  local out rc home="$TMP_ROOT/locked-home"
+  mkdir -p "$home/data/captain-projects" "$home/state"
+  printf '%s\n' '- Locked rule.' > "$home/data/captain-projects/alpha.md"
+  chmod 000 "$home/data/captain-projects"
+  if [ -x "$home/data/captain-projects" ]; then
+    chmod 755 "$home/data/captain-projects"
+    pass "fm-project-prefs.sh: unsearchable directory check skipped (permissions not enforced for this user)"
+    return
+  fi
+  out=$(FM_HOME="$home" "$PREFS" show alpha 2>&1); rc=$?
+  expect_code 3 "$rc" "show must refuse a preferences directory it cannot search"
+  assert_contains "$out" "must be a searchable directory" "the refusal must name the requirement"
+  FM_HOME="$home" "$PREFS" path alpha >/dev/null 2>&1; rc=$?
+  expect_code 3 "$rc" "path must refuse a preferences directory it cannot search"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-locked-s8 alpha --mode no-mistakes 2>&1); rc=$?
+  expect_code 1 "$rc" "a scaffold must stop when the preferences directory cannot be searched"
+  assert_contains "$out" "could not read the per-project captain preferences for alpha" "the scaffold refusal must name the project"
+  chmod 755 "$home/data/captain-projects"
+  pass "fm-project-prefs.sh: a preferences directory that cannot be searched is refused, never read as absent"
 }
 
 test_show_task_resolves_project_from_meta() {
@@ -371,6 +396,7 @@ test_path_reports_the_file
 test_unusual_names_never_refuse_work
 test_names_that_cannot_be_files_read_as_no_file
 test_unsafe_files_are_refused_loudly
+test_unsearchable_prefs_dir_is_refused_loudly
 test_show_task_resolves_project_from_meta
 test_brief_prints_project_prefs
 test_brief_refuses_unreadable_prefs_before_writing

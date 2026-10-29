@@ -235,8 +235,8 @@ fi
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
-"$FM_ROOT/bin/fm-project-prefs.sh" show "$(basename "$PROJ")" || {
-  echo "error: could not read the per-project captain preferences for $(basename "$PROJ")" >&2
+"$FM_ROOT/bin/fm-project-prefs.sh" show "$(basename -- "$PROJ")" || {
+  echo "error: could not read the per-project captain preferences for $(basename -- "$PROJ")" >&2
   exit 1
 }
 

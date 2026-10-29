@@ -601,7 +601,7 @@ REPO=${POS[1]}
 # the scaffold instead of letting the brief go out without the project's rules,
 # and they are printed after the scaffold line so firstmate writes them into the
 # brief's Firstmate spec.
-PROJECT_PREFS=$("$SCRIPT_DIR/fm-project-prefs.sh" show "$(basename "$REPO")") || {
+PROJECT_PREFS=$("$SCRIPT_DIR/fm-project-prefs.sh" show "$(basename -- "$REPO")") || {
   echo "error: could not read the per-project captain preferences for $REPO" >&2
   exit 1
 }

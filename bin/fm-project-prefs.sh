@@ -31,7 +31,7 @@
 #   path prints the file's path and exits 0 when the file exists, and exits 1
 #   silently when it does not.
 # A file that exists but is not a readable regular file, or whose directory is a
-# symlink, exits 3 naming the path, so a project's rules are never silently
+# symlink or cannot be searched, exits 3 naming the path, so a project's rules are never silently
 # skipped. Exit 2 is a usage error, and show --task exits 1 when the task record
 # is missing or has no project=.
 set -eu
@@ -76,6 +76,10 @@ prefs_file_for() {
     echo "error: $PREFS_DIR must be a plain directory" >&2
     return 3
   fi
+  if [ -d "$PREFS_DIR" ] && [ ! -x "$PREFS_DIR" ]; then
+    echo "error: $PREFS_DIR must be a searchable directory" >&2
+    return 3
+  fi
   file="$PREFS_DIR/$name.md"
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
     return 1
@@ -96,7 +100,7 @@ cmd_show() {
     [ -f "$meta" ] || { echo "error: no meta for task $2 at $meta" >&2; return 1; }
     proj=$(grep '^project=' "$meta" | tail -1 | cut -d= -f2- || true)
     [ -n "$proj" ] || { echo "error: meta for task $2 is missing project=" >&2; return 1; }
-    name=$(basename "$proj")
+    name=$(basename -- "$proj")
   else
     [ "$#" -eq 1 ] || { usage >&2; return 2; }
     name=$1
