@@ -4,8 +4,8 @@
 # Origin: the 2026-09-12 GitHub Actions starvation incident. firstmate CI had no
 # concurrency deduplication, so every superseded PR head kept its full job
 # fan-out, and four jobs carried no timeout at all. These tests hold both
-# safeguards: PR runs supersede within one PR while main pushes are never
-# cancelled, and every CI job carries a finite hang tripwire drawn from the
+# safeguards: PR runs supersede within one PR while close main pushes keep only
+# the newest run, and every CI job carries a finite hang tripwire drawn from the
 # three-tier timeout policy that docs/fm-test-portable-shards.md "Timeouts"
 # owns (fast, normal, heavy), so no job drifts back to a one-off number.
 #
@@ -256,6 +256,49 @@ end
   bash -c "$script" 2>&1
 }
 
+# Print the checks one simulated run publishes, one "<name><TAB><conclusion>"
+# per line: GitHub publishes a check for every job, running or skipped, so a
+# skipped job still appears with conclusion skipped. Matrix jobs are expanded
+# even when skipped, the stricter assumption about how GitHub names them. A
+# running lane concludes with the simulated needs outcome; the Full suite
+# verdict is executed by run_full_suite_verdict.
+published_checks() {  # [KEY=VALUE]...
+  local rows name conclusion
+  rows=$(ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
+doc = YAML.load_file(ARGV.shift)
+context = simulated_context(doc.fetch("name"), ARGV)
+doc.fetch("jobs").each do |id, job|
+  runs = Expression.condition(job["if"], context)
+  matrix = job.dig("strategy", "matrix") || {}
+  expansions = matrix.empty? ? [{}] : matrix.flat_map { |k, values| values.map { |v| { "matrix.#{k}" => v.to_s } } }
+  expansions.each do |extra|
+    name = interpolate(job.fetch("name", id), context.merge(extra))
+    conclusion = !runs ? "skipped" : id == "full-suite" ? "verdict" : context.fetch("needs.status")
+    puts [name, conclusion].join("\t")
+  end
+end
+' "$CI_WORKFLOW" "$@") || fail "could not resolve the published checks"
+  while IFS=$'\t' read -r name conclusion; do
+    if [ "$conclusion" = verdict ]; then
+      if run_full_suite_verdict "$@" >/dev/null; then conclusion=success; else conclusion=failure; fi
+    fi
+    printf '%s\t%s\n' "$name" "$conclusion"
+  done <<<"$rows"
+}
+
+# Print the PR's visible checks after two runs on one head: per check name,
+# the newer run's check replaces the older one, as GitHub and
+# bin/fm-pr-merge.sh's newest-check handling both read it.
+checks_after_two_runs() {  # <first run KEY=VALUE list> <second run KEY=VALUE list>
+  local first second
+  # shellcheck disable=SC2086  # each argument is a deliberate word list
+  first=$(published_checks $1) || exit 1
+  # shellcheck disable=SC2086
+  second=$(published_checks $2) || exit 1
+  printf '%s\n%s\n' "$first" "$second" | awk -F '\t' '{ latest[$1] = $2; if (!($1 in order)) { order[$1] = n++; names[n - 1] = $1 } }
+    END { for (i = 0; i < n; i++) print names[i] "\t" latest[names[i]] }'
+}
+
 job_timeout() {
   ruby -ryaml -e '
 puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes", "none")
@@ -422,6 +465,29 @@ test_unrelated_label_starts_no_lane() {
     || fail "could not resolve unrelated label jobs on an owner PR"
   [ -z "$actual" ] || fail "an unrelated label on an owner PR must run nothing, ran: $(printf '%s' "$actual" | tr '\n' ' ')"
   pass "an unrelated label starts no lane and keeps a waiting PR's failing verdict"
+}
+
+# Review finding on DOP-167's build: GitHub publishes skipped checks for every
+# job of an unrelated label event's run, so the failed-suite -> unrelated-label
+# sequence must leave the earlier failure visible under its own check names.
+test_unrelated_label_never_masks_an_earlier_failure() {
+  local first label before after name conclusion
+  while IFS='|' read -r first label; do
+    # shellcheck disable=SC2086  # each column is a deliberate word list
+    before=$(published_checks $first) || fail "could not resolve the first run for $first"
+    printf '%s\n' "$before" | grep -qx $'Full suite\tfailure' \
+      || fail "the first run ($first) must publish a failing Full suite, got:"$'\n'"$before"
+    after=$(checks_after_two_runs "$first" "$label") || fail "could not merge runs for $first"
+    while IFS=$'\t' read -r name conclusion; do
+      printf '%s\n' "$after" | grep -qxF "$name"$'\t'"$conclusion" \
+        || fail "after an unrelated label, $name must still read $conclusion (first run: $first), got:"$'\n'"$after"
+    done <<<"$before"
+  done <<'TABLE'
+labels=full-ci needs=failure|action=labeled label=bug labels=full-ci,bug needs=success
+association=OWNER needs=failure|action=labeled label=bug labels=bug association=OWNER needs=success
+needs=success|action=labeled label=bug labels=bug
+TABLE
+  pass "an unrelated label after a failed or waiting suite leaves every earlier check as it was"
 }
 
 test_every_job_has_a_finite_timeout() {
@@ -610,6 +676,7 @@ test_outside_pr_without_label_runs_only_quick_checks
 test_full_ci_label_runs_the_whole_suite
 test_trusted_runs_are_unchanged
 test_unrelated_label_starts_no_lane
+test_unrelated_label_never_masks_an_earlier_failure
 test_fork_skip_variables_are_opt_in
 test_timing_aggregate_still_runs_after_a_failed_lane
 test_every_job_has_a_finite_timeout
