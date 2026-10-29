@@ -1399,7 +1399,8 @@ test_take_over_confirms_a_watcher_stopped_inside_its_event_wait() {
 # opens a fresh downtime, the next cycle resurfaces it, the supervision host
 # passes it to main, and main's next park takes over again: an empty
 # rearm-resurface wake about every 30 seconds. The one-shot shim delays only the
-# stopped watcher's close, past the old 5-second stop bound.
+# stopped watcher's close, well past the old 50-poll stop bound, which per-poll
+# process overhead stretched to about 8 seconds on a loaded host.
 test_take_over_confirms_a_watcher_slow_to_honor_its_stop() {
   local dir state fakebin armout owner watcher acknowledged fresh real_mktemp i
   dir=$(make_case take-over-slow-stop)
@@ -1410,7 +1411,7 @@ test_take_over_confirms_a_watcher_slow_to_honor_its_stop() {
   cat > "$fakebin/mktemp" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  */.watcher-down.tmp.XXXXXX) ! rm "$dir/slow-close" 2>/dev/null || sleep 8 ;;
+  */.watcher-down.tmp.XXXXXX) ! rm "$dir/slow-close" 2>/dev/null || sleep 20 ;;
 esac
 exec "$real_mktemp" "\$@"
 SH
