@@ -66,7 +66,7 @@
 #   (z4) scout + ignored file                                -> ignored file survives
 #
 # Landed-work proof from current remote state, not stale tracking refs:
-#   (aa) work on another origin branch, pushed from another clone -> ALLOW (any mode)
+#   (aa) work on another origin branch, pushed from another clone -> ALLOW (local-only or open PR)
 #   (ab) same, but the refresh fails                              -> REFUSE, names remote
 #   (ac) refresh runs, commits on no remote branch                -> REFUSE
 #   (ad) same landed work plus uncommitted changes                -> REFUSE
@@ -1018,6 +1018,10 @@ test_landed_on_other_origin_branch_with_stale_refs_allows() {
     write_meta "$case_dir" "$mode" ship
     wt_commit_file "$case_dir" feature.txt landed
     land_task_commits_from_other_clone "$case_dir" release
+    if [ "$mode" != local-only ]; then
+      append_pr_meta_url "$case_dir"
+      add_gh_pr_open "$case_dir"
+    fi
 
     set +e
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1110,6 +1114,10 @@ test_edit_saved_during_refresh_refuses() {
     write_meta "$case_dir" "$mode" ship
     wt_commit_file "$case_dir" feature.txt landed
     land_task_commits_from_other_clone "$case_dir" release
+    if [ "$mode" != local-only ]; then
+      append_pr_meta_url "$case_dir"
+      add_gh_pr_open "$case_dir"
+    fi
     add_fetch_logging_git "$case_dir"
 
     set +e
@@ -1277,6 +1285,60 @@ test_no_mistakes_pushed_with_open_pr_allowed() {
 
   expect_code 0 "$rc" "nm-pushed-open-pr: teardown should proceed"
   pass "pushed work with a recorded open PR is not refused"
+}
+
+# A forge=external ship never pushes its task branch and records review=, not
+# pr=. A personal backup is not proof that reviewed content reached the default
+# branch, so an unmerged review is refused with or without that backup.
+external_backup_case() {  # <case-dir> <push-backup:0|1>
+  local case_dir=$1 push=$2
+  write_meta "$case_dir" direct-PR ship
+  printf '%s\n' forge=external backup_remote=backup backup_prefix=backup/ \
+    'review=https://review.example.com/c/42' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "reviewed work"
+  seed_backlog_in_flight "$case_dir"
+  git init -q --bare "$case_dir/backup.git"
+  git -C "$case_dir/project" remote add backup "$case_dir/backup.git"
+  if [ "$push" = 1 ]; then
+    git -C "$case_dir/wt" push -q backup HEAD:refs/heads/backup/task-x1
+    git -C "$case_dir/project" fetch -q backup
+  fi
+}
+
+test_external_forge_backup_copy_refuses_unmerged_review() {
+  local case_dir rc
+  case_dir=$(make_case ext-backup-unmerged)
+  external_backup_case "$case_dir" 1
+  local head
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ext-backup-unmerged: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "ext-backup-unmerged: no REFUSED line"
+  assert_refusal_retained_task_state "$case_dir" ext-backup-unmerged "$head"
+  pass "forge=external work on the personal backup remote is retained while its review is unmerged"
+}
+
+test_external_forge_without_backup_copy_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case ext-backup-refuse)
+  external_backup_case "$case_dir" 0
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ext-backup-refuse: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "ext-backup-refuse: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" ext-backup-refuse "$head"
+  pass "forge=external work missing from the personal backup remote is refused"
 }
 
 test_no_mistakes_pushed_with_closed_unmerged_pr_refuses() {
@@ -6787,6 +6849,8 @@ test_gate_remote_is_not_refreshed_into_landed
 test_no_mistakes_pushed_unmerged_refuses
 test_no_mistakes_pushed_with_open_pr_allowed
 test_no_mistakes_pushed_with_closed_unmerged_pr_refuses
+test_external_forge_backup_copy_refuses_unmerged_review
+test_external_forge_without_backup_copy_refuses
 test_pushed_followup_after_merged_pr_refuses
 test_no_mistakes_pushed_with_open_forgejo_pr_allowed
 test_no_mistakes_pushed_with_closed_unmerged_forgejo_pr_refuses

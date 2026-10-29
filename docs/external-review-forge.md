@@ -33,9 +33,9 @@ The backup prefix must be non-empty and must neither equal nor start with the ta
 Spawn refuses a backup remote the project does not have, or one whose URL matches origin's.
 Where the backup remote points is the captain's call; firstmate cannot police it, so a project whose code must not leave a network needs a backup inside that network.
 
-With a backup configured, the ready report is accepted only once HEAD is on the backup remote's namespace, and teardown's retention proof sees the copy as reachable from a remote-tracking ref.
+With a backup configured, the ready report is accepted only once HEAD is on the backup remote's namespace, and teardown accepts that copy as retention proof, so it may clean up the worker copy while the review is unmerged.
 Without one, the ready report is accepted on the review URL alone, because the snapshot lives in a tool firstmate cannot read; `review_head=` records what was uploaded.
-Teardown is unchanged either way, so without a backup it refuses cleanup until the reviewed content reaches origin's default branch, and the worker copy is retained until a human merges the review.
+Without a backup, teardown refuses cleanup until the reviewed content reaches origin's default branch, and the worker copy is retained until a human merges the review.
 
 ## Accepted residual
 
