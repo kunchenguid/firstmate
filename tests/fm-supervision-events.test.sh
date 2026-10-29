@@ -34,7 +34,7 @@ sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
-    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
+    "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.leftover-endpoint-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
@@ -78,6 +78,39 @@ fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind
 ) >/dev/null 2>&1 || true
 [ ! -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "a failed durable enqueue must leave the blocked edge eligible for reconnect reconciliation"
 pass "handle_push_transition: enqueue failure cannot commit the Herdr dedupe marker"
+
+# --- handle_push_transition: a leftover endpoint of retired work never stalls -
+
+# Live-task path: the recorded window still alarms as a stall (asserted first
+# above); here the retired path - no task record owns the window - is reported
+# once as housekeeping and never as a stall, and later edges stay quiet.
+reset_state
+fm_write_meta "$STATE_DIR/live.meta" "window=default:wL:pL" "backend=herdr" "kind=ship"
+handle_push_transition herdr default "$(mkrec wR:pR blocked)"
+if grep -q '^[^	]*	stale	' "$STATE_DIR/.wake-queue" 2>/dev/null; then
+  fail "an endpoint with no task record must not raise a stall: $(cat "$STATE_DIR/.wake-queue")"
+fi
+grep -q 'check	leftover-endpoint:default:wR:pR	.*no task record' "$STATE_DIR/.wake-queue" \
+  || fail "a leftover endpoint must be reported once as a housekeeping check: $(cat "$STATE_DIR/.wake-queue" 2>/dev/null)"
+[ "$(wc -l < "$WAKE_LOG" | tr -d '[:space:]')" = 1 ] || fail "the housekeeping note must wake exactly once, got: $(cat "$WAKE_LOG")"
+[ -e "$STATE_DIR/.herdr-escalated-default_wR_pR" ] || fail "the leftover edge must commit its dedupe marker"
+rm -f "$STATE_DIR/.herdr-escalated-default_wR_pR"
+handle_push_transition herdr default "$(mkrec wR:pR blocked)"
+[ "$(wc -l < "$WAKE_LOG" | tr -d '[:space:]')" = 1 ] || fail "a later edge on the same leftover endpoint must not wake again, got: $(cat "$WAKE_LOG")"
+[ "$(grep -c 'leftover-endpoint' "$STATE_DIR/.wake-queue")" = 1 ] || fail "a later edge must not queue a second note: $(cat "$STATE_DIR/.wake-queue")"
+grep -q 'leftover endpoint already reported' "$STATE_DIR/.watch-triage.log" || fail "the repeat edge should be logged to the triage log"
+pass "handle_push_transition: an endpoint with no task record is reported once as housekeeping, never as a stall"
+
+# A task torn down while the wait was open: its endpoint's edge arrives after
+# the record is gone, and the fallback task name alone must not count as one.
+reset_state
+fm_write_meta "$STATE_DIR/other.meta" "window=default:wO:pO" "backend=herdr" "kind=ship"
+handle_push_transition herdr default "$(fm_transition_record fm-other "" "" blocked claude)"
+if grep -q '	stale	' "$STATE_DIR/.wake-queue" 2>/dev/null; then
+  fail "a record for a different window must not make an endpoint look owned: $(cat "$STATE_DIR/.wake-queue")"
+fi
+grep -q 'leftover-endpoint:default:fm-other' "$STATE_DIR/.wake-queue" || fail "the unowned endpoint must be a housekeeping note: $(cat "$STATE_DIR/.wake-queue" 2>/dev/null)"
+pass "handle_push_transition: only a task record whose endpoint matches counts as an owner"
 
 # --- handle_push_transition: absorb (no wake, no enqueue) for a declared pause -
 
