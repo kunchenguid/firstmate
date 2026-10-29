@@ -568,7 +568,7 @@
 # a mate's completed turns stay in its own home. Codex stays unknown until a semantic
 # source exists. Grok keeps its rendered-tail fallback and is not given a parent
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
-# as for a crewmate. Muse, gemini, agy, devin, cortex, and rovo are refused as secondmates.
+# as for a crewmate. Muse, gemini, devin, cortex, and rovo are refused as secondmates.
 # A raw launch command for a claude, pi, pi-signed, or omp secondmate is not armed
 # and retires any arm an earlier launch of that mate left, so its verdict is unknown:
 # the raw command carries no --settings or -e flag to load the wiring.
@@ -595,7 +595,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, devin, commandcode, and cortex are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, devin, commandcode, and cortex are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -603,14 +603,15 @@
 # only after a TUI readiness gate, then a delivery-confirmation gate - the same
 # launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
 # grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
-# agy installs no hook either - it exposes no hook surface at all - so it
-# carries no busy-source wiring and no turn-end hook. Its brief rides the launch
-# command, but a fresh worktree would park it on a folder-trust dialog, so the
-# spawn pre-registers the worktree in agy's own trust store through
-# bin/fm-agy-trust.sh (the claude shape, but non-fatal) and then waits for a
-# busy turn - answering the dialog first if it renders anyway - before
-# reporting success (the rovo/kimi launch-then-confirm shape). Its busy state
-# is a screen-scrape fallback like grok and rovo, and it is crewmate/scout only.
+# agy installs no per-task worker hook; its brief rides the launch command, and a
+# fresh worktree or secondmate home would park it on a folder-trust dialog, so the
+# spawn pre-registers the worktree or secondmate home in agy's own trust store
+# through bin/fm-agy-trust.sh (the claude shape, but non-fatal) and then waits for
+# a busy turn - answering the dialog first if it renders anyway - before reporting
+# success (the rovo/kimi launch-then-confirm shape). Its busy state is a
+# screen-scrape fallback like grok and rovo, while an agy SECONDMATE runs the
+# tracked project-scope .agents/hooks.json in its own home, whose stop-hook park
+# owns that home's supervision (docs/supervision-protocols/agy.md).
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -644,7 +645,7 @@
 # past. bin/fm-polytoken-lib.sh owns every generated artifact and the verified
 # facts; .agents/skills/harness-adapters/references/harness/polytoken.md owns the
 # knowledge record. polytoken is crewmate/scout only and is refused for
-# --secondmate, like agy and devin.
+# --secondmate, like devin.
 # Unless config/keep-ai-trailers is present, every claude launch carries the
 # attribution-off policy in its per-launch --settings JSON, so a spawned worker
 # never writes a Co-Authored-By trailer, Claude-Session link, or generated-with
@@ -2948,7 +2949,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, devin, commandcode, polytoken, and cortex are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, devin, commandcode, polytoken, and cortex are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2958,8 +2959,6 @@ esac
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-# agy has none either: it exposes no hook surface for primary supervision and
-# docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
 # commandcode has none either: only its worker busy mod is verified, and
@@ -2968,7 +2967,7 @@ esac
 # docs/supervision-protocols/ carries no polytoken primary wake protocol.
 # cortex has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no cortex wake protocol (cortex 1.1.104).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -5724,14 +5723,13 @@ spawn_assert_agent_worktree
 # temp root, no retired relaunch wiring and no busy record exists yet to strand,
 # so the refusal names the endpoint the same way they do and leaves nothing else
 # behind.
-# agy gates a fresh worktree behind its own folder-trust dialog and honours a
-# trustedWorkspaces entry written ahead of launch (bin/fm-agy-trust.sh), so the
-# same pre-registration removes the dialog for it. Unlike claude's dialog, agy's
-# preselects the safe answer, so a failed registration is not fatal here: the
-# post-launch gate (agy_wait_for_working) answers the dialog itself and, on a
-# path that was not pre-registered, refuses to count a busy turn as ready until
-# it has done so. agy is crewmate/scout only (refused above for secondmate), so
-# only the worktree shape applies.
+# agy gates a fresh worktree or secondmate home behind its own folder-trust
+# dialog and honours a trustedWorkspaces entry written ahead of launch
+# (bin/fm-agy-trust.sh), so the same pre-registration removes the dialog for it.
+# Unlike claude's dialog, agy's preselects the safe answer, so a failed
+# registration is not fatal here: the post-launch gate (agy_wait_for_working)
+# answers the dialog itself and, on a path that was not pre-registered, refuses
+# to count a busy turn as ready until it has done so.
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
@@ -5746,12 +5744,15 @@ claude*)
   fi
   ;;
 agy)
-  if [ "$KIND" != secondmate ]; then
-    if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
-      AGY_TRUST_PREREGISTERED=1
-    else
-      echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
-    fi
+  if [ "$KIND" = secondmate ]; then
+    spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+  else
+    spawn_trust_args=("$WT" "$PROJ_ABS")
+  fi
+  if "$FM_ROOT/bin/fm-agy-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+    AGY_TRUST_PREREGISTERED=1
+  else
+    echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
   fi
   ;;
 esac
@@ -7034,7 +7035,7 @@ if [ "$KIND" = secondmate ]; then
   # receive extension to match fm_supervision_model's own table, so their pull
   # guard tolerates the extension hand-off exactly as a Pi primary does.
   case "$HARNESS" in
-  claude | cursor) supervision_model=autoarm ;;
+  claude | cursor | agy) supervision_model=autoarm ;;
   pi | pi-signed | omp) supervision_model=extension ;;
   *) supervision_model=persistent ;;
   esac
