@@ -246,7 +246,12 @@
 #   also adds --approve when that help advertises it, so the first unattended
 #   launch does not stall on Pi's "Trust project folder?" dialog for that home
 #   path; --approve is session-scoped to the launch cwd and does not rewrite the
-#   operator's trust.json. Ordinary Pi worker launches never receive --approve.
+#   operator's trust.json. Ordinary Pi worker launches never receive --approve;
+#   instead their fresh task worktree is registered into Pi's own trust.json
+#   ahead of launch by bin/fm-pi-trust.sh when the operator's defaultProjectTrust
+#   lets it, because a worktree path is new on every spawn and the dialog would
+#   otherwise park the worker forever (script header and
+#   docs/verification/runtime-backends.md own the store and policy facts).
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
 #   Devin is worker-only: --permission-mode dangerous and
@@ -474,7 +479,11 @@
 #   before provisioning; __PIEXCLUDE__ below owns the Pi launch substitution.
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. docs/configuration.md's "Worker account pin" section owns unpinned
-#   account selection. A present file pins every supported launch of
+#   account selection: an unpinned pi/pi-signed launch explicitly unsets
+#   PI_CODING_AGENT_DIR on its launch line, so it deterministically reads Pi's
+#   default <home>/.pi/agent store whatever the pane daemon exports, unless a raw
+#   launch command names its own agent root, which then wins.
+#   A present file pins every supported launch of
 #   that runner from this home - ship, scout, local secondmate, raw Claude
 #   command, and relaunch - to the declared account root, and the spawn
 #   refuses before any endpoint, worktree, or record exists when the file is
@@ -5709,6 +5718,16 @@ spawn_assert_agent_worktree
 # path that was not pre-registered, refuses to count a busy turn as ready until
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
 # only the worktree shape applies.
+# Pi gates its first launch in a directory holding trust-requiring resources -
+# which every task worktree does through .agents/skills - behind "Trust project
+# folder?", and remembers the answer per absolute path in its own trust.json, so
+# bin/fm-pi-trust.sh records the one worktree path this spawn uses before the
+# pane exists, leaving a saved trust decision and the selected root's
+# defaultProjectTrust policy alone; its failure is fatal like claude's, because
+# the worker would park there with no one to answer. A Pi secondmate is not
+# registered here, because its launch already carries the session-only --approve
+# for the home it starts in and a persistent home-level entry would widen a
+# grant for no gain.
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
@@ -5720,6 +5739,27 @@ claude*)
   if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
     exit 1
+  fi
+  ;;
+pi | pi-signed)
+  # The store is the one the LAUNCH will read: a worker account pin names the
+  # root on the launch line itself, and an unpinned launch line unsets
+  # PI_CODING_AGENT_DIR in its env prefix below, so that worker deterministically
+  # reads Pi's default <home>/.pi/agent. The exception is a raw launch command
+  # that itself names an agent root: that assignment wins after the unset, so it
+  # reads its own store. The spawning process's own environment is not an input,
+  # because a pane is created by a long-lived tmux/herdr daemon that does not
+  # inherit firstmate's environment. Only the realpath is registered, because Pi
+  # keys its store by the canonical path.
+  if [ "$KIND" != secondmate ]; then
+    spawn_pi_trust_args=("$WT" "$PROJ_ABS")
+    if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
+      spawn_pi_trust_args=(--agent-dir "$WORKER_ACCOUNT_ROOT" "${spawn_pi_trust_args[@]}")
+    fi
+    if ! "$FM_ROOT/bin/fm-pi-trust.sh" "${spawn_pi_trust_args[@]}" >/dev/null; then
+      echo "error: could not pre-register Pi project trust for $WT; refusing to launch a $HARNESS worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
+      exit 1
+    fi
   fi
   ;;
 agy)
@@ -6971,7 +7011,14 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex)
+pi | pi-signed)
+  if [ -n "$WORKER_ACCOUNT" ]; then
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
+  else
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u PI_CODING_AGENT_DIR $LAUNCH"
+  fi
+  ;;
+claude | codex | opencode | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac

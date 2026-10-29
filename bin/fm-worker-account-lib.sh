@@ -12,8 +12,11 @@
 #   claude          CLAUDE_CONFIG_DIR     config/claude-account
 #   pi, pi-signed   PI_CODING_AGENT_DIR   config/pi-account
 #
-# The pin is opt-in: an absent file is no pin, and the launch keeps today's
-# ambient behavior byte for byte. A present file must resolve, or the launch
+# The pin is opt-in: an absent file adds no pin. An unpinned Pi or pi-signed
+# launch unsets PI_CODING_AGENT_DIR (bin/fm-spawn.sh) so it reads $HOME/.pi/agent
+# deterministically, unless the raw command names its own root, which then wins;
+# an unpinned Claude launch keeps today's rule of forwarding firstmate's own
+# root. A present file must resolve, or the launch
 # refuses; nothing falls back to an ambient or vendor-default login once a
 # home has declared one. `ordinary` selects the vendor default: for Claude
 # that is CLAUDE_CONFIG_DIR unset, because Claude reads $CLAUDE_CONFIG_DIR/

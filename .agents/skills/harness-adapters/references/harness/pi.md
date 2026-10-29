@@ -30,10 +30,15 @@ The router's Detection section owns how launch markers and ancestry select betwe
 Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
-A project trust dialog can appear on the first Pi run in any not-yet-trusted directory that holds a trust-requiring resource such as `.pi/extensions/`, including a clean worktree and a freshly seeded secondmate home.
-Accept it with Enter and verify the instructions begin processing.
-The decision persists per path in `~/.pi/agent/trust.json`, or in the pinned root's `trust.json` under a worker account pin, so later spawns in the same pooled slot under that root skip it.
-For unattended seeded-secondmate launches, `../../../bin/fm-spawn.sh --help` owns the capability-gated project-trust approval mechanics; [runtime verification](../../../../../docs/verification/runtime-backends.md#pi-seeded-secondmate-project-trust) owns the regression evidence.
+A project trust dialog can appear on the first Pi run in any not-yet-trusted directory that holds a trust-requiring resource such as `.pi/extensions/` or `.agents/skills/`, including a clean worktree and a freshly seeded secondmate home.
+The decision persists per absolute path in `~/.pi/agent/trust.json`, or in the pinned root's `trust.json` under a worker account pin, so later spawns in the same pooled slot under that root skip it.
+A lookup takes the nearest recorded decision on the path or any ancestor, so a trusted ancestor already covers a new worktree and a recorded decline on an ancestor refuses the spawn.
+`../../../../../bin/fm-spawn.sh` pre-registers a crewmate or scout worktree through `../../../../../bin/fm-pi-trust.sh` before launch, which writes only that one absolute worktree path - into the pinned root, or, for an unpinned pi or pi-signed launch, into the default `~/.pi/agent` that the launch selects by explicitly unsetting `PI_CODING_AGENT_DIR` - and refuses the spawn when it cannot. The one exception is a raw launch command that itself names an agent root: its own assignment wins, so it reads its own store and the pre-registered entry is not the one it consults. Select a different agent root or account with `config/pi-account`, not by exporting the variable.
+The registration never overrides Pi's own trust policy (verified on Pi 0.84.2): it leaves a saved decision alone, as Pi does, and reads `defaultProjectTrust` from the selected root's `settings.json` only when none exists - `"ask"` or an absent setting gets this worktree's `true` entry, `"never"` writes nothing because Pi declines trust and renders no dialog, leaving that worker without the project settings, project extensions, and project skills, `"always"` writes nothing because Pi already trusts the directory, and an unreadable or malformed `settings.json` refuses the spawn naming that root.
+Seeded secondmate launches keep the session-scoped `--approve` instead, so no persistent home-level entry is written for them.
+Where no registration covers a launch and Pi's own policy still asks - the primary session's own first run in a clone, or a raw launch command that names its own trust root - the dialog renders and needs an interactive acceptance: press Enter and verify the instructions begin processing.
+[Runtime verification](../../../../../docs/verification/runtime-backends.md#pi-worker-worktree-project-trust) owns the store format and regression evidence.
+For unattended seeded-secondmate launches, `../../../../../bin/fm-spawn.sh --help` owns the capability-gated project-trust approval mechanics; [runtime verification](../../../../../docs/verification/runtime-backends.md#pi-seeded-secondmate-project-trust) owns the regression evidence.
 
 ## Worker turn-end extension
 

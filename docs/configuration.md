@@ -1305,6 +1305,8 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree, plus the parent home's `state/<id>.pi-ext.ts` busy extension.
 Pi-family secondmates can start unattended in Firstmate-seeded homes without accepting project trust manually; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the capability requirement, session-only approval scope, and older-version fallback, with [regression evidence](verification/runtime-backends.md#pi-seeded-secondmate-project-trust).
+Pi-family crewmate and scout launches need no manual approval either: `fm-spawn.sh` pre-registers each fresh task worktree in the Pi trust store that launch will read and refuses the spawn when it cannot, and [the Pi adapter reference](../.agents/skills/harness-adapters/references/harness/pi.md#operating-facts) owns the store, lookup, and policy facts, with [regression evidence](verification/runtime-backends.md#pi-worker-worktree-project-trust).
+The registration never overrides Pi's own trust policy: it leaves a saved decision alone and honours `defaultProjectTrust` from the selected root's `settings.json` only when none exists - `never` writes nothing, because Pi declines trust and renders no dialog, so that worker launches without the project settings, project extensions, and project skills, `always` writes nothing because Pi already trusts the directory, and `ask` or an absent setting writes the entry - refusing loudly when that settings file cannot be read.
 
 For omp secondmate launches, `fm-spawn.sh` names only the parent home's `state/<id>.omp-ext.ts` busy extension with `-e`: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch also carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
@@ -1443,7 +1445,7 @@ Each relaunch installs a fresh worker extension with the home's current list, so
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
 The pin is opt-in: without a home-wide or per-secondmate pin, pane-backed Claude launches keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
-Unpinned Pi launches use the destination pane's ambient account.
+Unpinned Pi and pi-signed launches explicitly unset `PI_CODING_AGENT_DIR` on their launch line, so an unpinned launch deterministically uses Pi's default `~/.pi/agent` store instead of whatever account the pane's daemon happens to export; a raw launch command that names its own agent root keeps that assignment and reads its own store instead. Select a different agent root or account with `config/pi-account`, not by exporting the variable.
 
 Both files are local and gitignored.
 
@@ -1608,6 +1610,7 @@ The allowlist floor also retains Tern block markers `TERN_IDENTITY`, `TERN_PANE`
 [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact retained names and parsing mechanics.
 
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
+An unpinned Pi or pi-signed launch unsets `PI_CODING_AGENT_DIR` after even an allowlisted forwarding, so this file cannot select their agent root; use [`config/pi-account`](#worker-account-pin-configclaude-account-configpi-account) instead.
 The command shell and worker may still create their own variables.
 
 Unless the Orca environment source below is configured, allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
