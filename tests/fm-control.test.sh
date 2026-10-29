@@ -722,6 +722,51 @@ test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping() {
   pass "fm-control relaunch: commandcode off tmux and herdr is refused before the running agent is stopped"
 }
 
+# bin/fm-spawn.sh refuses an mcode launch without the captain's Full access or
+# with an unconfigured model, but only after a relaunch has stopped the old
+# agent, so fm-control must run the same read-only preflight first.
+test_mcode_relaunch_refused_by_its_preflight_before_stopping() {
+  local dir out rc meta_before data case_model
+  for case_model in 'auto default' 'bypassPermissions minimax/MiniMax-Bogus-9'; do
+    dir=$(new_case mcode-relaunch)
+    add_task "$dir" t1 claude ship
+    alive_as "$dir" claude
+    printf '#!/bin/sh\nexit 0\n' > "$dir/fakebin/mcode"
+    chmod +x "$dir/fakebin/mcode"
+    data="$dir/minimax"
+    mkdir -p "$data"
+    printf 'permissionMode: %s\nprovider:\n  minimax:\n    models:\n      MiniMax-M3.1-Flash:\n        name: M3.1-Flash\n' \
+      "${case_model%% *}" > "$data/config.yaml"
+    meta_before=$(cat "$dir/home/state/t1.meta")
+    out=$(MINIMAX_DATA_DIR=$data run_control "$dir" t1 relaunch --harness mcode --model "${case_model#* }" --note x); rc=$?
+    expect_code 1 "$rc" "an mcode relaunch the preflight refuses ($case_model) should refuse"$'\n'"$out"
+    assert_contains "$out" MiniMax "the refusal should come from the mcode preflight: $out"
+    [ -z "$(literals "$dir")" ] && [ -z "$(keys_sent "$dir")" ] \
+      || fail "a refused mcode relaunch ($case_model) must send the running agent nothing"
+    [ "$(cat "$dir/fake/command")" = claude ] || fail "the running agent must still be running ($case_model)"
+    [ "$(cat "$dir/home/state/t1.meta")" = "$meta_before" ] \
+      || fail "a refused mcode relaunch ($case_model) must leave the task record unchanged"
+    [ ! -e "$dir/home/state/t1.control-relaunch" ] || fail "a refused mcode relaunch ($case_model) must open no relaunch transaction"
+  done
+  # The preflight reads the data directory the task recorded, so a caller whose
+  # own directory is in Full access cannot vouch for the task's.
+  dir=$(new_case mcode-relaunch)
+  add_task "$dir" t1 mcode ship
+  alive_as "$dir" minimax-code
+  printf '#!/bin/sh\nexit 0\n' > "$dir/fakebin/mcode"
+  chmod +x "$dir/fakebin/mcode"
+  mkdir -p "$dir/recorded" "$dir/caller"
+  printf 'permissionMode: auto\n' > "$dir/recorded/config.yaml"
+  printf 'permissionMode: bypassPermissions\n' > "$dir/caller/config.yaml"
+  printf 'mcode_data_dir=%s\n' "$dir/recorded" >> "$dir/home/state/t1.meta"
+  out=$(MINIMAX_DATA_DIR="$dir/caller" run_control "$dir" t1 relaunch --note x); rc=$?
+  expect_code 1 "$rc" "an mcode relaunch whose recorded data directory is not in Full access should refuse"$'\n'"$out"
+  assert_contains "$out" "$dir/recorded/config.yaml" "the preflight must check the recorded data directory: $out"
+  [ -z "$(literals "$dir")" ] && [ -z "$(keys_sent "$dir")" ] \
+    || fail "a refused mcode relaunch on its recorded data directory must send the running agent nothing"
+  pass "fm-control relaunch: an mcode preflight refusal happens before the running agent is stopped"
+}
+
 test_state_verified_backends_are_exactly_tmux_herdr_and_rex() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
@@ -1320,6 +1365,7 @@ test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping
+test_mcode_relaunch_refused_by_its_preflight_before_stopping
 test_state_verified_backends_are_exactly_tmux_herdr_and_rex
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused

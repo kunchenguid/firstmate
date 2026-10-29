@@ -229,6 +229,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/mcode.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/muse.md",
       "audience": "agent-runtime"
     },
@@ -557,6 +561,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/mcode.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/muse.md",
       "audience": "maintainer-verification"
     },
@@ -615,6 +623,10 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "tests/captures/mcode-0.7.1/README.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "tests/captures/no-mistakes-v1.70.1/README.md",

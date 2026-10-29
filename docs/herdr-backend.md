@@ -757,6 +757,7 @@ It hands the visible pane's ANSI viewport plus Herdr's capability facts to the f
 - opencode's left bar.
 - The Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle or done.
 - Cortex Code's titled rounded top rule, admitted only when native `agent get` identity is exactly `cortex`, which the adapter reads lazily and only when the classifier answers `need-identity` for a titled rounded box holding an agent prompt glyph; the same box on any other pane stays ambiguous, and Cortex is [verified](verification/cortex.md) on Herdr for crewmates and scouts only.
+- MiniMax Code's bare `›` row, whose placeholder and suggestion colour is ghost text only when the pane's `agent get` label is `mcode`; Herdr 0.9.5 has no mcode detection, so `bin/fm-spawn.sh` registers that label itself with the stateless `unknown` status, liveness lets the process view decide that one registration, and the adapter reads the label lazily only for a non-empty read of a screen holding a bare `›` row ([verification](verification/mcode.md)).
 
 ### Pi composer states
 

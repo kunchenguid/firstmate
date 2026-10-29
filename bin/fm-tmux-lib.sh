@@ -109,8 +109,11 @@ fm_tmux_composer_caps() {
 # foreground process name and its own verified busy footer: its composer is a
 # bare `❯` row between the same two rules, and its placeholder needs the
 # identity-scoped ghost ceiling in bin/fm-composer-lib.sh.
+# MiniMax Code answers from its anchored `minimax-code` process title the same
+# way; its placeholder needs the identity-scoped exact ghost colour.
 # Prints "<owner><TAB>idle" or "<owner><TAB>working" for owner pi,
-# polytoken, or commandcode; exits 1 when the pane is not a live shape owner.
+# polytoken, commandcode, or mcode; exits 1 when the pane is not a live shape
+# owner.
 fm_tmux_composer_identity() {  # <target>
   local target=$1 tty pgid tpgid comm owner='' status
   tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
@@ -123,6 +126,7 @@ fm_tmux_composer_identity() {  # <target>
           pi|pi-signed|pi-launcher|Pi) owner=pi ;;
           polytoken) owner=polytoken ;;
           command-code) owner=commandcode ;;
+          minimax-code) owner=mcode ;;
         esac
         [ -n "$owner" ] && break
       done <<EOF
@@ -201,6 +205,18 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
+  # MiniMax Code keeps the terminal cursor on its composer row, but its idle
+  # placeholder and next-message suggestion are bright enough to read as typed
+  # text without its identity (verified live, mcode 0.7.1), so any non-empty
+  # read of an mcode pane holding its bare `›` composer row is re-read once with that identity at the same
+  # cursor row. The identity only names which exact colour is ghost text, so a
+  # typed draft still reads pending.
+  if [ "$verdict" != empty ] && fm_composer_screen_has_mcode_prompt "$pane" \
+     && identity=$(fm_tmux_composer_identity "$target") \
+     && [ "${identity%%$'\t'*}" = mcode ]; then
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy" "$identity")
+    [ "$verdict" != need-identity ] || verdict=unknown
+  fi
   printf '%s' "$verdict"
 }
 
@@ -221,6 +237,26 @@ fm_tmux_pane_is_cortex() {  # <target>
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF
   return 1
+}
+
+# fm_tmux_mcode_title: print the pane title (#{pane_title}, the terminal title
+# the pane's program last set) only while the pane's FOREGROUND process group
+# contains MiniMax Code's anchored `minimax-code` process; exit 1 otherwise. tmux
+# keeps a title after its program exits, so the process gate is what keeps a
+# dead pane's last `Done | ...` title from reading as a live idle agent.
+fm_tmux_mcode_title() {  # <target>
+  local target=$1 tty pgid tpgid comm live=1
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r _ pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    [ "${comm##*/}" = minimax-code ] && { live=0; break; }
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  [ "$live" = 0 ] || return 1
+  tmux display-message -p -t "$target" '#{pane_title}' 2>/dev/null
 }
 
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
@@ -345,12 +381,15 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 }
 
 # fm_tmux_submit_busy_harness: the busy-footer harness for a submit on
-# <target> - polytoken when the pane's composer identity is polytoken, empty
-# (the harness-less union) for every other pane.
+# <target> - polytoken or mcode when the pane's composer identity names it,
+# empty (the harness-less union) for every other pane. mcode's spinner row is
+# matched by its slot, never by a union token.
 fm_tmux_submit_busy_harness() {  # <target>
   local identity
   identity=$(fm_tmux_composer_identity "$1") || return 0
-  [ "${identity%%$'\t'*}" != polytoken ] || printf 'polytoken'
+  case "${identity%%$'\t'*}" in
+    polytoken|mcode) printf '%s' "${identity%%$'\t'*}" ;;
+  esac
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>

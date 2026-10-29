@@ -46,6 +46,10 @@
 #               shape Cortex's identity could change. A probe answering
 #               `cortex` then proves it, as cortex=1 does. Other callers
 #               never see this sentinel for a titled box.
+#   mcode=ask   the caller can probe identity lazily (it declares identity=1):
+#               a non-empty verdict on a screen holding a bare `›` row becomes
+#               `need-identity`, because only an `mcode` identity can name
+#               MiniMax Code's placeholder colour as ghost text.
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -274,12 +278,19 @@ fm_composer_normalize_trim_var() {  # <varname>
 # ceiling to reach it would over-strip other harnesses, so only a screen that the
 # backend's identity probe attributes to Command Code is read with a fixed
 # ceiling of 160 in its place (fm_composer_classify_screen).
+# MiniMax Code draws its placeholder and its next-message suggestion in
+# truecolor 38;2;173;173;173 (luminance 173), while a typed slash command is
+# bold 38;2;104;192;255 (luminance ~172.9) and other typed text is the default
+# foreground (verified live, mcode 0.7.1). No ceiling strips the first and keeps
+# the second, so an mcode-identified screen names that exact colour in
+# FM_COMPOSER_GHOST_RGB (space-separated r;g;b triplets) instead, and only runs
+# in exactly that colour are de-emphasis.
 # The dim/faint and dark-foreground states are tracked together as "de-emphasis";
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
 # runs alike pass through or drop intact without locale-dependent classes.
 fm_composer_strip_ghost() {
-  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" '
+  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" -v ghostrgb="${FM_COMPOSER_GHOST_RGB:-}" '
     function sgr_code(v, b) {
       b = v
       sub(/:.*/, "", b)
@@ -297,7 +308,8 @@ fm_composer_strip_ghost() {
       return p + 1
     }
     # fg38_is_dark: 1 when the SGR 38 foreground starting at param p is a
-    # TRUECOLOR (38;2 / 38:2) whose luminance is below lumamax; 0 otherwise
+    # TRUECOLOR (38;2 / 38:2) whose luminance is below lumamax, or whose exact
+    # r;g;b is one of the space-separated ghostrgb triplets; 0 otherwise
     # (a 38;5 palette colour, a bright truecolor, or a malformed run).
     function fg38_is_dark(a, p, k, lumamax,   spec, nf, f, r, g, b) {
       spec = a[p]
@@ -305,10 +317,12 @@ fm_composer_strip_ghost() {
         nf = split(spec, f, ":")
         if (f[2] != "2" || nf < 5) return 0
         r = f[nf - 2] + 0; g = f[nf - 1] + 0; b = f[nf] + 0
+        if (index(" " ghostrgb " ", " " r ";" g ";" b " ") > 0) return 1
         return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
       }
       if (p + 1 > k || a[p + 1] != "2" || p + 4 > k) return 0
       r = a[p + 2] + 0; g = a[p + 3] + 0; b = a[p + 4] + 0
+      if (index(" " ghostrgb " ", " " r ";" g ";" b " ") > 0) return 1
       return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
     }
     {
@@ -374,6 +388,8 @@ fm_composer_strip_ghost() {
 # devin: "esc twice to interrupt" and its "❭ Guide Devin while it works" working composer;
 # cortex: "(esc to interrupt)" on its spinner row and "Type to queue message..." in its working composer;
 # commandcode: "esc to interrupt" beside a bullet-framed elapsed cell.
+# mcode: its spinner row, matched structurally (fm_composer_mcode_spinner_live)
+# rather than by a token, and outside the harness-less union below.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -414,6 +430,40 @@ FM_DELIVERY_CORTEX_BUSY_REGEX_DEFAULT='\(esc to interrupt\)|Type to queue messag
 # comes from the commandcode-mod writer in bin/fm-busy-lib.sh.
 FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT='esc to interrupt|•[[:space:]]+[0-9]+[smh]([[:space:]]+[0-9]+[smh])*[[:space:]]+•'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
+
+# fm_composer_screen_has_mcode_prompt: 0 when the screen in $1 holds a bare
+# `›` row, the only composer shape MiniMax Code draws; the cheap screen gate
+# every caller applies before paying for an mcode identity probe.
+fm_composer_screen_has_mcode_prompt() {  # <screen>
+  printf '%s\n' "$1" | fm_composer_strip_ansi | grep -q '^[[:space:]]*›'
+}
+
+# fm_composer_mcode_spinner_live: 0 when the plain pane text on stdin shows
+# MiniMax Code's running-turn spinner row in the one slot it occupies - the
+# last non-blank row above the rule that opens the bottom-most `›` composer,
+# where an idle pane draws its `Message · Enter send` header instead (verified
+# live, mcode 0.7.1: `⠼ Running 27s · Option+Enter queue · Enter steer · Ctrl+O
+# details · Esc stop`, `⠏ Loading · ...`, `⠏ Loading 4min37s · ...`). The row
+# must lead with a spinner glyph, a capitalised verb, and an optional elapsed
+# cell before the queue/steer hints, which a narrow pane keeps when it
+# truncates the right of the row. Matching the slot rather than the words is
+# what keeps transcript text that quotes the row, which renders above that
+# slot, from reading as a running turn. Delivery guard and rendered busy
+# fallback only; bin/fm-busy-lib.sh owns what the verdict means.
+fm_composer_mcode_spinner_live() {
+  awk '
+    /^[[:space:]]*$/ { next }
+    { row[++n] = $0 }
+    END {
+      for (i = n; i >= 3; i--) {
+        if (row[i] !~ /^[[:space:]]*›([[:space:]]|$)/) continue
+        if (row[i - 1] !~ /^[[:space:]]*(─)+[[:space:]]*$/) continue
+        exit !(row[i - 2] ~ /^[[:space:]]*[^[:space:]]+ [A-Z][a-z]+( [0-9][0-9a-z]*)? · Option\+Enter queue · Enter steer/)
+      }
+      exit 1
+    }
+  '
+}
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 # omp (Oh My Pi) renders its TUI busy line as `Working…` with U+2026 HORIZONTAL
@@ -474,6 +524,10 @@ fm_busy_lines_match() {  # [harness]
       devin) regex=$FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT ;;
       cortex) regex=$FM_DELIVERY_CORTEX_BUSY_REGEX_DEFAULT ;;
       commandcode) regex=$FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT ;;
+      mcode)
+        printf '%s\n' "$lines" | fm_composer_mcode_spinner_live
+        return
+        ;;
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;
@@ -2111,7 +2165,7 @@ fm_composer_dialog_sink_release() {
 
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
-  local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 kv plain
+  local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 mcode_ask=0 kv plain inner
   # Note the dialog before any early return so a pending picker is still named.
   fm_composer_note_blocking_dialog "$screen" || true
   while IFS= read -r kv; do
@@ -2121,17 +2175,38 @@ fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
       identity=1) has_identity=1 ;;
       cortex=1) cortex_proven=1 ;;
       cortex=ask) cortex_ask=1 ;;
+      mcode=ask) mcode_ask=1 ;;
     esac
   done <<EOF
 $caps
 EOF
+  # The lazy MiniMax Code identity pass (mcode=ask): an mcode pane's placeholder
+  # and suggestion read as typed text until its identity names their exact
+  # colour, so a caller that can probe identity lazily and has not yet supplied
+  # one gets need-identity for any non-empty read of a screen holding a bare `›`
+  # composer row; every other read keeps its verdict without the probe.
+  if [ "$mcode_ask" = 1 ] && [ "$has_identity" = 1 ] && [ -z "$identity" ]; then
+    inner=$(fm_composer_classify_screen "$(printf '%s\n' "$caps" | grep -vx 'mcode=ask')" "$screen" "$cy")
+    if [ "$inner" = need-identity ] \
+       || { [ "$inner" != empty ] && fm_composer_screen_has_mcode_prompt "$screen"; }; then
+      printf 'need-identity'
+    else
+      printf '%s' "$inner"
+    fi
+    return 0
+  fi
   # A Command Code identity (`commandcode` from the tmux probe, `cmd` from
   # Herdr's native agent detection) reads this one screen with Command Code's
   # placeholder ceiling; see fm_composer_strip_ghost.
+  # An mcode identity (`mcode` from the tmux probe or the pane registration
+  # fm-spawn reports to Herdr) reads it with MiniMax Code's exact ghost colour.
   if [ "$has_identity" = 1 ]; then
     case "${identity%%$'\t'*}" in
       commandcode|cmd)
         local FM_COMPOSER_GHOST_LUMA_MAX=160
+        ;;
+      mcode)
+        local FM_COMPOSER_GHOST_RGB='173;173;173'
         ;;
       cortex) cortex_proven=1 ;;
     esac

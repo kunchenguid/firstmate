@@ -174,6 +174,11 @@ The crewmate/scout-only Command Code 1.74.1 adapter was verified on 2026-10-05 a
 Its node process sets its title to `command-code`, the anchored foreground identity that classified `alive` on both backends, while `command-code-helper` remained ambiguous in the portable regression.
 [`commandcode.md`](commandcode.md) owns that evidence, and `FM_COMMANDCODE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-commandcode-signals-live-e2e.test.sh` refreshes it.
 
+The crewmate/scout-only MiniMax Code 0.7.1 adapter was verified on 2026-10-28 against tmux 3.7c and a Herdr 0.9.5 lab session on macOS arm64.
+Its node bundle sets its process title to `minimax-code`, the anchored foreground identity that classified `alive` on both backends while tmux's own `#{pane_current_command}` reported `node`, and `minimax-code-helper` remained ambiguous in the portable regression.
+On Herdr that liveness also rests on the pane registration the spawn reports, because Herdr 0.9.5 does not detect mcode.
+[`mcode.md`](mcode.md) owns that evidence, and `FM_MCODE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-mcode-signals-live-e2e.test.sh` refreshes it.
+
 The crewmate/scout-only Rovo CLI 202609.1.2 adapter added `*rovo*` to the same glob family as `*grok*`/`*kimi*` in the shared process-name classifier (now `fm_agent_process_classify_name` in `bin/fm-agent-process-lib.sh`), and was relaunched live under tmux 3.6a in an isolated private socket.
 `#{pane_current_command}` reported the truncated on-disk binary name `atlassian_cli_r` - macOS's 15-char `comm` truncation cuts `atlassian_cli_rovodev` off just before the `rovo` substring begins, the same truncation-volatility class codex/kimi's own patch-release name drift shows above - while the foreground ps-based `comm` correctly reported `rovo`, so `fm_backend_tmux_agent_state` returned `alive` through that primary source; the two-independent-name-sources design is exactly why the truncated title does not break the verdict.
 [`rovo.md`](rovo.md#backend-liveness-tmux-verified-live-herdr-placement-verified-live-with-a-herdr-side-agent-detection-gap) owns the fuller record, including the busy/interrupt/exit facts captured in that same live tmux session and the herdr agent-detection gap found when herdr placement was verified live in an isolated lab session.

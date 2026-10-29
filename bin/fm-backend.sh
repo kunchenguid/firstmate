@@ -1171,6 +1171,22 @@ fm_backend_busy_state() {  # <backend> <target>
 # fm_composer_classify_screen) - so no backend can hold a private shape
 # assumption; zellij's classifier reads `dump-screen --ansi`, which replaced
 # its old no-classifier content-diff reporting.
+# fm_backend_mcode_title: the terminal title a LIVE MiniMax Code TUI publishes
+# in <target>, printed only when the backend can prove the pane's agent is mcode
+# (tmux: its foreground process; Herdr: the pane's `mcode` registration, which
+# Herdr drops when the agent exits); nonzero otherwise. A title a dead pane
+# kept is never read. bin/fm-busy-lib.sh owns what the title means.
+fm_backend_mcode_title() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_tmux_mcode_title "$@" ;;
+    herdr) fm_backend_herdr_mcode_title "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pending|pending-unproven|unknown
   local backend=$1
   shift

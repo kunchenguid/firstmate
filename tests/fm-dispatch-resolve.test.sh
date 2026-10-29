@@ -11,6 +11,9 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# The absent-key cases must not inherit the operator's own dispatch key; every
+# case that needs one sets it explicitly.
+unset TYPESAFE_API_KEY TYPESAFE_API_KEY_PRIVATE
 
 TOOL="$ROOT/bin/fm-dispatch-resolve.sh"
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-resolve)

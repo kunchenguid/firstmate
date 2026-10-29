@@ -45,11 +45,13 @@ Cortex Code is the exception to both: its `Stop` hook fires on an Escape interru
 Devin's double Escape also opens its `/revert` picker on an idle agent, where Enter reverts file changes, so its second press is sent only after the first renders a running turn's armed hint and never sooner than the adapter's press gap.
 An interrupt whose first press shows no running turn stops there and reports `cancel=not-running`, leaving busy state untouched; a picker a mistimed press opened is closed with one Escape and reported as `revert-picker=dismissed`, and `exit` refuses to type into an open picker.
 Command Code cancels a running turn on one Escape and its own busy mod records the cancelled run idle, while two quick Escapes on an idle agent open its Rewind checkpoint picker, where Enter restores a checkpoint; it therefore gets exactly one press, and the same picker dismissal and `exit` refusal apply.
+MiniMax Code also cancels on one Escape and takes exactly one press, because two quick Escapes on an idle agent open its edit-latest-message mode, where Enter replaces that message and regenerates; that mode gets the same dismissal and `exit` refusal.
+Its busy state is read from its terminal title and spinner row rather than a hook, so a cancelled turn reads idle once the title settles on `Stopped`.
 [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh) owns the arm signal, press gap, and picker signal.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 
 On pane backends, an interrupt is not complete until the composer is empty.
-muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
+muse and MiniMax Code restore the cancelled prompt back into their composer as real text (mcode only when the cancelled turn had produced nothing yet), so their interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 For a typed exit, `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
@@ -63,7 +65,7 @@ T3 Code has no composer and its `/mcp` tools offer no session stop, so `exit` re
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
-It is not deterministic across the verified adapters: codex, grok, gemini, devin, commandcode, and cortex resume only from a session id printed at exit, polytoken resumes only from a session id held in its own sessions registry, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
+It is not deterministic across the verified adapters: codex, grok, gemini, devin, commandcode, cortex, and mcode resume only from a session id printed at exit, polytoken resumes only from a session id held in its own sessions registry, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
 `relaunch` uses the brief on disk - not a harness-private session - as the durable instruction when the backend can prove the old agent stopped and the composer is empty; Devin on Herdr currently fails that composer check and refuses.
 T3 Code cannot host a fresh replacement agent in a thread, so `relaunch` refuses before stopping anything.
 A relaunch does take one session reference when the endpoint's own runtime recorded it - see [the relaunch transaction](#transactional-relaunch) - but that is a relaunch input, not a caller-facing verb.
