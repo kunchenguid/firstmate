@@ -268,7 +268,7 @@ fm_backend_t3code_adopt_server_for_thread() {  # <thread-id> -> server identity
 }
 
 fm_backend_t3code_server_for_meta() (
-  local meta=$1 expected=${2:-} lock server tmp acquired=0
+  local meta=$1 expected=${2:-} lock server tmp acquired=0 carrier owner pid current inherited=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   server=$(fm_meta_get "$meta" t3_server)
   if [ -n "$server" ]; then
@@ -281,9 +281,18 @@ fm_backend_t3code_server_for_meta() (
     . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-wake-lib.sh"
   fi
   lock=$(fm_meta_lock_path "$meta") || return 1
-  if ! { [ "${META_LOCK_HELD:-0}" = 1 ] && [ "${META_LOCK:-}" = "$lock" ]; } &&
+  while IFS= read -r carrier; do
+    [ "${carrier%%|*}" = "$lock" ] || continue
+    owner=${carrier#*|}
+    fm_lock_points_to_owner "$lock" "$owner" || return 1
+    pid=$(cat "$owner/pid") || return 1
+    fm_current_pid current || return 1
+    fm_pid_descends_from "$current" "$pid" || return 1
+    inherited=1
+  done <<< "${FM_T3_META_LOCK_CARRIERS:-}"
+  if [ "$inherited" = 0 ] && ! { [ "${META_LOCK_HELD:-0}" = 1 ] && [ "${META_LOCK:-}" = "$lock" ]; } &&
     ! { [ "${SPAWN_META_LOCK_HELD:-0}" = 1 ] && [ "${SPAWN_META_LOCK:-}" = "$lock" ]; }; then
-    fm_lock_acquire_wait_max "$lock" 30 || return 1
+    fm_lock_try_acquire "$lock" || { echo "error: T3 adoption metadata lock is held; retry after its owner finishes" >&2; return 1; }
     acquired=1
   fi
   trap '[ "$acquired" = 0 ] || fm_lock_release "$lock"' EXIT

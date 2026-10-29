@@ -2781,6 +2781,36 @@ test_refused_pooled_launch_reclaims_without_metadata() {
   pass "a refused pooled T3 launch is reclaimed from its durable route after metadata rollback"
 }
 
+test_adoption_inherits_metadata_lock() {
+  local dir
+  dir="$TMP_ROOT/adoption-inherited-lock"
+  mkdir -p "$dir"
+  bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_source t3code
+    . "$1/bin/fm-wake-lib.sh"
+    meta="$2/task.meta"
+    printf "t3_thread_id=test-thread\n" > "$meta"
+    lock=$(fm_meta_lock_path "$meta")
+    fm_lock_try_acquire "$lock" || exit 1
+    trap "fm_lock_release \"$lock\"" EXIT
+    fm_backend_t3code_adopt_server_for_thread() { printf test-server; }
+    fm_backend_t3code_server_matches() { [ "$1" = test-server ]; }
+    export FM_T3_META_LOCK_CARRIERS="$lock|$(fm_lock_link_owner "$lock")"
+    [ "$(fm_backend_t3code_server_for_meta "$meta")" = test-server ] || exit 2
+    [ "$(fm_meta_get "$meta" t3_server)" = test-server ] || exit 3
+    [ -e "$lock/pid" ] || exit 4
+    printf "t3_thread_id=test-thread\n" > "$meta"
+    FM_T3_META_LOCK_CARRIERS=
+    ! fm_backend_t3code_server_for_meta "$meta" || exit 7
+    [ -e "$lock/pid" ] || exit 8
+    FM_T3_META_LOCK_CARRIERS="$lock|$2/wrong-owner"
+    ! fm_backend_t3code_server_for_meta "$meta" || exit 5
+    [ -z "$(fm_meta_get "$meta" t3_server)" ] || exit 6
+  ' bash "$ROOT" "$dir" || fail "adoption failed inherited-lock ownership contract"
+  pass "T3 adoption borrows verified metadata ownership and refuses forged carriers"
+}
+
 test_legacy_control_adoption_survives_shared_checks() {
   local id out rc thread=mcp:7a1b2c3d-4e5f-4a6b-8c7d-0123456789ab
   id=$(t3_uid t3legacyshared)
@@ -2919,4 +2949,5 @@ test_housekeeping_removes_the_iterated_stale_marker
 
 test_refused_pooled_launch_reclaims_without_metadata
 
+test_adoption_inherits_metadata_lock
 test_legacy_control_adoption_survives_shared_checks

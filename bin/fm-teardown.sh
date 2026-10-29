@@ -3407,6 +3407,11 @@ preflight_descendant_task_locks() {
       return 1
     fi
     DESCENDANT_LOCK_PATHS+=("$meta_lock")
+    local meta_owner
+    meta_owner=$(fm_lock_link_owner "$meta_lock") || return 1
+    FM_T3_META_LOCK_CARRIERS="${FM_T3_META_LOCK_CARRIERS:+$FM_T3_META_LOCK_CARRIERS
+}$meta_lock|$meta_owner"
+    export FM_T3_META_LOCK_CARRIERS
     [ -f "$meta" ] || {
       echo "REFUSED: descendant task $task_id changed while forced teardown acquired its locks; forced teardown changed nothing" >&2
       return 1
