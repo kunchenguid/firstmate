@@ -1306,8 +1306,8 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
     || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
-  RESTART_HELD=$(cd "$RECOVERY_PROJECT_DIR" && "$REAL_TREEHOUSE" status --json \
-    | jq -r --arg id "$RESTART_ID" '[.[] | select(.lease_holder == $id) | .path] | join(" ")') \
+  RESTART_HELD=$(jq -r --arg id "$RESTART_ID" '[.worktrees[]? | select(.leased == true and .lease_holder == $id) | .path] | join(" ")' \
+    "$(dirname "$(dirname "$OLD_RESTART_WT")")/treehouse-state.json") \
     || fail "could not read the recovery pool's leases after $RESTART_ID teardown"
   [ -z "$RESTART_HELD" ] \
     || fail "$RESTART_ID teardown after restart recovery left slots leased to it: $RESTART_HELD"

@@ -4438,8 +4438,11 @@ herdr_task_own_leased_worktree() { # <meta>
   slot=$(cd "$recorded" && pwd -P) || return 1
   fm_treehouse_slot_owner_state "$slot" "$ID"
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 1
-  (cd "$PROJ_ABS" && treehouse status --json 2>/dev/null) | jq -e --arg path "$slot" --arg id "$ID" \
-    'any(.[]; .path == $path and .status == "leased" and .lease_holder == $id)' >/dev/null 2>&1 || return 1
+  # The pool state file, not `treehouse status --json`, which older pinned
+  # Treehouse releases lack; fm_treehouse_pool_slot already required it.
+  jq -e --arg path "$slot" --arg id "$ID" \
+    'any(.worktrees[]?; .path == $path and .leased == true and .lease_holder == $id)' \
+    "$(dirname "$(dirname "$slot")")/treehouse-state.json" >/dev/null 2>&1 || return 1
   printf '%s\n' "$recorded"
 }
 
