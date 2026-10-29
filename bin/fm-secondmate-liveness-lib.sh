@@ -489,6 +489,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   [ -n "$creation_server" ] || creation_server=$(fm_meta_get "$meta" "${backend%code}_server")
   FM_SM_LIVE_SERVER=$creation_server
   agent_state=$(fm_control_endpoint_state "$backend" "$target" "$meta" "$creation_server") || agent_state=unreadable
+  [ "$backend" != t3code ] || FM_SM_LIVE_SERVER=$(fm_meta_get "$meta" t3_server)
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;
     *)

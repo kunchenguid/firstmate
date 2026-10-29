@@ -267,6 +267,43 @@ fm_backend_t3code_adopt_server_for_thread() {  # <thread-id> -> server identity
   printf '%s' "$server"
 }
 
+fm_backend_t3code_server_for_meta() (
+  local meta=$1 expected=${2:-} lock server tmp acquired=0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  server=$(fm_meta_get "$meta" t3_server)
+  if [ -n "$server" ]; then
+    fm_backend_t3code_server_matches "$server" || return 1
+    printf '%s' "$server"
+    return 0
+  fi
+  if ! declare -F fm_meta_lock_path >/dev/null; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-wake-lib.sh"
+  fi
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  if ! { [ "${META_LOCK_HELD:-0}" = 1 ] && [ "${META_LOCK:-}" = "$lock" ]; } &&
+    ! { [ "${SPAWN_META_LOCK_HELD:-0}" = 1 ] && [ "${SPAWN_META_LOCK:-}" = "$lock" ]; }; then
+    fm_lock_acquire_wait_max "$lock" 30 || return 1
+    acquired=1
+  fi
+  trap '[ "$acquired" = 0 ] || fm_lock_release "$lock"' EXIT
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  server=$(fm_meta_get "$meta" t3_server)
+  if [ -z "$server" ]; then
+    server=$(fm_backend_t3code_adopt_server_for_thread "$(fm_meta_get "$meta" t3_thread_id)") || return 1
+    [ -z "$expected" ] || [ "$server" = "$expected" ] || return 1
+    tmp=$(umask 077; mktemp "$meta.adopt.XXXXXX") || return 1
+    if { grep -v '^t3_server=' "$meta" || [ "$?" = 1 ]; } > "$tmp" &&
+      printf 't3_server=%s\n' "$server" >> "$tmp" &&
+      fm_backend_t3code_server_matches "$server" && mv -f "$tmp" "$meta"; then :; else
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+  fm_backend_t3code_server_matches "$server" || return 1
+  printf '%s' "$server"
+)
+
 # fm_backend_t3code_probe: one word naming the thread's row in the status
 # table, from its V2 thread status: blocked (any pending runtime request: a
 # question or a permission approval waits on a human), idle, starting

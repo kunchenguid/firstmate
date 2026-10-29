@@ -468,7 +468,7 @@ fm_control_endpoint_server_matches() {
   if [ -n "$meta" ] && [ -f "$meta" ]; then
     recorded=$(fm_meta_get "$meta" "${backend%code}_server")
     if [ "$backend" = t3code ] && [ -z "$recorded" ]; then
-      recorded=$(fm_backend_t3code_adopt_server_for_thread "$(fm_backend_target_of_meta "$meta")") || return 1
+      recorded=$(fm_backend_t3code_server_for_meta "$meta" "$server") || return 1
     fi
     [ -z "$server" ] || [ "$server" = "$recorded" ] || { echo "error: metadata and route name different creation servers" >&2; return 1; }
     [ -n "$server" ] || server=$recorded
@@ -487,7 +487,7 @@ fm_control_endpoint_state() {
     rex|t3code) [ -n "$server" ] || server=$(fm_meta_get "${3:-}" "${1%code}_server") ;;
   esac
   if [ "$1" = t3code ] && [ -z "$server" ]; then
-    server=$(fm_backend_t3code_adopt_server_for_thread "$2") || { printf unreadable; return 0; }
+    server=$(fm_backend_t3code_server_for_meta "${3:-}") || { printf unreadable; return 0; }
   fi
   fm_control_endpoint_server_matches "$1" "${3:-}" "$server" || { printf unreadable; return 0; }
   state=$(fm_backend_agent_state "$1" "$2") || state=unreadable
@@ -524,6 +524,9 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta] [server-ide
       ;;
     t3code)
       local recorded_server=${4-$(fm_meta_get "$meta" t3_server)}
+      if [ -z "$recorded_server" ]; then
+        recorded_server=$(fm_backend_t3code_server_for_meta "$meta") || { printf 'unproven\tT3 creation server cannot be verified'; return 0; }
+      fi
       fm_backend_t3code_server_matches "$recorded_server" || { printf 'unproven\tT3 creation server does not match the current credential'; return 0; }
       # A T3 `missing` is the server's own answer (an archived thread or an
       # HTTP 404), never a reachability guess: an unreachable server reads
