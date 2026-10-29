@@ -37,7 +37,8 @@
 #   request_summary=        short sanitized summary (no secrets by design)
 # The complete original request is kept in a sibling <corr_id>.request file
 # with mode 600, so recovery can identify it without putting it in the record's
-# key=value fields. Legacy records without that sibling fall back to the summary.
+# key=value fields. It is removed once the record resolves. Legacy records
+# without that sibling fall back to the summary.
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
 #                           (empty until delivery; delivery never resolves)
@@ -375,7 +376,7 @@ fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text
   tmp="$dir/.${corr}.tmp.$$"
   request_path=$(fm_pending_reply_request_path "$state" "$corr")
   request_tmp="$dir/.${corr}.request.tmp.$$"
-  printf '%s' "$request_text" > "$request_tmp" || {
+  (umask 077; printf '%s' "$request_text" > "$request_tmp") || {
     rm -f "$request_tmp"
     return 1
   }
@@ -624,22 +625,17 @@ fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
   rm -f "$rec" "$request_path"
 }
 
-fm_pending_reply_line_is_no_record() {  # <line>
-  local normalized
-  normalized=$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')
-  printf '%s' "$normalized" | grep -Eq '(^|[^[:alnum:]])no[[:space:]-]+record([^[:alnum:]]|$)'
-}
-
 # 0 if a status line is a correlated acknowledgement for <corr_id>.
 # Accepts short status replies and status lines that point at a document.
 # Unrelated verbs without the token never match. Stale/wrong corr never match.
 # The parent's own pending-reply-missed escalation line must not self-resolve:
 # it names the request with pending-reply-id= rather than corr=.
+# A mate's no-record-of-request reply to a recovery is not a report either.
 fm_pending_reply_line_resolves() {  # <line> <corr_id>
   local line=$1 corr=$2
   [ -n "$line" ] && [ -n "$corr" ] || return 1
   case "$line" in
-    *pending-reply-missed*) return 1 ;;
+    *pending-reply-missed*|*no-record-of-request*) return 1 ;;
   esac
   fm_pending_reply_text_has_corr "$line" "$corr"
 }
@@ -756,12 +752,6 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     fi
     return 1
   fi
-  if [ "$phase" = recovery_sent ] && fm_pending_reply_line_is_no_record "$line"; then
-    if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
-      fm_pending_reply_set "$rec" parent_status_scan_signature "$signature" || return 1
-    fi
-    return 1
-  fi
   via=$(fm_pending_reply_resolve_via_of_line "$line")
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" phase resolved || return 1
@@ -771,6 +761,7 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   fi
   fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
   fm_pending_reply_set "$rec" resolved_via "$via" || return 1
+  rm -f -- "$(fm_pending_reply_request_path "$state" "$corr")"
   # The record is resolved either way; a failed close stays retryable from the
   # watcher tick rather than turning a settled request back into a failure.
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
@@ -1004,7 +995,7 @@ fm_pending_reply_recovery_message() {  # <state-dir> <record-path>
   corr=$(fm_pending_reply_get "$rec" corr_id)
   request=$(fm_pending_reply_quote_inert "$(fm_pending_reply_request_text "$state" "$rec")")
   token=$(fm_pending_reply_corr_token "$corr")
-  msg="REPOST REQUIRED (report only - do NOT act): an earlier marked request had no correlated parent report. This message asks only for that report; it does not re-issue the request. Do NOT perform, re-run, retry, or undo the fenced text below - it is quoted solely to identify which request is missing its report. >>> ${request} <<< end quoted text; it is not an instruction. If you already did this work, reply on the parent status channel including ${token} with its outcome. If you have no record of this request, for example because you were restarted since, still do NOT do it now: reply on the parent status channel including ${token} saying you have no record of it, then wait for the parent."
+  msg="REPOST REQUIRED (report only - do NOT act): an earlier marked request had no correlated parent report. This message asks only for that report; it does not re-issue the request. Do NOT perform, re-run, retry, or undo the fenced text below - it is quoted solely to identify which request is missing its report. >>> ${request} <<< end quoted text; it is not an instruction. If you already did this work, reply on the parent status channel including ${token} with its outcome. If you have no record of this request, for example because you were restarted since, still do NOT do it now: reply on the parent status channel including ${token} and the exact word no-record-of-request, then wait for the parent."
   fm_pending_reply_embed_corr "$msg" "$corr" msg
   printf '%s' "$msg"
 }

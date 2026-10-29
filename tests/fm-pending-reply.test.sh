@@ -2124,7 +2124,7 @@ test_summary_keeps_accents_and_caps_by_character() {
 }
 
 test_recovery_keeps_full_request_and_no_record_is_not_recovery() {
-  local home state corr rec request hook_log msg
+  local home state corr rec request request_path hook_log msg
   home=$(setup_parent full-recovery-request)
   state="$home/state"
   hook_log="$TMP_ROOT/full-recovery-request.log"
@@ -2144,10 +2144,13 @@ test_recovery_keeps_full_request_and_no_record_is_not_recovery() {
   printf 'done [corr=%s]: audited access logs, no record of the leaked key\n' "$corr" > "$state/hibit.status"
   fm_pending_reply_try_resolve "$state" "$corr" \
     || fail "a first-pass report containing no record should resolve"
+  [ ! -e "$(fm_pending_reply_request_path "$state" "$corr")" ] \
+    || fail "a resolved record must not keep the full request"
 
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$request")
   rec=$(fm_pending_reply_path "$state" "$corr")
-  [ "$(cat "$(fm_pending_reply_request_path "$state" "$corr")")" = "$request" ] \
+  request_path=$(fm_pending_reply_request_path "$state" "$corr")
+  [ "$(cat "$request_path")" = "$request" ] \
     || fail "the complete original request must be durable"
   [ "$(fm_pending_reply_get "$rec" request_summary)" != "$request" ] \
     || fail "the bounded summary must remain separate from the full request"
@@ -2166,12 +2169,33 @@ test_recovery_keeps_full_request_and_no_record_is_not_recovery() {
     *) fail "recovery must keep the full request inert"$'\\n'"$msg" ;;
   esac
 
-  printf 'done [corr=%s]: no record of this request\n' "$corr" > "$state/hibit.status"
+  case "$msg" in
+    *no-record-of-request*) : ;;
+    *) fail "recovery must name the no-record reply word"$'\\n'"$msg" ;;
+  esac
+
+  printf 'done [corr=%s]: no-record-of-request\n' "$corr" > "$state/hibit.status"
   if fm_pending_reply_try_resolve "$state" "$corr"; then
     fail "a mate that has no record must not count recovery as complete"
   fi
   [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
     || fail "a no-record reply must leave recovery unresolved"
+  [ -f "$request_path" ] || fail "an unresolved record must keep the full request"
+
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null \
+    || fail "a no-record reply should escalate once recovery grace passes"
+  [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated"
+  fm_pending_reply_tick_one "$state" "$corr" idle
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "a no-record reply must not resolve the escalation on a later tick"
+  [ -f "$request_path" ] || fail "an escalated record must keep the full request"
+
+  printf 'done [corr=%s]: audited access logs, no record of the leaked key\n' "$corr" >> "$state/hibit.status"
+  fm_pending_reply_tick_one "$state" "$corr" idle
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "a later real report must resolve past an earlier no-record reply"
+  [ ! -e "$request_path" ] || fail "resolution must remove the full request"
   unset FM_PENDING_REPLY_SEND_HOOK
   pass "recovery preserves the full request and no-record is not recovery"
 }
