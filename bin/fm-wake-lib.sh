@@ -614,16 +614,40 @@ fm_lock_record_start() {
 }
 
 fm_lock_owner_gone() {
-  local lockdir=$1 pid=$2 recorded current recorded_key current_key
+  local lockdir=$1 pid=$2 recorded current recorded_key current_key recorded_value current_value
   fm_pid_alive "$pid" || return 0
   recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
   [ -n "$recorded" ] || return 1
   current=$(fm_pid_start_token "$pid" 2>/dev/null) || return 1
   [ -n "$current" ] || return 1
-  case "$recorded" in *=*) recorded_key=${recorded%%=*} ;; esac
-  case "$current" in *=*) current_key=${current%%=*} ;; esac
-  [ -n "$recorded_key" ] && [ "$recorded_key" = "$current_key" ] || return 1
-  [ "$current" != "$recorded" ]
+  case "$recorded" in
+    proc-starttime=*|linux-starttime=*)
+      recorded_key=proc-starttime
+      recorded_value=${recorded#*=}
+      ;;
+    ps-lstart=*)
+      recorded_key=ps-lstart
+      recorded_value=${recorded#*=}
+      ;;
+    *=*) return 1 ;;
+    *)
+      recorded_key=ps-lstart
+      recorded_value=$recorded
+      ;;
+  esac
+  case "$current" in
+    proc-starttime=*|linux-starttime=*)
+      current_key=proc-starttime
+      current_value=${current#*=}
+      ;;
+    ps-lstart=*)
+      current_key=ps-lstart
+      current_value=${current#*=}
+      ;;
+    *) return 1 ;;
+  esac
+  [ "$recorded_key" = "$current_key" ] || return 1
+  [ "$current_value" != "$recorded_value" ]
 }
 
 fm_lock_prepare_owner() {

@@ -411,6 +411,26 @@ test_mac_ps_start_token_normalizes_whitespace() {
   pass "macOS-style ps start tokens normalize leading and trailing whitespace"
 }
 
+test_lock_accepts_legacy_owner_tokens() {
+  local dir lockdir token legacy
+  dir=$(make_case lock-legacy-owner-token)
+  lockdir="$dir/state/.contend.lock"
+  mkdir "$lockdir"
+  printf '%s\n' "$$" > "$lockdir/pid"
+
+  token=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start_token "$2"' _ "$LIB" "$$") \
+    || fail "could not compute the live Linux owner token"
+  case "$token" in
+    linux-starttime=*|proc-starttime=*) legacy="proc-starttime=${token#*=}" ;;
+    ps-lstart=*) legacy=${token#*=} ;;
+    *) fail "unexpected start token: <$token>" ;;
+  esac
+  printf '%s\n' "$legacy" > "$lockdir/pid-start"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_lock_owner_gone "$2" "$3"' _ "$LIB" "$lockdir" "$$" \
+    && fail "legacy owner token did not protect a live owner"
+  pass "legacy owner start tokens remain compatible"
+}
+
 # Start a process that claims each given link lock, then SIGKILL it so every
 # claim is left behind with a dead owner - an acquirer TERMed mid-steal.
 leave_dead_link_locks() {  # <state> <lock>...
@@ -1708,6 +1728,7 @@ test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_reclaims_reused_pid_but_not_a_live_owner
 test_mac_ps_start_token_normalizes_whitespace
+test_lock_accepts_legacy_owner_tokens
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
