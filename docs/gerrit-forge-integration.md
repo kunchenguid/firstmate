@@ -188,7 +188,7 @@ The objection bounds how much weight detection can carry alone, which is the wei
 
 Read the modes as stopping points rather than as artifacts and they line up cleanly:
 
-- `local-only` stops at a ready branch and publishes nothing. Nothing about a forge applies, because no artifact is made: `bin/fm-merge-local.sh` fast-forwards the project's *local* default branch, and the intake guidance already allows a `local-only` project to have no remote at all.
+- `local-only` stops at a ready branch and publishes nothing. Nothing about a forge applies, because no artifact is made: `bin/fm-merge-local.sh` fast-forwards a branch in the project's *local* copy, and the intake guidance already allows a `local-only` project to have no remote at all.
 - `direct-PR` publishes without the pipeline.
 - `no-mistakes` runs the pipeline, then publishes.
 

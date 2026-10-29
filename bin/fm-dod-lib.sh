@@ -245,8 +245,9 @@ fm_ship_branch_prefix() {  # <branch> <task-id>
 # `# Setup` heading, bin/fm-spawn.sh takes it as --base-branch, refuses a brief
 # whose Base branch lines (fm_brief_base_branches) disagree, and records
 # base_branch= in the task metadata, and every later consumer reads that
-# metadata field rather than the clone's origin/HEAD record. It is refused on a
-# Gerrit forge, whose publish path targets the change's own branch.
+# metadata field rather than the clone's origin/HEAD record. It is refused on
+# every forge other than none; a Gerrit publish path, for one, targets the
+# change's own branch.
 fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   local base=$1 mode=$2 forge=$3 caller=$4
   [ -n "$base" ] || return 0
