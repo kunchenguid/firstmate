@@ -1335,6 +1335,31 @@ test_pr_health_monitor_arms_only_with_its_flag() {
   pass "bootstrap arms the PR health monitor only when config/pr-health-monitor exists"
 }
 
+test_preferred_provider_validation() {
+  local case_dir fakebin out value key
+  case_dir="$TMP_ROOT/preferred-provider"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  for key in '' test-key; do
+    for value in null false 42 '[]' '{}' '""' '"Codex"' '"codex\\n"' '" codex"'; do
+      printf '{"preferred_provider":%s}\n' "$value" > "$case_dir/home/config/crew-dispatch.json"
+      out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+        TYPESAFE_API_KEY="$key" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+      assert_contains "$out" 'CREW_DISPATCH: invalid config/crew-dispatch.json - preferred_provider must be a lowercase provider ID (for example codex)' \
+        "invalid preference $value is diagnosed with or without resolver opt-in"
+    done
+    for value in codex claude future-provider; do
+      printf '{"preferred_provider":"%s"}\n' "$value" > "$case_dir/home/config/crew-dispatch.json"
+      out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+        TYPESAFE_API_KEY="$key" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+      assert_equals '' "$out" 'valid preferred provider IDs remain silent'
+    done
+  done
+  pass 'bootstrap validates preferred_provider with and without resolver opt-in'
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out child_env n
   n=0
@@ -1507,4 +1532,5 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_pr_health_monitor_arms_only_with_its_flag
+test_preferred_provider_validation
 test_crew_dispatch_validation

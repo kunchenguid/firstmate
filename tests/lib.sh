@@ -10,7 +10,8 @@
 # fakebin/PATH-shim helpers, deterministic git identity and fixture builders,
 # state/<id>.meta writers, and the common string/exit-code/file assertions. Shared fake-toolchain and spawn-world
 # builders live in tests/fixtures.sh; wake-queue mocks in wake-helpers.sh;
-# secondmate-lifecycle mocks in secondmate-helpers.sh. Suite-specific fakes
+# secondmate-lifecycle mocks in secondmate-helpers.sh; supervision-host
+# fixtures in supervision-host-helpers.sh. Suite-specific fakes
 # that encode a single test's terminal or lifecycle assumptions still belong
 # with the tests that own them.
 #
