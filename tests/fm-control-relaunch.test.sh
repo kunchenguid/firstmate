@@ -3519,6 +3519,14 @@ test_host_prelaunch_refusal_releases_candidate_for_corrected_launch() {
   expect_code 0 "$rc" "corrected host launch after prelaunch refusal: $out"
   assert_equals corrected.op "$(sed -n 's/^spawn_gen=//p' "$dir/smhome/state/parent-route/sm69.meta")" \
     "corrected launch did not publish its generation"
+  out=$(run_existing_host "$dir" relaunch sm69 claude pool-model-a invalid-effort --operation rejected.effort --previous corrected.op); rc=$?
+  expect_code 1 "$rc" "host effort refusal: $out"
+  assert_equals prelaunch "$(sed -n 's/^phase=//p' "$dir/smhome/state/parent-route/sm69.seat-operation.rejected.effort")" "effort refusal was not persisted"
+  jq '.typed={} | .working={}' "$dir/herdr-state" > "$dir/herdr-dead"
+  mv "$dir/herdr-dead" "$dir/herdr-state"
+  out=$(run_existing_host "$dir" relaunch sm69 claude pool-model-a medium --operation corrected.relaunch --previous corrected.op); rc=$?
+  expect_code 0 "$rc" "corrected host relaunch after effort refusal: $out"
+  assert_equals corrected.relaunch "$(sed -n 's/^spawn_gen=//p' "$dir/smhome/state/parent-route/sm69.meta")" "corrected relaunch did not publish its generation"
   pass "a definitive host-side prelaunch refusal releases its candidate and accepts a corrected launch"
 }
 

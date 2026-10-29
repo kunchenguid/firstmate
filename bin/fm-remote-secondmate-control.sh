@@ -129,6 +129,7 @@ fi
 
 # Seat operation of the running launch/relaunch, when the parent passed one.
 SEAT_OP=
+SEAT_FRESH=0
 SEAT_PREV=-
 EXPECT_GENERATION=
 SEAT_LIFECYCLE_ID=
@@ -144,10 +145,10 @@ host_lifecycle_release() {
   [ -z "$HOST_LIFECYCLE_LOCK" ] || fm_lock_release "$HOST_LIFECYCLE_LOCK" || true
 }
 prelaunch_die() {
-  local reason=$1 definitive=${2:-no} receipt
+  local reason=$1 receipt
   if [ -n "$SEAT_OP" ]; then
     receipt=$(receipt_path "$SEAT_LIFECYCLE_ID")
-    if [ "$definitive" = yes ] && seat_mark_prelaunch 2>/dev/null; then
+    if seat_mark_prelaunch 2>/dev/null; then
       seat_emit prelaunch false false
     elif [ -e "$receipt" ] || [ -L "$receipt" ] \
       || [ -e "$CONTROL_STATE/$SEAT_LIFECYCLE_ID.seat-reservation.$SEAT_OP" ] \
@@ -256,6 +257,7 @@ seat_receipt_set() {  # <key=value>...
 
 seat_mark_prelaunch() {
   local receipt reservation history
+  [ "$SEAT_FRESH" = 1 ] || return 1
   receipt=$(receipt_path "$SEAT_LIFECYCLE_ID")
   reservation="$CONTROL_STATE/$SEAT_LIFECYCLE_ID.seat-reservation.$SEAT_OP"
   history="$FM_ROOT/state/remote-secondmate-history/$SEAT_LIFECYCLE_ID.operation.$SEAT_OP"
@@ -476,8 +478,9 @@ seat_enter() {
   (umask 077; set -C; printf '%s\n' "$record" > "$HOST_HISTORY/$id.operation.$SEAT_OP") \
     || { seat_emit unknown false false; die "the seat operation history could not be retained"; }
   seat_receipt_open "$id" "$verb" || prelaunch_die "the seat operation receipt could not be written"
+  SEAT_FRESH=1
   if [ "$SEAT_PREV" != - ] && [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" != "$SEAT_PREV" ]; then
-    seat_emit unknown false false
+    if seat_mark_prelaunch 2>/dev/null; then seat_emit prelaunch false false; else seat_emit unknown false false; fi
     echo "error: generation-mismatch: the host incarnation is not the reserved predecessor; nothing was changed" >&2
     exit 6
   fi
@@ -602,10 +605,10 @@ cmd_launch() {
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
     *) prelaunch_die "unverified remote secondmate harness: $harness" yes ;;
   esac
-  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" yes ;; esac
+  case "$effort" in -|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" \
-      || prelaunch_die "remote secondmate native effort validation failed" yes
+      || prelaunch_die "remote secondmate native effort validation failed"
   fi
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that
@@ -630,6 +633,7 @@ cmd_launch() {
         return 0
         ;;
       dead)
+        SEAT_FRESH=0
         fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "" "fm-$id" "$(fm_meta_get "$meta" "${REMOTE_ENDPOINT_BACKEND%code}_server")" 2>/dev/null \
           || prelaunch_die "could not remove the confirmed agent-less endpoint"
         ;;
@@ -645,6 +649,7 @@ cmd_launch() {
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
+  SEAT_FRESH=0
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
@@ -693,15 +698,15 @@ cmd_relaunch() {
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
     *) prelaunch_die "unverified remote secondmate harness: $harness" yes ;;
   esac
-  case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" yes ;; esac
-  case "$model" in *[[:space:]]*) prelaunch_die "invalid remote secondmate model: $model" yes ;; esac
+  case "$effort" in -|default|low|medium|high|xhigh|max|ultra) ;; *) prelaunch_die "invalid remote secondmate effort: $effort" ;; esac
+  case "$model" in *[[:space:]]*) prelaunch_die "invalid remote secondmate model: $model" ;; esac
   if [ "$effort" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" \
-      || prelaunch_die "remote secondmate native effort validation failed" yes
+      || prelaunch_die "remote secondmate native effort validation failed"
   fi
   if [ -n "$EXPECT_GENERATION" ] && [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" != "$EXPECT_GENERATION" ]; then
     if [ -n "$SEAT_OP" ]; then
-      seat_emit unknown false false
+      if seat_mark_prelaunch 2>/dev/null; then seat_emit prelaunch false false; else seat_emit unknown false false; fi
     fi
     echo "error: generation-mismatch: the host incarnation is not $EXPECT_GENERATION; nothing was changed" >&2
     exit 6
@@ -709,7 +714,7 @@ cmd_relaunch() {
   if [ -n "$SEAT_OP" ]; then
     if [ "$SEAT_PREV" = - ] || [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" != "$SEAT_PREV" ] \
       || { [ -n "$EXPECT_GENERATION" ] && [ "$EXPECT_GENERATION" != "$SEAT_PREV" ]; }; then
-      seat_emit unknown false false
+      if seat_mark_prelaunch 2>/dev/null; then seat_emit prelaunch false false; else seat_emit unknown false false; fi
       echo "error: generation-mismatch: the host incarnation is not the reserved predecessor; nothing was changed" >&2
       exit 6
     fi
@@ -725,6 +730,7 @@ cmd_relaunch() {
   # the dedicated fm-remote session, and the parent already owns both convergence
   # legs, so the host-local spawn must not re-sync or re-inherit against this
   # host's own Firstmate copy.
+  SEAT_FRESH=0
   HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
@@ -735,7 +741,9 @@ cmd_relaunch() {
     && [ "$(sed -n 's/^seat_operation=//p' "$CONTROL_STATE/$id.control-relaunch" 2>/dev/null | tail -1)" != "$SEAT_OP" ]; then
     # fm-control's pre-stop checkpoint refusals return normally without a
     # relaunch journal for this operation; later or interrupted outcomes stay unknown.
+    SEAT_FRESH=1
     seat_mark_prelaunch 2>/dev/null || true
+    SEAT_FRESH=0
   fi
   [ -z "$SEAT_OP" ] || seat_decide "$id"
   [ "$control_rc" -eq 0 ] || exit "$control_rc"
