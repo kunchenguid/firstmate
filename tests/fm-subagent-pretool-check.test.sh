@@ -41,6 +41,12 @@ PLAN_ONLY_TOOLS='TaskCreate TaskUpdate'
 # assumed.
 PLAN_ONLY_NEAR_MISSES='TaskCreateAgent TaskCreateWorktree TaskUpdateAgent RemoteTaskCreate Task TaskCreator'
 
+# The messaging tool that only carries text to an existing session, and names
+# built on it that could also start or target new work. Every near miss must
+# stay denied, so the messaging exclusion cannot widen past the one exact name.
+MESSAGE_ONLY_TOOLS='SendMessage'
+MESSAGE_ONLY_NEAR_MISSES='SendMessageAndSpawn SendMessageToAgent RemoteSendMessage SendMessageWorkflow SendMessages ScheduleSendMessage'
+
 run_tool() {
   local tool=$1 rc=0
   shift
@@ -81,6 +87,7 @@ test_guard_denies_every_currently_known_delegation_tool() {
     case "$tool" in
       TaskOutput|TaskStop|TaskGet|TaskList|CronList) continue ;;
       TaskCreate|TaskUpdate) continue ;;
+      SendMessage) continue ;;
     esac
     expect_deny "known delegation tool" "$tool"
   done
@@ -134,6 +141,26 @@ test_plan_only_exclusion_is_exact_name() {
   pass "the plan-only exclusion releases exactly two names and nothing that merely contains them"
 }
 
+test_guard_allows_messaging_an_existing_session() {
+  local tool
+  for tool in $MESSAGE_ONLY_TOOLS; do
+    expect_allow "message-only tool" "$tool"
+  done
+  pass "the guard lets the primary send a message to an existing session"
+}
+
+test_message_only_exclusion_is_exact_name() {
+  local tool
+  for tool in $MESSAGE_ONLY_NEAR_MISSES; do
+    expect_deny "message-only near miss" "$tool"
+  done
+  # Releasing messaging must not release the delegation tools beside it.
+  for tool in Agent Task Workflow RemoteTrigger ScheduleWakeup CronCreate EnterWorktree Monitor; do
+    expect_deny "delegation beside messaging" "$tool"
+  done
+  pass "the messaging exclusion releases exactly one name and every delegation tool stays denied"
+}
+
 test_guard_never_classifies_mcp_tools() {
   # An MCP server names its own tools; a task or agent noun there is common and
   # has nothing to do with fleet dispatch.
@@ -170,6 +197,7 @@ test_deny_message_defers_to_intake_classification() {
 test_escape_hatch_allows_deliberate_use() {
   local rc value
   expect_allow "escape hatch set" Agent FM_ALLOW_SUBAGENT=1
+  expect_allow "escape hatch set" SendMessageAndSpawn FM_ALLOW_SUBAGENT=1
   expect_deny "escape hatch unset" Agent
   for value in '' 0 yes true 11; do
     rc=0
@@ -242,6 +270,14 @@ test_stdin_transports_and_output_shapes() {
       "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "Bash through stdin must allow, got exit $rc"
   [ ! -s "$OUT" ] && [ ! -s "$ERR" ] || fail "stdin allow wrote output"
+
+  rc=0
+  : > "$OUT"; : > "$ERR"
+  printf '%s' '{"tool_name":"SendMessage","tool_input":{"to":"peer","message":"handover confirmed"}}' \
+    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a peer message through Claude stdin must allow, got exit $rc: $(cat "$ERR")"
+  [ ! -s "$OUT" ] && [ ! -s "$ERR" ] || fail "peer-message allow wrote output"
   pass "both stdin transports classify correctly and Claude's deny keeps stdout empty"
 }
 
@@ -281,6 +317,8 @@ test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
 test_guard_allows_session_local_todo_tools
 test_plan_only_exclusion_is_exact_name
+test_guard_allows_messaging_an_existing_session
+test_message_only_exclusion_is_exact_name
 test_guard_never_classifies_mcp_tools
 test_deny_message_defers_to_intake_classification
 test_escape_hatch_allows_deliberate_use

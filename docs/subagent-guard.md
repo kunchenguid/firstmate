@@ -47,7 +47,7 @@ agent  subagent  task  workflow  cron  schedul  worktree
 delegate  spawn  dispatch  handoff  remote  sendmessage  monitor
 ```
 
-Three exclusions keep the shape test from producing false positives.
+Four exclusions keep the shape test from producing false positives.
 
 - A name beginning `mcp__` is never classified.
   An MCP server chooses its own tool names, a task or agent noun there is common, and it has no bearing on fleet dispatch.
@@ -61,8 +61,16 @@ Three exclusions keep the shape test from producing false positives.
   So it is not the "work, agent, schedule, or isolated workspace that firstmate would not know about" the guard exists to stop, and the stem match on `task` is a false positive rather than a policy.
   The cost of the false positive was concrete: the primary could not track its own plan, and the deny text told it to run `bin/fm-brief.sh` and `bin/fm-spawn.sh` to create a todo entry.
 
-Both exclusion lists match the whole normalized name, never a substring, so neither can widen by accident: `TaskCreateAgent` and `RemoteTaskCreate` stay denied.
-Folding the two lists together would be the drift risk, because the observe-or-stop rationale is not true of a tool that writes.
+- `MESSAGE_ONLY_TOOLS`: the exact name `sendmessage` is allowed.
+  Claude's `SendMessage` carries text to a session that already exists, such as another of the user's own sessions on this machine, a Remote Control session, or a cloud session, and it cannot create a recipient.
+  Messaging is not delegation: the guard exists to stop work the fleet cannot see, and a peer that acts on a message does so in a session the user already runs, under that session's own guards.
+  The cost of the false positive was concrete: a primary could not send a one-line confirmation to the user's own peer sessions, and the answer had to be written to a file and relayed by hand.
+  The same tool can also wake an in-process subagent or teammate by name, which would be delegation.
+  That is why the exclusion is safe only beside the stems: every tool that creates such a recipient stays denied, so a guarded primary has none to wake.
+  The stem `sendmessage` stays on the delegation list, so a messaging tool under any other name, including one that also spawns or schedules work, is still denied.
+
+All three exclusion lists match the whole normalized name, never a substring, so none can widen by accident: `TaskCreateAgent`, `RemoteTaskCreate`, and `SendMessageAndSpawn` stay denied.
+Folding the lists together would be the drift risk, because the observe-or-stop rationale is not true of a tool that writes, and neither rationale is true of a tool that reaches another session.
 
 The shipped guard fires on every delegation-shaped name that reaches it, including future names that no deny list knows about yet.
 That future-name behavior is the reason the tracked matcher must match all tools and let the script filter.
@@ -81,7 +89,6 @@ Claude primaries should add this deny list in untracked per-home local settings,
       "RemoteTrigger",
       "Monitor",
       "ScheduleWakeup",
-      "SendMessage",
       "EnterWorktree",
       "ExitWorktree",
       "CronCreate",
@@ -113,6 +120,7 @@ In particular `TaskOutput`, `TaskStop`, `TaskGet`, `TaskList`, and `CronList` on
 The hook deliberately allows those five, so the shipped guard can never strand a runaway task with no way to inspect or end it, and it allows `TaskCreate` and `TaskUpdate` too, so it can never be the reason the primary cannot track its own plan.
 The two session-local todo tools are no longer recommended for local denial at all, because they write only the harness's session-local todo list, which has no executor and spawns nothing, so removing them from the schema removes no delegation power.
 Denying them there would instead reproduce at a stronger layer the exact false positive the shipped guard now avoids, leaving anyone who adopts this list verbatim unable to let a primary track its own plan.
+`SendMessage` is not recommended for local denial either, for the reason given under `MESSAGE_ONLY_TOOLS` above: it carries text to an existing session and creates no recipient, so removing it from the schema removes no delegation power and leaves the primary unable to answer the user's own other sessions.
 Narrowing the list further, including the five observe-or-stop names, is the captain's call, and this local list is the only layer that can remove a todo tool from the primary's schema.
 
 `permissions.allow` is a pre-approval list, not an availability list, so there is no fail-closed positive allowlist available.
@@ -157,6 +165,8 @@ It is an environment variable rather than a flag, a config file, or a state file
 The variable must be present when the harness process is launched, so no tool call the agent makes can enable it for the call that follows.
 A deliberate use therefore requires restarting the session with the variable set, which is a conscious act, while an accidental use is impossible.
 
+Messaging an existing session does not need it, so the escape hatch stays reserved for genuine delegation and keeps its meaning unchanged: it releases every delegation-shaped name at once.
+
 The escape hatch does not affect any local Claude deny list.
 A tool removed from the schema stays removed, so a genuinely intended use of a locally denied tool also requires narrowing or removing that local entry before launch.
 
@@ -180,7 +190,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 
 | Harness | Delegation surface | Status |
 | --- | --- | --- |
-| Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
+| Claude | 15 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | omp | present, per bundled material | Not wired and unverified. omp ships a built-in task delegation tool: its bundled docs list `tools/task.md` and the captain-level `task.maxConcurrency` setting governs it. No Firstmate delegation seatbelt is wired for it yet, and its status stays unverified until a live tool enumeration is recorded the way the Codex row was. |
@@ -354,7 +364,7 @@ The live consequence is confirmed by the shipped-guard result above: Claude hono
 ## Automated validation
 
 `tests/fm-subagent-pretool-check.test.sh` owns the acceptance matrix and is registered in the `pure-contract-unit` family in `bin/fm-test-run.sh`.
-It covers the tracked Claude settings boundary that forbids a `permissions` key; the match-all Claude hook registration; denial of every work-creating delegation tool by shape; denial of twelve hypothetical future tool names that appear on no list; the observe-or-stop, plan-only, and MCP exclusions; the exactness of the plan-only exclusion against six near-miss names a substring or shorter-stem widening would release; the scout-present and scout-absent message variants; the escape hatch including its fail-closed values; inertness in a linked task worktree and in a non-firstmate repo; in-scope enforcement for a marked secondmate home; both stdin transports; the empty-stdout requirement; fail-open transport behavior; and the preserved `Bash` seatbelts and `Stop` guard.
+It covers the tracked Claude settings boundary that forbids a `permissions` key; the match-all Claude hook registration; denial of every work-creating delegation tool by shape; denial of twelve hypothetical future tool names that appear on no list; the observe-or-stop, plan-only, message-only, and MCP exclusions; the exactness of the plan-only exclusion against six near-miss names a substring or shorter-stem widening would release; the exactness of the message-only exclusion against six near-miss names and the continued denial of the delegation tools beside it; the scout-present and scout-absent message variants; the escape hatch including its fail-closed values; inertness in a linked task worktree and in a non-firstmate repo; in-scope enforcement for a marked secondmate home; both stdin transports; the empty-stdout requirement; fail-open transport behavior; and the preserved `Bash` seatbelts and `Stop` guard.
 
 Run:
 
@@ -372,6 +382,10 @@ The coverage it leaves is partial rather than correct - the tracked entry passes
 Wiring Grok properly still requires the matcher-token verification described above, and that is what closes this exception.
 The same exception now also covers Cursor, which loads the tracked Claude settings as well: `.cursor/hooks.json` registers no subagent-spawn matcher, so this entry stays unguarded there for the same reason, and its `--claude` rendering leaves Cursor the exit-2 and stderr path rather than Cursor's own decision object.
 Cursor's subagent tool name has not been verified, and registering an unverified matcher would be a guess rather than coverage, so closing it needs the same verification step.
+
+The message-only exclusion leans on the delegation stems: a guarded primary cannot create an in-process subagent or teammate, so `SendMessage` can reach only sessions that already exist.
+An in-process agent created earlier in a conversation launched with `FM_ALLOW_SUBAGENT=1` could still be woken by name if that conversation is resumed without it, because the hook sees the recipient name but not what the name resolves to.
+That case begins with a deliberate escape, so it is recorded here rather than closed.
 
 This change does not close the deeper harness-agnostic defect.
 Every firstmate guard's in-flight-work branch keys off `state/<id>.meta`, and only `bin/fm-spawn.sh` writes that record.
