@@ -62,10 +62,15 @@ A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only` (`
 `bin/fm-project-mode.sh`'s header owns the binding and `bin/fm-dod-lib.sh` owns what it changes for a worker.
 The optional `pr=manual` token marks a `no-mistakes` project whose PR title and body a person writes, so the pipeline's `pr` step must not rewrite them; register it only on the captain's confirmation, with no `forge=` token (`docs/configuration.md` "PR text selection").
 
+The optional `best-practices=<owner>/<repo>` token records which best-practices pack the project's work follows; it composes with every posture and forge, `local-only` included, and the `best-practices-adapters` skill owns what it changes.
+Register it only on the captain's confirmation and never from a guess: a pack only installed on the machine, or enabled only in the captain's user settings, is never proposed.
+
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
+Once the clone exists, propose the forge, then propose the pack: run `bin/fm-best-practices.sh propose projects/<name>` and offer its `best-practices=` token alongside the posture; when the captain names a pack themselves and it prints none, name the repositories it carries and propose nothing.
+After the registry entry with a `best-practices=` token is written, check the pack yourself with `bin/fm-best-practices.sh check <owner>/<repo> --harness "$(bin/fm-harness.sh crew)" --project projects/<name>` and raise it with the captain only on a problem, relaying the runtime both sides support or the install or enable remedy it names, or when it reports the pack unreviewed, relaying that as a fact with the skills and label it names; the captain installs or enables the pack, never firstmate.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
