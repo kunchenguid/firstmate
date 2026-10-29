@@ -2976,7 +2976,14 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-tab> <new-pan
   # attempts the tab close with no agent recheck, because the sidebar can keep
   # the tab alive after the terminal pane is reaped.
   fm_backend_herdr_projection_close_tab_focus_preserving \
-    "$session" "$new_tab" "$new_pane" "$required_state" "$owned_workspace" "$prior_focus" || return 1
+    "$session" "$new_tab" "$new_pane" "$required_state" "$owned_workspace" "$prior_focus" || {
+    # The close refused (agent-state mismatch at the close boundary, a failed
+    # close, or the focus guard); clear the caller's rollback gate so the abort
+    # cleanup never retries this close without the agent-state recheck that the
+    # same-process rollback already performed.
+    FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=0
+    return 1
+  }
   [ "$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")" = dead ]
 }
 

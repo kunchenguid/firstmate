@@ -790,6 +790,18 @@ test_projection_reclaim_rollback_refuses_a_stale_registration() {
   pass "herdr stale registration: presentation reclaim never closes a stale-registration pane and never hands it to the abort cleanup"
 }
 
+test_projection_reclaim_rollback_clears_cleanup_safe_on_close_refusal() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_agent_state() { printf no-agent; }
+    fm_backend_herdr_projection_close_tab_focus_preserving() { return 1; }
+    FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+    fm_backend_herdr_projection_reclaim_rollback fmtest w1:t9 w1:p9; printf "rc=%s safe=%s" "$?" "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE"' "$ROOT" 2>&1)
+  [ "$out" = "rc=1 safe=0" ] \
+    || fail "reclaim rollback must clear the rollback gate when close_tab_focus_preserving refuses, got '$out'"
+  pass "herdr close refusal: presentation reclaim clears the rollback gate when close_tab_focus_preserving refuses"
+}
+
 test_busy_state_never_reports_a_shell_only_pane_busy() {
   local sleep_bin shell_pid dir resp log fb out
   sleep_bin=$(command -v sleep) || fail "sleep not found"
@@ -6360,6 +6372,7 @@ test_agent_descendant_under_a_spaced_install_path_stays_alive
 test_registered_agent_with_an_unreadable_process_view_is_unknown
 test_registered_agent_with_an_empty_foreground_over_a_real_shell_settles_via_descendant_walk
 test_projection_reclaim_rollback_refuses_a_stale_registration
+test_projection_reclaim_rollback_clears_cleanup_safe_on_close_refusal
 test_busy_state_never_reports_a_shell_only_pane_busy
 test_cli_caches_the_selected_client_within_a_process
 test_cli_scopes_the_selected_client_to_its_session
