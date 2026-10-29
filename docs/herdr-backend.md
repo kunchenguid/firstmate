@@ -821,6 +821,7 @@ The underlying harness processes and live agent registrations do not survive.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
 
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
+A tab whose root panes are empty (a sidebar-only husk) is also a replaceable husk, because the tab holds no terminal pane that could host a live process.
 This prevents closing the workspace's last tab before a replacement exists.
 
 ### Stale agent registrations

@@ -1250,6 +1250,7 @@ test_create_task_refuses_duplicate_label() {
   local dir log resp fb out status
   dir="$TMP_ROOT/dup-task"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-dup1","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup1 /tmp/proj' "$ROOT" 2>&1 )
@@ -1257,6 +1258,49 @@ test_create_task_refuses_duplicate_label() {
   [ "$status" -ne 0 ] || fail "create_task should refuse an existing tab label (herdr itself does not enforce uniqueness)"
   assert_contains "$out" "already exists" "create_task did not report the duplicate label"
   pass "fm_backend_herdr_create_task: refuses a duplicate tab label (herdr's own tab create has no uniqueness check)"
+}
+
+test_create_task_closes_and_replaces_sidebar_only_husk() {
+  local dir log resp fb out status tab pane
+  dir="$TMP_ROOT/husk-sidebar"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-sidebar-husk","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  # 2: pane list -> empty pane list (sidebar-only tab on Herdr 0.9.x)
+  printf '{"result":{"panes":[]}}\n' > "$resp/2.out"
+  # 3: tab create -> the replacement tab
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/3.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-sidebar-husk","workspace_id":"w1"}]}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-sidebar-husk /tmp/proj' "$ROOT" ) \
+    || fail "create_task should close-and-replace a sidebar-only husk (zero root panes) instead of refusing"
+  read -r tab pane <<EOF
+$out
+EOF
+  if [ "$tab" != "w1:t3" ] || [ "$pane" != "w1:p3" ]; then
+    fail "create_task should echo the NEW tab/pane ids, got '$out'"
+  fi
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''fm-sidebar-husk' \
+    "create_task did not create the replacement tab"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the sidebar-only husk's tab"
+  pass "fm_backend_herdr_create_task: closes and replaces a sidebar-only husk (zero root panes) - Herdr 0.9.x"
+}
+
+test_create_task_refuses_when_pane_list_unparseable() {
+  # An unparseable pane-list payload (not valid JSON) must refuse rather than
+  # treat the tab as a sidebar-only husk.
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-unparseable-panes"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-unparseable-husk","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  # 2: pane list -> unparseable payload (jq fails -> treat as unreadable)
+  printf 'not valid json\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-unparseable-husk /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse when the pane list payload is unparseable (fail-safe toward refusal)"
+  assert_contains "$out" "could not read root panes" "create_task did not report the unparseable pane list"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "create_task must not create a replacement tab on an unparseable pane list"
+  pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than treating an unparseable pane list as a sidebar-only husk"
 }
 
 # --- restored-layout husk close-and-replace (herdr session.json restore) -----
@@ -6328,6 +6372,8 @@ test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
+test_create_task_closes_and_replaces_sidebar_only_husk
+test_create_task_refuses_when_pane_list_unparseable
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk

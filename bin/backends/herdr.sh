@@ -2643,7 +2643,7 @@ fm_backend_herdr_agent_alive() {  # <target>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_panes dup_tab_pane_ids dup_pane dup_pane_count dup_tab_ids out tab_id pane_id remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -2655,11 +2655,37 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
   if [ -n "$dup_tabs" ]; then
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
-      dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
-      if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
-        echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+      dup_panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || {
+        echo "error: could not read root panes for herdr tab '$label' in workspace $wsid (session $session)" >&2
         return 1
-      fi
+      }
+      dup_tab_pane_ids=$(printf '%s' "$dup_panes" | jq -r --arg tab "$dup" \
+        '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null) || {
+        echo "error: could not read root panes for herdr tab '$label' in workspace $wsid (session $session)" >&2
+        return 1
+      }
+      dup_pane=""
+      dup_pane_count=0
+      while IFS= read -r dup_pane_id; do
+        [ -n "$dup_pane_id" ] || continue
+        dup_pane_count=$((dup_pane_count + 1))
+        dup_pane=$dup_pane_id
+      done <<PANES
+$dup_tab_pane_ids
+PANES
+      case $dup_pane_count in
+        0) : ;;  # sidebar-only husk: same label but no root pane seeded yet
+        1)
+          if ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
+            echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+            return 1
+          fi
+          ;;
+        *)
+          echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+          return 1
+          ;;
+      esac
       dup_tab_ids="${dup_tab_ids}${dup}"$'\n'
     done <<EOF
 $dup_tabs
