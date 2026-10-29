@@ -91,9 +91,12 @@ _fm_proc_starttime_to() {  # <output-variable> <proc-root> <pid>
   printf -v "$1" '%s' "$_fm_pst_value"
 }
 
-# Return only the normalized process start token used by ordinary lock owners.
+# Return only the normalized process start token used by ordinary lock owners,
+# in the same proc-starttime=<ticks> or bare ps lstart form fm_pid_start_time
+# renders, so a process that sourced an older library still matches it by
+# string equality.
 fm_pid_start_token() {
-  local pid=$1 proc_root stat_line starttime identity_key out trimmed
+  local pid=$1 proc_root stat_line starttime out trimmed
   local -a stat_fields
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
@@ -103,16 +106,14 @@ fm_pid_start_token() {
     [ "${#stat_fields[@]}" -ge 20 ] || return 1
     starttime=${stat_fields[19]}
     case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
-    identity_key=proc-starttime
-    [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime
-    printf '%s=%s\n' "$identity_key" "$starttime"
+    printf 'proc-starttime=%s\n' "$starttime"
     return 0
   fi
   out=$(COLUMNS=10000 LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   trimmed=${out#"${out%%[![:space:]]*}"}
   trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
   [ -n "$trimmed" ] || return 1
-  printf 'ps-lstart=%s\n' "$trimmed"
+  printf '%s\n' "$trimmed"
 }
 
 fm_pid_identity() {
@@ -620,9 +621,9 @@ fm_lock_record_start() {
 
 # fm_lock_start_token_matches <recorded> <current>
 # False only when both start tokens carry the same identity key and different
-# values. A legacy record - proc-starttime=... or a bare ps lstart date - is
-# read under its current key, and a record in a key this host cannot
-# recompute keeps the pid-liveness answer.
+# values. Both the written forms - proc-starttime=... or a bare ps lstart
+# date - and the linux-starttime=/ps-lstart= forms are read under one key, and
+# a record in a key this host cannot recompute keeps the pid-liveness answer.
 fm_lock_start_token_matches() {
   local recorded=$1 current=$2 recorded_key recorded_value current_key current_value
   case "$recorded" in
@@ -649,7 +650,11 @@ fm_lock_start_token_matches() {
       current_key=ps-lstart
       current_value=${current#*=}
       ;;
-    *) return 0 ;;
+    *=*) return 0 ;;
+    *)
+      current_key=ps-lstart
+      current_value=$current
+      ;;
   esac
   [ "$recorded_key" = "$current_key" ] || return 0
   [ "$current_value" = "$recorded_value" ]

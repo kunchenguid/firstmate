@@ -516,48 +516,67 @@ test_lock_reclaims_reused_pid_but_not_a_live_owner() {
 }
 
 test_mac_ps_start_token_normalizes_whitespace() {
-  local dir token_again token
+  local dir token rc
   dir=$(make_case lock-mac-start-token)
   token=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1"
     first=$(fm_pid_start_token "$$") || exit 1
     second=$(fm_pid_start_token "$$") || exit 1
     [ "$first" = "$second" ] || exit 2
-    printf "%s\n%s" "$first" "$second"
+    printf "%s" "$first"
   ' _ "$LIB") || {
     rc=$?
     [ "$rc" -eq 2 ] && fail "portable start token changed between reads"
     fail "portable start-token fallback failed"
   }
-  token=${token%%$'\n'*}
-  token_again=${token#*$'\n'}
-  [ "$token" = "$token_again" ] || fail "portable start token changed between reads"
   case "$token" in
-    ps-lstart=*) ;;
-    *) fail "portable start token did not identify its format: <$token>" ;;
+    *=*) fail "portable start token is not a bare ps lstart date: <$token>" ;;
   esac
-  case "$token" in *[[:space:]]) fail "portable start token retained trailing whitespace: <$token>" ;; esac
+  case "$token" in [[:space:]]*|*[[:space:]]) fail "portable start token retained edge whitespace: <$token>" ;; esac
   pass "macOS-style ps start tokens normalize leading and trailing whitespace"
 }
 
 test_lock_accepts_legacy_owner_tokens() {
-  local dir lockdir token legacy
+  local dir lockdir token keyed recorded
   dir=$(make_case lock-legacy-owner-token)
   lockdir="$dir/state/.contend.lock"
   mkdir "$lockdir"
   printf '%s\n' "$$" > "$lockdir/pid"
 
   token=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_start_token "$2"' _ "$LIB" "$$") \
-    || fail "could not compute the live Linux owner token"
+    || fail "could not compute the live owner token"
   case "$token" in
-    linux-starttime=*|proc-starttime=*) legacy="proc-starttime=${token#*=}" ;;
-    ps-lstart=*) legacy=${token#*=} ;;
-    *) fail "unexpected start token: <$token>" ;;
+    proc-starttime=*) keyed="linux-starttime=${token#*=}" ;;
+    *=*) fail "unexpected start token: <$token>" ;;
+    *) keyed="ps-lstart=$token" ;;
   esac
-  printf '%s\n' "$legacy" > "$lockdir/pid-start"
-  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_lock_holder_alive "$2" "$3"' _ "$LIB" "$lockdir" "$$" \
-    || fail "legacy owner token did not protect a live owner"
-  pass "legacy owner start tokens remain compatible"
+  for recorded in "$token" "$keyed"; do
+    printf '%s\n' "$recorded" > "$lockdir/pid-start"
+    FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_lock_holder_alive "$2" "$3"' _ "$LIB" "$lockdir" "$$" \
+      || fail "owner token <$recorded> did not protect a live owner"
+  done
+  pass "legacy and keyed owner start tokens remain compatible"
+}
+
+# A process that sourced the previous library keeps comparing the recorded
+# pid-start to fm_pid_start_time by plain string equality, so every record the
+# current writer leaves must equal that probe for its live holder, on both the
+# /proc and the ps paths.
+test_lock_start_record_matches_legacy_reader() {
+  local dir proc_root out
+  dir=$(make_case lock-legacy-reader)
+  for proc_root in /proc "$dir/no-proc"; do
+    out=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2" || exit 10
+      recorded=$(cat "$2/pid-start")
+      legacy=$(fm_pid_start_time "$(cat "$2/pid")")
+      fm_lock_release "$2"
+      [ -n "$recorded" ] && [ "$recorded" = "$legacy" ] || { printf "<%s> <%s>" "$recorded" "$legacy"; exit 11; }
+    ' _ "$LIB" "$dir/state/.contend.lock") \
+      || fail "proc root $proc_root: recorded pid-start does not equal fm_pid_start_time: $out"
+  done
+  pass "recorded pid-start matches a legacy reader by string equality"
 }
 
 # Start a process that claims each given link lock, then SIGKILL it so every
@@ -2009,6 +2028,7 @@ test_lock_steals_dead_pid_lock
 test_lock_reclaims_reused_pid_but_not_a_live_owner
 test_mac_ps_start_token_normalizes_whitespace
 test_lock_accepts_legacy_owner_tokens
+test_lock_start_record_matches_legacy_reader
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
