@@ -1835,8 +1835,7 @@ OpenRouter, `systemone`, and OpenAI each require their explicit `FM_DISPATCH_PRO
 `systemone` also requires `FM_DISPATCH_BASE_URL`, an `http://` or `https://` base such as a local llama.cpp server or a hosted System One-compatible service, and posts to `<base>/v1/systemone`; a missing or scheme-less base URL is an actionable configuration error.
 With no provider setting, the original typesafe.ai behavior is unchanged: `jev-latest` is used when `TYPESAFE_API_KEY` is available, `FM_DISPATCH_MODEL` is ignored, and the resolver is off when no key is available and no `typesafe` credential source is declared.
 Explicit `FM_DISPATCH_PROVIDER=typesafe` also uses `jev-latest` when no model is set.
-The selected provider's key must be non-empty in the environment or `.env`, with the environment taking precedence; `systemone` is the exception, where an absent `FM_DISPATCH_API_KEY` means the request carries no `Authorization` header.
-For `typesafe` and `openrouter`, the credential source that the home declares for that provider supplies the key when neither the environment nor `.env` does.
+The selected provider needs a non-empty key from the environment, else `.env`, else, for `typesafe` and `openrouter` only, the credential source the home declares for that provider; `systemone` is the exception, where an absent `FM_DISPATCH_API_KEY` means the request carries no `Authorization` header.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 A declared credential source that cannot supply its key is not off; see "Credential source declaration" below.
