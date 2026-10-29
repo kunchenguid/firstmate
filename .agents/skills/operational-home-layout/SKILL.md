@@ -110,7 +110,7 @@ state/               runtime records and signals; gitignored
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
-  <id>.review-park  record of a lane parked on review (agent stopped, copy leased) and .review-park-closed-<id> its one-shot closed-without-merge marker; bin/fm-park.sh owns both and teardown removes them
+  <id>.review-park  record of a lane parked on review (agent stopped, copy leased) , .review-park-closed-<id> its one-shot closed-without-merge marker, and .review-park-tick-next / .review-park-tick-next-unparked the lane the last time-limited tick did not reach; bin/fm-park.sh owns them and teardown removes the first two
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire

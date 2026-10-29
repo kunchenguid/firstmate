@@ -156,7 +156,7 @@ gl_fixture() {  # <world> [key=value...]
   local world=$1 kv
   shift
   local state=opened draft=false head has_conflicts=false dms=not_approved pstatus=success
-  local created=$OLD_ISO finished=$OLD_ISO notes
+  local created=$OLD_ISO finished=$OLD_ISO notes psha=''
   head=$(cat "$world/head")
   notes="[{\"notes\":[{\"author\":{\"username\":\"group_42_bot_abc\"},\"system\":false,\"created_at\":\"2026-01-01T00:05:00Z\",\"resolvable\":false}]}]"
   for kv in "$@"; do
@@ -164,10 +164,11 @@ gl_fixture() {  # <world> [key=value...]
       state=*) state=${kv#*=} ;; draft=*) draft=${kv#*=} ;; head=*) head=${kv#*=} ;;
       has_conflicts=*) has_conflicts=${kv#*=} ;; dms=*) dms=${kv#*=} ;; pstatus=*) pstatus=${kv#*=} ;;
       created=*) created=${kv#*=} ;; finished=*) finished=${kv#*=} ;; notes=*) notes=${kv#*=} ;;
+      psha=*) psha=${kv#*=} ;;
     esac
   done
   local pipeline=null
-  [ "$pstatus" = none ] || pipeline="{\"status\":\"$pstatus\",\"sha\":\"$head\",\"created_at\":\"$created\",\"finished_at\":\"$finished\"}"
+  [ "$pstatus" = none ] || pipeline="{\"status\":\"$pstatus\",\"sha\":\"${psha:-$head}\",\"created_at\":\"$created\",\"finished_at\":\"$finished\"}"
   printf '{"state":"%s","draft":%s,"sha":"%s","has_conflicts":%s,"detailed_merge_status":"%s","head_pipeline":%s}\n' \
     "$state" "$draft" "$head" "$has_conflicts" "$dms" "$pipeline" > "$world/gl.mr.json"
   printf '%s\n' "$notes" > "$world/gl.discussions.json"
@@ -213,32 +214,34 @@ test_github_gate_waits_for_review_bots_or_quiet_window() {
   w=$(make_world gh-bots "$GH_URL")
   # The bot reviewed an older head and CI just finished: neither settled.
   gh_fixture "$w/gh.1.json" review_oid=0000000000000000000000000000000000000001 completed="$NOW_ISO" committed="$NOW_ISO"
-  expect_unclean "$w" bot-stale "automated reviewers (coderabbitai) have not posted on this head"
+  expect_unclean "$w" bot-stale "automated reviewers (coderabbitai) have not submitted a review of this head"
   # No reviewer bot ever posted and CI just finished: only the window can settle it.
   gh_fixture "$w/gh.1.json" completed="$NOW_ISO" committed="$NOW_ISO" extra_reviews=''
   sed -i.bak 's/"coderabbitai","__typename":"Bot"/"alice","__typename":"User"/' "$w/gh.1.json"
-  expect_unclean "$w" no-bot "no automated reviewer has posted on this head"
+  expect_unclean "$w" no-bot "no automated reviewer has submitted a review of this head"
   # The same PR once the quiet window has elapsed.
   FM_TEST_QUIET=0 expect_clean "$w" quiet-elapsed
-  # A bot that commented after the push settles it without waiting.
-  gh_fixture "$w/gh.1.json" review_oid=0000000000000000000000000000000000000001 completed="$NOW_ISO" committed="$OLD_ISO" bot_at="$NOW_ISO"
-  expect_clean "$w" bot-after-push
+  # A bot comment or review edit after the push does not prove its review of
+  # this head finished: only a review bound to the head, or the window, does.
+  gh_fixture "$w/gh.1.json" review_oid=0000000000000000000000000000000000000001 completed="$NOW_ISO" committed="$OLD_ISO" bot_at="$NOW_ISO" \
+    comments="[{\"author\":{\"login\":\"coderabbitai\",\"__typename\":\"Bot\"},\"createdAt\":\"$NOW_ISO\",\"updatedAt\":\"$NOW_ISO\"}]"
+  expect_unclean "$w" bot-comment-after-push "automated reviewers (coderabbitai) have not submitted a review of this head"
   # A login named in config/contribution-review-bots counts as a reviewer bot.
   gh_fixture "$w/gh.1.json" completed="$NOW_ISO" committed="$NOW_ISO" \
     comments='[{"author":{"login":"greptile","__typename":"User"},"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}]'
   printf 'greptile\n' > "$w/config/contribution-review-bots"
   expect_unclean "$w" listed-bot "automated reviewers (coderabbitai, greptile)"
   rm -f "$w/config/contribution-review-bots"
-  # The head was committed before the bot's last edit on the previous head but
-  # pushed after it: the push, not the commit, decides.
+  # The head was committed long ago but pushed just now: the window runs from
+  # the push, not the commit.
   gh_fixture "$w/gh.1.json" review_oid=0000000000000000000000000000000000000001 committed="$OLD_ISO" \
-    bot_at=2026-01-01T00:05:00Z pushed="$NOW_ISO" completed="$NOW_ISO"
-  expect_unclean "$w" committed-before-push "automated reviewers (coderabbitai) have not posted on this head"
+    pushed="$NOW_ISO" completed="$OLD_ISO"
+  expect_unclean "$w" committed-before-push "quiet window"
   # With no check suite on the head, the committer time stands in for the push.
-  gh_fixture "$w/gh.1.json" review_oid=0000000000000000000000000000000000000001 committed="$OLD_ISO" \
-    bot_at="$NOW_ISO" pushed=none completed="$NOW_ISO"
-  expect_clean "$w" no-check-suite
-  pass "github gate waits for every reviewer bot to post on the current head since it was pushed, or the quiet window"
+  gh_fixture "$w/gh.1.json" review_oid=0000000000000000000000000000000000000001 committed="$NOW_ISO" \
+    pushed=none completed="$OLD_ISO"
+  expect_unclean "$w" no-check-suite "quiet window"
+  pass "github gate waits for every reviewer bot to submit a review of the current head, or the quiet window since it was pushed"
 }
 
 test_gitlab_gate_clean_and_unclean_conditions() {
@@ -253,13 +256,20 @@ test_gitlab_gate_clean_and_unclean_conditions() {
   gl_fixture "$w" pstatus=running; expect_unclean "$w" gl-ci-running "CI is pending"
   gl_fixture "$w" pstatus=failed; expect_unclean "$w" gl-ci-failed "CI is failure"
   gl_fixture "$w" pstatus=none; expect_unclean "$w" gl-ci-none "CI is none"
+  # A green pipeline that ran on an older commit is not CI on this head.
+  gl_fixture "$w" psha=0000000000000000000000000000000000000004; expect_unclean "$w" gl-ci-old-sha "CI is none"
   gl_fixture "$w" dms=requested_changes; expect_unclean "$w" gl-changes "changes are requested"
   gl_fixture "$w" dms=jira_association_missing; expect_unclean "$w" gl-other "merge status jira_association_missing"
   gl_fixture "$w" notes='[{"notes":[{"author":{"username":"bob"},"system":false,"created_at":"2026-01-01T00:00:00Z","resolvable":true,"resolved":false}]}]'
   expect_unclean "$w" gl-thread "1 review thread(s) unresolved"
   # CodeRabbit's group bot posted before this head's pipeline was created.
   gl_fixture "$w" created="$NOW_ISO" finished="$NOW_ISO"
-  expect_unclean "$w" gl-bot-stale "automated reviewers (group_42_bot_abc) have not posted on this head"
+  expect_unclean "$w" gl-bot-stale "automated reviewers (group_42_bot_abc) have not submitted a review of this head"
+  # A bot note after the pipeline started proves no finished review: the
+  # quiet window still decides.
+  gl_fixture "$w" created="$OLD_ISO" finished="$NOW_ISO" \
+    notes="[{\"notes\":[{\"author\":{\"username\":\"group_42_bot_abc\"},\"system\":false,\"created_at\":\"$NOW_ISO\",\"resolvable\":false}]}]"
+  expect_unclean "$w" gl-bot-note-only "quiet window"
   # A full first page of system-note discussions: every page is read.
   gl_fixture "$w" notes="$(jq -cn '[range(100) | {notes: [{author: {username: "root"}, system: true, created_at: "2026-01-01T00:00:00Z", resolvable: false}]}]')"
   printf '%s\n' '[{"notes":[{"author":{"username":"group_42_bot_abc"},"system":false,"created_at":"2026-01-01T00:05:00Z","resolvable":false}]}]' \
@@ -269,7 +279,7 @@ test_gitlab_gate_clean_and_unclean_conditions() {
     > "$w/gl.discussions.2.json"
   expect_unclean "$w" gl-second-page-thread "1 review thread(s) unresolved"
   rm -f "$w/gl.discussions.2.json"
-  pass "gitlab gate: clean MR parks, and draft, conflict, rebase, CI running/failed/absent, changes requested, other merge blockers, unresolved threads and a stale review bot each refuse, across every page of discussions"
+  pass "gitlab gate: clean MR parks, and draft, conflict, rebase, CI running/failed/absent, changes requested, other merge blockers, unresolved threads, a pipeline on an older commit, and a review bot that has not finished each refuse, across every page of discussions"
 }
 
 test_park_stops_agent_records_lane_and_leases_slot() {
@@ -328,6 +338,23 @@ SH
   [ ! -e "$w/state/lane.review-park" ] || fail "steered-busy: a park record was left behind"
   ! grep -q "parked on review" "$w/state/lane.status" || fail "steered: a parked line was appended"
   pass "an instruction or a new turn arriving after the preflight refuses the park before the agent is stopped"
+}
+
+test_interrupted_park_never_reads_as_parked() {
+  local w pid i
+  w=$(make_world park-interrupted "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  # The stop hangs; the park is killed outright in the middle of it.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/control.log"\nsleep 5\n' "$w" > "$w/fakebin/fm-control.sh"
+  TMPDIR="$w" run_park "$w" park lane >/dev/null 2>&1 &
+  pid=$!
+  for i in $(seq 1 100); do [ -s "$w/control.log" ] && break; sleep 0.1; done
+  [ -s "$w/control.log" ] || fail "interrupted: the stop never started"
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ ! -e "$w/state/lane.review-park" ] || fail "interrupted: a park record was published before the stop was confirmed"
+  [ -z "$(run_park "$w" list)" ] || fail "interrupted: list reports the lane as parked"
+  pass "a park interrupted during the stop leaves no park record behind"
 }
 
 test_park_preflight_refusals_leave_the_agent_running() {
@@ -406,7 +433,7 @@ fm_meta_get_test() {  # <world> <key>
 
 # Park a world through the real park path, then reset the forge read counter.
 park_world() {  # <world>
-  run_park "$1" park lane >/dev/null 2>&1 || fail "setup: park failed for $1"
+  local o; o=$(run_park "$1" park lane 2>&1) || fail "setup: park failed for $1: $o"
   rm -f "$1/gh.count" "$1/control.log"
 }
 
@@ -450,10 +477,19 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   gh_fixture "$w/gh.1.json" comments="[{\"author\":{\"login\":\"carol\",\"__typename\":\"User\"},\"createdAt\":\"$later\",\"updatedAt\":\"$later\"}]"
   expect_relaunch "$w" comment "new comments from carol"
 
+  # An older comment edited after the park is new feedback too.
+  w=$(make_world trig-edit "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" comments="[{\"author\":{\"login\":\"coderabbitai\",\"__typename\":\"Bot\"},\"createdAt\":\"$OLD_ISO\",\"updatedAt\":\"$later\"}]"
+  expect_relaunch "$w" edited-comment "new comments from coderabbitai"
+
+  w=$(make_world trig-gl-edit "$GL_URL"); gl_fixture "$w"; park_world "$w"
+  gl_fixture "$w" notes="[{\"notes\":[{\"author\":{\"username\":\"group_42_bot_abc\"},\"system\":false,\"created_at\":\"$OLD_ISO\",\"updated_at\":\"$later\",\"resolvable\":false}]}]"
+  expect_relaunch "$w" gitlab-edited-note "new comments from group_42_bot_abc"
+
   w=$(make_world trig-gl-note "$GL_URL"); gl_fixture "$w"; park_world "$w"
   gl_fixture "$w" notes="[{\"notes\":[{\"author\":{\"username\":\"dave\"},\"system\":false,\"created_at\":\"$later\",\"resolvable\":false}]}]"
   expect_relaunch "$w" gitlab-note "new comments from dave"
-  pass "head change, failing checks, changes requested, an unresolved thread, a conflict, and new GitHub or GitLab comments each relaunch a fresh worker with the trigger in its instructions"
+  pass "head change, failing checks, changes requested, an unresolved thread, a conflict, and new or edited GitHub or GitLab comments each relaunch a fresh worker with the trigger in its instructions"
 }
 
 test_behind_base_does_not_relaunch() {
@@ -478,6 +514,24 @@ test_tick_starts_no_action_that_outlasts_its_budget() {
   rm -f "$w/gh.1.sh" "$w/gh.count"
   expect_relaunch "$w" budget-next "checks are failing"
   pass "a tick never starts a lane action its remaining budget cannot hold, and the next tick takes it"
+}
+
+test_tick_resumes_where_the_last_one_ran_out_of_time() {
+  local w out
+  w=$(make_world tick-rotate "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  cp "$w/state/lane.meta" "$w/state/lane2.meta"
+  cp "$w/state/lane.review-park" "$w/state/lane2.review-park"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  # The first lane's read outlasts the whole tick.
+  printf 'sleep 4\n' > "$w/gh.1.sh"
+  out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
+  [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "rotate: the slow tick acted: $out"
+  out=$(run_park "$w" tick 2>&1)
+  head -1 "$w/control.log" | grep -q "^lane2 relaunch --note-file " \
+    || fail "rotate: the next tick did not start at the lane the last one never reached: $(grep ' relaunch ' "$w/control.log")"
+  [ ! -e "$w/state/lane.review-park" ] && [ ! -e "$w/state/lane2.review-park" ] \
+    || fail "rotate: a complete tick did not visit every lane: $out"
+  pass "a tick that runs out of time resumes at the next unvisited lane, so a slow early lane cannot starve later ones"
 }
 
 test_quiet_parked_lane_and_approval_do_not_relaunch() {
@@ -575,11 +629,13 @@ fm_test_run \
   test_park_stops_agent_records_lane_and_leases_slot \
   test_park_refuses_when_head_moves_after_the_verdict \
   test_park_refuses_when_the_lane_is_steered_before_the_stop \
+  test_interrupted_park_never_reads_as_parked \
   test_park_preflight_refusals_leave_the_agent_running \
   test_repark_reuses_its_own_lease_and_refuses_a_foreign_one \
   test_each_relaunch_trigger_relaunches_a_fresh_worker \
   test_behind_base_does_not_relaunch \
   test_tick_starts_no_action_that_outlasts_its_budget \
+  test_tick_resumes_where_the_last_one_ran_out_of_time \
   test_quiet_parked_lane_and_approval_do_not_relaunch \
   test_failed_relaunch_keeps_record_and_stops_retrying \
   test_closed_pr_is_reported_once \
