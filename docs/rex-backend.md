@@ -95,7 +95,7 @@ The reader subscribes first and the current program status of each block is reco
 A trusted `blocked` program status takes the immediate escalation path instead of waiting for the stale-pane timer; [push verification](verification/runtime-backends.md#push-events) records measured latency.
 It counts only when the process that reported it passes the same foreground-chain rule as native busy state, and its wake reason carries Rex's blocked kind (`permission`, `question`, or `auth`) and the program's message, cut at 160 characters.
 [`bin/fm-transition-lib.sh`](../bin/fm-transition-lib.sh) owns the shared policy and per-block escalation dedupe contract.
-The watcher skips secondmate endpoints, declared waits, and captain-held work exactly as it does for Herdr's push path.
+The watcher applies the same skips as [Herdr's push path](herdr-backend.md#push-events-and-polling-fallback).
 
 When a watched block's program exits or the block closes, the wait ends at once so the watcher's next poll reconciles that task immediately.
 That never wakes the supervisor by itself, because a routine cleanup closes blocks too.
