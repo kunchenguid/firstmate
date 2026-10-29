@@ -288,7 +288,7 @@ make_local_merge_fixture() { # <case-dir> <id> -> prints the project path
   git -C "$proj" add change
   git -C "$proj" commit -qm change
   git -C "$proj" checkout -q "$main"
-  printf 'project=%s\nmode=local-only\nbranch=fm/%s\n' "$proj" "$id" > "$case_dir/home/state/$id.meta"
+  printf 'project=%s\nmode=local-only\nbranch=fm/%s\nlocal_done_head=%s\n' "$proj" "$id" "$(git -C "$proj" rev-parse "fm/$id")" > "$case_dir/home/state/$id.meta"
   printf '%s\n' "$proj"
 }
 
