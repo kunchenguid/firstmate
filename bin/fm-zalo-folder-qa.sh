@@ -241,14 +241,17 @@ init_state() {
   if [ "$ready" -eq 1 ]; then
     rm -f -- "$STATE_READY" || die 'cannot invalidate state durability marker'
   fi
-  sync_path directory "$STATE_ROOT" \
+  if sync_path directory "$STATE_ROOT" \
     && sync_path directory "$STATE_PARENT" \
     && sync_path directory "$STATE_DIR" \
     && sync_path directory "$STATE_ROOT" \
     && sync_path directory "$SEEN_DIR" \
     && sync_path directory "$STATE_DIR" \
-    && publish_state_ready \
-    || die 'state initialization durability failed; refusing to verify, poll, or send'
+    && publish_state_ready; then
+    return 0
+  else
+    die 'state initialization durability failed; refusing to verify, poll, or send'
+  fi
 }
 
 urlencode() {
@@ -362,7 +365,7 @@ parse_event() { # <json>; sets EVENT_* globals
   text_length=$(printf '%s' "$event" | jq '.message.text | length')
   EVENT_MESSAGE_ID=$(printf '%s' "$event" | jq -r '.message.message_id')
   [ "$text_length" -gt 0 ] && [ "$text_length" -le 2000 ] && [ -n "$EVENT_MESSAGE_ID" ] || {
-    EVENT_REASON=invalid-message
+    EVENT_REASON='invalid-message'
     return 0
   }
   EVENT_ACTION=query
