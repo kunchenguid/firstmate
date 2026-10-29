@@ -697,6 +697,40 @@ test_archive_allows_missing_optional_records() {
   pass "teardown archive treats absent status and inbox records as a complete capture"
 }
 
+test_archive_resolves_local_and_remote_generation_metadata() {
+  local case_name home export_root generation rc
+  for case_name in spawn-only remote-only both fleet-only neither; do
+    home=$(make_home "archive-generation-$case_name")
+    export_root="$TMP_ROOT/export-generation-$case_name"
+    printf '%s\n' "$export_root" > "$home/config/record-export-root"
+    mkdir -p "$home/state"
+    case "$case_name" in
+      spawn-only) printf 'spawn_gen=local-generation\n' > "$home/state/task-a.meta"; generation='local-generation' ;;
+      remote-only) printf 'remote_spawn_gen=remote-generation\n' > "$home/state/task-a.meta"; generation='remote-generation' ;;
+      both)
+        printf 'spawn_gen=preferred-generation\nremote_spawn_gen=remote-generation\nfleet_seat_generation=fleet-generation\n' > "$home/state/task-a.meta"
+        generation='preferred-generation'
+        ;;
+      fleet-only) printf 'fleet_seat_generation=fleet-generation\n' > "$home/state/task-a.meta"; generation='fleet-generation' ;;
+      neither) printf 'kind=secondmate\n' > "$home/state/task-a.meta"; generation= ;;
+    esac
+    rc=0
+    run_export "$home" archive-task task-a > "$home/stdout" 2> "$home/stderr" || rc=$?
+    if [ "$case_name" = neither ]; then
+      [ "$rc" -ne 0 ] || fail "archive accepted metadata without a generation"
+      assert_absent "$export_root/archive/task-a" "metadata without a generation created an archive"
+    else
+      expect_code 0 "$rc" "archive generation case $case_name: $(cat "$home/stderr")"
+      assert_present "$export_root/archive/task-a/$generation/manifest.v1.json" \
+        "archive did not use the resolved generation for $case_name"
+      jq -e --arg generation "$generation" '.spawn_gen == $generation' \
+        "$export_root/archive/task-a/$generation/manifest.v1.json" >/dev/null \
+        || fail "manifest did not preserve the resolved generation for $case_name"
+    fi
+  done
+  pass "record export resolves exactly one generation with local-first remote fallback precedence"
+}
+
 test_archive_refuses_unsafe_sources_and_destinations() {
   local home export_root outside rc case_name
   for case_name in missing-gen duplicate-gen unsafe-gen meta-link status-fifo inbox-link destination-link unknown-partial; do
@@ -867,6 +901,7 @@ test_archive_retry_removes_stale_files_from_a_partial_generation
 test_archive_revalidates_sources_immediately_before_publication
 test_archive_waits_for_the_task_lock_before_enumerating_sources
 test_archive_allows_missing_optional_records
+test_archive_resolves_local_and_remote_generation_metadata
 test_archive_refuses_unsafe_sources_and_destinations
 test_archive_retention_prunes_only_old_committed_generations
 test_export_root_stays_cold_to_firstmate_readers
