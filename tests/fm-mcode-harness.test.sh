@@ -91,7 +91,25 @@ asked=$'styled=1\ncursor=0\nidentity=1\nmcode=ask'
 [ "$(fm_composer_classify_screen "$asked" "$idle" '' $'mcode\tunknown')" = empty ] || fail 'the mcode identity answer was not applied'
 plain_box=$(printf '%s\n' '╭────╮' '│    │' '╰────╯')
 [ "$(fm_composer_classify_screen "$asked" "$plain_box")" = empty ] || fail 'an empty read paid for an mcode identity probe'
-pass "composer placeholder and suggestion, draft and slash safety, exact-colour identity scoping, and the lazy Herdr probe"
+# Replay the real panes (tests/captures/mcode-0.7.1/README.md owns their
+# provenance and cursor rows): verdict with the tmux identity, without it, and
+# cursorless with the Herdr registration, then the slot-anchored spinner read.
+caps_dir="$ROOT/tests/captures/mcode-0.7.1"
+while read -r shot cy with without herdr spin; do
+  pane=$(cat "$caps_dir/$shot.ansi")
+  [ "$(fm_composer_classify_screen "$caps" "$pane" "$cy" $'mcode\tidle')" = "$with" ] || fail "real $shot pane with the mcode identity is not $with"
+  [ "$(fm_composer_classify_screen "$caps" "$pane" "$cy" probe-absent)" = "$without" ] || fail "real $shot pane without the identity is not $without"
+  [ "$(fm_composer_classify_screen "$cursorless" "$pane" '' $'mcode\tunknown')" = "$herdr" ] || fail "real $shot pane cursorless is not $herdr"
+  if printf '%s\n' "$pane" | fm_composer_strip_ansi | fm_composer_mcode_spinner_live; then got=busy; else got=idle; fi
+  [ "$got" = "$spin" ] || fail "real $shot pane spinner read is $got, not $spin"
+done <<'ROWS'
+idle 32 empty pending empty idle
+busy 30 empty pending empty busy
+typed-draft 32 pending pending pending idle
+typed-slash 45 unknown unknown pending idle
+suggestion 46 empty pending empty idle
+ROWS
+pass "composer placeholder and suggestion, draft and slash safety, exact-colour identity scoping, and the lazy Herdr probe, replayed on real panes"
 
 [ "$(fm_busy_mcode_title_state 'Working | wt (mvs_7422) | MCode')" = busy ] || fail 'busy title misread'
 for title in 'Ready | wt (mvs_7422) | MCode' 'Done | Run sleep 8 | MCode' 'Stopped | Run sleep 8 | MCode' 'Failed | x | MCode' 'Error | x | MCode'; do

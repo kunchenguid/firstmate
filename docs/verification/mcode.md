@@ -110,6 +110,7 @@ A relaunched mcode in the same pane accepted a fresh report.
 
 ## Coverage and limits
 
+The raw panes the portable regression replays, with their provenance and cursor rows, are [`tests/captures/mcode-0.7.1`](../../tests/captures/mcode-0.7.1/README.md).
 The portable regression drives anchored ancestry and liveness, worker-only resolution, the single-press interrupt with its Ctrl+U clear and edit-mode hazard, the captured placeholder, suggestion, draft, and slash-command composer shapes with and without the mcode identity, the lazy Herdr identity probe, the title and spinner-row busy signals driven apart, the launch preflight and its pinned data directory, and the scout launch, readiness gate, and refusals; `tests/fm-control.test.sh` pins that an mcode relaunch the preflight refuses sends the running worker nothing.
 `tests/fm-backend-herdr.test.sh` pins the stateless `mcode` registration reading live over a `minimax-code` process and stale over a shell-only pane.
 Not verified and therefore unsupported:
