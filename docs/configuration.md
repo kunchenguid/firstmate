@@ -125,6 +125,8 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 - The [`bin/fm-fleet-snapshot.sh` header](../bin/fm-fleet-snapshot.sh) owns the snapshot's event-time and age fields, including secondmate parent-event projections.
 
+- [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) owns portable coordination-lock publication, including the automatic non-symlink fallback (requires Perl) for Git Bash without native symlink support, and its identity and recovery rules; [`tests/fm-watcher-lock.test.sh`](../tests/fm-watcher-lock.test.sh) covers both publication modes.
+
 - Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
 ### Session-start references
@@ -3168,7 +3170,7 @@ FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
-FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs, and live ones whose start time no longer matches the holder's recorded start time, have no age grace
+FM_LOCK_STALE_AFTER=2   # fallback grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); generation-aware exceptions: fm_lock_mid_acquire_is_fresh in bin/fm-wake-lib.sh; dead numeric PIDs, and live ones whose start time no longer matches the holder's recorded start time, have no age grace
 FM_GUARD_GRACE=300      # beacon freshness threshold for guard verdicts, arm health checks, and the primary turn-end guard; see docs/turnend-guard.md for model-aware exceptions
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, an open Stop auto-arm generation claim, or a fresh epoch before deciding recovery ownership or failure progression

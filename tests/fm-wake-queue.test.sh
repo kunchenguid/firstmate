@@ -2796,12 +2796,40 @@ SH
   pass "bounded acquire hands ownership to the waiting caller after contention"
 }
 
+# Rerun a lock test unchanged with a copying ln, which forces the directory
+# lock record (bin/fm-wake-lib.sh header), and prove that record was used.
+with_copied_link_locks() {  # <test>
+  local bin="$TMP_ROOT/copied-link-locks-bin" log="$TMP_ROOT/copied-link-locks.log" real_ln
+  real_ln=$(command -v ln)
+  mkdir -p "$bin"
+  cat > "$bin/ln" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = -s ]; then
+  printf 'copied\n' >> "$FM_TEST_COPIED_LINK_LOG"
+  exec cp -R "$2" "$3"
+fi
+exec "$FM_TEST_REAL_LN" "$@"
+SH
+  chmod +x "$bin/ln"
+  rm -f "$log"
+  ( PATH="$bin:$PATH" FM_TEST_REAL_LN="$real_ln" FM_TEST_COPIED_LINK_LOG="$log" \
+      FM_TEST_CASE_SUFFIX=-copied-link "$1" ) || fail "$1 failed with copied-link directory locks"
+  [ -s "$log" ] || fail "$1 did not exercise copied-link directory locks"
+  pass "$1 also holds with copied-link directory locks"
+}
+
 # A live-but-stuck presentation lock must not strand the executable drain. The
 # presentation remains retriable on the next pass, while the separate queue
 # mutation lock keeps its blocking all-or-nothing acknowledgement contract.
 test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   local dir state status queue_out queue_err first_out first_err second_out second_err replay_out replay_err
   local queue_holder presentation_holder ack_holder i start elapsed rc advisory_count
+  # The one-second timeout bounds lock waiting, not executable startup or queue
+  # rendering. The copied-link rerun adds directory-lock publication and
+  # recovery overhead, so it alone gets a wider budget, still well before the
+  # holder's 30-second exit.
+  local drain_budget=4
+  [ -z "${FM_TEST_CASE_SUFFIX:-}" ] || drain_budget=15
   dir=$(make_case presentation-lock-deadline)
   state="$dir/state"
   status="$state/task.status"
@@ -2838,7 +2866,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     "$DRAIN" > "$queue_out" 2> "$queue_err" \
     || { kill "$queue_holder" 2>/dev/null || true; fail "bounded queue presentation drain failed"; }
   elapsed=$(( $(date +%s) - start ))
-  [ "$elapsed" -le 4 ] \
+  [ "$elapsed" -le "$drain_budget" ] \
     || { kill "$queue_holder" 2>/dev/null || true; fail "queue lock delayed the drain for ${elapsed}s"; }
   advisory_count=$(grep -Fc \
     "WAKE DRAIN SKIPPED: queue lock remains held by live pid $queue_holder" \
@@ -2878,7 +2906,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     "$DRAIN" > "$first_out" 2> "$first_err" \
     || { kill "$presentation_holder" 2>/dev/null || true; fail "bounded presentation drain failed"; }
   elapsed=$(( $(date +%s) - start ))
-  [ "$elapsed" -le 4 ] \
+  [ "$elapsed" -le "$drain_budget" ] \
     || { kill "$presentation_holder" 2>/dev/null || true; fail "presentation lock delayed the drain for ${elapsed}s"; }
   advisory_count=$(grep -Fc \
     "STATUS PRESENTATION SKIPPED: lock remains held by live pid $presentation_holder" \
@@ -3627,7 +3655,9 @@ test_self_held_lock_reclaims_instead_of_deadlocking
 test_lock_wait_returns_when_its_directory_is_removed
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
+with_copied_link_locks test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
+with_copied_link_locks test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
 test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once
 test_secondmate_declared_pause_rows_do_not_feed_stall_escalation
