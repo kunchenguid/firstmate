@@ -381,6 +381,40 @@ grep -Eq '^needs-decision .*key=midtask-fallback' "$CASE/state/$ID.status" || fa
 grep -Eq '^blocked .*key=midtask-fallback' "$CASE/state/$ID.status" || fail "blocked report was suppressed"
 ok "blocked and needs-decision reports do not suppress each other"
 
+open_decisions() {
+  ( . "$ROOT/bin/fm-classify-lib.sh" && status_open_decisions "$CASE/state/$ID.status" )
+}
+
+# A successful switch closes an earlier midtask-fallback decision.
+begin switch-closes-decision
+write_rules true
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+printf 'paused [at=100]: out of credits\n' > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 grok exhausted_now 0 codex exhausted_now 0
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null
+open_decisions | grep -q 'midtask-fallback' || fail "no-candidate report did not open a decision"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 grok exhausted_now 0 codex through_reset 40
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null || fail "switch after a decision failed"
+assert_switch codex gpt-5.5 high usage-limit
+[ -z "$(open_decisions)" ] || fail "switch left a decision open: $(open_decisions)"
+
+begin switch-closes-block
+write_rules true
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+printf 'paused [at=100]: rate limit\n' > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 grok through_reset 40 codex through_reset 40
+CONTROL_RC=1
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null
+open_decisions | grep -q 'midtask-fallback' || fail "failed relaunch did not open a block"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 grok exhausted_now 0 codex through_reset 40
+CONTROL_RC=0
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null || fail "switch after a block failed"
+grep -q '^relaunch$' "$CASE/control-calls" || fail "next candidate was not relaunched"
+[ -z "$(open_decisions)" ] || fail "switch left a block open: $(open_decisions)"
+ok "a successful switch closes an earlier midtask-fallback decision"
+
 # A finished or waiting task is not relaunched on exhausted_now.
 for verb in "done" "needs-decision" blocked failed; do
   begin "finished-$verb"
