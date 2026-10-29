@@ -426,26 +426,54 @@ receipt_state() {
   cat "$state"
 }
 
-test_unsupported_platform_stops_before_inputs_or_state() {
-  local command output rc held_config=$CONFIG_FILE.held
+test_unsupported_platform_gates_runtime_only() {
+  local event output rc held_config=$CONFIG_FILE.held
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
   reset_runtime
-  mv "$CONFIG_FILE" "$held_config"
   FAKE_PLATFORM_MODE=unsupported
   export FAKE_PLATFORM_MODE
-  for command in check source-status handle run; do
-    if [ "$command" = handle ]; then
-      output=$(printf '%s' '{}' | run_tool handle 2>&1)
-    else
-      output=$(run_tool "$command" 2>&1)
-    fi
-    rc=$?
-    [ "$rc" -ne 0 ] || fail "unsupported platform accepted $command"
-    case "$output" in
-      *'unsupported platform; Linux is required'*) ;;
-      *) fail "unsupported platform $command reached another boundary" ;;
-    esac
-  done
+
+  output=$(run_tool --help) || fail 'unsupported platform rejected help'
+  case "$output" in
+    *'Usage:'*) ;;
+    *) fail 'unsupported platform help omitted usage' ;;
+  esac
+  output=$(run_tool check) || fail 'unsupported platform rejected offline check'
+  case "$output" in
+    *'configured: exact Zalo group and exact Graph drive/folder; answers unavailable'*) ;;
+    *) fail 'unsupported platform check returned an unexpected result' ;;
+  esac
+  event=$(event_json USER member-private 'Cho tôi xem tồn kho')
+  output=$(printf '%s' "$event" | run_tool handle) \
+    || fail 'unsupported platform rejected offline handle'
+  assert_json_field "$output" '.reason' direct-message 'unsupported-platform handle reason'
+  [ ! -e "$FAKE_LOG_DIR/counter" ] \
+    || fail 'unsupported platform offline commands contacted a transport'
+
+  output=$(run_tool source-status) || fail 'unsupported platform rejected source status'
+  assert_json_field "$output" '.reason' freshness-policy-undefined 'unsupported-platform source reason'
+  [ "$(call_count 'login.microsoftonline.com')" -eq 1 ] \
+    || fail 'unsupported platform source status did not request one Graph token'
+  [ "$(call_count '/drives/')" -eq 1 ] \
+    || fail 'unsupported platform source status did not request one pinned folder'
+  [ "$(call_count '/getMe')" -eq 0 ] \
+    || fail 'unsupported platform source status reached Zalo verification'
+  [ "$(call_count '/sendMessage')" -eq 0 ] \
+    || fail 'unsupported platform source status sent a message'
+  [ ! -e "$HOME_DIR/state/zalo-folder-qa" ] \
+    || fail 'unsupported platform portable commands created runtime state'
+
+  reset_runtime
+  FAKE_PLATFORM_MODE=unsupported
+  export FAKE_PLATFORM_MODE
+  mv "$CONFIG_FILE" "$held_config"
+  output=$(run_tool run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'unsupported platform accepted run'
+  case "$output" in
+    *'unsupported platform; Linux is required'*) ;;
+    *) fail 'unsupported platform run reached another boundary' ;;
+  esac
   mv "$held_config" "$CONFIG_FILE"
   FAKE_PLATFORM_MODE=linux
   export FAKE_PLATFORM_MODE
@@ -454,8 +482,8 @@ test_unsupported_platform_stops_before_inputs_or_state() {
   [ ! -e "$RECEIPT_SYNC_COUNTER" ] \
     || fail 'unsupported platform reached durability synchronization'
   [ ! -e "$FAKE_LOG_DIR/counter" ] \
-    || fail 'unsupported platform contacted a transport'
-  pass 'unsupported platforms stop before inputs, state, or transports'
+    || fail 'unsupported platform run contacted a transport'
+  pass 'unsupported platforms retain portable commands and reject the runtime'
 }
 
 test_required_private_pins_fail_closed() {
@@ -1135,7 +1163,7 @@ test_run_fails_closed_on_malformed_send_and_has_no_reply_command() {
 }
 
 fm_test_run \
-  test_unsupported_platform_stops_before_inputs_or_state \
+  test_unsupported_platform_gates_runtime_only \
   test_required_private_pins_fail_closed \
   test_seen_receipt_capacity_is_required_and_bounded \
   test_private_files_reject_mode_symlink_hardlink_and_nonregular \

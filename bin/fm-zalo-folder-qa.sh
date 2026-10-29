@@ -560,6 +560,7 @@ cmd_handle() {
 
 cmd_run() {
   local raw event code receipt_status
+  require_linux
   load_config
   need jq
   need curl
@@ -612,8 +613,6 @@ cmd_run() {
       || die 'reply was acknowledged but receipt transition failed; operator reconciliation required'
   done
 }
-
-require_linux
 
 case "${1:-}" in
   check)
