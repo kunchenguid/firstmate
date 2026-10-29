@@ -302,8 +302,11 @@ fm_backend_t3code_server_for_meta() (
     server=$(fm_backend_t3code_adopt_server_for_thread "$(fm_meta_get "$meta" t3_thread_id)") || return 1
     [ -z "$expected" ] || [ "$server" = "$expected" ] || return 1
     tmp=$(umask 077; mktemp "$meta.adopt.XXXXXX") || return 1
-    if { grep -v '^t3_server=' "$meta" || [ "$?" = 1 ]; } > "$tmp" &&
-      printf 't3_server=%s\n' "$server" >> "$tmp" &&
+    if awk -v server="$server" '
+      /^pr=/ && !inserted { print "t3_server=" server; inserted=1 }
+      !/^t3_server=/ { print }
+      END { if (!inserted) print "t3_server=" server }
+    ' "$meta" > "$tmp" &&
       fm_backend_t3code_server_matches "$server" && mv -f "$tmp" "$meta"; then :; else
       rm -f "$tmp"
       return 1

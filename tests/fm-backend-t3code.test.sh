@@ -2817,16 +2817,22 @@ test_legacy_control_adoption_survives_shared_checks() {
   make_t3_control_task legacy-shared "$id" "$thread" running
   sed '/^t3_server=/d' "$CTRL_STATE/$id.meta" > "$CTRL_STATE/legacy-meta"
   mv "$CTRL_STATE/legacy-meta" "$CTRL_STATE/$id.meta"
+  printf 'pr=https://github.com/example/repo/pull/1\n' >> "$CTRL_STATE/$id.meta"
   out=$(FM_CONFIG_OVERRIDE="$CONFIG" bash -c '
     . "$1/bin/fm-backend.sh"
     . "$1/bin/fm-control-lib.sh"
     fm_control_endpoint_state t3code "$2" "$3"
   ' _ "$ROOT" "$thread" "$CTRL_STATE/$id.meta")
   assert_equals alive "$out" "cold shared state reader rejected verified legacy adoption"
+  sed '/^t3_server=/d' "$CTRL_STATE/$id.meta" > "$CTRL_STATE/legacy-meta"
+  mv "$CTRL_STATE/legacy-meta" "$CTRL_STATE/$id.meta"
   out=$(run_t3_control "$id" interrupt); rc=$?
   expect_code 0 "$rc" "legacy interrupt failed after verified adoption: $out"
   assert_contains "$out" cancel=confirmed "legacy interrupt was not confirmed"
   assert_grep 't3_server=' "$CTRL_STATE/$id.meta" "verified adoption was not persisted"
+  bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_metadata_identity_parse "$2" && [ "$FM_PR_META_URL" = "$3" ]' \
+    _ "$ROOT" "$CTRL_STATE/$id.meta" 'https://github.com/example/repo/pull/1' \
+    || fail "legacy adoption during interrupt made the armed PR identity unreadable"
   sed '/^t3_server=/d' "$CTRL_STATE/$id.meta" > "$CTRL_STATE/legacy-meta"
   mv "$CTRL_STATE/legacy-meta" "$CTRL_STATE/$id.meta"
   t3_world_set 'for (const t of Object.values(w.threads)) { t.archived = true; t.activeRunId = null; }'
