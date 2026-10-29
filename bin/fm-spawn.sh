@@ -3056,6 +3056,9 @@ mcode)
     echo "error: mcode executable not found on PATH; install MiniMax Code (@minimax-ai/code) or select a different verified harness" >&2
     exit 1
   }
+  # Recorded in task metadata and named in a readiness refusal, so a vendor
+  # surface that drifted after an update is traceable to the version that ran.
+  MCODE_VERSION=$("$MCODE_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
   ;;
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -6720,7 +6723,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version mcode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -6755,6 +6758,9 @@ preserve_relaunch_meta() {
   # agent's TUI understands. Written only when a version was resolved, so a
   # non-opencode or undetectable task record stays byte-identical.
   [ -z "$OPENCODE_VERSION" ] || echo "opencode_version=$OPENCODE_VERSION"
+  # The launched MiniMax Code version, only for an mcode task whose version
+  # could be read.
+  [ -z "${MCODE_VERSION:-}" ] || echo "mcode_version=$MCODE_VERSION"
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
@@ -7501,7 +7507,7 @@ if [ "$HARNESS" = agy ]; then
 fi
 if [ "$HARNESS" = mcode ]; then
   if ! mcode_wait_for_working; then
-    agy_spawn_fail "mcode did not start processing its brief in window $T"
+    agy_spawn_fail "mcode ${MCODE_VERSION:-(version unreadable)} did not start processing its brief in window $T (neither a Working title nor its spinner row appeared; the adapter is verified on mcode 0.7.1)"
     exit 1
   fi
 fi

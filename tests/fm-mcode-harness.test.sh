@@ -157,6 +157,10 @@ done
 ! printf '%s\n' "$echo_tail" | fm_busy_lines_match mcode || fail 'quoted spinner text confirmed a delivery'
 [ "$(fm_composer_queued_enter_verdict pending idle)" != empty ] || fail 'an idle pane converted a pending composer to delivered'
 ! printf '%s\n' "$spinner" | fm_busy_lines_match mcode || fail 'a spinner row outside its slot read busy'
+# Drift shapes: another verb in the same row still reads busy, while a row that
+# lost its queue and steer hints does not (the title still carries busy).
+bottom '  ⠙ Compacting 3s · Option+Enter queue · Enter steer · Ctrl+O details' | fm_busy_lines_match mcode || fail 'a new spinner verb lost the row'
+! bottom '  ⠙ Running 3s · Esc stop' | fm_busy_lines_match mcode || fail 'a reshaped row was claimed without its hints'
 ! printf '%s\n' "$busy_tail" | fm_busy_lines_match || fail 'the harness-less union must not carry the mcode row'
 ! printf 'esc to cancel\n' | fm_busy_lines_match mcode || fail 'borrowed another harness signal'
 pass "busy state: title and slot-anchored spinner row each prove busy, quoted text fakes neither busy nor delivery, idle only from a settled title"
@@ -210,7 +214,10 @@ pass "launch preflight: Full access required, configured providers and models on
 
 case_dir="$TMP_ROOT/spawn"
 fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
-fm_fake_exit0 "$fakebin" mcode
+# A drifted install: the version is read into the task record and named in a
+# readiness refusal.
+printf '#!/bin/sh\n[ "${1:-}" = --version ] && echo 0.8.0\nexit 0\n' > "$fakebin/mcode"
+chmod +x "$fakebin/mcode"
 # The spawn readiness gate reads the pane: serve a chosen mcode screen and
 # delegate every other call to the fixture's fake tmux.
 mv "$fakebin/tmux" "$fakebin/tmux-base"
@@ -247,11 +254,16 @@ case "$launch" in *--effort*|*__*) fail "effort reached argv or a placeholder su
 assert_grep 'harness=mcode' "$home/state/mc-high.meta" 'harness not recorded'
 assert_grep 'effort=high' "$home/state/mc-high.meta" 'effort not recorded'
 assert_absent "$home/state/mc-high.busy-gen" 'mcode has no semantic writer, so nothing may be armed'
+assert_grep 'mcode_version=0.8.0' "$home/state/mc-high.meta" 'the launched mcode version was not recorded'
 pass "scout launch carries the model, records and omits effort, pins colour, and arms nothing"
 
 out=$(FM_FAKE_MCODE_SCREEN="$idle_tail" spawn_case mc-stuck) && fail 'a launch that never showed a busy turn reported success'
-assert_contains "$out" 'mcode did not start processing its brief' "wrong readiness failure: $out"
-assert_grep 'mcode did not start processing its brief' "$home/state/mc-stuck.status" 'readiness failure not recorded'
+assert_contains "$out" 'mcode 0.8.0 did not start processing its brief' "the readiness failure must name the drifted version: $out"
+assert_contains "$out" 'verified on mcode 0.7.1' "the readiness failure must name the verified version: $out"
+assert_grep 'did not start processing its brief' "$home/state/mc-stuck.status" 'readiness failure not recorded'
+# The fake tmux records the task window on new-window and clears it on
+# kill-window, so an empty record proves the failed launch's endpoint was closed.
+[ ! -s "$fakebin/.spawn-window" ] || fail "a failed readiness gate left its endpoint open: $(cat "$fakebin/.spawn-window")"
 pass "readiness gate requires a busy turn before the spawn reports success"
 
 refuse_case() {  # <id> <expected> [fm-spawn args...]
