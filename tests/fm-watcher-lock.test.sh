@@ -246,14 +246,37 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
   pass "live watcher lock with a beacon past the hard bound is replaced, under it is still refused"
 }
 
-test_watch_replaces_live_holder_with_legacy_local_time_identity() {
-  # Issue #7801: on a /proc-less host outside UTC, a watcher started before
-  # fm_pid_identity pinned TZ=UTC0 recorded its lstart in local time, so after
-  # the update its own identity no longer recomputes. A fresh watcher must
-  # replace that live holder instead of standing down beside it, and the old
-  # watcher must stand down on its own without being signalled.
-  local dir state fakebin no_proc old new old_out new_out legacy current i lock_pid old_rc
-  dir=$(make_case watch-legacy-local-time-identity)
+# Stop <pid> at a moment it holds no state lock but the watch lock, so a
+# successor never waits on a lock the stopped holder cannot release.
+stop_outside_state_locks() {  # <pid> <state>
+  local pid=$1 state=$2 i=0 lock held
+  while [ "$i" -lt 100 ]; do
+    kill -STOP "$pid" 2>/dev/null || return 1
+    held=0
+    for lock in "$state"/.*.lock "$state"/.*.lock.steal "$state"/*.lock; do
+      [ "$lock" != "$state/.watch.lock" ] || continue
+      [ "$(cat "$lock/pid" 2>/dev/null || true)" != "$pid" ] || { held=1; break; }
+    done
+    [ "$held" -eq 1 ] || return 0
+    kill -CONT "$pid" 2>/dev/null || true
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Issue #7801: on a /proc-less host outside UTC, a watcher started before
+# fm_pid_identity pinned TZ=UTC0 recorded its lstart in local time, so after the
+# update its own identity no longer recomputes. A fresh watcher must replace that
+# live holder instead of standing down beside it, and the old watcher must stand
+# down on its own (exit 0) without being terminated. <successor-first> 1 pauses
+# the old watcher until the successor has delivered its recovery wake and exited,
+# so the old watcher then finds no lock holder at all in a state directory that
+# was never torn down.
+run_legacy_identity_takeover() {  # <case> <successor-first>
+  local case_name=$1 successor_first=$2
+  local dir state fakebin no_proc old new old_out new_out legacy current i lock_pid old_rc claimed released
+  dir=$(make_case "$case_name")
   state="$dir/state"
   fakebin="$dir/fakebin"
   no_proc="$dir/no-proc"
@@ -281,20 +304,43 @@ test_watch_replaces_live_holder_with_legacy_local_time_identity() {
   rm -f "$state/.watch.lock/pid-start"
   printf '%s\n' "$legacy" > "$state/.watch.lock/pid-identity"
   is_live_non_zombie "$old" || fail "the old holder exited before its successor started, so the replacement would not be exercised: $(cat "$old_out")"
+  if [ "$successor_first" -eq 1 ]; then
+    stop_outside_state_locks "$old" "$state" \
+      || fail "could not pause the old holder outside its state locks: $(cat "$old_out")"
+  fi
   PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=America/Los_Angeles FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$new_out" 2>&1 &
   new=$!
   i=0
+  claimed=0
   while [ "$i" -lt 100 ] && is_live_non_zombie "$new"; do
     lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-    [ "$lock_pid" = "$new" ] && break
+    [ "$lock_pid" = "$new" ] && { claimed=1; break; }
     sleep 0.1
     i=$((i + 1))
   done
-  [ "$lock_pid" = "$new" ] || fail "a fresh watcher stood down beside a live holder whose legacy identity no longer recomputes: $(cat "$new_out")"
+  if [ "$successor_first" -eq 1 ]; then
+    i=0
+    while [ "$i" -lt 200 ] && is_live_non_zombie "$new"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    released=$([ -e "$state/.watch.lock/pid" ] && echo no || echo yes)
+    # Resume before any assertion can fail, so a failure never strands it stopped.
+    kill -CONT "$old" 2>/dev/null || true
+    is_live_non_zombie "$new" && fail "the successor never delivered its recovery wake and exited: $(cat "$new_out")"
+    wait "$new" || fail "the successor did not exit cleanly after its recovery wake: $(cat "$new_out")"
+    # A successor that held the lock delivers a wake; one that stood down prints
+    # only a watcher: refusal.
+    [ "$claimed" -eq 1 ] || grep -q '^check: ' "$new_out" \
+      || fail "a fresh watcher stood down beside a live holder whose legacy identity no longer recomputes: $(cat "$new_out")"
+    [ "$released" = yes ] || fail "the exited successor left a lock holder behind, so the old watcher would not find the lock released"
+  else
+    [ "$claimed" -eq 1 ] || fail "a fresh watcher stood down beside a live holder whose legacy identity no longer recomputes: $(cat "$new_out")"
+  fi
   # The old holder may already have stood down by now, so its clean exit below,
   # not its liveness here, proves it saw the successor's claim.
   i=0
-  while [ "$i" -lt 100 ] && is_live_non_zombie "$old"; do
+  while [ "$i" -lt 200 ] && is_live_non_zombie "$old"; do
     sleep 0.1
     i=$((i + 1))
   done
@@ -305,7 +351,19 @@ test_watch_replaces_live_holder_with_legacy_local_time_identity() {
   ! grep -q 'watcher: exiting' "$old_out" || fail "the replaced watcher exited for another reason, not by standing down: $(cat "$old_out")"
   kill "$new" 2>/dev/null || true
   wait "$new" 2>/dev/null || true
+}
+
+test_watch_replaces_live_holder_with_legacy_local_time_identity() {
+  run_legacy_identity_takeover watch-legacy-local-time-identity 0
   pass "a fresh watcher replaces a live holder whose pre-UTC-pin identity no longer recomputes, and the old holder stands down unsignalled"
+}
+
+test_watch_replaced_holder_stands_down_after_successor_exits() {
+  # The successor delivers its recovery wake and exits, releasing the lock,
+  # before the old holder looks again. That released lock is not a torn-down
+  # state directory, so the old holder still stands down with exit 0.
+  run_legacy_identity_takeover watch-legacy-identity-successor-exited 1
+  pass "a replaced holder stands down cleanly even when its successor has already exited and released the lock"
 }
 
 test_guard_warnings() {
@@ -1819,6 +1877,7 @@ test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_live_stalled_watch_lock_is_replaced_past_hard_bound
 test_watch_replaces_live_holder_with_legacy_local_time_identity
+test_watch_replaced_holder_stands_down_after_successor_exits
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock

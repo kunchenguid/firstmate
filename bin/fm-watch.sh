@@ -3546,6 +3546,14 @@ FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
+# Hold this state directory open for the main loop's teardown check: a
+# directory recreated at the same path is then a different directory, and the
+# held descriptor keeps its inode from being reused. A host that cannot open a
+# directory keeps reading a lock with no holder as a teardown.
+WATCH_STATE_HELD=0
+if { exec 6<"$STATE"; } 2>/dev/null; then
+  WATCH_STATE_HELD=1
+fi
 
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
@@ -3624,13 +3632,11 @@ while :; do
   # into nothing, or into a live home from a checkout that no longer exists.
   # A detached helper this watcher started (home-summary refresh, reconcile)
   # can recreate a deleted state directory before the next poll, so a lock
-  # with no holder at all is read as the same teardown: only a fresh watcher
-  # ever recreates the lock, and that case is the self-eviction below. A
-  # successor reclaiming this watcher's lock removes it before relinking it
-  # under the steal mutex, so a missing holder during a steal is that
-  # self-eviction too, not a teardown. The holder is re-read after the steal
-  # mutex, so a steal that finished between the first two reads is not read as
-  # a teardown either.
+  # with no holder at all is read as the same teardown when the state directory
+  # is no longer the one this watcher holds open. A lock with no holder in the
+  # same directory was released by a successor - one still relinking the lock
+  # it reclaimed from this watcher, or one that already delivered its wake and
+  # exited before this poll - so it is the self-eviction below.
   # Scoped to this process alone: no other watcher is signalled.
   if [ "$WATCH_HOME_EXISTED" -eq 1 ] && [ ! -d "$FM_HOME" ]; then
     echo "watcher: exiting - home no longer exists: $FM_HOME" >&2
@@ -3638,7 +3644,8 @@ while :; do
   elif [ ! -d "$STATE" ]; then
     echo "watcher: exiting - state directory no longer exists: $STATE" >&2
     exit 1
-  elif [ ! -e "$WATCH_LOCK/pid" ] && [ ! -e "$WATCH_LOCK.steal" ] && [ ! -e "$WATCH_LOCK/pid" ]; then
+  elif [ ! -e "$WATCH_LOCK/pid" ] \
+    && { [ "$WATCH_STATE_HELD" -ne 1 ] || [ ! /dev/fd/6 -ef "$STATE" ]; }; then
     echo "watcher: exiting - state directory was torn down (singleton lock removed): $STATE" >&2
     exit 1
   elif [ ! -d "$SCRIPT_DIR" ]; then
