@@ -74,6 +74,12 @@ die() {
   exit 1
 }
 
+require_linux() {
+  local platform
+  platform=$(uname -s 2>/dev/null) || die 'cannot determine platform; Linux is required'
+  [ "$platform" = Linux ] || die 'unsupported platform; Linux is required'
+}
+
 log() {
   printf 'fm-zalo-folder-qa: %s\n' "$*" >&2
 }
@@ -252,7 +258,7 @@ urlencode() {
 zalo_request() { # <method> <json-body> <max-seconds>
   local method=$1 body=$2 max_seconds=$3 url
   url=$ZALO_API_ORIGIN/bot$ZALO_BOT_TOKEN/$method
-  printf '%s' "$body" | curl --silent --show-error --max-time "$max_seconds" \
+  printf '%s' "$body" | curl --disable --silent --show-error --max-time "$max_seconds" \
     --request POST --header 'Content-Type: application/json' --data-binary @- \
     --config /dev/fd/3 3< <(printf 'url = "%s"\n' "$url")
 }
@@ -265,7 +271,7 @@ refresh_graph_token() {
   unset refresh
   body="grant_type=refresh_token&client_id=$GRAPH_CLIENT_ID&refresh_token=$encoded&scope=offline_access%20Files.Read"
   unset encoded
-  raw=$(printf '%s' "$body" | curl --silent --show-error --max-time 30 \
+  raw=$(printf '%s' "$body" | curl --disable --silent --show-error --max-time 30 \
     --request POST --header 'Content-Type: application/x-www-form-urlencoded' \
     --data-binary @- "$GRAPH_TOKEN_URL") || return 1
   unset body
@@ -287,7 +293,7 @@ refresh_graph_token() {
 
 graph_request() { # <url>
   local url=$1
-  curl --silent --show-error --max-time 30 --config /dev/fd/3 \
+  curl --disable --silent --show-error --max-time 30 --config /dev/fd/3 \
     3< <(printf 'url = "%s"\nheader = "Authorization: Bearer %s"\n' "$url" "$GRAPH_ACCESS_TOKEN")
 }
 
@@ -423,7 +429,7 @@ read_receipt_state() {
 }
 
 sync_path() {
-  python3 - "$1" "$2" <<'PY'
+  python3 -I -S - "$1" "$2" <<'PY'
 import os
 import stat
 import sys
@@ -441,15 +447,7 @@ try:
         raise OSError("synchronization target is not a regular file")
     if kind == "directory" and not stat.S_ISDIR(mode):
         raise OSError("synchronization target is not a directory")
-    if sys.platform == "darwin":
-        import fcntl
-
-        fullfsync = getattr(fcntl, "F_FULLFSYNC", None)
-        if fullfsync is None:
-            raise OSError("F_FULLFSYNC is unavailable")
-        fcntl.fcntl(fd, fullfsync)
-    else:
-        os.fsync(fd)
+    os.fsync(fd)
 finally:
     os.close(fd)
 PY
@@ -614,6 +612,8 @@ cmd_run() {
       || die 'reply was acknowledged but receipt transition failed; operator reconciliation required'
   done
 }
+
+require_linux
 
 case "${1:-}" in
   check)

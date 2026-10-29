@@ -10,12 +10,14 @@ TMP_ROOT=$(fm_test_tmproot zalo-folder-qa)
 HOME_DIR="$TMP_ROOT/home"
 FAKEBIN="$TMP_ROOT/fakebin"
 NO_FLOCK_BIN="$TMP_ROOT/no-flock-bin"
-PYTHON_FIXTURE="$TMP_ROOT/python-fixture"
+PYTHON_INJECTION_DIR="$TMP_ROOT/python-injection"
+PYTHON_INJECTION_MARKER="$TMP_ROOT/python-injection-loaded"
+HOSTILE_CURL_HOME="$TMP_ROOT/hostile-curl-home"
+HOSTILE_CURLRC_MARKER="$TMP_ROOT/hostile-curlrc-loaded"
 FAKE_LOG_DIR="$TMP_ROOT/curl-log"
 CONFIG_FILE="$HOME_DIR/config/zalo-folder-qa.env"
 REFRESH_FILE="$HOME_DIR/config/graph-refresh-token"
 UPDATE_QUEUE="$TMP_ROOT/update-queue.jsonl"
-DURABILITY_CALL_LOG="$TMP_ROOT/durability-call.log"
 ORIGINAL_PATH=$PATH
 FAKE_ZALO_TOKEN=fake-zalo-private-token
 FAKE_BOT_ID=bot-mac
@@ -30,9 +32,7 @@ FAKE_RECEIPT_IO_MODE=exact
 FAKE_RECEIPT_SYNC_FAIL_AT=0
 FAKE_RECEIPT_SYNC_PAUSE_AT=0
 FAKE_RECEIPT_SYNC_CRASH_AT=0
-FAKE_SYNC_PLATFORM=native
-FAKE_FULLFSYNC_MODE=success
-FAKE_FULLFSYNC_FAIL_AT=0
+FAKE_PLATFORM_MODE=linux
 RECEIPT_SYNC_COUNTER="$TMP_ROOT/receipt-sync-counter"
 RECEIPT_SYNC_PAUSE_READY="$TMP_ROOT/receipt-sync-pause-ready"
 RECEIPT_SYNC_PAUSE_RELEASE="$TMP_ROOT/receipt-sync-pause-release"
@@ -41,66 +41,50 @@ export ORIGINAL_PATH FAKE_LOG_DIR UPDATE_QUEUE FAKE_GRAPH_MODE FAKE_BOT_MODE FAK
 export FAKE_RECEIPT_IO_MODE FAKE_RECEIPT_SYNC_FAIL_AT FAKE_RECEIPT_SYNC_PAUSE_AT
 export FAKE_RECEIPT_SYNC_CRASH_AT RECEIPT_SYNC_COUNTER RECEIPT_SYNC_PAUSE_READY
 export RECEIPT_SYNC_PAUSE_RELEASE
-export PYTHON_FIXTURE DURABILITY_CALL_LOG FAKE_SYNC_PLATFORM FAKE_FULLFSYNC_MODE
-export FAKE_FULLFSYNC_FAIL_AT
+export PYTHON_INJECTION_DIR PYTHON_INJECTION_MARKER HOSTILE_CURL_HOME HOSTILE_CURLRC_MARKER
+export FAKE_PLATFORM_MODE
 export FAKE_BOT_ID FAKE_DRIVE_ID FAKE_FOLDER_ID
 
-mkdir -p "$HOME_DIR/config" "$HOME_DIR/state" "$FAKEBIN" "$FAKE_LOG_DIR" "$PYTHON_FIXTURE"
-chmod 700 "$HOME_DIR/config" "$HOME_DIR/state" "$FAKEBIN" "$FAKE_LOG_DIR" "$PYTHON_FIXTURE"
+mkdir -p "$HOME_DIR/config" "$HOME_DIR/state" "$FAKEBIN" "$FAKE_LOG_DIR" \
+  "$PYTHON_INJECTION_DIR" "$HOSTILE_CURL_HOME"
+chmod 700 "$HOME_DIR/config" "$HOME_DIR/state" "$FAKEBIN" "$FAKE_LOG_DIR" \
+  "$PYTHON_INJECTION_DIR" "$HOSTILE_CURL_HOME"
 printf '%s\n' fake-refresh-token > "$REFRESH_FILE"
 chmod 600 "$REFRESH_FILE"
 : > "$UPDATE_QUEUE"
 
-cat > "$PYTHON_FIXTURE/sitecustomize.py" <<'PY'
+cat > "$PYTHON_INJECTION_DIR/sitecustomize.py" <<'PY'
 import os
-import sys
-import types
 
-platform = os.environ.get("FAKE_SYNC_PLATFORM", "native")
-mode = os.environ.get("FAKE_FULLFSYNC_MODE", "success")
-fail_at = int(os.environ.get("FAKE_FULLFSYNC_FAIL_AT", "0"))
-log_path = os.environ["DURABILITY_CALL_LOG"]
-
-
-def record(value):
-    with open(log_path, "a", encoding="ascii") as stream:
-        stream.write(value + "\n")
-    with open(log_path, encoding="ascii") as stream:
-        return sum(1 for _ in stream)
-
-
-if platform == "linux":
-    sys.platform = "linux"
-
-    def fsync(_fd):
-        record("fsync")
-
-    os.fsync = fsync
-elif platform == "darwin":
-    sys.platform = "darwin"
-
-    def fsync(_fd):
-        raise OSError("plain fsync is forbidden by the Darwin fixture")
-
-    os.fsync = fsync
-    module = types.ModuleType("fcntl")
-    if mode != "unavailable":
-        module.F_FULLFSYNC = 4242
-
-        def fullfsync(_fd, command, _arg=0):
-            call = record(f"fullfsync:{command}")
-            if mode == "failure" and call == fail_at:
-                raise OSError("synthetic F_FULLFSYNC failure")
-            return 0
-
-        module.fcntl = fullfsync
-    sys.modules["fcntl"] = module
+with open(os.environ["PYTHON_INJECTION_MARKER"], "w", encoding="ascii") as stream:
+    stream.write("loaded\n")
+os.fsync = lambda _fd: None
 PY
+
+cat > "$HOSTILE_CURL_HOME/.curlrc" <<EOF
+--trace-ascii "$HOSTILE_CURLRC_MARKER"
+url = "https://hostile.invalid/"
+EOF
+
+cat > "$FAKEBIN/uname" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$FAKE_PLATFORM_MODE" in
+  linux) printf '%s\n' Linux ;;
+  unsupported) printf '%s\n' Darwin ;;
+  *) exit 2 ;;
+esac
+SH
 
 printf '%s\n' '#!/usr/bin/env bash' > "$FAKEBIN/curl"
 chmod 700 "$FAKEBIN/curl"
 apply_fake_curl=$(cat <<'SH'
 set -u
+if [ "${1:-}" != --disable ] && [ "${HOME:-}" = "$HOSTILE_CURL_HOME" ] \
+  && [ -s "$HOSTILE_CURL_HOME/.curlrc" ]; then
+  printf '%s\n' loaded > "$HOSTILE_CURLRC_MARKER"
+  exit 97
+fi
 config=
 if { : <&3; } 2>/dev/null; then
   config=$(cat <&3)
@@ -234,6 +218,7 @@ SH
 cat > "$FAKEBIN/python3" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ "${1:-}" = -I ] && [ "${2:-}" = -S ] || exit 98
 counter=0
 if [ -f "$RECEIPT_SYNC_COUNTER" ]; then
   IFS= read -r counter < "$RECEIPT_SYNC_COUNTER"
@@ -253,9 +238,10 @@ fi
 if [ "$FAKE_RECEIPT_SYNC_FAIL_AT" -eq "$counter" ]; then
   exit 1
 fi
-PYTHONPATH=$PYTHON_FIXTURE PATH=$ORIGINAL_PATH exec python3 "$@"
+PATH=$ORIGINAL_PATH exec python3 "$@"
 SH
-chmod 700 "$FAKEBIN/mktemp" "$FAKEBIN/ln" "$FAKEBIN/rm" "$FAKEBIN/python3"
+chmod 700 "$FAKEBIN/mktemp" "$FAKEBIN/ln" "$FAKEBIN/rm" "$FAKEBIN/python3" \
+  "$FAKEBIN/uname"
 
 write_config() { # <group-id> <drive-id> <folder-id> [refresh-file] [max-seen]
   local max_seen=$FAKE_MAX_SEEN_RECEIPTS
@@ -274,7 +260,7 @@ write_config() { # <group-id> <drive-id> <folder-id> [refresh-file] [max-seen]
 reset_runtime() {
   rm -rf "$FAKE_LOG_DIR" "$HOME_DIR/state/zalo-folder-qa"
   rm -f "$RECEIPT_SYNC_COUNTER" "$RECEIPT_SYNC_PAUSE_READY" "$RECEIPT_SYNC_PAUSE_RELEASE" \
-    "$DURABILITY_CALL_LOG"
+    "$PYTHON_INJECTION_MARKER" "$HOSTILE_CURLRC_MARKER"
   mkdir -m 700 "$FAKE_LOG_DIR"
   : > "$UPDATE_QUEUE"
   FAKE_GRAPH_MODE=exact
@@ -284,12 +270,10 @@ reset_runtime() {
   FAKE_RECEIPT_SYNC_FAIL_AT=0
   FAKE_RECEIPT_SYNC_PAUSE_AT=0
   FAKE_RECEIPT_SYNC_CRASH_AT=0
-  FAKE_SYNC_PLATFORM=native
-  FAKE_FULLFSYNC_MODE=success
-  FAKE_FULLFSYNC_FAIL_AT=0
+  FAKE_PLATFORM_MODE=linux
   export FAKE_GRAPH_MODE FAKE_BOT_MODE FAKE_SEND_MODE FAKE_RECEIPT_IO_MODE
   export FAKE_RECEIPT_SYNC_FAIL_AT FAKE_RECEIPT_SYNC_PAUSE_AT FAKE_RECEIPT_SYNC_CRASH_AT
-  export FAKE_SYNC_PLATFORM FAKE_FULLFSYNC_MODE FAKE_FULLFSYNC_FAIL_AT
+  export FAKE_PLATFORM_MODE
 }
 
 wait_for_path() {
@@ -338,6 +322,22 @@ run_tool() {
   "$TOOL" "$@"
 }
 
+run_tool_with_hostile_curlrc() {
+  HOME="$HOSTILE_CURL_HOME" \
+  FM_HOME="$HOME_DIR" \
+  FM_ZALO_FOLDER_QA_CONFIG="$CONFIG_FILE" \
+  PATH="$FAKEBIN:$ORIGINAL_PATH" \
+  "$TOOL" "$@"
+}
+
+run_tool_with_python_injection() {
+  PYTHONPATH="$PYTHON_INJECTION_DIR" \
+  FM_HOME="$HOME_DIR" \
+  FM_ZALO_FOLDER_QA_CONFIG="$CONFIG_FILE" \
+  PATH="$FAKEBIN:$ORIGINAL_PATH" \
+  "$TOOL" "$@"
+}
+
 run_tool_with_state_root() {
   local state_root=$1
   shift
@@ -352,7 +352,7 @@ run_tool_without_flock() {
   local name resolved
   rm -rf "$NO_FLOCK_BIN"
   mkdir -m 700 "$NO_FLOCK_BIN"
-  for name in bash basename cat chmod date dirname id jq mkdir mv od ps readlink rmdir sed sh stat tr uname; do
+  for name in bash basename cat chmod date dirname id jq mkdir mv od ps readlink rmdir sed sh stat tr; do
     resolved=$(PATH="$ORIGINAL_PATH" command -v "$name") \
       || fail "no-flock fixture cannot resolve required command: $name"
     ln -s "$resolved" "$NO_FLOCK_BIN/$name"
@@ -426,16 +426,36 @@ receipt_state() {
   cat "$state"
 }
 
-durability_call_count() {
-  local expected=$1 count=0 call
-  [ -f "$DURABILITY_CALL_LOG" ] || {
-    printf '0\n'
-    return 0
-  }
-  while IFS= read -r call; do
-    [ "$call" != "$expected" ] || count=$((count + 1))
-  done < "$DURABILITY_CALL_LOG"
-  printf '%s\n' "$count"
+test_unsupported_platform_stops_before_inputs_or_state() {
+  local command output rc held_config=$CONFIG_FILE.held
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  reset_runtime
+  mv "$CONFIG_FILE" "$held_config"
+  FAKE_PLATFORM_MODE=unsupported
+  export FAKE_PLATFORM_MODE
+  for command in check source-status handle run; do
+    if [ "$command" = handle ]; then
+      output=$(printf '%s' '{}' | run_tool handle 2>&1)
+    else
+      output=$(run_tool "$command" 2>&1)
+    fi
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "unsupported platform accepted $command"
+    case "$output" in
+      *'unsupported platform; Linux is required'*) ;;
+      *) fail "unsupported platform $command reached another boundary" ;;
+    esac
+  done
+  mv "$held_config" "$CONFIG_FILE"
+  FAKE_PLATFORM_MODE=linux
+  export FAKE_PLATFORM_MODE
+  [ ! -e "$HOME_DIR/state/zalo-folder-qa" ] \
+    || fail 'unsupported platform created bridge state'
+  [ ! -e "$RECEIPT_SYNC_COUNTER" ] \
+    || fail 'unsupported platform reached durability synchronization'
+  [ ! -e "$FAKE_LOG_DIR/counter" ] \
+    || fail 'unsupported platform contacted a transport'
+  pass 'unsupported platforms stop before inputs, state, or transports'
 }
 
 test_required_private_pins_fail_closed() {
@@ -639,6 +659,34 @@ test_source_status_rejects_drive_folder_and_malformed_responses() {
     assert_json_field "$output" '.reason' "$expected" "$mode reason"
   done
   pass 'drive, folder, token-scope, and malformed Graph responses fail closed'
+}
+
+test_curl_disables_hostile_default_config() {
+  local output rc event
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  reset_runtime
+  output=$(run_tool_with_hostile_curlrc source-status) || fail 'hostile-curlrc source probe failed'
+  assert_json_field "$output" '.reason' freshness-policy-undefined 'hostile-curlrc source reason'
+  [ "$(call_count 'login.microsoftonline.com')" -eq 1 ] \
+    || fail 'hostile-curlrc source probe did not request one Graph token'
+  [ "$(call_count '/drives/')" -eq 1 ] \
+    || fail 'hostile-curlrc source probe did not request one pinned folder'
+  [ ! -e "$HOSTILE_CURLRC_MARKER" ] || fail 'Graph transport loaded the hostile curlrc'
+
+  reset_runtime
+  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' curlrc-1)
+  queue_event "$event"
+  output=$(run_tool_with_hostile_curlrc run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'terminal fake poll did not stop hostile-curlrc run'
+  [ "$(call_count '/getMe')" -eq 1 ] || fail 'hostile-curlrc run did not verify once'
+  [ "$(call_count '/getUpdates')" -eq 2 ] || fail 'hostile-curlrc run did not finish the fake event path'
+  [ "$(call_count '/sendMessage')" -eq 1 ] || fail 'hostile-curlrc run did not send the fixed reply once'
+  [ ! -e "$HOSTILE_CURLRC_MARKER" ] || fail 'Zalo transport loaded the hostile curlrc'
+  case "$output" in
+    *"$FAKE_ZALO_TOKEN"*|*fake-refresh-token*) fail 'hostile-curlrc run exposed a token' ;;
+  esac
+  pass 'credential-bearing curl calls ignore hostile default configuration'
 }
 
 test_run_rejects_bot_identity_before_polling() {
@@ -882,100 +930,32 @@ test_run_stops_on_receipt_sync_errors() {
   pass 'file and directory sync failures stop at both receipt transitions'
 }
 
-test_run_uses_platform_durability_barriers() {
-  local output rc event fail_at expected_getme expected_polls expected_sends expected_state
+test_sync_ignores_ambient_python_injection() {
+  local output rc event
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
-  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' platform-sync-1)
-
   reset_runtime
-  FAKE_SYNC_PLATFORM=linux
-  export FAKE_SYNC_PLATFORM
-  output=$(run_tool run 2>&1)
-  rc=$?
-  [ "$rc" -ne 0 ] || fail 'terminal fake poll did not stop synthetic Linux run'
-  [ "$(durability_call_count fsync)" -eq 8 ] \
-    || fail 'non-Darwin synchronization did not retain fsync for every state barrier'
-  [ "$(durability_call_count fullfsync:4242)" -eq 0 ] \
-    || fail 'non-Darwin synchronization used the Darwin primitive'
-  [ "$(call_count '/getMe')" -eq 1 ] || fail 'synthetic Linux run did not verify after synchronization'
-  [ "$(call_count '/getUpdates')" -eq 1 ] || fail 'synthetic Linux run did not poll after synchronization'
-  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'synthetic Linux run sent without an event'
-
-  reset_runtime
+  PYTHONPATH="$PYTHON_INJECTION_DIR" PATH="$ORIGINAL_PATH" python3 -c 'pass' \
+    || fail 'ambient Python injection control did not execute'
+  [ -e "$PYTHON_INJECTION_MARKER" ] \
+    || fail 'ambient Python injection fixture was not active'
+  rm -f "$PYTHON_INJECTION_MARKER"
+  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' isolated-sync-1)
   queue_event "$event"
-  FAKE_SYNC_PLATFORM=darwin
-  export FAKE_SYNC_PLATFORM
-  output=$(run_tool run 2>&1)
+  output=$(run_tool_with_python_injection run 2>&1)
   rc=$?
-  [ "$rc" -ne 0 ] || fail 'terminal fake poll did not stop synthetic Darwin run'
-  [ "$(durability_call_count fullfsync:4242)" -eq 12 ] \
-    || fail 'Darwin did not use F_FULLFSYNC for every state and receipt barrier'
-  [ "$(durability_call_count fsync)" -eq 0 ] || fail 'Darwin fell back to plain fsync'
-  [ "$(call_count '/getMe')" -eq 1 ] || fail 'synthetic Darwin run did not verify after synchronization'
-  [ "$(call_count '/getUpdates')" -eq 2 ] || fail 'synthetic Darwin run did not finish the fake event path'
-  [ "$(call_count '/sendMessage')" -eq 1 ] || fail 'synthetic Darwin run did not send the fixed reply once'
-  [ "$(receipt_state)" = sent ] || fail 'synthetic Darwin run did not durably reach sent'
-
-  reset_runtime
-  queue_event "$event"
-  FAKE_SYNC_PLATFORM=darwin
-  FAKE_FULLFSYNC_MODE=unavailable
-  export FAKE_SYNC_PLATFORM FAKE_FULLFSYNC_MODE
-  output=$(run_tool run 2>&1)
-  rc=$?
-  [ "$rc" -ne 0 ] || fail 'Darwin accepted an unavailable F_FULLFSYNC primitive'
-  [ "$(cat "$RECEIPT_SYNC_COUNTER")" -eq 1 ] \
-    || fail 'unavailable F_FULLFSYNC continued state synchronization'
-  [ "$(call_count '/getMe')" -eq 0 ] || fail 'unavailable F_FULLFSYNC reached bot verification'
-  [ "$(call_count '/getUpdates')" -eq 0 ] || fail 'unavailable F_FULLFSYNC reached polling'
-  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'unavailable F_FULLFSYNC sent a message'
-
-  for fail_at in 1 9 11; do
-    reset_runtime
-    queue_event "$event"
-    FAKE_SYNC_PLATFORM=darwin
-    FAKE_FULLFSYNC_MODE=failure
-    FAKE_FULLFSYNC_FAIL_AT=$fail_at
-    export FAKE_SYNC_PLATFORM FAKE_FULLFSYNC_MODE FAKE_FULLFSYNC_FAIL_AT
-    output=$(run_tool run 2>&1)
-    rc=$?
-    [ "$rc" -ne 0 ] || fail "Darwin F_FULLFSYNC failure $fail_at did not stop run"
-    [ "$(durability_call_count fullfsync:4242)" -eq "$fail_at" ] \
-      || fail "Darwin F_FULLFSYNC failure $fail_at crossed another durability barrier"
-    expected_getme=1
-    expected_polls=1
-    expected_sends=0
-    expected_state=
-    case "$fail_at" in
-      1)
-        expected_getme=0
-        expected_polls=0
-        ;;
-      9) ;;
-      11)
-        expected_sends=1
-        expected_state=pending
-        ;;
-    esac
-    [ "$(call_count '/getMe')" -eq "$expected_getme" ] \
-      || fail "Darwin F_FULLFSYNC failure $fail_at crossed the verification boundary"
-    [ "$(call_count '/getUpdates')" -eq "$expected_polls" ] \
-      || fail "Darwin F_FULLFSYNC failure $fail_at crossed the polling boundary"
-    [ "$(call_count '/sendMessage')" -eq "$expected_sends" ] \
-      || fail "Darwin F_FULLFSYNC failure $fail_at crossed the send boundary"
-    if [ -n "$expected_state" ]; then
-      [ "$(receipt_state)" = "$expected_state" ] \
-        || fail "Darwin F_FULLFSYNC failure $fail_at left the wrong receipt state"
-    else
-      [ "$(receipt_count)" -eq 0 ] \
-        || fail "Darwin F_FULLFSYNC failure $fail_at published an unsafe receipt"
-    fi
-    case "$output" in
-      *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) \
-        fail "Darwin F_FULLFSYNC failure $fail_at exposed a private value" ;;
-    esac
-  done
-  pass 'platform-specific durability barriers fail closed around external operations'
+  [ "$rc" -ne 0 ] || fail 'terminal fake poll did not stop isolated-sync run'
+  [ ! -e "$PYTHON_INJECTION_MARKER" ] \
+    || fail 'durability helper loaded ambient sitecustomize code'
+  [ "$(cat "$RECEIPT_SYNC_COUNTER")" -eq 12 ] \
+    || fail 'isolated durability helper did not complete all state and receipt barriers'
+  [ "$(call_count '/getMe')" -eq 1 ] || fail 'isolated-sync run did not verify once'
+  [ "$(call_count '/getUpdates')" -eq 2 ] || fail 'isolated-sync run did not finish the fake event path'
+  [ "$(call_count '/sendMessage')" -eq 1 ] || fail 'isolated-sync run did not send the fixed reply once'
+  [ "$(receipt_state)" = sent ] || fail 'isolated-sync run did not durably reach sent'
+  case "$output" in
+    *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) fail 'isolated-sync run exposed a private value' ;;
+  esac
+  pass 'durability helper ignores ambient Python injection'
 }
 
 test_run_durably_publishes_first_use_state() {
@@ -1155,6 +1135,7 @@ test_run_fails_closed_on_malformed_send_and_has_no_reply_command() {
 }
 
 fm_test_run \
+  test_unsupported_platform_stops_before_inputs_or_state \
   test_required_private_pins_fail_closed \
   test_seen_receipt_capacity_is_required_and_bounded \
   test_private_files_reject_mode_symlink_hardlink_and_nonregular \
@@ -1164,6 +1145,7 @@ fm_test_run \
   test_every_exact_group_question_is_unavailable_offline \
   test_source_status_pins_drive_and_folder_without_freshness_claim \
   test_source_status_rejects_drive_folder_and_malformed_responses \
+  test_curl_disables_hostile_default_config \
   test_run_rejects_bot_identity_before_polling \
   test_run_acquires_portable_lock_without_flock \
   test_run_never_sends_for_dm_wrong_group_or_malformed_poll \
@@ -1172,7 +1154,7 @@ fm_test_run \
   test_run_stops_before_receipt_capacity_overflow \
   test_run_stops_on_receipt_io_errors \
   test_run_stops_on_receipt_sync_errors \
-  test_run_uses_platform_durability_barriers \
+  test_sync_ignores_ambient_python_injection \
   test_run_durably_publishes_first_use_state \
   test_run_serializes_and_recovers_state_publication \
   test_run_fails_closed_on_malformed_send_and_has_no_reply_command
