@@ -711,11 +711,17 @@ def metadata_spawn_generation(metadata_fd: int) -> str:
         text = read_all(metadata_fd).decode("utf-8")
     except UnicodeDecodeError:
         fail("task metadata is not valid UTF-8")
-    values = [line.partition("=")[2] for line in text.splitlines() if line.partition("=")[0] == "spawn_gen"]
-    if len(values) != 1:
-        fail("task metadata must contain exactly one spawn_gen for record export")
-    safe_component(values[0], "spawn_gen for record export archive")
-    return values[0]
+    generations = {
+        name: [line.partition("=")[2] for line in text.splitlines() if line.partition("=")[0] == name]
+        for name in ("spawn_gen", "remote_spawn_gen", "fleet_seat_generation")
+    }
+    if any(len(values) > 1 for values in generations.values()):
+        fail("task metadata must contain at most one value for each record export generation field")
+    generation = next((values[0] for values in generations.values() if values), None)
+    if generation is None:
+        fail("task metadata must contain a generation for record export")
+    safe_component(generation, "spawn_gen for record export archive")
+    return generation
 
 
 def copy_archive_source(source: ArchiveSource, stage_fd: int) -> dict[str, object]:
