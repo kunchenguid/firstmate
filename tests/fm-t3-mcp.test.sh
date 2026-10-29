@@ -547,6 +547,44 @@ test_resolve_selection_uses_t3_catalog() {
   pass "fm-t3-mcp resolve-selection: driver, model, and options come from T3's catalog; an effort override keeps other options"
 }
 
+test_resolve_selection_reads_values_catalog_shape() {
+  local project
+  fresh_case resolve-selection-values
+  mcp project-ensure --root "$TMP_ROOT/proj"
+  project=$(field "$OUT" projectId)
+  # T3 0.1.3 describes an option as {id, values} with the choices inline, a
+  # boolean option as values [false, true] with no type, and sets the project
+  # default from that same catalog.
+  FM_T3_ID="$project" t3_fake_set '
+w.providers = [{ providerInstanceId: "claudeAgent", driverKind: "claudeAgent", constraints: [], models: [{
+  id: "claude-opus-5-5", label: "Claude Opus 5.5", options: [
+    { id: "effort", values: ["low", "medium", "high", "xhigh", "max"], default: "medium" },
+    { id: "fastMode", values: [false, true] },
+    { id: "bare", label: "bare" },
+  ] }] }];
+w.projects.find((p) => p.id === process.env.FM_T3_ID).defaultModelSelection = { instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "high" }, { id: "fastMode", value: true }] }'
+  mcp resolve-selection --harness claude --instance claudeAgent --model claude-opus-5-5 --effort low --project "$project"
+  expect_code 0 "$RC" "an effort the values catalog lists resolves: $ERR"
+  assert_equals '{"instanceId":"claudeAgent","model":"claude-opus-5-5","options":[{"id":"effort","value":"low"}]}' \
+    "$(field "$OUT" selection)" "the selection carries the requested effort"
+  mcp resolve-selection --harness claude --instance claudeAgent --model default --effort default --project "$project"
+  expect_code 0 "$RC" "a project default carrying a select and a boolean option resolves: $ERR"
+  assert_equals '{"instanceId":"claudeAgent","model":"claude-opus-5-5","options":[{"id":"effort","value":"high"},{"id":"fastMode","value":true}]}' \
+    "$(field "$OUT" selection)" "the project default is kept whole"
+  mcp resolve-selection --harness claude --instance claudeAgent --model claude-opus-5-5 --effort turbo --project "$project"
+  expect_code 4 "$RC" "an effort the values catalog lacks is refused"
+  assert_contains "$ERR" "is not one of low, medium, high, xhigh, max" "the refusal lists the catalog's values"
+  FM_T3_ID="$project" t3_fake_set 'w.projects.find((p) => p.id === process.env.FM_T3_ID).defaultModelSelection.options = [{ id: "fastMode", value: "yes" }]'
+  mcp resolve-selection --harness claude --instance claudeAgent --model default --effort default --project "$project"
+  expect_code 4 "$RC" "a non-boolean value for a values [false, true] option is refused"
+  assert_contains "$ERR" "takes true or false" "the refusal names the boolean contract"
+  FM_T3_ID="$project" t3_fake_set 'w.projects.find((p) => p.id === process.env.FM_T3_ID).defaultModelSelection.options = [{ id: "bare", value: "anything" }]'
+  mcp resolve-selection --harness claude --instance claudeAgent --model default --effort default --project "$project"
+  expect_code 4 "$RC" "a descriptor with neither values nor options never passes a value"
+  assert_contains "$ERR" "option 'bare' value 'anything' is not one of" "the refusal names the empty catalog"
+  pass "fm-t3-mcp resolve-selection: the {id, values} catalog shape is read for selects and booleans; a bare descriptor still refuses"
+}
+
 test_launch_reads_back_full_configuration() {
   local project sel='{"instanceId":"codex","model":"gpt-5.6-sol","options":[{"id":"reasoningEffort","value":"high"},{"id":"serviceTier","value":"priority"}]}'
   fresh_case launch-config
@@ -820,6 +858,7 @@ test_interrupt_confirms_only_the_interrupted_run
 test_send_lost_reply_is_unconfirmed_and_retry_is_one_delivery
 test_thread_for_root_pages_and_forks
 test_resolve_selection_uses_t3_catalog
+test_resolve_selection_reads_values_catalog_shape
 test_launch_reads_back_full_configuration
 test_requests_and_respond
 test_watch_is_event_driven_and_bounded

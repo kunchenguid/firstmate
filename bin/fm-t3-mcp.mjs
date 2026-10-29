@@ -760,12 +760,17 @@ function modelSelection(flags) {
 }
 
 // An option selection is valid when the model's catalog describes its id and,
-// for a select, lists its value; a boolean option takes a boolean.
+// for a select, lists its value; a boolean option takes a boolean. T3 has
+// described an option two ways: `{type: "select", options: [{id}]}` with
+// `{type: "boolean"}` (T3 <= 0.1.2), and `{values: [...]}` holding the
+// choices themselves, a boolean option carrying `values: [false, true]` and
+// no type (T3 0.1.3). Both are read; a descriptor listing neither is refused.
 function optionProblem(model, option) {
   const descriptor = (model.options ?? []).find((d) => d.id === option.id);
   if (!descriptor) return `option '${option.id}' is not one model ${model.id} offers`;
-  if (descriptor.type === "boolean") return typeof option.value === "boolean" ? null : `option '${option.id}' takes true or false`;
-  const values = (descriptor.options ?? []).map((c) => c.id);
+  const values = Array.isArray(descriptor.values) ? descriptor.values : (descriptor.options ?? []).map((c) => c.id);
+  const boolean = descriptor.type === "boolean" || (values.length > 0 && values.every((v) => typeof v === "boolean"));
+  if (boolean) return typeof option.value === "boolean" ? null : `option '${option.id}' takes true or false`;
   return values.includes(option.value) ? null : `option '${option.id}' value '${option.value}' is not one of ${values.join(", ")} for model ${model.id}`;
 }
 
