@@ -3644,7 +3644,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
     if [ "$child_backend" = rex ]; then
       [ -n "$(meta_value "$child_meta" rex_server)" ] && [ "$(meta_value "$child_meta" rex_server)" = "$(fm_backend_rex_server_endpoint)" ] || return 1
     elif [ "$child_backend" = t3code ]; then
-      fm_backend_t3code_server_matches "$(meta_value "$child_meta" t3_server)" || return 1
+      t3_server_for_meta "$child_meta" >/dev/null || return 1
     fi
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -3705,7 +3705,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 archive_parent=${2:-$ID} home=$1 archive_parent=${2:-$ID} archive_parent child_backend child_busy_gen child_gen child_home child_id child_inventory_rc child_kind child_ledger child_meta child_orca_worktree_id child_owner_rc child_pool_slot child_proj child_return_rc child_rex_home child_route child_socket child_t child_windows child_wt home sub_state
+  local home=$1 archive_parent=${2:-$ID} home=$1 archive_parent=${2:-$ID} archive_parent child_backend child_busy_gen child_gen child_home child_id child_inventory_rc child_kind child_ledger child_meta child_orca_worktree_id child_owner_rc child_pool_slot child_proj child_return_rc child_rex_home child_route child_socket child_t child_windows child_wt child_server home sub_state
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3797,7 +3797,11 @@ cleanup_firstmate_home_children() {
           fm_backend_kill "$child_backend" "$child_t" "" "fm-$child_id" "$(meta_value "$child_meta" rex_server)" ) \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       else
-        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "$(meta_value "$child_meta" "${child_backend%code}_server")" \
+        child_server=$(meta_value "$child_meta" "${child_backend%code}_server")
+        if [ "$child_backend" = t3code ]; then
+          child_server=$(t3_server_for_meta "$child_meta") || return 1
+        fi
+        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "$child_server" \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
@@ -3889,6 +3893,17 @@ cleanup_firstmate_home_children() {
   done
 }
 
+t3_server_for_meta() {  # <task-meta> -> the verified server identity for this cleanup
+  local recorded
+  recorded=$(fm_meta_get "$1" t3_server)
+  if [ -n "$recorded" ]; then
+    fm_backend_t3code_server_matches "$recorded" || return 1
+    printf '%s' "$recorded"
+  else
+    fm_backend_t3code_server_identity
+  fi
+}
+
 remove_secondmate_registry_entry() {
   local id=$1 tmp lock rc=0 acquired=0
   [ -f "$SECONDMATE_REG" ] || return 0
@@ -3908,8 +3923,10 @@ if [ "$BACKEND" = rex ]; then
   [ "$(fm_meta_get "$META" rex_server)" = "$(fm_backend_rex_server_endpoint)" ] && [ -n "$(fm_meta_get "$META" rex_server)" ] \
     || { echo "error: Rex creation server does not match; preserving the task and its worktree" >&2; exit 1; }
 elif [ "$BACKEND" = t3code ]; then
-  fm_backend_t3code_server_matches "$(fm_meta_get "$META" t3_server)" \
+  T3_SERVER_FOR_CLEANUP=$(t3_server_for_meta "$META") \
     || { echo "error: T3 creation server does not match; preserving the task and its worktree" >&2; exit 1; }
+  [ -n "$T3_SERVER_FOR_CLEANUP" ] \
+    || { echo "error: T3 server identity is unavailable; preserving the task and its worktree" >&2; exit 1; }
 fi
 
 require_exclusive_task_worktree_slot || exit 1
@@ -4165,7 +4182,7 @@ fi
 # T3 project is deliberately left in place: project.delete refuses while the
 # archived thread exists and would take that transcript with it under force.
 if [ "$BACKEND" = t3code ]; then
-  fm_backend_kill t3code "$T" "" "fm-$ID" "$(meta_value "$META" t3_server)" || {
+  fm_backend_kill t3code "$T" "" "fm-$ID" "$T3_SERVER_FOR_CLEANUP" || {
     echo "error: could not stop and archive T3 thread $T for $ID; start T3 Code (or archive the thread there) and re-run teardown" >&2
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
