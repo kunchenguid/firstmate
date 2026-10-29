@@ -36,8 +36,14 @@ ROOT=$(CDPATH='' cd -- "$SELF_DIR/.." && pwd -P)
 FM_HOME=${FM_HOME:-$ROOT}
 CONFIG_FILE=${FM_ZALO_FOLDER_QA_CONFIG:-$FM_HOME/config/zalo-folder-qa.env}
 STATE_ROOT=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+while [ "$STATE_ROOT" != / ] && [ "${STATE_ROOT%/}" != "$STATE_ROOT" ]; do
+  STATE_ROOT=${STATE_ROOT%/}
+done
+STATE_PARENT=$(dirname "$STATE_ROOT")
 STATE_DIR=$STATE_ROOT/zalo-folder-qa
 SEEN_DIR=$STATE_DIR/seen
+STATE_READY=$STATE_DIR/durable-ready
+INIT_LOCK=$STATE_ROOT.zalo-folder-qa.init.lock
 RUN_LOCK=$STATE_DIR/run.lock
 
 ZALO_API_ORIGIN=https://bot-api.zaloplatforms.com
@@ -57,6 +63,9 @@ MAX_SEEN_RECEIPTS=
 GRAPH_ACCESS_TOKEN=
 SOURCE_STATUS_JSON=
 RECEIPT_COUNT=0
+STATE_PATH_CREATED=0
+INIT_LOCK_HELD=0
+RUN_LOCK_HELD=0
 
 UNAVAILABLE_TEXT='Nguồn dữ liệu Check tồn kho âm hiện chưa khả dụng; tôi chưa thể trả lời từ dữ liệu đã xác minh.'
 
@@ -161,24 +170,79 @@ load_config() {
   validate_private_file "$GRAPH_REFRESH_TOKEN_FILE" 'Graph refresh-token file'
 }
 
+validate_state_parent() {
+  [ -e "$STATE_PARENT" ] && [ ! -L "$STATE_PARENT" ] && [ -d "$STATE_PARENT" ] \
+    || die "stable state parent is unavailable: $STATE_PARENT"
+  [ "$(file_owner "$STATE_PARENT")" = "$(id -u)" ] \
+    || die "stable state parent is not owned by the current user: $STATE_PARENT"
+}
+
+ensure_state_directory() {
+  local directory=$1 label=$2
+  if [ -e "$directory" ] || [ -L "$directory" ]; then
+    [ -d "$directory" ] && [ ! -L "$directory" ] || die "unsafe $label: $directory"
+    [ "$(file_owner "$directory")" = "$(id -u)" ] \
+      || die "$label is not owned by the current user: $directory"
+    chmod 700 "$directory"
+  else
+    mkdir -m 700 "$directory"
+    STATE_PATH_CREATED=1
+  fi
+}
+
+state_is_ready() {
+  local value
+  [ -e "$STATE_READY" ] || [ -L "$STATE_READY" ] || return 1
+  validate_private_file "$STATE_READY" 'state durability marker'
+  value=$(cat "$STATE_READY") || die 'cannot read state durability marker'
+  [ "$value" = 'zalo-folder-qa-state-v1' ] || die 'state durability marker is invalid'
+}
+
+publish_state_ready() {
+  local tmp=$STATE_READY.tmp
+  if [ -e "$tmp" ] || [ -L "$tmp" ]; then
+    rm -f -- "$tmp" || return 1
+  fi
+  if ! (set -C; printf 'zalo-folder-qa-state-v1\n' > "$tmp"); then
+    return 1
+  fi
+  if ! chmod 600 "$tmp" || ! sync_path file "$tmp"; then
+    rm -f -- "$tmp" || return 1
+    return 1
+  fi
+  if ! mv "$tmp" "$STATE_READY"; then
+    rm -f -- "$tmp" || return 1
+    return 1
+  fi
+  if ! sync_path directory "$STATE_DIR"; then
+    rm -f -- "$STATE_READY" || return 1
+    return 1
+  fi
+}
+
 init_state() {
-  if [ -e "$STATE_DIR" ] || [ -L "$STATE_DIR" ]; then
-    [ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] || die "unsafe state directory: $STATE_DIR"
-    [ "$(file_owner "$STATE_DIR")" = "$(id -u)" ] || die "state directory is not owned by the current user: $STATE_DIR"
-    chmod 700 "$STATE_DIR"
-  else
-    mkdir -p "$STATE_DIR"
-    chmod 700 "$STATE_DIR"
-    sync_new_directory "$STATE_DIR" "$STATE_ROOT" 'state directory'
+  local ready=0
+  STATE_PATH_CREATED=0
+  ensure_state_directory "$STATE_ROOT" 'state root'
+  ensure_state_directory "$STATE_DIR" 'state directory'
+  ensure_state_directory "$SEEN_DIR" 'seen directory'
+  if state_is_ready; then
+    ready=1
   fi
-  if [ -e "$SEEN_DIR" ] || [ -L "$SEEN_DIR" ]; then
-    [ -d "$SEEN_DIR" ] && [ ! -L "$SEEN_DIR" ] || die "unsafe seen directory: $SEEN_DIR"
-    [ "$(file_owner "$SEEN_DIR")" = "$(id -u)" ] || die "seen directory is not owned by the current user: $SEEN_DIR"
-    chmod 700 "$SEEN_DIR"
-  else
-    mkdir -m 700 "$SEEN_DIR"
-    sync_new_directory "$SEEN_DIR" "$STATE_DIR" 'seen directory'
+  if [ "$ready" -eq 1 ] && [ "$STATE_PATH_CREATED" -eq 0 ]; then
+    return 0
   fi
+  if [ "$ready" -eq 1 ]; then
+    rm -f -- "$STATE_READY" || die 'cannot invalidate state durability marker'
+  fi
+  sync_path directory "$STATE_ROOT" \
+    && sync_path directory "$STATE_PARENT" \
+    && sync_path directory "$STATE_DIR" \
+    && sync_path directory "$STATE_ROOT" \
+    && sync_path directory "$SEEN_DIR" \
+    && sync_path directory "$STATE_DIR" \
+    && publish_state_ready \
+    || die 'state initialization durability failed; refusing to verify, poll, or send'
 }
 
 urlencode() {
@@ -243,7 +307,7 @@ source_status() {
     --arg drive "$GRAPH_DRIVE_ID" \
     --arg folder "$GRAPH_FOLDER_ID" \
     --arg name "$EXPECTED_FOLDER_NAME" \
-    '.error == null and .id == $folder and .name == $name and .folder != null and .parentReference.driveId == $drive' \
+    '.error == null and .id == $folder and .name == $name and (.folder | type == "object") and .parentReference.driveId == $drive' \
     >/dev/null 2>&1; then
     SOURCE_STATUS_JSON=$(jq -n '{status:"unavailable", reason:"folder-pin"}')
     return 0
@@ -383,17 +447,12 @@ finally:
 PY
 }
 
-sync_new_directory() {
-  local directory=$1 parent=$2 label=$3
-  if ! sync_path directory "$directory"; then
-    rmdir "$directory" \
-      || die "$label synchronization and cleanup failed; operator reconciliation required"
-    die "$label synchronization failed; refusing to verify, poll, or send"
+release_run_locks() {
+  if [ "$RUN_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$RUN_LOCK" || true
   fi
-  if ! sync_path directory "$parent"; then
-    rmdir "$directory" \
-      || die "$label publication and cleanup failed; operator reconciliation required"
-    die "$label publication failed; refusing to verify, poll, or send"
+  if [ "$INIT_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$INIT_LOCK" || true
   fi
 }
 
@@ -499,14 +558,20 @@ cmd_run() {
   need jq
   need curl
   need python3
-  init_state
+  validate_state_parent
   # shellcheck source=bin/fm-wake-lib.sh
-  FM_STATE_OVERRIDE="$STATE_DIR" . "$SELF_DIR/fm-wake-lib.sh"
-  fm_lock_try_acquire "$RUN_LOCK" || die 'another folder-Q&A bridge is already running'
-  trap 'fm_lock_release "$RUN_LOCK"' EXIT
+  FM_STATE_OVERRIDE="$STATE_PARENT" . "$SELF_DIR/fm-wake-lib.sh"
+  fm_lock_try_acquire "$INIT_LOCK" || die 'state initialization is already running'
+  INIT_LOCK_HELD=1
+  trap release_run_locks EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  init_state
+  fm_lock_release "$INIT_LOCK" || die 'state initialization lock release failed'
+  INIT_LOCK_HELD=0
+  fm_lock_try_acquire "$RUN_LOCK" || die 'another folder-Q&A bridge is already running'
+  RUN_LOCK_HELD=1
   if initialize_receipts; then
     :
   else
