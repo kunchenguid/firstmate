@@ -1596,7 +1596,7 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 marker_publish_bound=${2:-} pid steal cur rc steal_owner primary_owner current
+  local lockdir=$1 marker_publish_bound=${2:-} pid steal cur recovered_pid rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
   FM_LOCK_HELD_PATH=
   FM_LOCK_OWNER_DIR=
@@ -1689,12 +1689,13 @@ fm_lock_try_acquire() {
     FM_LOCK_OWNER_DIR=
     return 1
   fi
+  recovered_pid=$cur
   fm_lock_remove_path "$lockdir" stale || true
   rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
-    FM_LOCK_RECOVERED_PID=$pid
+    FM_LOCK_RECOVERED_PID=$recovered_pid
   fi
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
