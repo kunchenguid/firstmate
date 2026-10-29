@@ -636,7 +636,8 @@ test_lock_stale_steal_single_winner_under_concurrency() {
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
   : > "$marker"
-  mkfifo "$gate" "$hold"
+  : > "$gate"
+  mkfifo "$hold"
   # try_acquire is nonblocking: all one-shot candidates may lose to a transient
   # steal mutex. A waiting contender guarantees eventual acquisition, and the
   # FIFO keeps the winner alive until every other contender has finished.
@@ -662,7 +663,13 @@ test_lock_stale_steal_single_winner_under_concurrency() {
     pids="$pids $!"
     i=$((i + 1))
   done
-  IFS= read -r winner < "$gate"
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$gate" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  winner=$(cat "$gate" 2>/dev/null || true)
+  [ -n "$winner" ] || fail "stale-lock contender did not report a winner"
   [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
   for pid in $pids; do
     [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true
