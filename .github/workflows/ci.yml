@@ -46,10 +46,10 @@ concurrency:
 # when a PR is picked up for review. Any other PR runs only the coverage guard
 # and the invariants, and the Full suite job fails naming the label, so no
 # outside PR looks fully tested before the go-ahead. A label event for any
-# other label runs nothing except that failing Full suite verdict on a PR still
-# waiting for the go-ahead. Contributors already lint and test locally through
-# no-mistakes. GitHub still publishes a skipped check for every job of that
-# label event's run, and a newer skipped check with a job's own name would
+# other label runs nothing: a PR still waiting for the go-ahead already carries
+# the failing verdict from its push. Contributors already lint and test
+# locally through no-mistakes. GitHub still publishes a skipped check for every
+# job of that label event's run, and a newer skipped check with a job's own name would
 # replace and mask an earlier failure, so each job that skips there takes a
 # "Not run for label - " name prefix instead. The condition is repeated per job
 # for the same reason as the fork opt-out; CONTRIBUTING.md documents the label.
@@ -532,11 +532,11 @@ jobs:
   # The Full suite verdict: one check that fails until an outside PR has the
   # full-ci go-ahead and otherwise fails when any lane failed or was cancelled.
   # It runs even when every lane is skipped, because a skipped job would read
-  # as passing. On an unrelated label event it runs only for a PR still waiting
-  # for the go-ahead; otherwise its skipped check takes the prefixed name, so it
-  # never replaces a real verdict with a skipped one.
+  # as passing. On an unrelated label event it skips under the prefixed name
+  # like every other job: that run is never cancelled, so a verdict it computed
+  # from its older event could finish after, and mask, a later full-ci pass.
   full-suite:
-    name: ${{ ((github.event.action == 'labeled' && github.event.label.name != 'full-ci') && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository || github.event.pull_request.author_association == 'OWNER' || github.event.pull_request.author_association == 'MEMBER' || github.event.pull_request.author_association == 'COLLABORATOR' || contains(github.event.pull_request.labels.*.name, 'full-ci'))) && 'Not run for label - ' || '' }}Full suite
+    name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Full suite
     runs-on: ubuntu-24.04
     # Fast tier: the verdict reads its needed jobs' results.
     timeout-minutes: 5
@@ -549,7 +549,7 @@ jobs:
       - tests-herdr
       - macos-stock-bash
       - invariants
-    if: ${{ always() && !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') && !((github.event.action == 'labeled' && github.event.label.name != 'full-ci') && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository || github.event.pull_request.author_association == 'OWNER' || github.event.pull_request.author_association == 'MEMBER' || github.event.pull_request.author_association == 'COLLABORATOR' || contains(github.event.pull_request.labels.*.name, 'full-ci'))) }}
+    if: ${{ always() && !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') && !(github.event.action == 'labeled' && github.event.label.name != 'full-ci') }}
     steps:
       - name: Require the full-ci go-ahead and passing lanes
         env:

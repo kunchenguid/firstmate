@@ -212,6 +212,17 @@ def simulated_context(workflow_name, overrides)
   }
 end
 
+# Whether the workflow triggers start a run for this simulated event at all:
+# a pull_request action outside on.pull_request.types (the GitHub default when
+# absent is opened, synchronize, reopened) starts no run and publishes nothing.
+# Psych reads the bare key `on` as true.
+def triggered?(doc, context)
+  return true unless context["github.event_name"] == "pull_request"
+  triggers = doc[true] || doc["on"]
+  types = triggers.fetch("pull_request", nil).to_h.fetch("types", %w[opened synchronize reopened])
+  types.include?(context["github.event.action"])
+end
+
 def interpolate(raw, context)
   raw.to_s.gsub(/\$\{\{(.+?)\}\}/m) { Expression.evaluate(Regexp.last_match(1), context).to_s }
 end
@@ -236,6 +247,7 @@ jobs_running_under() {  # [KEY=VALUE]...
   ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
 doc = YAML.load_file(ARGV.shift)
 context = simulated_context(doc.fetch("name"), ARGV)
+exit unless triggered?(doc, context)
 doc.fetch("jobs").each do |name, job|
   puts name if Expression.condition(job["if"], context)
 end
@@ -274,6 +286,7 @@ published_checks() {  # [KEY=VALUE]...
   rows=$(ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
 doc = YAML.load_file(ARGV.shift)
 context = simulated_context(doc.fetch("name"), ARGV)
+exit unless triggered?(doc, context)
 doc.fetch("jobs").each do |id, job|
   runs = Expression.condition(job["if"], context)
   matrix = job.dig("strategy", "matrix") || {}
@@ -285,6 +298,7 @@ doc.fetch("jobs").each do |id, job|
   end
 end
 ' "$CI_WORKFLOW" "$@") || fail "could not resolve the published checks"
+  [ -n "$rows" ] || return 0
   while IFS=$'\t' read -r name conclusion; do
     if [ "$conclusion" = verdict ]; then
       if run_full_suite_verdict "$@" needs="$outcome" >/dev/null; then conclusion=success; else conclusion=failure; fi
@@ -293,16 +307,17 @@ end
   done <<<"$rows"
 }
 
-# Print the PR's visible checks after two runs on one head: per check name,
-# the newer run's check replaces the older one, as GitHub and
-# bin/fm-pr-merge.sh's newest-check handling both read it.
-checks_after_two_runs() {  # <first run KEY=VALUE list> <second run KEY=VALUE list>
-  local first second
-  # shellcheck disable=SC2086  # each argument is a deliberate word list
-  first=$(published_checks $1) || exit 1
-  # shellcheck disable=SC2086
-  second=$(published_checks $2) || exit 1
-  printf '%s\n%s\n' "$first" "$second" | awk -F '\t' '{ latest[$1] = $2; if (!($1 in order)) { order[$1] = n++; names[n - 1] = $1 } }
+# Print the PR's visible checks after several runs on one head, given in the
+# order their checks finish: per check name, the later run's check replaces
+# the earlier one, as GitHub and bin/fm-pr-merge.sh's newest-check handling
+# both read it. Each argument is one run's KEY=VALUE list.
+checks_after_runs() {  # <run KEY=VALUE list>...
+  local run all=
+  for run in "$@"; do
+    # shellcheck disable=SC2086  # each argument is a deliberate word list
+    all=$all$(published_checks $run)$'\n' || exit 1
+  done
+  printf '%s' "$all" | awk -F '\t' 'NF { latest[$1] = $2; if (!($1 in seen)) { seen[$1] = 1; names[n++] = $1 } }
     END { for (i = 0; i < n; i++) print names[i] "\t" latest[names[i]] }'
 }
 
@@ -457,29 +472,41 @@ test_trusted_runs_are_unchanged() {
   pass "main pushes, own branches and write-access authors still run every job and pass the verdict"
 }
 
-# DOP-167: another label starts no lane. A PR still waiting for the go-ahead
-# keeps its failing verdict; any other PR runs nothing, so no real verdict is
-# replaced by a skipped one.
-test_unrelated_label_starts_no_lane() {
-  local actual out
-  actual=$(jobs_running_under action=labeled label=bug labels=bug | tr '\n' ' ') \
-    || fail "could not resolve unrelated label jobs on an outside PR"
-  [ "$actual" = "full-suite " ] \
-    || fail "an unrelated label on a PR waiting for the go-ahead must run only the verdict, ran: $actual"
-  if out=$(run_full_suite_verdict action=labeled label=bug labels=bug); then
-    fail "that verdict must still fail naming full-ci:"$'\n'"$out"
-  fi
-  actual=$(jobs_running_under action=labeled label=bug labels=full-ci,bug) \
-    || fail "could not resolve unrelated label jobs on a labelled PR"
-  [ -z "$actual" ] || fail "an unrelated label on a labelled PR must run nothing, ran: $(printf '%s' "$actual" | tr '\n' ' ')"
-  actual=$(jobs_running_under action=labeled label=bug labels=bug association=OWNER) \
-    || fail "could not resolve unrelated label jobs on an owner PR"
-  [ -z "$actual" ] || fail "an unrelated label on an owner PR must run nothing, ran: $(printf '%s' "$actual" | tr '\n' ' ')"
-  pass "an unrelated label starts no lane and keeps a waiting PR's failing verdict"
+# DOP-167: another label neither starts nor cancels a run: no job runs, not
+# even the Full suite verdict, whose waiting failure the PR's push already
+# published (Greptile review on PR #7949: a verdict from that never-cancelled
+# run could otherwise finish after, and mask, a later full-ci pass).
+test_unrelated_label_starts_no_job() {
+  local labels association actual
+  while read -r labels association; do
+    actual=$(jobs_running_under action=labeled label=bug labels="$labels" association="$association") \
+      || fail "could not resolve unrelated label jobs for labels=$labels association=$association"
+    [ -z "$actual" ] \
+      || fail "an unrelated label (labels=$labels association=$association) must run no job, ran: $(printf '%s' "$actual" | tr '\n' ' ')"
+  done <<'TABLE'
+bug         NONE
+full-ci,bug NONE
+bug         OWNER
+TABLE
+  pass "an unrelated label runs no job on a waiting, labelled or owner PR"
 }
 
-# Review finding on DOP-167's build: GitHub publishes skipped checks for every
-# job of an unrelated label event's run, so the failed-suite -> unrelated-label
+# Greptile review on PR #7949: an unrelated label added before full-ci starts
+# a run that is never cancelled; even if its checks finish after the approved
+# full-ci run, the passing Full suite must stay the visible verdict.
+test_late_unrelated_label_run_never_masks_a_full_ci_pass() {
+  local after
+  after=$(checks_after_runs "outcome=success" \
+    "action=labeled label=full-ci labels=bug,full-ci outcome=success" \
+    "action=labeled label=bug labels=bug outcome=success") \
+    || fail "could not merge the three runs"
+  printf '%s\n' "$after" | grep -qx $'Full suite\tsuccess' \
+    || fail "a late unrelated label run must leave Full suite passing, got:"$'\n'"$after"
+  printf '%s\n' "$after" | grep -qx $'Lint 1\tsuccess' \
+    || fail "a late unrelated label run must leave the lanes passing, got:"$'\n'"$after"
+  pass "a late-finishing unrelated label run leaves a full-ci pass visible"
+}
+
 # sequence must leave the earlier failure visible under its own check names.
 test_unrelated_label_never_masks_an_earlier_failure() {
   local first label expect want before after name conclusion
@@ -498,7 +525,7 @@ test_unrelated_label_never_masks_an_earlier_failure() {
       [ "$conclusion" = "$want" ] \
         || fail "the first run ($first) must publish $name as $want before the label event, got $conclusion"
     done <<<"$before"
-    after=$(checks_after_two_runs "$first" "$label") || fail "could not merge runs for $first"
+    after=$(checks_after_runs "$first" "$label") || fail "could not merge runs for $first"
     while IFS=$'\t' read -r name conclusion; do
       printf '%s\n' "$after" | grep -qxF "$name"$'\t'"$conclusion" \
         || fail "after an unrelated label, $name must still read $conclusion (first run: $first), got:"$'\n'"$after"
@@ -696,7 +723,8 @@ test_only_the_full_ci_label_joins_the_pr_group
 test_outside_pr_without_label_runs_only_quick_checks
 test_full_ci_label_runs_the_whole_suite
 test_trusted_runs_are_unchanged
-test_unrelated_label_starts_no_lane
+test_unrelated_label_starts_no_job
+test_late_unrelated_label_run_never_masks_a_full_ci_pass
 test_unrelated_label_never_masks_an_earlier_failure
 test_fork_skip_variables_are_opt_in
 test_timing_aggregate_still_runs_after_a_failed_lane
