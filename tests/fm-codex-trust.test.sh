@@ -216,6 +216,58 @@ test_inserts_after_final_header_without_newline() {
   pass "fm-codex-trust: adds trust under a final header that has no newline"
 }
 
+test_updates_spaced_header_and_quoted_key() {
+  local rec
+  rec=$(make_case spaced)
+  read_case "$rec"
+  cat > "$CODEX_HOME_DIR/config.toml" <<EOF
+[ projects . "$WORKTREE" ]
+"trust_level" = "untrusted"
+note = "preserve"
+EOF
+  CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$WORKTREE" "$PROJECT" >/dev/null \
+    || fail "spaced header with a quoted trust_level key was refused"
+  [ "$(trust_value "$CODEX_HOME_DIR" "$WORKTREE")" = trusted ] \
+    || fail "quoted trust_level key under a spaced header was not updated"
+  [ "$(project_field "$CODEX_HOME_DIR" "$WORKTREE" note)" = preserve ] \
+    || fail "spaced header project fields were not preserved"
+
+  rec=$(make_case spaced-literal)
+  read_case "$rec"
+  cat > "$CODEX_HOME_DIR/config.toml" <<EOF
+[projects. '$WORKTREE']
+'trust_level' = "untrusted"
+EOF
+  CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$WORKTREE" "$PROJECT" >/dev/null \
+    || fail "spaced dotted header with a literal-quoted trust_level key was refused"
+  [ "$(trust_value "$CODEX_HOME_DIR" "$WORKTREE")" = trusted ] \
+    || fail "literal-quoted trust_level key was not updated"
+  pass "fm-codex-trust: updates a whitespace header and a quoted trust_level key in place"
+}
+
+test_concurrent_registrations_keep_every_entry() {
+  local rec i pids=() status=0
+  rec=$(make_case concurrent)
+  read_case "$rec"
+  printf 'model = "gpt-5"\n' > "$CODEX_HOME_DIR/config.toml"
+  for i in 1 2 3 4 5 6 7 8; do
+    git -C "$PROJECT" worktree add -q "$CASE_DIR/wt-$i"
+  done
+  for i in 1 2 3 4 5 6 7 8; do
+    CODEX_HOME="$CODEX_HOME_DIR" "$TRUST" "$CASE_DIR/wt-$i" "$PROJECT" >/dev/null 2>&1 &
+    pids+=("$!")
+  done
+  for i in "${pids[@]}"; do
+    wait "$i" || status=1
+  done
+  [ "$status" -eq 0 ] || fail "a concurrent trust registration failed"
+  for i in 1 2 3 4 5 6 7 8; do
+    [ "$(trust_value "$CODEX_HOME_DIR" "$(cd -P "$CASE_DIR/wt-$i" && pwd -P)")" = trusted ] \
+      || fail "concurrent registration dropped worktree wt-$i"
+  done
+  pass "fm-codex-trust: concurrent registrations into one store keep every entry"
+}
+
 test_selects_python_with_tomllib() {
   local rec fakebin
   rec=$(make_case python)
@@ -273,6 +325,8 @@ test_ignores_multiline_string_structure
 test_ignores_escaped_delimiter_in_multiline_basic_string
 test_ignores_multiline_literal_string_structure
 test_inserts_after_final_header_without_newline
+test_updates_spaced_header_and_quoted_key
+test_concurrent_registrations_keep_every_entry
 test_selects_python_with_tomllib
 test_refuses_without_codex_home_or_home
 test_refuses_invalid_config_without_replacement

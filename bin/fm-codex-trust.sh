@@ -118,6 +118,7 @@ if [ -e "$STORE" ]; then
 fi
 
 if ! "$PYTHON" - "$STORE" "$TARGET_REAL" <<'PY'
+import fcntl
 import hashlib
 import os
 import pathlib
@@ -130,6 +131,11 @@ import tomllib
 
 store = pathlib.Path(sys.argv[1])
 target = sys.argv[2]
+# Serialize every registration into this store across the whole read, edit,
+# and replace, so concurrent spawns never drop each other's entries.
+store.parent.mkdir(parents=True, exist_ok=True)
+lock_fd = os.open(store.parent / f".{store.name}.fm-codex-trust.lock", os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(lock_fd, fcntl.LOCK_EX)
 original = store.read_bytes() if store.exists() else b""
 try:
     parsed = tomllib.loads(original.decode())
@@ -145,7 +151,7 @@ if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
 text = original.decode() if original else ""
 escaped = target.replace("\\", "\\\\").replace('"', '\\"')
 header = f'[projects."{escaped}"]'
-header_re = re.compile(r'^[ \t]*(?P<header>\[projects\.(?:"(?:[^"\\]|\\.)*"|\'[^\']*\')\])[ \t]*(?:#.*)?(?:\r?\n)?$')
+header_re = re.compile(r'^[ \t]*(?P<header>\[[ \t]*projects[ \t]*\.[ \t]*(?:"(?:[^"\\]|\\.)*"|\'[^\']*\')[ \t]*\])[ \t]*(?:#.*)?(?:\r?\n)?$')
 table_re = re.compile(r'^[ \t]*\[\[?[^\n]+\]\]?[ \t]*(?:#.*)?(?:\r?\n)?$')
 
 # TOML strings can contain anything that resembles a table or assignment,
@@ -221,7 +227,7 @@ else:
     trust_index = None
     for index in range(match_index + 1, section_end):
         line, (_, state_before) = lines[index], starts[index]
-        if state_before is None and re.match(r'^[ \t]*trust_level[ \t]*=', line):
+        if state_before is None and re.match(r'^[ \t]*(?:trust_level|"trust_level"|\'trust_level\')[ \t]*=', line):
             trust_index = index
             break
     if trust_index is not None:
@@ -248,7 +254,6 @@ if hashlib.sha256(current).digest() != before:
     raise SystemExit(f"Codex config '{store}' changed during trust registration; refusing to overwrite it")
 
 mode = stat.S_IMODE(store.stat().st_mode) if store.exists() else 0o600
-store.parent.mkdir(parents=True, exist_ok=True)
 fd, staged = tempfile.mkstemp(prefix=".config.toml.fm-codex-trust.", dir=store.parent)
 try:
     os.fchmod(fd, mode)
