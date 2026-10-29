@@ -1355,7 +1355,7 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur recovered_pid rc steal_owner primary_owner current
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -1365,8 +1365,8 @@ fm_lock_try_acquire() {
   fi
 
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  local -r FM_LOCK_SAVED_DISPLACED_PID=$pid
   fm_current_pid current || return 1
-  recovered_pid=$pid
   if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
@@ -1443,8 +1443,8 @@ fm_lock_try_acquire() {
   rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     rc=0
+    FM_LOCK_RECOVERED_PID=$FM_LOCK_SAVED_DISPLACED_PID
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
-    FM_LOCK_RECOVERED_PID=$recovered_pid
   fi
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.

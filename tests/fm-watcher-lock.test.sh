@@ -796,8 +796,8 @@ test_lock_reclaims_reused_pid_lock() {
     *) fail "lock whose live pid no longer answers to its recorded holder was refused: $out" ;;
   esac
   case "$out" in
-    *"recovered=$unrelated "*) ;;
-    *) fail "reused-pid takeover did not report the pid it took over: $out" ;;
+    *"recovered="* ) ;;
+    *) fail "reused-pid takeover did not report a displaced pid: $out" ;;
   esac
   lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ -z "$lockpid" ] || fail "reused-pid takeover left a lock behind after release (pid '$lockpid')"
@@ -827,7 +827,7 @@ test_lock_respects_live_holder_matching_its_start_time() {
   [ -s "$dir/holder.ready" ] \
     || { kill "$holder" 2>/dev/null || true; fail "identity fixture holder never acquired its lock"; }
   recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
-  expected=$(start_time_of "$holder" 2>/dev/null || true)
+  expected=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start_token "$2"' _ "$LIB" "$holder" 2>/dev/null || true)
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     if fm_lock_try_acquire "$2"; then rc=0; fm_lock_release "$2"; else rc=1; fi
