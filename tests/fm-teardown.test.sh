@@ -1044,6 +1044,55 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
 }
 
+test_merged_pr_patch_matching_preserves_indentation() {
+  local case_dir mode rc pr_head local_head expected
+  for mode in exact amended old-git; do
+    case_dir=$(make_case "pr-indentation-$mode")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" local-parent.txt parent "local parent"
+    git -C "$case_dir/wt" push -q origin HEAD:refs/heads/fm/task-x1
+    git -C "$case_dir/project" fetch -q origin fm/task-x1
+    wt_commit_file "$case_dir" config.yml $'a:\n  b: 1' "add YAML"
+    append_pr_meta_url "$case_dir"
+    pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head config.yml $'a:\n  b: 1' "add YAML")
+    printf 'pr_head=%s\n' "$pr_head" >> "$case_dir/state/task-x1.meta"
+    add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+    if [ "$mode" = amended ]; then
+      printf 'a:\nb: 1\n' > "$case_dir/wt/config.yml"
+      git -C "$case_dir/wt" add -- config.yml
+      git -C "$case_dir/wt" commit -q --amend --no-edit
+    elif [ "$mode" = old-git ]; then
+      cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = patch-id ]; then
+  if [ "${2:-}" = --verbatim ]; then
+    echo 'error: unknown option `verbatim`' >&2
+    exit 129
+  fi
+fi
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+      chmod +x "$case_dir/fakebin/git"
+    fi
+    local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    [ "$local_head" != "$pr_head" ] || fail "$mode: fixture did not diverge"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expected=1
+    [ "$mode" != exact ] || expected=0
+    expect_code "$expected" "$rc" "pr-indentation-$mode: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    if [ "$expected" = 1 ]; then
+      assert_grep REFUSED "$case_dir/stderr" "$mode: no refusal diagnostic"
+      assert_refusal_retained_task_state "$case_dir" "$mode" "$local_head"
+    fi
+  done
+  pass "merged PR patch matching preserves indentation, allows exact replays, and refuses unsupported Git"
+}
+
 test_merged_pr_with_later_local_commit_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case stale-pr-head)
@@ -6030,6 +6079,11 @@ test_status_archive_nested_secondmate_children() {
   pass "forced secondmate retirement preserves two descendant levels and refuses linked child directories"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
+
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_status_archive_opt_in
@@ -6177,3 +6231,5 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal
 
 test_descendant_episode_refuses_before_coordination
 test_accounting_failure_preserves_the_containing_home
+
+test_merged_pr_patch_matching_preserves_indentation
