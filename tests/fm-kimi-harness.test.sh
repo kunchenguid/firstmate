@@ -70,15 +70,17 @@ fake_screen() {
     trust-wrapped)
       printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate ·        │\n│ Enter select · Esc   │\n│ exit                 │\n│ %s │\n│ ❯ Trust this folder  │\n│   Don'"'"'t trust         │\n╰──────────────────────╯\n' "$FM_FAKE_PANE_PATH"
       ;;
-    trust-230|trust-230-rootmcp|trust-230-kimimcp|trust-230-small|trust-230-paged)
-      # Recorded from Kimi Code CLI 2.3.0; tests/captures/kimi-code-2.3.0/README.md
-      # owns the provenance. The directory line becomes the fake pane's path.
+    trust-230|trust-230-rootmcp|trust-230-kimimcp|trust-230-small|trust-230-paged|trust-240)
+      # Recorded from Kimi Code CLI 2.3.0 and 2.4.0. The capture directory is
+      # FM_FAKE_KIMI_CAPTURES; each README there owns provenance. The directory
+      # line becomes the fake pane's path.
       case "$state" in
         trust-230) capture=plain.pane ;;
         trust-230-rootmcp) capture=root-mcp-json.pane ;;
         trust-230-kimimcp) capture=kimi-code-mcp-json.pane ;;
         trust-230-small) capture=small-terminal.pane ;;
         trust-230-paged) capture=paged.pane ;;
+        trust-240) capture=instructions.pane ;;
       esac
       sed "s|{WORKDIR}|$FM_FAKE_PANE_PATH|g" "$FM_FAKE_KIMI_CAPTURES/$capture"
       ;;
@@ -145,7 +147,7 @@ case "${1:-}" in
         *)
           printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
           case "$state" in
-            trust|trust-wrapped|trust-partial|trust-decoy|trust-230|trust-230-rootmcp|trust-230-kimimcp|trust-230-small|trust-230-paged|booting|banner-only|banner-first|blank-frame) ;;
+            trust|trust-wrapped|trust-partial|trust-decoy|trust-230|trust-230-rootmcp|trust-230-kimimcp|trust-230-small|trust-230-paged|trust-240|booting|banner-only|banner-first|blank-frame) ;;
             *) printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE" ;;
           esac
           ;;
@@ -169,11 +171,12 @@ case "${1:-}" in
                 230-kimimcp) printf 'trust-230-kimimcp\n' > "$FM_FAKE_KIMI_STATE" ;;
                 230-small) printf 'trust-230-small\n' > "$FM_FAKE_KIMI_STATE" ;;
                 230-paged) printf 'trust-230-paged\n' > "$FM_FAKE_KIMI_STATE" ;;
+                240) printf 'trust-240\n' > "$FM_FAKE_KIMI_STATE" ;;
                 *) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
               esac
             fi
             ;;
-          trust|trust-wrapped|trust-230)
+          trust|trust-wrapped|trust-230|trust-240)
             printf 'enter\n' >> "$FM_FAKE_KIMI_TRUST_ENTER_LOG"
             trust_enters=$(wc -l < "$FM_FAKE_KIMI_TRUST_ENTER_LOG" | tr -d ' ')
             case "${FM_FAKE_KIMI_TRUST_CLEARS:-yes}" in
@@ -311,7 +314,7 @@ run_spawn() {
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
-    FM_FAKE_KIMI_CAPTURES="$ROOT/tests/captures/kimi-code-2.3.0" \
+    FM_FAKE_KIMI_CAPTURES="${FM_FAKE_KIMI_CAPTURES:-$ROOT/tests/captures/kimi-code-2.3.0}" \
     FM_FAKE_MCP_MARKER_LOG="$case_dir/marker.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
@@ -1241,6 +1244,26 @@ test_kimi_230_prompt_in_a_terminal_too_small_to_confirm_receives_no_key() {
   pass "fm-spawn: a recorded Kimi 2.3.0 prompt collapsed to its title receives no key and reports that it is not ready"
 }
 
+test_kimi_240_prompt_that_loads_project_instructions_is_answered_and_verified() {
+  local id rec out rc
+  id=kimi-240-instructions-b1
+  rec=$(make_spawn_case trust-240 "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=240 \
+    FM_FAKE_KIMI_CAPTURES="$ROOT/tests/captures/kimi-code-2.4.0" run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "the recorded 2.4.0 prompt that loads project instructions should be answered into a verified spawn"
+  assert_contains "$out" "spawned $id harness=kimi" "Kimi spawn did not continue after the 2.4.0 instruction prompt cleared"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "the 2.4.0 instruction prompt was not answered exactly once"
+  assert_grep 'Read the brief at' "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered after the 2.4.0 instruction prompt"
+  assert_contains "$(cat "$CASE_DIR/launch.log")" "--auto" "the launch did not stay kimi --auto"
+  assert_project_server_stayed_idle
+  pass "fm-spawn: the recorded Kimi 2.4.0 prompt that loads project instructions is answered once and the brief is delivered"
+}
+
 test_kimi_230_prompt_that_pages_its_disclosure_receives_no_key() {
   local id rec out rc
   id=kimi-230-paged-a5
@@ -1291,4 +1314,5 @@ test_kimi_230_prompt_with_no_project_servers_is_answered_and_verified
 test_kimi_230_prompt_announcing_a_root_mcp_json_server_receives_no_key
 test_kimi_230_prompt_announcing_a_kimi_code_mcp_json_server_receives_no_key
 test_kimi_230_prompt_in_a_terminal_too_small_to_confirm_receives_no_key
+test_kimi_240_prompt_that_loads_project_instructions_is_answered_and_verified
 test_kimi_230_prompt_that_pages_its_disclosure_receives_no_key

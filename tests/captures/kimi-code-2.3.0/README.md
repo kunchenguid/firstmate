@@ -25,3 +25,4 @@ Pressing Enter on the `root-mcp-json.pane` prompt in the same lab started that c
 
 The replays prove how `bin/fm-spawn.sh` answers these exact panes.
 Whether the installed Kimi still renders them is the live guard's question: `tests/fm-kimi-trust-prompt-live-e2e.test.sh`.
+Kimi 2.4.0's project-instruction disclosure is recorded in `tests/captures/kimi-code-2.4.0/README.md`.
