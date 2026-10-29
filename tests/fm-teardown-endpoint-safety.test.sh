@@ -1646,6 +1646,76 @@ SH
   pass "retirement adopts empty staging after normal checks and refuses nonempty or linked staging"
 }
 
+test_local_retirement_resumes_recorded_staging() {
+  local shape dir mate child stage meta rc real_rm
+  real_rm=$(command -v rm)
+  for shape in top descendant successor; do
+    dir=$(make_case "local-retire-resume-$shape")
+    mate="$dir/mate"
+    child="$mate/child"
+    mkdir -p "$mate/state" "$mate/data" "$mate/config"
+    printf 'mate\n' >"$mate/.fm-secondmate-home"
+    printf 'manual\n' >"$dir/home/config/backlog-backend"
+    fm_write_meta "$dir/home/state/mate.meta" \
+      "window=isolated:fm-mate" "endpoint_task_id=mate" "backend=tmux" \
+      "kind=secondmate" "home=$mate" "worktree=$mate" "project=$dir/project" "spawn_gen=g1"
+    meta="$dir/home/state/mate.meta"
+    if [ "$shape" = descendant ]; then
+      mkdir -p "$child/state" "$child/data" "$child/config"
+      printf 'child\n' >"$child/.fm-secondmate-home"
+      printf 'manual\n' >"$mate/config/backlog-backend"
+      fm_write_meta "$mate/state/child.meta" \
+        "window=isolated:fm-child" "endpoint_task_id=child" "backend=tmux" \
+        "kind=secondmate" "home=$child" "worktree=$child" "project=$dir/project" "spawn_gen=g1"
+      meta="$mate/state/child.meta"
+    fi
+    cat >"$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+SH
+    cat >"$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+case "$last" in
+  *.retiring.*)
+    if [ -e "$FM_TEST_DELETE_FAIL" ]; then
+      "$FM_TEST_REAL_RM" -f "$last/home/.fm-secondmate-home"
+      exit 1
+    fi ;;
+esac
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+    chmod +x "$dir/fakebin/rm"
+    touch "$dir/delete-fail"
+    rc=0
+    FM_TEST_REAL_RM="$real_rm" FM_TEST_DELETE_FAIL="$dir/delete-fail" \
+      run_case "$dir" mate >"$dir/first.out" 2>"$dir/first.err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "injected staging deletion failure was ignored"
+    stage=$(sed -n 's/^home_removal_stage=//p' "${meta%.meta}.home-removal")
+    [ -n "$stage" ] && [ -d "$stage/home" ] || fail "failed deletion lost its recorded staging: $(cat "$dir/first.err")"
+    rm "$dir/delete-fail"
+    if [ "$shape" = successor ]; then
+      sed 's/^spawn_gen=.*/spawn_gen=g2/' "$meta" >"$dir/replacement.meta"
+      mv "$dir/replacement.meta" "$meta"
+    fi
+    rc=0
+    FM_TEST_REAL_RM="$real_rm" FM_TEST_DELETE_FAIL="$dir/delete-fail" \
+      run_case "$dir" mate >"$dir/retry.out" 2>"$dir/retry.err" || rc=$?
+    if [ "$shape" = successor ]; then
+      [ "$rc" -ne 0 ] || fail "successor consumed predecessor staging"
+      assert_present "$stage/home" "generation mismatch destroyed staged private data"
+    else
+      expect_code 0 "$rc" "staged deletion retry: $(cat "$dir/retry.err")"
+      assert_absent "$stage" "successful retry orphaned staged private data"
+      assert_absent "${meta%.meta}.home-removal" "successful retry retained removal evidence"
+      assert_absent "$mate" "successful retry retained the home"
+      assert_absent "$dir/home/state/mate.meta" "successful retry retained metadata"
+    fi
+  done
+  pass "local retirement resumes top-level and descendant staged deletion and fences successors"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -1682,3 +1752,5 @@ test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
 
 test_retirement_reuses_only_empty_staging
+
+test_local_retirement_resumes_recorded_staging

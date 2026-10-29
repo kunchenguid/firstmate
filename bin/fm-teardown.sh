@@ -3010,8 +3010,38 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup retired
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} meta=${5:-$META} abs_home_path process_event_backup retired recorded tmp generation evidence
   [ -n "$home" ] || return 0
+  evidence="${meta%.meta}.home-removal"
+  if [ -e "$evidence" ] || [ -L "$evidence" ]; then
+    [ -f "$evidence" ] && [ ! -L "$evidence" ] || return 1
+    recorded=$(meta_value "$evidence" home_removal_stage)
+    [ -n "$recorded" ] || return 1
+  else
+    recorded=''
+  fi
+  generation=$(meta_value "$meta" spawn_gen)
+  if [ -n "$recorded" ]; then
+    [ ! -L "$home" ] || return 1
+    [ "$(meta_value "$evidence" home_removal_source)" = "$home" ] \
+      && [ "$(meta_value "$evidence" home_removal_generation)" = "$generation" ] || return 1
+    abs_home_path=$(secondmate_registry_path_key "$home") || return 1
+    case "$recorded" in
+      "$abs_home_path.retiring."*)
+        case "${recorded#"$abs_home_path.retiring."}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac ;;
+      *) return 1 ;;
+    esac
+    [ ! -L "$recorded" ] || return 1
+    if [ ! -e "$home" ] && [ ! -L "$home" ]; then
+      if [ -e "$recorded" ]; then
+        [ -d "$recorded" ] || return 1
+        validate_removal_target "$recorded" "$label staging" >/dev/null || return 1
+        rm -rf -- "$recorded" || return 1
+      fi
+      rm -f -- "$evidence" || return 1
+      return 0
+    fi
+  fi
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
@@ -3056,10 +3086,28 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
         rmdir "$retired" || return 1
       fi
       mkdir -m 700 "$retired" || return 1 ;;
-    *) retired=$(mktemp -d "${abs_home_path}.retiring.XXXXXX") || return 1 ;;
+    *)
+      if [ -n "$recorded" ]; then
+        retired=$recorded
+        if [ -e "$retired" ]; then
+          [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
+          rmdir "$retired" || return 1
+        fi
+        mkdir -m 700 "$retired" || return 1
+      else
+        retired=$(mktemp -d "${abs_home_path}.retiring.XXXXXX") || return 1
+        tmp=$(umask 077; mktemp "${evidence}.XXXXXX") || { rmdir "$retired"; return 1; }
+        if ! printf 'home_removal_source=%s\nhome_removal_generation=%s\nhome_removal_stage=%s\n' "$home" "$generation" "$retired" >"$tmp" \
+          || ! mv -f -- "$tmp" "$evidence"; then
+          rm -f -- "$tmp"
+          rmdir "$retired" 2>/dev/null || true
+          return 1
+        fi
+      fi ;;
   esac
   if mv -- "$abs_home_path" "$retired/home"; then
     rm -rf -- "$retired" || return 1
+    rm -f -- "$evidence" || return 1
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -3199,6 +3247,7 @@ preflight_firstmate_home_process_event_tree() {
 collect_descendant_task_locks() {
   local home=$1 sub_state child_meta child_id child_kind child_wt child_home task_set_lock
   local -a child_ids
+  if [ ! -e "$home" ] && [ ! -L "$home" ]; then return 0; fi
   sub_state="$home/state"
   if [ -L "$sub_state" ]; then
     echo "REFUSED: secondmate home $home has a symbolic-link state path at $sub_state; forced teardown changed nothing" >&2
@@ -3713,9 +3762,9 @@ cleanup_firstmate_home_children() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      if [ -n "$child_home" ] && [ -d "$child_home" ]; then
+      if [ -n "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" "$archive_parent/children/$child_id" || return $?
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_backend" || return $?
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_backend" "$child_meta" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -4260,7 +4309,7 @@ if [ "$KIND" = secondmate ]; then
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
     || { echo "error: local pending-reply recovery paths changed; preserving the secondmate home and route" >&2; exit 1; }
-  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND"; then
+  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND" "$META"; then
     :
   else
     rc=$?
