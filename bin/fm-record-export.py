@@ -1167,11 +1167,11 @@ def main(argv: list[str]) -> int:
         print("usage: fm-record-export.py sync | archive-task <task-id>", file=sys.stderr)
         return 2
     script_dir = os.path.dirname(os.path.realpath(__file__))
-    root = os.environ.get("FM_ROOT_OVERRIDE", os.path.dirname(script_dir))
-    home = os.environ.get("FM_HOME", root)
-    config = os.environ.get("FM_CONFIG_OVERRIDE", os.path.join(home, "config"))
-    data = os.environ.get("FM_DATA_OVERRIDE", os.path.join(home, "data"))
-    state = os.environ.get("FM_STATE_OVERRIDE", os.path.join(home, "state"))
+    root = (os.environ.get("FM_ROOT_OVERRIDE") or os.path.dirname(script_dir))
+    home = (os.environ.get("FM_HOME") or root)
+    config = (os.environ.get("FM_CONFIG_OVERRIDE") or os.path.join(home, "config"))
+    data = (os.environ.get("FM_DATA_OVERRIDE") or os.path.join(home, "data"))
+    state = (os.environ.get("FM_STATE_OVERRIDE") or os.path.join(home, "state"))
     if argv == ["sync"]:
         sync_records(home, config, data, state)
     elif len(argv) == 2 and argv[0] == "archive-task":

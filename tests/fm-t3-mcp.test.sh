@@ -40,6 +40,28 @@ fresh_case() {  # <name> [world-json]
   t3_fake_credential "$CRED"
 }
 
+test_secret_parse_failures_are_redacted() {
+  local cli
+  fresh_case malformed-secrets
+  printf '{"access_token":"TOKEN-FRAGMENT-SECRET" trailing' >"$CRED"
+  chmod 600 "$CRED"
+  mcp status
+  expect_code 4 "$RC" "malformed credential must refuse"
+  assert_equals credential_unreadable "$(field "$OUT" error.code)" "malformed credential code"
+  assert_not_contains "$OUT$ERR" 'TOKEN-FRAGMENT-SECRET' "credential parser leaked input"
+  cli="$TMP_ROOT/malformed-t3"
+  cat >"$cli" <<'SH'
+#!/usr/bin/env bash
+printf '{"credential":"PAIRING-FRAGMENT-SECRET" trailing'
+SH
+  chmod +x "$cli"
+  mcp login --url "$T3_FAKE_URL" --access full-access --t3 "$cli"
+  expect_code 1 "$RC" "malformed pairing JSON must refuse"
+  assert_equals pairing_failed "$(field "$OUT" error.code)" "malformed pairing code"
+  assert_not_contains "$OUT$ERR" 'PAIRING-FRAGMENT-SECRET' "pairing parser leaked input"
+  pass "credential and pairing parser failures publish no secret fragments"
+}
+
 test_login_writes_private_credential_and_never_prints_token() {
   local cli
   t3_fake_case "$TMP_ROOT/cases/login"
@@ -831,3 +853,5 @@ test_jsonrpc_server_error_is_not_proven_refusal
 test_orchestration_error_is_not_proven_refusal
 test_long_wait_rearms_in_slices
 test_capture_clamps_lines_and_closes_session
+
+test_secret_parse_failures_are_redacted

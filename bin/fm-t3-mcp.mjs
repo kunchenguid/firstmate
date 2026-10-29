@@ -308,8 +308,8 @@ export function readCredential(file, now = Date.now()) {
   let cred;
   try {
     cred = JSON.parse(readFileSync(file, "utf8"));
-  } catch (err) {
-    throw new Refusal("credential_unreadable", `T3 credential ${file} is not valid JSON: ${err.message}`);
+  } catch {
+    throw new Refusal("credential_unreadable", `T3 credential ${file} could not be read as valid JSON; sign in again`);
   }
   for (const key of ["origin", "access_token", "expires_at", "environment_id"]) {
     if (!cred[key]) throw new Refusal("credential_unreadable", `T3 credential ${file} lacks ${key}; sign in again`);
@@ -595,7 +595,7 @@ async function login(flags) {
   try {
     pairing = JSON.parse(execFileSync(t3, pairingArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
   } catch (err) {
-    throw new Refusal("pairing_failed", `could not mint a pairing code with '${t3} auth pairing create': ${err.status !== undefined ? `exit ${err.status}` : err.message}`, 1);
+    throw new Refusal("pairing_failed", `could not mint a pairing code with '${t3} auth pairing create': ${Number.isInteger(err.status) ? `exit ${err.status}` : "command failed or returned invalid JSON"}`, 1);
   }
   if (!pairing?.credential) throw new Refusal("pairing_failed", "t3 auth pairing create returned no credential", 1);
   const decision = await postJson(`${origin}/oauth/mcp/decision`, {
