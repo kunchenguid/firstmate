@@ -4760,7 +4760,7 @@ else
         [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
         validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
         HERDR_WT_LEASED=1
-        freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || {
+        freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || {
           if [ "$?" -eq 2 ]; then
             HERDR_WT_LEASED=0
             echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2
