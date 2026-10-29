@@ -64,7 +64,9 @@ screen() {  # <header> <styled composer row>
 }
 ghost() { printf '%s' "$glyph ${esc}[7m${esc}[38;2;173;173;173m${1:0:1}${esc}[0m${esc}[38;2;173;173;173m${1:1}${esc}[39m"; }
 idle=$(screen Message "$(ghost 'Ask Mcode to do anything')")
+# shellcheck disable=SC2034 # read through ${!shot} below
 suggest=$(screen 'Suggested next message' "$(ghost 'Verify that notes.txt contains alpha.')")
+# shellcheck disable=SC2034 # read through ${!shot} below
 draft=$(screen Prompt "$glyph typed draft text${esc}[7m ${esc}[0m")
 slash=$(screen Command "$glyph ${esc}[1m${esc}[38;2;104;192;255m/quit${esc}[0;7m ${esc}[0m")
 caps=$'styled=1\ncursor=1\nidentity=1'
