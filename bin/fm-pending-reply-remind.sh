@@ -52,9 +52,57 @@ _fm_pending_reply_stamp_escalated() {  # <state-dir> <record-path> <field> <valu
   return "$rc"
 }
 
+# Under the record lock: save the dismissal verdict or scan, then 0 when the
+# record still needs a reminder in session <token>, 1 when it does not, 2 when
+# a save failed. The scan runs under the lock because a resend can reset and
+# re-escalate the record between a scan and its save; a verdict read before
+# the lock would then close the new escalation the operator never saw.
+_fm_pending_reply_select_locked() {  # <record-path> <token>
+  local rec=$1 token=$2 scan
+  [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || return 1
+  [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || return 1
+  if fm_pending_reply_escalation_dismissed "$rec" scan; then
+    fm_pending_reply_set "$rec" escalation_dismissed_epoch "$(fm_pending_reply_now)" || return 2
+    return 1
+  fi
+  [ -z "$scan" ] || fm_pending_reply_set "$rec" escalation_dismiss_scan "$scan" || return 2
+  [ "$(fm_pending_reply_get "$rec" surfaced_session)" != "$token" ]
+}
+
+# Under the queue lock: enqueue one check wake naming the records still due in
+# session <token>, then stamp them before the lock is released. Session start
+# and a watcher tick carry the same token and select without this lock, so
+# both can select one record; the first to get here stamps it, and its wake
+# may be handled and acknowledged before the second arrives. The recheck
+# drops what the first pass named, and stamping under the lock keeps the
+# drain from consuming the wake before the stamp lands.
+_fm_pending_reply_remind_locked() {  # <state-dir> <token> <record-path>...
+  local state=$1 token=$2 rec corr task summary payload
+  local -a due=()
+  shift 2
+  for rec in "$@"; do
+    [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+    [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || continue
+    [ "$(fm_pending_reply_get "$rec" surfaced_session)" != "$token" ] || continue
+    due+=("$rec")
+  done
+  [ "${#due[@]}" -gt 0 ] || return 0
+  payload='pending-reply-escalated:'
+  for rec in "${due[@]}"; do
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    task=$(fm_pending_reply_get "$rec" task_id)
+    summary=$(fm_pending_reply_get "$rec" request_summary)
+    payload="$payload task=$task pending-reply-id=$corr request=$summary;"
+  done
+  fm_wake_append_locked check pending-reply-escalated "$payload" || return $?
+  for rec in "${due[@]}"; do
+    _fm_pending_reply_stamp_escalated "$state" "$rec" surfaced_session "$token" || return 1
+  done
+}
+
 # Remind unresolved escalations once per later live session.
 fm_pending_reply_remind_escalated() {  # <state-dir>
-  local state=$1 token dir rec corr task summary payload key queued scan appended=0 rc=0
+  local state=$1 token dir rec lock selected queued rc=0
   local -a open=() recs=()
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   fm_pending_reply_resurface_enabled || return 0
@@ -72,43 +120,32 @@ fm_pending_reply_remind_escalated() {  # <state-dir>
   [ -n "$token" ] || return 0
   STATE=$state
   for rec in "${open[@]}"; do
-    if fm_pending_reply_escalation_dismissed "$rec" scan; then
-      _fm_pending_reply_stamp_escalated "$state" "$rec" escalation_dismissed_epoch "$(fm_pending_reply_now)" || return 1
-      continue
-    fi
-    [ -z "$scan" ] || _fm_pending_reply_stamp_escalated "$state" "$rec" escalation_dismiss_scan "$scan" || return 1
-    [ "$(fm_pending_reply_get "$rec" surfaced_session)" != "$token" ] || continue
-    recs+=("$rec")
+    lock="$state/.pending-reply-$(basename "$rec").lock"
+    fm_lock_acquire_wait "$lock" || return 1
+    _fm_pending_reply_select_locked "$rec" "$token" && selected=0 || selected=$?
+    fm_lock_release "$lock"
+    case "$selected" in
+      0) recs+=("$rec") ;;
+      1) ;;
+      *) return 1 ;;
+    esac
   done
   [ "${#recs[@]}" -gt 0 ] || return 0
   FM_WAKE_QUEUE="$state/.wake-queue"
   FM_WAKE_QUEUE_LOCK="$state/.wake-queue.lock"
-  key=pending-reply-escalated
-  payload='pending-reply-escalated:'
-  for rec in "${recs[@]}"; do
-    corr=$(fm_pending_reply_get "$rec" corr_id)
-    task=$(fm_pending_reply_get "$rec" task_id)
-    summary=$(fm_pending_reply_get "$rec" request_summary)
-    payload="$payload task=$task pending-reply-id=$corr request=$summary;"
-  done
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   queued=$(fm_wake_queued_keys_locked check)
   case "
 $queued
 " in
+    # A still-queued reminder does not name these records; remind them on a later pass.
     *"
-$key
+pending-reply-escalated
 "*) ;;
-    *) fm_wake_append_locked check "$key" "$payload" && appended=1 || rc=$? ;;
+    *) _fm_pending_reply_remind_locked "$state" "$token" "${recs[@]}" || rc=$? ;;
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-  [ "$rc" -eq 0 ] || return "$rc"
-  # A still-queued reminder does not name these records; remind them on a later pass.
-  [ "$appended" -eq 1 ] || return 0
-  for rec in "${recs[@]}"; do
-    _fm_pending_reply_stamp_escalated "$state" "$rec" surfaced_session "$token" || return 1
-  done
-  return 0
+  return "$rc"
 }
 
 if [ "${1:-}" = --token ]; then

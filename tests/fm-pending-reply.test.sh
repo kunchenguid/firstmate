@@ -2450,6 +2450,111 @@ test_dismissal_scan_is_saved_under_record_lock() {
   pass "the dismissal scan is saved only under the record lock"
 }
 
+# BASH_ENV file for one reminder process: with set -T, a DEBUG trap stops it
+# immediately before the first simple command whose text starts with
+# <command-prefix> inside a function matching the glob <function>, writes
+# <dir>/paused, and continues when <dir>/resume exists (or after 30 seconds,
+# so a failed test never strands the process). Nothing in bin/ reads it.
+pause_before() {  # <dir> <function> <command-prefix> -> env-file
+  local dir=$1
+  cat > "$dir/pause.env" <<EOF
+set -T
+_pause_fn='$2'
+_pause_cmd='$3'
+trap 'if [[ \${FUNCNAME[0]:-} == \$_pause_fn && \$BASH_COMMAND == "\$_pause_cmd"* ]]; then trap - DEBUG; : > "$dir/paused"; for _ in \$(seq 1 600); do [ -e "$dir/resume" ] && break; sleep 0.05; done; fi' DEBUG
+EOF
+  printf '%s\n' "$dir/pause.env"
+}
+
+wait_for_file() {  # <path>
+  local _i
+  for _i in $(seq 1 200); do [ -e "$1" ] && return 0; sleep 0.05; done
+  return 1
+}
+
+# Session start and a watcher tick both run the reminder with one session
+# token. When both select the same escalation before either stamps it, the
+# first wake can be handled and acknowledged before the second reaches the
+# queue lock. The second must then find nothing left to remind.
+test_overlapping_reminders_do_not_repeat_a_handled_wake() {
+  local home state corr rec env slow wakes
+  home=$(setup_parent remind-overlap)
+  opt_in_resurface "$home"
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  corr=$(FM_PENDING_REPLY_SESSION=s1 escalate_new "$home" "$state" "overlapping reminders")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  # shellcheck disable=SC2031 # The s1 escalation above ran in a subshell on purpose.
+  export FM_PENDING_REPLY_SESSION=s2
+  # shellcheck disable=SC2016 # The literal command text the reminder runs.
+  env=$(pause_before "$home" fm_pending_reply_remind_escalated 'fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"')
+  BASH_ENV="$env" "$ROOT/bin/fm-pending-reply-remind.sh" "$state" &
+  slow=$!
+  wait_for_file "$home/paused" || { kill "$slow" 2>/dev/null; fail "the slow reminder never reached the queue lock"; }
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "the overlapping reminder failed"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    || fail "precondition: the overlapping reminder should enqueue the wake"
+  [ "$(fm_pending_reply_get "$rec" surfaced_session)" = s2 ] \
+    || fail "precondition: the overlapping reminder should stamp the session"
+  : > "$state/.wake-queue"
+  : > "$home/resume"
+  wait "$slow" || fail "the slow reminder failed after the wake was acknowledged"
+  wakes=$(grep -c $'\tcheck\tpending-reply-escalated\t' "$state/.wake-queue" || true)
+  [ "${wakes:-0}" = 0 ] || fail "a handled escalation was reminded again in the same session"
+  unset FM_PENDING_REPLY_SESSION FM_PENDING_REPLY_NOW FM_HOME
+  pass "an overlapping reminder does not repeat a wake the session already handled"
+}
+
+# A dismissal the reminder read before taking the record lock belongs to the
+# escalation that was open at that moment. If a resend resets the record and
+# it escalates again before the reminder holds the lock, the new escalation
+# is not the one the operator closed: it keeps its reminder and Bearings row.
+test_stale_dismissal_is_not_saved_against_a_new_escalation() {
+  local home state corr rec status env slow
+  home=$(setup_parent remind-stale-dismissal)
+  opt_in_resurface "$home"
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_SESSION=s1
+  corr=$(fm_pending_reply_create "$home" "$state" mate "wake after lost transport")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_prepare_delivery "$state" "$corr" || fail "prepare delivery failed"
+  fm_pending_reply_mark_delivery_unknown "$state" "$corr" || fail "mark delivery unknown failed"
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "first escalation should fire"
+  status=$(fm_pending_reply_get "$rec" parent_status)
+  printf 'resolved [key=pending-reply-%s]: pending-reply-resolved: ack\n' "$corr" >> "$status"
+  export FM_PENDING_REPLY_SESSION=s2
+  # shellcheck disable=SC2016 # The literal command text the reminder runs.
+  env=$(pause_before "$home" '*' 'fm_lock_acquire_wait "$lock"')
+  BASH_ENV="$env" "$ROOT/bin/fm-pending-reply-remind.sh" "$state" &
+  slow=$!
+  wait_for_file "$home/paused" || { kill "$slow" 2>/dev/null; fail "the reminder never reached the record lock"; }
+  fm_pending_reply_reset_known_undelivered "$state" "$corr" || fail "reset for the resend failed"
+  fm_pending_reply_prepare_delivery "$state" "$corr" || fail "resend prepare failed"
+  fm_pending_reply_mark_delivery_unknown "$state" "$corr" || fail "resend mark delivery unknown failed"
+  FM_PENDING_REPLY_NOW=5000 fm_pending_reply_maybe_escalate "$state" "$corr" \
+    || fail "second escalation should fire"
+  [ "$(grep -cF "blocked [key=pending-reply-$corr]" "$status")" = 2 ] \
+    || fail "precondition: the second escalation should reopen the decision"
+  : > "$home/resume"
+  wait "$slow" || fail "the reminder failed after the record escalated again"
+  [ "$(phase_of "$state" "$corr")" = escalated ] || fail "the record should still be escalated"
+  [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] \
+    || fail "the earlier close was saved against the new escalation"
+  "$ROOT/bin/fm-pending-reply-remind.sh" --decisions "$state" \
+    | jq -e --arg key "pending-reply-$corr" 'any(.[]; .key == $key)' >/dev/null \
+    || fail "the earlier close hid the new escalation from bearings"
+  : > "$state/.wake-queue"
+  export FM_PENDING_REPLY_SESSION=s3
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "later-session remind failed"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    || fail "the earlier close hid the new escalation from the reminder"
+  unset FM_PENDING_REPLY_SESSION FM_PENDING_REPLY_NOW FM_HOME
+  pass "a dismissal read before the record lock is not saved against a new escalation"
+}
+
 # Without the config flag, an escalation is surfaced once and then stays quiet.
 test_resurface_stays_off_without_the_flag() {
   local home state corr rec
@@ -2759,6 +2864,8 @@ test_other_closes_do_not_dismiss_escalation
 test_same_session_operator_close_is_recorded
 test_unchanged_status_log_is_not_reread_for_dismissal
 test_dismissal_scan_is_saved_under_record_lock
+test_overlapping_reminders_do_not_repeat_a_handled_wake
+test_stale_dismissal_is_not_saved_against_a_new_escalation
 test_resurface_stays_off_without_the_flag
 test_resurface_flag_follows_the_config_dir
 test_mid_session_opt_in_does_not_repeat_the_reminder
