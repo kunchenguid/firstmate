@@ -3010,7 +3010,7 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup retired
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -3047,10 +3047,19 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
-  if safe_rm_rf "$abs_home_path" "$label"; then
+  case "${FM_REMOTE_RETIRE_STAGE:-}" in
+    "$abs_home_path.retiring."*)
+      retired=$FM_REMOTE_RETIRE_STAGE
+      case "${retired#"$abs_home_path.retiring."}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+      mkdir -m 700 "$retired" || return 1 ;;
+    *) retired=$(mktemp -d "${abs_home_path}.retiring.XXXXXX") || return 1 ;;
+  esac
+  if mv -- "$abs_home_path" "$retired/home"; then
+    rm -rf -- "$retired" || return 1
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
+  rmdir "$retired" 2>/dev/null || true
   restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
   return 1
 }
