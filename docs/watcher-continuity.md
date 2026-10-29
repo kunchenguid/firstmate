@@ -495,6 +495,9 @@ It checks that a newly appended keyed decision is classified without rereading e
 - The typed self-eviction failure.
 - Bounded and successor-linked lifecycle rows.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+- Protection for a live owner with a matching process-identity token and reclamation after PID reuse with a mismatched token.
+- Normalized macOS `ps` start tokens and compatibility with legacy owner-token formats.
+- Reporting the displaced PID when a reused-PID stale lock is reclaimed.
 
 ### Claude auto-arm and turn-end guard
 
