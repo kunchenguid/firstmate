@@ -4920,14 +4920,11 @@ test_own_autonomous_run_is_left_alone() {
   pass "a task-owned autonomous running step is left alone rather than aborted"
 }
 
-test_leaked_worktree_process_is_reaped() {
-  local case_dir rc pid
-  case_dir=$(make_case leaked-process-reap)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-
-  # Provide the lsof cwd interface used by teardown on hosts where lsof is not
-  # installed, keeping this process-reaping test hermetic.
+add_lsof_cwd_scanner() {
+  local case_dir=$1
+  [ -z "$REAL_LSOF_FOR_TEST" ] || return 0
+  [ "$(uname -s)" = Linux ] && [ -d /proc/self ] \
+    || fail "cwd process-reaping tests require lsof or Linux /proc"
   cat > "$case_dir/fakebin/lsof" <<'SH'
 #!/usr/bin/env bash
 for proc in /proc/[0-9]*; do
@@ -4937,6 +4934,15 @@ for proc in /proc/[0-9]*; do
 done
 SH
   chmod +x "$case_dir/fakebin/lsof"
+}
+
+test_leaked_worktree_process_is_reaped() {
+  local case_dir rc pid
+  case_dir=$(make_case leaked-process-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  add_lsof_cwd_scanner "$case_dir"
 
   # A backgrounded, disowned process rooted (by cwd) under the task's own
   # worktree - the same shape the observed incident's leaked `go test`
@@ -4969,17 +4975,7 @@ test_leaked_tasktmp_process_is_reaped() {
   mkdir -p "$case_dir/tasktmp"
   land_shippable_commit "$case_dir"
 
-  # Provide the lsof cwd interface used by teardown on hosts where lsof is not
-  # installed, matching the worktree process-reaping test above.
-  cat > "$case_dir/fakebin/lsof" <<'SH'
-#!/usr/bin/env bash
-for proc in /proc/[0-9]*; do
-  pid=${proc##*/}
-  cwd=$(readlink "$proc/cwd" 2>/dev/null) || continue
-  printf 'p%s\nfcwd\nn%s\n' "$pid" "$cwd"
-done
-SH
-  chmod +x "$case_dir/fakebin/lsof"
+  add_lsof_cwd_scanner "$case_dir"
 
   ( cd "$case_dir/tasktmp" && exec sleep 300 ) &
   pid=$!
