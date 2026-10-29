@@ -3896,10 +3896,15 @@ cleanup_firstmate_home_children() {
 t3_server_for_meta() {  # <task-meta> -> the verified server identity for this cleanup
   local recorded
   recorded=$(fm_meta_get "$1" t3_server)
-  [ -n "$recorded" ] || {
-    echo "error: T3 creation server identity is missing; preserving the task and its worktree" >&2
-    return 1
-  }
+  if [ -z "$recorded" ]; then
+    if [ "$FORCE" = --force ]; then
+      recorded=$(fm_backend_t3code_server_identity) || return 1
+      echo "warning: T3 creation server identity is missing; --force authorizes cleanup using the selected server" >&2
+    else
+      echo "error: T3 creation server identity is missing; preserving the task and its worktree" >&2
+      return 1
+    fi
+  fi
   fm_backend_t3code_server_matches "$recorded" || return 1
   printf '%s' "$recorded"
 }
