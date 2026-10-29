@@ -238,7 +238,7 @@ run_control() {  # <case-dir> <args...>
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
@@ -1029,6 +1029,106 @@ test_worker_account_never_pinned_relaunches_unchanged() {
   assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR=" \
     "an unpinned replacement must launch exactly as before"
   pass "fm-control relaunch: a home that never pinned the runner relaunches unchanged"
+}
+
+test_worker_account_survives_two_relaunches_after_unpinning() {
+  local dir out rc id=rl-acct-twice
+  dir=$(new_case acct-twice "$id")
+  add_ship_task "$dir" "$id" claude
+  mkdir -p "$dir/work" "$dir/other" "$dir/home/config"
+  printf 'account=%s\n' "$dir/work" >> "$dir/home/state/$id.meta"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$dir/work" run_control "$dir" "$id" relaunch \
+    --note "continue after unpinning"); rc=$?
+  expect_code 0 "$rc" "an unpinned relaunch on the recorded ambient account should succeed: $out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] \
+    || fail "the first relaunch must carry the recorded account forward"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work'" \
+    "the first replacement must explicitly use the recorded root"
+
+  printf '%s\n' "$dir/other" > "$dir/home/config/claude-account"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
+  : > "$dir/fake/literal"
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$dir/work" run_control "$dir" "$id" relaunch \
+    --note "pin changed after unpinned relaunch"); rc=$?
+  expect_code 1 "$rc" "the second relaunch must refuse a different pin"
+  assert_contains "$out" "now selects account $dir/other" "the refusal must name the changed pin"
+  [ ! -s "$dir/fake/literal" ] || fail "the second relaunch must refuse before stopping the agent"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "the refusal must keep the recorded account"
+  pass "two relaunches: an unpinned same-account replacement preserves protection against a later pin change"
+}
+
+test_unpinned_pi_relaunch_keeps_the_recorded_root_in_a_different_pane_environment() {
+  local dir out rc id=rl-pi-unpinned harness account root launch provider
+  for harness in pi pi-signed; do
+    dir=$(new_case "unpinned-$harness" "$id")
+    add_ship_task "$dir" "$id" "$harness"
+    root="$dir/work"
+    account=$root
+    if [ "$harness" = pi-signed ]; then
+      root="$dir/user-home/.pi/agent"
+      account=ordinary
+    fi
+    mkdir -p "$root" "$dir/caller" "$dir/pane"
+    printf 'account=%s\naccount_provider=provider-a\nmodel=provider-a/model\n' "$account" \
+      >> "$dir/home/state/$id.meta"
+    printf '%s' "$harness" > "$dir/fake/command"
+    printf '%s' "$harness" > "$dir/fake/becomes"
+    cat > "$dir/fakebin/$harness" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --help ]; then printf 'Options: --tui-mode\\n'; exit 0; fi
+printf '%s\\n' "\${PI_CODING_AGENT_DIR:-\$HOME/.pi/agent}" > '$dir/worker-root'
+SH
+    chmod +x "$dir/fakebin/$harness"
+    provider='provider-a'
+    [ "$harness" != pi ] || provider='provider-b'
+    out=$(PI_CODING_AGENT_DIR="$dir/caller" run_control "$dir" "$id" relaunch \
+      --model "$provider/model" --note "keep the recorded Pi account"); rc=$?
+    expect_code 0 "$rc" "an unpinned $harness relaunch should retain its account: $out"
+    launch=$(grep 'encode launch-brief' "$dir/fake/literal" | tail -n 1)
+    [ -n "$launch" ] || fail "the relaunch must send a launch command"
+    env -i HOME="$dir/user-home" PATH="$dir/fakebin:$PATH" \
+      PI_CODING_AGENT_DIR="$dir/pane" bash -c "$launch" \
+      || fail "the replacement command must run in the synthetic pane"
+    [ "$(cat "$dir/worker-root")" = "$root" ] || fail "the replacement must use the recorded root, regardless of caller and pane accounts"
+    [ "$(meta_field "$dir" "$id" account)" = "$account" ] || fail "the unpinned replacement must retain the recorded account"
+    [ "$(meta_field "$dir" "$id" account_provider)" = "$provider" ] || fail "the unpinned replacement must use the launch model's provider"
+    assert_contains "$launch" "--provider '$provider'" "the replacement must use the launch model's provider"
+  done
+  pass "unpinned Pi replacements explicitly keep their recorded account across different caller and pane environments"
+}
+
+test_spawn_relaunch_checks_the_same_pin_selection_it_launches() {
+  local dir out rc id=rl-acct-snapshot
+  dir=$(new_case acct-snapshot "$id")
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/work" "$dir/other"
+  : > "$dir/work/.credentials.json"
+  : > "$dir/other/.credentials.json"
+  printf 'account=%s\n' "$dir/work" >> "$dir/home/state/$id.meta"
+  printf '%s\n' "$dir/work" > "$dir/home/config/claude-account"
+  # Rewrite the pin immediately after each read. A separate guard read would
+  # approve the recorded root, then launch the replacement under the next one.
+  cat > "$dir/fakebin/perl" <<SH
+#!/usr/bin/env bash
+'$(command -v perl)' "\$@"
+rc=\$?
+if [ "\${!#}" = '$dir/home/config/claude-account' ]; then
+  printf 'read\\n' >> '$dir/pin-reads'
+  printf '%s\\n' '$dir/other' > '$dir/home/config/claude-account'
+fi
+exit "\$rc"
+SH
+  chmod +x "$dir/fakebin/perl"
+  printf zsh > "$dir/fake/command"
+  out=$(run_spawn "$dir" "$id" --relaunch); rc=$?
+  expect_code 0 "$rc" "the launch should use the single approved selection: $out"
+  [ "$(cat "$dir/home/config/claude-account")" = "$dir/other" ] || fail "the fixture must change the pin after selection"
+  [ "$(wc -l < "$dir/pin-reads" | tr -d ' ')" = 1 ] || fail "a relaunch must resolve the pin only once"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] || fail "the record must carry the guarded selection"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work'" "the launch must use the guarded selection"
+  pass "fm-spawn relaunch guards and launches the same pin snapshot even if the file changes after the read"
 }
 
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop() {
@@ -3072,6 +3172,9 @@ test_worker_account_pin_moved_since_the_launch_refuses
 test_worker_account_pin_on_the_recorded_account_relaunches
 test_worker_account_pin_removed_refuses
 test_worker_account_never_pinned_relaunches_unchanged
+test_worker_account_survives_two_relaunches_after_unpinning
+test_unpinned_pi_relaunch_keeps_the_recorded_root_in_a_different_pane_environment
+test_spawn_relaunch_checks_the_same_pin_selection_it_launches
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops

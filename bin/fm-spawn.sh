@@ -3133,22 +3133,23 @@ elif [ "$HARNESS" = polytoken ]; then
   POLYTOKEN_MODEL_REF=$(fm_polytoken_model_ref "$POLYTOKEN_BIN" "$MODEL" "$EFFORT") || exit 1
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
-# record exists. An absent pin selects nothing and leaves every later launch
-# step exactly as it was. A pinned Claude root is exported here as well, so the
-# trust registration below writes the store the worker will actually read.
+# record exists. An absent pin leaves a fresh launch unchanged; a relaunch can
+# retain its recorded account. The selected Claude root is exported here as well,
+# so trust registration below writes the store the worker will actually read.
 RAW_COMMAND=
 [ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
 WORKER_ACCOUNT_MATE=
 [ "$KIND" != secondmate ] || WORKER_ACCOUNT_MATE=$ID
-# A relaunch keeps the task on the account it was launched on, so the shared
-# guard runs here as well as in bin/fm-control.sh: reached directly, this is
-# the only place that refusal can still be made.
+# Account selection guards the same resolved pin it checks and launches with.
+WORKER_ACCOUNT_RELAUNCH_ID=
+WORKER_ACCOUNT_RECORDED=
 if [ "$RELAUNCH" -eq 1 ]; then
-  fm_worker_account_relaunch_guard "$HARNESS" "$CONFIG" "$ID" \
-    "$RELAUNCH_PRIOR_HARNESS" "$(fm_meta_get "$RELAUNCH_META" account)" \
-    "$WORKER_ACCOUNT_MATE" || exit 1
+  WORKER_ACCOUNT_RELAUNCH_ID=$ID
+  WORKER_ACCOUNT_RECORDED=$(fm_meta_get "$RELAUNCH_META" account)
 fi
-WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND" "$WORKER_ACCOUNT_MATE") || exit 1
+WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" \
+  "$RAW_COMMAND" "$WORKER_ACCOUNT_MATE" "$WORKER_ACCOUNT_RELAUNCH_ID" \
+  "$RELAUNCH_PRIOR_HARNESS" "$WORKER_ACCOUNT_RECORDED") || exit 1
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}

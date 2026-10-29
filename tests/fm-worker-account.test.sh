@@ -393,9 +393,11 @@ test_local_secondmate_reads_the_launching_home_pin() {
 
 # guard_says <expect-rc> <message> <guard args...>
 guard_says() {
-  local want=$1 msg=$2 out rc
+  local want=$1 msg=$2 out rc selection
   shift 2
-  out=$(fm_worker_account_relaunch_guard "$@" 2>&1); rc=$?
+  selection=$(fm_worker_account_resolve "$1" "$2" "config/$(fm_worker_account_file "$1")") \
+    || fail "could not resolve the guard fixture's account"
+  out=$(fm_worker_account_relaunch_guard "$1" "$3" "$4" "$5" "$selection" "${6:-}" 2>&1); rc=$?
   [ "$rc" = "$want" ] || fail "$msg: expected exit $want, got $rc ($out)"
   GUARD_OUT=$out
 }
@@ -462,10 +464,8 @@ test_relaunch_guard_keeps_a_task_on_its_recorded_account() {
   rm "$cfg/pi-account"
   guard_says 0 "a removed Pi pin on the recorded ordinary root must not refuse" \
     pi "$cfg" g1 pi ordinary
-  guard_says 1 "a removed Pi pin that would move the task off its recorded root must refuse" \
+  guard_says 0 "a removed Pi pin explicitly keeps the recorded root" \
     pi "$cfg" g1 pi "$TMP_ROOT/guard/pi-other"
-  assert_contains "$GUARD_OUT" "config/pi-account is now absent, so the relaunch would use the ambient account $pi_home/.pi/agent" \
-    "the refusal should name the Pi root an unpinned relaunch would use"
   PI_CODING_AGENT_DIR=$TMP_ROOT/guard/pi-other guard_says 0 "a removed Pi pin whose ambient root is the recorded one must not refuse" \
     pi "$cfg" g1 pi "$TMP_ROOT/guard/pi-other"
   HOME=$saved_home
