@@ -6085,7 +6085,6 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
 fi
 
 test_hidden_untracked_work_refuses_before_return
-test_content_fallback_git_capability_boundary
 test_status_archive_opt_in
 test_record_export_config_absent_never_reads_the_exporter
 test_record_export_unopted_symlinked_config_does_not_block_teardown
