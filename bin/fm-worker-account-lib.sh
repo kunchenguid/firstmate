@@ -245,7 +245,7 @@ fm_worker_account_describe() {
 # that mate is applied (docs/configuration.md "Per-secondmate account pins").
 fm_worker_account_relaunch_guard() {
   local harness=$1 id=$2 recorded_harness=$3 recorded=$4 selection=$5 mate=${6:-}
-  local file recorded_file declared root recorded_root now
+  local file recorded_file declared root recorded_root now rest
   [ -n "$recorded" ] || return 0
   [ -z "$mate" ] || return 0
   file=$(fm_worker_account_file "$harness") || return 0
@@ -257,6 +257,7 @@ fm_worker_account_relaunch_guard() {
     root=${selection#*$'\t'}
     root=${root%%$'\t'*}
     now="config/$file now selects $(fm_worker_account_describe "$harness" "$declared")"
+    rest="relaunching would move the task to a different account directory, and the replacement would start without the outgoing worker's session state, which stays under the recorded account. Set config/$file back to '$recorded' to relaunch this task, or leave it and start a fresh task on the new account"
   else
     case "$harness" in
     claude) root=${CLAUDE_CONFIG_DIR:-} ;;
@@ -267,9 +268,10 @@ fm_worker_account_relaunch_guard() {
     else
       now="config/$file is now absent, so no pin selects an account, and the recorded account differs from the account firstmate is currently running with, $(fm_worker_account_describe "$harness" ordinary)"
     fi
+    rest="the relaunch is refused because no pin selects an account and firstmate is running with a different account than the task recorded. Set config/$file to '$recorded' or run firstmate with that account to relaunch this task, or start a fresh task on the current account"
   fi
   ! fm_worker_account_same_root "$root" "$recorded_root" || return 0
-  echo "error: task $id was launched on $(fm_worker_account_describe "$recorded_harness" "$recorded"), but $now; relaunching would move the task to a different account directory, and the replacement would start without the outgoing worker's session state, which stays under the recorded account. Set config/$file back to '$recorded' to relaunch this task, or leave it and start a fresh task on the new account" >&2
+  echo "error: task $id was launched on $(fm_worker_account_describe "$recorded_harness" "$recorded"), but $now; $rest" >&2
   return 1
 }
 

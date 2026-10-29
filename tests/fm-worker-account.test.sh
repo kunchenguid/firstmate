@@ -431,7 +431,8 @@ test_relaunch_guard_keeps_a_task_on_its_recorded_account() {
     claude "$cfg" g1 claude "$b"
   assert_contains "$GUARD_OUT" "config/claude-account is now absent, so no pin selects an account, and the recorded account differs from the account firstmate is currently running with, the ordinary account (~/.claude with CLAUDE_CONFIG_DIR unset)" \
     "the refusal should name the account firstmate is currently running with"
-  assert_contains "$GUARD_OUT" "Set config/claude-account back to '$b'" "the refusal should say how to proceed"
+  assert_contains "$GUARD_OUT" "the relaunch is refused because no pin selects an account and firstmate is running with a different account than the task recorded. Set config/claude-account to '$b' or run firstmate with that account to relaunch this task, or start a fresh task on the current account" \
+    "the refusal should say why it refused and how to proceed without a pin"
   CLAUDE_CONFIG_DIR=$a guard_says 1 "a removed pin that would move the task to the ambient root must refuse" \
     claude "$cfg" g1 claude "$b"
   assert_contains "$GUARD_OUT" "the account firstmate is currently running with, account $a" "the refusal should name the root firstmate is currently running with"
