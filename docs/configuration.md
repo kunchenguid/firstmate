@@ -803,9 +803,9 @@ The flag is a home-local preference and is not inherited by secondmate homes.
 ## Park on review (config/park-on-review, config/no-auto-land)
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review, while keeping its branch, PR, task record, instructions, and local copy.
-A lane parks only from a verified clean, ready-to-merge state: open and not a draft, no conflicts, CI green on the current head, no changes requested, zero unresolved review threads, and every automated reviewer (CodeRabbit, Greptile, or a login listed in `config/contribution-review-bots`) having posted on the current head, or a quiet window having passed since CI finished on it.
+A lane parks only from a verified clean, ready-to-merge state: open and not a draft, no conflicts, CI green on the current head, no changes requested, zero unresolved review threads, and every automated reviewer (CodeRabbit, Greptile, or a login listed in `config/contribution-review-bots`) having submitted a review of the current head, or a quiet window having passed since CI finished on it (a bot comment alone does not prove a finished review).
 Anything else keeps the worker working, and the verdict is re-read from the forge immediately before the agent is stopped, so a head that moved in between refuses the park.
-A parked lane's local copy is durably leased so the worktree pool never hands it out, and new comments, failing checks, requested changes, a conflict, an unresolved thread, or a new push relaunch a fresh worker in the same copy on the same branch with the trigger in its instructions.
+A parked lane's local copy is durably leased so the worktree pool never hands it out, and new or edited comments, failing checks, requested changes, a conflict, an unresolved thread, or a new push relaunch a fresh worker in the same copy on the same branch with the trigger in its instructions.
 A branch that merely fell behind its base does not relaunch a parked lane.
 Without the flag, `bin/fm-park.sh park <task-id>` still parks one lane on request.
 

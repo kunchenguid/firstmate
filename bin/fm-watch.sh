@@ -4090,17 +4090,19 @@ EOF
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
-          if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
-            triage_log "absorbed duplicate merged PR poll result for $id"
-            continue
-          fi
           # A merged lane is cleaned up here through bin/fm-teardown.sh's own
           # gates unless config/no-auto-land opts out (a parked lane always
-          # is); its one-line outcome joins the merge outcome in the same wake.
+          # is), also when bin/fm-pr-merge.sh already recorded the merge; its
+          # one-line outcome joins the merge outcome in the same wake.
           land_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
             "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible 2>/dev/null) || true
           if [ -n "$land_out" ]; then
-            fm_wake_append check "$c" "check: $id merged $url - $land_out" || exit 1
+            fm_wake_append check "land-$id" "check: $id merged $url - $land_out" || exit 1
+          fi
+          if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
+            triage_log "absorbed duplicate merged PR poll result for $id"
+            [ -n "$land_out" ] || continue
+            reason="check: $id merged $url - $land_out"
           fi
           wake "$reason"
         fi
