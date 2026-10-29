@@ -209,6 +209,16 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 mkdir -p "$STATE"
+# Hold this state directory open for the main loop's teardown check: a
+# directory recreated at the same path is then a different directory, and the
+# held descriptor keeps its inode from being reused. It is opened before the
+# lock claim so a teardown during startup is not mistaken for the directory
+# this watcher claimed in. A host that cannot open a directory keeps reading a
+# lock with no holder as a teardown.
+WATCH_STATE_HELD=0
+if { exec 6<"$STATE"; } 2>/dev/null; then
+  WATCH_STATE_HELD=1
+fi
 # A home that never existed (a state-only test fixture) is not a home that
 # disappeared, so the per-poll home-gone exit below applies only when it did.
 WATCH_HOME_EXISTED=0
@@ -3546,14 +3556,6 @@ FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
-# Hold this state directory open for the main loop's teardown check: a
-# directory recreated at the same path is then a different directory, and the
-# held descriptor keeps its inode from being reused. A host that cannot open a
-# directory keeps reading a lock with no holder as a teardown.
-WATCH_STATE_HELD=0
-if { exec 6<"$STATE"; } 2>/dev/null; then
-  WATCH_STATE_HELD=1
-fi
 
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
