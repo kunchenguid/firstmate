@@ -1607,8 +1607,9 @@ fm_lock_try_acquire() {
     return 0
   fi
 
-  fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fm_current_pid current || return 1
+  recovered_pid=$pid
   if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
@@ -1689,7 +1690,6 @@ fm_lock_try_acquire() {
     FM_LOCK_OWNER_DIR=
     return 1
   fi
-  recovered_pid=$cur
   fm_lock_remove_path "$lockdir" stale || true
   rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
