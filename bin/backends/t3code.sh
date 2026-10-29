@@ -254,6 +254,19 @@ fm_backend_t3code_thread_state() {  # <thread-id>
   fm_backend_t3code_mcp state --thread "$1"
 }
 
+# Legacy task metadata has no recorded server identity. Adopt the selected
+# server only when it returns positive evidence that this thread exists there;
+# a not-found response cannot distinguish a server switch from destruction.
+fm_backend_t3code_adopt_server_for_thread() {  # <thread-id> -> server identity
+  local thread=$1 out exists server
+  server=$(fm_backend_t3code_server_identity) || return 1
+  out=$(fm_backend_t3code_thread_state "$thread") || return 1
+  exists=$(printf '%s' "$out" | fm_backend_t3code_json_get exists) || return 1
+  [ "$exists" = true ] || return 1
+  fm_backend_t3code_server_matches "$server" || return 1
+  printf '%s' "$server"
+}
+
 # fm_backend_t3code_probe: one word naming the thread's row in the status
 # table, from its V2 thread status: blocked (any pending runtime request: a
 # question or a permission approval waits on a human), idle, starting

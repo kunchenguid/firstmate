@@ -482,6 +482,9 @@ fm_control_endpoint_state() {
   case "$1" in
     rex|t3code) [ -n "$server" ] || server=$(fm_meta_get "${3:-}" "${1%code}_server") ;;
   esac
+  if [ "$1" = t3code ] && [ -z "$server" ]; then
+    server=$(fm_backend_t3code_adopt_server_for_thread "$2") || { printf unreadable; return 0; }
+  fi
   fm_control_endpoint_server_matches "$1" "${3:-}" "$server" || { printf unreadable; return 0; }
   state=$(fm_backend_agent_state "$1" "$2") || state=unreadable
   fm_control_endpoint_server_matches "$1" "${3:-}" "$server" || { printf unreadable; return 0; }

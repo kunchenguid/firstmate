@@ -2493,16 +2493,16 @@ fm_secondmate_liveness_relaunch "$1" smfail && echo relaunched=yes || echo relau
 # proven closed: recovery leaves it in place instead of launching a second
 # supervisor beside the draining one.
 test_draining_archived_t3_secondmate_is_not_relaunched() {
-  local thread=mcp:0b1c2d3e-5f6a-4b7c-8d9e-789abcdef012 state out
+  local thread=mcp:0b1c2d3e-5f6a-4b7c-8d9e-789abcdef012 state home out
   t3_case secondmate-draining running
   t3_world "$(t3_thread_json "$thread" running true)"
-  state="$CASE_DIR/state"
-  mkdir -p "$state"
-  fm_write_meta "$state/smdrain.meta" "window=fm-smdrain" "kind=secondmate" "harness=claude" "backend=t3code" "t3_server=$(t3_run fm_backend_t3code_server_identity)" "t3_thread_id=$thread" "home=$CASE_DIR/sm-home"
-  out=$(STATE="$state" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" FM_HOME="$CASE_DIR/home" bash -c '
+  state="$CASE_DIR/state" home="$CASE_DIR/home"
+  mkdir -p "$state" "$home"
+  fm_write_meta "$state/smdrain.meta" "window=fm-smdrain" "kind=secondmate" "harness=claude" "backend=t3code" "t3_thread_id=$thread" "home=$CASE_DIR/sm-home"
+  out=$(STATE="$state" FM_ROOT_OVERRIDE="$CASE_DIR" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$CONFIG" FM_HOME="$home" bash -c '
 . "$0/bin/fm-secondmate-liveness-lib.sh"
 fm_secondmate_liveness_probe "$1" smdrain poll
-printf "probe=%s state=%s\n" "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_STATE"
+printf "probe=%s state=%s reason=%s\n" "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_STATE" "$FM_SM_LIVE_REASON"
 ' "$ROOT" "$state/smdrain.meta" 2>&1)
   assert_not_contains "$out" "probe=relaunchable" "an archived thread with an active run must not be relaunchable: $out"
   assert_contains "$out" "state=unreadable" "an archived thread with an active run reads unreadable: $out"
