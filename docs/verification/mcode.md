@@ -57,6 +57,7 @@ Why · Needs confirmation: The exact user-requested command appends to a concret
 ```
 
 `MINIMAX_DATA_DIR=<empty dir> mcode exec ...` failed with `Sign in to MiniMax to use Agent features. Run \`mcode login\`, then retry.`, so a per-task data directory loses the sign-in.
+The bundle resolves the data directory as `process.env.MINIMAX_DATA_DIR?.trim()||process.env.MAVIS_DATA_DIR?.trim()` before its `~/.minimax` default, and `MINIMAX_DATA_DIR=$HOME/.minimax mcode exec ...` pinned to the default directory kept the sign-in and answered `PONG`, which is what lets the launch pin the directory the preflight checked.
 mcode's packaged hooks reference names the user file `{{DATA_DIR}}/hooks.json`, which needs `"enabled": true`, and a project `.minimax/hooks.json` that runs only after the user switches it on per project in Settings; a project hooks file in a fresh directory did not fire.
 `mcode -m minimax/MiniMax-Bogus-9` and `mcode exec --model minimax/MiniMax-Bogus-9` both ran on M3.1-Flash with no error.
 The installed config lists `MiniMax-M3` and `MiniMax-M3.1-Flash` under `provider.minimax.models`, and M3.1-Flash advertises effort levels `default`, `low`, `medium`, `high`, `xhigh`, and `max` that only `/model` and `mcode exec --effort` select.
@@ -109,7 +110,7 @@ A relaunched mcode in the same pane accepted a fresh report.
 
 ## Coverage and limits
 
-The portable regression drives anchored ancestry and liveness, worker-only resolution, the single-press interrupt with its Ctrl+U clear and edit-mode hazard, the captured placeholder, suggestion, draft, and slash-command composer shapes with and without the mcode identity, the lazy Herdr identity probe, the title and spinner-row busy signals driven apart, the launch preflight, and the scout launch, readiness gate, and refusals.
+The portable regression drives anchored ancestry and liveness, worker-only resolution, the single-press interrupt with its Ctrl+U clear and edit-mode hazard, the captured placeholder, suggestion, draft, and slash-command composer shapes with and without the mcode identity, the lazy Herdr identity probe, the title and spinner-row busy signals driven apart, the launch preflight and its pinned data directory, and the scout launch, readiness gate, and refusals; `tests/fm-control.test.sh` pins that an mcode relaunch the preflight refuses sends the running worker nothing.
 `tests/fm-backend-herdr.test.sh` pins the stateless `mcode` registration reading live over a `minimax-code` process and stale over a shell-only pane.
 Not verified and therefore unsupported:
 - Linux; the process title and colours were observed on macOS only.

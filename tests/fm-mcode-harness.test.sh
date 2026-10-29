@@ -165,11 +165,30 @@ out=$(preflight minimax/MiniMax-M3.1-Flash) || fail "a configured quoted model r
 out=$(preflight minimax/MiniMax-M3) || fail "a configured model refused: $out"
 out=$(preflight minimax/MiniMax-Bogus-9) && fail 'an unknown model was accepted although mcode would silently run its default'
 assert_contains "$out" 'minimax/MiniMax-M3, minimax/MiniMax-M3.1-Flash' 'refusal must list the configured ids'
-out=$(preflight other/thing) || fail "an unlisted provider must launch unvalidated: $out"
-assert_contains "$out" unvalidated 'unvalidated launch must be announced'
+out=$(preflight other/thing) && fail 'a provider the config does not define was accepted although mcode would silently run its default'
+assert_contains "$out" 'configured: minimax' 'refusal must list the configured providers'
 out=$(preflight MiniMax-M3) && fail 'a model without its provider was accepted'
 out=$(MINIMAX_DATA_DIR="$TMP_ROOT/absent" "$CONFIG_TOOL" preflight 2>&1) && fail 'an unreadable config was accepted'
-pass "launch preflight: Full access required, configured models only, unlisted providers announced"
+# The one directory checked is printed for the launch to pin, resolved the way
+# mcode resolves it, and a relative override is refused.
+[ "$(MINIMAX_DATA_DIR=$data "$CONFIG_TOOL" preflight 2>/dev/null)" = "$data" ] || fail 'the checked data directory was not printed'
+[ "$(MINIMAX_DATA_DIR="  $data  " "$CONFIG_TOOL" preflight 2>/dev/null)" = "$data" ] || fail 'a padded override was not trimmed as mcode trims it'
+[ "$(MAVIS_DATA_DIR=$data "$CONFIG_TOOL" preflight 2>/dev/null)" = "$data" ] || fail 'the MAVIS_DATA_DIR fallback was not honored'
+[ "$(MINIMAX_DATA_DIR=$data MAVIS_DATA_DIR="$TMP_ROOT/absent" "$CONFIG_TOOL" preflight 2>/dev/null)" = "$data" ] || fail 'MINIMAX_DATA_DIR must outrank MAVIS_DATA_DIR'
+out=$(MINIMAX_DATA_DIR=minimax "$CONFIG_TOOL" preflight 2>&1) && fail 'a relative data directory was accepted'
+assert_contains "$out" relative 'the relative refusal must say why'
+# mcode writes two-space block YAML, but any consistent indentation, quoted
+# keys, and a commented quoted mode parse alike; a flow-style models map cannot
+# be read and launches unvalidated.
+wide="$TMP_ROOT/minimax-wide"
+mkdir -p "$wide"
+printf '%s\n' 'permissionMode: "bypassPermissions"  # set by /permission full' 'provider:' '    minimax:' '        models:' \
+  "            'MiniMax-M3.1-Flash':" '                name: M3.1-Flash' '    flow:' '        models: {a: 1}' > "$wide/config.yaml"
+out=$(MINIMAX_DATA_DIR=$wide "$CONFIG_TOOL" preflight minimax/MiniMax-M3.1-Flash 2>&1) || fail "four-space indentation refused: $out"
+out=$(MINIMAX_DATA_DIR=$wide "$CONFIG_TOOL" preflight minimax/MiniMax-M3 2>&1) && fail 'an unlisted model passed under four-space indentation'
+out=$(MINIMAX_DATA_DIR=$wide "$CONFIG_TOOL" preflight flow/a 2>&1) || fail "a flow-style models map refused: $out"
+assert_contains "$out" unvalidated 'an unreadable models map must be announced'
+pass "launch preflight: Full access required, configured providers and models only, one absolute data directory printed"
 
 case_dir="$TMP_ROOT/spawn"
 fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
@@ -202,7 +221,8 @@ spawn_case() {  # <id> [fm-spawn args...]
 out=$(spawn_case mc-high --model minimax/MiniMax-M3.1-Flash --effort high) || fail "spawn failed: $out"
 launch=$(cat "$case_dir/mc-high.launch")
 assert_contains "$launch" "$fakebin/mcode' --model 'minimax/MiniMax-M3.1-Flash' " 'resolved binary or model lost'
-assert_contains "$launch" '-u NO_COLOR COLORTERM=truecolor' 'placeholder styling not pinned'
+assert_contains "$launch" '-u NO_COLOR -u MAVIS_DATA_DIR COLORTERM=truecolor' 'placeholder styling not pinned or MAVIS_DATA_DIR kept'
+assert_contains "$launch" "MINIMAX_DATA_DIR='$data' " 'the worker does not read the configuration the preflight checked'
 assert_contains "$launch" 'env -u CLAUDECODE' 'foreign launcher marker not cleared'
 assert_contains "$launch" 'encode launch-brief' 'typed launch envelope lost'
 case "$launch" in *--effort*|*__*) fail "effort reached argv or a placeholder survived: $launch" ;; esac

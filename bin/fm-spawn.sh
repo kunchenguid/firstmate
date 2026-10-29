@@ -548,6 +548,7 @@
 #     __CORTEXPLUGIN__ private per-task Cortex plugin directory with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
 #     __MCODEBIN__  resolved MiniMax Code executable for an mcode launch
+#     __MCODEDATA__ absolute mcode data directory the launch preflight checked
 #     __OPENCODEBIN__ quoted concrete opencode executable path resolved from PATH -
 #                  the same binary the version-gate probe reads, so the recorded
 #                  major can never describe a different executable than the pane
@@ -2744,9 +2745,11 @@ launch_template() {
   # renders on a fresh worktree. NO_COLOR is cleared and COLORTERM pinned so
   # the placeholder keeps the truecolor the composer guard reads, and the
   # foreign primary markers are cleared because mcode publishes none of its own.
+  # MINIMAX_DATA_DIR is pinned to the directory the preflight checked, and
+  # MAVIS_DATA_DIR cleared, so the worker cannot read a different config.
   # No hook is loaded: busy state is the title and rendered-tail fallback in
   # bin/fm-busy-lib.sh, so nothing is armed below.
-  mcode) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR COLORTERM=truecolor __MCODEBIN__ __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  mcode) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR -u MAVIS_DATA_DIR COLORTERM=truecolor MINIMAX_DATA_DIR=__MCODEDATA__ __MCODEBIN__ __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -3165,9 +3168,11 @@ if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
 fi
 # MiniMax Code: the captain's global Full access and a configured model id
-# are proven read-only before any worktree, endpoint, or record exists.
+# are proven read-only before any worktree, endpoint, or record exists, and the
+# one data directory that proof read is pinned into the launch (__MCODEDATA__)
+# so the worker reads that same configuration.
 if [ "$HARNESS" = mcode ]; then
-  "$SCRIPT_DIR/fm-mcode-config.sh" preflight "$MODEL" || exit 1
+  MCODE_DATA_DIR=$("$SCRIPT_DIR/fm-mcode-config.sh" preflight "$MODEL") || exit 1
 fi
 # polytoken's model validation composes firstmate's model and effort axes into
 # the launch model reference (bin/fm-polytoken-lib.sh owns the reasoning): the
@@ -6988,7 +6993,10 @@ cortex)
   LAUNCH=${LAUNCH//__CORTEXPLUGIN__/"$(shell_quote "$STATE_REAL/$ID.cortex-plugin")"}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
-mcode) LAUNCH=${LAUNCH//__MCODEBIN__/"$(shell_quote "$MCODE_BIN")"} ;;
+mcode)
+  LAUNCH=${LAUNCH//__MCODEBIN__/"$(shell_quote "$MCODE_BIN")"}
+  LAUNCH=${LAUNCH//__MCODEDATA__/"$(shell_quote "$MCODE_DATA_DIR")"}
+  ;;
 opencode)
   # The resolved absolute path probed for the version gate above, so the pane
   # runs exactly the binary whose major was recorded. An unresolved executable

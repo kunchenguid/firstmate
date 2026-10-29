@@ -1068,6 +1068,19 @@ resolve_relaunch_profile() {
         | grep -qxF "$(fm_polytoken_hooks_file "$WT")" \
       || fm_polytoken_require_hooks_free "$WT" || return 1
   fi
+  # Likewise MiniMax Code's launch refusals: its backend boundary, a missing
+  # executable, and the read-only preflight (missing Full access, an
+  # unconfigured model, an unusable data directory) refuse here, before the old
+  # agent stops, rather than in the launch owner after it.
+  if [ "$TARGET_HARNESS" = mcode ]; then
+    case "$BACKEND" in
+      tmux|herdr) ;;
+      *) die "mcode is verified on the tmux and herdr backends only; relaunching $ID on $BACKEND would stop the running agent for a launch that must be refused" ;;
+    esac
+    command -v mcode >/dev/null 2>&1 \
+      || die "mcode executable not found on PATH; relaunching $ID onto it would stop the running agent for a launch that must be refused"
+    "$SCRIPT_DIR/fm-mcode-config.sh" preflight "$TARGET_MODEL" >/dev/null || return 1
+  fi
   # Likewise config/crew-exclude-tools: a malformed file, or a replacement
   # runtime that cannot hide the listed tools, refuses here, before the old
   # agent stops. Secondmate agents are not covered.
