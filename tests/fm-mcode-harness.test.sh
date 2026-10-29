@@ -103,8 +103,18 @@ done
 for title in 'Working | x' 'zsh' '' 'Working on it | MCode tips'; do
   [ "$(fm_busy_mcode_title_state "$title")" = unknown ] || fail "foreign title claimed: $title"
 done
-busy_tail='  ⠼ Running 27s · Option+Enter queue · Enter steer · Ctrl+O details · Esc stop'
-idle_tail='    Message · Enter send · Ctrl+J newline'
+# The bottom of a live mcode pane: the slot row above the composer's top
+# rule holds the spinner while a turn runs and the `Message` header when idle.
+bottom() {  # <slot row> [transcript row]
+  printf '%s\n' "${2:-  ● done}" "$1" "    $rule" '  ›  Ask Mcode to do anything' "    $rule" '' \
+    '  …/wt │ ⎇ main │ Full access │ ✦ M3.1-Flash · Effort default'
+}
+spinner='  ⠼ Running 27s · Option+Enter queue · Enter steer · Ctrl+O details · Esc stop'
+header='    Message · Enter send · Ctrl+J newline'
+busy_tail=$(bottom "$spinner")
+idle_tail=$(bottom "$header")
+# Transcript text quoting the spinner row renders above the slot, never in it.
+echo_tail=$(bottom "$header" "  ● The status row reads: $spinner")
 # Drive the two signals apart through the classifier's own backend seams.
 FAKE_TITLE=
 FAKE_TAIL=
@@ -116,15 +126,22 @@ classify() { FAKE_TITLE=$1 FAKE_TAIL=$2; fm_busy_classify tmux fake:w mcode work
 [ "$(classify 'Done | wt | MCode' "$busy_tail")" = 'busy mcode-regex' ] || fail 'the spinner row alone must prove busy'
 [ "$(classify '' "$busy_tail")" = 'busy mcode-regex' ] || fail 'a missing title must not hide the spinner row'
 [ "$(classify 'Done | wt | MCode' "$idle_tail")" = 'idle mcode-title' ] || fail 'a settled title with no spinner must read idle'
+[ "$(classify 'Done | wt | MCode' "$echo_tail")" = 'idle mcode-title' ] || fail 'quoted spinner text in the transcript faked a running turn'
 [ "$(classify '' "$idle_tail")" = 'unknown mcode-title' ] || fail 'no title must never read idle'
 [ "$(classify 'Needs approval | wt | MCode' "$idle_tail")" = 'unknown mcode-title' ] || fail 'a parked worker must not read idle'
 unset -f fm_backend_mcode_title fm_backend_capture fm_backend_busy_state
 printf '%s\n' "$busy_tail" | fm_busy_lines_match mcode || fail 'mcode delivery signal lost'
-printf '%s\n' '  ⠏ Loading · Option+Enter queue · Enter steer · Ctrl+O de' | fm_busy_lines_match mcode || fail 'a truncated spinner row lost'
-printf '%s\n' "$busy_tail" | fm_busy_lines_match || fail 'the harness-less union lost mcode'
+for slot in '  ⠏ Loading · Option+Enter queue · Enter steer · Ctrl+O de' '    ⠏ Loading 4min37s · Option+Enter queue · Enter steer · Ctrl+O details · Esc stop'; do
+  bottom "$slot" | fm_busy_lines_match mcode || fail "spinner row variant lost: $slot"
+done
 ! printf '%s\n' "$idle_tail" | fm_busy_lines_match mcode || fail 'idle header read busy'
+# A pending composer with quoted spinner text must not convert to delivered.
+! printf '%s\n' "$echo_tail" | fm_busy_lines_match mcode || fail 'quoted spinner text confirmed a delivery'
+[ "$(fm_composer_queued_enter_verdict pending idle)" != empty ] || fail 'an idle pane converted a pending composer to delivered'
+! printf '%s\n' "$spinner" | fm_busy_lines_match mcode || fail 'a spinner row outside its slot read busy'
+! printf '%s\n' "$busy_tail" | fm_busy_lines_match || fail 'the harness-less union must not carry the mcode row'
 ! printf 'esc to cancel\n' | fm_busy_lines_match mcode || fail 'borrowed another harness signal'
-pass "busy state: title and spinner row each prove busy, idle only from a settled title, parked and unreadable stay unknown"
+pass "busy state: title and slot-anchored spinner row each prove busy, quoted text fakes neither busy nor delivery, idle only from a settled title"
 
 data="$TMP_ROOT/minimax"
 mkdir -p "$data"

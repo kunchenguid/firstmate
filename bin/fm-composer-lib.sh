@@ -388,7 +388,8 @@ fm_composer_strip_ghost() {
 # devin: "esc twice to interrupt" and its "❭ Guide Devin while it works" working composer;
 # cortex: "(esc to interrupt)" on its spinner row and "Type to queue message..." in its working composer;
 # commandcode: "esc to interrupt" beside a bullet-framed elapsed cell.
-# mcode: "Option+Enter queue · Enter steer" on its spinner row.
+# mcode: its spinner row, matched structurally (fm_composer_mcode_spinner_live)
+# rather than by a token, and outside the harness-less union below.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
 # signature separate from the shared default because that shape is not generic
@@ -413,7 +414,7 @@ fm_composer_strip_ghost() {
 # tmux agy endpoint reaches the submit core with no recorded harness, and its
 # bare `>` composer verdict is `unknown`, so the busy footer is the only
 # turn-started acknowledgement that path can read.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$|Option\+Enter queue · Enter steer'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 # Devin 3000.11.1: the working composer and interrupt hint are independent
 # delivery signals. Neither is used as semantic worker-state evidence.
@@ -428,14 +429,34 @@ FM_DELIVERY_CORTEX_BUSY_REGEX_DEFAULT='\(esc to interrupt\)|Type to queue messag
 # the idle footer carries neither. Delivery guard only; recorded worker state
 # comes from the commandcode-mod writer in bin/fm-busy-lib.sh.
 FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT='esc to interrupt|•[[:space:]]+[0-9]+[smh]([[:space:]]+[0-9]+[smh])*[[:space:]]+•'
-# MiniMax Code 0.7.1 renders one spinner row while a turn runs, for example
-# `⠼ Running 27s · Option+Enter queue · Enter steer · Ctrl+O details · Esc stop`
-# (`Loading` before the first tool call); the idle row reads `Message · Enter
-# send`. The matched left part survives a narrow pane truncating the row.
-# Delivery guard only; recorded worker state comes from the mcode arm of
-# bin/fm-busy-lib.sh.
-FM_DELIVERY_MCODE_BUSY_REGEX_DEFAULT='Option\+Enter queue · Enter steer'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
+
+# fm_composer_mcode_spinner_live: 0 when the plain pane text on stdin shows
+# MiniMax Code's running-turn spinner row in the one slot it occupies - the
+# last non-blank row above the rule that opens the bottom-most `›` composer,
+# where an idle pane draws its `Message · Enter send` header instead (verified
+# live, mcode 0.7.1: `⠼ Running 27s · Option+Enter queue · Enter steer · Ctrl+O
+# details · Esc stop`, `⠏ Loading · ...`, `⠏ Loading 4min37s · ...`). The row
+# must lead with a spinner glyph, a capitalised verb, and an optional elapsed
+# cell before the queue/steer hints, which a narrow pane keeps when it
+# truncates the right of the row. Matching the slot rather than the words is
+# what keeps transcript text that quotes the row, which renders above that
+# slot, from reading as a running turn. Delivery guard and rendered busy
+# fallback only; bin/fm-busy-lib.sh owns what the verdict means.
+fm_composer_mcode_spinner_live() {
+  awk '
+    /^[[:space:]]*$/ { next }
+    { row[++n] = $0 }
+    END {
+      for (i = n; i >= 3; i--) {
+        if (row[i] !~ /^[[:space:]]*›([[:space:]]|$)/) continue
+        if (row[i - 1] !~ /^[[:space:]]*(─)+[[:space:]]*$/) continue
+        exit !(row[i - 2] ~ /^[[:space:]]*[^[:space:]]+ [A-Z][a-z]+( [0-9][0-9a-z]*)? · Option\+Enter queue · Enter steer/)
+      }
+      exit 1
+    }
+  '
+}
 FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT='esc interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 # omp (Oh My Pi) renders its TUI busy line as `Working…` with U+2026 HORIZONTAL
@@ -496,7 +517,10 @@ fm_busy_lines_match() {  # [harness]
       devin) regex=$FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT ;;
       cortex) regex=$FM_DELIVERY_CORTEX_BUSY_REGEX_DEFAULT ;;
       commandcode) regex=$FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT ;;
-      mcode) regex=$FM_DELIVERY_MCODE_BUSY_REGEX_DEFAULT ;;
+      mcode)
+        printf '%s\n' "$lines" | fm_composer_mcode_spinner_live
+        return
+        ;;
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
       opencode) regex=$FM_DELIVERY_OPENCODE_BUSY_REGEX_DEFAULT ;;
       pi|pi-signed) regex=$FM_DELIVERY_PI_BUSY_REGEX_DEFAULT ;;

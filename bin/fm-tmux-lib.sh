@@ -380,12 +380,15 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 }
 
 # fm_tmux_submit_busy_harness: the busy-footer harness for a submit on
-# <target> - polytoken when the pane's composer identity is polytoken, empty
-# (the harness-less union) for every other pane.
+# <target> - polytoken or mcode when the pane's composer identity names it,
+# empty (the harness-less union) for every other pane. mcode's spinner row is
+# matched by its slot, never by a union token.
 fm_tmux_submit_busy_harness() {  # <target>
   local identity
   identity=$(fm_tmux_composer_identity "$1") || return 0
-  [ "${identity%%$'\t'*}" != polytoken ] || printf 'polytoken'
+  case "${identity%%$'\t'*}" in
+    polytoken|mcode) printf '%s' "${identity%%$'\t'*}" ;;
+  esac
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>

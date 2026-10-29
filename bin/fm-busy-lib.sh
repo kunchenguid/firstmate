@@ -939,14 +939,13 @@ fm_busy_mcode_title_state() {  # <title>
   esac
 }
 
-# fm_busy_mcode_tail_busy: the MiniMax Code rendered-tail busy signature, the
-# spinner row pinned above its composer while a turn runs (`⠼ Running 27s ·
-# Option+Enter queue · Enter steer · Ctrl+O details · Esc stop`, verified live
-# on mcode 0.7.1; the idle row reads `Message · Enter send`). Only the row's
-# left part is matched, so a narrow pane that truncates the row still matches.
+# fm_busy_mcode_tail_busy: 0 when the pane tail on stdin shows MiniMax Code's
+# running-turn spinner row in its own slot above the composer. The shape is
+# owned by bin/fm-composer-lib.sh (fm_composer_mcode_spinner_live), which every
+# backend this arm can read has loaded; without it the row proves nothing.
 fm_busy_mcode_tail_busy() {
-  grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qE 'Option\+Enter queue · Enter steer'
+  command -v fm_composer_mcode_spinner_live >/dev/null 2>&1 || return 1
+  fm_composer_mcode_spinner_live
 }
 
 # --- launch-prompt signatures (fm_busy_launch_prompt_parked) ----------------

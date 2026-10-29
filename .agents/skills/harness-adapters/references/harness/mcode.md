@@ -10,7 +10,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Fact | Value |
 |---|---|
 | Unattended mode | The TUI has no permission flag; its mode is the global `permissionMode` key of `$MINIMAX_DATA_DIR/config.yaml` (default `~/.minimax/config.yaml`), which `/permission full` and Alt+M both write. The captain sets Full access (`bypassPermissions`) once; `../../../../../bin/fm-mcode-config.sh` refuses a launch until it reads that value and never writes it. |
-| Busy state | No hook is loaded. `../../../../../bin/fm-busy-lib.sh` reads two independent signals: the terminal title mcode publishes as `<status> \| <session> \| MCode` (`Working` for the whole turn) and the pinned spinner row `Option+Enter queue · Enter steer`. Idle comes only from a settled title (`Ready`, `Done`, `Stopped`, `Failed`, `Error`) with no spinner row; `Needs approval`, `Needs input`, and `Needs login` read unknown. |
+| Busy state | No hook is loaded. `../../../../../bin/fm-busy-lib.sh` reads two independent signals: the terminal title mcode publishes as `<status> \| <session> \| MCode` (`Working` for the whole turn) and the spinner row `<glyph> Running <elapsed> · Option+Enter queue · Enter steer`, matched only in the slot above the composer's top rule where an idle pane draws `Message · Enter send`, so transcript text quoting the row reads neither busy nor delivered. Idle comes only from a settled title (`Ready`, `Done`, `Stopped`, `Failed`, `Error`) with no spinner row; `Needs approval`, `Needs input`, and `Needs login` read unknown. |
 | Exit command | `/quit` (`/exit` is an alias), one Enter; prints `mcode --session <id>`. |
 | Interrupt | One Esc cancels a running turn and prints `Interrupted after <n>s`. A turn cancelled before it produced anything prints `Stopped · message restored to the Composer.` and puts the prompt back, so the control plane follows with Ctrl+U. On an idle agent one Esc arms `Press Esc again to edit the latest message`, and a second within about 0.4 s opens `Editing the selected message · Enter replace and regenerate`, which one more Esc cancels; the control plane sends one press and dismisses that mode if it renders. |
 | Skill invocation | `/<skill>` from the composer, labelled `Skill`; not exercised through `fm-send`. |
@@ -46,6 +46,7 @@ The launch clears `NO_COLOR` and pins `COLORTERM=truecolor` so those colours sta
 `../../../../../bin/fm-spawn.sh` refuses an mcode launch on zellij, cmux, orca, paseo, rex, tern, and t3code, which supply neither that identity nor the title.
 After Ctrl+U clears a typed slash command, mcode 0.7.1 can leave its slash popup drawn; the composer then reads unknown and steering defers until the next redraw.
 Text sent while a turn runs steers it, and Option+Enter queues instead.
+Submit confirmation passes `mcode` to the delivery matcher only for a pane identified as mcode; the spinner row is not part of the harness-less union.
 
 ## Primary integration
 
