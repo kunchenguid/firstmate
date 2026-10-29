@@ -91,9 +91,12 @@ _fm_proc_starttime_to() {  # <output-variable> <proc-root> <pid>
   printf -v "$1" '%s' "$_fm_pst_value"
 }
 
-# Return only the normalized process start token used by ordinary lock owners.
+# Return only the normalized process start token used by ordinary lock owners,
+# in the same proc-starttime=<ticks> or bare ps lstart form fm_pid_start_time
+# renders, so a process that sourced an older library still matches it by
+# string equality.
 fm_pid_start_token() {
-  local pid=$1 proc_root stat_line starttime identity_key out trimmed
+  local pid=$1 proc_root stat_line starttime out trimmed
   local -a stat_fields
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
@@ -103,16 +106,14 @@ fm_pid_start_token() {
     [ "${#stat_fields[@]}" -ge 20 ] || return 1
     starttime=${stat_fields[19]}
     case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
-    identity_key=proc-starttime
-    [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime
-    printf '%s=%s\n' "$identity_key" "$starttime"
+    printf 'proc-starttime=%s\n' "$starttime"
     return 0
   fi
   out=$(COLUMNS=10000 LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   trimmed=${out#"${out%%[![:space:]]*}"}
   trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
   [ -n "$trimmed" ] || return 1
-  printf 'ps-lstart=%s\n' "$trimmed"
+  printf '%s\n' "$trimmed"
 }
 
 fm_pid_identity() {
@@ -628,13 +629,13 @@ fm_lock_record_start() {
   printf '%s\n' "$token" > "$dir/pid-start" 2>/dev/null || true
 }
 
-fm_lock_owner_gone() {
-  local lockdir=$1 pid=$2 recorded current recorded_key current_key recorded_value current_value
-  fm_pid_alive "$pid" || return 0
-  recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
-  [ -n "$recorded" ] || return 1
-  current=$(fm_pid_start_token "$pid" 2>/dev/null) || return 1
-  [ -n "$current" ] || return 1
+# fm_lock_start_token_matches <recorded> <current>
+# False only when both start tokens carry the same identity key and different
+# values. Both the written forms - proc-starttime=... or a bare ps lstart
+# date - and the linux-starttime=/ps-lstart= forms are read under one key, and
+# a record in a key this host cannot recompute keeps the pid-liveness answer.
+fm_lock_start_token_matches() {
+  local recorded=$1 current=$2 recorded_key recorded_value current_key current_value
   case "$recorded" in
     proc-starttime=*|linux-starttime=*)
       recorded_key=proc-starttime
@@ -644,7 +645,7 @@ fm_lock_owner_gone() {
       recorded_key=ps-lstart
       recorded_value=${recorded#*=}
       ;;
-    *=*) return 1 ;;
+    *=*) return 0 ;;
     *)
       recorded_key=ps-lstart
       recorded_value=$recorded
@@ -659,10 +660,14 @@ fm_lock_owner_gone() {
       current_key=ps-lstart
       current_value=${current#*=}
       ;;
-    *) return 1 ;;
+    *=*) return 0 ;;
+    *)
+      current_key=ps-lstart
+      current_value=$current
+      ;;
   esac
-  [ "$recorded_key" = "$current_key" ] || return 1
-  [ "$current_value" != "$recorded_value" ]
+  [ "$recorded_key" = "$current_key" ] || return 0
+  [ "$current_value" = "$recorded_value" ]
 }
 
 fm_lock_prepare_owner() {
@@ -676,7 +681,7 @@ fm_lock_prepare_owner() {
 
 # fm_lock_holder_alive <lockdir> <pid>
 # True while the lock's recorded holder <pid> is alive. A record that carries
-# the holder's start time is held only while that live pid still has it: macOS
+# the holder's start token is held only while that live pid still has it: macOS
 # and Linux both hand a dead holder's pid to unrelated processes, and pid
 # liveness alone would then read the lock as held forever. The watch lock is
 # additionally held only while its recorded pid-identity still recomputes for
@@ -692,24 +697,29 @@ fm_lock_prepare_owner() {
 fm_lock_holder_alive() {
   local lockdir=$1 pid=$2
   fm_pid_alive "$pid" || return 1
-  _fm_lock_record_matches "$lockdir" "$pid" pid-start fm_pid_start_time || return 1
+  _fm_lock_record_matches "$lockdir" "$pid" pid-start fm_pid_start_token fm_lock_start_token_matches || return 1
   [ "$lockdir" -ef "$STATE/.watch.lock" ] || return 0
   _fm_lock_record_matches "$lockdir" "$pid" pid-identity fm_pid_identity
 }
 
-# _fm_lock_record_matches <lockdir> <pid> <record-file> <probe-function>
+# _fm_lock_record_matches <lockdir> <pid> <record-file> <probe-function> [match-function]
 # False only when <record-file> is recorded and <probe-function> <pid> now
-# reads a different value. The pid is re-read after the record so a record
+# reads a different value, compared by <match-function> when given and by
+# string equality otherwise. The pid is re-read after the record so a record
 # rewritten in between (the bounded wait's handoff) is never judged against
 # another holder's value.
 _fm_lock_record_matches() {
-  local lockdir=$1 pid=$2 record=$3 probe=$4 recorded current
+  local lockdir=$1 pid=$2 record=$3 probe=$4 match=${5:-} recorded current
   recorded=$(cat "$lockdir/$record" 2>/dev/null || true)
   [ -n "$recorded" ] || return 0
   [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$pid" ] || return 0
   current=$("$probe" "$pid" 2>/dev/null) || return 0
   [ -n "$current" ] || return 0
-  [ "$current" = "$recorded" ]
+  if [ -n "$match" ]; then
+    "$match" "$recorded" "$current"
+  else
+    [ "$current" = "$recorded" ]
+  fi
 }
 
 fm_lock_link_owner() {
@@ -969,7 +979,7 @@ fm_lock_recheck_stale_owner() {
   fi
   actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$actual_pid" = "$expected_pid" ] || return 1
-  if ! fm_lock_owner_gone "$lockdir" "$actual_pid"; then
+  if fm_lock_holder_alive "$lockdir" "$actual_pid"; then
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
@@ -1625,7 +1635,7 @@ fm_lock_try_acquire() {
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
-  if ! fm_lock_owner_gone "$lockdir" "$pid"; then
+  if fm_lock_holder_alive "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
@@ -1643,7 +1653,7 @@ fm_lock_try_acquire() {
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if ! fm_lock_owner_gone "$lockdir" "$cur"; then
+  if fm_lock_holder_alive "$lockdir" "$cur"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
@@ -1868,7 +1878,7 @@ fm_lock_acquire_wait_bounded() {
         ;;
       *[!0-9]*|0) return 1 ;;
       *)
-        if [ "$owner_pid" -gt 0 ] 2>/dev/null && ! fm_lock_owner_gone "$lockdir" "$owner_pid"; then
+        if [ "$owner_pid" -gt 0 ] 2>/dev/null && fm_lock_holder_alive "$lockdir" "$owner_pid"; then
           FM_LOCK_HELD_PID=$owner_pid
         fi
         ;;
