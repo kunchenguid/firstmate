@@ -3897,7 +3897,7 @@ t3_server_for_meta() {  # <task-meta> -> the verified server identity for this c
   local recorded
   recorded=$(fm_meta_get "$1" t3_server)
   if [ -z "$recorded" ]; then
-    recorded=$(fm_backend_t3code_adopt_server_for_thread "$(fm_meta_get "$1" t3_thread_id)") || recorded=
+    recorded=$(fm_backend_t3code_server_for_meta "$1") || recorded=
     if [ -n "$recorded" ]; then
       echo "warning: T3 creation server identity is missing; adopted the selected server after confirming the thread exists" >&2
     elif [ "$FORCE" = --force ]; then

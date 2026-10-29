@@ -2639,12 +2639,13 @@ test_t3_secondmate_missing_thread_reproves_close_before_replacement() {
   chmod +x "$root/bin/fm-spawn.sh"
   run_relaunch() {  # <state-dir> <js run between probe and relaunch>
     mkdir -p "$1"
-    fm_write_meta "$1/smgone.meta" "window=fm-smgone" "kind=secondmate" "harness=claude" "backend=t3code" "t3_server=$(t3_run fm_backend_t3code_server_identity)" "t3_thread_id=$thread" "home=$CASE_DIR/sm-home"
+    fm_write_meta "$1/smgone.meta" "window=fm-smgone" "kind=secondmate" "harness=claude" "backend=t3code" "t3_thread_id=$thread" "home=$CASE_DIR/sm-home"
     STATE="$1" FM_STATE_OVERRIDE="$1" FM_CONFIG_OVERRIDE="$CONFIG" FM_HOME="$CASE_DIR/home" FM_ROOT_OVERRIDE="$root" \
       WORLD="$T3_FAKE_WORLD" BETWEEN="$2" bash -c '
 . "$0/bin/fm-secondmate-liveness-lib.sh"
 fm_secondmate_liveness_probe "$1" smgone poll
 printf "probe=%s kill=%s\n" "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_KILL"
+[ -n "$(fm_meta_get "$1" t3_server)" ] || exit 1
 node -e "const fs=require(\"fs\"); let w=JSON.parse(fs.readFileSync(process.env.WORLD,\"utf8\")); eval(process.env.BETWEEN); fs.writeFileSync(process.env.WORLD, JSON.stringify(w))"
 fm_secondmate_liveness_relaunch "$1" smgone && echo relaunched=yes || echo "relaunched=no status=$FM_SM_LIVE_STATUS reason=$FM_SM_LIVE_REASON"
 ' "$ROOT" "$1/smgone.meta" 2>&1
@@ -2795,6 +2796,19 @@ test_legacy_control_adoption_survives_shared_checks() {
   out=$(run_t3_control "$id" interrupt); rc=$?
   expect_code 0 "$rc" "legacy interrupt failed after verified adoption: $out"
   assert_contains "$out" cancel=confirmed "legacy interrupt was not confirmed"
+  assert_grep 't3_server=' "$CTRL_STATE/$id.meta" "verified adoption was not persisted"
+  sed '/^t3_server=/d' "$CTRL_STATE/$id.meta" > "$CTRL_STATE/legacy-meta"
+  mv "$CTRL_STATE/legacy-meta" "$CTRL_STATE/$id.meta"
+  t3_world_set 'for (const t of Object.values(w.threads)) { t.archived = true; t.activeRunId = null; }'
+  out=$(FM_CONFIG_OVERRIDE="$CONFIG" bash -c '
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-control-lib.sh"
+    fm_control_endpoint_absence_verdict t3code "$2" "$3"
+  ' _ "$ROOT" "$thread" "$CTRL_STATE/$id.meta")
+  assert_contains "$out" gone "legacy archive absence proof discarded adoption"
+  assert_grep 't3_server=' "$CTRL_STATE/$id.meta" "absence proof did not retain adoption"
+  sed '/^t3_server=/d' "$CTRL_STATE/$id.meta" > "$CTRL_STATE/legacy-meta"
+  mv "$CTRL_STATE/legacy-meta" "$CTRL_STATE/$id.meta"
   t3_world_set 'w.threads = {}'
   out=$(run_t3_control "$id" interrupt); rc=$?
   expect_code 1 "$rc" "missing thread established legacy origin: $out"

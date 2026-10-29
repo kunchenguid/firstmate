@@ -919,9 +919,12 @@ route_local_gone() {
       [ "$(meta_generation "$meta")" = "$1" ] || { EVIDENCE_REASON="metadata names another generation"; return 1; }
       fm_backend_validate_task_endpoint "$meta" "$TASK" >/dev/null 2>&1 || return 1
       [ "$FM_BACKEND_VALIDATED_BACKEND" = "$backend" ] && [ "$FM_BACKEND_VALIDATED_TARGET" = "$target" ] || return 1
+      if [ "$backend" = t3code ]; then
+        fm_backend_source t3code && fm_backend_t3code_server_for_meta "$meta" "$server" >/dev/null || return 1
+      fi
       recorded=$(record_field "$meta" "${backend%code}_server")
       [ -z "$server" ] || [ "$server" = "$recorded" ] || { EVIDENCE_REASON="metadata and ledger name different creation servers"; return 1; }
-      [ -n "$server" ] || [ "$backend" != rex ] || server=$recorded
+      [ -n "$server" ] || server=$recorded
     else
       meta=
       [ "$(inc_get "$1" '.route.spawn_gen // empty')" = "$1" ] || { EVIDENCE_REASON="the durable route lacks this exact generation"; return 1; }
