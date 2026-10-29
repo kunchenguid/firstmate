@@ -431,6 +431,13 @@ FM_DELIVERY_CORTEX_BUSY_REGEX_DEFAULT='\(esc to interrupt\)|Type to queue messag
 FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT='esc to interrupt|•[[:space:]]+[0-9]+[smh]([[:space:]]+[0-9]+[smh])*[[:space:]]+•'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 
+# fm_composer_screen_has_mcode_prompt: 0 when the screen in $1 holds a bare
+# `›` row, the only composer shape MiniMax Code draws; the cheap screen gate
+# every caller applies before paying for an mcode identity probe.
+fm_composer_screen_has_mcode_prompt() {  # <screen>
+  printf '%s\n' "$1" | fm_composer_strip_ansi | grep -q '^[[:space:]]*›'
+}
+
 # fm_composer_mcode_spinner_live: 0 when the plain pane text on stdin shows
 # MiniMax Code's running-turn spinner row in the one slot it occupies - the
 # last non-blank row above the rule that opens the bottom-most `›` composer,
@@ -2181,7 +2188,7 @@ EOF
   if [ "$mcode_ask" = 1 ] && [ "$has_identity" = 1 ] && [ -z "$identity" ]; then
     inner=$(fm_composer_classify_screen "$(printf '%s\n' "$caps" | grep -vx 'mcode=ask')" "$screen" "$cy")
     if [ "$inner" = need-identity ] \
-       || { [ "$inner" != empty ] && printf '%s\n' "$screen" | fm_composer_strip_ansi | grep -q '^[[:space:]]*›'; }; then
+       || { [ "$inner" != empty ] && fm_composer_screen_has_mcode_prompt "$screen"; }; then
       printf 'need-identity'
     else
       printf '%s' "$inner"

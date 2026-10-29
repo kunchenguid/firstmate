@@ -208,10 +208,11 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # MiniMax Code keeps the terminal cursor on its composer row, but its idle
   # placeholder and next-message suggestion are bright enough to read as typed
   # text without its identity (verified live, mcode 0.7.1), so any non-empty
-  # read of an mcode pane is re-read once with that identity at the same
+  # read of an mcode pane holding its bare `›` composer row is re-read once with that identity at the same
   # cursor row. The identity only names which exact colour is ghost text, so a
   # typed draft still reads pending.
-  if [ "$verdict" != empty ] && identity=$(fm_tmux_composer_identity "$target") \
+  if [ "$verdict" != empty ] && fm_composer_screen_has_mcode_prompt "$pane" \
+     && identity=$(fm_tmux_composer_identity "$target") \
      && [ "${identity%%$'\t'*}" = mcode ]; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy" "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
