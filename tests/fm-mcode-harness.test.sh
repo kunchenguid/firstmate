@@ -241,15 +241,29 @@ chmod +x "$fakebin/mcode"
 # The spawn readiness gate reads the pane: serve a chosen mcode screen and
 # delegate every other call to the fixture's fake tmux.
 mv "$fakebin/tmux" "$fakebin/tmux-base"
+# FM_FAKE_MCODE_TITLE serves a live mcode's terminal title: a pane tty whose
+# foreground process is minimax-code (through the fake ps), then the title.
 cat > "$fakebin/tmux" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = capture-pane ] && [ -n "${FM_FAKE_MCODE_SCREEN:-}" ]; then
   printf '%s\n' "$FM_FAKE_MCODE_SCREEN"
   exit 0
 fi
+if [ "${1:-}" = display-message ] && [ -n "${FM_FAKE_MCODE_TITLE:-}" ]; then
+  case "$*" in
+    *'#{pane_tty}'*) echo /dev/fm-fake-mcode-tty; exit 0 ;;
+    *'#{pane_title}'*) printf '%s\n' "$FM_FAKE_MCODE_TITLE"; exit 0 ;;
+  esac
+fi
 exec "$(dirname "$0")/tmux-base" "$@"
 EOF
 chmod +x "$fakebin/tmux"
+cat > "$fakebin/ps" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = -t ] && [ "${2:-}" = fm-fake-mcode-tty ] && { echo '4242 4242 4242 minimax-code'; exit 0; }
+exec /bin/ps "$@"
+EOF
+chmod +x "$fakebin/ps"
 home="$case_dir/home"
 proj="$case_dir/project"
 wt="$case_dir/wt"
@@ -275,6 +289,7 @@ assert_grep 'harness=mcode' "$home/state/mc-high.meta" 'harness not recorded'
 assert_grep 'effort=high' "$home/state/mc-high.meta" 'effort not recorded'
 assert_absent "$home/state/mc-high.busy-gen" 'mcode has no semantic writer, so nothing may be armed'
 assert_grep 'mcode_version=0.8.0' "$home/state/mc-high.meta" 'the launched mcode version was not recorded'
+assert_grep "mcode_data_dir=$data" "$home/state/mc-high.meta" 'the checked data directory was not recorded for a relaunch'
 pass "scout launch carries the model, records and omits effort, pins colour, and arms nothing"
 
 out=$(FM_FAKE_MCODE_SCREEN="$idle_tail" spawn_case mc-stuck) && fail 'a launch that never showed a busy turn reported success'
@@ -284,7 +299,14 @@ assert_grep 'did not start processing its brief' "$home/state/mc-stuck.status" '
 # The fake tmux records the task window on new-window and clears it on
 # kill-window, so an empty record proves the failed launch's endpoint was closed.
 [ ! -s "$fakebin/.spawn-window" ] || fail "a failed readiness gate left its endpoint open: $(cat "$fakebin/.spawn-window")"
-pass "readiness gate requires a busy turn before the spawn reports success"
+# A short brief can finish between polls: a settled `Done` title proves the
+# launch turn ran, while a fresh `Ready` screen never ran the brief.
+out=$(FM_FAKE_MCODE_SCREEN="$idle_tail" FM_FAKE_MCODE_TITLE='Done | wt | MCode' spawn_case mc-done) \
+  || fail "a launch whose turn already finished was refused: $out"
+out=$(FM_FAKE_MCODE_SCREEN="$idle_tail" FM_FAKE_MCODE_TITLE='Ready | wt | MCode' spawn_case mc-ready) \
+  && fail 'a Ready screen that never ran the brief reported success'
+assert_grep 'did not start processing its brief' "$home/state/mc-ready.status" 'Ready readiness failure not recorded'
+pass "readiness gate requires a busy or finished turn before the spawn reports success; Ready alone never passes"
 
 refuse_case() {  # <id> <expected> [fm-spawn args...]
   local id=$1 expected=$2 refusal

@@ -3173,9 +3173,14 @@ fi
 # MiniMax Code: the captain's global Full access and a configured model id
 # are proven read-only before any worktree, endpoint, or record exists, and the
 # one data directory that proof read is pinned into the launch (__MCODEDATA__)
-# so the worker reads that same configuration.
+# so the worker reads that same configuration. A relaunch re-checks and pins
+# the directory the task recorded (mcode_data_dir=), not the caller's, so a
+# one-command override at spawn keeps the task's sign-in and configuration.
 if [ "$HARNESS" = mcode ]; then
-  MCODE_DATA_DIR=$("$SCRIPT_DIR/fm-mcode-config.sh" preflight "$MODEL") || exit 1
+  MCODE_RECORDED_DATA_DIR=
+  [ "$RELAUNCH" -eq 0 ] || MCODE_RECORDED_DATA_DIR=$(fm_meta_get "$RELAUNCH_META" mcode_data_dir)
+  MCODE_DATA_DIR=$(MINIMAX_DATA_DIR=${MCODE_RECORDED_DATA_DIR:-${MINIMAX_DATA_DIR:-}} \
+    "$SCRIPT_DIR/fm-mcode-config.sh" preflight "$MODEL") || exit 1
 fi
 # polytoken's model validation composes firstmate's model and effort axes into
 # the launch model reference (bin/fm-polytoken-lib.sh owns the reasoning): the
@@ -5505,14 +5510,15 @@ agy_spawn_fail() {  # <detail>
 # its gate is the agy shape without the dialog: positive proof that the brief
 # is being processed, the same verdict the supervisor reads (the `Working`
 # title or the pinned spinner row through fm_busy_classify), before the spawn
-# reports success. Herdr has no MiniMax Code detection, so on Herdr every poll
+# reports success, or a settled `Done` title proving that turn already
+# finished. Herdr has no MiniMax Code detection, so on Herdr every poll
 # first reports the pane's `mcode` registration
 # (fm_backend_herdr_report_mcode); the report is idempotent, and repeating it
 # covers a first poll that lands before mcode owns the pane. Readiness on Herdr
 # also requires the registration to read back, because without it the
 # liveness probe would call the live worker dead.
 mcode_wait_for_working() {
-  local i=0 max=${FM_MCODE_READY_POLLS:-60} interval=${FM_MCODE_POLL_INTERVAL:-0.5} pane
+  local i=0 max=${FM_MCODE_READY_POLLS:-60} interval=${FM_MCODE_POLL_INTERVAL:-0.5} pane title
   while [ "$i" -lt "$max" ]; do
     [ "$BACKEND" != herdr ] || fm_backend_herdr_report_mcode "$T" >/dev/null 2>&1 || true
     pane=$(fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true)
@@ -5523,6 +5529,12 @@ mcode_wait_for_working() {
         fi
         ;;
     esac
+    # A short brief can finish between polls: a settled `Done` title proves
+    # the launch turn ran, while `Ready` never does. Reading the title back on
+    # Herdr is the registration proof too.
+    title=$(fm_backend_mcode_title "$BACKEND" "$T" 2>/dev/null) \
+      && [ "$(fm_busy_mcode_title_state "$title")" = settled ] \
+      && [ "${title%% | *}" = Done ] && return 0
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
@@ -6723,7 +6735,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version mcode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version mcode_version mcode_data_dir account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -6761,6 +6773,9 @@ preserve_relaunch_meta() {
   # The launched MiniMax Code version, only for an mcode task whose version
   # could be read.
   [ -z "${MCODE_VERSION:-}" ] || echo "mcode_version=$MCODE_VERSION"
+  # The mcode data directory the preflight checked and the launch pinned, so a
+  # relaunch reuses it.
+  [ -z "${MCODE_DATA_DIR:-}" ] || echo "mcode_data_dir=$MCODE_DATA_DIR"
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
@@ -7507,7 +7522,7 @@ if [ "$HARNESS" = agy ]; then
 fi
 if [ "$HARNESS" = mcode ]; then
   if ! mcode_wait_for_working; then
-    agy_spawn_fail "mcode ${MCODE_VERSION:-(version unreadable)} did not start processing its brief in window $T (neither a Working title nor its spinner row appeared; the adapter is verified on mcode 0.7.1)"
+    agy_spawn_fail "mcode ${MCODE_VERSION:-(version unreadable)} did not start processing its brief in window $T (neither a Working or Done title nor its spinner row appeared; the adapter is verified on mcode 0.7.1)"
     exit 1
   fi
 fi

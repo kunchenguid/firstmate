@@ -748,6 +748,22 @@ test_mcode_relaunch_refused_by_its_preflight_before_stopping() {
       || fail "a refused mcode relaunch ($case_model) must leave the task record unchanged"
     [ ! -e "$dir/home/state/t1.control-relaunch" ] || fail "a refused mcode relaunch ($case_model) must open no relaunch transaction"
   done
+  # The preflight reads the data directory the task recorded, so a caller whose
+  # own directory is in Full access cannot vouch for the task's.
+  dir=$(new_case mcode-relaunch)
+  add_task "$dir" t1 mcode ship
+  alive_as "$dir" minimax-code
+  printf '#!/bin/sh\nexit 0\n' > "$dir/fakebin/mcode"
+  chmod +x "$dir/fakebin/mcode"
+  mkdir -p "$dir/recorded" "$dir/caller"
+  printf 'permissionMode: auto\n' > "$dir/recorded/config.yaml"
+  printf 'permissionMode: bypassPermissions\n' > "$dir/caller/config.yaml"
+  printf 'mcode_data_dir=%s\n' "$dir/recorded" >> "$dir/home/state/t1.meta"
+  out=$(MINIMAX_DATA_DIR="$dir/caller" run_control "$dir" t1 relaunch --note x); rc=$?
+  expect_code 1 "$rc" "an mcode relaunch whose recorded data directory is not in Full access should refuse"$'\n'"$out"
+  assert_contains "$out" "$dir/recorded/config.yaml" "the preflight must check the recorded data directory: $out"
+  [ -z "$(literals "$dir")" ] && [ -z "$(keys_sent "$dir")" ] \
+    || fail "a refused mcode relaunch on its recorded data directory must send the running agent nothing"
   pass "fm-control relaunch: an mcode preflight refusal happens before the running agent is stopped"
 }
 

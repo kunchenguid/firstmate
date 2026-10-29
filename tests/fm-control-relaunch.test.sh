@@ -117,6 +117,7 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     [ -z "${FM_FAKE_COMPOSER_READ_FAIL:-}" ] || exit 1
+    [ ! -s "$D/screen" ] || { cat "$D/screen"; exit 0; }
     if [ -s "$D/composer" ]; then
       printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
     else
@@ -1577,6 +1578,36 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+# An mcode task records the data directory its spawn checked and pinned; a
+# relaunch re-checks and pins that one, never the caller's, so a one-command
+# MINIMAX_DATA_DIR override keeps the task's sign-in and configuration.
+test_spawn_relaunch_of_mcode_reuses_the_recorded_data_dir() {
+  local dir out recorded caller rule
+  dir=$(new_case mcodedata rl80)
+  add_ship_task "$dir" rl80 mcode
+  recorded="$dir/minimax-recorded"
+  caller="$dir/minimax-caller"
+  mkdir -p "$recorded" "$caller"
+  printf 'permissionMode: bypassPermissions\n' > "$recorded/config.yaml"
+  printf 'permissionMode: auto\n' > "$caller/config.yaml"
+  printf 'mcode_data_dir=%s\n' "$recorded" >> "$dir/home/state/rl80.meta"
+  printf '#!/bin/sh\nexit 0\n' > "$dir/fakebin/mcode"
+  chmod +x "$dir/fakebin/mcode"
+  printf 'zsh' > "$dir/fake/command"
+  # The readiness gate reads mcode's running-turn spinner in its slot above
+  # the composer.
+  rule=$(printf '─%.0s' $(seq 1 60))
+  printf '%s\n' '  ● done' '  ⠼ Running 2s · Option+Enter queue · Enter steer · Ctrl+O details · Esc stop' \
+    "    $rule" '  ›  Ask Mcode to do anything' "    $rule" '' '  …/wt │ Full access' > "$dir/fake/screen"
+  out=$(MINIMAX_DATA_DIR=$caller FM_MCODE_READY_POLLS=2 FM_MCODE_POLL_INTERVAL=0 run_spawn "$dir" rl80 --relaunch) \
+    || fail "an mcode relaunch whose recorded data directory is in Full access was refused: $out"
+  assert_contains "$(cat "$dir/fake/literal")" "MINIMAX_DATA_DIR='$recorded' " \
+    "the replacement must pin the recorded data directory, not the caller's"
+  [ "$(meta_field "$dir" rl80 mcode_data_dir)" = "$recorded" ] \
+    || fail "the relaunched record lost its data directory: $(meta_field "$dir" rl80 mcode_data_dir)"
+  pass "fm-spawn --relaunch: an mcode task re-checks and pins its recorded data directory over the caller's"
+}
+
 # A promoted scout records kind=ship and a custom ship branch in its meta, but
 # its brief is the scout scaffold: it never gained a Ship branch line, and a
 # relaunch cannot regenerate the brief (--branch-prefix is refused there). The
@@ -3009,6 +3040,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_of_mcode_reuses_the_recorded_data_dir
 test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired

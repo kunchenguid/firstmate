@@ -1079,7 +1079,12 @@ resolve_relaunch_profile() {
     esac
     command -v mcode >/dev/null 2>&1 \
       || die "mcode executable not found on PATH; relaunching $ID onto it would stop the running agent for a launch that must be refused"
-    "$SCRIPT_DIR/fm-mcode-config.sh" preflight "$TARGET_MODEL" >/dev/null || return 1
+    # The data directory the task recorded at spawn is the one the launch
+    # owner re-checks and pins, so it is the one checked here too.
+    local mcode_data_dir
+    mcode_data_dir=$(fm_meta_get "$META" mcode_data_dir)
+    MINIMAX_DATA_DIR=${mcode_data_dir:-${MINIMAX_DATA_DIR:-}} \
+      "$SCRIPT_DIR/fm-mcode-config.sh" preflight "$TARGET_MODEL" >/dev/null || return 1
   fi
   # Likewise config/crew-exclude-tools: a malformed file, or a replacement
   # runtime that cannot hide the listed tools, refuses here, before the old
