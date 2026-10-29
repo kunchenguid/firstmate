@@ -1282,8 +1282,12 @@ fm_recovery_marker_handover_restore() {  # <marker> <snapshot-token> <snapshot-s
 # successor's link. A reaper that died after winning leaves its tombstone; a
 # later reaper re-elects itself by renaming that dead reaper's tombstone, and a
 # reaper whose own election a trap interrupted resumes it from its tombstone.
+# The name publishes the reaper's start time with the election rename, rather
+# than the dead holder's pid-start inside the directory. Hex keeps the same
+# start-time identity portable in filenames. Legacy names and unavailable
+# probes keep the PID-only answer; only a proven mismatch permits takeover.
 fm_lock_reap_dead_link() {
-  local lockdir=$1 owner pid token tomb current
+  local lockdir=$1 owner pid token tomb current reaper recorded start
   [ -L "$lockdir" ] || return 1
   owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || return 1
   fm_current_pid current || return 1
@@ -1295,14 +1299,29 @@ fm_lock_reap_dead_link() {
     token=
     for tomb in "$owner".reaped.*; do
       [ -d "$tomb" ] || continue
-      if [ "${tomb##*.reaped.}" != "$current" ]; then
-        fm_pid_alive "${tomb##*.reaped.}" && return 1
+      reaper=${tomb##*.reaped.}
+      pid=${reaper%%.start-*}
+      if [ "$pid" != "$current" ] && fm_pid_alive "$pid"; then
+        case "$reaper" in
+          *.start-*) recorded=${reaper#*.start-} ;;
+          *) return 1 ;;
+        esac
+        [ -n "$recorded" ] || return 1
+        start=$(fm_pid_start_time "$pid" 2>/dev/null || true)
+        [ -n "$start" ] || return 1
+        start=$(printf '%s' "$start" | od -An -v -tx1 | tr -d '[:space:]')
+        [ "$start" != "$recorded" ] || return 1
       fi
       token=$tomb
     done
     [ -n "$token" ] || return 1
   fi
   tomb="$owner.reaped.$current"
+  start=$(fm_pid_start_time "$current" 2>/dev/null || true)
+  if [ -n "$start" ]; then
+    start=$(printf '%s' "$start" | od -An -v -tx1 | tr -d '[:space:]')
+    tomb="$tomb.start-$start"
+  fi
   if [ "$token" != "$tomb" ]; then
     mv -- "$token" "$tomb" 2>/dev/null || return 1
   fi
