@@ -153,6 +153,31 @@ test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
   pass "emitted branch prompt routes completed scouts through existing policies and leased cleanup, preserving unfinished work"
 }
 
+# Empty away words authorize no new spawn. The one exception is a recurring
+# backlog item whose captain hold already records a standing order to start it
+# while away. The emitted prompt is that contract.
+test_branch_prompt_dispatches_dated_standing_hold_when_away_words_are_empty() {
+  local prompt
+  prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
+
+  assert_contains "$prompt" \
+    "When the away words are empty, dispatch still proceeds for one class only: a recurring backlog item whose captain hold records a standing order to start that item while away, and whose hold date has arrived." \
+    "branch prompt does not dispatch a dated standing hold while away words are empty"
+  assert_contains "$prompt" \
+    "File and dispatch only the run that hold names, within the record's spend cap, through \`bin/fm-spawn.sh\`, then re-hold the item until the next day the way that hold already says." \
+    "branch prompt does not keep the standing-hold dispatch on the guarded spawn path"
+  assert_contains "$prompt" \
+    "Leave the hold itself in place until that re-hold, merge nothing because the words are empty, and dispatch no other new work." \
+    "branch prompt lets empty away words merge or start other new work"
+  assert_contains "$prompt" \
+    'Report that dispatch in the outcome, and do not open the summary with "per your away instructions:" because the words did not name it.' \
+    "branch prompt attributes the standing-hold dispatch to the empty away words"
+  assert_not_contains "$prompt" \
+    "empty words cancel no standing grant" \
+    "branch prompt reopened every standing grant under empty away words"
+  pass "emitted branch prompt dispatches only a dated standing hold when away words are empty"
+}
+
 # --- append-only outcome store ------------------------------------------------
 
 test_outcome_store_is_append_only_with_cursor_reads() {
@@ -1658,6 +1683,7 @@ WRAPPER
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_branch_prompt_home_include_is_appended_last
 test_branch_prompt_routes_completed_scouts_through_guarded_cleanup
+test_branch_prompt_dispatches_dated_standing_hold_when_away_words_are_empty
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget

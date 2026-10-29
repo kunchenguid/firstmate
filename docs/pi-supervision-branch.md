@@ -606,6 +606,8 @@ The captain's away words are the whole mandate:
 - It holds with verdict captain on doubt.
 
 `bin/fm-branch-prompt.sh` "Postures" owns those execution rules.
+Empty away words still authorize no merge and no other new spawn.
+That owner names the one dispatch they do not cancel: a recurring backlog item whose captain hold records a standing order to start it while away.
 It requires every action taken under the words to open its outcome summary with "per your away instructions:".
 
 Each relocated script keeps its own gate, enforcing exactly what a script can check without reading words:
