@@ -18,6 +18,196 @@ Observed end-to-end latency from a Mac was 123 to 348 ms per request, with the s
 OpenRouter's [Jev 1.13 model catalog entry](https://openrouter.ai/typesafe/jev-1.13) listed `typesafe/jev-1.13` at $0.042 per million input tokens and $0 per million output tokens on 2026-10-12.
 OpenRouter's [Decisions API guide](https://openrouter.ai/blog/insights/what-is-jev/) specifies `POST https://openrouter.ai/api/alpha/decisions` with the same `{model, state, questions}` Choice request and typed Choice answer.
 
+OpenAI's [Decisions API guide](https://developers.openai.com/api/docs/guides/decisions) on 2026-10-22 specified `POST /v1/decisions` with `{model, input, questions}`, where a `choice` question carries `name`, `instructions`, and `choices` of `{value, description}`, and named `gpt-6-luna` as the only supported model.
+Its illustrative choice answer is an `answers` array entry with `type`, `name`, `choice`, `probabilities` as `{value, probability}` pairs, and `confidence`, plus a `refusal` answer type.
+The live run below returned exactly that choice shape.
+
+## Live provider checks
+
+Each provider needs a dated section here with real request and response captures and a calibration note.
+
+### `systemone` against Clef on Cloudflare Workers AI
+
+Run 2026-10-23 (21:20 UTC) with `FM_DISPATCH_PROVIDER=systemone` and model `clef`, served by Cloudflare Workers AI as `@cf/cloudflare/clef`, resolver commit `8d01fe8d`, confidence floor 0.6, timeout 10 s.
+Workers AI serves the System One shape at `POST /client/v4/accounts/<account>/ai/run/@cf/cloudflare/clef` inside a `{result, success, errors, messages}` envelope rather than at `/v1/systemone`, so the run reached it through a local test-only relay on `127.0.0.1`.
+The relay forwarded each request body unchanged, added the Cloudflare bearer token itself, and returned the envelope's `result` verbatim; it renamed and filled in nothing, and the resolver accepted all 25 responses without adaptation.
+The resolver ran with no dispatch key, so it sent no `Authorization` header; a post-run scan found neither the token, the account id, nor a bearer header in any captured file.
+A direct Workers AI option (a configurable path plus envelope unwrapping in the resolver) is out of scope for this provider and not part of this change.
+Rules, briefs, hand labels, and the constant quota snapshot are the same as the `openai` run below.
+
+| Measure | Result |
+| --- | --- |
+| Top rule matched the hand label | 23 of 25 |
+| Outcomes: clear / ambiguous / escalate / error | 18 / 3 / 4 / 0 |
+| Clear results with a profile other than the hand label | 0 |
+| Resolver latency (min / median / max) | 151 / 281 / 513 ms |
+| Workers AI round trip at the relay (min / median / max) | 137 / 266 / 498 ms |
+| Input tokens per brief (min / median / max) | 397 / 419 / 443 |
+| Output tokens | 0 on every response |
+| HTTP errors and malformed answers | 0 / 0 |
+
+The four escalations were the hardest-tier briefs, picked at confidence 0.86 to 0.94 and escalated by the rule's `approval: captain` as designed.
+All three ambiguous results fell below the 0.6 floor, and two of them had a top pick other than the label, so the floor withheld both misses.
+The on-call scheduling brief, labeled `default`, led with the trivial-edit rule at probability 0.67 and confidence 0.41.
+The copywriting brief, labeled `default`, led with `default` at probability 0.30 and confidence 0.11.
+The large-file-split brief, labeled routine work, led with the approval-gated hardest-tier rule at probability 0.48 and confidence 0.21; had it cleared the floor, that rule would still have escalated rather than dispatched.
+
+Calibration note: Clef's `confidence` ran 0.02 to 0.27 below the top option's probability, with the widest gaps on the three ambiguous briefs, and every clear pick had confidence 0.81 or higher.
+Compared with `gpt-6-luna` on the same set, Clef was less confident on the two no-rule briefs, which `gpt-6-luna` resolved to `default` and Clef handed back to firstmate, and it put the split brief's top pick on the hardest tier instead of routine work.
+On this set the 0.6 floor admitted no wrong pick; 25 synthetic briefs are a smoke test of the provider path, not a basis for per-rule `min_confidence` values.
+
+Request for the bug-fix brief, as the resolver sent it (the relay forwarded it unchanged):
+
+```json
+{
+  "model": "clef",
+  "state": {
+    "task": {
+      "project": "web-app",
+      "brief": "## Captain's intent\nFix the pagination bug on the orders list: the last page repeats the first item of the previous page. Root cause: the offset is computed with <= instead of < in orders_query.go.\n\n## Firstmate spec\nChange the comparison, add a regression test for the last page, and do not refactor the query builder.\n"
+    }
+  },
+  "questions": {
+    "rule": {
+      "type": "choice",
+      "instructions": "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule's own matching condition; pick `default` when no rule's condition is met, including when a rule's own exemption text excludes this task.",
+      "criteria": {
+        "rule_1": "Work the brief itself calls unusually difficult or high-risk, such as a security-sensitive redesign or a migration where a mistake is costly; routine builds, ports, and installers do not qualify.",
+        "rule_2": "Routine feature work, a port, or an installer build inside an existing codebase.",
+        "rule_3": "A bug fix whose root cause the brief states.",
+        "rule_4": "A trivial mechanical edit such as a rename, typo, version bump, or wording fix.",
+        "rule_5": "A read-only investigation, diagnosis, or audit whose deliverable is a written report, not a code change.",
+        "default": "No listed rule applies to this task."
+      }
+    }
+  }
+}
+```
+
+Workers AI response envelope, as received (HTTP 200, 137 ms at the relay, 145 ms end to end); the resolver received exactly the `result` object:
+
+```json
+{
+  "result": {
+    "model": "clef",
+    "answers": {
+      "rule": {
+        "type": "choice",
+        "choice": "rule_3",
+        "probabilities": {
+          "rule_1": 0.0018,
+          "rule_2": 0.01,
+          "rule_3": 0.9682,
+          "rule_4": 0.0118,
+          "rule_5": 0.0014,
+          "default": 0.0068
+        },
+        "confidence": 0.9252
+      }
+    },
+    "usage": {
+      "input_tokens": 433,
+      "output_tokens": 0
+    }
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}
+```
+
+The resolver mapped it to `status: clear`, `rule: rule_3` at confidence 0.9252, and the rule's `cursor-grok-4.6-medium` profile.
+
+### `openai` against the Decisions API
+
+Run 2026-10-23 (17:18 UTC) against `https://api.openai.com/v1/decisions` with model `gpt-6-luna`, resolver commit `29d3d159`, confidence floor 0.6, timeout 10 s.
+The key came only from `OPENAI_API_KEY` in the environment and reached `curl` only on file descriptor 3; a capturing `curl` wrapper recorded each request body, response headers, and response body, and a post-run scan found neither the key nor a bearer header in any captured file.
+Quota came from one constant fake `quota-axi` snapshot, as in the 2026-09-17 run.
+
+Rules: a generic five-rule file - an `approval: captain` hardest-tier rule that excludes routine builds, ports, and installers; routine feature, port, or installer work with one `all_models` floor; bug fixes with a stated root cause; trivial mechanical edits; and read-only investigations or audits - plus the shipped neutral none option.
+Briefs: 25 synthetic briefs in the scaffold's task-section shape, hand-labeled before the run: four per rule, four of them scouts carrying the scout contract line, two that match no rule, and three borderline ones (a large file split, a rounding fix, and a routine signed Linux installer).
+The 25 real and synthetic briefs of the Jev run are not reproduced here, so these runs compare with it in shape only.
+
+| Measure | Result |
+| --- | --- |
+| Top rule matched the hand label | 25 of 25 |
+| Outcomes: clear / ambiguous / escalate / error | 20 / 1 / 4 / 0 |
+| Clear results with a profile other than the hand label | 0 |
+| Resolver latency (min / median / max) | 118 / 172 / 918 ms |
+| Server `openai-processing-ms` (min / median / max) | 46 / 91 / 433 ms |
+| Input tokens per brief (min / median / max) | 342 / 364 / 387 |
+| Output tokens | 0 on every response |
+| HTTP errors, refusals, malformed answers | 0 / 0 / 0 |
+
+The four escalations were the hardest-tier briefs, each picked at 0.99 and escalated by the rule's `approval: captain` as designed.
+The one `ambiguous` result was the large-file-split brief: `rule_2` led at probability 0.56 with `default` at 0.22, and confidence 0.47 fell below the 0.6 floor, so firstmate keeps that call, as with Jev's split fixture on 2026-09-23.
+The first request was the slowest (918 ms with 344 ms on the server); every other request took at most 502 ms end to end.
+
+Calibration note: across the 25 answers `confidence` ran 0.01 to 0.09 below the top option's probability, never above it.
+Every pick at confidence 0.7 or higher matched its label; the lowest-confidence correct clear picks were a one-label copy change at 0.70 and a no-code copywriting brief resolved to `default` at 0.76.
+On this set the 0.6 floor withheld one correct top pick and admitted no wrong one; 25 synthetic briefs cannot show overconfidence on genuinely hard calls, so per-rule `min_confidence` values for this provider should still come from a home's own briefs.
+No answer was a refusal, so the refusal path is covered only by the offline tests.
+
+The `usage` object carried `input_tokens`, `input_tokens_details` (`cached_tokens`, `cache_write_tokens`), `output_tokens`, `output_tokens_details.reasoning_tokens`, and `total_tokens`; the resolver keeps only the two numeric counts it displays.
+Responses carried `x-request-id`, `openai-processing-ms`, `server-timing-total`, and `x-ratelimit-*` request and token headers.
+
+Request for the bug-fix brief, as sent:
+
+```json
+{
+  "model": "gpt-6-luna",
+  "input": "{\"task\":{\"project\":\"web-app\",\"brief\":\"## Captain's intent\\nFix the pagination bug on the orders list: the last page repeats the first item of the previous page. Root cause: the offset is computed with <= instead of < in orders_query.go.\\n\\n## Firstmate spec\\nChange the comparison, add a regression test for the last page, and do not refactor the query builder.\\n\"}}",
+  "questions": [
+    {
+      "type": "choice",
+      "name": "rule",
+      "instructions": "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule's own matching condition; pick `default` when no rule's condition is met, including when a rule's own exemption text excludes this task.",
+      "choices": [
+        { "value": "rule_1", "description": "Work the brief itself calls unusually difficult or high-risk, such as a security-sensitive redesign or a migration where a mistake is costly; routine builds, ports, and installers do not qualify." },
+        { "value": "rule_2", "description": "Routine feature work, a port, or an installer build inside an existing codebase." },
+        { "value": "rule_3", "description": "A bug fix whose root cause the brief states." },
+        { "value": "rule_4", "description": "A trivial mechanical edit such as a rename, typo, version bump, or wording fix." },
+        { "value": "rule_5", "description": "A read-only investigation, diagnosis, or audit whose deliverable is a written report, not a code change." },
+        { "value": "default", "description": "No listed rule applies to this task." }
+      ]
+    }
+  ]
+}
+```
+
+Response, as received (HTTP 200, 169 ms end to end, 91 ms on the server):
+
+```json
+{
+  "model": "gpt-6-luna",
+  "answers": [
+    {
+      "type": "choice",
+      "name": "rule",
+      "choice": "rule_3",
+      "probabilities": [
+        { "value": "rule_1", "probability": 0.0 },
+        { "value": "rule_2", "probability": 0.01 },
+        { "value": "rule_3", "probability": 0.95 },
+        { "value": "rule_4", "probability": 0.02 },
+        { "value": "rule_5", "probability": 0.01 },
+        { "value": "default", "probability": 0.01 }
+      ],
+      "confidence": 0.94
+    }
+  ],
+  "usage": {
+    "input_tokens": 379,
+    "input_tokens_details": { "cached_tokens": 0, "cache_write_tokens": 0 },
+    "output_tokens": 0,
+    "output_tokens_details": { "reasoning_tokens": 0 },
+    "total_tokens": 379
+  }
+}
+```
+
+The resolver mapped it to `status: clear`, `rule: rule_3` at confidence 0.94, and the rule's `cursor-grok-4.6-medium` profile.
+
 ## Live rule match against real briefs
 
 Run 2026-09-16 with the key injected for the one command through the vault (`av inject +TYPESAFE_API_KEY -- ...`), model `jev-latest`, confidence floor 0.6, timeout 5 s, one `quota-axi --json` snapshot for the whole run.
@@ -112,6 +302,9 @@ It proves the key is absent from child environments, never appears on `curl` arg
 It proves the default typesafe.ai request keeps its fixed endpoint and model, carries only the project, the brief's task sections read by the shared brief-heading parser with a scout line only for a scout brief and never a ship brief's delivery mode (or the whole brief when it has neither section), and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
 It also proves OpenRouter requires an explicit provider and model, accepts the environment or `.env` key, sends the same Choice request to the Decisions API, preserves clear and ambiguous output, withholds a never-send match, and handles malformed responses and HTTP errors.
 The fake `curl` and `quota-axi` prove that the OpenRouter key stays out of their argv and environments.
+It proves that with no provider set, other providers' settings leave the original off line unchanged byte for byte, with no network or quota call.
+It proves `systemone` posts the unchanged System One request to `<base>/v1/systemone`, sends no `Authorization` header and opens no descriptor without a key, carries a key only on the descriptor, reads its settings from `.env`, exits 2 for a missing model or a missing or scheme-less base URL, withholds a never-send base URL, and returns partial responses and transport failure as `error`.
+It proves `openai` is off with one line without its key, exits 2 without a model, sends the same state as JSON text `input` with one named choice question carrying every option, maps the probability array back, withholds a never-send match inside the serialized input or the model name, and rejects refusals, missing or duplicated answers and option values, missing options or confidence, and non-JSON bodies before quota is read.
 It proves a declared `min_confidence` is checked against the rule's own probability both as the pick and as a runner-up, a picked rule below it falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, and that a file without declared floors keeps the global 0.6 floor on confidence unchanged.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, schema-6 account-row binding with schema-5 compatibility, `preferred_provider` family preference across accounts with fallback only on proven ineligibility and escalation on unknown preferred quota, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
 `tests/fm-bootstrap.test.sh` covers bootstrap's typesafe-key validation gate, its key-independent `preferred_provider` check, and child-environment protection; [configuration](../configuration.md#crew-dispatch-profiles-configcrew-dispatchjson) owns that gate's operator contract.

@@ -58,7 +58,7 @@ test_supervision_host_protocol_on_every_arm_owner() {
   home="$TMP_ROOT/host-owners-home"
   config="$TMP_ROOT/host-owners-config"
   mkdir -p "$home/state" "$config"
-  for harness in claude cursor opencode omp grok codex; do
+  for harness in claude cursor agy opencode omp grok codex; do
     : > "$config/supervision-host-off"
     plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
     assert_not_contains "$plain" "Supervision host" "$harness: a home opted out by config/supervision-host-off rendered the host protocol"
@@ -252,6 +252,16 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_contains "$out" "watcher supervision needs Stop-owned automatic recovery" "claude recovery line lost its neutral automatic-recovery guidance"
   assert_not_contains "$out" "is broken" "claude recovery line claimed failure before verification"
   assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line must not create a repeatable manual arm loop"
+
+  out=$("$RENDER" --harness agy)
+  assert_contains "$out" "primary harness: agy" "agy heading missing"
+  assert_contains "$out" "Mode: Antigravity Stop-hook-owned supervision." "agy mode line missing"
+  assert_contains "$out" "bin/fm-turnend-guard-agy.sh" "agy block lost the Stop-hook park script name"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "bin/fm-turnend-guard-agy.sh" "agy ordinary-wake line lost the Stop-hook park script name"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "agy ordinary-wake line must not call the manual arm"
+  out=$("$RENDER" --harness agy --repair-line)
+  assert_contains "$out" "Stop-hook park" "agy recovery line lost its Stop-hook park guidance"
 
   out=$("$RENDER" --harness grok)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')

@@ -52,6 +52,10 @@ done
 if [ -n "${FM_REMOTE_REPLY_POLL_LOG:-}" ]; then
   printf 'x\n' >> "$FM_REMOTE_REPLY_POLL_LOG"
 fi
+[ "${FM_REMOTE_REPLY_TRANSPORT_ERROR:-}" != 1 ] || {
+  printf 'A\000 connection attempt failed because the connected party did not properly respond\000 Error code: Bash/Service/WSAETIMEDOUT\000\n'
+  exit 255
+}
 [ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
 host=$1
 entry=$2
@@ -156,6 +160,19 @@ ADAPTER="$ROOT/bin/fm-procevent-remote-reply.sh"
 SID=$(remote_env "$ADAPTER" source-id ios)
 out=$(remote_env "$ADAPTER" arm ios)
 assert_contains "$out" "armed: $SID offset=0" "remote reply source was not armed at the empty cursor"
+
+# A failed or non-schema remote leg must never become a malformed capture.
+set +e
+FM_REMOTE_REPLY_TRANSPORT_ERROR=1 remote_env "$ADAPTER" source ios > "$TMP_ROOT/transport-error.result"
+transport_error_rc=$?
+FM_REMOTE_REPLY_FAIL_READ=1 remote_env "$ADAPTER" source ios > "$TMP_ROOT/ssh-255.result"
+ssh_255_rc=$?
+set -e
+[ "$transport_error_rc" -ne 0 ] || fail "a non-schema transport diagnostic returned success"
+[ ! -s "$TMP_ROOT/transport-error.result" ] || fail "a non-schema transport diagnostic was emitted as a result"
+[ "$ssh_255_rc" -ne 0 ] || fail "ssh exit 255 returned success"
+[ ! -s "$TMP_ROOT/ssh-255.result" ] || fail "ssh exit 255 emitted a result"
+pass "transport failures and non-schema diagnostics stay out of captured results"
 
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"

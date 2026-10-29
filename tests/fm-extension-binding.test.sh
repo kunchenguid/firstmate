@@ -18,7 +18,7 @@ fi
 
 extension_segment=${FM_EXTENSION_BINDING_SEGMENT:-all}
 case "$extension_segment" in
-  all|coordinator|early-bind|early-validation|early-handshake|early-integrity|matrix|matrix-runtime|lifecycle-flow|lifecycle-host-errors|lifecycle-order|lifecycle-lock|lifecycle-runner|lifecycle-state|lifecycle-invocation-cleanup|remote-envelope|remote-activation|remote-lifecycle|remote-retirement|example|coordinator-fail|coordinator-wait|coordinator-stubborn|coordinator-pass|coordinator-late-pass|coordinator-scheduler-block|coordinator-scheduler-late) ;;
+  all|coordinator|early-bind|early-validation|early-handshake|early-integrity|matrix|matrix-runtime|lifecycle-flow|lifecycle-host-errors|lifecycle-order|lifecycle-lock|lifecycle-runner|lifecycle-state|lifecycle-invocation-cleanup|lifecycle-orphan-readiness|remote-envelope|remote-activation|remote-lifecycle|remote-retirement|example|coordinator-fail|coordinator-wait|coordinator-stubborn|coordinator-pass|coordinator-late-pass|coordinator-scheduler-block|coordinator-scheduler-late) ;;
   *) printf 'unknown extension-binding segment: %s\n' "$extension_segment" >&2; exit 64 ;;
 esac
 
@@ -256,11 +256,11 @@ elif mode in ("replay", "replay-no-result"):
 elif mode == "host-error-output" and request["operation"] == "source.poll":
     evidence = {"schema":"firstmate.process-event-extension-error.v1", "extension_id":manifest["id"], "operation":"source.poll", "code":"package-missing"}
     raw(success({"status":"result", "output":json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n"}))
-elif mode.startswith("active-block|"):
+elif mode.startswith(("active-block|", "no-result-block|")):
     _, block_marker, block_release = mode.split("|", 2)
     write_exclusive(block_marker, f"{os.getpid()}\n")
     while not os.path.exists(block_release): time.sleep(.01)
-    raw(success({"status":"result", "output":"active runner completed\n"}))
+    raw(success({"status":"no-result", "output":""} if mode.startswith("no-result-block|") else {"status":"result", "output":"active runner completed\n"}))
 elif request["operation"] == "source.poll": raw(success({"status":"no-result" if mode == "no-result" else "result", "output":"" if mode == "no-result" else f"external evidence: {mode}\n"}))
 elif request["operation"] == "result.classify": raw(success({"classification":"external-ready"}))
 elif request["operation"] == "result.terminal": raw(success({"value":fixed != "keep-armed"}))
@@ -2055,6 +2055,177 @@ crash_cleanup_release=
 assert_absent "$H_INVOCATION_CLEANUP/config/extensions.d/org.example.invocation-cleanup.json" \
   "identity-safe retirement retained the recovered binding"
 pass "host-crash recovery retires only after exact invocation-group extinction"
+fi
+
+if section_enabled lifecycle-flow lifecycle-orphan-readiness; then
+# Ownerless readiness records have no source selector or signalling authority.
+# Use only private fixture groups, and keep an unrelated live PID as a reuse case.
+P_INVOCATION_CLEANUP="$PACKAGES/orphan-cleanup"
+make_package "$P_INVOCATION_CLEANUP" org.example.invocation-cleanup ext-invocation-cleanup
+H_ORPHAN_READY="$HOMES/orphan-ready"; new_home "$H_ORPHAN_READY"
+bind_package "$H_ORPHAN_READY" "$P_INVOCATION_CLEANUP" ext-invocation-cleanup >/dev/null
+for orphan_source in orphan-first orphan-second; do
+  FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" register-extension ext-invocation-cleanup "$orphan_source" --config-ref silent-result >/dev/null
+done
+orphan_root="$H_ORPHAN_READY/state/extension-invocations"
+mkdir -p "$orphan_root"
+chmod 0700 "$orphan_root"
+orphan_token="sha256:$(printf 'a%.0s' {1..64})"
+orphan_ready="$orphan_root/${orphan_token#sha256:}.ready.json"
+write_orphan_ready() {  # <token> <pid> <identity>
+  node - "$orphan_ready" "$1" "$2" "$3" <<'JS'
+const fs = require("fs");
+const [file, token, pid, identity] = process.argv.slice(2);
+fs.writeFileSync(file, JSON.stringify({schema: "firstmate.extension-invocation-ready.v1",
+  token, group_pid: Number(pid), group_identity: identity}) + "\n", {mode: 0o600});
+JS
+}
+crash_cleanup_group_pid=$(node - "$ROOT/bin/fm-extension-launch-barrier.mjs" "$orphan_token" <<'JS'
+const {spawn} = require("child_process");
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", ...process.argv.slice(2)],
+  {detached: true, stdio: "ignore"});
+console.log(child.pid);
+child.unref();
+JS
+)
+write_orphan_ready "$orphan_token" "$crash_cleanup_group_pid" "barrier-token:$orphan_token"
+expect_failure "process-cleanup-failed" env FM_HOME="$H_ORPHAN_READY" "$HOST" cleanup-invocations
+kill -0 -"$crash_cleanup_group_pid" 2>/dev/null || fail "ownerless cleanup signalled a live fixture group"
+assert_present "$orphan_ready" "ownerless cleanup discarded a live group's readiness"
+write_orphan_ready "$orphan_token" "$$" "barrier-token:$orphan_token"
+expect_failure "process-cleanup-failed" env FM_HOME="$H_ORPHAN_READY" "$HOST" cleanup-invocations
+kill -0 "$$" 2>/dev/null || fail "ownerless cleanup signalled a reused PID"
+kill -0 -"$crash_cleanup_group_pid" 2>/dev/null || fail "ownerless cleanup signalled an unrelated group"
+orphan_dead_pid=$crash_cleanup_group_pid
+kill -TERM -"$crash_cleanup_group_pid" 2>/dev/null || fail "cannot stop private orphan fixture group"
+for _ in $(seq 1 200); do
+  kill -0 -"$crash_cleanup_group_pid" 2>/dev/null || break
+  sleep 0.1
+done
+kill -0 -"$crash_cleanup_group_pid" 2>/dev/null && fail "private orphan fixture group did not exit"
+crash_cleanup_group_pid=
+write_orphan_ready "sha256:$(printf 'b%.0s' {1..64})" "$orphan_dead_pid" "barrier-token:$orphan_token"
+expect_failure "process-cleanup-failed" env FM_HOME="$H_ORPHAN_READY" "$HOST" cleanup-invocations
+write_orphan_ready "$orphan_token" "$orphan_dead_pid" "unprovable-identity"
+expect_failure "process-cleanup-failed" env FM_HOME="$H_ORPHAN_READY" "$HOST" cleanup-invocations
+write_orphan_ready "$orphan_token" "$orphan_dead_pid" "barrier-token:$orphan_token"
+chmod 0644 "$orphan_ready"
+expect_failure "private host-owned file" env FM_HOME="$H_ORPHAN_READY" "$HOST" cleanup-invocations
+chmod 0600 "$orphan_ready"
+mv "$orphan_ready" "$TMP_ROOT/orphan-outside.json"
+ln -s "$TMP_ROOT/orphan-outside.json" "$orphan_ready"
+expect_failure "private host-owned file" env FM_HOME="$H_ORPHAN_READY" "$HOST" cleanup-invocations
+assert_present "$TMP_ROOT/orphan-outside.json" "cleanup followed an unsafe readiness symlink"
+mv "$orphan_ready" "$TMP_ROOT/orphan-symlink"
+mv "$TMP_ROOT/orphan-outside.json" "$orphan_ready"
+orphan_cleaned=$(FM_HOME="$H_ORPHAN_READY" "$HOST" cleanup-invocations --source-id orphan-first)
+assert_contains "$orphan_cleaned" "cleaned-invocations: 1" "dead exact-token orphan readiness was not reclaimed"
+assert_absent "$orphan_ready" "dead orphan readiness survived successful cleanup"
+pass "ownerless readiness recovers only dead exact-token groups and refuses unsafe or unproved ownership"
+
+# One malformed residue must neither silently disable both sources nor wake on
+# every reconcile.
+write_orphan_ready "$orphan_token" "$orphan_dead_pid" "unprovable-identity"
+for _ in 1 2; do
+  orphan_reconcile=$(FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" reconcile)
+  assert_contains "$orphan_reconcile" "uncertain=2" "unsafe residue did not preserve both sources"
+done
+for orphan_source in orphan-first orphan-second; do
+  orphan_wakes=$(wake_payloads "$H_ORPHAN_READY" | grep -c "source $orphan_source .*cleanup" || true)
+  [ "$orphan_wakes" -eq 1 ] || fail "cleanup uncertainty must wake once per source failure episode: $orphan_wakes"
+done
+write_orphan_ready "$orphan_token" "$orphan_dead_pid" "barrier-token:$orphan_token"
+orphan_reconcile=$(FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" reconcile)
+assert_contains "$orphan_reconcile" "started=2" "dead orphan readiness blocked recovery of two extension sources"
+assert_contains "$orphan_reconcile" "uncertain=0" "recovered extension sources remained uncertain"
+for orphan_source in orphan-first orphan-second; do
+  for _ in $(seq 1 200); do
+    [ -f "$H_ORPHAN_READY/state/procevent-inbox/$orphan_source.1.handled" ] && break
+    sleep 0.05
+  done
+  assert_present "$H_ORPHAN_READY/state/procevent-inbox/$orphan_source.1.handled" \
+    "recovered source $orphan_source never handled its private result"
+  for _ in $(seq 1 200); do
+    [ ! -e "$H_ORPHAN_READY/state/procevent/$orphan_source.source" ] \
+      && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$orphan_source.claim" ] && break
+    sleep 0.05
+  done
+  assert_absent "$H_ORPHAN_READY/state/procevent/$orphan_source.source" "recovered terminal source did not retire"
+  assert_absent "$FM_PROCEVENT_CLAIM_ROOT/$orphan_source.claim" "recovered terminal source retained its claim"
+done
+assert_absent "$orphan_ready" "reconcile did not reclaim dead orphan readiness"
+pass "reconcile durably announces cleanup uncertainty once and recovers both extension sources"
+
+surface_orphan_wakes() {
+  FM_HOME="$H_ORPHAN_READY" bash -c '
+    . "$1/bin/fm-watch.sh"
+    procevent_surface_queued
+  ' _ "$ROOT"
+}
+for orphan_recovery in attached live; do
+  orphan_source="orphan-$orphan_recovery"
+  orphan_config=no-result
+  if [ "$orphan_recovery" = live ]; then
+    active_runner_marker="$TMP_ROOT/orphan-live.marker"
+    active_runner_release="$TMP_ROOT/orphan-live.release"
+    orphan_config="no-result-block|$active_runner_marker|$active_runner_release"
+  fi
+  orphan_registration=$(FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" register-extension ext-invocation-cleanup "$orphan_source" --config-ref "$orphan_config") \
+    || fail "could not register $orphan_source"
+  orphan_owner=$(printf '%s\n' "$orphan_registration" | sed -n 's/^owner-token: //p')
+  [ -n "$orphan_owner" ] || fail "registration returned no retirement identity for $orphan_source"
+  write_orphan_ready "$orphan_token" "$orphan_dead_pid" "unprovable-identity"
+  for _ in 1 2; do
+    orphan_reconcile=$(FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" reconcile)
+    assert_contains "$orphan_reconcile" "uncertain=1" "cleanup episode did not preserve $orphan_source"
+  done
+  orphan_wakes=$(wake_payloads "$H_ORPHAN_READY" | grep -c "source $orphan_source .*cleanup" || true)
+  [ "$orphan_wakes" -eq 1 ] || fail "first cleanup episode must wake once for $orphan_source: $orphan_wakes"
+  orphan_headline=$(surface_orphan_wakes) || fail "watcher could not deliver cleanup failure wakes"
+  assert_contains "$orphan_headline" "process-event source failed to start:" "cleanup failure delivered the wrong headline"
+  assert_not_contains "$orphan_headline" "process-event result captured:" "cleanup uncertainty was presented as captured evidence"
+  assert_contains "$orphan_headline" "procevent:$orphan_source:launch-failed:" "watcher omitted $orphan_source cleanup failure"
+  cp "$H_ORPHAN_READY/state/procevent/.$orphan_source.cleanup-failed" "$TMP_ROOT/orphan.previous-episode" \
+    || fail "could not retain the previous cleanup episode"
+  write_orphan_ready "$orphan_token" "$orphan_dead_pid" "barrier-token:$orphan_token"
+  FM_HOME="$H_ORPHAN_READY" "$HOST" cleanup-invocations >/dev/null
+  if [ "$orphan_recovery" = attached ]; then
+    FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" start "$orphan_source" > "$TMP_ROOT/orphan-attached.out" \
+      || fail "attached start did not recover after public cleanup"
+  else
+    FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" start "$orphan_source" > "$TMP_ROOT/orphan-live.out" 2>&1 &
+    active_runner_pid=$!
+    wait_for_file "$active_runner_marker" || fail "live recovery source never entered extension code"
+    cp "$TMP_ROOT/orphan.previous-episode" "$H_ORPHAN_READY/state/procevent/.$orphan_source.cleanup-failed" \
+      || fail "could not restore a prior cleanup episode for live-owner recovery"
+    orphan_reconcile=$(FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" reconcile)
+    assert_contains "$orphan_reconcile" "uncertain=0" "live-owner recovery remained uncertain"
+    assert_absent "$H_ORPHAN_READY/state/procevent/.$orphan_source.cleanup-failed" "live-owner recovery retained a prior cleanup episode"
+    touch "$active_runner_release"
+    wait "$active_runner_pid" || fail "live recovery source did not complete successfully"
+    active_runner_pid=
+    active_runner_release=
+  fi
+  assert_present "$H_ORPHAN_READY/state/procevent/$orphan_source.source" "no-result recovery replaced its registration"
+  assert_absent "$H_ORPHAN_READY/state/procevent/.$orphan_source.cleanup-failed" "$orphan_recovery recovery retained its prior cleanup episode"
+  write_orphan_ready "$orphan_token" "$orphan_dead_pid" "unprovable-identity"
+  for _ in 1 2; do
+    orphan_reconcile=$(FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" reconcile)
+    assert_contains "$orphan_reconcile" "uncertain=1" "second cleanup episode did not preserve $orphan_source"
+  done
+  orphan_wakes=$(wake_payloads "$H_ORPHAN_READY" | grep -c "source $orphan_source .*cleanup" || true)
+  [ "$orphan_wakes" -eq 2 ] || fail "second cleanup episode must wake again for $orphan_source: $orphan_wakes"
+  orphan_headline=$(surface_orphan_wakes) || fail "watcher could not deliver the second cleanup episode"
+  assert_contains "$orphan_headline" "process-event source failed to start:" "second cleanup episode delivered the wrong headline"
+  assert_not_contains "$orphan_headline" "process-event result captured:" "second cleanup episode was presented as captured evidence"
+  assert_contains "$orphan_headline" "procevent:$orphan_source:launch-failed:" "watcher suppressed $orphan_source second cleanup episode"
+  assert_equals "$(surface_orphan_wakes)" "" "watcher delivered a cleanup failure more than once"
+  write_orphan_ready "$orphan_token" "$orphan_dead_pid" "barrier-token:$orphan_token"
+  FM_HOME="$H_ORPHAN_READY" "$HOST" cleanup-invocations >/dev/null
+  FM_HOME="$H_ORPHAN_READY" "$PROCEVENT" retire "$orphan_source" --if-owner "$orphan_owner" >/dev/null \
+    || fail "could not retire the recovered $orphan_source fixture"
+done
+pass "attached start and live-owner recovery renew cleanup failure wakes with delivered failure headlines"
 fi
 
 # --- independent remote envelope, lifecycle, and retirement paths -----------

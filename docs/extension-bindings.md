@@ -112,6 +112,9 @@ The parser rejects malformed UTF-8, a byte-order mark, duplicate object keys, un
 A tracked static core launch barrier publishes one exact host-created process group before the host releases package code, without `eval`, generated source, a shell, or a package-controlled bootstrap.
 A timeout, output-bound violation, failed response, host interruption, or successful parent that leaves that group live sends `TERM`, escalates to `KILL`, and rejects the invocation until that exact group is proved gone.
 If the host dies first, its private identity-bound cleanup record keeps source reconciliation, home cleanup, and binding retirement from releasing ownership until a later core invocation proves that exact group extinct; an uncertain or reused live identity is retained and never signalled.
+An ownerless readiness record carries no source or binding authority and never authorizes signalling.
+Cleanup reclaims it only after validating its private file and exact filename-bound barrier token, proving both its PID and process group gone, and rechecking that the record is unchanged and its owner is still absent.
+This check applies even during source- or binding-filtered cleanup because the readiness record cannot establish either association; unsafe or unprovable residue remains a refusal.
 Extension children must remain foreground members of their invocation group and be owned and reaped by the live entrypoint. Starting another session or process group, changing process groups, double-forking, reparenting, or surviving the entrypoint response violates this protocol contract.
 Trusted same-user code is not an operating-system sandbox: deliberate process-group escape is outside this protocol guarantee. The host never infers ownership from process-table scans or signals contemporaneous same-user processes outside the exact invocation group.
 Extension stderr and failure diagnostics are never copied into a wake or authority-bearing record.
