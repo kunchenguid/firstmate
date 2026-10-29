@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for per-project captain preferences (data/captain-projects/<project>.md):
-# bin/fm-project-prefs.sh's show/path/list contract and name rule, the readers
+# bin/fm-project-prefs.sh's show/path contract and name rule, the readers
 # that surface it (bin/fm-brief.sh for ship and scout scaffolds and
 # bin/fm-review-diff.sh, a ship or scout spawn's dispatch notice, and
 # bin/fm-merge-local.sh), and the guarantee that the startup memory budget never
@@ -52,25 +52,55 @@ test_absent_project_is_silent() {
   pass "fm-project-prefs.sh: a project without a file is silent for show and exit 1 for path"
 }
 
-test_path_and_list() {
+test_path_reports_the_file() {
   local out
   out=$(run_prefs path alpha 2>&1) || fail "path alpha should exit 0"
   assert_equals "$PREFS_DIR/alpha.md" "$out" "path must print the file path"
-  out=$(run_prefs list 2>&1) || fail "list should exit 0"
-  assert_equals "alpha
-spaced name" "$out" "list must print every project with a file, sorted"
-  out=$(FM_HOME="$TMP_ROOT/empty-home" "$PREFS" list 2>&1) || fail "list on an empty home should exit 0"
-  [ -z "$out" ] || fail "list on a home with no files must print nothing"
-  pass "fm-project-prefs.sh: path and list report the files that exist"
+  pass "fm-project-prefs.sh: path reports the file that exists"
 }
 
-test_invalid_names_and_unsafe_files() {
+test_unusual_names_never_refuse_work() {
   local out rc name
-  for name in "../alpha" "a/b" ".hidden" "-flag" ""; do
-    out=$(run_prefs show "$name" 2>&1); rc=$?
-    expect_code 2 "$rc" "show '$name' should be a usage-class refusal"
-    assert_contains "$out" "invalid project name" "show '$name' must explain the refusal"
+  printf '%s\n' '- Dot project rule.' > "$PREFS_DIR/.dotproj.md"
+  printf '%s\n' '- Dash project rule.' > "$PREFS_DIR/-dashproj.md"
+  printf '%s\n' '- Non-ASCII project rule.' > "$PREFS_DIR/caf"$'\303\251'".md"
+  for name in .dotproj -dashproj "caf"$'\303\251'; do
+    out=$(LC_ALL=C run_prefs show "$name" 2>&1); rc=$?
+    expect_code 0 "$rc" "show '$name' under LC_ALL=C should succeed"
+    assert_contains "$out" "project rule." "show '$name' must print its file"
+    out=$(LC_ALL=C run_prefs path "$name" 2>&1); rc=$?
+    expect_code 0 "$rc" "path '$name' under LC_ALL=C should succeed"
   done
+  for name in .noprefs -noprefs "n"$'\303\251'; do
+    out=$(LC_ALL=C run_prefs show "$name" 2>&1); rc=$?
+    expect_code 0 "$rc" "show '$name' without a file should exit 0"
+    [ -z "$out" ] || fail "show '$name' without a file must print nothing (got: $out)"
+  done
+  out=$(LC_ALL=C FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" brief-dot-s6 .dotproj --mode no-mistakes 2>&1); rc=$?
+  expect_code 0 "$rc" "a scaffold for a leading-dot project should exit 0"$'\n'"$out"
+  assert_contains "$out" "Dot project rule." "a scaffold must print a leading-dot project's preferences"
+  out=$(LC_ALL=C FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" brief-nonascii-s7 "n"$'\303\251' --mode no-mistakes 2>&1); rc=$?
+  expect_code 0 "$rc" "a scaffold for a non-ASCII project without a file should exit 0"$'\n'"$out"
+  rm -f "$PREFS_DIR/.dotproj.md" "$PREFS_DIR/-dashproj.md" "$PREFS_DIR/caf"$'\303\251'".md"
+  pass "fm-project-prefs.sh: leading-dot, leading-dash, and non-ASCII names resolve under a C locale"
+}
+
+test_names_that_cannot_be_files_read_as_no_file() {
+  local out rc name
+  printf 'secret\n' > "$TMP_ROOT/alpha.md"
+  for name in "../alpha" "a/b" "." ".." "" "bad"$'\n'"name" "bad"$'\t'"name"; do
+    out=$(run_prefs show "$name" 2>&1); rc=$?
+    expect_code 0 "$rc" "show '$name' should read as a project without a file"
+    [ -z "$out" ] || fail "show '$name' must print nothing (got: $out)"
+    out=$(run_prefs path "$name" 2>&1); rc=$?
+    expect_code 1 "$rc" "path '$name' should read as a project without a file"
+    [ -z "$out" ] || fail "path '$name' must print nothing (got: $out)"
+  done
+  pass "fm-project-prefs.sh: a name that cannot be a file name reads as no file, never a refusal"
+}
+
+test_unsafe_files_are_refused_loudly() {
+  local out rc
   printf 'secret\n' > "$TMP_ROOT/outside.md"
   ln -s "$TMP_ROOT/outside.md" "$PREFS_DIR/linked.md"
   out=$(run_prefs show linked 2>&1); rc=$?
@@ -84,7 +114,9 @@ test_invalid_names_and_unsafe_files() {
   rm -f "$PREFS_DIR/linked.md"
   run_prefs bogus >/dev/null 2>&1; rc=$?
   expect_code 2 "$rc" "an unknown subcommand should be a usage error"
-  pass "fm-project-prefs.sh: invalid names and non-regular files are refused loudly"
+  run_prefs list >/dev/null 2>&1; rc=$?
+  expect_code 2 "$rc" "list is not a subcommand"
+  pass "fm-project-prefs.sh: non-regular files are refused loudly"
 }
 
 test_show_task_resolves_project_from_meta() {
@@ -335,8 +367,10 @@ test_merge_local_warns_but_still_merges_when_prefs_unreadable() {
 
 test_show_prints_header_and_content
 test_absent_project_is_silent
-test_path_and_list
-test_invalid_names_and_unsafe_files
+test_path_reports_the_file
+test_unusual_names_never_refuse_work
+test_names_that_cannot_be_files_read_as_no_file
+test_unsafe_files_are_refused_loudly
 test_show_task_resolves_project_from_meta
 test_brief_prints_project_prefs
 test_brief_refuses_unreadable_prefs_before_writing

@@ -1053,7 +1053,8 @@ Shared captain preferences that apply across secondmate domains live only in the
 ## Per-project captain preferences (data/captain-projects/)
 
 A preference that applies to one project only lives in that project's own `data/captain-projects/<project>.md`, not in `data/captain.md`, so sessions that never touch the project stop paying for it.
-`<project>` is the registry name, the same as its `projects/<name>` clone directory, and must be one plain path component.
+`<project>` is the registry name, the same as its `projects/<name>` clone directory.
+A name that cannot be a plain file name (empty, containing a slash or a control character, or `.` or `..`) simply has no file, so work on a project is never refused because of its name.
 Keep `data/captain.md` for cross-project preferences and working style.
 
 The file is local, gitignored with the rest of `data/`, and never printed by session start or counted by the [startup memory budget](#startup-memory-budget-configstartup-memory-budget), which cover only `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`.
