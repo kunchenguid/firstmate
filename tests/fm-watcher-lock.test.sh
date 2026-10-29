@@ -687,50 +687,76 @@ SH
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
-  local dir state lockdir dead marker gate hold i pids pid waiter winner wins
+  local dir state lockdir dead marker gate hold attempts i pids pid waiter winner wins ready
   dir=$(make_case lock-stale-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
   gate="$dir/first-winner"
   hold="$dir/winner-release"
+  attempts="$dir/attempts"
   dead=$(dead_pid)
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
   : > "$marker"
-  mkfifo "$gate" "$hold"
+  mkdir "$attempts"
   # try_acquire is nonblocking: all one-shot candidates may lose to a transient
   # steal mutex. A waiting contender guarantees eventual acquisition, and the
-  # FIFO keeps the winner alive until every other contender has finished.
+  # release marker keeps winners alive until every contender has tried. Publish
+  # completed records through regular files. An interrupted FIFO open can leave
+  # its peer blocked forever, before the assertion can even run.
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_acquire_wait "$2" || exit 1
-    printf "%s\n" "${BASHPID:-$$}" >> "$3"
-    printf "%s\n" "${BASHPID:-$$}" > "$4"
-    IFS= read -r _ < "$5"
-  ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
+    self=${BASHPID:-$$}
+    printf "%s\n" "$self" >> "$3"
+    printf "%s\n" "$self" > "$6/winner.$self"
+    ln "$6/winner.$self" "$4" 2>/dev/null || true
+    while [ ! -e "$5" ]; do sleep 0.05; done
+  ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" "$attempts" &
   waiter=$!
   pids=
   i=1
   while [ "$i" -le 39 ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
+      self=${BASHPID:-$$}
       if fm_lock_try_acquire "$2"; then
-        printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        printf "%s\n" "${BASHPID:-$$}" > "$4"
-        IFS= read -r _ < "$5"
+        printf "%s\n" "$self" >> "$3"
+        printf "%s\n" "$self" > "$6/winner.$self"
+        ln "$6/winner.$self" "$4" 2>/dev/null || true
+        : > "$6/$self"
+        while [ ! -e "$5" ]; do sleep 0.05; done
+      else
+        : > "$6/$self"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
+    ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" "$attempts" &
     pids="$pids $!"
     i=$((i + 1))
   done
-  IFS= read -r winner < "$gate"
-  [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
-  for pid in $pids; do
-    [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true
+  i=0
+  ready=0
+  while [ "$i" -lt 400 ]; do
+    ready=1
+    [ -s "$gate" ] || ready=0
+    for pid in $pids; do
+      [ -e "$attempts/$pid" ] || ready=0
+    done
+    [ "$ready" -eq 1 ] && break
+    sleep 0.1
+    i=$((i + 1))
   done
+  if [ "$ready" -ne 1 ]; then
+    : > "$hold"
+    fail "stale-lock contenders did not publish their completed attempts"
+  fi
+  winner=$(cat "$gate")
+  [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
-  printf 'release\n' > "$hold"
+  : > "$hold"
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
   wait "$winner" 2>/dev/null || true
   [ "$wins" -eq 1 ] || fail "expected exactly one stale-lock stealer, got $wins"
   pass "concurrent stale-lock steal yields exactly one winner"

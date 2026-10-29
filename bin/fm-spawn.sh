@@ -17,7 +17,10 @@
 #   refuses a brief whose `forge=` disagrees with the registered binding in
 #   either direction, and refuses --yolo on for a forge=gerrit or
 #   forge=external project, where yolo is inactive (bin/fm-project-mode.sh's
-#   header carries that decision). A forge=external ship also refuses a missing
+#   header carries that decision). The project's pr=manual binding is read the
+#   same way and agrees with the brief's " pr=manual" contract suffix in either
+#   direction; only a no-mistakes ship takes it, so a no-mistakes-prod-only
+#   project's direct-PR task expects none. A forge=external ship also refuses a missing
 #   review tool adapter and an unusable personal backup remote, installs the
 #   per-task pre-push guard (bin/fm-git-push-guard.sh) even when the home keeps
 #   AI trailers, and records forge=external, backup_remote=, and backup_prefix=
@@ -4061,6 +4064,26 @@ if [ "$KIND" = ship ]; then
       forge_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE --forge $STANDING_FORGE"
     fi
     echo "error: forge mismatch for $ID: $PROJ_NAME is registered forge=$STANDING_FORGE but $SOURCE_BRIEF records forge=$BRIEF_FORGE; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $forge_scaffold, then re-fill those two subsections, so the worker's publication matches the project's forge" >&2
+    exit 1
+  fi
+  # The registered PR-text binding is read the same way: a brief that disagrees
+  # would hand the pipeline's pr step the text a person owns, or the worker text
+  # the pipeline owns. direct-PR already leaves the text to the worker, so a
+  # conditional-policy project's direct-PR task expects none.
+  if ! STANDING_PR=$("$FM_ROOT/bin/fm-project-mode.sh" --pr "$PROJ_NAME" 2>/dev/null); then
+    "$FM_ROOT/bin/fm-project-mode.sh" --pr "$PROJ_NAME" >/dev/null || true
+    echo "error: $ID cannot launch: the registry entry for $PROJ_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and spawn again" >&2
+    exit 1
+  fi
+  [ -n "$STANDING_PR" ] || STANDING_PR=auto
+  [ "$MODE" = no-mistakes ] || STANDING_PR=auto
+  BRIEF_PR=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]pr=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  [ -n "$BRIEF_PR" ] || BRIEF_PR=auto
+  if [ "$BRIEF_PR" != "$STANDING_PR" ]; then
+    pr_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE"
+    [ "$STANDING_FORGE" = none ] || pr_scaffold="$pr_scaffold --forge $STANDING_FORGE"
+    [ "$STANDING_PR" = auto ] || pr_scaffold="$pr_scaffold --pr $STANDING_PR"
+    echo "error: PR-text mismatch for $ID: $PROJ_NAME is registered pr=$STANDING_PR but $SOURCE_BRIEF records pr=$BRIEF_PR; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $pr_scaffold, then re-fill those two subsections, so the worker owns the PR text exactly when the project says so" >&2
     exit 1
   fi
   # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
