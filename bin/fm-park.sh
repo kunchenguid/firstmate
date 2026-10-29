@@ -589,6 +589,10 @@ closed_once() {  # <id> <pr>
 
 watch_parked() {  # <id>
   local id=$1 pr head parked snap result state triggers
+  if [ -n "$(record_get "$id" pending)" ]; then
+    ( LOCKS_HELD=; trap release_locks EXIT; settle_pending "$id" ) || true
+    [ -e "$(record_path "$id")" ] || return 0
+  fi
   [ -z "$(record_get "$id" resume_error)" ] || return 0
   pr=$(record_get "$id" pr)
   head=$(record_get "$id" head)
@@ -626,13 +630,18 @@ watch_unparked() {  # <id>
 
 # A pending record is a park that did not confirm its stop. Once its agent is
 # confirmed dead it is promoted to parked; while the agent is still alive the
-# park did not happen and the record is dropped; otherwise it stays pending.
+# park did not happen and the record is dropped; otherwise (including a check
+# that outlasts its bound) it stays pending.
 settle_pending() {  # <id>
-  local id=$1 meta
+  local id=$1 meta secs alive
   lock_try "$STATE/.review-park-$id.lock" || return 0
   [ -n "$(record_get "$id" pending)" ] || return 0
   meta="$STATE/$id.meta"
-  case "$(fm_backend_agent_alive "$(fm_backend_of_meta "$meta")" "$(fm_backend_target_of_meta "$meta")")" in
+  secs=$(step_secs "$READ_SECS") || return 0
+  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
+  alive=$(fm_run_timed "$secs" bash -c '. "$1"; fm_backend_agent_alive "$2" "$3"' _ \
+    "$SCRIPT_DIR/fm-backend.sh" "$(fm_backend_of_meta "$meta")" "$(fm_backend_target_of_meta "$meta")" 2>/dev/null) || true
+  case "$alive" in
     dead)
       record_write "$id" "pr=$(record_get "$id" pr)" "head=$(record_get "$id" head)" \
         "parked_at=$(record_get "$id" parked_at)" "slot_leased=$(record_get "$id" slot_leased)" ;;
@@ -674,10 +683,6 @@ cmd_tick() {
     [ -e "$rec" ] || continue
     id=$(basename "$rec" .review-park)
     fm_pr_task_id_valid "$id" && [ -f "$STATE/$id.meta" ] || continue
-    if [ -n "$(record_get "$id" pending)" ]; then
-      ( LOCKS_HELD=; trap release_locks EXIT; settle_pending "$id" ) || true
-      [ -e "$rec" ] || continue
-    fi
     parked+=("$id")
   done
   visit_lanes "$STATE/.review-park-tick-next" watch_parked ${parked[@]+"${parked[@]}"} || return 0

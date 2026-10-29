@@ -96,6 +96,7 @@ SH
   # live claude in the foreground while $world/agent.alive exists.
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+[ ! -e "$world/tmux.hang" ] || sleep 30
 [ -e "$world/agent.alive" ] || { echo "no server running on /tmp/tmux-fake/default" >&2; exit 1; }
 case "\$1" in
   list-windows) echo fm-lane ;;
@@ -405,6 +406,30 @@ test_interrupted_park_reads_as_parking_and_the_tick_settles_it() {
   pass "a park killed during the stop reads as parking, still relaunches on feedback, and the next tick parks it once the agent is dead or drops it while the agent runs"
 }
 
+test_hung_pending_check_ends_within_the_tick() {
+  local w out start took
+  w=$(make_world park-pending-hang "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  kill_park_during_stop "$w"
+  cp "$w/state/lane.meta" "$w/state/lane2.meta"
+  cp "$w/state/lane.review-park" "$w/state/lane2.review-park"
+  : > "$w/tmux.hang"
+  start=$(date +%s)
+  out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
+  took=$(( $(date +%s) - start ))
+  [ "$took" -lt 10 ] || fail "pending-hang: a hung agent check held the tick for ${took}s"
+  [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "pending-hang: tick acted: $out"
+  grep -qx 'pending=1' "$w/state/lane.review-park" || fail "pending-hang: an unanswered check settled a pending record"
+  grep -qx 'pending=1' "$w/state/lane2.review-park" || fail "pending-hang: an unvisited pending record was settled"
+  [ "$(cat "$w/state/.review-park-tick-next" 2>/dev/null)" = lane2 ] \
+    || fail "pending-hang: the tick did not save the lane it never reached"
+  rm -f "$w/tmux.hang"
+  run_park "$w" tick >/dev/null 2>&1
+  ! grep -q '^pending=' "$w/state/lane.review-park" "$w/state/lane2.review-park" \
+    || fail "pending-hang: the next tick did not settle the pending records"
+  pass "a hung agent check on a pending park ends within the tick, and the next tick resumes and settles it"
+}
+
 test_failed_park_record_write_leaves_the_agent_running() {
   local w out rc=0
   w=$(make_world park-record-fail "$GH_URL")
@@ -697,6 +722,7 @@ fm_test_run \
   test_park_refuses_when_head_moves_after_the_verdict \
   test_park_refuses_when_the_lane_is_steered_before_the_stop \
   test_interrupted_park_reads_as_parking_and_the_tick_settles_it \
+  test_hung_pending_check_ends_within_the_tick \
   test_failed_park_record_write_leaves_the_agent_running \
   test_park_preflight_refusals_leave_the_agent_running \
   test_repark_reuses_its_own_lease_and_refuses_a_foreign_one \
