@@ -459,7 +459,7 @@ fi
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  fm_control_endpoint_state "$BACKEND" "$T" "$META"
 }
 
 busy_verdict() {

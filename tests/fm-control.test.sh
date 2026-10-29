@@ -1349,3 +1349,31 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
+
+
+test_control_refuses_foreign_creation_server() {
+  local verb dir out rc sid=00000001-0000-7000-8000-000000000001 bid=00000002-0000-7000-8000-000000000002
+  for verb in exit interrupt; do
+    dir=$(new_case "foreign-rex-$verb")
+    add_task "$dir" t1 claude ship rex "$sid:$bid"
+    printf 'rex_session_id=session:%s\nrex_window_id=window:%s\nrex_block_id=block:%s\nrex_server=unix:/origin\n' "$sid" "$sid" "$bid" >> "$dir/home/state/t1.meta"
+    cat > "$dir/fakebin/rex" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *whoami*) printf '{"endpoint":"unix:/foreign"}' ;;
+  *process*) printf '{"last_exit":0}' ;;
+  *) printf '%s\n' "$*" >> "$FM_FAKE_DIR/rex-effects" ;;
+esac
+SH
+    chmod +x "$dir/fakebin/rex"
+    out=$(run_control "$dir" t1 "$verb"); rc=$?
+    expect_code 1 "$rc" "foreign Rex $verb was accepted: $out"
+    assert_contains "$out" 'creation server' 'control omitted server mismatch diagnostic'
+    assert_not_contains "$out" already-stopped 'foreign dead endpoint was accepted as stopped'
+    [ ! -e "$dir/fake/rex-effects" ] || fail "control delivered to a foreign Rex server"
+    assert_present "$dir/home/state/t1.meta" "control removed the held task"
+  done
+  pass "control refuses foreign creation servers without exit or interrupt delivery"
+}
+
+test_control_refuses_foreign_creation_server
