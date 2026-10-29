@@ -1169,6 +1169,38 @@ test_watcher_self_evicts_on_lock_takeover() {
   pass "watcher self-evicts when the lock pid no longer names it"
 }
 
+test_watcher_exits_on_state_teardown_during_startup() {
+  # A state directory torn down and recreated at the same path just after the
+  # watcher claimed its lock - before the main loop - is still a teardown: the
+  # empty lock in the recreated directory was never released by a successor.
+  local dir state fakebin out pid end stopped rc
+  dir=$(make_case startup-teardown)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  # watcher-path is written only after the claim, a few lines before the main
+  # loop, so pause the watcher the moment it appears.
+  stopped=0
+  end=$((SECONDS + 20))
+  while [ "$SECONDS" -lt "$end" ] && is_live_non_zombie "$pid"; do
+    [ -e "$state/.watch.lock/watcher-path" ] && kill -STOP "$pid" 2>/dev/null && { stopped=1; break; }
+  done
+  [ "$stopped" -eq 1 ] || fail "watcher never finished claiming its lock: $(cat "$out")"
+  rm -rf "$state"
+  mkdir -p "$state"
+  kill -CONT "$pid" 2>/dev/null || true
+  # wait_for_exit returns the watcher's own status, or TERMs a watcher that
+  # kept running in the torn-down directory.
+  rc=0
+  wait_for_exit "$pid" 100 || rc=$?
+  [ "$rc" -eq 1 ] || fail "watcher read a startup teardown as a successor's release (exit $rc): $(cat "$out")"
+  grep -q '^watcher: exiting - state directory was torn down' "$out" \
+    || fail "watcher exited without its teardown reason: $(cat "$out")"
+  pass "watcher exits 1 with its reason when its state directory is torn down and recreated during startup"
+}
+
 test_arm_self_eviction_is_loud_without_successor() {
   local dir state fakebin armout armpid watcher_pid status i
   dir=$(make_case arm-self-evict)
@@ -1899,6 +1931,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
+test_watcher_exits_on_state_teardown_during_startup
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
