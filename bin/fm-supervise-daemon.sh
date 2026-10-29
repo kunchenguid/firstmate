@@ -993,19 +993,20 @@ escalate_flush() {  # <state>
   if [ "${FM_SUPERVISOR_BACKEND:-tmux}" = t3code ]; then
     id="fm-digest-$(_now)-$$-$RANDOM$RANDOM"
     msg=$(_collapse_newlines "$msg")
-    fm_operational_input_encode away-supervisor "$msg" frozen_msg || return 1
-    escalate_freeze "$buf" "$frozen_msg" "$id" || return 1
-    escalate_flush_frozen "$state" "$buf"
-    return $?
-  fi
-  if inject_msg "$msg" "$state" "" "$id"; then
+    if ! fm_operational_input_encode away-supervisor "$msg" frozen_msg \
+      || ! escalate_freeze "$buf" "$frozen_msg" "$id"; then
+      [ "$fresh" != 1 ] || rm -f "$full"
+      return 1
+    fi
+    escalate_flush_frozen "$state" "$buf" && return 0
+  elif inject_msg "$msg" "$state" "" "$id"; then
     unknown_wake_acknowledge_flushed "$state" "$buf" \
       || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
     ESCALATE_KEPT_FULL=
     return 0
   fi
-  if [ "$INJECT_SUBMIT_ATTEMPTED" = 1 ]; then
+  if [ "$INJECT_SUBMIT_ATTEMPTED" = 1 ] || [ -f "$buf.frozen" ]; then
     [ -z "$full" ] || ESCALATE_KEPT_FULL=$full
   elif [ "$fresh" = 1 ]; then
     rm -f "$full"

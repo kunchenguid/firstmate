@@ -1895,6 +1895,40 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+test_changed_extension_and_watcher_regressions_are_selected() {
+  local tmp repo source listed script
+  tmp=$(fm_test_tmproot fm-test-run-restored-selection)
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  for script in fm-procevent-extension-errors.test.sh fm-watch-open-decisions.test.sh fm-extension-binding.test.sh fm-procevent.test.sh fm-procevent-when.test.sh fm-remote-reply.test.sh; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/tests/$script"
+    chmod +x "$repo/tests/$script"
+  done
+  for source in fm-extension.mjs fm-extension.sh fm-procevent.sh fm-procevent-lib.sh fm-procevent-extension-capture.pl fm-watch.sh; do
+    : >"$repo/bin/$source"
+  done
+  mkdir -p "$repo/docs/examples/process-event-extension"
+  : >"$repo/docs/examples/process-event-extension/probe.sh"
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm selection-fixture
+  for source in bin/fm-extension.mjs bin/fm-extension.sh bin/fm-procevent.sh bin/fm-procevent-lib.sh bin/fm-procevent-extension-capture.pl docs/examples/process-event-extension/probe.sh bin/fm-watch.sh; do
+    printf '\n' >>"$repo/$source"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD) || fail "selection failed for $source"
+    if [ "$source" = bin/fm-watch.sh ]; then
+      assert_contains "$listed" tests/fm-watch-open-decisions.test.sh "watcher change omitted decision coverage"
+    else
+      assert_contains "$listed" tests/fm-procevent-extension-errors.test.sh "$source omitted extension error coverage"
+    fi
+    git -C "$repo" checkout -q -- "$source"
+  done
+  pass "extension, process-event, and watcher changes select their existing regressions"
+}
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1938,3 +1972,5 @@ test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+
+test_changed_extension_and_watcher_regressions_are_selected

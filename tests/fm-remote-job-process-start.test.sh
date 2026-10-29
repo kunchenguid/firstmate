@@ -74,6 +74,8 @@ test_fake_proc_token_is_stable_and_parses_comm() {
   second=$(FM_PROC_ROOT_OVERRIDE="$proc_root" fm_remote_job_process_start 4242) \
     || fail "could not re-read the fake /proc starttime"
   [ "$second" = "$first" ] || fail "the token changed without a starttime change"
+  FM_PROC_ROOT_OVERRIDE="$proc_root" fm_remote_job_start_matches proc-starttime=987654 4242 || fail "preceding proc token did not migrate"
+  FM_PROC_ROOT_OVERRIDE="$proc_root" fm_remote_job_start_matches proc-starttime=987655 4242 && fail "mismatched preceding proc token verified"
   printf 'different-boot\n' > "$proc_root/sys/kernel/random/boot_id"
   FM_PROC_ROOT_OVERRIDE="$proc_root" fm_remote_job_start_matches "$first" 4242 && fail "a previous boot matched the same pid and start tick"
   case "$first" in *$'\n'*) fail "token is not a single line" ;; esac
@@ -176,34 +178,40 @@ test_c_locale_cookie_verifies_under_localized_ps() (
 )
 
 test_pre_update_worker_lock_verifies_then_code_identity_replaces() {
-  local old new legacy_start
+  local old new legacy_start format
   has_proc || { pass "pre-update worker lock upgrade skipped without /proc"; return; }
-  stop_fixture_worker
-  ensure_worker
-  old=$(cat "$LOCK/pid")
-  legacy_start=$(ps -p "$old" -o lstart= 2>/dev/null) \
-    || fail "could not read the live owner's bare lstart"
-  printf '%s\n' "$legacy_start" > "$LOCK/start"
-  fm_remote_job_recorded_owner_alive "$LOCK" \
-    || fail "a pre-update lock start did not verify the live owner"
-  fm_remote_job_worker_owned_alive "$FIXTURE_ROOT" "$ACCOUNT_HOME" \
-    || fail "worker_owned_alive rejected a pre-update lock start"
-  # Stale code identity forces the ordinary replace path once ownership holds.
-  printf 'stale-pre-update-identity\n' > "$STATE_ROOT/worker.identity"
-  ensure_worker
-  new=$(cat "$LOCK/pid")
-  [ "$new" != "$old" ] || fail "code-identity path did not replace the pre-update worker"
-  wait_gone "$old" || fail "the pre-update worker survived its replacement"
-  case "$(cat "$LOCK/start")" in boot=*proc-starttime=*) ;; *)
-    fail "replacement did not record a /proc token"
-    ;;
-  esac
-  [ "$(supervisor_count)" = 1 ] || fail "upgrade left $(supervisor_count) supervisors"
-  ensure_worker
-  ensure_worker
-  [ "$(cat "$LOCK/pid")" = "$new" ] || fail "repeated ensure replaced the upgraded worker"
-  [ "$(supervisor_count)" = 1 ] || fail "repeated ensure piled up $(supervisor_count) supervisors"
-  pass "pre-update lock start verifies; code-identity replace yields one supervisor"
+  for format in lstart proc; do
+    stop_fixture_worker
+    ensure_worker
+    old=$(cat "$LOCK/pid")
+    if [ "$format" = proc ]; then
+      legacy_start=$(fm_remote_job_process_start "$old") || fail "could not read live proc token"
+      legacy_start=${legacy_start#* }
+    else
+      legacy_start=$(ps -p "$old" -o lstart= 2>/dev/null) || fail "could not read live lstart"
+    fi
+    printf '%s\n' "$legacy_start" > "$LOCK/start"
+    fm_remote_job_recorded_owner_alive "$LOCK" \
+      || fail "a pre-update lock start did not verify the live owner"
+    fm_remote_job_worker_owned_alive "$FIXTURE_ROOT" "$ACCOUNT_HOME" \
+      || fail "worker_owned_alive rejected a pre-update lock start"
+    # Stale code identity forces the ordinary replace path once ownership holds.
+    printf 'stale-pre-update-identity\n' > "$STATE_ROOT/worker.identity"
+    ensure_worker
+    new=$(cat "$LOCK/pid")
+    [ "$new" != "$old" ] || fail "code-identity path did not replace the pre-update worker"
+    wait_gone "$old" || fail "the pre-update worker survived its replacement"
+    case "$(cat "$LOCK/start")" in boot=*proc-starttime=*) ;; *)
+      fail "replacement did not record a /proc token"
+      ;;
+    esac
+    [ "$(supervisor_count)" = 1 ] || fail "upgrade left $(supervisor_count) supervisors"
+    ensure_worker
+    ensure_worker
+    [ "$(cat "$LOCK/pid")" = "$new" ] || fail "repeated ensure replaced the upgraded worker"
+    [ "$(supervisor_count)" = 1 ] || fail "repeated ensure piled up $(supervisor_count) supervisors"
+  done
+  pass "pre-update lstart and proc locks verify; code-identity replacement yields one supervisor"
 }
 
 # Wait for a fresh worker.ready heartbeat that the current code identity owns.

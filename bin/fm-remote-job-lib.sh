@@ -1013,7 +1013,14 @@ fm_remote_job_start_matches() { # <recorded-start> <pid>
   [ -n "$recorded" ] || return 1
   if actual=$(fm_remote_job_process_start "$pid" 2>/dev/null); then
     [ "$recorded" = "$actual" ] && return 0
-    case "$recorded" in boot=*|proc-starttime=*) return 1 ;; esac
+    case "$recorded" in
+      proc-starttime=*)
+        case "$actual" in
+          boot=*' proc-starttime='*) [ "$recorded" = "${actual#* }" ]; return $? ;;
+        esac
+        return 1 ;;
+      boot=*) return 1 ;;
+    esac
   else
     case "$recorded" in boot=*|proc-starttime=*) return 1 ;; esac
   fi
