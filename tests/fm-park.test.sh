@@ -53,6 +53,12 @@ make_world() {
 
   cat > "$fakebin/gh" <<SH
 #!/usr/bin/env bash
+# The base branch's required checks: gh.branch.json (unprotected by default,
+# gh.branch.fail fails the read), with no rulesets.
+case "\$*" in
+  *"/rules/branches/"*) echo '[]'; exit 0 ;;
+  *"/branches/"*) [ ! -e "$world/gh.branch.fail" ] || exit 1; cat "$world/gh.branch.json" 2>/dev/null || echo '{"protected":false}'; exit 0 ;;
+esac
 # Serves gh.<n>.json for the n-th GraphQL read, repeating the last one.
 n=\$(( \$(cat "$world/gh.count" 2>/dev/null || echo 0) + 1 ))
 printf '%s\n' "\$n" > "$world/gh.count"
@@ -153,10 +159,10 @@ gh_fixture() {  # <out> [key=value...]
   local suites="[{\"createdAt\":\"${pushed:-$committed}\"}]"
   [ "$pushed" != none ] || suites='[]'
   local rollup_obj=null
-  [ "$rollup" = null ] || rollup_obj="{\"state\":$rollup,\"contexts\":{\"nodes\":[{\"__typename\":\"CheckRun\",\"completedAt\":\"$completed\"}]}}"
+  [ "$rollup" = null ] || rollup_obj="{\"state\":$rollup,\"contexts\":{\"nodes\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"completedAt\":\"$completed\"}]}}"
   cat > "$out" <<JSON
 {"data":{"repository":{"pullRequest":{
-  "state":"$state","isDraft":$draft,"headRefOid":"$head","mergeable":"$mergeable",
+  "state":"$state","isDraft":$draft,"headRefOid":"$head","baseRefName":"main","mergeable":"$mergeable",
   "mergeStateStatus":"$mss","reviewDecision":"$decision",
   "commits":{"nodes":[{"commit":{"oid":"$head","committedDate":"$committed","checkSuites":{"nodes":$suites},"statusCheckRollup":$rollup_obj}}]},
   "reviewThreads":{"totalCount":$total,"nodes":$threads},
@@ -224,6 +230,21 @@ test_github_gate_clean_and_each_unclean_condition() {
   expect_unclean "$w" threads "1 review thread(s) unresolved"
   gh_fixture "$w/gh.1.json" 'threads=[]' total=150; expect_unclean "$w" threads-truncated "could not all be read"
   pass "github gate: clean PR parks, and draft, closed, conflict, behind, unknown mergeability, CI pending/failing/absent, changes requested, unresolved and unread threads each refuse"
+}
+
+test_github_gate_refuses_until_every_required_check_reports() {
+  local w
+  w=$(make_world gh-required "$GH_URL")
+  gh_fixture "$w/gh.1.json"
+  # The rollup is green, but it holds only the checks that reported: the
+  # base branch also requires validate, which has not.
+  printf '%s\n' '{"protected":true,"protection":{"required_status_checks":{"contexts":["ci","validate"]}}}' > "$w/gh.branch.json"
+  expect_unclean "$w" required-missing "required check(s) validate have not reported on head"
+  printf '%s\n' '{"protected":true,"protection":{"required_status_checks":{"contexts":["ci"]}}}' > "$w/gh.branch.json"
+  expect_clean "$w" required-reported
+  : > "$w/gh.branch.fail"
+  expect_unclean "$w" required-unreadable "the required checks of the base branch could not be read"
+  pass "github gate refuses while a required check of the base branch has not reported on the head, or the requirement cannot be read"
 }
 
 test_github_gate_waits_for_review_bots_or_quiet_window() {
@@ -574,6 +595,13 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   gh_fixture "$w/gh.1.json" comments="[{\"author\":{\"login\":\"coderabbitai\",\"__typename\":\"Bot\"},\"createdAt\":\"$OLD_ISO\",\"updatedAt\":\"$later\"}]"
   expect_relaunch "$w" edited-comment "new comments from coderabbitai"
 
+  # An inline reply in an already resolved thread leaves no unresolved thread
+  # and no new review submission; the reply itself is the new feedback.
+  w=$(make_world trig-thread-reply "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" total=1 \
+    threads="[{\"isResolved\":true,\"comments\":{\"nodes\":[{\"author\":{\"login\":\"erin\",\"__typename\":\"User\"},\"createdAt\":\"$later\",\"updatedAt\":\"$later\"}]}}]"
+  expect_relaunch "$w" thread-reply "new comments from erin"
+
   w=$(make_world trig-gl-edit "$GL_URL"); gl_fixture "$w"; park_world "$w"
   gl_fixture "$w" notes="[{\"notes\":[{\"author\":{\"username\":\"group_42_bot_abc\"},\"system\":false,\"created_at\":\"$OLD_ISO\",\"updated_at\":\"$later\",\"resolvable\":false}]}]"
   expect_relaunch "$w" gitlab-edited-note "new comments from group_42_bot_abc"
@@ -581,7 +609,7 @@ test_each_relaunch_trigger_relaunches_a_fresh_worker() {
   w=$(make_world trig-gl-note "$GL_URL"); gl_fixture "$w"; park_world "$w"
   gl_fixture "$w" notes="[{\"notes\":[{\"author\":{\"username\":\"dave\"},\"system\":false,\"created_at\":\"$later\",\"resolvable\":false}]}]"
   expect_relaunch "$w" gitlab-note "new comments from dave"
-  pass "head change, failing checks, changes requested, an unresolved thread, a conflict, and new or edited GitHub or GitLab comments each relaunch a fresh worker with the trigger in its instructions"
+  pass "head change, failing checks, changes requested, an unresolved thread, a conflict, and new or edited GitHub or GitLab comments, including an inline reply in a resolved thread, each relaunch a fresh worker with the trigger in its instructions"
 }
 
 test_behind_base_does_not_relaunch() {
@@ -716,6 +744,7 @@ test_land_cleans_up_by_default_unless_opted_out() {
 
 fm_test_run \
   test_github_gate_clean_and_each_unclean_condition \
+  test_github_gate_refuses_until_every_required_check_reports \
   test_github_gate_waits_for_review_bots_or_quiet_window \
   test_gitlab_gate_clean_and_unclean_conditions \
   test_park_stops_agent_records_lane_and_leases_slot \

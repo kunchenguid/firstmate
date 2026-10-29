@@ -23,7 +23,11 @@
 #     has_conflicts false with detailed_merge_status mergeable or not_approved);
 #   - CI green on the current head (GitHub statusCheckRollup SUCCESS on the
 #     head commit; GitLab head_pipeline success with its sha the MR's sha); no
-#     CI reported on the current head is not green;
+#     CI reported on the current head is not green; on GitHub every check the
+#     base branch requires has also reported on the head, read with
+#     bin/fm-pr-merge.sh's required-check reading (bin/fm-pr-lib.sh), because
+#     the rollup holds only checks that reported; an unreadable requirement
+#     is unclean;
 #   - no changes requested (GitHub reviewDecision; GitLab requested_changes);
 #   - zero unresolved review threads, all of them read;
 #   - automated reviewers settled: every reviewer bot that has ever posted on
@@ -89,7 +93,8 @@
 #     gate parks it.
 # Relaunch triggers on a parked lane: the head moved, checks failing, changes
 # requested, a merge conflict, any unresolved review thread, or any new
-# comment, review or note created or edited after the park (an approval with
+# comment (inline review-thread replies included), review or note created or
+# edited after the park (an approval with
 # no body is not a comment). A branch merely behind its base is not a trigger. It prints
 # one line per action taken, which the watcher turns into one wake; a quiet
 # tick prints nothing.
@@ -232,9 +237,9 @@ review_bots_json() {
 # and trigger programs read, so both providers share one decision procedure.
 
 GITHUB_QUERY='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){
-  state isDraft headRefOid mergeable mergeStateStatus reviewDecision
-  commits(last:1){nodes{commit{oid committedDate checkSuites(first:100){nodes{createdAt}} statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{completedAt} ... on StatusContext{createdAt}}}}}}}
-  reviewThreads(first:100){totalCount nodes{isResolved}}
+  state isDraft headRefOid baseRefName mergeable mergeStateStatus reviewDecision
+  commits(last:1){nodes{commit{oid committedDate checkSuites(first:100){nodes{createdAt}} statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name completedAt} ... on StatusContext{context createdAt}}}}}}}
+  reviewThreads(first:100){totalCount nodes{isResolved comments(last:100){nodes{author{login __typename} createdAt updatedAt}}}}
   reviews(last:100){nodes{author{login __typename} state body submittedAt updatedAt commit{oid}}}
   comments(last:100){nodes{author{login __typename} createdAt updatedAt}}
 }}}'
@@ -270,6 +275,8 @@ GITHUB_NORMALIZE='
         + [$p.reviews.nodes[] | {author: (.author.login // "ghost"), bot: (.author.__typename == "Bot"),
           at: .submittedAt, touched: (.updatedAt // .submittedAt), on_head: (.commit.oid == $p.headRefOid),
           approval_only: (.state == "APPROVED" and ((.body // "") | length) == 0)}]
+        + [$p.reviewThreads.nodes[].comments.nodes[]? | {author: (.author.login // "ghost"), bot: (.author.__typename == "Bot"),
+          at: .createdAt, touched: (.updatedAt // .createdAt), on_head: false, approval_only: false}]
         | map(select(.at != null)))
     }'
 
@@ -305,8 +312,30 @@ GITLAB_NORMALIZE='
            touched: (.updated_at // .created_at), on_head: false, approval_only: false}]
     }'
 
-snapshot() {  # <pr-url>
-  local url=$1 raw mr discussions enc secs
+# The required checks of the PR's base branch that have not reported on its
+# head, as a JSON array, read with the same required-check reading
+# bin/fm-pr-merge.sh does; fails when any requirement cannot be read.
+github_required_unreported() {  # <graphql-json>
+  local raw=$1 base head rollup secs missing
+  base=$(printf '%s' "$raw" | jq -er '.data.repository.pullRequest.baseRefName | select(type == "string" and length > 0)') || return 1
+  head=$(printf '%s' "$raw" | jq -r '.data.repository.pullRequest.headRefOid')
+  rollup=$(printf '%s' "$raw" | jq -c '{statusCheckRollup: (.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes // [])}') || return 1
+  secs=$(step_secs "$READ_SECS") || return 1
+  # shellcheck disable=SC2016
+  missing=$(fm_run_timed "$secs" bash -c '
+    . "$1/fm-pr-lib.sh"
+    PR_OWNER=$2 PR_REPO=$3
+    github_read_required_contexts "$4" && github_read_required_producers "$5" \
+      && github_required_checks_missing "$6" "$FM_PR_GITHUB_REQUIRED" "$FM_PR_GITHUB_PRODUCERS"' \
+    _ "$SCRIPT_DIR" "$FM_PR_OWNER" "$FM_PR_REPO" "$base" "$head" "$rollup" 2>/dev/null) || return 1
+  printf '%s' "$missing" | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
+# snapshot <pr-url> [--required]: --required adds required_missing, the GitHub
+# required checks not yet reported on the head (null when unreadable), which
+# only the gate reads.
+snapshot() {  # <pr-url> [--required]
+  local url=$1 raw mr discussions enc secs snap missing
   fm_pr_url_parse "$url" || return 1
   case "$FM_PR_PROVIDER" in
     github)
@@ -315,7 +344,10 @@ snapshot() {  # <pr-url>
       secs=$(step_secs "$READ_SECS") || return 1
       raw=$(fm_run_timed "$secs" gh api graphql -f query="$GITHUB_QUERY" \
         -F "owner=${FM_PR_PATH%%/*}" -F "repo=${FM_PR_PATH#*/}" -F "number=$FM_PR_NUMBER" 2>/dev/null) || return 1
-      printf '%s' "$raw" | jq -c "$GITHUB_NORMALIZE" 2>/dev/null
+      snap=$(printf '%s' "$raw" | jq -c "$GITHUB_NORMALIZE" 2>/dev/null) || return 1
+      [ "${2-}" = --required ] || { printf '%s\n' "$snap"; return 0; }
+      missing=$(github_required_unreported "$raw") || missing=null
+      printf '%s' "$snap" | jq -c --argjson m "$missing" '. + {required_missing: $m}'
       ;;
     gitlab)
       command -v glab >/dev/null 2>&1 || return 1
@@ -357,6 +389,10 @@ GATE_PROGRAM="$JQ_TIME"'
        elif $s.conflict == "unknown" then "mergeability is not computed yet (\($s.merge_status))" else empty end),
       (if $s.blocked_other != null then "the forge reports merge status \($s.blocked_other)" else empty end),
       (if $s.ci != "success" then "CI is \($s.ci) on head \($s.head[0:12])" else empty end),
+      (if ($s | has("required_missing") | not) then empty
+       elif $s.required_missing == null then "the required checks of the base branch could not be read"
+       elif ($s.required_missing | length) > 0 then "required check(s) \($s.required_missing | join(", ")) have not reported on head \($s.head[0:12])"
+       else empty end),
       (if $s.changes_requested then "changes are requested" else empty end),
       (if $s.threads_unresolved > 0 then "\($s.threads_unresolved) review thread(s) unresolved" else empty end),
       (if ($s.threads_complete | not) then "review threads could not all be read" else empty end),
@@ -387,7 +423,7 @@ gate_eval() {  # <id> <expect-head>
   local id=$1 expect=$2 pr snap bots
   pr=$(fm_meta_get "$STATE/$id.meta" pr)
   [ -n "$pr" ] || return 1
-  snap=$(snapshot "$pr") || return 1
+  snap=$(snapshot "$pr" --required) || return 1
   [ -n "$snap" ] || return 1
   bots=$(review_bots_json) || return 1
   printf '%s' "$snap" | jq -c --argjson now "$(date +%s)" --argjson quiet "$QUIET_SECS" \
