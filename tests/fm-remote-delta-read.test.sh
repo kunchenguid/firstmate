@@ -110,32 +110,19 @@ assert_contains "$OUT" 'to_offset=2' 'the break did not report the shrunk size'
 assert_contains "$OUT" "to_prefix_sha256=$(sha 'a\n')" 'the break did not hash the remaining prefix'
 pass 'a shrunk log breaks continuity as truncated with the remaining hash'
 
-# A same-size in-place rewrite changes only mtime/ctime: the stat gate must
-# still take the snapshot, where the prefix hash catches the changed bytes.
-# This rewrite lands in a later epoch second.
-printf 'alpha\nbeta\n' > "$DELTA_HOME/$DELTA_LOG_REL"
-run_reader 11 "$PREFIX_SHA" 4 > "$TMP_ROOT/rewrite.out" &
-READER_PID=$!
-sleep 1.1
-printf 'OMEGA\nbeta\n' > "$DELTA_HOME/$DELTA_LOG_REL"
-wait "$READER_PID" || fail 'the rewritten read did not exit 0'
-OUT=$(<"$TMP_ROOT/rewrite.out")
-assert_contains "$OUT" 'status=continuity-broken' 'a same-size rewrite did not produce a break'
-assert_contains "$OUT" 'reason=prefix-changed' 'the same-size rewrite was not named prefix-changed'
-assert_contains "$OUT" 'to_offset=11' 'the break did not report the current size'
-pass 'a same-size in-place rewrite breaks continuity as prefix-changed'
-
-# Model a same-second same-size rewrite at the stat executable boundary:
-# size, inode, device, and whole-second timestamps stay fixed; only the
-# fractions change. Rewrite the real log after the initial snapshot's prefix
-# has been hashed, so scheduler load cannot move the test across a second.
+# Model same-size rewrites at the stat executable boundary. Rewrite the real
+# log after the initial snapshot's prefix has been hashed and before shasum
+# returns, so the next poll cannot observe the truncate-before-write gap.
 SUBSECOND_SHIM="$TMP_ROOT/subsecond-shim"
 mkdir -p "$SUBSECOND_SHIM"
 cat > "$SUBSECOND_SHIM/stat" <<'SH'
 #!/bin/sh
+epoch=100
 fraction=111111111
-[ ! -e "$FM_TEST_REWRITE_DONE" ] || fraction=222222222
-printf '11:100.%s:100.%s:123:456\n' "$fraction" "$fraction"
+if [ -e "$FM_TEST_REWRITE_DONE" ]; then
+  if [ "${FM_TEST_LATER_EPOCH:-0}" = 1 ]; then epoch=101; else fraction=222222222; fi
+fi
+printf '11:%s.%s:%s.%s:123:456\n' "$epoch" "$fraction" "$epoch" "$fraction"
 SH
 REAL_SHASUM=$(PATH=/usr/bin:/bin command -v shasum)
 cat > "$SUBSECOND_SHIM/shasum" <<SH
@@ -155,6 +142,28 @@ case "\$3" in
 esac
 SH
 chmod +x "$SUBSECOND_SHIM/stat" "$SUBSECOND_SHIM/shasum"
+
+# A later-epoch rewrite changes only mtime/ctime: the stat gate must still
+# take the snapshot, where the prefix hash catches the changed bytes.
+printf 'alpha\nbeta\n' > "$DELTA_HOME/$DELTA_LOG_REL"
+REWRITE_ID=$(perl -e '@s = stat $ARGV[0]; print "$s[0]:$s[1]:$s[7]\n"' "$DELTA_HOME/$DELTA_LOG_REL")
+FM_TEST_REWRITE_LOG="$DELTA_HOME/$DELTA_LOG_REL" \
+  FM_TEST_REWRITE_DONE="$TMP_ROOT/later-epoch-done" FM_TEST_LATER_EPOCH=1 \
+  PATH="$SUBSECOND_SHIM:/usr/bin:/bin" \
+  run_reader 11 "$PREFIX_SHA" 10 > "$TMP_ROOT/rewrite.out" \
+  || fail 'the rewritten read did not exit 0'
+[ -e "$TMP_ROOT/later-epoch-done" ] || fail 'the initial prefix hash did not trigger the later-epoch rewrite'
+[ "$(perl -e '@s = stat $ARGV[0]; print "$s[0]:$s[1]:$s[7]\n"' "$DELTA_HOME/$DELTA_LOG_REL")" = "$REWRITE_ID" ] \
+  || fail 'the later-epoch rewrite changed device, inode, or size'
+OUT=$(<"$TMP_ROOT/rewrite.out")
+assert_contains "$OUT" 'status=continuity-broken' 'a same-size rewrite did not produce a break'
+assert_contains "$OUT" 'reason=prefix-changed' 'the same-size rewrite was not named prefix-changed'
+assert_contains "$OUT" 'to_offset=11' 'the break did not report the current size'
+assert_contains "$OUT" "to_prefix_sha256=$(sha 'OMEGA\nbeta\n')" 'the break did not hash the rewritten prefix'
+pass 'a later-epoch same-size in-place rewrite breaks continuity as prefix-changed'
+
+# In the same second, size, inode, device, and whole-second timestamps stay
+# fixed; only the fractions change.
 printf 'alpha\nbeta\n' > "$DELTA_HOME/$DELTA_LOG_REL"
 FM_TEST_REWRITE_LOG="$DELTA_HOME/$DELTA_LOG_REL" \
   FM_TEST_REWRITE_DONE="$TMP_ROOT/rewrite-done" \
