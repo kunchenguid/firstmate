@@ -2457,6 +2457,12 @@ handle_paused_stale() {  # <window> <task> <hash>
   last=$(status_declared_wait_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  # A lane parked on review stopped its agent on purpose; bin/fm-park.sh's tick
+  # watches its PR and owns every wake for it.
+  if [ -f "$STATE/$task.review-park" ]; then
+    triage_log "absorbed stale (parked on review, watched by fm-park.sh tick): $win"
+    return 0
+  fi
   if status_is_captain_held "$last"; then
     if away_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
@@ -4088,6 +4094,17 @@ EOF
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
+          # A parked lane, or every lane under config/auto-land, is cleaned up
+          # here through bin/fm-teardown.sh's own gates; its one-line outcome
+          # joins the merge outcome in the same wake.
+          land_out=
+          if [ -e "$STATE/$id.review-park" ] || [ -e "$CONFIG/auto-land" ]; then
+            land_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+              "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible 2>/dev/null) || true
+          fi
+          if [ -n "$land_out" ]; then
+            fm_wake_append check "$c" "check: $id merged $url - $land_out" || exit 1
+          fi
           wake "$reason"
         fi
         pr_poll_control_release || exit 1
@@ -4100,6 +4117,21 @@ EOF
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      touch "$STATE/.last-check"
+      wake "$reason"
+    fi
+    # Parked-on-review lanes and opt-in automatic parking (bin/fm-park.sh owns
+    # both); a home with neither configured nor parked costs file tests only.
+    park_out=
+    park_any=
+    for park_rec in "$STATE"/*.review-park; do [ -e "$park_rec" ] && park_any=1 && break; done
+    if [ -n "$park_any" ] || [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]; then
+      park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
+    fi
+    if [ -n "$park_out" ]; then
+      reason="check: park-on-review: $(printf '%s' "$park_out" | paste -sd ';' - | sed 's/;/; /g')"
+      fm_wake_append check park-on-review "$reason" || exit 1
       touch "$STATE/.last-check"
       wake "$reason"
     fi

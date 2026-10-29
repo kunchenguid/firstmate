@@ -1093,11 +1093,15 @@ fm_pr_github_read_record() {  # <host> <owner> <repo> <number>
   fm_pr_github_read_record_with_gh_axi "$@"
 }
 
+# Reads one merge request's state and its own head commit (the MR's sha, never
+# a merge, squash, or merge-train commit, which is what lets bin/fm-teardown.sh
+# prove a squash-merged or merge-train-merged copy landed).
 fm_pr_gitlab_read_record() {  # <host> <path> <number>
   local host=$1 path=$2 number=$3 project_url json fields line
-  local total=0 named=0 state='' merged=''
+  local total=0 named=0 state='' merged='' head=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
+  FM_PR_RECORD_HEAD=
   command -v glab >/dev/null 2>&1 || return 1
   command -v jq >/dev/null 2>&1 || return 1
   project_url="https://$host/$path"
@@ -1109,7 +1113,8 @@ fm_pr_gitlab_read_record() {  # <host> <path> <number>
   if ! fields=$(printf '%s' "$json" | jq -r '
       if type == "object" and (.state | type == "string") and .state != "" then
         "state=" + .state,
-        "merged=" + (if .state == "merged" then "true" else "false" end)
+        "merged=" + (if .state == "merged" then "true" else "false" end),
+        "head=" + (if (.sha | type) == "string" then .sha else "" end)
       else
         error("invalid merge request state")
       end' 2>/dev/null); then
@@ -1120,13 +1125,14 @@ fm_pr_gitlab_read_record() {  # <host> <path> <number>
     case "$line" in
       state=*) state=${line#state=} ;;
       merged=*) merged=${line#merged=} ;;
+      head=*) head=${line#head=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$state" ] \
+  if [ "$named" -ne 3 ] || [ "$total" -ne 3 ] || [ -z "$state" ] \
     || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
     return 1
   fi
@@ -1134,9 +1140,12 @@ FIELDS
   # Consumed by bin/fm-crew-state.sh passed_pr_detail.
   # shellcheck disable=SC2034
   FM_PR_RECORD_STATE=$state
-  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail and bin/fm-teardown.sh.
   # shellcheck disable=SC2034
   FM_PR_RECORD_MERGED=$merged
+  # Consumed by bin/fm-teardown.sh pr_is_merged; empty when the forge omitted it.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_HEAD=$head
 }
 
 # tea addresses a repo by slug only and takes the host from a named login, so
