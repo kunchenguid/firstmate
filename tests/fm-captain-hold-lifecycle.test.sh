@@ -1348,6 +1348,48 @@ EOF
   pass "a transfer key re-asked while settlement checks its calls takes no retraction"
 }
 
+# DEBUG runs before each simple command, and functrace inherits it in functions.
+# Insert the worker append after the final comparison, without replacing either
+# the answer command or the readers, to make the remaining race deterministic.
+test_settlement_preserves_a_question_appended_at_retraction() {
+  local home lane open reader
+  home=$(make_home append-raced-transfer)
+  lane=sample-append-raced-lane
+  tasks_in "$home" add "$lane" "Scout the append-raced sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the append-raced lane"
+  write_origin_meta "$home" "$lane"
+  printf 'needs-decision [key=route]: choose route north or route south\n' > "$home/state/$lane.status"
+  run_captain "$home" hold sample-append-raced-choice --title "Choose the append-raced route" \
+    --reason "route choice pending" >/dev/null || fail "could not hold the route call"
+  run_captain "$home" complete "$lane" sample-append-raced-choice >/dev/null \
+    || fail "could not transfer the append-raced lane's decision"
+  bash -c '. "$1"; status_open_decisions_incremental "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status" >/dev/null
+  cat > "$home/append-hook.sh" <<'EOF'
+set -T
+trap 'if [[ "$BASH_COMMAND" == '\''status_append_retraction "$id" "$f" "$key" "$note"'\'' && "${f-}" == "${RACE_STATUS-}" && ! -e "${RACE_MARK-}" ]]; then
+  printf "needs-decision [key=route]: choose route east or route west\n" >> "$RACE_STATUS"
+  : > "$RACE_MARK"
+fi' DEBUG
+EOF
+  printf 'Take route north.\n' > "$home/route.txt"
+  BASH_ENV="$home/append-hook.sh" RACE_STATUS="$home/state/$lane.status" RACE_MARK="$home/worker-reasked" \
+    run_captain "$home" answer sample-append-raced-choice --decision-file "$home/route.txt" >/dev/null \
+    || fail "answer could not close the route call"
+  assert_present "$home/worker-reasked" "the worker append did not interleave with retraction"
+  for reader in status_open_decisions status_open_decisions_incremental; do
+    open=$(bash -c '. "$1"; "$2" "$3"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$reader" "$home/state/$lane.status")
+    [ "$open" = $'route\tneeds-decision\tchoose route east or route west' ] \
+      || fail "$reader lost the question appended at retraction: '$open'"
+  done
+  open=$(bash -c '. "$1"; . "$2"; status_current_line "$3" scout' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$lane.status")
+  [ "$open" = 'needs-decision [key=route]: choose route east or route west' ] \
+    || fail "the current state hid the question appended at retraction: '$open'"
+  pass "a question appended at retraction stays open in full, incremental, and current-state reads"
+}
+
 # A worker decision key has no length bound and command_complete transfers it
 # uncut, so the retraction that settles the transfer must keep the whole key
 # and its closing text however long the key is; only the note may be cut.
@@ -5187,6 +5229,7 @@ test_settlement_retracts_a_buried_hold_mirror
 test_settlement_keeps_a_reasked_transfer_key_open
 test_settlement_skips_a_transfer_key_reasked_during_its_checks
 test_retraction_keeps_a_long_key_and_its_closing_text
+test_settlement_preserves_a_question_appended_at_retraction
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due

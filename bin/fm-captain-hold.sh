@@ -350,11 +350,11 @@ status_retract_mirrors() {  # <task-id> <note>
   done <<< "$standing"
 }
 
-# The worker appends to its log with a bare `>>` under no lock, so nothing can
-# keep its line from landing between the last-event read and the retraction
-# append. The open-call checks are the long part of that gap, so the top event
-# is read again once they pass and the retraction is appended only while it is
-# still the transfer that was checked.
+# Worker appends use bare `>>`, so a writer-side lock cannot protect this read.
+# Recheck after the slow backlog probes to avoid unnecessary retractions, but
+# correctness does not depend on that check: the decision fold ignores hold
+# retractions, so a question appended even after the check cannot be answered
+# by this bookkeeping. The transfer already closed the original question.
 status_retract_top_transfers() {  # <task-id> <status-file> <note>
   local id=$1 f=$2 note=$3 last checked key lane ids named rc
   local -a names

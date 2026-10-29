@@ -146,6 +146,11 @@ fm_utc_iso_to_epoch() {  # <timestamp>
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
+# A hold settlement retracts only bookkeeping, never a worker's newer question.
+# Keep this shape shared with the hold-aware readers, including for callers
+# that load only this classifier and for incremental folds across appends.
+FM_HOLD_RETRACTION_ERE='^resolved \[key=[A-Za-z0-9._-]+\]: captain call .+ by fm-captain-hold$'
+
 # How many trailing lines the latest-event read parses before it widens to the
 # whole file. A status record and its continuation prose sit within a few lines
 # of the log's end, so this bounds the watcher's per-poll read on a long-lived
@@ -860,6 +865,10 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   # decision no later line could close. The stored and surfaced bytes stay the
   # caller's own.
   _fm_status_unstamped "$line" unstamped
+  if [[ $unstamped =~ $FM_HOLD_RETRACTION_ERE ]]; then
+    printf '%s' "$open"
+    return 0
+  fi
   # Declaration guard. A transition's verb ends at a colon, or - in the colonless
   # form _fm_decision_key still accepts below - at a complete "[key=...]" token.
   # A line holding neither is continuation prose, a bare word, or blank, and can
@@ -1253,7 +1262,9 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=9
+# 10: hold retractions no longer close worker decisions, so rebuild cursors
+# that could have lost a question appended between a transfer and its retraction.
+FM_OPEN_DECISIONS_FOLD_VERSION=10
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity

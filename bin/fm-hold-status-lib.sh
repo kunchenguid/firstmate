@@ -26,9 +26,9 @@ unset -f _fm_hold_status_load
 # decision as `captain-held [key=<k>]: tracked by <ids>`
 # (FM_HOLD_TRANSFER_ERE, capturing <k> and <ids>). Settlement retracts either
 # with `resolved [key=<key>]: captain call <how> by fm-captain-hold`
-# (FM_HOLD_RETRACTION_ERE).
+# (FM_HOLD_RETRACTION_ERE, owned by bin/fm-classify-lib.sh so the decision fold
+# never treats hold bookkeeping as an answer to a worker's newer question).
 FM_HOLD_TRANSFER_ERE='^captain-held \[key=([A-Za-z0-9._-]+)\]: tracked by ([A-Za-z0-9._,-]+)$'
-FM_HOLD_RETRACTION_ERE='^resolved \[key=[A-Za-z0-9._-]+\]: captain call .+ by fm-captain-hold$'
 
 _fm_hold_mirror_line_ere() {  # <status-file> <verb-ere>
   local task=${1##*/}
