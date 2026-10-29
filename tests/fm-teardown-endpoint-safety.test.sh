@@ -1605,7 +1605,7 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
 
 test_retirement_reuses_only_empty_staging() {
   local shape dir mate stage rc force
-  for shape in ordinary forced nonempty linked; do
+  for shape in ordinary forced nonempty linked evidence; do
     dir=$(make_case "retire-stage-$shape")
     mate="$dir/mate"
     stage="$mate.retiring.g1"
@@ -1626,10 +1626,28 @@ SH
       nonempty) printf keep >"$stage/sentinel" ;;
       linked) rmdir "$stage"; mkdir "$dir/outside"; ln -s "$dir/outside" "$stage" ;;
     esac
+    mkdir -p "$mate/state/procevent" "$mate/bin"
+    printf 'registration\n' >"$mate/state/procevent/wait.source"
+    cat >"$mate/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  sweep-home) [ "${2:-}" = --preflight ] || rm -f "$FM_HOME/state/procevent/"*.source ;;
+  reconcile) exit 0 ;;
+esac
+SH
+    chmod +x "$mate/bin/fm-procevent.sh"
+    if [ "$shape" = evidence ]; then
+      cat >"$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in *.home-removal) exit 1 ;; esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+      chmod +x "$dir/fakebin/mv"
+    fi
     force=''
     [ "$shape" != forced ] || force=--force
     rc=0
-    env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_RETIRE_STAGE="$stage" \
+    env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_RETIRE_STAGE="$( [ "$shape" = evidence ] || printf '%s' "$stage" )" FM_TEST_REAL_MV="$(command -v mv)" \
       FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
       "$TEARDOWN" mate ${force:+"$force"} >"$dir/out" 2>"$dir/err" || rc=$?
     case "$shape" in
@@ -1640,6 +1658,7 @@ SH
       *)
         [ "$rc" -ne 0 ] || fail "unsafe staging was accepted: $shape"
         assert_present "$mate" "unsafe staging refusal removed the home"
+        assert_grep registration "$mate/state/procevent/wait.source" "staging failure swept registrations"
         assert_present "$stage" "unsafe staging refusal removed the stage" ;;
     esac
   done
@@ -1674,10 +1693,24 @@ test_local_retirement_resumes_recorded_staging() {
 case "$*" in *has-session*) exit 1 ;; esac
 exit 0
 SH
+    local event_home="$mate"
+    [ "$shape" != descendant ] || event_home="$child"
+    mkdir -p "$event_home/state/procevent" "$event_home/bin"
+    printf 'registration\n' >"$event_home/state/procevent/wait.source"
+    cat >"$event_home/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  sweep-home) [ "${2:-}" = --preflight ] || rm -f "$FM_HOME/state/procevent/"*.source ;;
+  reconcile) exit 0 ;;
+esac
+SH
+    chmod +x "$event_home/bin/fm-procevent.sh"
+    jq -n --arg h "$mate" '{schema:"fm-remote-retirement-pending.v1",task:"mate",home:$h,generation:"g1",target:"isolated:fm-mate",backend:"herdr",phase:"pending",destroyed:false,exit_code:null}' >"$dir/pending.json"
     cat >"$dir/fakebin/rm" <<'SH'
 #!/usr/bin/env bash
 last=${!#}
 case "$last" in
+  *.retiring.*/*) ;;
   *.retiring.*)
     if [ -e "$FM_TEST_DELETE_FAIL" ]; then
       "$FM_TEST_REAL_RM" -f "$last/home/.fm-secondmate-home"
@@ -1689,18 +1722,25 @@ SH
     chmod +x "$dir/fakebin/rm"
     touch "$dir/delete-fail"
     rc=0
-    FM_TEST_REAL_RM="$real_rm" FM_TEST_DELETE_FAIL="$dir/delete-fail" \
+    FM_REMOTE_RETIRE_PENDING="$dir/pending.json" FM_TEST_REAL_RM="$real_rm" FM_TEST_DELETE_FAIL="$dir/delete-fail" \
       run_case "$dir" mate >"$dir/first.out" 2>"$dir/first.err" || rc=$?
     [ "$rc" -ne 0 ] || fail "injected staging deletion failure was ignored"
+    if [ "$shape" != descendant ]; then
+      jq -e '.exit_code == 0' "$dir/pending.json" >/dev/null || fail "home removal did not retain outcome before interruption"
+    fi
     stage=$(sed -n 's/^home_removal_stage=//p' "${meta%.meta}.home-removal")
     [ -n "$stage" ] && [ -d "$stage/home" ] || fail "failed deletion lost its recorded staging: $(cat "$dir/first.err")"
+    local backup
+    for backup in "$event_home"/../.fm-procevent-restore.* "$stage/home"/.fm-procevent-restore.*; do
+      assert_absent "$backup" "committed rename leaked registration backup"
+    done
     rm "$dir/delete-fail"
     if [ "$shape" = successor ]; then
       sed 's/^spawn_gen=.*/spawn_gen=g2/' "$meta" >"$dir/replacement.meta"
       mv "$dir/replacement.meta" "$meta"
     fi
     rc=0
-    FM_TEST_REAL_RM="$real_rm" FM_TEST_DELETE_FAIL="$dir/delete-fail" \
+    FM_REMOTE_RETIRE_PENDING="$dir/pending.json" FM_TEST_REAL_RM="$real_rm" FM_TEST_DELETE_FAIL="$dir/delete-fail" \
       run_case "$dir" mate >"$dir/retry.out" 2>"$dir/retry.err" || rc=$?
     if [ "$shape" = successor ]; then
       [ "$rc" -ne 0 ] || fail "successor consumed predecessor staging"

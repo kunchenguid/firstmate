@@ -972,6 +972,7 @@ cmd_retire() {
       partial=1
     fi
     if [ "$partial" = 1 ]; then
+      [ -n "$pending_rc" ] || die "remote retirement outcome is unknown; preserving pending evidence"
       fm_backend_source herdr || return 1
       fm_backend_herdr_endpoint_confirmed_gone "$target" || return 1
       reconciled=1
@@ -1056,16 +1057,18 @@ cmd_retire() {
       FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
         FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
         FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
-        FM_REMOTE_RETIRE_STAGE="${TARGET_HOME}.retiring.$generation" \
+        FM_REMOTE_RETIRE_STAGE="${TARGET_HOME}.retiring.$generation" FM_REMOTE_RETIRE_PENDING="$pending" \
         "$SCRIPT_DIR/fm-teardown.sh" "$id" --force || rc=$?
     else
       FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
         FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
         FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
-        FM_REMOTE_RETIRE_STAGE="${TARGET_HOME}.retiring.$generation" \
+        FM_REMOTE_RETIRE_STAGE="${TARGET_HOME}.retiring.$generation" FM_REMOTE_RETIRE_PENDING="$pending" \
         "$SCRIPT_DIR/fm-teardown.sh" "$id" || rc=$?
     fi
     [ "$rc" -eq 0 ] || [ "$rc" -eq 4 ] || return "$rc"
+    pending_rc=$(jq -r .exit_code "$pending") || return 1
+    [ "$pending_rc" != 4 ] || rc=4
     # Record the exact successful outcome before the absence read, so a retry
     # after a failed probe still answers with the code the destroy returned.
     tmp=$(umask 077; mktemp "$HOST_HISTORY/.retirement.XXXXXX") || return 1

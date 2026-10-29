@@ -3010,7 +3010,7 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} meta=${5:-$META} abs_home_path process_event_backup retired recorded tmp generation evidence
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} meta=${5:-$META} abs_home_path process_event_backup backup_root retired recorded tmp generation evidence
   [ -n "$home" ] || return 0
   evidence="${meta%.meta}.home-removal"
   if [ -e "$evidence" ] || [ -L "$evidence" ]; then
@@ -3050,7 +3050,40 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
   if [ "$backend" = t3code ]; then
     { fm_backend_source t3code && fm_backend_t3code_home_env_cleanup "$abs_home_path"; } || return 1
   fi
-  process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
+  retired=''
+  if ! firstmate_home_has_treehouse_slot "$abs_home_path"; then
+    case "${FM_REMOTE_RETIRE_STAGE:-}" in
+      "$abs_home_path.retiring."*)
+        retired=$FM_REMOTE_RETIRE_STAGE
+        case "${retired#"$abs_home_path.retiring."}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        if [ -e "$retired" ] || [ -L "$retired" ]; then
+          [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
+          rmdir "$retired" || return 1
+        fi
+        mkdir -m 700 "$retired" || return 1 ;;
+      *)
+        if [ -n "$recorded" ]; then
+          retired=$recorded
+          if [ -e "$retired" ]; then
+            [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
+            rmdir "$retired" || return 1
+          fi
+          mkdir -m 700 "$retired" || return 1
+        else
+          retired=$(mktemp -d "${abs_home_path}.retiring.XXXXXX") || return 1
+          tmp=$(umask 077; mktemp "${evidence}.XXXXXX") || { rmdir "$retired"; return 1; }
+          if ! printf 'home_removal_source=%s\nhome_removal_generation=%s\nhome_removal_stage=%s\n' "$home" "$generation" "$retired" >"$tmp" \
+            || ! mv -f -- "$tmp" "$evidence"; then
+            rm -f -- "$tmp"
+            rmdir "$retired" 2>/dev/null || true
+            return 1
+          fi
+        fi ;;
+    esac
+  fi
+  backup_root=${abs_home_path%/*}
+  [ -z "$retired" ] || backup_root=$abs_home_path
+  process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label" "$backup_root") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
@@ -3077,42 +3110,14 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
-  case "${FM_REMOTE_RETIRE_STAGE:-}" in
-    "$abs_home_path.retiring."*)
-      retired=$FM_REMOTE_RETIRE_STAGE
-      case "${retired#"$abs_home_path.retiring."}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-      if [ -e "$retired" ] || [ -L "$retired" ]; then
-        [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
-        rmdir "$retired" || return 1
-      fi
-      mkdir -m 700 "$retired" || return 1 ;;
-    *)
-      if [ -n "$recorded" ]; then
-        retired=$recorded
-        if [ -e "$retired" ]; then
-          [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
-          rmdir "$retired" || return 1
-        fi
-        mkdir -m 700 "$retired" || return 1
-      else
-        retired=$(mktemp -d "${abs_home_path}.retiring.XXXXXX") || return 1
-        tmp=$(umask 077; mktemp "${evidence}.XXXXXX") || { rmdir "$retired"; return 1; }
-        if ! printf 'home_removal_source=%s\nhome_removal_generation=%s\nhome_removal_stage=%s\n' "$home" "$generation" "$retired" >"$tmp" \
-          || ! mv -f -- "$tmp" "$evidence"; then
-          rm -f -- "$tmp"
-          rmdir "$retired" 2>/dev/null || true
-          return 1
-        fi
-      fi ;;
-  esac
   if mv -- "$abs_home_path" "$retired/home"; then
+    [ -z "$process_event_backup" ] || rm -rf -- "$retired/home/${process_event_backup##*/}" || return 1
     rm -rf -- "$retired" || return 1
     rm -f -- "$evidence" || return 1
-    [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
-  rmdir "$retired" 2>/dev/null || true
   restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+  rmdir "$retired" 2>/dev/null || true
   return 1
 }
 
@@ -3133,12 +3138,12 @@ firstmate_home_has_process_events() {
 }
 
 snapshot_firstmate_home_process_events() {
-  local home=$1 label=$2 backup path
+  local home=$1 label=$2 backup_root=${3:-${1%/*}} backup path
   if ! firstmate_home_has_process_events "$home"; then
     printf '\n'
     return 0
   fi
-  backup=$(umask 077; mktemp -d "${home%/*}/.fm-procevent-restore.XXXXXX") || {
+  backup=$(umask 077; mktemp -d "$backup_root/.fm-procevent-restore.XXXXXX") || {
     echo "REFUSED: cannot stage recoverable process-event state for $label $home" >&2
     return 1
   }
@@ -4305,6 +4310,23 @@ teardown_export_records "$STATE" "$ID" || exit 1
 teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  if [ -n "${FM_REMOTE_RETIRE_PENDING:-}" ]; then
+    [ -f "$FM_REMOTE_RETIRE_PENDING" ] && [ ! -L "$FM_REMOTE_RETIRE_PENDING" ] || exit 1
+    retirement_tmp=$(umask 077; mktemp "${FM_REMOTE_RETIRE_PENDING}.XXXXXX") || exit 1
+    retirement_rc=0
+    [ "$TEARDOWN_POOL_SLOT_LOST" = 0 ] || retirement_rc=$TEARDOWN_LOST_SLOT_EXIT
+    if ! jq -e --arg id "$ID" --arg home "$HOME_PATH" --arg gen "$(meta_value "$META" spawn_gen)" \
+      --arg target "$T" --argjson rc "$retirement_rc" '
+      select(.schema == "fm-remote-retirement-pending.v1" and .task == $id and .home == $home
+        and .generation == $gen and .target == $target and .backend == "herdr"
+        and .phase == "pending" and .destroyed == false
+        and (.exit_code == null or .exit_code == 0 or .exit_code == 4))
+      | .exit_code = (if .exit_code == 4 then 4 else $rc end)' "$FM_REMOTE_RETIRE_PENDING" > "$retirement_tmp" \
+      || ! mv -f -- "$retirement_tmp" "$FM_REMOTE_RETIRE_PENDING"; then
+      rm -f -- "$retirement_tmp"
+      exit 1
+    fi
+  fi
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
