@@ -163,6 +163,7 @@ A tool removed from the schema stays removed, so a genuinely intended use of a l
 ## Output contract
 
 - Allow returns exit 0 with both streams empty.
+- Under Pi with the Cursor provider, a Cursor-delivered allow writes `{}` to stdout instead; `bin/fm-hook-host-lib.sh` owns why, and [the verification record](verification/supervision.md#pi-hosted-cursor-sdk-pretool-replies-2026-10-10) holds the live measurement.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[subagent-dispatch] ..."}` to stderr.
 - Default deny mode also writes `{"decision":"deny","reason":"[subagent-dispatch] ..."}` to stdout for Grok.
 - `--claude` suppresses stdout completely, because Claude Code ignores a PreToolUse deny when stdout is nonempty.

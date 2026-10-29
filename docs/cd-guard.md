@@ -95,6 +95,7 @@ A broken hook must never deny every shell tool call.
 Identical in shape to `docs/arm-pretool-check.md`:
 
 - Allow (and inert-outside-primary) returns exit 0 with both streams empty.
+- Under Pi with the Cursor provider, a Cursor-delivered allow writes `{}` to stdout instead; `bin/fm-hook-host-lib.sh` owns why, and [the verification record](verification/supervision.md#pi-hosted-cursor-sdk-pretool-replies-2026-10-10) holds the live measurement.
 - Deny returns exit 2 and writes `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"[persistent-cd] reason"}` to stderr.
 - Default deny mode also writes `{"decision":"deny","reason":"[persistent-cd] reason"}` to stdout for Grok.
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
