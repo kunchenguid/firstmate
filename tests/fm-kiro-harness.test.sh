@@ -305,6 +305,16 @@ test_kiro_delivery_footer_matches_and_is_scoped() {
   # a landed kiro submit would read pending or unknown.
   printf '%s\0' $'work\n› Kiro is working · Type to steer' | fm_busy_lines_match \
     || fail "the harness-less delivery union must see a kiro busy footer"
+  # Output that merely names the phrase (a grep or cat of kiro docs in some
+  # other harness's pane) is not the footer row and must never read busy, in the
+  # union or for any harness.
+  local echoed=$'$ grep -rn "Kiro is working" docs\ndocs/kiro.md:87: the › Kiro is working footer is a delivery guard'
+  printf '%s\0' "$echoed" | fm_busy_lines_match \
+    && fail "prose naming the kiro footer must not read busy in the harness-less union" || true
+  printf '%s\0' "$echoed" | fm_busy_lines_match claude \
+    && fail "prose naming the kiro footer must not read busy for claude" || true
+  printf '%s\0' "$echoed" | fm_busy_lines_match kiro \
+    && fail "prose naming the kiro footer must not read busy for kiro" || true
   pass "fm-composer-lib: the kiro delivery footer matches busy, its idle row does not, and the union sees it"
 }
 

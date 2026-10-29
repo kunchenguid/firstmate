@@ -488,7 +488,7 @@ fm_composer_strip_ghost() {
 # takes its pre-typing baseline with no harness, so without the literal an
 # already-busy kiro pane reads `idle` and wrongly arms the idle-to-busy
 # confirmation.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$|Kiro is working'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$|^[[:space:]]*›[[:space:]]+Kiro is working'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 # Devin 3000.11.1: the working composer and interrupt hint are independent
 # delivery signals. Neither is used as semantic worker-state evidence.
@@ -559,8 +559,10 @@ FM_DELIVERY_POLYTOKEN_BUSY_REGEX_DEFAULT='^[[:space:]]*Running for [0-9]+([.][0-
 # `esc to cancel` token kiro also renders in its tool-call region and shares with
 # agy, so echoed worker output cannot fake an acknowledgement. Delivery guard
 # only; recorded worker state comes from the kiro-hook record in
-# bin/fm-busy-lib.sh, which never consults this footer.
-FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT='Kiro is working'
+# bin/fm-busy-lib.sh, which never consults this footer. The match is anchored to
+# the footer row (`›` glyph first), so prose that merely names the phrase, such
+# as a grep of these docs in another harness's pane, is never read as busy.
+FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT='^[[:space:]]*›[[:space:]]+Kiro is working'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
