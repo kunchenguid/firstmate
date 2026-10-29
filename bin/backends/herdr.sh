@@ -2979,11 +2979,13 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-tab> <new-pan
     "$session" "$new_tab" "$new_pane" "$required_state" "$owned_workspace" "$prior_focus" || {
     # A focus-guard or close-failure refusal still lets the abort cleanup retry
     # the close with the owned-workspace/prior-focus scope.  An agent-state
-    # refusal at the close boundary (FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE
-    # is set and != required_state) must clear the caller's gate instead, so the
-    # abort cleanup never re-closes that pane without the recheck the
-    # same-process rollback already performed.
-    if [ -n "$FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE" ]; then
+    # refusal at the close boundary (CLOSE_AGENT_STATE is set and differs from
+    # required_state) must clear the caller's gate instead, so the abort cleanup
+    # never re-closes that pane without the recheck the same-process rollback
+    # already performed.  When required_state is empty the recheck is skipped
+    # entirely (CLOSE_AGENT_STATE stays empty), so the gate is always preserved.
+    if [ -n "$FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE" ] \
+      && [ "$FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE" != "${required_state:-}" ]; then
       FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=0
     fi
     return 1

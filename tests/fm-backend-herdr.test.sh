@@ -790,7 +790,7 @@ test_projection_reclaim_rollback_refuses_a_stale_registration() {
   pass "herdr stale registration: presentation reclaim never closes a stale-registration pane and never hands it to the abort cleanup"
 }
 
-test_projection_reclaim_rollback_clears_cleanup_safe_on_close_refusal() {
+test_projection_reclaim_rollback_clears_cleanup_safe_on_agent_state_close_refusal() {
   local out
   out=$(bash -c '. "$0/bin/backends/herdr.sh"
     fm_backend_herdr_pane_agent_state() { printf no-agent; }
@@ -803,17 +803,35 @@ test_projection_reclaim_rollback_clears_cleanup_safe_on_close_refusal() {
   pass "herdr close refusal: presentation reclaim clears the rollback gate on agent-state close refusal"
 }
 
-test_projection_reclaim_rollback_preserves_caller_gate_on_focus_close_refusal() {
+test_projection_reclaim_rollback_preserves_caller_gate_on_close_failure() {
   local out
   out=$(bash -c '. "$0/bin/backends/herdr.sh"
     fm_backend_herdr_pane_agent_state() { printf no-agent; }
+    # CLOSE_AGENT_STATE matches required_state (no-agent) but the close fails
+    # for a non-agent reason (e.g. tab close command error).
+    fm_backend_herdr_projection_close_tab_focus_preserving() {
+      FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=no-agent; return 1; }
+    FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+    fm_backend_herdr_projection_reclaim_rollback fmtest w1:t9 w1:p9; printf "rc=%s safe=%s" "$?" "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE"' "$ROOT" 2>&1)
+  [ "$out" = "rc=1 safe=1" ] \
+    || fail "reclaim rollback must preserve the caller gate on close failure (agent state matches), got '$out'"
+  pass "herdr close refusal: presentation reclaim preserves the caller gate when agent state matches but close fails"
+}
+
+test_projection_reclaim_rollback_preserves_caller_gate_when_required_state_empty() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"
+    # When pane_agent_state returns dead, required_state is set to empty,
+    # so close_tab_focus_preserving skips the agent-state recheck entirely
+    # and CLOSE_AGENT_STATE stays empty.
+    fm_backend_herdr_pane_agent_state() { printf dead; }
     fm_backend_herdr_projection_close_tab_focus_preserving() {
       FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""; return 1; }
     FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
     fm_backend_herdr_projection_reclaim_rollback fmtest w1:t9 w1:p9; printf "rc=%s safe=%s" "$?" "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE"' "$ROOT" 2>&1)
   [ "$out" = "rc=1 safe=1" ] \
-    || fail "reclaim rollback must preserve the caller gate on focus/close refusal, got '$out'"
-  pass "herdr close refusal: presentation reclaim preserves the caller gate on focus/close refusal"
+    || fail "reclaim rollback must preserve the caller gate when required_state is empty (dead pane), got '$out'"
+  pass "herdr close refusal: presentation reclaim preserves the caller gate when required_state is empty"
 }
 
 test_busy_state_never_reports_a_shell_only_pane_busy() {
@@ -6386,8 +6404,9 @@ test_agent_descendant_under_a_spaced_install_path_stays_alive
 test_registered_agent_with_an_unreadable_process_view_is_unknown
 test_registered_agent_with_an_empty_foreground_over_a_real_shell_settles_via_descendant_walk
 test_projection_reclaim_rollback_refuses_a_stale_registration
-test_projection_reclaim_rollback_clears_cleanup_safe_on_close_refusal
-test_projection_reclaim_rollback_preserves_caller_gate_on_focus_close_refusal
+test_projection_reclaim_rollback_clears_cleanup_safe_on_agent_state_close_refusal
+test_projection_reclaim_rollback_preserves_caller_gate_on_close_failure
+test_projection_reclaim_rollback_preserves_caller_gate_when_required_state_empty
 test_busy_state_never_reports_a_shell_only_pane_busy
 test_cli_caches_the_selected_client_within_a_process
 test_cli_scopes_the_selected_client_to_its_session
