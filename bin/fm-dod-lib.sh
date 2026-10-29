@@ -10,6 +10,9 @@
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
 # contract.
+# For local-only tasks, the first accepted done head is latched as exactly one
+# local_done_head= full commit id in the live task metadata. Observing done again
+# never changes that identity. Revised work needs a new task/approval record.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.
@@ -150,6 +153,20 @@ When this task works on Firstmate itself, the repository root `AGENTS.md` (also 
 Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
 EOF
   printf "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`%s/.agents/skills/firstmate-coding-guidelines/SKILL.md\` instead.\n" "$root"
+}
+
+# Return 0 when <mode> is one of the two publishing modes, whose Definition of
+# done below publishes the task for review: a pull request, or on a
+# forge=gerrit project a change. local-only publishes nothing, and a scout
+# records no mode. A home that opts in with config/spawn-base-primary-checkout
+# reads it in bin/fm-spawn.sh, bin/fm-review-diff.sh, and bin/fm-promote.sh:
+# published work must start from, and be reviewed against, origin's tip rather
+# than a local branch carrying commits origin has never received.
+fm_mode_publishes() {  # <mode>
+  case "$1" in
+    no-mistakes|direct-PR) return 0 ;;
+  esac
+  return 1
 }
 
 # Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh, so a
@@ -729,6 +746,52 @@ fm_dod_meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-
 }
 
+# Read the single owned local landing identity. Never accept rev expressions,
+# abbreviated hashes, duplicate fields, or a record with no head.
+fm_dod_local_done_head() {  # <meta>
+  local value count
+  count=$(awk -F= '$1 == "local_done_head" { n++ } END { print n+0 }' "$1") || return 1
+  [ "$count" = 1 ] || return 1
+  value=$(fm_dod_meta_value "$1" local_done_head) || return 1
+  case "$value" in ''|*[!0-9a-f]*) return 1 ;; esac
+  case ${#value} in 40|64) printf '%s\n' "$value" ;; *) return 1 ;; esac
+}
+
+# Latch the head before reporting readiness, not at landing time. Snapshot
+# callers may supply captured meta; compare it with the live record under the
+# existing control/meta locks before publishing to the live owner only. A caller
+# already holding the live meta lock passes meta-locked and retains its locks.
+fm_dod_pin_local_done_head() (  # <state> <id> <meta> <sha> <captured-meta> [meta-locked]
+  local state=$1 id=$2 meta=$3 sha=$4 captured=$5 script_dir live control='' lock='' tmp='' pinned
+  script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  # These lazy imports are canonical lint roots. Keep their subshell-local
+  # initializers out of ShellCheck's analysis of the sourcing caller's globals.
+  # shellcheck source=/dev/null
+  . "$script_dir/fm-wake-lib.sh"
+  # shellcheck source=/dev/null
+  . "$script_dir/fm-backlog-transition-lib.sh"
+  live="$state/$id.meta"
+  if [ "${6:-}" != meta-locked ]; then
+    control="$state/.control-$id.lock"
+    lock=$(fm_meta_lock_path "$live") || return 1
+    fm_lock_try_acquire "$control" || return 1
+    trap 'fm_lock_release "$control" || true' EXIT
+    fm_lock_try_acquire "$lock" || return 1
+  fi
+  trap '[ -z "$tmp" ] || rm -f -- "$tmp"; [ -z "$lock" ] || fm_lock_release "$lock" || true; [ -z "$control" ] || fm_lock_release "$control" || true' EXIT
+  fm_backlog_record_present "$live" 'local readiness metadata' "$state" || return 1
+  cmp -s "$meta" "$live" || return 1
+  [ "$(cat "$live")" = "$captured" ] || return 1
+  if grep -q '^local_done_head=' "$live"; then
+    pinned=$(fm_dod_local_done_head "$live") || return 1
+    [ "$pinned" = "$sha" ]
+    return
+  fi
+  tmp=$(mktemp "$state/.local-done-$id.XXXXXX") || return 1
+  { cat "$live" && printf '\nlocal_done_head=%s\n' "$sha"; } > "$tmp" || return 1
+  fm_backlog_record_publish "$tmp" "$live" 'local readiness metadata' "$state"
+)
+
 # 0 when the forge's head for a PR is the head the done names. In no-mistakes
 # mode the pipeline pushes it, possibly with commits the worker clone never
 # fetched. A direct-PR worker pushes from its own copy, so its named head stays
@@ -847,9 +910,17 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # output. <state> <id> <meta> supply pr=,
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
-fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
+fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured=''
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
+  if [ "$mode" = local-only ] && [ -n "$meta" ]; then
+    captured=$(cat "$meta") || return 1
+    if [ "$(fm_dod_meta_value "$meta" worktree)" != "$wt" ] \
+      || [ "$(fm_dod_meta_value "$meta" project)" != "$project" ]; then
+      printf '%s\n' 'local-only task identity changed before readiness could be recorded'
+      return 1
+    fi
+  fi
   if [ -n "$meta" ] && [ "$(fm_dod_meta_value "$meta" forge)" = external ]; then
     fm_dod_accept_external_review_done "$wt" "$project" "$line" "$meta"
     return
@@ -888,6 +959,13 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     return 1
   fi
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+    if [ "$mode" = local-only ] && [ -n "$meta" ]; then
+      if [ -z "$state" ] || [ -z "$id" ] \
+        || ! fm_dod_pin_local_done_head "$state" "$id" "$meta" "$sha" "$captured" "${9:-}"; then
+        printf '%s\n' "local-only done head could not be recorded or differs from the recorded head; revised work requires a new task/approval record"
+        return 1
+      fi
+    fi
     return 0
   fi
   printf '%s\n' "named head $sha is unreachable outside the worker copy"

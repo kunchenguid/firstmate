@@ -204,6 +204,12 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
+# shellcheck source=bin/fm-warm-compact-lib.sh
+. "$SCRIPT_DIR/fm-warm-compact-lib.sh"
 
 FIRST_ARM_RESTART=0
 case "${1:-}" in
@@ -232,6 +238,7 @@ TURN_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_TURN_TIMEOUT:-}" 1200)
 ROTATE_TURNS=$(numeric_or "${FM_SUPERVISION_HOST_ROTATE_TURNS:-}" 20)
 READY_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_READY_TIMEOUT:-}" 25)
 POLL=$(numeric_or "${FM_SUPERVISION_HOST_POLL:-}" 1)
+WARM_COMPACT_TICK=$(numeric_or "${FM_WARM_COMPACT_TICK:-}" 60)
 COOLDOWN=$FM_SUPERVISION_HOST_COOLDOWN
 COOLDOWN_MAX=3600
 AUTOARM_GEN=${FM_SUPERVISION_HOST_AUTOARM_GEN:-}
@@ -393,7 +400,7 @@ activate() {
     case "$ledger" in *.pids|*.next) continue ;; esac
     [ -f "$ledger" ] && _fm_engine_reap "$ledger"
   done
-  rm -f "$STATE"/.supervision-host-arm.* "$STATE"/.supervision-host-descendants.* "$STATE"/.supervision-host-result.* \
+  rm -f "$STATE"/.supervision-host-arm.* "$STATE"/.supervision-host-warm.* "$STATE"/.supervision-host-descendants.* "$STATE"/.supervision-host-result.* \
     "$STATE"/.supervision-host-errors.* "$STATE"/.supervision-host-readback.* "$TURN_FILE" "$MIRROR_FEED" 2>/dev/null || true
   # The successor a pass-through left for main: the first cycle takes it over
   # while it still answers to its recorded identity, and its record goes only
@@ -553,6 +560,86 @@ stream_ready_line() {
   READY_PENDING=0
 }
 
+# Warm-cache compaction (bin/fm-warm-compact-lib.sh owns the gate and the
+# guards). The park is the primary's idle episode: the owner starts the host at
+# the primary's turn end and the host exits when main is needed. The engine
+# conversation's episode is the time since its last handled turn. Each is
+# compacted at most once per episode, and neither result reaches the close.
+WARM_COMPACT_LAST_TICK=-1
+WARM_COMPACT_PRIMARY_DONE=0
+WARM_COMPACT_VERDICT=
+
+warm_compact_tick() {
+  local backend target verdict ended compacted
+  [ -f "$CONFIG/warm-compact" ] || return 0
+  park_elapsed
+  if [ "$WARM_COMPACT_LAST_TICK" -ge 0 ] && [ $((PARK_ELAPSED - WARM_COMPACT_LAST_TICK)) -lt "$WARM_COMPACT_TICK" ]; then
+    return 0
+  fi
+  WARM_COMPACT_LAST_TICK=$PARK_ELAPSED
+  turn_crosses_boundary && return 0
+  if [ "$PRIMARY" = claude ] && [ "$WARM_COMPACT_PRIMARY_DONE" -eq 0 ] && [ -n "${FM_WARM_COMPACT_TRANSCRIPT:-}" ] \
+    && target=$(discover_supervisor_target) && backend=$(discover_supervisor_backend); then
+    verdict=$(fm_warm_compact_primary "$CONFIG" "$backend" "$target" "$PARK_ELAPSED" "$FM_WARM_COMPACT_TRANSCRIPT" 0)
+    case "$verdict" in sent | failed) WARM_COMPACT_PRIMARY_DONE=1; log_line "warm-compact	primary	$verdict" ;; esac
+  fi
+  if fm_supervision_host_config "$CONFIG" "$PRIMARY" && [ -n "$FM_SUPERVISION_ENGINE" ] && engine_record_resumable; then
+    ended=$(numeric_or "$(sed -n 's/^ended=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)" 0)
+    [ "$ended" -gt 0 ] || return 0
+    compacted=0
+    [ "$(sed -n 's/^compacted=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)" != "$ended" ] || compacted=1
+    run_warm_compact_engine $(($(date +%s) - ended)) "$RECORD_SESSION" "$compacted"
+    case "$WARM_COMPACT_VERDICT" in
+      compacted | failed)
+        mark_engine_compacted "$ended"
+        log_line "warm-compact	engine	$WARM_COMPACT_VERDICT"
+        ;;
+    esac
+  fi
+}
+
+# Run the engine compaction as a bounded background turn the cleanup can stop,
+# and abandon it the moment the arm closes or the park boundary arrives, so a
+# real wake never waits behind it. Sets WARM_COMPACT_VERDICT, empty when abandoned.
+run_warm_compact_engine() {  # <idle-seconds> <session> <compacted 0|1>
+  local verdict_file abandoned=0
+  WARM_COMPACT_VERDICT=
+  verdict_file=$(mktemp "$STATE/.supervision-host-warm.verdict.XXXXXX") || return 0
+  ENGINE_RUNNING=1
+  (
+    export FM_HOME STATE
+    [ -z "${FM_STATE_OVERRIDE:-}" ] || export FM_STATE_OVERRIDE
+    [ -z "${FM_CONFIG_OVERRIDE:-}" ] || export FM_CONFIG_OVERRIDE
+    fm_warm_compact_engine "$CONFIG" "$1" "$2" "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" \
+      "$PROMPT_FILE" "$3" "$ENGINE_PID_FILE" > "$verdict_file"
+  ) &
+  ENGINE_SUBSHELL=$!
+  while fm_pid_alive "$ENGINE_SUBSHELL"; do
+    if ! fm_pid_alive "$ARM_PID" || boundary_reached; then
+      abandoned=1
+      stop_engine_turn
+      break
+    fi
+    sleep 0.5
+  done
+  wait "$ENGINE_SUBSHELL" 2>/dev/null || true
+  ENGINE_SUBSHELL=
+  ENGINE_RUNNING=0
+  rm -f "$ENGINE_PID_FILE"
+  [ "$abandoned" -eq 1 ] || WARM_COMPACT_VERDICT=$(cat "$verdict_file" 2>/dev/null || true)
+  rm -f "$verdict_file"
+}
+
+mark_engine_compacted() {  # <ended>
+  local tmp
+  tmp=$(mktemp "$ENGINE_RECORD.tmp.XXXXXX") || return 0
+  if { grep -v '^compacted=' "$ENGINE_RECORD"; printf 'compacted=%s\n' "$1"; } > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$ENGINE_RECORD" || rm -f "$tmp"
+  else
+    rm -f "$tmp"
+  fi
+}
+
 # Wait for the current arm to close. Returns 0 with ARM_TEXT set,
 # or 1 when the park boundary arrives first.
 await_close() {
@@ -561,6 +648,7 @@ await_close() {
     refresh_process "$ARM_PID"
     [ "$READY_PENDING" -eq 0 ] || stream_ready_line
     boundary_reached && return 1
+    warm_compact_tick
     # Probe the arm's exit twice a second between POLL-cadence checks, without
     # changing the outer identity refresh, readiness, or boundary cadence.
     i=$((POLL * 2))
@@ -790,23 +878,30 @@ leave_successor_for_main() {
 # The engine conversation for this turn: the recorded one while it belongs to
 # this main session and has turns left, otherwise a new one. Sets ENGINE_SESSION
 # and ENGINE_MODE (new|resume).
-choose_conversation() {
-  local key recorded_key recorded_session recorded_engine recorded_model turns
+# Succeed, setting RECORD_KEY, RECORD_SESSION and RECORD_TURNS, when the
+# recorded conversation is one the next turn resumes.
+engine_record_resumable() {
+  local key recorded_engine recorded_model
   key=$(fm_supervision_host_main_key "$STATE") || key=
-  recorded_key=$(sed -n 's/^key=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
-  recorded_session=$(sed -n 's/^session=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
+  RECORD_KEY=$key
+  RECORD_SESSION=$(sed -n 's/^session=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
   recorded_engine=$(sed -n 's/^engine=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
   recorded_model=$(sed -n 's/^model=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
-  turns=$(numeric_or "$(sed -n 's/^turns=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)" 0)
-  if [ -n "$key" ] && [ -n "$recorded_session" ] && [ "$recorded_key" = "$key" ] \
+  RECORD_TURNS=$(numeric_or "$(sed -n 's/^turns=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)" 0)
+  [ -n "$key" ] && [ -n "$RECORD_SESSION" ] \
+    && [ "$(sed -n 's/^key=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)" = "$key" ] \
     && [ "$recorded_engine" = "$FM_SUPERVISION_ENGINE" ] \
     && [ "$recorded_model" = "$FM_SUPERVISION_ENGINE_MODEL" ] \
-    && [ "$turns" -lt "$ROTATE_TURNS" ] && [ -s "$PROMPT_FILE" ]; then
-    ENGINE_SESSION=$recorded_session
+    && [ "$RECORD_TURNS" -lt "$ROTATE_TURNS" ] && [ -s "$PROMPT_FILE" ]
+}
+
+choose_conversation() {
+  if engine_record_resumable; then
+    ENGINE_SESSION=$RECORD_SESSION
     ENGINE_MODE=resume
-    ENGINE_TURNS=$turns
+    ENGINE_TURNS=$RECORD_TURNS
     ENGINE_COST=$(sed -n 's/^conversation_cost=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
-    ENGINE_KEY=$key
+    ENGINE_KEY=$RECORD_KEY
     return 0
   fi
   ENGINE_SESSION=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]')
@@ -817,7 +912,7 @@ choose_conversation() {
   ENGINE_MODE=new
   ENGINE_TURNS=0
   ENGINE_COST=0
-  ENGINE_KEY=$key
+  ENGINE_KEY=$RECORD_KEY
   local tmp
   tmp=$(mktemp "$PROMPT_FILE.tmp.XXXXXX") || return 1
   if ! "$SCRIPT_DIR/fm-branch-prompt.sh" > "$tmp" 2>/dev/null \
@@ -832,8 +927,8 @@ choose_conversation() {
 write_engine_record() {  # <turns> <conversation-cost>
   local tmp
   tmp=$(mktemp "$ENGINE_RECORD.tmp.XXXXXX") || return 1
-  printf 'engine=%s\nmodel=%s\nsession=%s\nkey=%s\nturns=%s\nconversation_cost=%s\n' \
-    "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" "$ENGINE_SESSION" "$ENGINE_KEY" "$1" "$2" > "$tmp" \
+  printf 'engine=%s\nmodel=%s\nsession=%s\nkey=%s\nturns=%s\nconversation_cost=%s\nended=%s\n' \
+    "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" "$ENGINE_SESSION" "$ENGINE_KEY" "$1" "$2" "$(date +%s)" > "$tmp" \
     && mv -f "$tmp" "$ENGINE_RECORD"
 }
 

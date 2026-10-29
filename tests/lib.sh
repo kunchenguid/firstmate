@@ -6,11 +6,12 @@
 #   . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # It provides the boilerplate every test file used to re-roll: ok/not-ok
-# reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
-# git identity and fixture builders, state/<id>.meta writers, and the common
-# string/exit-code/file assertions. Shared fake-toolchain and spawn-world
+# reporters, TAP plan and completion (fm_test_run), a self-cleaning temp root,
+# fakebin/PATH-shim helpers, deterministic git identity and fixture builders,
+# state/<id>.meta writers, and the common string/exit-code/file assertions. Shared fake-toolchain and spawn-world
 # builders live in tests/fixtures.sh; wake-queue mocks in wake-helpers.sh;
-# secondmate-lifecycle mocks in secondmate-helpers.sh. Suite-specific fakes
+# secondmate-lifecycle mocks in secondmate-helpers.sh; supervision-host
+# fixtures in supervision-host-helpers.sh. Suite-specific fakes
 # that encode a single test's terminal or lifecycle assumptions still belong
 # with the tests that own them.
 #
@@ -105,6 +106,27 @@ fail() {
 
 pass() {
   printf 'ok - %s\n' "$1"
+}
+
+# fm_test_run <test-function>...
+# Print a TAP plan 1..N derived from the function names (N is $#), run each
+# function (each must emit exactly one `ok - ` line via pass), then print
+# FM_TEST_COMPLETE. Adding a test is adding a name to this call; N is not a
+# separately maintained numeral. The names given are the names run.
+# bin/fm-test-tap-verify.sh is the completeness checker the stock macOS Bash
+# job uses against that plan and marker.
+fm_test_run() {
+  local name kind
+  [ "$#" -gt 0 ] || fail "fm_test_run: no tests registered"
+  printf '1..%s\n' "$#"
+  while [ "$#" -gt 0 ]; do
+    name=$1
+    shift
+    kind=$(type -t "$name" 2>/dev/null || true)
+    [ "$kind" = function ] || fail "fm_test_run: $name is not a function"
+    "$name"
+  done
+  printf 'FM_TEST_COMPLETE\n'
 }
 
 # Harness argument assertions reuse the emitted prefix rather than duplicating

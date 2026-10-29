@@ -74,9 +74,25 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# Store field 22 of a Linux-compatible /proc stat file (the process start in
+# clock ticks since boot) in the named variable.
+# Locals carry a private prefix so printf -v reaches the caller's variable.
+_fm_proc_starttime_to() {  # <output-variable> <proc-root> <pid>
+  local _fm_pst_line _fm_pst_value
+  local -a _fm_pst_fields
+  _fm_pst_line=$(cat "$2/$3/stat" 2>/dev/null) || return 1
+  # After the final comm delimiter, array index 19 is proc stat field 22.
+  read -r -a _fm_pst_fields <<< "${_fm_pst_line##*)}"
+  [ "${#_fm_pst_fields[@]}" -ge 20 ] || return 1
+  _fm_pst_value=${_fm_pst_fields[19]}
+  case "$_fm_pst_value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf -v "$1" '%s' "$_fm_pst_value"
+}
+
 fm_pid_identity() {
-  local pid=$1 out proc_root stat_line starttime cmdline_hex identity_key
-  local -a stat_fields
+  local pid=$1 out proc_root starttime cmdline_hex identity_key
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -88,14 +104,7 @@ fm_pid_identity() {
   # Git Bash/MSYS exposes these compatible files but its Cygwin ps rejects the
   # portable fallback's -o fields, so capability detection must not key on uname.
   if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
-    # After the final comm delimiter, array index 19 is proc stat field 22.
-    read -r -a stat_fields <<< "${stat_line##*)}"
-    [ "${#stat_fields[@]}" -ge 20 ] || return 1
-    starttime=${stat_fields[19]}
-    case "$starttime" in
-      ''|*[!0-9]*) return 1 ;;
-    esac
+    _fm_proc_starttime_to starttime "$proc_root" "$pid" || return 1
     cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
     [ -n "$cmdline_hex" ] || return 1
     identity_key=proc-starttime
@@ -116,11 +125,38 @@ fm_pid_identity() {
   # host's grant owner as dead, discard the grant, and refuse its drain.
   # bin/fm-extension.mjs's pidIdentity pins the same zone. On a /proc-less host
   # outside UTC, an identity recorded before this pin may read as reused for one
-  # upgrade window; this is an accepted bounded upgrade-window residual that the
-  # restart /updatefirstmate performs after a successful update clears.
+  # upgrade window; this is an accepted bounded upgrade-window residual. The
+  # watch lock's next claim clears it, because fm_lock_holder_alive reads that
+  # watcher as dead and the replaced watcher stands down at its next poll. The
+  # autoarm abandonment proof already reclaims a mismatched claim, at the cost of
+  # the one-extra-continuation residual docs/turnend-guard.md describes. Only the
+  # supervise-daemon lock (fm_afk_daemon_owns_supervision, daemon_pid_matches)
+  # keeps the residual by design.
   out=$(COLUMNS=10000 LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+}
+
+# fm_pid_start_time <pid>
+# Only the start-time half of fm_pid_identity, from the same sources and pins.
+# exec keeps a process's pid and start time but replaces its command, so a
+# record that must keep naming its holder across an exec compares this instead.
+fm_pid_start_time() {
+  local pid=$1 proc_root starttime out
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
+    _fm_proc_starttime_to starttime "$proc_root" "$pid" || return 1
+    printf 'proc-starttime=%s\n' "$starttime"
+    return 0
+  fi
+  out=$(LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  out=${out#"${out%%[![:space:]]*}"}
+  out=${out%"${out##*[![:space:]]}"}
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
 }
 
 fm_path_mtime() {
@@ -502,6 +538,7 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/pid-start" \
     "$lockdir/role" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
@@ -539,12 +576,64 @@ fm_lock_owner_dir() {
   mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
 }
 
+# The acquiring process's own fm_pid_start_time, probed once per pid: a
+# process's start time never changes, so a long-lived lock user pays it once.
+_FM_LOCK_SELF_START_PID=
+_FM_LOCK_SELF_START=
+
+# Record the holder's pid and, when it can be probed, its start time, before
+# the owner directory is published, so fm_lock_holder_alive can tell this
+# holder from a later process that reuses its pid.
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
   fm_current_pid mypid || return 1
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  [ "$back" = "$mypid" ]
+  [ "$back" = "$mypid" ] || return 1
+  if [ "$_FM_LOCK_SELF_START_PID" != "$mypid" ]; then
+    _FM_LOCK_SELF_START=$(fm_pid_start_time "$mypid" 2>/dev/null || true)
+    _FM_LOCK_SELF_START_PID=$mypid
+  fi
+  [ -z "$_FM_LOCK_SELF_START" ] \
+    || printf '%s\n' "$_FM_LOCK_SELF_START" > "$ownerdir/pid-start" 2>/dev/null || true
+}
+
+# fm_lock_holder_alive <lockdir> <pid>
+# True while the lock's recorded holder <pid> is alive. A record that carries
+# the holder's start time is held only while that live pid still has it: macOS
+# and Linux both hand a dead holder's pid to unrelated processes, and pid
+# liveness alone would then read the lock as held forever. The watch lock is
+# additionally held only while its recorded pid-identity still recomputes for
+# the pid, so a watcher whose identity was recorded in a format this code no
+# longer renders - the fm_pid_identity UTC-pin residual - is replaced rather
+# than stranding every successor beside it. Only the watch lock gets that
+# check because only the watcher stands down on its own once a successor owns
+# its lock; the supervise daemon also records a pid-identity on its lock but
+# never re-checks ownership, so reclaiming its lock would run two live daemons
+# at once. A missing record, or a live pid whose value cannot be read
+# right now, keeps the pid-liveness answer, so only a proven mismatch frees a
+# lock.
+fm_lock_holder_alive() {
+  local lockdir=$1 pid=$2
+  fm_pid_alive "$pid" || return 1
+  _fm_lock_record_matches "$lockdir" "$pid" pid-start fm_pid_start_time || return 1
+  [ "$lockdir" = "$STATE/.watch.lock" ] || return 0
+  _fm_lock_record_matches "$lockdir" "$pid" pid-identity fm_pid_identity
+}
+
+# _fm_lock_record_matches <lockdir> <pid> <record-file> <probe-function>
+# False only when <record-file> is recorded and <probe-function> <pid> now
+# reads a different value. The pid is re-read after the record so a record
+# rewritten in between (the bounded wait's handoff) is never judged against
+# another holder's value.
+_fm_lock_record_matches() {
+  local lockdir=$1 pid=$2 record=$3 probe=$4 recorded current
+  recorded=$(cat "$lockdir/$record" 2>/dev/null || true)
+  [ -n "$recorded" ] || return 0
+  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$pid" ] || return 0
+  current=$("$probe" "$pid" 2>/dev/null) || return 0
+  [ -n "$current" ] || return 0
+  [ "$current" = "$recorded" ]
 }
 
 fm_lock_link_owner() {
@@ -675,7 +764,7 @@ fm_lock_recheck_stale_owner() {
   fi
   actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$actual_pid" = "$expected_pid" ] || return 1
-  if fm_pid_alive "$actual_pid"; then
+  if fm_lock_holder_alive "$lockdir" "$actual_pid"; then
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
@@ -1270,7 +1359,7 @@ fm_lock_try_acquire() {
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
-  if fm_pid_alive "$pid"; then
+  if fm_lock_holder_alive "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
@@ -1288,7 +1377,7 @@ fm_lock_try_acquire() {
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if fm_pid_alive "$cur"; then
+  if fm_lock_holder_alive "$lockdir" "$cur"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
@@ -1389,7 +1478,7 @@ fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds>
 # every interruption safe: before transfer the helper is the owner; after
 # transfer the still-live caller is the owner.
 _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
-  local lockdir=$1 caller_pid=$2 ownerdir current back
+  local lockdir=$1 caller_pid=$2 ownerdir current back caller_start
   case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
   fm_pid_alive "$caller_pid" || return 1
   trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
@@ -1404,12 +1493,19 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   fi
   fm_current_pid current || { fm_lock_release "$lockdir"; return 1; }
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  # Drop this helper's start time before the pid changes hands and record the
+  # caller's only after, so fm_lock_holder_alive never pairs one holder's pid
+  # with the other's start time.
   if [ "$back" != "$current" ] \
+    || ! rm -f "$ownerdir/pid-start" 2>/dev/null \
     || ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
     || [ "$(cat "$ownerdir/pid" 2>/dev/null || true)" != "$caller_pid" ]; then
     fm_lock_release "$lockdir"
     return 1
   fi
+  caller_start=$(fm_pid_start_time "$caller_pid" 2>/dev/null || true)
+  [ -z "$caller_start" ] \
+    || printf '%s\n' "$caller_start" > "$ownerdir/pid-start" 2>/dev/null || true
   trap - TERM INT
 }
 
@@ -1832,17 +1928,19 @@ fm_failure_episode_reset() {
 #     (continuity falls to the synchronous guard), and the identity is read
 #     from the ledger entry alone - never substituted from any lock - so a
 #     reused pid can never authenticate someone else's stale entry. Line 3 of an
-#     arming entry that recorded owner_session_id is the pid-identity of the
-#     session-lock holder the claim was taken under, read the same way.
+#     arming entry that recorded owner_session_id is the session-lock identity
+#     of the holder the claim was taken under, read by the session-lock bridge
+#     when the holder is a tagged Windows pid.
 #   - A claim is OPEN (fm_autoarm_claim_open) while its outcome is "arming",
 #     its owner pid is alive, its recorded identity successfully recomputes
 #     and matches that pid, its owner is still REACHABLE by its session -
-#     either it DESCENDS from the session-lock pid (state/.lock line 1, which
-#     must be numeric: a missing or malformed lock means no session can receive
-#     a rewake) or its recorded owner_session_id matches the trusted session id
-#     beside that lock (state/.lock-session) WHILE the recorded pid-identity of
-#     the lock holder it claimed under (entry line 3) still recomputes from the
-#     lock's current holder pid. The id signal is the second one
+#     either it DESCENDS from the numeric session-lock pid (state/.lock line 1)
+#     or, for a tagged Windows session-lock pid that is outside the local
+#     process table, its recorded owner_session_id matches the trusted session
+#     id beside that lock (state/.lock-session) WHILE the recorded pid-identity
+#     of the lock holder it claimed under (entry line 3) still recomputes from
+#     the lock's current holder pid. A missing or malformed lock means no
+#     session can receive a rewake. The id signal is the second one
 #     the claiming hook's own admission accepts (fm_session_lock_owned_by_self),
 #     so a background session whose bridge is recycled mid-cycle keeps its live
 #     claim; pinning it to the recorded lock-holder identity is what keeps a
@@ -1933,7 +2031,7 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
 # Parse the current ledger claim. Sets FM_AUTOARM_GEN, FM_AUTOARM_OWNER,
 # FM_AUTOARM_OUTCOME, FM_AUTOARM_SESSION, FM_AUTOARM_RECOVERY,
 # FM_AUTOARM_OWNER_SESSION_ID, FM_AUTOARM_OWNER_LOCK_IDENTITY (line 3 of the
-# entry: the pid-identity of the session-lock holder as the claim was taken), and
+# entry: the session-lock identity of the holder as the claim was taken), and
 # FM_AUTOARM_IDENTITY (line 2 of the entry, and ONLY
 # line 2 - identity is never substituted from a lock, so a transient
 # micro-mutex hold or a reused pid can never authenticate a stale entry).
@@ -1997,15 +2095,13 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
   [ -n "$current" ] || return 1
   [ "$current" = "$FM_AUTOARM_IDENTITY" ] || return 1
   lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
+  _fm_wake_require_session_lock
+  fm_session_pid_valid "$lock_pid" || return 1
   if ! fm_pid_descends_from "$FM_AUTOARM_OWNER" "$lock_pid"; then
     [ -n "$FM_AUTOARM_OWNER_SESSION_ID" ] || return 1
     [ -n "$FM_AUTOARM_OWNER_LOCK_IDENTITY" ] || return 1
-    lock_identity=$(fm_pid_identity "$lock_pid" 2>/dev/null) || return 1
+    lock_identity=$(fm_session_pid_identity "$lock_pid" 2>/dev/null) || return 1
     [ "$lock_identity" = "$FM_AUTOARM_OWNER_LOCK_IDENTITY" ] || return 1
-    _fm_wake_require_session_lock
     recorded=$(fm_session_lock_recorded_session_id "$state" 2>/dev/null || true)
     [ -n "$recorded" ] && [ "$recorded" = "$FM_AUTOARM_OWNER_SESSION_ID" ] || return 1
   fi
@@ -2041,7 +2137,8 @@ fm_autoarm_midturn_healthy() {  # <state-dir> [grace]
   [ "$FM_AUTOARM_OUTCOME" = rewake ] || return 1
   lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
   [ -n "$FM_AUTOARM_SESSION" ] && [ "$FM_AUTOARM_SESSION" = "$lock_pid" ] || return 1
-  fm_pid_alive "$lock_pid" || return 1
+  _fm_wake_require_session_lock
+  fm_session_pid_alive "$lock_pid" || return 1
   fm_recovery_marker_read "$state/.watcher-down" || return 1
   recovery=${FM_RECOVERY_MARKER_TOKEN##*:}
   [ -n "$FM_AUTOARM_RECOVERY" ] && [ "$FM_AUTOARM_RECOVERY" = "$recovery" ] || return 1
@@ -2072,7 +2169,7 @@ fm_autoarm_claim_next() {  # <state-dir> [grace]
     *[![:alnum:]_.-]*) session_id= ;;
   esac
   lock_pid=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
-  lock_identity=$(fm_pid_identity "$lock_pid" 2>/dev/null || true)
+  lock_identity=$(fm_session_pid_identity "$lock_pid" 2>/dev/null || true)
   [ -n "$lock_identity" ] || session_id=
   fm_lock_try_acquire "$lock" || return 1
   if fm_autoarm_claim_open "$state" "$grace"; then

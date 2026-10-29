@@ -185,6 +185,109 @@ run_without_curl() {
 KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
 
+# --- preferred family: public resolution across accounts of one family -----
+test_preferred_provider() (
+  local scenario=$1 expected="--harness 'pi' --model 'openai-codex/gpt-6-astra'"
+  local decision='codex: prefer eligible family candidates' status=clear
+  local rules_filter='.' quota_filter='.' override_dir=''
+  write_response "$RESPONSE" rule_4 0.9
+  jq '.preferred_provider = "codex" | .rules[3].use = [
+    {harness:"claude",model:"opus"},
+    {harness:"pi",model:"openai-codex/gpt-6-astra",provider:"codex"},
+    {harness:"pi",model:"openai-codex-work/gpt-6-astra",provider:"codex"}]' "$BASE_RULES" > "$TMP_ROOT/preferred-rules.json"
+  jq '.schemaVersion = 6 | .providers |= map(.accountKey = "default") |
+    (.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[0]) |=
+      (.effectivePercentRemaining = 26 | .selection.spendPriority = 0.8) |
+    (.providers[] | select(.provider == "codex")) |=
+      (.accountKey = "openai-codex" | .quotaSemantics.effectiveAvailability[0] |=
+        (.effectivePercentRemaining = 82 | .runway.status = "through_reset" | .selection.spendPriority = 0.2)) |
+    .providers += [(.providers[] | select(.provider == "codex") | .accountKey = "openai-codex-work" |
+      .quotaSemantics.effectiveAvailability[0].selection.spendPriority = 0.1)]' "$QUOTA" > "$TMP_ROOT/preferred-quota.json"
+  case "$scenario" in
+    astra-82-claude-26) ;;
+    work-account)
+      quota_filter='(.providers[] | select(.accountKey == "openai-codex-work").quotaSemantics.effectiveAvailability[0].selection.spendPriority) = 0.3'
+      expected="--harness 'pi' --model 'openai-codex-work/gpt-6-astra'" ;;
+    exhausted)
+      quota_filter='(.providers[] | select(.provider == "codex").quotaSemantics.effectiveAvailability[0].runway.status) = "exhausted_now"'
+      expected="--harness 'claude' --model 'opus'"
+      decision='codex: fall back; every matched family candidate is ineligible' ;;
+    unknown)
+      quota_filter='(.providers[] | select(.provider == "codex").quotaSemantics) = {status:"unknown",effectiveAvailability:[]}'
+      status=escalate; expected='' ;;
+    unknown-one-known-one)
+      quota_filter='(.providers[] | select(.accountKey == "openai-codex").quotaSemantics) = {status:"unknown",effectiveAvailability:[]}'
+      expected="--harness 'pi' --model 'openai-codex-work/gpt-6-astra'" ;;
+    claude-only)
+      rules_filter='.rules[3].use = [.rules[3].use[0]]'
+      expected="--harness 'claude' --model 'opus'"
+      decision='codex: not in matched profiles; preserve the selected rule' ;;
+    config-override)
+      override_dir="$TMP_ROOT/preferred-override"; mkdir -p "$override_dir"
+      jq '.preferred_provider = "claude"' "$TMP_ROOT/preferred-rules.json" > "$override_dir/crew-dispatch.json"
+      expected="--harness 'claude' --model 'opus'"
+      decision='claude: prefer eligible family candidates' ;;
+    prose-why)
+      rules_filter='.rules[3].why = "Always choose Claude instead of OpenAI."' ;;
+    absent)
+      rules_filter='del(.preferred_provider)'
+      expected="--harness 'claude' --model 'opus'"; decision='' ;;
+    approval)
+      rules_filter='.rules[3].approval = "captain"'
+      status=escalate; expected=''; decision='' ;;
+    tie)
+      quota_filter='(.providers[] | select(.provider == "codex").quotaSemantics.effectiveAvailability[0].selection.spendPriority) = 0.2'
+      status=escalate; expected='' ;;
+    floor)
+      rules_filter='(.rules[3].use[] | select(.provider == "codex").floor) = {scope:"all_models",min_percent:90}'
+      expected="--harness 'claude' --model 'opus'"
+      decision='codex: fall back; every matched family candidate is ineligible' ;;
+  esac
+  jq "$rules_filter" "$TMP_ROOT/preferred-rules.json" > "$RULES"
+  jq "$quota_filter" "$TMP_ROOT/preferred-quota.json" > "$TMP_ROOT/preferred-case-quota.json"
+  reset_log
+  TYPESAFE_API_KEY=$KEY FM_CONFIG_OVERRIDE="${override_dir:-$HOME_DIR/config}" \
+    QUOTA_AXI_FIXTURE="$TMP_ROOT/preferred-case-quota.json" \
+    run code out err "$BRIEF"
+  expect_code 0 "$code" "$scenario resolves"
+  assert_contains "$out" "  status: $status" "$scenario status"
+  if [ -n "$expected" ]; then
+    assert_contains "$out" "  profile: $expected" "$scenario choice"
+  else
+    assert_not_contains "$out" '  profile:' "$scenario cannot authorize a profile"
+  fi
+  if [ -n "$decision" ]; then
+    assert_contains "$out" "  preferred_provider: $decision" "$scenario explains the family decision"
+  else
+    assert_not_contains "$out" '  preferred_provider:' "$scenario does not apply preference"
+  fi
+  if [ "$scenario" = prose-why ]; then
+    assert_not_contains "$(cat "$LOG/body")" 'Always choose Claude' 'rule why never reaches the rule matcher'
+  fi
+  pass "preferred provider: $scenario"
+)
+test_invalid_preferred_provider() (
+  local value=$1
+  jq --argjson value "$value" '.preferred_provider = $value' "$BASE_RULES" > "$RULES"
+  reset_log
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "invalid preferred_provider $value is refused"
+  assert_contains "$err" 'preferred_provider must be a lowercase provider ID (for example codex)' 'actionable preference error'
+  assert_absent "$LOG/argv" 'invalid preference never reaches the rule matcher'
+  assert_absent "$LOG/quota-axi.calls" 'invalid preference never reads quota'
+  pass "invalid preferred_provider: $value"
+)
+preferred_failures=0
+for value in null false 42 '[]' '{}' '""' '"Codex"' '"codex\\n"' '" codex"'; do
+  test_invalid_preferred_provider "$value" || preferred_failures=$((preferred_failures + 1))
+done
+for scenario in astra-82-claude-26 work-account exhausted unknown unknown-one-known-one claude-only config-override prose-why absent approval tie floor; do
+  test_preferred_provider "$scenario" || preferred_failures=$((preferred_failures + 1))
+done
+[ "$preferred_failures" -eq 0 ] || fail "$preferred_failures preferred-provider cases failed"
+cp "$BASE_RULES" "$RULES"
+reset_log
+
 # --- absent key: off, silent on stdout, no network, no quota read -----------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
