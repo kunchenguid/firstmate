@@ -80,7 +80,7 @@ Since OpenCode 1.18.0 its left bar also draws the working directory and branch r
 OpenCode 1.19.0 draws its mode/model footer row de-emphasised, so the classifier proves that footer from both the ghost-stripped and the ANSI-stripped form of the row; the dated capture and the plain-form safety argument are in [runtime backend verification](verification/runtime-backends.md#2026-10-14-opencode-1190-de-emphasised-modefooter-row-in-the-left-bar-composer).
 Real text in an identified shape is pending, while only positively proven emptiness reads empty.
 A blank or otherwise unidentified cursor row is `unknown` and every consumer defers, except that a foreground process proven to be Cursor or Cortex is re-read cursorlessly because each parks its terminal cursor below its footer.
-A foreground process proven to be MiniMax Code is re-read at its own cursor row with that identity whenever the first read is not `empty`, because only the identity names its placeholder and next-message suggestion colour as ghost text.
+A foreground process proven to be MiniMax Code is re-read at its own cursor row with that identity whenever the first read is not `empty` and the screen holds a bare `›` composer row, because only the identity names its placeholder and next-message suggestion colour as ghost text.
 That identity-gated exception preserves the strict container-proof rule for every other pane, so a modal dialog, a dead shell between stale rules, or a mid-redraw pane is never an injection target.
 The shared classifier accepts a shell glyph as an empty agent composer only inside a bordered container.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
