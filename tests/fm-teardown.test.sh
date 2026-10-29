@@ -1704,6 +1704,18 @@ seed_nested_clone_and_scratch() {
   printf 'scratch\n' > "$wt/scratch.txt"
 }
 
+# Seed a Vibe session root shaped like a relaunched worker's: two launch
+# generations of journals plus the read-only plugin cache Vibe unpacks.
+seed_vibe_sessions() {
+  local root=$1 gen
+  for gen in 1 2; do
+    mkdir -p "$root/$gen/unified/session-$gen" "$root/$gen/plugins/pkg/lib"
+    printf '{"role":"user"}\n' > "$root/$gen/unified/session-$gen/messages.jsonl"
+    printf 'cached\n' > "$root/$gen/plugins/pkg/lib/plugin.py"
+    chmod -R a-w "$root/$gen/plugins"
+  done
+}
+
 # Move the case worktree to pool/<slot>/repo so teardown sees a Treehouse slot.
 move_case_to_pool_slot() {
   local case_dir=$1 slot=$2 dest
@@ -1722,6 +1734,7 @@ test_scout_nested_clone_returns_with_no_untracked_entries() {
   write_meta "$case_dir" no-mistakes scout
   prepare_scout_teardown "$case_dir"
   seed_nested_clone_and_scratch "$case_dir" "$wt"
+  seed_vibe_sessions "$case_dir/state/task-x1.vibe-sessions"
   add_treehouse_clean_fd "$case_dir"
 
   set +e
@@ -1730,6 +1743,8 @@ test_scout_nested_clone_returns_with_no_untracked_entries() {
   set -e
 
   expect_code 0 "$rc" "scout-nested-clean: teardown should return the scratch copy"
+  assert_absent "$case_dir/state/task-x1.vibe-sessions" \
+    "scout-nested-clean: Vibe journals and read-only plugin cache survived teardown"
   [ -z "$(git -C "$wt" status --porcelain --untracked-files=all)" ] \
     || fail "scout-nested-clean: untracked entries remain: $(git -C "$wt" status --porcelain --untracked-files=all)"
   assert_absent "$wt/scratch-clone" "scout-nested-clean: nested clone survived return"
@@ -1847,12 +1862,15 @@ test_forced_secondmate_child_scout_nested_clone_returns_clean() {
     "kind=scout" \
     "mode=local-only"
   seed_nested_clone_and_scratch "$case_dir" "$child_wt"
+  seed_vibe_sessions "$home/state/child-scout.vibe-sessions"
   add_treehouse_clean_fd "$case_dir"
 
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "secondmate-child-nested-clean: forced secondmate teardown should succeed"
+  assert_absent "$home/state/child-scout.vibe-sessions" \
+    "secondmate-child-nested-clean: child Vibe journals and read-only plugin cache survived teardown"
   [ -z "$(git -C "$child_wt" status --porcelain --untracked-files=all)" ] \
     || fail "secondmate-child-nested-clean: untracked entries remain: $(git -C "$child_wt" status --porcelain --untracked-files=all)"
   assert_absent "$child_wt/scratch-clone" "secondmate-child-nested-clean: nested clone survived return"

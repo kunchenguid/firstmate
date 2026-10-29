@@ -46,6 +46,10 @@
 #               shape Cortex's identity could change. A probe answering
 #               `cortex` then proves it, as cortex=1 does. Other callers
 #               never see this sentinel for a titled box.
+#   vibe=1      the caller proved Vibe identity, by foreground process or the
+#               exact endpoint's recorded harness. Enables its ruled composer.
+#   vibe=ask    with identity=1, a Vibe-like footer requests the lazy probe;
+#               only an identity answering `vibe` enables that composer.
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -472,6 +476,7 @@ fm_busy_lines_match() {  # [harness]
     case "$harness" in
       claude) regex=$FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT ;;
       devin) regex=$FM_DELIVERY_DEVIN_BUSY_REGEX_DEFAULT ;;
+      vibe) regex='Esc/Ctrl\+C to interrupt|Generating…|Thinking…' ;;
       cortex) regex=$FM_DELIVERY_CORTEX_BUSY_REGEX_DEFAULT ;;
       commandcode) regex=$FM_DELIVERY_COMMANDCODE_BUSY_REGEX_DEFAULT ;;
       codex) regex=$FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT ;;
@@ -2109,9 +2114,39 @@ fm_composer_dialog_sink_release() {
   fi
 }
 
+# Vibe 3.0.2 rendered delivery shapes.
+# fm_vibe_screen_state <plain-screen> -> busy|idle|unknown
+# The composer must be the final ruled > region followed by Vibe's cwd/PID
+# footer. Missing or changed shapes are unknown, never presumed idle.
+fm_vibe_screen_state() {
+  printf '%s\n' "$1" | awk '
+    /^[─]+ (accept edits · )?(auto-approve|accept edits|smart approve|ask) [─]+[[:space:]]*$/ { top=NR; glyph=0; bottom=0; footer=0 }
+    top && NR==top+1 && /^>[[:space:]]*/ { glyph=NR }
+    glyph && NR>glyph && /^[─]+[[:space:]]*$/ { bottom=NR }
+    bottom && NR>bottom && /\[PID [0-9]+\].*tokens/ { footer=NR }
+    /Esc\/Ctrl\+C to interrupt/ { busy=NR }
+    END {
+      if (!top || !glyph || !bottom || footer!=NR) print "unknown";
+      else if (busy && busy==top-1) print "busy";
+      else print "idle";
+    }'
+}
+
+# fm_vibe_composer_state <plain-screen> -> empty|pending|unknown
+fm_vibe_composer_state() {
+  local state
+  state=$(fm_vibe_screen_state "$1")
+  [ "$state" != unknown ] || { printf 'unknown'; return; }
+  printf '%s\n' "$1" | awk '
+    /^[─]+ (accept edits · )?(auto-approve|accept edits|smart approve|ask) [─]+[[:space:]]*$/ { active=1; pending=0; next }
+    active && /^[─]+[[:space:]]*$/ { active=0; next }
+    active { sub(/^>[[:space:]]*/, ""); if ($0 ~ /[^[:space:]]/) pending=1 }
+    END { print pending ? "pending" : "empty" }'
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
-  local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 kv plain
+  local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 vibe_proven=0 vibe_ask=0 kv plain
   # Note the dialog before any early return so a pending picker is still named.
   fm_composer_note_blocking_dialog "$screen" || true
   while IFS= read -r kv; do
@@ -2121,6 +2156,8 @@ fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
       identity=1) has_identity=1 ;;
       cortex=1) cortex_proven=1 ;;
       cortex=ask) cortex_ask=1 ;;
+      vibe=1) vibe_proven=1 ;;
+      vibe=ask) vibe_ask=1 ;;
     esac
   done <<EOF
 $caps
@@ -2134,6 +2171,7 @@ EOF
         local FM_COMPOSER_GHOST_LUMA_MAX=160
         ;;
       cortex) cortex_proven=1 ;;
+      vibe) vibe_proven=1 ;;
     esac
   fi
   [ "$cursor" = 1 ] || cy=''
@@ -2141,6 +2179,20 @@ EOF
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  # A rendered footer can be transcript text in any harness. Only a proven
+  # Vibe pane may use its composer verdict; shape alone can request a probe.
+  if [ "$vibe_proven" = 1 ]; then
+    local vibe_verdict
+    vibe_verdict=$(fm_vibe_composer_state "$plain")
+    if [ "$vibe_verdict" != unknown ]; then
+      printf '%s' "$vibe_verdict"
+      return 0
+    fi
+  elif [ "$vibe_ask" = 1 ] && [ "$has_identity" = 1 ] && [ -z "$identity" ] \
+       && printf '%s\n' "$plain" | grep -qE '\[PID [0-9]+\].*tokens'; then
+    printf 'need-identity'
+    return 0
+  fi
   _fm_composer_scan_screen "$plain" "$cy" '' "$cortex_proven"
   # The lazy Cortex identity pass: only a caller that asked for it
   # (cortex=ask), has not yet supplied an identity, and sees a titled rounded

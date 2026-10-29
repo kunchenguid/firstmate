@@ -65,6 +65,7 @@ omp is anchored to the exact `omp` identity for the same reason, so `ompd` and `
 AGY, Devin, and Command Code are anchored to the exact `agy`, `devin`, and `command-code` identities for the same reason, so unrelated names containing any of those fragments remain ambiguous.
 Polytoken is anchored to the exact `polytoken` identity for the same reason, so unrelated names containing that fragment remain ambiguous.
 Cortex is anchored to the exact `cortex` identity for the same reason.
+Vibe is anchored to the exact `vibe-rs` TUI identity for the same reason, so `vibe-rs-helper` remains ambiguous.
 An unrelated tool that ships a binary named exactly `cortex` is still classified as an agent when it is a pane's foreground process, because the exact name is the only identity Cortex Code carries.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 
@@ -75,6 +76,7 @@ Run the real-harness guard after any harness upgrade and before trusting refresh
 
 Agent liveness and composer safety are separate checks.
 The tmux reader is a thin adapter over the fleet-wide classifier in `bin/fm-composer-lib.sh`: it contributes one styled full-pane capture, the `#{cursor_y}` cursor row, and foreground-process identity probes, and the shape containing the cursor - a complete bordered box (titled bottom borders tolerated, and rounded titled top rules only for a pane whose foreground process is exactly `cortex`), a bare agent-glyph row with its wrapped input, opencode's left bar, or Pi's identity-corroborated separator pair - normally decides the verdict.
+A Vibe-shaped screen first triggers a lazy foreground probe, and only a pane whose foreground process is exactly `vibe-rs` takes its verdict from Vibe's ruled composer region; any other pane uses the ordinary classifier.
 Since OpenCode 1.18.0 its left bar also draws the working directory and branch right-aligned inside the rows above the Build footer, and the classifier recognises that cwd:branch furniture structurally so an idle pane keeps a proven `empty` verdict.
 OpenCode 1.19.0 draws its mode/model footer row de-emphasised, so the classifier proves that footer from both the ghost-stripped and the ANSI-stripped form of the row; the dated capture and the plain-form safety argument are in [runtime backend verification](verification/runtime-backends.md#2026-10-14-opencode-1190-de-emphasised-modefooter-row-in-the-left-bar-composer).
 Real text in an identified shape is pending, while only positively proven emptiness reads empty.

@@ -3573,11 +3573,13 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.polytoken-busy.sh" \
       "$sub_state/.$child_id.branch-outcome-index"
     chmod u+w "$sub_state/$child_id.git-hooks" 2>/dev/null || true
+    chmod -R u+w "$sub_state/$child_id.vibe-sessions" 2>/dev/null || true
     rm -rf "$sub_state/$child_id.git-hooks" "$sub_state/$child_id.push-guard" \
       "$sub_state/$child_id.cortex-plugin" \
       "$sub_state/$child_id.polytoken-config" \
       "$sub_state/$child_id.polytoken-sessions" \
-      "$sub_state/$child_id.polytoken-sessions-v1"
+      "$sub_state/$child_id.polytoken-sessions-v1" \
+      "$sub_state/$child_id.vibe-sessions"
   done
 }
 
@@ -4111,10 +4113,15 @@ chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 # and the git-hooks dir rather than the flat file list above.
 # state/<id>.cortex-plugin is the per-task Cortex Code plugin directory
 # (bin/fm-cortex-plugin.sh) carrying the busy-state hooks.
+# state/<id>.vibe-sessions holds every launch generation's Vibe session
+# journals (transcripts) plus the read-only plugin cache Vibe unpacks there, so
+# it is made writable before removal. Relaunch keeps it; only teardown removes it.
+chmod -R u+w "$STATE/$ID.vibe-sessions" 2>/dev/null || true
 rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" "$STATE/$ID.push-guard" \
   "$STATE/$ID.cortex-plugin" \
   "$STATE/$ID.polytoken-config" \
-  "$STATE/$ID.polytoken-sessions" "$STATE/$ID.polytoken-sessions-v1"
+  "$STATE/$ID.polytoken-sessions" "$STATE/$ID.polytoken-sessions-v1" \
+  "$STATE/$ID.vibe-sessions"
 # A presentation journal the close path left behind is orphaned once the
 # recorded pane is proven gone (the Herdr gate above) unless it still names a
 # live projected workspace - a version 2 binding of some other pane, or a

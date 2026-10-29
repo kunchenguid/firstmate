@@ -2317,7 +2317,9 @@ EOF
 #                 agent get -> agent_not_found - docs/herdr-backend.md "ID
 #                 stability across a server restart"), and what a future
 #                 `resume_agents_on_restore = false` restore would produce too
-#                 (a plain shell, never an agent).
+#                 (a plain shell, never an agent). Recorded Vibe endpoints
+#                 instead require the process-level shell proof, because Herdr
+#                 does not recognize their running agent in its catalog.
 #   stale-agent - `agent get` reports a registered agent_status (working, idle,
 #                 done, or blocked) but fm_backend_herdr_pane_process_state
 #                 proves the pane is shell-only: the registered agent's process
@@ -2334,16 +2336,18 @@ EOF
 #                 is running, or something that is not a bare shell is, so the
 #                 registration keeps its authority. An idle or blocked agent
 #                 is still a genuine, still-registered agent, not a restored
-#                 husk, so it is never a close-and-replace candidate.
+#                 husk, so it is never a close-and-replace candidate. A
+#                 recorded Vibe endpoint with no registration is live on the
+#                 same `agent` or `other` process-level view.
 #   unknown     - anything else: an unparseable/unexpected response from
 #                 either call, a `pane get` success whose own echoed pane_id
 #                 does not round-trip (guards against misreading a herdr
 #                 response shape change as "the pane exists"), or a registered
-#                 agent whose process-level view is unreadable - the
-#                 registration alone is no longer trusted, and its absence is
-#                 not claimed either. The caller must fail safe toward refusal
-#                 here, never toward closing - this is the conservative
-#                 backstop the husk check depends on.
+#                 agent or recorded Vibe endpoint whose process-level view is
+#                 unreadable - the registration alone is no longer trusted,
+#                 and its absence is not claimed either. The caller must fail
+#                 safe toward refusal here, never toward closing - this is the
+#                 conservative backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code presence status
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
@@ -2357,7 +2361,27 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
-    [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
+    if [ "$code" = agent_not_found ]; then
+      # Herdr does not catalog Vibe 3's Rust TUI. Only a recorded Vibe
+      # endpoint needs process evidence in place of that absent registration;
+      # other harnesses retain Herdr's ordinary agent_not_found semantics.
+      local meta='' harness=''
+      if command -v fm_backend_meta_for_window >/dev/null 2>&1; then
+        meta=$(fm_backend_meta_for_window "$session:$pane_id" "${STATE:-${FM_STATE_OVERRIDE:-$FM_HOME/state}}" 2>/dev/null || true)
+        [ -z "$meta" ] || harness=$(fm_meta_get "$meta" harness)
+      fi
+      if [ "$harness" = vibe ]; then
+        case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
+          agent|other) printf 'live' ;;
+          shell) printf 'no-agent' ;;
+          *) printf 'unknown' ;;
+        esac
+      else
+        printf 'no-agent'
+      fi
+    else
+      printf 'unknown'
+    fi
     return 0
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
@@ -3299,6 +3323,15 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   else
     printf 'unknown'
     return 0
+  fi
+  # Vibe is not in Herdr's native agent catalog. Bind its capability to the
+  # exact recorded endpoint, never to a lookalike screen in another pane.
+  local meta=''
+  if command -v fm_backend_meta_for_window >/dev/null 2>&1; then
+    meta=$(fm_backend_meta_for_window "$target" "${STATE:-${FM_STATE_OVERRIDE:-$FM_HOME/state}}" 2>/dev/null || true)
+    if [ -n "$meta" ] && [ "$(fm_meta_get "$meta" harness)" = vibe ]; then
+      caps=$caps$'\nvibe=1'
+    fi
   fi
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then

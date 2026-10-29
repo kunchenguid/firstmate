@@ -1223,6 +1223,9 @@ It has no primary or secondmate supervision protocol.
 The launch generates a private per-task config directory that mirrors the operator's provider/model configuration and enforces unattended permissions without modifying global configuration.
 The first-start license dialog requires an operator decision and is never accepted automatically.
 
+Vibe is verified for crewmate and scout launches on tmux and Herdr only, not primary or secondmate use.
+[Its adapter reference](../.agents/skills/harness-adapters/references/harness/vibe.md) owns model discovery, unsupported effort pinning, and control limits; [Vibe verification](verification/vibe.md) owns the refresh commands and live evidence.
+
 ### Verification and primary supervision
 
 New harnesses get verified through a supervised trial task before joining the set.

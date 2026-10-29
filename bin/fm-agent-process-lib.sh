@@ -55,8 +55,9 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # process is comm `polytoken`, the same binary name as its per-session
     # daemon), so a `*polytoken*` glob never claims an unrelated command.
     # cortex (Cortex Code) is anchored too (verified, cortex 1.1.104: a
-    # Bun-compiled single binary, comm=cortex).
-    agy|devin|command-code|polytoken|cortex) printf 'agent' ;;
+    # Bun-compiled single binary, comm=cortex). vibe-rs is Vibe 3.0.2's exact
+    # Rust TUI name, anchored so vibe-rs-helper never matches.
+    agy|devin|command-code|polytoken|cortex|vibe-rs) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
