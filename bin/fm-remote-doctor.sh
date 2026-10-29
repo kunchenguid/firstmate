@@ -768,6 +768,8 @@ write_launch_agent() { # <resolved-login-shell>
 # Reload rather than plain bootstrap so a rewritten plist replaces a stale
 # in-memory copy, and kickstart so the server is running now rather than at the
 # next login. Both are safe to repeat.
+# fm_remote_job_launchctl_reload owns the bootout/bootstrap sequence, including
+# its bounded settle and EIO retry.
 reload_launch_agent() { # <check-to-report-under>
   local report=$1 out
   [ -f "$LAUNCH_AGENT_PLIST" ] || {
@@ -778,8 +780,8 @@ reload_launch_agent() { # <check-to-report-under>
     fix_report "$report" failed "launchctl or the account uid is unavailable"
     return 1
   fi
-  launchctl bootout "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
-  if ! out=$(launchctl bootstrap "gui/$UID_NUM" "$LAUNCH_AGENT_PLIST" 2>&1); then
+  if ! fm_remote_job_launchctl_reload "$UID_NUM" "$LAUNCH_AGENT_LABEL" "$LAUNCH_AGENT_PLIST"; then
+    out=$FM_REMOTE_JOB_BOOTSTRAP_OUT
     fix_report "$report" failed "launchctl bootstrap gui/$UID_NUM refused: ${out:-no diagnostic}"
     return 1
   fi

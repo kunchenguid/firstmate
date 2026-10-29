@@ -139,6 +139,15 @@ case "${1:-}" in
   bootstrap)
     # launchd refuses a gui/<uid> domain that has no login session.
     [ -f "$FM_FAKE_STATE/gui-session" ] || { printf 'Bootstrap failed: 5: Input/output error\n' >&2; exit 5; }
+    # A settling domain refuses the first N bootstraps the same transient way.
+    if [ -f "$FM_FAKE_STATE/bootstrap-eio" ]; then
+      remaining=$(cat "$FM_FAKE_STATE/bootstrap-eio")
+      if [ "$remaining" -gt 0 ]; then
+        printf '%s\n' "$((remaining - 1))" > "$FM_FAKE_STATE/bootstrap-eio"
+        printf 'Bootstrap failed: 5: Input/output error\n' >&2
+        exit 5
+      fi
+    fi
     [ ! -f "$loaded" ] || { printf 'Bootstrap failed: service already loaded\n' >&2; exit 5; }
     plist=${3:-}
     label=${plist##*/}
@@ -559,6 +568,49 @@ expect_code 0 "$DOCTOR_RC" "--fix did not replace the stale loaded launch-agent 
 assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the replacement loaded contract was not confirmed"
 assert_no_grep '/obsolete/bin/herdr' "$CASE_STATE/loaded-$LABEL" "the stale effective program survived replacement"
 pass "a failed reload leaves stale effective launch-agent state unready"
+
+# --- a settling gui domain refuses bootstrap with EIO and the reload retries -
+
+# launchd can refuse a bootstrap with EIO while the domain still drains the job
+# bootout just removed, which is why the same commands succeed by hand and fail
+# from a reload. A cold host has no other automated loader, so the retry is the
+# only thing standing between that race and an unusable worker.
+new_case Darwin with-herdr gui
+printf '2\n' > "$CASE_STATE/bootstrap-eio"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix gave up on a transient EIO instead of retrying the bootstrap"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the retried bootstrap did not load the launch agent"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker-loaded=ok:' "the retried bootstrap did not load the remote job worker"
+assert_not_contains "$DOCTOR_OUT" 'Input/output error' "a transient EIO was reported as a failure"
+[ "$(grep -c '^bootstrap ' "$CASE_LAUNCHCTL_LOG")" -gt 2 ] \
+  || fail "the reload never re-attempted the refused bootstrap"$'\n'"$(cat "$CASE_LAUNCHCTL_LOG")"
+assert_no_dangerous_calls "the retried repair reached for auto-login, FileVault, or the keychain"
+pass "a bootstrap refused by a settling domain is retried until it takes"
+
+# The remote job worker is the cold-host path the entrypoint depends on, so
+# drive its reload alone with the launch agent already healthy and loaded.
+rm -f "$CASE_STATE/loaded-$JOB_LABEL"
+printf '1\n' > "$CASE_STATE/bootstrap-eio"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix gave up on a transient EIO while loading the remote job worker"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker-loaded=ok:' "the remote job worker did not survive a transient EIO"
+assert_grep "bootstrap gui/$(id -u) $CASE_JOB_PLIST" "$CASE_LAUNCHCTL_LOG" \
+  "the remote job worker was never bootstrapped into the GUI domain"
+[ "$(grep -cF -- "bootstrap gui/$(id -u) $CASE_JOB_PLIST" "$CASE_LAUNCHCTL_LOG")" -eq 2 ] \
+  || fail "the remote job worker reload did not retry exactly once"$'\n'"$(cat "$CASE_LAUNCHCTL_LOG")"
+assert_no_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" \
+  "a healthy launch agent was reloaded while repairing the remote job worker"
+pass "the remote job worker reload survives the same settling-domain refusal"
+
+# A refusal that no amount of settling clears is still reported on the spot.
+new_case Darwin with-herdr no-gui
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "--fix reported a host with no login session as ready"
+assert_contains "$DOCTOR_OUT" 'check gui-session=human:' "an absent login session was not tagged as a human gap"
+[ "$(grep -c '^bootstrap ' "$CASE_LAUNCHCTL_LOG")" -le 1 ] \
+  || fail "a refusal no settling can clear was retried"$'\n'"$(cat "$CASE_LAUNCHCTL_LOG")"
+pass "an absent login session is a permanent gap the retry never papers over"
 
 # --- a launch agent that is not Aqua-scoped is repaired in place -------------
 
