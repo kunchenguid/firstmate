@@ -1354,8 +1354,8 @@ cp "$WATCH_STATE/.remote-inherit-ios.generation" "$PARENT/state/" 2>/dev/null ||
 pass "watch liveness: a dead remote secondmate is auto-relaunched on its own host with one wake"
 
 # Host loss mid-supervision is never evidence of death: the same tick on an
-# unreachable route probes and preserves the endpoint, and a persistent episode
-# wakes the parent exactly once for inspection.
+# unreachable route probes, preserves, and stays silent, even past the
+# uncertain-episode bound that ambiguous or unreadable probes alert on.
 WATCH_STATE_UNREACHABLE="$TMP_ROOT/watch-liveness-unreachable"
 mkdir -p "$WATCH_STATE_UNREACHABLE"
 cp "$WATCH_STATE/ios.meta" "$WATCH_STATE_UNREACHABLE/ios.meta"
@@ -1368,38 +1368,36 @@ FM_FAKE_SSH_MODE=unreachable FM_STATE_OVERRIDE="$WATCH_STATE_UNREACHABLE" \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-unreachable.out" 2> "$TMP_ROOT/watch-unreachable.err" &
 watch_pid=$!
-watch_deadline=$((SECONDS + 60))
-while kill -0 "$watch_pid" 2>/dev/null && [ "$SECONDS" -lt "$watch_deadline" ]; do
-  sleep 0.1
-done
-if kill -0 "$watch_pid" 2>/dev/null; then
-  kill "$watch_pid" 2>/dev/null || true
-  fail "the watcher never woke on a persistently unreachable remote secondmate: $(cat "$TMP_ROOT/watch-unreachable.out" "$TMP_ROOT/watch-unreachable.err" 2>/dev/null)"
-fi
-wait "$watch_pid" \
-  || fail "the unreachable watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-unreachable.err")"
+# Four probe cadences exceed the three-tick bound, so a silent watcher here
+# proves host loss never reaches the inspection wake.
+sleep 4
+kill -0 "$watch_pid" 2>/dev/null \
+  || fail "the watcher exited against an unreachable remote secondmate: $(cat "$TMP_ROOT/watch-unreachable.out" "$TMP_ROOT/watch-unreachable.err")"
+kill "$watch_pid" 2>/dev/null || true
+wait "$watch_pid" 2>/dev/null || true
 watch_pid=''
+sleep 1
 ssh_after=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
 [ "$ssh_after" -gt "$ssh_before" ] || fail "the unreachable remote endpoint was never probed"
-[ "$(grep -c 'check: secondmate ios liveness remains unavailable after 3 consecutive probes; endpoint was not changed' "$TMP_ROOT/watch-unreachable.out")" -eq 1 ] \
-  || fail "the unreachable episode did not produce exactly one inspection line: $(cat "$TMP_ROOT/watch-unreachable.out")"
-[ "$(grep -c $'\tcheck\tsecondmate-liveness-uncertain-ios' "$WATCH_STATE_UNREACHABLE/.wake-queue")" -eq 1 ] \
-  || fail "the unreachable episode did not queue exactly one inspection wake: $(cat "$WATCH_STATE_UNREACHABLE/.wake-queue" 2>/dev/null)"
-# The watcher exits on its wake, so nothing keeps probing into the fixture
-# root while the EXIT trap removes it.
+# A watcher that survives this stop keeps probing into the fixture root until
+# the EXIT trap races its removal, so prove nothing polls past a few cycles.
 touch "$TMP_ROOT/watch-unreachable.stopped"
 sleep 3
 [ "$(cat "$SSH_COUNT" 2>/dev/null || printf '0')" = "$ssh_after" ] \
   || fail "the stopped unreachable watcher kept probing the remote endpoint"
 [ -z "$(find "$WATCH_STATE_UNREACHABLE" -newer "$TMP_ROOT/watch-unreachable.stopped" -print)" ] \
   || fail "the stopped unreachable watcher kept writing its state"
+[ ! -s "$WATCH_STATE_UNREACHABLE/.wake-queue" ] \
+  || fail "an unreachable remote probe queued a wake: $(cat "$WATCH_STATE_UNREACHABLE/.wake-queue")"
+assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-liveness-uncertain-ios" \
+  "an unreachable remote probe opened an uncertain-liveness episode"
 assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-relaunch-ios" \
   "an unreachable remote probe ledgered a relaunch attempt"
 assert_grep 'remote_host=remote-mac' "$WATCH_STATE_UNREACHABLE/ios.meta" \
   "an unreachable remote probe changed the route metadata"
 assert_grep '- ios ' "$PARENT/data/secondmates.md" \
   "an unreachable remote probe changed the registry route"
-pass "watch liveness: an unreachable remote secondmate is probed, preserved, never failed over, and wakes once for inspection"
+pass "watch liveness: an unreachable remote secondmate is probed, preserved, never failed over, and stays silent"
 
 # --- a stale herdr client shadowing the one the server accepts --------------
 # The remote host's job PATH can resolve an older self-updated herdr ahead of

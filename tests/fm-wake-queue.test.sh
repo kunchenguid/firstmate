@@ -3482,8 +3482,8 @@ test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once() {
     || fail "persistent inconclusive tracking marker was not written"
   [ -e "$state/.secondmate-liveness-uncertain-alert-sm1" ] \
     || fail "persistent inconclusive alert marker was not written"
-  [ "$(grep -c 'secondmate-liveness-uncertain-sm1' "$state/.wake-queue")" -eq 1 ] \
-    || fail "persistent inconclusive state did not queue exactly one wake: $(cat "$state/.wake-queue")"
+  [ "$(grep -c $'\tcheck\tsecondmate-liveness-uncertain-sm1-[0-9]*\t' "$state/.wake-queue")" -eq 1 ] \
+    || fail "persistent inconclusive state did not queue exactly one episode-keyed wake: $(cat "$state/.wake-queue")"
 
   # A restarted watcher must not repeat the alert while the same uncertain
   # episode continues. A later live probe clears the episode markers.
@@ -3494,7 +3494,7 @@ test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once() {
   is_live_non_zombie "$pid" \
     || fail "the watcher repeated an inconclusive alert for the same episode: $(cat "$dir/watch-inconclusive-repeat.out" "$dir/watch-inconclusive-repeat.err")"
   kill_liveness_leg "$pid"
-  [ "$(grep -c 'secondmate-liveness-uncertain-sm1' "$state/.wake-queue" 2>/dev/null || true)" -eq 0 ] \
+  [ "$(grep -c 'secondmate-liveness-uncertain-sm1-' "$state/.wake-queue" 2>/dev/null || true)" -eq 0 ] \
     || fail "the same inconclusive episode queued a second wake: $(cat "$state/.wake-queue")"
 
   drain_liveness_wakes "$dir"
@@ -3509,6 +3509,78 @@ test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once() {
   [ ! -e "$state/.secondmate-liveness-uncertain-alert-sm1" ] \
     || fail "a live probe did not clear the inconclusive alert marker"
   pass "watch liveness: persistent inconclusive endpoints alert once and rearm after recovery"
+}
+
+# The parent reads a wake first and acknowledges it only after handling, so
+# an inspection row can sit read-but-unacked across a recovery and a fresh
+# episode. The fresh episode must land its own durable row rather than dedupe
+# against the stale one, or acknowledging the old row would erase the only
+# evidence of the new failure.
+test_secondmate_liveness_tick_new_episode_queues_its_own_row_while_old_row_is_unacked() {
+  local dir state pid out key1 key2 seq gen i
+  dir=$(make_secondmate_liveness_case liveness-episodes)
+  state="$dir/state"
+  # The verdict must change under one running watcher, so the fake pane reads
+  # its current command from a file instead of a fixed environment value.
+  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux.fixed"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+FM_FAKE_TMUX_CURRENT_COMMAND=\$(cat "$dir/current-command") exec "$dir/fakebin/tmux.fixed" "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  printf 'node\n' > "$dir/current-command"
+  run_liveness_leg "$dir" episode-one FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 500 || fail "the first uncertain episode did not wake"
+  key1=$(awk -F '\t' '$3 == "check" && $4 ~ /^secondmate-liveness-uncertain-sm1-[0-9]+$/ { print $4 }' "$state/.wake-queue")
+  [ "$(printf '%s\n' "$key1" | grep -c .)" -eq 1 ] \
+    || fail "the first episode did not queue exactly one episode-keyed row: $(cat "$state/.wake-queue")"
+
+  # Read the row the way a firstmate does, but leave it unacknowledged.
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain-read.out" 2> "$dir/drain-read.err" || true
+  grep -F "$key1" "$dir/drain-read.out" >/dev/null \
+    || fail "the drain did not present the first episode's row: $(cat "$dir/drain-read.out" "$dir/drain-read.err")"
+  grep -F "$key1" "$state/.wake-queue" >/dev/null \
+    || fail "reading the first episode's row removed it before acknowledgement"
+
+  # The endpoint recovers, which closes the first episode, then goes
+  # uncertain again under the same watcher.
+  printf 'claude\n' > "$dir/current-command"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" episode-two FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
+  i=0
+  while [ "$i" -lt 100 ] && [ -e "$state/.secondmate-liveness-uncertain-sm1" ] && is_live_non_zombie "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$pid" \
+    || fail "the watcher exited before the live probe could close the first episode: $(cat "$dir/watch-episode-two.out" "$dir/watch-episode-two.err")"
+  [ ! -e "$state/.secondmate-liveness-uncertain-sm1" ] \
+    || fail "a live probe did not close the first uncertain episode"
+  printf 'node\n' > "$dir/current-command"
+  wait_for_exit "$pid" 500 || fail "the second uncertain episode did not wake while the first row was unacked"
+  out="$dir/watch-episode-two.out"
+  grep -F 'check: secondmate sm1 liveness remains ambiguous after 3 consecutive probes; endpoint was not changed' "$out" >/dev/null \
+    || fail "the second episode did not wake with its evidence: $(cat "$out" "$dir/watch-episode-two.err")"
+  key2=$(awk -F '\t' -v old="$key1" '$3 == "check" && $4 ~ /^secondmate-liveness-uncertain-sm1-[0-9]+$/ && $4 != old { print $4 }' "$state/.wake-queue")
+  [ "$(printf '%s\n' "$key2" | grep -c .)" -eq 1 ] \
+    || fail "the second episode did not queue its own row beside the unacked first one: $(cat "$state/.wake-queue")"
+  [ -e "$state/.secondmate-liveness-uncertain-alert-sm1" ] \
+    || fail "the second episode was not marked alerted"
+
+  # Acknowledging only the first row must leave the second episode's evidence.
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain-both.out" 2> "$dir/drain-both.err" || true
+  seq=$(awk -F '\t' -v key="$key1" '$3 == "check" && $4 == key { print $2 }' "$state/.wake-queue")
+  gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\).*$/\1/p' "$dir/drain-both.err")
+  [ -n "$seq" ] && [ -n "$gen" ] \
+    || fail "the first row's sequence or the drain's generation was not found: $(cat "$dir/drain-both.err")"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$seq" --recovery-generation "$gen" \
+    > /dev/null 2> "$dir/drain-ack.err" || fail "acknowledging the first row failed: $(cat "$dir/drain-ack.err")"
+  ! grep -F "$key1" "$state/.wake-queue" >/dev/null \
+    || fail "acknowledging through the first row did not consume it: $(cat "$state/.wake-queue")"
+  grep -F "$key2" "$state/.wake-queue" >/dev/null \
+    || fail "acknowledging the first row erased the second episode's evidence: $(cat "$state/.wake-queue")"
+  pass "watch liveness: a new uncertain episode queues its own row while the earlier row is read but unacked"
 }
 
 test_secondmate_liveness_tick_cadence_gates_the_probe() {
@@ -3765,12 +3837,21 @@ SH
   chmod +x "$dir/fakebin/ssh"
   : > "$dir/ssh.log"
 
-  run_liveness_leg "$dir" unreachable FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log" FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=999999; pid=$LIVENESS_PID
-  sleep 4
+  # Host loss is never evidence about the endpoint, so the three-probe bound
+  # that alerts on ambiguous or unreadable endpoints must not fire here: wait
+  # for more probes than the bound and prove the watcher stayed silent.
+  run_liveness_leg "$dir" unreachable FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log" FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
+  i=0
+  while [ "$i" -lt 300 ] && [ "$(grep -c . "$dir/ssh.log")" -lt 4 ] && is_live_non_zombie "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
   is_live_non_zombie "$pid" \
     || fail "the watcher exited against an unreachable remote secondmate: $(cat "$dir/watch-unreachable.out" "$dir/watch-unreachable.err")"
   kill_liveness_leg "$pid"
-  [ -s "$dir/ssh.log" ] || fail "the remote endpoint was never probed"
+  [ "$(grep -c . "$dir/ssh.log")" -ge 4 ] || fail "the remote endpoint was not probed past the uncertain bound: $(cat "$dir/ssh.log")"
+  [ ! -e "$state/.secondmate-liveness-uncertain-rsm1" ] \
+    || fail "an unreachable remote probe opened an uncertain-liveness episode"
   cmp -s "$dir/rsm1.meta.before" "$state/rsm1.meta" \
     || fail "an unreachable remote probe changed the route metadata"
   assert_grep '- rsm1 ' "$dir/data/secondmates.md" "an unreachable probe changed the registry route"
@@ -3782,6 +3863,63 @@ SH
 }
 
 test_branch_grant_requires_lock_acquisition
+test_secondmate_liveness_tick_alerts_persistent_remote_probe_failure_once() {
+  local rc=1 expected=unreadable dir state pid out
+  dir=$(make_secondmate_liveness_case "liveness-remote-$expected")
+  state="$dir/state"
+  rm -f "$state/sm1.meta"
+  cat > "$state/rsm1.meta" <<EOF
+window=remote:rsm1
+kind=secondmate
+harness=claude
+remote_host=lab-host
+remote_backend=herdr
+remote_herdr_session=fm-remote
+remote_target=fm-remote:w1:p1
+home=/remote/rsm1-home
+EOF
+  cat > "$dir/data/secondmates.md" <<EOF
+- rsm1 - Remote mate (host: lab-host; root: /remote/root; home: /remote/rsm1-home; scope: remote work; projects: alpha; added 2026-01-01)
+EOF
+  cp "$state/rsm1.meta" "$dir/rsm1.meta.before"
+  cat > "$dir/fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_SSH_LOG:?}"
+exit "${FM_FAKE_SSH_RC:?}"
+SH
+  chmod +x "$dir/fakebin/ssh"
+  : > "$dir/ssh.log"
+
+  # A remote state verb that keeps failing is never evidence of death, but
+  # three consecutive unreadable probes must wake the parent once.
+  run_liveness_leg "$dir" "$expected" FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log" \
+    FM_FAKE_SSH_RC="$rc" FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 500 || fail "the watcher did not wake after a persistent $expected remote probe"
+  out="$dir/watch-$expected.out"
+  grep -F "check: secondmate rsm1 liveness remains $expected after 3 consecutive probes; endpoint was not changed" "$out" >/dev/null \
+    || fail "a persistent $expected remote probe did not wake with its evidence: $(cat "$out" "$dir/watch-$expected.err")"
+  [ "$(grep -c $'\tcheck\tsecondmate-liveness-uncertain-rsm1-[0-9]*\t' "$state/.wake-queue")" -eq 1 ] \
+    || fail "a persistent $expected remote probe did not queue exactly one episode-keyed wake: $(cat "$state/.wake-queue")"
+  cmp -s "$dir/rsm1.meta.before" "$state/rsm1.meta" \
+    || fail "a $expected remote probe changed the route metadata"
+  assert_grep '- rsm1 ' "$dir/data/secondmates.md" "a $expected remote probe changed the registry route"
+  [ ! -e "$state/.secondmate-relaunch-rsm1" ] \
+    || fail "a $expected remote probe ledgered a relaunch attempt"
+  [ ! -s "$dir/tmux.log" ] || fail "a $expected remote probe touched a local endpoint"
+
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" "$expected-repeat" FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log" \
+    FM_FAKE_SSH_RC="$rc" FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher repeated a $expected remote alert for the same episode: $(cat "$dir/watch-$expected-repeat.out" "$dir/watch-$expected-repeat.err")"
+  kill_liveness_leg "$pid"
+  [ "$(grep -c 'secondmate-liveness-uncertain-rsm1-' "$state/.wake-queue" 2>/dev/null || true)" -eq 0 ] \
+    || fail "the same $expected remote episode queued a second wake: $(cat "$state/.wake-queue")"
+  pass "watch liveness: a persistent unreadable remote probe alerts once and never fails over"
+}
+
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_lock_wait_returns_when_its_directory_is_removed
 test_subshell_lock_ownership_without_bashpid
@@ -3846,6 +3984,7 @@ test_secondmate_liveness_tick_relaunches_missing_endpoint
 test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking
 test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched
 test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once
+test_secondmate_liveness_tick_new_episode_queues_its_own_row_while_old_row_is_unacked
 test_secondmate_liveness_tick_cadence_gates_the_probe
 test_secondmate_liveness_tick_attempt_bound_parks_then_rearm_on_alive
 test_secondmate_liveness_tick_relaunch_failure_reports_once
