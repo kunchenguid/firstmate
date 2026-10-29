@@ -441,7 +441,15 @@ try:
         raise OSError("synchronization target is not a regular file")
     if kind == "directory" and not stat.S_ISDIR(mode):
         raise OSError("synchronization target is not a directory")
-    os.fsync(fd)
+    if sys.platform == "darwin":
+        import fcntl
+
+        fullfsync = getattr(fcntl, "F_FULLFSYNC", None)
+        if fullfsync is None:
+            raise OSError("F_FULLFSYNC is unavailable")
+        fcntl.fcntl(fd, fullfsync)
+    else:
+        os.fsync(fd)
 finally:
     os.close(fd)
 PY

@@ -10,10 +10,12 @@ TMP_ROOT=$(fm_test_tmproot zalo-folder-qa)
 HOME_DIR="$TMP_ROOT/home"
 FAKEBIN="$TMP_ROOT/fakebin"
 NO_FLOCK_BIN="$TMP_ROOT/no-flock-bin"
+PYTHON_FIXTURE="$TMP_ROOT/python-fixture"
 FAKE_LOG_DIR="$TMP_ROOT/curl-log"
 CONFIG_FILE="$HOME_DIR/config/zalo-folder-qa.env"
 REFRESH_FILE="$HOME_DIR/config/graph-refresh-token"
 UPDATE_QUEUE="$TMP_ROOT/update-queue.jsonl"
+DURABILITY_CALL_LOG="$TMP_ROOT/durability-call.log"
 ORIGINAL_PATH=$PATH
 FAKE_ZALO_TOKEN=fake-zalo-private-token
 FAKE_BOT_ID=bot-mac
@@ -28,6 +30,9 @@ FAKE_RECEIPT_IO_MODE=exact
 FAKE_RECEIPT_SYNC_FAIL_AT=0
 FAKE_RECEIPT_SYNC_PAUSE_AT=0
 FAKE_RECEIPT_SYNC_CRASH_AT=0
+FAKE_SYNC_PLATFORM=native
+FAKE_FULLFSYNC_MODE=success
+FAKE_FULLFSYNC_FAIL_AT=0
 RECEIPT_SYNC_COUNTER="$TMP_ROOT/receipt-sync-counter"
 RECEIPT_SYNC_PAUSE_READY="$TMP_ROOT/receipt-sync-pause-ready"
 RECEIPT_SYNC_PAUSE_RELEASE="$TMP_ROOT/receipt-sync-pause-release"
@@ -36,13 +41,61 @@ export ORIGINAL_PATH FAKE_LOG_DIR UPDATE_QUEUE FAKE_GRAPH_MODE FAKE_BOT_MODE FAK
 export FAKE_RECEIPT_IO_MODE FAKE_RECEIPT_SYNC_FAIL_AT FAKE_RECEIPT_SYNC_PAUSE_AT
 export FAKE_RECEIPT_SYNC_CRASH_AT RECEIPT_SYNC_COUNTER RECEIPT_SYNC_PAUSE_READY
 export RECEIPT_SYNC_PAUSE_RELEASE
+export PYTHON_FIXTURE DURABILITY_CALL_LOG FAKE_SYNC_PLATFORM FAKE_FULLFSYNC_MODE
+export FAKE_FULLFSYNC_FAIL_AT
 export FAKE_BOT_ID FAKE_DRIVE_ID FAKE_FOLDER_ID
 
-mkdir -p "$HOME_DIR/config" "$HOME_DIR/state" "$FAKEBIN" "$FAKE_LOG_DIR"
-chmod 700 "$HOME_DIR/config" "$HOME_DIR/state" "$FAKEBIN" "$FAKE_LOG_DIR"
+mkdir -p "$HOME_DIR/config" "$HOME_DIR/state" "$FAKEBIN" "$FAKE_LOG_DIR" "$PYTHON_FIXTURE"
+chmod 700 "$HOME_DIR/config" "$HOME_DIR/state" "$FAKEBIN" "$FAKE_LOG_DIR" "$PYTHON_FIXTURE"
 printf '%s\n' fake-refresh-token > "$REFRESH_FILE"
 chmod 600 "$REFRESH_FILE"
 : > "$UPDATE_QUEUE"
+
+cat > "$PYTHON_FIXTURE/sitecustomize.py" <<'PY'
+import os
+import sys
+import types
+
+platform = os.environ.get("FAKE_SYNC_PLATFORM", "native")
+mode = os.environ.get("FAKE_FULLFSYNC_MODE", "success")
+fail_at = int(os.environ.get("FAKE_FULLFSYNC_FAIL_AT", "0"))
+log_path = os.environ["DURABILITY_CALL_LOG"]
+
+
+def record(value):
+    with open(log_path, "a", encoding="ascii") as stream:
+        stream.write(value + "\n")
+    with open(log_path, encoding="ascii") as stream:
+        return sum(1 for _ in stream)
+
+
+if platform == "linux":
+    sys.platform = "linux"
+
+    def fsync(_fd):
+        record("fsync")
+
+    os.fsync = fsync
+elif platform == "darwin":
+    sys.platform = "darwin"
+
+    def fsync(_fd):
+        raise OSError("plain fsync is forbidden by the Darwin fixture")
+
+    os.fsync = fsync
+    module = types.ModuleType("fcntl")
+    if mode != "unavailable":
+        module.F_FULLFSYNC = 4242
+
+        def fullfsync(_fd, command, _arg=0):
+            call = record(f"fullfsync:{command}")
+            if mode == "failure" and call == fail_at:
+                raise OSError("synthetic F_FULLFSYNC failure")
+            return 0
+
+        module.fcntl = fullfsync
+    sys.modules["fcntl"] = module
+PY
 
 printf '%s\n' '#!/usr/bin/env bash' > "$FAKEBIN/curl"
 chmod 700 "$FAKEBIN/curl"
@@ -200,7 +253,7 @@ fi
 if [ "$FAKE_RECEIPT_SYNC_FAIL_AT" -eq "$counter" ]; then
   exit 1
 fi
-PATH=$ORIGINAL_PATH exec python3 "$@"
+PYTHONPATH=$PYTHON_FIXTURE PATH=$ORIGINAL_PATH exec python3 "$@"
 SH
 chmod 700 "$FAKEBIN/mktemp" "$FAKEBIN/ln" "$FAKEBIN/rm" "$FAKEBIN/python3"
 
@@ -220,7 +273,8 @@ write_config() { # <group-id> <drive-id> <folder-id> [refresh-file] [max-seen]
 
 reset_runtime() {
   rm -rf "$FAKE_LOG_DIR" "$HOME_DIR/state/zalo-folder-qa"
-  rm -f "$RECEIPT_SYNC_COUNTER" "$RECEIPT_SYNC_PAUSE_READY" "$RECEIPT_SYNC_PAUSE_RELEASE"
+  rm -f "$RECEIPT_SYNC_COUNTER" "$RECEIPT_SYNC_PAUSE_READY" "$RECEIPT_SYNC_PAUSE_RELEASE" \
+    "$DURABILITY_CALL_LOG"
   mkdir -m 700 "$FAKE_LOG_DIR"
   : > "$UPDATE_QUEUE"
   FAKE_GRAPH_MODE=exact
@@ -230,8 +284,12 @@ reset_runtime() {
   FAKE_RECEIPT_SYNC_FAIL_AT=0
   FAKE_RECEIPT_SYNC_PAUSE_AT=0
   FAKE_RECEIPT_SYNC_CRASH_AT=0
+  FAKE_SYNC_PLATFORM=native
+  FAKE_FULLFSYNC_MODE=success
+  FAKE_FULLFSYNC_FAIL_AT=0
   export FAKE_GRAPH_MODE FAKE_BOT_MODE FAKE_SEND_MODE FAKE_RECEIPT_IO_MODE
   export FAKE_RECEIPT_SYNC_FAIL_AT FAKE_RECEIPT_SYNC_PAUSE_AT FAKE_RECEIPT_SYNC_CRASH_AT
+  export FAKE_SYNC_PLATFORM FAKE_FULLFSYNC_MODE FAKE_FULLFSYNC_FAIL_AT
 }
 
 wait_for_path() {
@@ -366,6 +424,18 @@ receipt_state() {
   done
   [ "$count" -eq 1 ] || return 1
   cat "$state"
+}
+
+durability_call_count() {
+  local expected=$1 count=0 call
+  [ -f "$DURABILITY_CALL_LOG" ] || {
+    printf '0\n'
+    return 0
+  }
+  while IFS= read -r call; do
+    [ "$call" != "$expected" ] || count=$((count + 1))
+  done < "$DURABILITY_CALL_LOG"
+  printf '%s\n' "$count"
 }
 
 test_required_private_pins_fail_closed() {
@@ -812,6 +882,102 @@ test_run_stops_on_receipt_sync_errors() {
   pass 'file and directory sync failures stop at both receipt transitions'
 }
 
+test_run_uses_platform_durability_barriers() {
+  local output rc event fail_at expected_getme expected_polls expected_sends expected_state
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  event=$(event_json GROUP "$FAKE_GROUP_ID" 'Tồn kho hiện tại là bao nhiêu?' platform-sync-1)
+
+  reset_runtime
+  FAKE_SYNC_PLATFORM=linux
+  export FAKE_SYNC_PLATFORM
+  output=$(run_tool run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'terminal fake poll did not stop synthetic Linux run'
+  [ "$(durability_call_count fsync)" -eq 8 ] \
+    || fail 'non-Darwin synchronization did not retain fsync for every state barrier'
+  [ "$(durability_call_count fullfsync:4242)" -eq 0 ] \
+    || fail 'non-Darwin synchronization used the Darwin primitive'
+  [ "$(call_count '/getMe')" -eq 1 ] || fail 'synthetic Linux run did not verify after synchronization'
+  [ "$(call_count '/getUpdates')" -eq 1 ] || fail 'synthetic Linux run did not poll after synchronization'
+  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'synthetic Linux run sent without an event'
+
+  reset_runtime
+  queue_event "$event"
+  FAKE_SYNC_PLATFORM=darwin
+  export FAKE_SYNC_PLATFORM
+  output=$(run_tool run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'terminal fake poll did not stop synthetic Darwin run'
+  [ "$(durability_call_count fullfsync:4242)" -eq 12 ] \
+    || fail 'Darwin did not use F_FULLFSYNC for every state and receipt barrier'
+  [ "$(durability_call_count fsync)" -eq 0 ] || fail 'Darwin fell back to plain fsync'
+  [ "$(call_count '/getMe')" -eq 1 ] || fail 'synthetic Darwin run did not verify after synchronization'
+  [ "$(call_count '/getUpdates')" -eq 2 ] || fail 'synthetic Darwin run did not finish the fake event path'
+  [ "$(call_count '/sendMessage')" -eq 1 ] || fail 'synthetic Darwin run did not send the fixed reply once'
+  [ "$(receipt_state)" = sent ] || fail 'synthetic Darwin run did not durably reach sent'
+
+  reset_runtime
+  queue_event "$event"
+  FAKE_SYNC_PLATFORM=darwin
+  FAKE_FULLFSYNC_MODE=unavailable
+  export FAKE_SYNC_PLATFORM FAKE_FULLFSYNC_MODE
+  output=$(run_tool run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'Darwin accepted an unavailable F_FULLFSYNC primitive'
+  [ "$(cat "$RECEIPT_SYNC_COUNTER")" -eq 1 ] \
+    || fail 'unavailable F_FULLFSYNC continued state synchronization'
+  [ "$(call_count '/getMe')" -eq 0 ] || fail 'unavailable F_FULLFSYNC reached bot verification'
+  [ "$(call_count '/getUpdates')" -eq 0 ] || fail 'unavailable F_FULLFSYNC reached polling'
+  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'unavailable F_FULLFSYNC sent a message'
+
+  for fail_at in 1 9 11; do
+    reset_runtime
+    queue_event "$event"
+    FAKE_SYNC_PLATFORM=darwin
+    FAKE_FULLFSYNC_MODE=failure
+    FAKE_FULLFSYNC_FAIL_AT=$fail_at
+    export FAKE_SYNC_PLATFORM FAKE_FULLFSYNC_MODE FAKE_FULLFSYNC_FAIL_AT
+    output=$(run_tool run 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "Darwin F_FULLFSYNC failure $fail_at did not stop run"
+    [ "$(durability_call_count fullfsync:4242)" -eq "$fail_at" ] \
+      || fail "Darwin F_FULLFSYNC failure $fail_at crossed another durability barrier"
+    expected_getme=1
+    expected_polls=1
+    expected_sends=0
+    expected_state=
+    case "$fail_at" in
+      1)
+        expected_getme=0
+        expected_polls=0
+        ;;
+      9) ;;
+      11)
+        expected_sends=1
+        expected_state=pending
+        ;;
+    esac
+    [ "$(call_count '/getMe')" -eq "$expected_getme" ] \
+      || fail "Darwin F_FULLFSYNC failure $fail_at crossed the verification boundary"
+    [ "$(call_count '/getUpdates')" -eq "$expected_polls" ] \
+      || fail "Darwin F_FULLFSYNC failure $fail_at crossed the polling boundary"
+    [ "$(call_count '/sendMessage')" -eq "$expected_sends" ] \
+      || fail "Darwin F_FULLFSYNC failure $fail_at crossed the send boundary"
+    if [ -n "$expected_state" ]; then
+      [ "$(receipt_state)" = "$expected_state" ] \
+        || fail "Darwin F_FULLFSYNC failure $fail_at left the wrong receipt state"
+    else
+      [ "$(receipt_count)" -eq 0 ] \
+        || fail "Darwin F_FULLFSYNC failure $fail_at published an unsafe receipt"
+    fi
+    case "$output" in
+      *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) \
+        fail "Darwin F_FULLFSYNC failure $fail_at exposed a private value" ;;
+    esac
+  done
+  pass 'platform-specific durability barriers fail closed around external operations'
+}
+
 test_run_durably_publishes_first_use_state() {
   local output rc fail_at missing_parent="$TMP_ROOT/missing-state-parent"
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
@@ -1006,6 +1172,7 @@ fm_test_run \
   test_run_stops_before_receipt_capacity_overflow \
   test_run_stops_on_receipt_io_errors \
   test_run_stops_on_receipt_sync_errors \
+  test_run_uses_platform_durability_barriers \
   test_run_durably_publishes_first_use_state \
   test_run_serializes_and_recovers_state_publication \
   test_run_fails_closed_on_malformed_send_and_has_no_reply_command
