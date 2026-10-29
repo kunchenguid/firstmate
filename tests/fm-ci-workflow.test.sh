@@ -172,7 +172,9 @@ end
 # fork variables unset, and needed jobs successful. Short keys: event, action,
 # label (the label an event adds), labels (comma-separated labels on the PR),
 # association, head (head repository), number, run_id, skip_push, skip_macos,
-# needs (success, failure, or cancelled). A push event clears the PR fields,
+# needs (success, failure, or cancelled: the needed jobs' results that job
+# conditions and the Full suite verdict read), outcome (how every job that runs
+# concludes, read only by published_checks). A push event clears the PR fields,
 # which GitHub leaves empty there. Each resolver prepends this.
 # shellcheck disable=SC2016  # Ruby text, not shell expansions
 CONTEXT_RUBY='
@@ -181,7 +183,7 @@ def simulated_context(workflow_name, overrides)
     "event" => "pull_request", "action" => "synchronize", "label" => "",
     "labels" => "", "association" => "NONE", "head" => "contributor/firstmate",
     "number" => "108", "run_id" => "900001", "skip_push" => "", "skip_macos" => "",
-    "needs" => "success",
+    "needs" => "success", "outcome" => "success",
   }
   if overrides.any? { |pair| pair == "event=push" }
     o.merge!("action" => "", "association" => "", "head" => "", "number" => "")
@@ -206,6 +208,7 @@ def simulated_context(workflow_name, overrides)
     "vars.FM_CI_SKIP_MACOS" => o["skip_macos"],
     "needs.status" => o["needs"],
     "needs.*.result" => [o["needs"]],
+    "simulated.outcome" => o["outcome"],
   }
 end
 
@@ -259,11 +262,15 @@ end
 # Print the checks one simulated run publishes, one "<name><TAB><conclusion>"
 # per line: GitHub publishes a check for every job, running or skipped, so a
 # skipped job still appears with conclusion skipped. Matrix jobs are expanded
-# even when skipped, the stricter assumption about how GitHub names them. A
-# running lane concludes with the simulated needs outcome; the Full suite
-# verdict is executed by run_full_suite_verdict.
+# even when skipped, the stricter assumption about how GitHub names them. Job
+# conditions read the needs prerequisite status as given; every running job
+# concludes with the simulated outcome, and the Full suite verdict is executed
+# by run_full_suite_verdict with that outcome as its needed jobs' results.
 published_checks() {  # [KEY=VALUE]...
-  local rows name conclusion
+  local rows name conclusion outcome=success arg
+  for arg in "$@"; do
+    case $arg in outcome=*) outcome=${arg#outcome=} ;; esac
+  done
   rows=$(ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
 doc = YAML.load_file(ARGV.shift)
 context = simulated_context(doc.fetch("name"), ARGV)
@@ -273,14 +280,14 @@ doc.fetch("jobs").each do |id, job|
   expansions = matrix.empty? ? [{}] : matrix.flat_map { |k, values| values.map { |v| { "matrix.#{k}" => v.to_s } } }
   expansions.each do |extra|
     name = interpolate(job.fetch("name", id), context.merge(extra))
-    conclusion = !runs ? "skipped" : id == "full-suite" ? "verdict" : context.fetch("needs.status")
+    conclusion = !runs ? "skipped" : id == "full-suite" ? "verdict" : context.fetch("simulated.outcome")
     puts [name, conclusion].join("\t")
   end
 end
 ' "$CI_WORKFLOW" "$@") || fail "could not resolve the published checks"
   while IFS=$'\t' read -r name conclusion; do
     if [ "$conclusion" = verdict ]; then
-      if run_full_suite_verdict "$@" >/dev/null; then conclusion=success; else conclusion=failure; fi
+      if run_full_suite_verdict "$@" needs="$outcome" >/dev/null; then conclusion=success; else conclusion=failure; fi
     fi
     printf '%s\t%s\n' "$name" "$conclusion"
   done <<<"$rows"
@@ -475,21 +482,31 @@ test_unrelated_label_starts_no_lane() {
 # job of an unrelated label event's run, so the failed-suite -> unrelated-label
 # sequence must leave the earlier failure visible under its own check names.
 test_unrelated_label_never_masks_an_earlier_failure() {
-  local first label before after name conclusion
-  while IFS='|' read -r first label; do
+  local first label expect want before after name conclusion
+  while IFS='|' read -r first label expect; do
     # shellcheck disable=SC2086  # each column is a deliberate word list
     before=$(published_checks $first) || fail "could not resolve the first run for $first"
-    printf '%s\n' "$before" | grep -qx $'Full suite\tfailure' \
-      || fail "the first run ($first) must publish a failing Full suite, got:"$'\n'"$before"
+    # Every canonical check the first run published must hold the expected
+    # conclusion, so the label run below has a real failure to mask.
+    while IFS=$'\t' read -r name conclusion; do
+      case "$expect:$name" in
+        all-failed:*) want=failure ;;
+        waiting:'Full suite') want=failure ;;
+        waiting:'Test coverage guard'|waiting:'Repo invariants') want=success ;;
+        waiting:*) want=skipped ;;
+      esac
+      [ "$conclusion" = "$want" ] \
+        || fail "the first run ($first) must publish $name as $want before the label event, got $conclusion"
+    done <<<"$before"
     after=$(checks_after_two_runs "$first" "$label") || fail "could not merge runs for $first"
     while IFS=$'\t' read -r name conclusion; do
       printf '%s\n' "$after" | grep -qxF "$name"$'\t'"$conclusion" \
         || fail "after an unrelated label, $name must still read $conclusion (first run: $first), got:"$'\n'"$after"
     done <<<"$before"
   done <<'TABLE'
-labels=full-ci needs=failure|action=labeled label=bug labels=full-ci,bug needs=success
-association=OWNER needs=failure|action=labeled label=bug labels=bug association=OWNER needs=success
-needs=success|action=labeled label=bug labels=bug
+labels=full-ci outcome=failure|action=labeled label=bug labels=full-ci,bug|all-failed
+association=OWNER outcome=failure|action=labeled label=bug labels=bug association=OWNER|all-failed
+outcome=success|action=labeled label=bug labels=bug|waiting
 TABLE
   pass "an unrelated label after a failed or waiting suite leaves every earlier check as it was"
 }
