@@ -640,6 +640,10 @@ cmd_launch() {
       missing) ;;
       *) prelaunch_die "remote endpoint state is $current; refusing duplicate launch" ;;
     esac
+    if [ -n "$SEAT_OP" ] && { [ "$current" = dead ] || [ "$current" = missing ]; }; then
+      seat_receipt_set old_destroyed=true \
+        || { seat_emit unknown false false; die "could not retain predecessor destruction evidence"; }
+    fi
   fi
   # The parent owns both convergence legs before it asks for this launch: it
   # already fast-forwarded this home to ITS primary commit and pushed inherited

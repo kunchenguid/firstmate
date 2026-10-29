@@ -782,10 +782,11 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SPAWN_PREFLIGHT_ID=${1:-}
 spawn_preflight_cleanup() {
   local status=${1:-$?} receipt="$STATE/$SPAWN_PREFLIGHT_ID.seat-operation.${FM_REMOTE_SEAT_OPERATION:-}"
-  if [ "$status" = 1 ] && [ "${FM_REMOTE_SEAT_FRESH:-0}" = 1 ] &&
+  if [ "$status" = 1 ] &&
     [ -n "${FM_REMOTE_SEAT_OPERATION:-}" ] &&
     fm_supervisor_lifecycle_adopt "$STATE" "$SPAWN_PREFLIGHT_ID" &&
     [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
+    { [ "${FM_REMOTE_SEAT_FRESH:-0}" = 1 ] || [ "$(sed -n 's/^old_destroyed=//p' "$receipt")" = true ]; } &&
     [ "$(sed -n 's/^phase=//p' "$receipt")" = received ]; then
     fm_remote_seat_receipt_update "$receipt" "$FM_REMOTE_SEAT_OPERATION" "${FM_SPAWN_SEAT_GENERATION:-}" \
       phase=prelaunch || echo "error: could not retain the spawn preflight refusal" >&2
