@@ -7437,6 +7437,24 @@ if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
 
+# Copy <meta> without the keys <drop-keys> names (space separated), then the
+# lines read from stdin, then the record's PR trailer: a recorded pr= must stay
+# the tail that bin/fm-pr-lib.sh fm_pr_metadata_identity_parse validates, or the
+# armed merge poll stops running and the lane's merge goes unseen.
+spawn_meta_rewrite_keep_pr_tail() {  # <meta> <drop-keys>
+  awk -F= -v drop="$2" '
+    BEGIN { n = split(drop, d, " "); for (i = 1; i <= n; i++) dropped[d[i]] = 1 }
+    FILENAME == "-" { added[++a] = $0; next }
+    $1 in dropped { next }
+    $1 == "pr" || $1 == "pr_head" || $1 ~ /^x_(request|request_ts|followups|platform|reply_max_chars)$/ { tail[++t] = $0; next }
+    { print }
+    END {
+      for (i = 1; i <= a; i++) print added[i]
+      for (i = 1; i <= t; i++) print tail[i]
+    }
+  ' - "$1"
+}
+
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
   # Fresh publication still owns the lock. Relaunch deliberately uses a short
