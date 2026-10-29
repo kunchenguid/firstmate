@@ -123,6 +123,15 @@ printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
 exit 1
 SH
       ;;
+    slow-failed)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >> "$FM_HOME/state/arm-ran"
+sleep 1.5
+printf 'watcher: FAILED - cycle ended without an actionable reason\n'
+exit 1
+SH
+      ;;
     attached-close)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -203,6 +212,8 @@ test_agents_hooks_json_registration_and_cwd_contract() {
     and ([.[] | .PreToolUse // empty | .[] | (.matcher | type) == "string" and ([.hooks[].command | type == "string"] | length > 0 and all)] | length > 0 and all)
   ' "$reg" >/dev/null 2>&1 \
     || fail ".agents/hooks.json must be agy named hook specs with flat SessionStart/Stop and grouped PreToolUse handlers"
+  jq -e '[.[] | .Stop // empty | .[].timeout] | length > 0 and all(. == 28800)' "$reg" >/dev/null 2>&1 \
+    || fail ".agents/hooks.json Stop must allow the park the 28800s hook budget Cursor and Claude use"
 
   dir=$(make_primary_dir "$TMP_ROOT/hooks-cwd")
   install_digest_fixture "$dir"
@@ -349,6 +360,13 @@ test_turnend_guard_agy_park_timeout_rearms() {
   assert_equals "continue" "$decision" "park timeout must return decision=continue"
   assert_contains "$reason" "[supervision-park]" "park timeout reason must include [supervision-park]"
   ! kill -0 "$(cat "$dir/state/arm-ran")" 2>/dev/null || fail "park timeout must stop the arm child"
+
+  dir=$(make_primary_dir "$TMP_ROOT/stop-timeout-total")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" slow-failed
+  out=$(FM_AGY_PARK_TIMEOUT=2 run_agy_stop "$dir" "$payload")
+  [ "$(wc -l < "$dir/state/arm-ran")" -eq 1 ] \
+    || fail "FM_AGY_PARK_TIMEOUT must bound the total park, not grant each arm attempt a fresh budget"
   pass "fm-turnend-guard-agy: park timeout stops the arm and returns continue with [supervision-park]"
 }
 
@@ -396,7 +414,7 @@ test_turnend_guard_agy_loop_ceiling() {
   : > "$dir/state/task1.meta"
   write_arm_fixture "$dir" actionable
   payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":4,"terminationReason":"NO_TOOL_CALL"}'
-  out=$(run_agy_stop "$dir" "$payload")
+  out=$(FM_AGY_TURNEND_LOOP_CEILING=4 run_agy_stop "$dir" "$payload")
   decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
   reason=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null)
   assert_equals "continue" "$decision" "reaching the ceiling with work in flight must notify once"
@@ -404,13 +422,13 @@ test_turnend_guard_agy_loop_ceiling() {
   [ ! -e "$dir/state/arm-ran" ] || fail "the ceiling must not park"
 
   payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":5,"terminationReason":"NO_TOOL_CALL"}'
-  out=$(run_agy_stop "$dir" "$payload")
+  out=$(FM_AGY_TURNEND_LOOP_CEILING=4 run_agy_stop "$dir" "$payload")
   assert_equals "{}" "$out" "past the ceiling must return {}"
   [ ! -e "$dir/state/arm-ran" ] || fail "past the ceiling must not park"
 
   rm -f "$dir/state/task1.meta"
   payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":4,"terminationReason":"NO_TOOL_CALL"}'
-  out=$(run_agy_stop "$dir" "$payload")
+  out=$(FM_AGY_TURNEND_LOOP_CEILING=4 run_agy_stop "$dir" "$payload")
   assert_equals "{}" "$out" "reaching the ceiling with nothing to supervise must return {}"
   pass "fm-turnend-guard-agy: the loop ceiling notifies once while supervision is needed, then passes through"
 }

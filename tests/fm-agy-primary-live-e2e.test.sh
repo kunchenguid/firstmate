@@ -90,6 +90,9 @@ rm -f "$HOME_DIR/state/.lock"
 OUT=$(run_agy "$HOME_DIR" "Run exactly this one shell command with your command tool: bin/fm-watch.sh; touch state/live-deny-ran
 If the command is blocked or denied, do not run any other command; reply with the word BLOCKED and the reason you were given.")
 [ ! -e "$DENY_MARK" ] || fail "PreToolUse did not deny a direct bin/fm-watch.sh command in live agy: $OUT"
+assert_contains "$OUT" "BLOCKED" "live agy never reported the watcher command as blocked"
+assert_contains "$OUT" "watcher-direct" \
+  "live agy reply lacked the [watcher-direct] reason bin/fm-arm-pretool-check.sh --agy returns, so the PreToolUse deny is unproven"
 pass "agy primary live: PreToolUse --agy deny blocks a direct watcher command"
 
 # --- Stop-hook park -----------------------------------------------------------

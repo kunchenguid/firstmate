@@ -8,11 +8,13 @@
 # bin/fm-turnend-guard-cursor.sh:
 #   - bin/fm-watch-arm.sh, or bin/fm-supervision-host.sh park when the home
 #     runs the supervision host (fm_supervision_host_enabled ... agy).
-#   - The child is polled every FM_AGY_PARK_POLL seconds (default 2). When
-#     FM_AGY_PARK_TIMEOUT seconds (default 330) pass with the child still
-#     running, the child is stopped and the hook returns
-#     {"decision":"continue","reason":"[supervision-park] ..."} so the next
-#     turn boundary parks again inside the hooks.json timeout.
+#   - The child is polled every FM_AGY_PARK_POLL seconds (default 2) and the
+#     park waits on it under the 28800s hooks.json timeout, so an idle cycle
+#     spends no model turn. Only when FM_AGY_PARK_TIMEOUT is set to a positive
+#     number of seconds, and that total wait across every attempt passes with
+#     the child still running, is the child stopped and
+#     {"decision":"continue","reason":"[supervision-park] ..."} returned so the
+#     next turn boundary parks again.
 #   - An actionable close (a signal:/stale:/check:/heartbeat line, or a
 #     supervision-host: line in host mode) resets state/.turnend-blocks and
 #     returns {"decision":"continue","reason":"<wake>"} on stdout.
@@ -27,7 +29,7 @@
 #     other than NO_TOOL_CALL) with {} without parking.
 #   - Verify session-lock ownership via bin/fm-session-lock-lib.sh so a
 #     read-only or foreign session never steals supervision.
-#   - At executionNum == the loop ceiling (default 4, overridable via
+#   - At executionNum == the loop ceiling (default 180, overridable via
 #     FM_AGY_TURNEND_LOOP_CEILING) with supervision still needed, return one
 #     loud ceiling notice; past the ceiling, pass through with {}.
 #   - Record a unique claim in state/.agy-park-owner before parking and yield
@@ -44,11 +46,11 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 ARM_ATTEMPTS=2
 
 POLL=${FM_AGY_PARK_POLL:-2}
-PARK_TIMEOUT=${FM_AGY_PARK_TIMEOUT:-330}
-LOOP_CEILING=${FM_AGY_TURNEND_LOOP_CEILING:-4}
+PARK_TIMEOUT=${FM_AGY_PARK_TIMEOUT:-0}
+LOOP_CEILING=${FM_AGY_TURNEND_LOOP_CEILING:-180}
 case "$POLL" in ''|*[!0-9]*|0) POLL=2 ;; esac
-case "$PARK_TIMEOUT" in ''|*[!0-9]*|0) PARK_TIMEOUT=330 ;; esac
-case "$LOOP_CEILING" in ''|*[!0-9]*|0) LOOP_CEILING=4 ;; esac
+case "$PARK_TIMEOUT" in ''|*[!0-9]*) PARK_TIMEOUT=0 ;; esac
+case "$LOOP_CEILING" in ''|*[!0-9]*|0) LOOP_CEILING=180 ;; esac
 
 allow_stop() {
   printf '{}\n'
@@ -131,8 +133,10 @@ fi
 # Never leave a park child or its capture file behind, on any exit path.
 trap '[ -n "$ARM_PID" ] && kill "$ARM_PID" 2>/dev/null; [ -n "$ARM_OUT" ] && rm -f "$ARM_OUT" 2>/dev/null; :' EXIT
 
+waited=0
 attempt=0
 while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
+  [ "$PARK_TIMEOUT" -eq 0 ] || [ "$waited" -lt "$PARK_TIMEOUT" ] || break
   attempt=$((attempt + 1))
   ARM_OUT=$(mktemp "$STATE/.agy-park-output.XXXXXX") || { ARM_OUT=; break; }
   if [ "$HOST_MODE" -eq 1 ]; then
@@ -141,14 +145,13 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
     "$SCRIPT_DIR/fm-watch-arm.sh" >"$ARM_OUT" 2>&1 &
   fi
   ARM_PID=$!
-  waited=0
   while kill -0 "$ARM_PID" 2>/dev/null; do
     # Stand down when a newer Stop claimed the baton, the session lock moved,
     # or away mode started and its daemon now owns the watcher.
     if ! park_still_ours || ! fm_session_lock_owned_by_self "$STATE" || [ -e "$STATE/.afk" ]; then
       allow_stop
     fi
-    if [ "$waited" -ge "$PARK_TIMEOUT" ]; then
+    if [ "$PARK_TIMEOUT" -gt 0 ] && [ "$waited" -ge "$PARK_TIMEOUT" ]; then
       kill "$ARM_PID" 2>/dev/null
       ARM_PID=
       continue_turn "[supervision-park] No actionable wake arrived within ${PARK_TIMEOUT}s while supervision is still needed. End your turn briefly so the Antigravity Stop hook can re-park on the next turn boundary."

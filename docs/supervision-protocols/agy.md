@@ -10,10 +10,10 @@ When this session owns supervision and away mode is not active:
    On that wake, run `bin/fm-wake-drain.sh` first and handle it.
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end parks again automatically when supervision is still needed.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records, the drain's `OPEN DECISIONS` entries, or a real watcher reason line.
-4. The Stop-hook park checks its tracked child every `FM_AGY_PARK_POLL` seconds (default 2) and bounds the park at `FM_AGY_PARK_TIMEOUT` seconds (default 330).
-   When the bound passes without a wake, it stops the child and returns `{"decision":"continue","reason":"..."}` carrying `[supervision-park]`; end the turn briefly so the next turn boundary parks again.
+4. The Stop-hook park checks its tracked child every `FM_AGY_PARK_POLL` seconds (default 2) and waits on it under the 28800-second hook timeout, so an idle cycle spends no turn.
+   Only when the optional `FM_AGY_PARK_TIMEOUT` bound is set and passes without a wake does it stop the child and returns `{"decision":"continue","reason":"..."}` carrying `[supervision-park]`; end the turn briefly so the next turn boundary parks again.
    When nothing needs supervision, or the park closed beside a verified healthy watcher, the hook returns `{}` and allows normal turn completion.
-   When `.executionNum` reaches the loop ceiling (default 4) while supervision is still needed, the hook returns one `FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED` notice; drain and handle queued wakes yourself, and past the ceiling the hook returns `{}`.
+   When `.executionNum` reaches the loop ceiling (`FM_AGY_TURNEND_LOOP_CEILING`, default 180) while supervision is still needed, the hook returns one `FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED` notice; drain and handle queued wakes yourself, and past the ceiling the hook returns `{}`.
    Only normal turn completions with `.terminationReason == "NO_TOOL_CALL"` trigger a park; other termination reasons pass through with `{}`.
 5. The captain keeps control while the hook is parked.
    A message sent while parked supersedes the older park through `state/.agy-park-owner`, making the older park stand down cleanly with `{}` without emitting duplicate wakes.
