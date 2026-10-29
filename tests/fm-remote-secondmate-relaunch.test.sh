@@ -663,6 +663,7 @@ case "${1:-} ${2:-}" in
   'agent get')
     case "$(cat "$FM_TEST_HERDR_STATE")" in
       alive) printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
+      alive-then-unknown) printf 'unknown\n' >"$FM_TEST_HERDR_STATE"; printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
       dead) printf '{"error":{"code":"agent_not_found"}}\n' ;;
       *) printf '{"error":{"code":"transport_unavailable"}}\n' ;;
     esac ;;
@@ -707,6 +708,46 @@ host_journal foreign.journal exited
 printf 'exit_result=already-stopped\n' >> "$HOST_HOME/state/parent-route/ios.control-relaunch"
 assert_equals "unknown false" "$(host_disposition foreign.journal)" "the journal used another generation's predecessor evidence"
 pass "existing host receipts re-probe their actual generation and preserve its terminal outcome"
+cp "$HOST_HOME/state/parent-route/ios.meta" "$TMP/refusal-baseline.meta"
+cp "$HOST_HOME/state/parent-route/ios.control-relaunch" "$TMP/refusal-baseline.journal"
+for REFUSAL_VERB in launch relaunch; do
+  for REFUSAL_MODE in probe endpoint predecessor secondprobe generation; do
+    [ "$REFUSAL_VERB:$REFUSAL_MODE" != relaunch:secondprobe ] || continue
+    cp "$TMP/refusal-baseline.meta" "$HOST_HOME/state/parent-route/ios.meta"
+    printf 'alive\n' >"$TMP/herdr-state"
+    case "$REFUSAL_MODE" in
+      probe) printf 'unknown\n' >"$TMP/herdr-state" ;;
+      endpoint) printf 'backend=tmux\n' >>"$HOST_HOME/state/parent-route/ios.meta" ;;
+      predecessor)
+        perl -pi -e 's/^spawn_gen=.*/spawn_gen=unconfirmed-refusal/' "$HOST_HOME/state/parent-route/ios.meta"
+        printf 'dead\n' >"$TMP/herdr-state" ;;
+      secondprobe) printf 'alive-then-unknown\n' >"$TMP/herdr-state" ;;
+    esac
+    cp "$HOST_HOME/state/parent-route/ios.meta" "$TMP/refusal-before.meta"
+    REFUSAL_GEN=$(sed -n 's/^spawn_gen=//p' "$TMP/refusal-before.meta")
+    REFUSAL_PREV=$REFUSAL_GEN
+    [ "$REFUSAL_MODE" != generation ] || REFUSAL_PREV=foreign-generation
+    REFUSAL_OP="refusal.$REFUSAL_VERB.$REFUSAL_MODE"
+    REFUSAL_ARGS=("$REFUSAL_VERB" ios claude pool-model-a medium)
+    [ "$REFUSAL_VERB" != launch ] || REFUSAL_ARGS+=(herdr)
+    OUT=$(host_control "${REFUSAL_ARGS[@]}" --operation "$REFUSAL_OP" --previous "$REFUSAL_PREV" <<<"$(host_parent_record "$REFUSAL_OP" "$REFUSAL_PREV")"); RC=$?
+    REFUSAL_RC=1
+    [ "$REFUSAL_MODE" != generation ] || REFUSAL_RC=6
+    expect_code "$REFUSAL_RC" "$RC" "fresh pre-delivery refusal: $OUT"
+    assert_equals "prelaunch false" "$(host_disposition "$REFUSAL_OP")" "fresh refusal remained unknown: $REFUSAL_OP"
+    cmp -s "$TMP/refusal-before.meta" "$HOST_HOME/state/parent-route/ios.meta" || fail "refusal changed predecessor metadata"
+    cmp -s "$TMP/refusal-baseline.journal" "$HOST_HOME/state/parent-route/ios.control-relaunch" || fail "refusal entered control lifecycle"
+    OUT=$(host_control "${REFUSAL_ARGS[@]}" --operation "$REFUSAL_OP" --previous "$REFUSAL_GEN"); RC=$?
+    expect_code 1 "$RC" "refusal replay must not dispatch: $OUT"
+    assert_contains "$OUT" 'already handled' "refusal replay opened another operation"
+    cp "$TMP/refusal-baseline.meta" "$HOST_HOME/state/parent-route/ios.meta"
+    printf 'alive\n' >"$TMP/herdr-state"
+    OUT=$(host_control launch ios claude pool-model-a medium herdr --operation "$REFUSAL_OP.corrected" --previous s-newer <<<"$(host_parent_record "$REFUSAL_OP.corrected" s-newer)"); RC=$?
+    expect_code 0 "$RC" "corrected operation refused after definitive refusal: $OUT"
+  done
+done
+pass "fresh launch and relaunch refusals persist prelaunch without changing predecessor or control evidence"
+
 # A busy episode may be running this very token: unknown, never a refusal.
 bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" ios 0 && : > "$3" && exec sleep 600' \
   _ "$ROOT" "$HOST_HOME/state/parent-route" "$TMP/host-episode" &
@@ -818,7 +859,7 @@ assert_present "$HOST_HOME/state/parent-route/ios.seat-operation.history1" "succ
 OUT=$(host_control relaunch ios claude pool-model-a medium --operation history1); RC=$?
 [ "$RC" -ne 0 ] || fail "an old refused token launched again"
 DISP=$(printf '%s\n' "$OUT" | sed -n 's/^seat_disposition=//p' | tail -1)
-assert_equals unknown "$(printf '%s\n' "$DISP" | jq -r .disposition)" "an unbound refusal released an existing supervisor's candidate"
+assert_equals prelaunch "$(printf '%s\n' "$DISP" | jq -r .disposition)" "verified refusal did not replay its prelaunch outcome"
 assert_contains "$OUT" "already handled" "a delayed token was treated as fresh"
 host_receipt verified.refusal launch prelaunch
 assert_equals "prelaunch false" "$(host_disposition verified.refusal)" "a durable verified refusal did not preserve its prelaunch outcome"
@@ -870,7 +911,7 @@ OUT=$(host_control relaunch ios claude pool-model-a medium --operation hostfence
   <<< "$(host_parent_record hostfence host-old)"); RC=$?
 expect_code 6 "$RC" "tracked host generation mismatch: $OUT"
 DISP=$(printf '%s\n' "$OUT" | sed -n 's/^seat_disposition=//p' | tail -1)
-assert_equals 'unknown false' "$(printf '%s\n' "$DISP" | jq -r '.disposition + " " + (.old_stopped | tostring)')" "the host mismatch authorized a predecessor stop"
+assert_equals 'prelaunch false' "$(printf '%s\n' "$DISP" | jq -r '.disposition + " " + (.old_stopped | tostring)')" "the fresh host mismatch did not retain its pre-stop refusal"
 perl -ni -e 'print unless /^spawn_gen=/' "$HOST_HOME/state/parent-route/ios.meta"
 OUT=$(host_control relaunch ios claude pool-model-a medium --expect-generation host-old); RC=$?
 expect_code 6 "$RC" "missing host generation binding: $OUT"
