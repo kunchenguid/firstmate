@@ -73,6 +73,14 @@ case "${1:-}" in
       esac
     done
     payload=${1:-}
+    if [ "${FM_FAKE_INTERRUPT_SEND_FAIL:-0}" = 1 ] && { [ "$payload" = C-c ] || [ "$payload" = Escape ]; }; then
+      printf '%s\n' "$payload" >> "$D/keys"
+      exit 1
+    fi
+    if [ "${FM_FAKE_EXIT_SEND_FAIL:-0}" = 1 ] && [ "$literal:$payload" = 1:/exit ]; then
+      printf '/exit\n' >> "$D/literal"
+      exit 1
+    fi
     if [ "$literal" = 1 ]; then
       case "$payload" in
         ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
@@ -3588,6 +3596,56 @@ test_host_prestop_journal_refusal_persists_prelaunch() {
   pass "pre-stop journal refusals persist prelaunch while interrupted operations stay unknown"
 }
 
+test_verified_do_exit_refusals_persist_only_before_delivery() {
+  local mode dir out rc expected gen receipt home
+  for mode in pending unknown unclassified interrupt send; do
+    dir=$(new_case "exit-refusal-$mode" sm71)
+    sm_case "$dir" sm71
+    home="$dir/home"
+    receipt="$home/state/sm71.seat-operation.candidate"
+    printf 'schema=fm-remote-seat-receipt.v1\noperation=candidate\nverb=relaunch\nrequested_generation=candidate\nprevious_generation=g-sm-old\nphase=received\n' >"$receipt"
+    expected=prelaunch
+    case "$mode" in
+      pending) printf draft >"$dir/fake/composer" ;;
+      unclassified) printf some-unrelated-process >"$dir/fake/command" ;;
+      interrupt)
+        expected=received
+        gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" sm71)
+        printf 'busy_gen=%s\n' "$gen" >>"$home/state/sm71.meta"
+        "$ROOT/bin/fm-busy-event.sh" apply "$home/state" sm71 busy --gen "$gen" --source claude-hook --event user-prompt-submit >/dev/null
+        ;;
+      send) expected=received ;;
+    esac
+    out=$(FM_REMOTE_SEAT_FRESH=1 FM_REMOTE_SEAT_OPERATION=candidate FM_SPAWN_SEAT_GENERATION=candidate \
+      FM_FAKE_COMPOSER_READ_FAIL="$( [ "$mode" = unknown ] && echo 1 )" \
+      FM_FAKE_INTERRUPT_SEND_FAIL="$( [ "$mode" = interrupt ] && echo 1 || echo 0 )" \
+      FM_FAKE_EXIT_SEND_FAIL="$( [ "$mode" = send ] && echo 1 || echo 0 )" \
+      run_control "$dir" sm71 relaunch --harness claude --model pool-model-a); rc=$?
+    expect_code 1 "$rc" "$mode exit refusal: $out"
+    assert_equals "$expected" "$(sed -n 's/^phase=//p' "$receipt")" "$mode classified delivery incorrectly"
+    assert_grep 'spawn_gen=g-sm-old' "$home/state/sm71.meta" "$mode changed predecessor generation"
+    if [ "$expected" = prelaunch ]; then
+      assert_no_grep /exit "$dir/fake/literal" "pre-delivery refusal attempted exit"
+      assert_no_grep C-c "$dir/fake/keys" "pre-delivery refusal attempted interrupt"
+      assert_no_grep Escape "$dir/fake/keys" "pre-delivery refusal attempted interrupt"
+      mkdir -p "$dir/smhome/state/parent-route"
+      cp "$receipt" "$dir/smhome/state/parent-route/sm71.seat-operation.candidate"
+      cp "$home/state/sm71.control-relaunch" "$dir/smhome/state/parent-route/sm71.control-relaunch"
+      out=$(run_existing_host "$dir" disposition sm71 --operation candidate)
+      assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "$mode journal demoted explicit refusal"
+      : >"$dir/fake/composer"
+      printf claude >"$dir/fake/command"
+      out=$(run_control "$dir" sm71 relaunch --harness claude --model pool-model-a); rc=$?
+      expect_code 0 "$rc" "corrected relaunch after $mode refusal: $out"
+    elif [ "$mode" = interrupt ]; then
+      assert_grep Escape "$dir/fake/keys" "interrupt case did not attempt delivery"
+    else
+      assert_grep /exit "$dir/fake/literal" "send case did not attempt delivery"
+    fi
+  done
+  pass "verified do_exit refusals persist prelaunch before delivery and preserve unknown after interrupt or send attempts"
+}
+
 test_control_terminalizes_all_observing_predecessor_receipts() {
   local dir out rc op receipt
   dir=$(new_case host-alias-stop sm68)
@@ -3613,7 +3671,7 @@ test_control_terminalizes_all_observing_predecessor_receipts() {
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_fractional_supervisor_startup_timeout_retains_the_launch|test_unpooled_supervisor_spawn_keeps_prior_success_semantics|test_existing_host_generations_recover_through_observing_operations|test_control_terminalizes_all_observing_predecessor_receipts|test_host_prelaunch_refusal_releases_candidate_for_corrected_launch|test_host_prestop_journal_refusal_persists_prelaunch|test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
+      test_fractional_supervisor_startup_timeout_retains_the_launch|test_unpooled_supervisor_spawn_keeps_prior_success_semantics|test_existing_host_generations_recover_through_observing_operations|test_control_terminalizes_all_observing_predecessor_receipts|test_host_prelaunch_refusal_releases_candidate_for_corrected_launch|test_host_prestop_journal_refusal_persists_prelaunch|test_verified_do_exit_refusals_persist_only_before_delivery|test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -3728,3 +3786,5 @@ test_host_prelaunch_refusal_releases_candidate_for_corrected_launch
 test_control_terminalizes_all_observing_predecessor_receipts
 
 test_host_prestop_journal_refusal_persists_prelaunch
+
+test_verified_do_exit_refusals_persist_only_before_delivery
