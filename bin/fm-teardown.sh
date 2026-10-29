@@ -3897,11 +3897,14 @@ t3_server_for_meta() {  # <task-meta> -> the verified server identity for this c
   local recorded
   recorded=$(fm_meta_get "$1" t3_server)
   if [ -z "$recorded" ]; then
-    if [ "$FORCE" = --force ]; then
+    recorded=$(fm_backend_t3code_adopt_server_for_thread "$(fm_meta_get "$1" t3_thread_id)") || recorded=
+    if [ -n "$recorded" ]; then
+      echo "warning: T3 creation server identity is missing; adopted the selected server after confirming the thread exists" >&2
+    elif [ "$FORCE" = --force ]; then
       recorded=$(fm_backend_t3code_server_identity) || return 1
-      echo "warning: T3 creation server identity is missing; --force authorizes cleanup using the selected server" >&2
+      echo "warning: T3 creation server identity is missing and thread ownership could not be verified; --force authorizes cleanup using the selected server" >&2
     else
-      echo "error: T3 creation server identity is missing; preserving the task and its worktree" >&2
+      echo "error: T3 creation server identity is missing and the thread is not present on the selected server; preserving the task and its worktree" >&2
       return 1
     fi
   fi
