@@ -144,6 +144,24 @@ mark_surface_reported() {  # <status-file> <reported-signature>
   status_presentation_marker_report "$(_hb_surfaced_path "$task")" "$2"
 }
 
+# Report a push edge on an endpoint with no task record once, as housekeeping.
+# The per-window marker keeps the note one-shot; the dedupe commit keeps the
+# same edge from being re-read on the next wait.
+push_leftover_endpoint() {  # <backend> <session> <record> <window> <to-status>
+  local backend=$1 session=$2 record=$3 window=$4 to=$5 marker reason
+  marker=$(fm_transition_marker "$STATE" .leftover-endpoint- "$window")
+  if [ -e "$marker" ]; then
+    triage_log "absorbed push $to (leftover endpoint already reported, no task record): $window"
+    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+    return
+  fi
+  reason="check: leftover endpoint $window ($backend: agent $to) - no task record owns it, so its work is already retired; housekeeping only, close it when convenient"
+  fm_wake_append check "leftover-endpoint:$window" "$reason" || exit 1
+  : > "$marker" || exit 1
+  fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+  wake "$reason"
+}
+
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
   local backend=$1 session=$2 record=$3 pane_id to detail window task reason span_record rest surface_end='' surface_ident='' note
@@ -153,6 +171,15 @@ handle_push_transition() {  # <backend> <session> <record>
   [ -n "$pane_id" ] || { sleep 1; return; }
   window=$(fm_backend_transition_target "$backend" "$session" "$pane_id")
   task=$(window_to_task "$window" "$STATE")
+  # An endpoint no surviving task record owns belongs to retired work: its
+  # task was torn down while the bounded wait was open, or the backend
+  # streamed an edge for a pane outside the subscribed set. There is no
+  # worker to recover, so it never raises a stall; the leftover is reported
+  # once as housekeeping and every later edge is only logged.
+  if [ "$(fm_backend_target_of_meta "$STATE/$task.meta" 2>/dev/null)" != "$window" ]; then
+    push_leftover_endpoint "$backend" "$session" "$record" "$window" "$to"
+    return
+  fi
   # A declared wait already names the human this transition would report: an
   # external dependency, or the captain a verified hold transferred the work to.
   # Either way the wait is durably recorded, so absorb the immediate escalation
