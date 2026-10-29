@@ -246,7 +246,7 @@ control_cleanup() {
   fi
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
-    relaunch_rollback || true
+    relaunch_rollback "$status" || true
   fi
   # Remove the dialog file while the lock is still held: once it is released,
   # the next lifecycle command for this task writes the same path.
@@ -1002,6 +1002,12 @@ relaunch_rollback() {
         cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
       fi
       journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
+      if [ "$1" -eq 1 ] && [ "${FM_REMOTE_SEAT_FRESH:-0}" = 1 ] && [ -n "$SEAT_OPERATION" ] \
+        && [ "$(fm_meta_get "$STATE/$ID.seat-operation.$SEAT_OPERATION" phase)" = received ] \
+        && [ "$(fm_meta_get "$STATE/$ID.seat-operation.$SEAT_OPERATION" old_stopped)" != true ]; then
+        fm_remote_seat_receipt_update "$STATE/$ID.seat-operation.$SEAT_OPERATION" "$SEAT_OPERATION" "$SEAT_GEN" \
+          phase=prelaunch || echo "error: could not retain the pre-stop refusal for $ID" >&2
+      fi
       echo 'relaunch_failure=prelaunch' >&2
       echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       ;;

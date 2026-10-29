@@ -291,6 +291,14 @@ SH
 make_mv_failure_stub() {  # <case-dir>
   cat > "$1/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FM_FAKE_PRESTOP_PHASE:-}" ]; then
+  for path in "$@"; do
+    if [ -f "$path" ] && grep -Fxq "phase=$FM_FAKE_PRESTOP_PHASE" "$path"; then
+      if [ "${FM_FAKE_PRESTOP_INTERRUPT:-0}" = 1 ]; then kill -TERM "$PPID"; exit 143; fi
+      exit 1
+    fi
+  done
+fi
 if [ -n "${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" ]; then
   for path in "$@"; do
     if [ -f "$path" ] && grep -Fqx 'phase=complete' "$path"; then
@@ -3530,6 +3538,56 @@ test_host_prelaunch_refusal_releases_candidate_for_corrected_launch() {
   pass "a definitive host-side prelaunch refusal releases its candidate and accepts a corrected launch"
 }
 
+test_host_prestop_journal_refusal_persists_prelaunch() {
+  local phase mode dir out rc receipt expected real_mv effect
+  . "$ROOT/tests/remote-herdr-fixture.sh"
+  real_mv=$(command -v mv)
+  for phase in noted stopping; do
+    for mode in refusal interrupted; do
+      dir=$(new_case "prestop-$phase-$mode" sm70)
+      sm_case "$dir" sm70
+      mkdir -p "$dir/smhome/data/.parent-route/sm70" "$dir/smhome/config"
+      cp "$dir/home/data/sm70/brief.md" "$dir/smhome/data/.parent-route/sm70/brief.md"
+      cp "$dir/home/config/fleet-seats" "$dir/smhome/config/fleet-seats"
+      install_remote_herdr_fixture "$dir/herdr" "$dir/herdr-state" "$dir/herdr-log" "$dir/herdr-fail" "$TMP_ROOT/prestop-$phase-$mode.sock"
+      out=$(run_existing_host "$dir" launch sm70 claude pool-model-a medium herdr --operation original); rc=$?
+      expect_code 0 "$rc" "initial host launch: $out"
+      cp "$dir/smhome/state/parent-route/sm70.meta" "$dir/before.meta"
+      cp "$dir/herdr-log" "$dir/before.log"
+      cp "$dir/smhome/data/.parent-route/sm70/brief.md" "$dir/before.brief"
+      make_mv_failure_stub "$dir"
+      expected=prelaunch
+      [ "$mode" != interrupted ] || expected=unknown
+      rc=0
+      out=$(FM_REAL_MV="$real_mv" FM_FAKE_PRESTOP_PHASE="$phase" FM_FAKE_PRESTOP_INTERRUPT="$( [ "$mode" = interrupted ] && echo 1 || echo 0 )" \
+        run_existing_host "$dir" relaunch sm70 claude pool-model-a medium --operation refused --previous original); rc=$?
+      [ "$rc" -ne 0 ] || fail "journal failure succeeded: $phase/$mode"
+      receipt="$dir/smhome/state/parent-route/sm70.seat-operation.refused"
+      if [ "$mode" = refusal ]; then
+        expect_code 1 "$rc" "definitive journal refusal: $out"
+        assert_equals prelaunch "$(sed -n 's/^phase=//p' "$receipt")" "pre-stop rollback did not persist prelaunch"
+      else
+        assert_equals received "$(sed -n 's/^phase=//p' "$receipt")" "interruption was reclassified as a refusal"
+      fi
+      cmp -s "$dir/before.meta" "$dir/smhome/state/parent-route/sm70.meta" || fail "pre-stop failure changed predecessor"
+      out=$(FM_REAL_MV="$real_mv" run_existing_host "$dir" disposition sm70 --operation refused)
+      assert_equals "$expected" "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "journal outcome did not replay ($phase/$mode): $out"
+      tail -n +"$(( $(wc -l < "$dir/before.log") + 1 ))" "$dir/herdr-log" >"$dir/effects.log"
+      for effect in 'pane send' 'pane write' 'workspace close' 'tab close'; do
+        assert_no_grep "$effect" "$dir/effects.log" "pre-stop rollback touched endpoint lifecycle"
+      done
+      cmp -s "$dir/before.brief" "$dir/smhome/data/.parent-route/sm70/brief.md" || fail "pre-stop rollback did not restore instructions"
+      if [ "$mode" = refusal ]; then
+        jq '.typed={} | .working={}' "$dir/herdr-state" >"$dir/dead"
+        mv "$dir/dead" "$dir/herdr-state"
+        out=$(FM_REAL_MV="$real_mv" run_existing_host "$dir" relaunch sm70 claude pool-model-a medium --operation corrected --previous original); rc=$?
+        expect_code 0 "$rc" "corrected relaunch after journal refusal: $out"
+      fi
+    done
+  done
+  pass "pre-stop journal refusals persist prelaunch while interrupted operations stay unknown"
+}
+
 test_control_terminalizes_all_observing_predecessor_receipts() {
   local dir out rc op receipt
   dir=$(new_case host-alias-stop sm68)
@@ -3555,7 +3613,7 @@ test_control_terminalizes_all_observing_predecessor_receipts() {
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_fractional_supervisor_startup_timeout_retains_the_launch|test_unpooled_supervisor_spawn_keeps_prior_success_semantics|test_existing_host_generations_recover_through_observing_operations|test_control_terminalizes_all_observing_predecessor_receipts|test_host_prelaunch_refusal_releases_candidate_for_corrected_launch|test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
+      test_fractional_supervisor_startup_timeout_retains_the_launch|test_unpooled_supervisor_spawn_keeps_prior_success_semantics|test_existing_host_generations_recover_through_observing_operations|test_control_terminalizes_all_observing_predecessor_receipts|test_host_prelaunch_refusal_releases_candidate_for_corrected_launch|test_host_prestop_journal_refusal_persists_prelaunch|test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -3668,3 +3726,5 @@ test_legacy_predecessors_remain_counted_without_socket_identity
 test_existing_host_generations_recover_through_observing_operations
 test_host_prelaunch_refusal_releases_candidate_for_corrected_launch
 test_control_terminalizes_all_observing_predecessor_receipts
+
+test_host_prestop_journal_refusal_persists_prelaunch
