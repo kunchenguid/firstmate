@@ -1,0 +1,5 @@
+# actionlint 1.7.3+ auto-detects this file. Declares the custom runner label so
+# the lint gate understands runs-on entries targeting the self-hosted ai-server.
+self-hosted-runner:
+  labels:
+    - ai-server
