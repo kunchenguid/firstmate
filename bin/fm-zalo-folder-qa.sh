@@ -38,6 +38,7 @@ CONFIG_FILE=${FM_ZALO_FOLDER_QA_CONFIG:-$FM_HOME/config/zalo-folder-qa.env}
 STATE_ROOT=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 STATE_DIR=$STATE_ROOT/zalo-folder-qa
 SEEN_DIR=$STATE_DIR/seen
+RUN_LOCK=$STATE_DIR/run.lock
 
 ZALO_API_ORIGIN=https://bot-api.zaloplatforms.com
 GRAPH_API_ORIGIN=https://graph.microsoft.com/v1.0
@@ -399,10 +400,14 @@ cmd_run() {
   load_config
   need jq
   need curl
-  need flock
   init_state
-  exec 9> "$STATE_DIR/run.lock"
-  flock -n 9 || die 'another folder-Q&A bridge is already running'
+  # shellcheck source=bin/fm-wake-lib.sh
+  FM_STATE_OVERRIDE="$STATE_DIR" . "$SELF_DIR/fm-wake-lib.sh"
+  fm_lock_try_acquire "$RUN_LOCK" || die 'another folder-Q&A bridge is already running'
+  trap 'fm_lock_release "$RUN_LOCK"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   verify_bot || die 'bot identity check failed'
   log 'ready for the configured group; data answers remain unavailable'
   while :; do

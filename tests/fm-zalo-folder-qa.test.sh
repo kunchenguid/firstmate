@@ -9,6 +9,7 @@ TOOL="$ROOT/bin/fm-zalo-folder-qa.sh"
 TMP_ROOT=$(fm_test_tmproot zalo-folder-qa)
 HOME_DIR="$TMP_ROOT/home"
 FAKEBIN="$TMP_ROOT/fakebin"
+NO_FLOCK_BIN="$TMP_ROOT/no-flock-bin"
 FAKE_LOG_DIR="$TMP_ROOT/curl-log"
 CONFIG_FILE="$HOME_DIR/config/zalo-folder-qa.env"
 REFRESH_FILE="$HOME_DIR/config/graph-refresh-token"
@@ -126,9 +127,9 @@ unset apply_fake_curl
 cat > "$FAKEBIN/mktemp" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$FAKE_RECEIPT_IO_MODE" in
-  mktemp-fail) exit 1 ;;
-  write-fail)
+case "$FAKE_RECEIPT_IO_MODE:$*" in
+  mktemp-fail:*'/seen/.seen.'*) exit 1 ;;
+  write-fail:*'/seen/.seen.'*)
     path=${1%XXXXXX}write-fail
     PATH=$ORIGINAL_PATH mkdir "$path" || exit 1
     printf '%s\n' "$path"
@@ -140,8 +141,8 @@ SH
 cat > "$FAKEBIN/ln" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$FAKE_RECEIPT_IO_MODE" in
-  ln-fail) exit 1 ;;
+case "$FAKE_RECEIPT_IO_MODE:$*" in
+  ln-fail:*'/seen/.seen.'*) exit 1 ;;
   *) PATH=$ORIGINAL_PATH exec ln "$@" ;;
 esac
 SH
@@ -211,6 +212,24 @@ run_tool() {
   FM_HOME="$HOME_DIR" \
   FM_ZALO_FOLDER_QA_CONFIG="$CONFIG_FILE" \
   PATH="$FAKEBIN:$ORIGINAL_PATH" \
+  "$TOOL" "$@"
+}
+
+run_tool_without_flock() {
+  local name resolved
+  rm -rf "$NO_FLOCK_BIN"
+  mkdir -m 700 "$NO_FLOCK_BIN"
+  for name in bash basename cat chmod date dirname id jq mkdir mv od ps readlink rmdir sed sh stat tr uname; do
+    resolved=$(PATH="$ORIGINAL_PATH" command -v "$name") \
+      || fail "no-flock fixture cannot resolve required command: $name"
+    ln -s "$resolved" "$NO_FLOCK_BIN/$name"
+  done
+  if PATH="$FAKEBIN:$NO_FLOCK_BIN" command -v flock >/dev/null 2>&1; then
+    fail 'no-flock fixture unexpectedly exposes flock'
+  fi
+  FM_HOME="$HOME_DIR" \
+  FM_ZALO_FOLDER_QA_CONFIG="$CONFIG_FILE" \
+  PATH="$FAKEBIN:$NO_FLOCK_BIN" \
   "$TOOL" "$@"
 }
 
@@ -497,6 +516,25 @@ test_run_rejects_bot_identity_before_polling() {
   pass 'run requires exact string bot identity and group capability'
 }
 
+test_run_acquires_portable_lock_without_flock() {
+  local output rc lock leftover
+  write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
+  reset_runtime
+  output=$(run_tool_without_flock run 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail 'terminal fake poll did not stop the no-flock run'
+  [ "$(call_count '/getMe')" -eq 1 ] || fail 'no-flock run did not verify the bot after locking'
+  [ "$(call_count '/getUpdates')" -eq 1 ] || fail 'no-flock run did not reach polling after locking'
+  [ "$(call_count '/sendMessage')" -eq 0 ] || fail 'no-flock run sent a message'
+  lock="$HOME_DIR/state/zalo-folder-qa/run.lock"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail 'no-flock run retained its portable lock'
+  for leftover in "$lock".owner.* "$lock".steal "$lock".steal.owner.*; do
+    [ ! -e "$leftover" ] && [ ! -L "$leftover" ] || fail 'no-flock run left lock ownership state behind'
+  done
+  case "$output" in *"$FAKE_ZALO_TOKEN"*|*"$FAKE_GROUP_ID"*) fail 'no-flock run exposed a private value' ;; esac
+  pass 'run acquires and releases the portable lock without flock'
+}
+
 test_run_never_sends_for_dm_wrong_group_or_malformed_poll() {
   local output rc event
   write_config "$FAKE_GROUP_ID" "$FAKE_DRIVE_ID" "$FAKE_FOLDER_ID"
@@ -641,6 +679,7 @@ fm_test_run \
   test_source_status_pins_drive_and_folder_without_freshness_claim \
   test_source_status_rejects_drive_folder_and_malformed_responses \
   test_run_rejects_bot_identity_before_polling \
+  test_run_acquires_portable_lock_without_flock \
   test_run_never_sends_for_dm_wrong_group_or_malformed_poll \
   test_run_sends_only_fixed_unavailable_once_and_deduplicates \
   test_run_stops_before_receipt_capacity_overflow \
