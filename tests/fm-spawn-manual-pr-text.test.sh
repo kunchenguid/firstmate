@@ -47,7 +47,7 @@ run_spawn() {  # <id> <args...>
   fm_test_run_spawn "$HOME_DIR" "$POOL_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR" "$@"
 }
 
-test_spawn_records_the_registered_pr_text() {
+test_spawn_launches_when_brief_and_registry_agree_on_pr_text() {
   local id out status
   id=pr-text-s1
   make_case record "$id" "no-mistakes pr=manual" --pr manual
@@ -79,7 +79,7 @@ test_spawn_refuses_a_pr_text_mismatch_before_launch() {
   pass "fm-spawn: a brief and registry that disagree on pr=manual refuse before launch in both directions"
 }
 
-test_spawn_records_the_registered_pr_text
+test_spawn_launches_when_brief_and_registry_agree_on_pr_text
 test_spawn_refuses_a_pr_text_mismatch_before_launch
 
 echo "# all fm-spawn-manual-pr-text tests passed"

@@ -619,9 +619,6 @@ EOF
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
-# Spawn and promotion refuse leftover Task-subsection placeholders through the
-# public brief/spawn/promote path. Filling both subsections lets the spawn
-# delivery checks proceed (the fake tmux still fails later).
 # pr=manual hands a no-mistakes project's PR title and body to the worker: the
 # registry token is carried into the brief's contract line, the pipeline's pr and
 # ci steps are skipped, and the worker writes and publishes the text itself.
@@ -804,6 +801,9 @@ STUB
   pass "fm-promote: a promoted no-mistakes worker receives the registered pr=manual contract "
 }
 
+# Spawn and promotion refuse leftover Task-subsection placeholders through the
+# public brief/spawn/promote path. Filling both subsections lets the spawn
+# delivery checks proceed (the fake tmux still fails later).
 test_spawn_and_promote_require_filled_task_subsections() {
   local rec home proj fakebin out status id brief meta intent_body spec_body authorized
   rec=$(make_home subsections)
