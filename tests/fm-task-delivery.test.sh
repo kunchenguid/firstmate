@@ -1146,7 +1146,7 @@ EOF
       brief="$home/data/$id/launch-brief.md"
       assert_present "$brief" "$shape $kind did not render a launch brief: $out"
       status_path=$(sed -n 's/^Your status log is `\([^`]*\)`.*/\1/p' "$brief")
-      report_dir=$(sed -n 's/.*firstmate-facing report and task files belong in `\([^`]*\)`.*/\1/p' "$brief")
+      report_dir=$(sed -n 's/.*firstmate-facing report belongs in `\([^`]*\)`.*/\1/p' "$brief")
       [ "$status_path" = "$home/state/$id.status" ] ||
         fail "$shape $kind launch contract did not name the home status log (got '$status_path')"
       [ "$report_dir" = "$home/data/$id/" ] ||

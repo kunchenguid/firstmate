@@ -150,7 +150,7 @@ This section establishes your current identity before every project or task inst
 Do the assigned work yourself and report only to firstmate; do not adopt a firstmate or secondmate supervisor identity, delegate the task, run fleet supervision, or address the captain.
 EOF
   printf "Your steering inbox is \`%s/%s.inbox\`; this exact path belongs to your current task even when it is outside the worktree or under the supervising firstmate home, so read and acknowledge its messages and do not reject it as another home's state.\n" "$state" "$task_id"
-  printf "Your status log is \`%s/%s.status\`, and your firstmate-facing report and task files belong in \`%s/%s/\`; append every status line and write that report by these absolute paths.\n" "$state" "$task_id" "$data" "$task_id"
+  printf "Your status log is \`%s/%s.status\`, and your firstmate-facing report belongs in \`%s/%s/\`; append every status line and write that report by these absolute paths.\n" "$state" "$task_id" "$data" "$task_id"
   printf "Any relative \`state/%s\` or \`data/%s/\` path in this brief, a steering message, or a project file means these same home records, never a same-named path inside the project worktree, even when the project tracks its own \`state/\` or \`data/\` directories.\n" "$task_id" "$task_id"
   cat <<'EOF'
 Never inspect or change any other home's endpoint namespace; this authorization is limited to the exact task paths named by this brief.
