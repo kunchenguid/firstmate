@@ -398,11 +398,15 @@ QUICK_JOBS='test-coverage invariants full-suite'
 # DOP-167 direction A: an outside PR without the label runs only the quick
 # checks and the Full suite verdict, which fails naming the label.
 test_outside_pr_without_label_runs_only_quick_checks() {
-  local action actual out
-  for action in opened synchronize reopened; do
-    actual=$(jobs_running_under action="$action" | tr '\n' ' ') || fail "could not resolve outside $action jobs"
-    [ "$actual" = "$QUICK_JOBS " ] \
-      || fail "an unlabelled outside PR ($action) must run only $QUICK_JOBS, ran: $actual"
+  local action association actual out
+  # The associations open fork PRs to firstmate carried on 2026-10-29.
+  for association in CONTRIBUTOR FIRST_TIME_CONTRIBUTOR NONE; do
+    for action in opened synchronize reopened; do
+      actual=$(jobs_running_under action="$action" association="$association" | tr '\n' ' ') \
+        || fail "could not resolve outside $association $action jobs"
+      [ "$actual" = "$QUICK_JOBS " ] \
+        || fail "an unlabelled outside PR ($association, $action) must run only $QUICK_JOBS, ran: $actual"
+    done
   done
   if out=$(run_full_suite_verdict); then
     fail "the Full suite verdict must fail on an unlabelled outside PR:"$'\n'"$out"
