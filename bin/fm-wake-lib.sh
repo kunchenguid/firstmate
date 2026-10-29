@@ -1441,10 +1441,10 @@ fm_lock_try_acquire() {
   fi
   fm_lock_remove_path "$lockdir" || true
   rc=1
+  # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     rc=0
     FM_LOCK_RECOVERED_PID=$FM_LOCK_SAVED_DISPLACED_PID
-    # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
   fi
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
