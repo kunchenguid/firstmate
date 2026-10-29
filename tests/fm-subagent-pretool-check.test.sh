@@ -237,12 +237,21 @@ test_stdin_transports_and_output_shapes() {
 
   rc=0
   : > "$OUT"; : > "$ERR"
+  printf '%s' '{"toolCall":{"name":"invoke_subagent"}}' \
+    | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" > "$OUT" 2> "$ERR" || rc=$?
+  [ "$rc" -eq 2 ] || fail "AGY-shaped stdin must deny, got exit $rc"
+  jq -e '.decision == "deny" and (.reason | startswith("[subagent-dispatch]"))' "$OUT" >/dev/null 2>&1 \
+    || fail "AGY deny must write a decision object on stdout: $(cat "$OUT")"
+
+  rc=0
+  : > "$OUT"; : > "$ERR"
   printf '%s' '{"tool_name":"Bash","tool_input":{"command":"ls"}}' \
     | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
       "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
   [ "$rc" -eq 0 ] || fail "Bash through stdin must allow, got exit $rc"
   [ ! -s "$OUT" ] && [ ! -s "$ERR" ] || fail "stdin allow wrote output"
-  pass "both stdin transports classify correctly and Claude's deny keeps stdout empty"
+  pass "stdin transports (Claude, Grok, AGY) classify correctly and Claude's deny keeps stdout empty"
 }
 
 test_malformed_transport_fails_open() {

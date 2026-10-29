@@ -1,4 +1,4 @@
-# Verification: the agy (Antigravity CLI) crewmate/scout adapter
+# Verification: the agy (Antigravity CLI) adapter
 
 Active empirical facts for firstmate's agy adapter.
 The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.agents/skills/harness-adapters/SKILL.md) owns the operating facts through [`references/harness/agy.md`](../../.agents/skills/harness-adapters/references/harness/agy.md); this record owns how they were established and what is still unproven.
@@ -7,8 +7,8 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
-| Verified | 2026-09-10 |
+| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12), and primary supervision, secondmate support, and separated `>` composer and background-task tray classification were verified on `agy 1.4.5` (2026-10-22) |
+| Verified | 2026-09-10 (refreshed 2026-10-22 on `agy 1.4.5`) |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
 | Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |
@@ -133,16 +133,17 @@ $ herdr agent get w2:p1 --session fm-lab-firstmate-agy-ad-1599574-8823
 
 Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy`), so `fm_backend_herdr_pane_agent_state` returns `live` for every registered agy status and no exit-detection hardening was needed.
 The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
-agy stays out of the session-lock name vocabulary in `bin/fm-session-lock-lib.sh`, where the other crewmate-only adapters are also absent.
+`agy` is also registered in `bin/fm-session-lock-lib.sh` so Antigravity CLI can hold the session lock when acting as a primary or secondmate supervisor.
 
-## Composer: unknown by design
+## Composer: identity-gated separated `>` pair
 
-Byte-level capture of the idle pane shows a bare unstyled `>` between two full-width `─` rules, with an unstyled `? for shortcuts` cell and a dim (`SGR 2`) model cell in the status row below.
-The shared classifier reads that bare `>` as `unknown` under the dead-shell rule, never `empty`.
-Steering still confirms delivery: the Herdr submit core leads with the native `idle`-to-`working` transition, which agy performs, and the delivery footer regex covers the tmux path.
+Byte-level capture of the idle pane shows a leading `>` row between two full-width `─` rules, with an unstyled `? for shortcuts` cell and a dim (`SGR 2`) model cell in the status row below; when one or more background `run_command` tasks are active, `agy` renders a `─`-bounded task tray (`  ● [HH:MM:SS] <cmd> running`) immediately below the composer's bottom `─` rule and above `? for shortcuts` (verified live on `agy 1.4.5`).
+Because a bare `>` row is a shell prompt glyph under the dead-shell rule, `bin/fm-composer-lib.sh` classifies `agy`'s composer through the shared separated-pair identity+structure conjunction (`_fm_composer_pi_verdict`, backed by Herdr's `agent get` and `fm_tmux_composer_identity` in `bin/fm-tmux-lib.sh`): an `agy` identity with a valid `>`-led separator pair (preserving that pair above any immediately adjacent `● [HH:MM:SS] ... running` task-tray block) reads `empty` when `idle` or `done` with no text after `>`, `pending` when draft text follows `>` or continues on wrapped rows inside the pair, and `unknown` when `working` or when identity or the separator pair is absent.
+This allows `fm-watch.sh`'s away-mode injector and `fm-task-inbox.sh`'s steering doorbell to prove an idle `agy` primary, secondmate, or worker composer `empty` (with or without active background tasks) while refusing dead shells, bare `>` prompts, and half-typed drafts (`pending`).
+Because `agy` exposes no out-of-band composer-buffer RPC, reading the `─`-bounded `>` composer row and `● [HH:MM:SS] <cmd> running` background-task tray from the rendered pane is recorded as pinned rendered-surface adapter debt against `agy 1.4.5`.
+Steering also confirms delivery through the native `idle`-to-`working` transition on Herdr and the delivery footer regex on tmux.
 agy renders the busy footer late for that confirm loop - about 1.5 s after Enter for a short steer and 4-5 s for a realistic longer brief, measured live on `agy 1.2.1` (2026-09-12) against the shared budget's 3 x 0.4 s - so `bin/fm-send.sh` gives agy typed targets a longer default submit-confirm budget (20 retries, about 8 s at the default cadence); an explicit `FM_SEND_RETRIES` still wins and every other harness keeps the shared 3-retry default.
-`tests/fm-send-agy-confirm.test.sh` pins the raised default and `tests/fm-agy-harness.test.sh` pins the Herdr transition path.
-This is the cursor precedent, not a gap to patch in shared code.
+`tests/fm-send-agy-confirm.test.sh` pins the raised default and `tests/fm-agy-harness.test.sh` and `tests/fm-composer-lib.test.sh` pin the separated composer classification and Herdr transition path.
 
 ## Supervised task: spawn, steer, relaunch, and exit through the new path
 
@@ -153,12 +154,30 @@ Same-copy relaunch held: `bin/fm-control.sh relaunch --note` replaced the worker
 Exit held: `bin/fm-control.sh exit` stopped the worker, the registry returned `agent_not_found`, and the pane remained a lone shell in the worktree with all work intact.
 No automatic quota failover was exercised or claimed; every handoff above was an explicit supervised relaunch.
 
+## PreToolUse hooks and delegation tools
+
+Antigravity CLI and Antigravity 2.0 discover project lifecycle hooks in `.agents/hooks.json`.
+When Antigravity runs as a primary session, its built-in in-process subagent tools (`invoke_subagent`, `define_subagent`, `send_message`, `manage_subagents`) bypass Treehouse worktrees, Herdr/tmux tabs, and Firstmate fleet supervision records.
+A tracked `PreToolUse` hook in `.agents/hooks.json` forwards tool calls to `bin/fm-subagent-pretool-check.sh`.
+The hook receives a JSON payload on stdin containing `toolCall.name`, matches delegation-shaped stems, and returns `{"decision":"deny","reason":"..."}` on stdout with exit 0.
+The primary scope check (`bin/fm-primary-scope-lib.sh`) keeps the hook inert in task worktrees, preserving crewmate delegation tools while enforcing the fleet boundary in primary homes.
+
+## Primary integration: background-notify supervision and Stop-hook backstop
+
+Antigravity CLI (agy) runs as a verified Firstmate primary using its tracked background `run_command` tool (`WaitMsBeforeAsync`) and reactive wakeup system, backed by the lifecycle `Stop` hook in `.agents/hooks.json` (`docs/supervision-protocols/agy.md`).
+When fleet supervision is active, the primary session arms `bin/fm-watch-arm.sh` via `run_command` (`WaitMsBeforeAsync: 1000`), which confirms a fresh watcher beacon (`watcher: started ...` or `watcher: attached ...`), moves into Antigravity's background task manager, and wakes the session out-of-band when an actionable wake exits the watcher.
+At each turn boundary where the execution loop terminates with `terminationReason: "NO_TOOL_CALL"` (or `"model_stop"`), the tracked `Stop` hook runs `bin/fm-turnend-guard-agy.sh` as a fast non-blocking backstop.
+When a healthy watcher cycle is running, supervision is inactive, or the session is in away mode (`state/.afk`), the hook returns `{"decision": "allow"}` immediately without blocking the prompt.
+When unread wakes remain queued in `state/.wake-queue` at turn end, or when active tasks are in flight with no healthy watcher cycle, the hook returns `{"decision": "continue", "reason": "..."}` on stdout with exit 0 so the session drains or re-arms before ending the turn.
+Consecutive hook-driven continuations are bounded by `FM_AGY_TURNEND_LOOP_CEILING` (default 180), and consecutive missing-watcher repair continuations are bounded by `FM_AGY_TURNEND_BLOCK_BUDGET` (default 3) before failing open.
+Session lock integration in `bin/fm-session-lock-lib.sh` recognizes `agy` in contiguous process ancestry.
+Hermetic regression coverage lives in `tests/fm-agy-primary.test.sh`.
+
 ## What is still unproven
 
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
-No primary or secondmate behavior was built or tested, and none is claimed.
 
 ## Refreshing this record
 
@@ -166,5 +185,6 @@ Run the portable suite and the live guard after any agy upgrade, because the pro
 
 ```
 bin/fm-test-run.sh tests/fm-agy-harness.test.sh
+bin/fm-test-run.sh tests/fm-agy-primary.test.sh
 FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
 ```
