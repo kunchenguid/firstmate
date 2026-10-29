@@ -206,7 +206,7 @@ resolve_review_base() {
   fi
   if [ -z "$mb_origin" ] || [ "$mb_local" = "$mb_origin" ] \
     || { [ -n "$mb_local" ] && git -C "$WT" merge-base --is-ancestor "$mb_origin" "$mb_local" 2>/dev/null; }; then
-    printf '%s' "$DEFAULT"
+    printf '%s' "refs/heads/$DEFAULT"
     return 0
   fi
   if [ -z "$mb_local" ] || git -C "$WT" merge-base --is-ancestor "$mb_local" "$mb_origin" 2>/dev/null; then
@@ -214,7 +214,7 @@ resolve_review_base() {
     return 0
   fi
   echo "note: $DEFAULT and origin/$DEFAULT meet $COMPARE_REF at unrelated commits, so neither is the tighter anchor; anchoring on $DEFAULT" >&2
-  printf '%s' "$DEFAULT"
+  printf '%s' "refs/heads/$DEFAULT"
 }
 
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
@@ -231,15 +231,15 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
     fi
   fi
 else
-  BASE="$DEFAULT"
+  BASE="refs/heads/$DEFAULT"
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
-echo "diff base: $BASE"
+echo "diff base: ${BASE#refs/heads/}"
 if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
-  echo "no changes vs $BASE"
+  echo "no changes vs ${BASE#refs/heads/}"
   exit 0
 fi
 

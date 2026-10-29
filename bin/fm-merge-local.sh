@@ -150,10 +150,7 @@ local_head_matches || { echo "error: branch $BRANCH differs from the recorded lo
 # The landing branch: the task's recorded base when it has one, else the
 # project's default branch. A recorded base is read from the task record only.
 if [ -n "$BASE_BRANCH" ]; then
-  if [ "${BASE_BRANCH#-}" != "$BASE_BRANCH" ] || ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
-    echo "error: task $ID has an invalid recorded base branch '$BASE_BRANCH'" >&2
-    exit 1
-  fi
+  fm_base_branch_valid "$BASE_BRANCH" local-only none "fm-merge-local.sh $ID" || exit 1
   git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BASE_BRANCH" >/dev/null || {
     echo "error: task $ID lands on its recorded base branch '$BASE_BRANCH', but $PROJ has no local branch of that name; create or check it out there, then retry" >&2
     exit 1
@@ -165,7 +162,8 @@ fi
 
 # The project's main checkout must be on the landing branch and clean, so the
 # fast-forward lands predictably (firstmate never writes here otherwise).
-cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
+cur=$(git -C "$PROJ" symbolic-ref HEAD 2>/dev/null || echo "")
+cur=${cur#refs/heads/}
 if [ "$cur" != "$DEFAULT" ]; then
   if [ -n "$BASE_BRANCH" ]; then
     echo "error: $PROJ is on '$cur', but task $ID lands on its recorded base branch '$BASE_BRANCH'; check out $BASE_BRANCH in $PROJ before retrying, because the base named at intake is the landing branch and is not re-pointed here" >&2
@@ -180,7 +178,7 @@ if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
 fi
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
-before=$(git -C "$PROJ" rev-parse "$DEFAULT")
+before=$(git -C "$PROJ" rev-parse --verify "refs/heads/$DEFAULT^{commit}")
 if ! git -C "$PROJ" merge-base --is-ancestor "$before" "$MERGE_HEAD"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
@@ -231,7 +229,7 @@ MERGE_META_LOCK=
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
-after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+after=$(git -C "$PROJ" rev-parse --short "refs/heads/$DEFAULT")
 fm_lock_release "$MERGE_PROJECT_LOCK" || true
 MERGE_PROJECT_LOCK=
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.

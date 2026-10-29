@@ -2109,7 +2109,7 @@ teardown_note_dirty_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT landing_ref unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -2146,12 +2146,10 @@ validate_worktree_teardown_safety() {
         return 1
       }
       DEFAULT=$BASE_BRANCH
-      landing_ref=refs/heads/$BASE_BRANCH
     else
       DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-      landing_ref=$DEFAULT
     fi
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$landing_ref" -- 2>/dev/null); then
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "refs/heads/$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
