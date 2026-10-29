@@ -6,6 +6,12 @@
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin tip, launches a clean origin-less
 # pool as-is, or stops when a configured origin is unusable.
+# A home that opts in with config/spawn-base-primary-checkout starts a
+# local-only ship or a scout from the primary checkout's default branch when it
+# strictly contains origin's tip; the opt-in cases below also prove that a
+# publishing mode, a named base branch, a diverged or trailing primary, and an
+# unclean slot keep the rules above, and that the review starts where the slot
+# was planted.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -1174,6 +1180,204 @@ test_scout_base_branch_refused_on_gerrit_forge() {
   pass "a based scout on a forge=gerrit project is refused at spawn"
 }
 
+# A local-only project lands work with bin/fm-merge-local.sh: the primary
+# checkout's default branch advances and nothing is pushed, so origin stays at
+# the tip the slot was allocated from while that branch moves on.
+make_local_landing_case() { # <name> <id> <landings>
+  local name=$1 id=$2 landings=$3 case_dir home project origin pool fakebin frozen n
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b main "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  frozen=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$frozen"
+
+  n=1
+  while [ "$n" -le "$landings" ]; do
+    printf 'landed locally %s\n' "$n" > "$project/landed-$n.txt"
+    git -C "$project" add "landed-$n.txt"
+    git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "land $n"
+    n=$((n + 1))
+  done
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$frozen|main"
+}
+
+opt_in_primary_checkout_base() {
+  : > "$HOME_DIR/config/spawn-base-primary-checkout"
+}
+
+# Push a commit to origin that the primary checkout never pulls.
+push_forge_only_commit() {
+  local publisher="$CASE_DIR/forge-publisher"
+  git clone --quiet "file://$CASE_DIR/origin.git" "$publisher"
+  printf 'pushed straight to the forge\n' > "$publisher/forge-only.txt"
+  git -C "$publisher" add forge-only.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm forge-only
+  git -C "$publisher" push --quiet origin main
+}
+
+spawn_delivery() { # <id> <no-mistakes|direct-PR|local-only|scout>
+  if [ "$2" = scout ]; then
+    run_spawn "$1" --scout
+  else
+    run_spawn "$1" --mode "$2" --yolo off
+  fi
+}
+
+# Without the opt-in the refresh is the origin reset pinned above, even for the
+# two deliveries the opt-in moves: a local-only ship and a scout still start
+# from origin's tip however far the primary checkout's branch has moved.
+test_default_keeps_origin_tip_while_the_primary_leads() {
+  local rec id out status contract
+  for contract in local-only scout; do
+    id="pool-default-$contract-r1"
+    rec=$(make_local_landing_case "default-$contract" "$id" 3)
+    read_case_record "$rec"
+
+    out=$(spawn_delivery "$id" "$contract")
+    status=$?
+    expect_code 0 "$status" "a $contract spawn without the opt-in should launch"$'\n'"$out"
+    [ "$(git -C "$PROJECT_DIR" rev-parse main)" != "$INITIAL_SHA" ] \
+      || fail "fixture did not advance the primary checkout past origin's tip"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+      || fail "without the opt-in a $contract spawn moved off origin's tip"
+    [ ! -e "$POOL_DIR/landed-3.txt" ] \
+      || fail "without the opt-in a $contract spawn started from the primary checkout's branch"
+    assert_not_contains "$out" "note: pooled worktree" \
+      "without the opt-in the $contract refresh printed a base note"
+  done
+  pass "without the opt-in a local-only ship or a scout still starts from origin's tip while the primary leads"
+}
+
+# With the opt-in the base follows the delivery: a local-only ship or a scout
+# starts from the primary checkout's branch when it strictly contains origin's
+# tip, and every other case keeps origin's tip - either publishing mode, a
+# primary that has diverged (reported in a note), and a primary that trails
+# origin. The slot's base and the commit the captain's review starts from must
+# be the same commit, so each case also commits on the slot and runs the
+# opted-in review.
+test_opt_in_base_follows_the_delivery_and_the_review_follows_the_base() {
+  local shape contract publishes id rec out status head expected review base_line review_start landings
+  for shape in leading diverged trailing; do
+    for contract in no-mistakes direct-PR local-only scout; do
+      id="pool-opt-in-$shape-$contract-r1"
+      publishes=0
+      case $contract in no-mistakes | direct-PR) publishes=1 ;; esac
+      landings=2
+      [ "$shape" != trailing ] || landings=0
+      rec=$(make_local_landing_case "opt-in-$shape-$contract" "$id" "$landings")
+      read_case_record "$rec"
+      opt_in_primary_checkout_base
+      [ "$shape" = leading ] || push_forge_only_commit
+
+      out=$(spawn_delivery "$id" "$contract")
+      status=$?
+      expect_code 0 "$status" "$shape/$contract: an opted-in spawn should launch"$'\n'"$out"
+      head=$(git -C "$POOL_DIR" rev-parse HEAD)
+      if [ "$shape" = leading ] && [ "$publishes" = 0 ]; then
+        expected=$(git -C "$PROJECT_DIR" rev-parse main)
+        [ "$expected" != "$INITIAL_SHA" ] || fail "$shape/$contract: fixture did not advance the primary checkout"
+      else
+        expected=$(git -C "$POOL_DIR" rev-parse origin/main)
+      fi
+      [ "$head" = "$expected" ] || fail "$shape/$contract: the slot started at $head, not $expected"
+      if [ "$shape" = diverged ] && [ "$publishes" = 0 ]; then
+        assert_contains "$out" "main in the primary checkout has diverged from origin/main (ahead by 2, behind by 1); starting from origin's tip" \
+          "$shape/$contract: the spawn did not report the divergence it set aside"
+      else
+        assert_not_contains "$out" "note: pooled worktree" "$shape/$contract: the spawn printed a base note"
+      fi
+
+      git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+      printf 'the work under review\n' > "$POOL_DIR/task-change.txt"
+      git -C "$POOL_DIR" add task-change.txt
+      git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'task work'
+      review=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+        "$ROOT/bin/fm-review-diff.sh" "$id" --stat 2>/dev/null)
+      base_line=$(printf '%s\n' "$review" | sed -n 's/^diff base: //p')
+      [ -n "$base_line" ] || fail "$shape/$contract: the review printed no base"
+      review_start=$(git -C "$POOL_DIR" merge-base "$base_line" "fm/$id" 2>/dev/null) \
+        || fail "$shape/$contract: the review base '$base_line' shares no history with the branch"
+      [ "$review_start" = "$head" ] \
+        || fail "$shape/$contract: the slot started at $head but the review starts at $review_start (anchored on $base_line)"
+      assert_contains "$review" 'task-change.txt' "$shape/$contract: the review lost the task's own work"
+      assert_not_contains "$review" 'landed-' "$shape/$contract: the review carries a local landing the task never authored"
+      assert_not_contains "$review" 'forge-only.txt' "$shape/$contract: the review carries an origin commit the task never authored"
+      if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+        printf '# opted-in %s/%s: slot=%s review base=%s\n' "$shape" "$contract" "$head" "$base_line"
+      fi
+    done
+  done
+  pass "with the opt-in only a local-only ship or a scout leaves origin's tip, for a primary that strictly contains it, and the review starts where the slot did"
+}
+
+# A named base branch is delivered against origin, so the opt-in leaves it on
+# origin's copy even when the primary checkout's branch of that name is ahead.
+test_opt_in_keeps_a_named_base_branch_on_origin() {
+  local rec id out status parent local_tip
+  id='pool-opt-in-named-base-r1'
+  rec=$(make_case opt-in-named-base "$id")
+  read_case_record "$rec"
+  opt_in_primary_checkout_base
+  publish_feature_branch feature/hub
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  parent=$(git -C "$PROJECT_DIR" rev-parse origin/feature/hub)
+  local_tip=$(git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit-tree "$parent^{tree}" -p "$parent" -m 'local only on feature/hub')
+  git -C "$PROJECT_DIR" update-ref refs/heads/feature/hub "$local_tip"
+  brief_with_base "$id" feature/hub
+
+  out=$(run_spawn "$id" --scout --base-branch feature/hub)
+  status=$?
+  expect_code 0 "$status" "an opted-in scout on a named base should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
+    || fail "the opt-in moved a named base branch off origin/feature/hub"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$local_tip" ] \
+    || fail "the opt-in started a named base branch from the primary checkout's copy"
+  pass "with the opt-in a named base branch still starts from origin's copy"
+}
+
+# The clean-slot refusal still comes first: an unclean slot is refused as
+# uncommitted work, untouched, before any base is chosen or reported.
+test_opt_in_still_refuses_an_unclean_slot_first() {
+  local rec id out status before
+  id='pool-opt-in-dirty-r1'
+  rec=$(make_local_landing_case opt-in-dirty "$id" 2)
+  read_case_record "$rec"
+  opt_in_primary_checkout_base
+  push_forge_only_commit
+  printf 'work the captain has not committed\n' > "$POOL_DIR/uncommitted.txt"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an opted-in spawn launched from an unclean slot"
+  assert_contains "$out" "refusing to discard uncommitted work" \
+    "the unclean slot was not refused as uncommitted work"
+  assert_not_contains "$out" "has diverged" \
+    "the unclean slot was reported as a divergence instead of as uncommitted work"
+  assert_grep 'work the captain has not committed' "$POOL_DIR/uncommitted.txt" \
+    "the opted-in spawn discarded uncommitted work"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "the opted-in spawn moved an unclean slot's base"
+  pass "with the opt-in an unclean slot is still refused, untouched, before any base is chosen"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
@@ -1202,5 +1406,9 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_default_keeps_origin_tip_while_the_primary_leads
+test_opt_in_base_follows_the_delivery_and_the_review_follows_the_base
+test_opt_in_keeps_a_named_base_branch_on_origin
+test_opt_in_still_refuses_an_unclean_slot_first
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
