@@ -4,7 +4,7 @@
 # The bridge accepts messages only from the configured Zalo group.
 # Until a workbook schema, isolated data handler, allowed-query policy,
 # freshness threshold, and per-file evidence contract are defined, every
-# eligible message receives only the fixed unavailable response.
+# newly observed eligible message receives only the fixed unavailable response.
 # No message content is sent to Microsoft Graph or to an executable handler.
 #
 # Usage:
@@ -13,20 +13,20 @@
 #   fm-zalo-folder-qa.sh handle       # one Zalo event JSON on stdin; no reply
 #   fm-zalo-folder-qa.sh run          # foreground long poll and fixed replies
 #
-# Configuration is a mode-600 data file selected by FM_ZALO_FOLDER_QA_CONFIG,
-# defaulting to $FM_HOME/config/zalo-folder-qa.env.
-# It accepts exactly these KEY=value records:
+# Configuration and supported boundaries are documented at:
+#   docs/configuration.md#dormant-zalo-folder-bridge-configzalo-folder-qaenv
+# The private config defaults to $FM_HOME/config/zalo-folder-qa.env;
+# FM_ZALO_FOLDER_QA_CONFIG selects another file.
 #
-#   ZALO_BOT_TOKEN=<private Bot Mac Louis token>
-#   ZALO_BOT_ID=<exact bot ID returned by getMe>
-#   ZALO_GROUP_ID=<exact private chat.id of TỒN KHO ÂM-DƯƠNG>
-#   GRAPH_DRIVE_ID=<exact private Graph drive ID>
-#   GRAPH_FOLDER_ID=<exact private Graph item ID for Check tồn kho âm>
-#   GRAPH_REFRESH_TOKEN_FILE=<absolute mode-600 Files.Read refresh-token file>
-#   MAX_SEEN_RECEIPTS=<required integer from 1 through 1000000>
-#
-# source-status verifies only the configured drive/folder identity.
+# check validates the configuration without network access.
+# handle classifies one event from stdin without network access.
+# source-status calls Graph only to verify the configured folder identity.
 # It always reports unavailable because no freshness or evidence policy exists.
+# run is Linux-only and long-polls the configured Zalo group for fixed replies.
+# It never sends question content to Graph,
+# never invokes an executable handler or Firstmate authority,
+# and never activates itself.
+# Read the configuration reference before first use.
 set -euo pipefail
 
 umask 077
