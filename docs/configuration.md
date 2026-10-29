@@ -2084,6 +2084,8 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 Without it, launches are not capped.
 [`bin/fm-fleet-seats.sh`](../bin/fm-fleet-seats.sh) owns the accounting mechanics and exit codes; this section owns the operator contract.
 
+Fleet seat timing uses fixed bounds: lock waits are limited to 30 seconds, remote seat requests wait up to 90 seconds for an answer, and the primary watcher starts remote seat-serving passes at least 30 seconds apart. Each remote call is limited to 20 seconds; a remote that fails to answer is skipped for 120 seconds before another attempt.
+
 ```json
 {
   "pools": [
@@ -3416,11 +3418,6 @@ FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion f
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
 FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs, and live ones whose start time (or, for the watch lock, process identity) no longer matches the holder's recorded value, have no age grace
-FM_FLEET_SEATS_LOCK_WAIT=30   # seconds a seat reservation waits for the fleet seat lock before refusing (docs/configuration.md "Fleet seat pools")
-FM_FLEET_SEATS_REMOTE_WAIT=90   # seconds a remote home's seat request waits for the primary's answer before refusing
-FM_FLEET_SEATS_SERVE_INTERVAL=30   # seconds between the primary watcher's remote seat-serving passes
-FM_FLEET_SEATS_SERVE_TIMEOUT=20   # bound on one remote seat-serving call
-FM_FLEET_SEATS_SERVE_BACKOFF=120   # seconds a remote that failed to answer is skipped before the next attempt
 FM_GUARD_GRACE=300      # beacon freshness threshold for guard verdicts, arm health checks, and the primary turn-end guard; see docs/turnend-guard.md for model-aware exceptions
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3
 FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800   # milliseconds the --claude turn-end guard waits for watcher health, an open Stop auto-arm generation claim, or a fresh epoch before deciding recovery ownership or failure progression
