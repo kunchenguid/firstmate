@@ -3898,9 +3898,11 @@ test_authority_persistence_refuses_rebound_metadata() {
   write_task_meta "$dir" task-a
   run_check_entry "$dir" task-a "$url_a" >/dev/null 2> "$dir/seed.err" \
     || fail "rebind: could not arm the original poll"
+  # The hook runs inside the merge, which holds the task control lock, so it
+  # re-records the way a lock holder does rather than waiting on its parent.
   cat > "$dir/rebind.sh" <<SH
 #!/usr/bin/env bash
-FM_TEST_JQ="$REAL_JQ" "$PR_CHECK" task-a "$url_b" >/dev/null
+FM_PR_CHECK_MERGE=1 FM_TEST_JQ="$REAL_JQ" "$PR_CHECK" task-a "$url_b" >/dev/null
 SH
   chmod +x "$dir/rebind.sh"
   set +e
@@ -4002,10 +4004,12 @@ test_authority_retirement_preserves_replacement() {
   queue_merge "$dir" "$url_a"
   # The replacement runs inside the watcher, whose environment names the real
   # firstmate root, so restore the fixture root every other arming here uses.
+  # The watcher holds the task control lock here, so the re-arm re-records the
+  # way a lock holder does rather than waiting on its parent.
   cat > "$dir/replace-authority.sh" <<SH
 #!/usr/bin/env bash
 export FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_JQ="$REAL_JQ"
-"$PR_CHECK" task-a "$url_b" >/dev/null
+FM_PR_CHECK_MERGE=1 "$PR_CHECK" task-a "$url_b" >/dev/null
 (
   FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \\
   FM_TEST_GH_GRAPHQL_QUEUED=true \\
