@@ -233,6 +233,7 @@ case_dir="$TMP_ROOT/spawn"
 fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
 # A drifted install: the version is read into the task record and named in a
 # readiness refusal.
+# shellcheck disable=SC2016 # $1 expands in the generated fake binary
 printf '#!/bin/sh\n[ "${1:-}" = --version ] && echo 0.8.0\nexit 0\n' > "$fakebin/mcode"
 chmod +x "$fakebin/mcode"
 # The spawn readiness gate reads the pane: serve a chosen mcode screen and
