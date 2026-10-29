@@ -984,11 +984,6 @@ test_list_live_scopes_to_this_home() {
   pass "fm_backend_rex_list_live: home-scoped blocks only, nothing when unreachable"
 }
 
-if [ -n "${FM_TEST_ONLY:-}" ]; then
-  "$FM_TEST_ONLY"
-  exit 0
-fi
-
 # --- attention marks (opt-in) ---------------------------------------------------
 
 # mark_case: a task tab whose foreground is a harness at pid 4242 under a shell

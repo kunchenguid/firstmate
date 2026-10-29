@@ -132,6 +132,10 @@ SEAT_OP=
 SEAT_PREV=-
 EXPECT_GENERATION=
 SEAT_LIFECYCLE_ID=
+HOST_LIFECYCLE_LOCK=
+host_lifecycle_release() {
+  [ -z "$HOST_LIFECYCLE_LOCK" ] || fm_lock_release "$HOST_LIFECYCLE_LOCK" || true
+}
 prelaunch_die() {
   if [ -n "$SEAT_OP" ]; then
     if [ -e "$(receipt_path "$SEAT_LIFECYCLE_ID")" ] || [ -L "$(receipt_path "$SEAT_LIFECYCLE_ID")" ] \
@@ -408,7 +412,7 @@ seat_enter() {
     seat_emit unknown false false
     die "another lifecycle episode for remote secondmate $id is running on this host"
   fi
-  trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"' EXIT
+  trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"; host_lifecycle_release' EXIT
   if [ -z "$SEAT_OP" ] && host_pools_enabled; then
     prelaunch_die "this home has fleet seat pools, so a supervisor $verb must come from the parent's seat operation (bin/fm-remote-secondmate-relaunch.sh or fm-spawn); nothing was changed"
   fi
@@ -726,7 +730,7 @@ cmd_disposition() {
     seat_emit unknown false false
     return 0
   fi
-  trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"' EXIT
+  trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"; host_lifecycle_release' EXIT
   seat_decide "$id"
 }
 
@@ -891,7 +895,7 @@ cmd_update() {
 
 cmd_retire() {
   local id=$1 force='' rc=0 generation target proof pending='' tmp expected='' replay record operation
-  local pending_record='' pending_target='' pending_rc=''
+  local pending_record='' pending_target='' pending_rc='' reconciled=0 partial=0 retained_generation retained_target retired marker_path
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -935,20 +939,61 @@ cmd_retire() {
       pending_rc=$(printf '%s\n' "$pending_record" | jq -r '.exit_code // empty')
     fi
   fi
-  validate_home "$id" yes || rc=$?
-  if [ "$rc" -eq 2 ]; then
-    # A missing home is "already retired" only when no pending record binds
-    # this generation. With one, re-prove the endpoint absent (the same
-    # non-vacuous rule the first attempt used) and publish the evidence that
-    # attempt could not. Without this, an interrupted retirement stranded its
-    # counted seat behind an evidence-free success.
-    [ -n "$pending_record" ] || { printf 'already-retired: %s\n' "$id"; return 0; }
+  if [ -n "$pending_record" ]; then
+    [ ! -L "$TARGET_HOME" ] || die "remote secondmate home is unsafe"
+    if [ -e "$TARGET_HOME" ]; then
+      [ -d "$TARGET_HOME" ] || die "remote secondmate home is unsafe"
+      for marker_path in "$TARGET_HOME/state" "$CONTROL_STATE" "$(meta_path "$id")" "$TARGET_HOME/.fm-secondmate-home"; do
+        [ ! -L "$marker_path" ] || die "remote retirement retry path is unsafe"
+      done
+      if [ -e "$TARGET_HOME/.fm-secondmate-home" ]; then
+        [ "$(cat "$TARGET_HOME/.fm-secondmate-home")" = "$id" ] || die "remote home belongs to another secondmate"
+      fi
+      if [ -e "$(meta_path "$id")" ]; then
+        retained_generation=$(fm_meta_get "$(meta_path "$id")" spawn_gen)
+        [ "$retained_generation" = "$expected" ] || die "generation-mismatch: refusing to retire a successor"
+        retained_target=$(fm_meta_get "$(meta_path "$id")" window)
+        [ -z "$retained_target" ] || [ "$retained_target" = "$pending_target" ] \
+          || die "remote retirement pending history does not match this endpoint"
+      fi
+    fi
     generation=$expected
     target=$pending_target
     rc=${pending_rc:-0}
-    fm_backend_source herdr || return 1
-    fm_backend_herdr_endpoint_confirmed_gone "$target" || return 1
-  else
+    if [ ! -f "$TARGET_HOME/.fm-secondmate-home" ] || [ ! -f "$TARGET_HOME/AGENTS.md" ] \
+      || [ ! -d "$TARGET_HOME/bin" ] || [ ! -f "$(meta_path "$id")" ]; then
+      partial=1
+    fi
+    if [ "$partial" = 1 ]; then
+      fm_backend_source herdr || return 1
+      fm_backend_herdr_endpoint_confirmed_gone "$target" || return 1
+      reconciled=1
+    fi
+    if [ "$reconciled" = 1 ]; then
+      retired="${TARGET_HOME}.retiring.$generation"
+      [ ! -L "$retired" ] || die "remote retirement staging path is unsafe"
+      if [ -e "$retired" ]; then
+        [ -d "$retired" ] || die "remote retirement staging path is unsafe"
+        rm -rf -- "$retired" || return 1
+      fi
+    fi
+    if [ "$reconciled" = 1 ] && [ -d "$TARGET_HOME" ]; then
+      mkdir -m 700 "$retired" || return 1
+      if ! mv -- "$TARGET_HOME" "$retired/home"; then
+        rmdir "$retired" 2>/dev/null || true
+        return 1
+      fi
+      rm -rf -- "$retired" || return 1
+    fi
+  fi
+  if [ "$reconciled" = 0 ]; then
+    rc=0
+    validate_home "$id" yes || rc=$?
+    if [ "$rc" -eq 2 ]; then
+      [ -z "$pending_record" ] || return 1
+      printf 'already-retired: %s\n' "$id"
+      return 0
+    fi
     [ -z "$force" ] || [ "$force" = --force ] || usage
     remote_endpoint_require "$id"
     generation=$(fm_meta_get "$(meta_path "$id")" spawn_gen)
@@ -959,7 +1004,7 @@ cmd_retire() {
     # Keep the endpoint binding fixed through teardown and the final absence read.
     fm_supervisor_lifecycle_enter "$CONTROL_STATE" "$id" 30 || die "remote retirement lifecycle is busy"
     SEAT_LIFECYCLE_ID=$id
-    trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"' EXIT
+    trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"; host_lifecycle_release' EXIT
     [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" = "$generation" ] \
       || die "generation-mismatch: refusing to retire a successor"
     # Include operations claimed before durable host history was introduced.
@@ -1004,11 +1049,13 @@ cmd_retire() {
       FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
         FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
         FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
+        FM_REMOTE_RETIRE_STAGE="${TARGET_HOME}.retiring.$generation" \
         "$SCRIPT_DIR/fm-teardown.sh" "$id" --force || rc=$?
     else
       FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
         FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
         FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
+        FM_REMOTE_RETIRE_STAGE="${TARGET_HOME}.retiring.$generation" \
         "$SCRIPT_DIR/fm-teardown.sh" "$id" || rc=$?
     fi
     [ "$rc" -eq 0 ] || [ "$rc" -eq 4 ] || return "$rc"
@@ -1036,6 +1083,17 @@ cmd_retire() {
   printf 'seat_retirement=%s\n' "$(cat "$proof")"
   return "$rc"
 }
+
+case "${1:-}" in
+  launch|relaunch|retire)
+    validate_id "${2:-}"
+    host_history_require
+    fm_sm_live_require_locks || die "remote lifecycle locks are unavailable"
+    HOST_LIFECYCLE_LOCK="$HOST_HISTORY/$2.lifecycle.lock"
+    fm_lock_acquire_wait_max "$HOST_LIFECYCLE_LOCK" 30 || die "remote host lifecycle is busy"
+    trap 'host_lifecycle_release' EXIT
+    ;;
+esac
 
 case "${1:-}" in
   launch)

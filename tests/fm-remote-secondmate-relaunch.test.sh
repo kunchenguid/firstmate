@@ -970,6 +970,7 @@ cat > "$RETIRE_BIN/fm-teardown.sh" <<'SH'
   exit 9
 }
 touch "$FM_TEST_RETIRE_INVOKED" || exit 1
+[ "${FM_TEST_RETIRE_REFUSE:-0}" != 1 ] || exit 8
 rm -rf -- "$FM_TEST_RETIRE_HOME" || exit 1
 [ -z "${FM_TEST_RETIRE_KEEP_ENDPOINT:-}" ] || exit 0
 touch "$FM_TEST_RETIRE_ABSENT" || exit 1
@@ -1100,3 +1101,48 @@ assert_absent "$RETIRE_PENDING" "the lost-slot retirement retained its pending r
 pass "host retirement publishes pending evidence before destruction and finishes interrupted retries"
 
 echo "ALL TESTS PASSED"
+
+for partial_shape in missing-marker missing-checkout missing-route renamed successor foreign live; do
+  retirement_reset "retire-$partial_shape" "retirement.partial-$partial_shape" "partial-$partial_shape"
+  OUT=$(FM_TEST_RETIRE_CRASH_AFTER_REMOVE=1 host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
+  expect_code 1 "$RC" "fixture must leave an interrupted retirement"
+  mkdir -p "$RETIRE_HOME/state/parent-route" "$RETIRE_HOME/bin"
+  printf '%s\n' "$RETIRE_ID" >"$RETIRE_HOME/.fm-secondmate-home"
+  : >"$RETIRE_HOME/AGENTS.md"
+  printf 'spawn_gen=%s\n' "$RETIRE_GEN" >"$RETIRE_HOME/state/parent-route/$RETIRE_ID.meta"
+  case "$partial_shape" in
+    missing-marker) rm "$RETIRE_HOME/.fm-secondmate-home" ;;
+    missing-checkout) rm -rf "${RETIRE_HOME:?}/bin" "$RETIRE_HOME/AGENTS.md" ;;
+    missing-route) rm "$RETIRE_HOME/state/parent-route/$RETIRE_ID.meta" ;;
+    renamed) mkdir "$RETIRE_HOME.retiring.$RETIRE_GEN"; mv "$RETIRE_HOME" "$RETIRE_HOME.retiring.$RETIRE_GEN/home" ;;
+    successor) printf 'spawn_gen=successor\n' >"$RETIRE_HOME/state/parent-route/$RETIRE_ID.meta" ;;
+    foreign) printf 'another-mate\n' >"$RETIRE_HOME/.fm-secondmate-home" ;;
+    live) rm "$RETIRE_ABSENT" "$RETIRE_HOME/.fm-secondmate-home" ;;
+  esac
+  OUT=$(host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
+  case "$partial_shape" in
+    successor|foreign|live)
+      [ "$RC" -ne 0 ] || fail "unsafe partial retirement was accepted: $partial_shape"
+      assert_present "$RETIRE_HOME" "refusal deleted the partial home"
+      assert_absent "$RETIRE_PROOF" "refusal published completion"
+      ;;
+    *)
+      expect_code 0 "$RC" "partial-home retry failed: $OUT"
+      assert_absent "$RETIRE_HOME" "partial-home retry left the home"
+      assert_absent "$RETIRE_HOME.retiring.$RETIRE_GEN" "partial-home retry left staged deletion"
+      assert_present "$RETIRE_PROOF" "partial-home retry omitted its proof"
+      assert_absent "$RETIRE_PENDING" "partial-home retry retained pending evidence"
+      ;;
+  esac
+done
+pass "pending retirement reconciles partial homes and refuses successors, foreign homes, and live endpoints"
+
+retirement_reset retire-intact retirement.intact intact
+OUT=$(FM_TEST_RETIRE_REFUSE=1 host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 8 "$RC" "fixture must retain an intact refused home"
+touch "$RETIRE_ABSENT"
+OUT=$(FM_TEST_RETIRE_REFUSE=1 host_retirement retire "$RETIRE_ID" --force --expect-generation "$RETIRE_GEN"); RC=$?
+expect_code 8 "$RC" "intact retry must still honor normal teardown refusals"
+assert_present "$RETIRE_HOME" "pending evidence bypassed intact-home teardown checks"
+assert_absent "$RETIRE_PROOF" "intact-home refusal published completion"
+pass "pending evidence does not bypass teardown checks for intact homes"
