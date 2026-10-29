@@ -127,6 +127,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - run: echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -172,6 +173,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - run: echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -222,6 +224,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - run: echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
       - name: Install pinned ShellCheck
         run: |
           set -eu
