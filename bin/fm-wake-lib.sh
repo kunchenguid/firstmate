@@ -125,8 +125,13 @@ fm_pid_identity() {
   # host's grant owner as dead, discard the grant, and refuse its drain.
   # bin/fm-extension.mjs's pidIdentity pins the same zone. On a /proc-less host
   # outside UTC, an identity recorded before this pin may read as reused for one
-  # upgrade window; this is an accepted bounded upgrade-window residual that the
-  # restart /updatefirstmate performs after a successful update clears.
+  # upgrade window; this is an accepted bounded upgrade-window residual. The
+  # watch lock's next claim clears it, because fm_lock_holder_alive reads that
+  # watcher as dead and the replaced watcher stands down at its next poll. The
+  # autoarm abandonment proof already reclaims a mismatched claim, at the cost of
+  # the one-extra-continuation residual docs/turnend-guard.md describes. Only the
+  # supervise-daemon lock (fm_afk_daemon_owns_supervision, daemon_pid_matches)
+  # keeps the residual by design.
   out=$(COLUMNS=10000 LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
@@ -286,7 +291,7 @@ fm_supervision_model() {
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
-    claude|cursor) printf 'autoarm\n' ;;
+    claude|cursor|agy) printf 'autoarm\n' ;;
     pi|pi-signed|omp) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
@@ -597,18 +602,36 @@ fm_lock_prepare_owner() {
 # True while the lock's recorded holder <pid> is alive. A record that carries
 # the holder's start time is held only while that live pid still has it: macOS
 # and Linux both hand a dead holder's pid to unrelated processes, and pid
-# liveness alone would then read the lock as held forever. A record without a
-# start time, or a live pid whose start time cannot be read right now, keeps
-# the pid-liveness answer, so only a proven mismatch frees a lock. The pid is
-# re-read after the start time so a record rewritten in between (the bounded
-# wait's handoff) is never judged against another holder's start time.
+# liveness alone would then read the lock as held forever. The watch lock is
+# additionally held only while its recorded pid-identity still recomputes for
+# the pid, so a watcher whose identity was recorded in a format this code no
+# longer renders - the fm_pid_identity UTC-pin residual - is replaced rather
+# than stranding every successor beside it. Only the watch lock gets that
+# check because only the watcher stands down on its own once a successor owns
+# its lock; the supervise daemon also records a pid-identity on its lock but
+# never re-checks ownership, so reclaiming its lock would run two live daemons
+# at once. A missing record, or a live pid whose value cannot be read
+# right now, keeps the pid-liveness answer, so only a proven mismatch frees a
+# lock.
 fm_lock_holder_alive() {
-  local lockdir=$1 pid=$2 recorded current
+  local lockdir=$1 pid=$2
   fm_pid_alive "$pid" || return 1
-  recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
+  _fm_lock_record_matches "$lockdir" "$pid" pid-start fm_pid_start_time || return 1
+  [ "$lockdir" = "$STATE/.watch.lock" ] || return 0
+  _fm_lock_record_matches "$lockdir" "$pid" pid-identity fm_pid_identity
+}
+
+# _fm_lock_record_matches <lockdir> <pid> <record-file> <probe-function>
+# False only when <record-file> is recorded and <probe-function> <pid> now
+# reads a different value. The pid is re-read after the record so a record
+# rewritten in between (the bounded wait's handoff) is never judged against
+# another holder's value.
+_fm_lock_record_matches() {
+  local lockdir=$1 pid=$2 record=$3 probe=$4 recorded current
+  recorded=$(cat "$lockdir/$record" 2>/dev/null || true)
   [ -n "$recorded" ] || return 0
   [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$pid" ] || return 0
-  current=$(fm_pid_start_time "$pid" 2>/dev/null) || return 0
+  current=$("$probe" "$pid" 2>/dev/null) || return 0
   [ -n "$current" ] || return 0
   [ "$current" = "$recorded" ]
 }
