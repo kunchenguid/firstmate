@@ -2627,20 +2627,21 @@ kiro_model_validate() {  # <kiro-bin> <model>
 }
 
 # kiro's hook commands are single-token absolute paths, so a hook path carrying
-# whitespace cannot be delivered as one token under either interpretation - a
-# shell splits it and an argv split does the same, and no quoting fixes both.
-# kiro has no second state source, so the seeded busy record would never clear
-# and the supervisor would read the worker as provably working forever. Refuse
-# alongside the model check, before any worktree or pane exists, and name the
-# path. The physical resolution is what gets embedded, so that is what is
-# checked; an unresolvable state dir falls back to the configured string.
+# whitespace or a shell-special character cannot be delivered as one token under
+# both interpretations - a shell splits or expands it, an argv split does not,
+# and no quoting fixes both. kiro has no second state source, so the seeded
+# busy record would never clear and the supervisor would read the worker as
+# provably working forever. Refuse alongside the model check, before any
+# worktree or pane exists, and name the path. The physical resolution is what
+# gets embedded, so that is what is checked; an unresolvable state dir falls
+# back to the configured string.
 kiro_hook_path_validate() {  # <state-dir> <id>
   local state=$1 id=$2 real
   real=$(cd "$state" 2>/dev/null && pwd -P) || real=$state
   [ -n "$real" ] || real=$state
   case "$real/$id.kiro-home" in
-    *[[:space:]]*)
-      echo "error: kiro hook scripts would live under '$real/$id.kiro-home', whose path contains whitespace; kiro hook commands must be a single unquoted token, so point FM_HOME or FM_STATE_OVERRIDE at a whitespace-free path" >&2
+    *[[:space:]\'\"\\\$\`\;\&\|\<\>\(\)\*\?\[\]\{\}\!]*)
+      echo "error: kiro hook scripts would live under '$real/$id.kiro-home', whose path contains whitespace or a shell-special character; kiro hook commands must be a single unquoted token, so point FM_HOME or FM_STATE_OVERRIDE at a path free of both" >&2
       return 1 ;;
   esac
   return 0

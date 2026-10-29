@@ -1205,7 +1205,7 @@ rovo is likewise verified for crewmate and scout launches ONLY, refused for a se
 
 agy is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no hook surface and no primary supervision protocol; [`docs/verification/agy.md`](verification/agy.md) owns that evidence, including the spawn-time worktree trust pre-registration through `bin/fm-agy-trust.sh` and Herdr's native agy pane recognition.
 kiro (Kiro CLI, V2 engine only) is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason; it is claude-shaped, so its per-task turn-end and busy hooks live in a firstmate-owned agent config the spawn writes under `state/<id>.kiro-home` and reaches by relocating `KIRO_HOME` (never the worktree's own `.kiro/`), with the `--trust-all-tools` modal suppressed by a seeded `chat.disableTrustAllConfirmation` setting; [`docs/verification/kiro.md`](verification/kiro.md) owns that evidence, and the v3/KAS engine is out of scope and unsupported on Amazon Linux 2.
-A kiro hook command must be one unquoted token, so a kiro spawn refuses before launch when that per-task home path contains whitespace and asks for a whitespace-free `FM_HOME` or `FM_STATE_OVERRIDE`.
+A kiro hook command must be one unquoted token, so a kiro spawn refuses before launch when that per-task home path contains whitespace or a shell-special character (such as a quote or `$`) and asks for an `FM_HOME` or `FM_STATE_OVERRIDE` free of them.
 
 devin is verified for crewmate and scout launches only; a secondmate is refused because Devin has no verified primary supervision protocol.
 
