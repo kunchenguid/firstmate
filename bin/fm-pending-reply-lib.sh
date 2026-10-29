@@ -761,7 +761,6 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   fi
   fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
   fm_pending_reply_set "$rec" resolved_via "$via" || return 1
-  rm -f -- "$(fm_pending_reply_request_path "$state" "$corr")"
   # The record is resolved either way; a failed close stays retryable from the
   # watcher tick rather than turning a settled request back into a failure.
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
@@ -1231,7 +1230,8 @@ fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
 # Close the durable status decision a previous escalation opened for <corr_id>.
 # Idempotent, and safe to retry until it succeeds: it appends the closing line
 # only while that exact keyed decision is still open in
-# bin/fm-classify-lib.sh's fold. Records that never escalated are left untouched.
+# bin/fm-classify-lib.sh's fold. It also drops a resolved record's full-request
+# sidecar. Records that never escalated are otherwise left untouched.
 fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   # Serialized per correlation so a resolution and an escalation cannot interleave.
   # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
@@ -1260,6 +1260,10 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
+  # A resolved record no longer needs the full request text for recovery. It is
+  # dropped here, the one path every resolve and every later tick of a resolved
+  # record reaches, so an interrupted resolve still converges.
+  rm -f -- "$(fm_pending_reply_request_path "$state" "$corr")"
   escalated=$(fm_pending_reply_get "$rec" escalated_epoch)
   [ -n "$escalated" ] || return 0
   closed=$(fm_pending_reply_get "$rec" escalation_closed_epoch)
@@ -1574,7 +1578,8 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Print, one per line, the records among <record-path>... that the tick has work
 # for, reading every record once in a single awk process instead of forking
 # per record. A resolved record needs work only while an escalation it opened
-# is still unclosed: for every other resolved record the tick's per-record path
+# is still unclosed or its full-request sidecar is still on disk: for every
+# other resolved record the tick's per-record path
 # (fm_pending_reply_close_escalation) is a no-op that still pays a lock and
 # several forks, and records are never pruned, so that cost grew with the store.
 # Every other record - any phase but resolved, no phase at all, or one awk
@@ -1592,7 +1597,10 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
         else if (index(line, "escalation_closed_epoch=") == 1) closed = substr(line, 25)
       }
       close(path)
-      if (rc < 0 || phase != "resolved" || (escalated != "" && closed == "")) print path
+      if (rc < 0 || phase != "resolved" || (escalated != "" && closed == "")) { print path; next }
+      n = split(path, parts, "/")
+      request = substr(path, 1, length(path) - length(parts[n])) "." parts[n] ".request"
+      if ((getline line < request) >= 0) { close(request); print path }
     }
   '
 }
@@ -1630,8 +1638,9 @@ fm_pending_reply_tick() {  # <state-dir>
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
     if [ "$phase" = resolved ]; then
-      # Cheap no-op unless an escalation for this record is still open; this is
-      # the retry that makes the close converge after a transient write failure.
+      # Cheap no-op unless an escalation for this record is still open or its
+      # request sidecar remains; this is the retry that makes the close and the
+      # sidecar removal converge after a transient write failure.
       fm_pending_reply_close_escalation "$state" "$corr" || true
       continue
     fi

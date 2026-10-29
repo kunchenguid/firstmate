@@ -422,6 +422,12 @@ test_partial_resolve_write_blocks_firing() {
     [ "$(phase_of "$state" "$corr")" = resolved ] \
       || fail "partial resolve should leave phase resolved, got $(phase_of "$state" "$corr")"
     [ ! -s "$hook_log" ] || fail "recovery was sent after a partial resolve"
+    # Simulate an exit between phase=resolved and the sidecar removal: a later
+    # watcher pass must still drop the full request text.
+    printf 'leftover request\n' > "$(fm_pending_reply_request_path "$state" "$corr")"
+    fm_pending_reply_tick "$state"
+    [ ! -e "$(fm_pending_reply_request_path "$state" "$corr")" ] \
+      || fail "a later tick must remove a resolved record's leftover request file"
 
     corr=$(fm_pending_reply_create "$home" "$state" "hibit" "partial resolve before escalation")
     fm_pending_reply_mark_delivered "$state" "$corr"
@@ -436,6 +442,12 @@ test_partial_resolve_write_blocks_firing() {
     if grep -qF "blocked [key=pending-reply-$corr]" "$status"; then
       fail "escalation must not publish after a partial resolve"
     fi
+    [ -e "$(fm_pending_reply_request_path "$state" "$corr")" ] \
+      || fail "setup: the interrupted resolve should leave the request file"
+    fm_pending_reply_try_resolve "$state" "$corr" \
+      || fail "a retried resolve of a resolved record should succeed"
+    [ ! -e "$(fm_pending_reply_request_path "$state" "$corr")" ] \
+      || fail "a retried resolve must remove a resolved record's request file"
   ) || exit 1
   pass "a resolve that fails after committing resolved still blocks repost and escalation"
 }
