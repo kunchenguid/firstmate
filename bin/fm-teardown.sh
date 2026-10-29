@@ -1820,7 +1820,7 @@ ensure_commit_object() {
 patch_id_for_commit() {
   local commit=$1
   git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
+    | git patch-id --verbatim 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
 }
 

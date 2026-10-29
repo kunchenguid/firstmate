@@ -1924,6 +1924,20 @@ test_changed_extension_and_watcher_regressions_are_selected() {
   pass "extension, process-event, and watcher changes select their existing regressions"
 }
 
+test_coverage_guard_uses_c_order_under_localized_locale() {
+  local candidate selected='' out tmp
+  for candidate in en_US.UTF-8 en_US.utf8; do
+    if locale -a | grep -Fx "$candidate" >/dev/null; then selected=$candidate; break; fi
+  done
+  [ -n "$selected" ] || { printf 'skip: en_US UTF-8 locale unavailable\n'; return; }
+  tmp=$(fm_test_tmproot fm-test-run-comm-locale)
+  out=$(LC_ALL="$selected" "$RUNNER" --check-coverage 2>"$tmp/err") \
+    || fail "localized coverage verification failed: $(cat "$tmp/err")"
+  assert_no_grep 'sorted order' "$tmp/err" "localized comm rejected C-sorted inputs"
+  assert_contains "$out" 'FM_TEST_COVERAGE ok' "coverage guard omitted result"
+  pass "coverage comparisons retain C ordering under en_US UTF-8"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit
@@ -1974,3 +1988,5 @@ test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
 
 test_changed_extension_and_watcher_regressions_are_selected
+
+test_coverage_guard_uses_c_order_under_localized_locale
