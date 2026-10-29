@@ -463,7 +463,7 @@ setup_remote_case() {  # <case-dir> <id> <ssh-mode>
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
-cat > /dev/null
+stdin_payload=$(cat)
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
@@ -493,14 +493,14 @@ case "${rargs[1]:-}" in
     fi
     printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\ntarget=fm-remote:2ndmate-%s\nspawn_gen=%s\n' "${rargs[2]}" "${FM_FAKE_HOST_GENERATION:-g-initial}"
     ;;
-  send)
+  send-stdin)
     if [ "${FM_FAKE_CHANGE_GENERATION:-}" = 1 ]; then
       perl -pi -e 's/^remote_spawn_gen=.*/remote_spawn_gen=g-new/' "$FM_FAKE_REMOTE_META"
     fi
     # Model the live remote mate: act on the instruction and report back on the
     # parent channel, carrying the correlation token the request embedded.
     if [ -n "${FM_FAKE_ANSWER_STATUS:-}" ]; then
-      corr=$(printf '%s' "${rargs[3]:-}" | grep -oE 'corr=[0-9a-f]{16}' | head -1)
+      corr=$(printf '%s' "$stdin_payload" | grep -oE 'corr=[0-9a-f]{16}' | head -1)
       [ -z "$corr" ] || printf 'done [%s]: open records written down\n' "$corr" \
         >> "$FM_FAKE_ANSWER_STATUS"
     fi
@@ -553,7 +553,7 @@ test_remote_mate_restarts_over_the_transport_hop() {
   [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high --expect-generation g-initial" ] \
     || fail "the host-local relaunch did not carry the parent's resolved profile: $relaunch_line"
   # The persist request crossed the SAME hop before the restart did.
-  [ "$(grep -n '^fm-remote-secondmate-control.sh send' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
+  [ "$(grep -n '^fm-remote-secondmate-control.sh send-stdin' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
      -lt "$(grep -n '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1 | cut -d: -f1)" ] \
     || fail "the remote mate was restarted before it was asked to persist"$'\n'"$(cat "$dir/ssh.log")"
   pass "T6 a remote mate restarts through the host-local control plane over the fm-on hop"

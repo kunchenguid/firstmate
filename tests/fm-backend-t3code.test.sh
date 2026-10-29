@@ -2629,6 +2629,8 @@ test_t3_secondmate_missing_thread_reproves_close_before_replacement() {
   local thread=mcp:0b1c2d3e-5f6a-4b7c-8d9e-789abcdef012 root state out
   t3_case secondmate-missing completed
   t3_world "$(t3_thread_json "$thread" completed true)"
+  printf '{"pools":[]}\n' > "$CONFIG/fleet-seats"
+  mkdir -p "$CASE_DIR/home/state" "$CASE_DIR/home/data"
   root="$CASE_DIR/fake-root"
   mkdir -p "$root/bin"
   printf '#!/usr/bin/env bash\nprintf "SPAWN %%s\\n" "$*" >> "%s"\n' "$CASE_DIR/spawns" > "$root/bin/fm-spawn.sh"
@@ -2651,10 +2653,10 @@ fm_secondmate_liveness_relaunch "$1" smgone && echo relaunched=yes || echo "rela
   assert_grep "SPAWN smgone --secondmate" "$CASE_DIR/spawns" "the guarded secondmate spawn runs after the proven close"
   : > "$CASE_DIR/spawns"
   out=$(run_relaunch "$CASE_DIR/state-fail" 'w.failTools = { t3_thread_read: { code: "unavailable", message: "read unavailable" } }')
-  assert_contains "$out" "relaunched=no status=skipped reason=could not prove the old t3code endpoint $thread closed" "an unproved close must stop recovery: $out"
+  assert_contains "$out" "relaunched=no status=skipped reason=the recorded incarnation or its endpoint changed since it was probed (now unreadable); left for the next check" "an unreadable endpoint recheck must stop recovery: $out"
   [ ! -s "$CASE_DIR/spawns" ] || fail "no replacement may be spawned after an unproved close, got $(cat "$CASE_DIR/spawns")"
   assert_grep "t3_thread_id=$thread" "$CASE_DIR/state-fail/smgone.meta" "the endpoint record is kept"
-  assert_grep failed "$CASE_DIR/state-fail/.secondmate-relaunch-smgone" "the refused attempt is recorded in the relaunch ledger"
+  assert_absent "$CASE_DIR/state-fail/.secondmate-relaunch-smgone" "a recheck refusal was recorded as a relaunch attempt"
   pass "secondmate liveness backend=t3code: a missing thread re-proves its archive before replacement, and an unproved close spawns nothing"
 }
 

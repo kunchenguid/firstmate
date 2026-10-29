@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-afk-launch.sh
 . "$ROOT/bin/fm-afk-launch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-afk-rex-origin)
 FM_AFK_LAUNCH_STATE=$TMP_ROOT
