@@ -409,7 +409,7 @@ t_activity_after_done_and_idle_inbox() {
   sleep 300 &
   local holder=$!
   now=$(date +%s)
-  printf 'state=idle ts=%s\n' "$((now - 20))" >"$d/state/t12.busy-state"
+  printf 'state=busy ts=%s\n' "$((now - 20))" >"$d/state/t12.busy-state"
   printf 'done [at=%s]: PR https://example.test/pr/2\n' "$((now - 10))" >"$d/state/t12.status"
   clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t12 --kind ship --state "$d/state" --harness codex \

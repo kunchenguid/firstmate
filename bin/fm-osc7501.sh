@@ -39,10 +39,10 @@
 #   unhandled <id>.inbox/*.msg with an idle-or-silent busy record reads as
 #     working "Steering received"
 #   a failed/done/paused declaration yields to activity after it: once the
-#   watcher sees a turn start (busy after non-busy) stamped later, the
-#   declaration is retired and the busy record and inbox map as above, and a
-#   later unhandled inbox message reads as "Steering received"; an open
-#   decision or blocker always wins
+#   watcher sees a busy record stamped later, the declaration is retired and
+#   the busy record and inbox map as above, and a later unhandled inbox
+#   message reads as "Steering received"; an open decision or blocker always
+#   wins
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
@@ -311,7 +311,6 @@ osc_native() {
 
 LIBS_LOADED=0
 OSC_TURN_AT=0
-OSC_LAST_BS=
 osc_load_libs() {
   [ "$LIBS_LOADED" = 1 ] && return 0
   # shellcheck source=bin/fm-classify-lib.sh
@@ -333,7 +332,7 @@ osc_inbox_since() {
 
 # osc_plan sets W_STATE, W_KIND, W_MSG; returns 1 when nothing should be
 # emitted (no signal yet, or the busy record is unknown). OSC_TURN_AT keeps the
-# start of the latest turn seen across polls.
+# newest busy record stamp seen across polls.
 osc_plan() { # <task> <kind> <state>
   local task=$1 kind=$2 state_dir=$3 line verb note held rec bs bts since=0
   W_STATE=
@@ -344,8 +343,7 @@ osc_plan() { # <task> <kind> <state>
   bs=$(printf '%s\n' "$rec" | sed -n 's/^state=//p' | tail -1)
   bts=$(printf '%s\n' "$rec" | sed -n 's/^ts=//p' | tail -1)
   case "$bts" in '' | *[!0-9]*) bts=0 ;; esac
-  if [ "$bs" = busy ] && [ "$OSC_LAST_BS" != busy ]; then OSC_TURN_AT=$bts; fi
-  OSC_LAST_BS=$bs
+  if [ "$bs" = busy ] && [ "$bts" -gt "$OSC_TURN_AT" ]; then OSC_TURN_AT=$bts; fi
   line=$(status_current_line "$state_dir/$task.status" "$kind" 2>/dev/null)
   verb=$(status_line_verb "$line" 2>/dev/null) || verb=
   note=$(status_line_note "$line" 2>/dev/null) || note=
