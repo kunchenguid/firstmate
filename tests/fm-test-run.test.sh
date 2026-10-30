@@ -1537,7 +1537,8 @@ test_stop_is_scoped_to_one_run() {
   b_out="$tmp/b.out"
   a_fix="$tmp/fixture-a.pid"
   b_fix="$tmp/fixture-b.pid"
-  FM_STOP_MARK=a TMPDIR="$tmp" "$runner" "$sleeper" >"$a_out" 2>&1 &
+  # The run and --stop use different time zones, as a harness and an agent may.
+  FM_STOP_MARK=a TZ=UTC TMPDIR="$tmp" "$runner" "$sleeper" >"$a_out" 2>&1 &
   a_pid=$!
   FM_STOP_MARK=b TMPDIR="$tmp" "$runner" "$sleeper" >"$b_out" 2>&1 &
   b_pid=$!
@@ -1548,10 +1549,10 @@ test_stop_is_scoped_to_one_run() {
   done
   [ -s "$a_fix" ] && [ -s "$b_fix" ] || fail "the fixture scripts never started"
   [ -z "$(find "$pid_dir" -maxdepth 0 ! -perm 700)" ] || fail "the run registry must be mode 700"
-  a_id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$a_pid" '$2 == p {print $1}')
+  a_id=$(TZ=Pacific/Kiritimati TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$a_pid" '$2 == p {print $1}')
   b_id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$b_pid" '$2 == p {print $1}')
   [ -n "$a_id" ] && [ -n "$b_id" ] || fail "--stop did not list both live runs"
-  TMPDIR="$tmp" "$runner" --stop "$a_id" >/dev/null || fail "--stop <run> failed"
+  TZ=Pacific/Kiritimati TMPDIR="$tmp" "$runner" --stop "$a_id" >/dev/null || fail "--stop <run> failed"
   a_rc=0
   wait "$a_pid" || a_rc=$?
   [ "$a_rc" -eq 143 ] || fail "a stopped run must exit 143, got $a_rc: $(cat "$a_out")"
