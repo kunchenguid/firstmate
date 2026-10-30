@@ -137,6 +137,54 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/best-practices-adapters/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/brief-done.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/brief-practice.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/cleanup-record.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/handoff-review.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/intake-question.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/landing-post-merge.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/notes.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/reproduce.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/scout-report.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/verify.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/best-practices-adapters/references/addyosmani/agent-skills/work.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/bootstrap-diagnostics/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -403,6 +451,10 @@
     {
       "path": "docs/gerrit-change-watch.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/best-practices-adapters.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/external-review-forge.md",

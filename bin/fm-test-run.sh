@@ -298,7 +298,7 @@ family_for_basename() {
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|fm-read-repetition.test.sh|\
     fm-calm-claude-mod.test.sh|\
-    fm-harness-adapter-references.test.sh|fm-project-mode.test.sh|\
+    fm-harness-adapter-references.test.sh|fm-project-mode.test.sh|fm-best-practices.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
@@ -388,7 +388,8 @@ family_for_basename() {
     fm-calm-pi-queue-retention-live-e2e.test.sh|\
     fm-herdr-submit-confirm-live-e2e.test.sh|\
     fm-backend-rex-composer-live-e2e.test.sh|\
-    fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh)
+    fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh|\
+    fm-best-practices-fingerprints-live.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -1787,6 +1788,17 @@ families_for_changed_path() {
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-best-practices.sh|bin/fm-best-practices-lib.sh|\
+    .agents/skills/best-practices-adapters/SKILL.md|.agents/skills/best-practices-adapters/references/*)
+      printf '%s\n' "__script__:fm-best-practices.test.sh"
+      printf '%s\n' "__script__:fm-best-practices-fingerprints-live.test.sh"
+      ;;
+    bin/fm-decision-provider-lib.sh)
+      # The typed-decision provider code: the dispatch resolver and the
+      # best-practices adapter routing both send through it.
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      printf '%s\n' "__script__:fm-best-practices.test.sh"
       ;;
     .agents/skills/harness-adapters/SKILL.md|.agents/skills/harness-adapters/references/*)
       printf '%s\n' pure-contract-unit

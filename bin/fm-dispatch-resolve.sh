@@ -15,7 +15,9 @@
 #   provider maps the System One request to OpenAI's Decisions API and maps its
 #   answer back before validation. The selected key lives in a non-exported
 #   shell variable and reaches curl through fd 3, never argv, logs, or child
-#   environments.
+#   environments. The gate, the never-send check, and the POST are
+#   bin/fm-decision-provider-lib.sh's, shared with bin/fm-best-practices.sh's
+#   adapter routing; the OpenAI request and answer mapping stays here.
 #
 # What it does when on with at least one rule: one POST with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
@@ -121,16 +123,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-decision-provider-lib.sh
+. "$SCRIPT_DIR/fm-decision-provider-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
-TS_MODEL=jev-latest
-TS_BASE=https://api.typesafe.ai
-TS_TIMEOUT=5
-OR_BASE=https://openrouter.ai/api
-OR_TIMEOUT=10
-SO_TIMEOUT=10
-OA_BASE=https://api.openai.com
-OA_TIMEOUT=10
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
@@ -158,66 +154,15 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- opt-in gate ---------------------------------------------------------------
-DISPATCH_PROVIDER=${FM_DISPATCH_PROVIDER:-}
-[ -n "$DISPATCH_PROVIDER" ] || DISPATCH_PROVIDER=$(fmx_env_get FM_DISPATCH_PROVIDER "$FM_HOME/.env")
-DISPATCH_MODEL=${FM_DISPATCH_MODEL:-}
-[ -n "$DISPATCH_MODEL" ] || DISPATCH_MODEL=$(fmx_env_get FM_DISPATCH_MODEL "$FM_HOME/.env")
-case "$DISPATCH_PROVIDER" in
-  '')
-    DISPATCH_PROVIDER=typesafe
-    DISPATCH_MODEL=$TS_MODEL
-    [ -n "$TYPESAFE_API_KEY_PRIVATE" ] || TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-    if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-      echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-      exit 0
-    fi
-    ;;
-  typesafe)
-    [ -n "$DISPATCH_MODEL" ] || DISPATCH_MODEL=$TS_MODEL
-    [ -n "$TYPESAFE_API_KEY_PRIVATE" ] || TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-    if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-      echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-      exit 0
-    fi
-    ;;
-  openrouter)
-    [ -n "$DISPATCH_MODEL" ] || die "FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=openrouter"
-    [ -n "$OPENROUTER_API_KEY_PRIVATE" ] || OPENROUTER_API_KEY_PRIVATE=$(fmx_env_get OPENROUTER_API_KEY "$FM_HOME/.env")
-    if [ -z "$OPENROUTER_API_KEY_PRIVATE" ]; then
-      echo "dispatch-resolve: off (OPENROUTER_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-      exit 0
-    fi
-    ;;
-  systemone)
-    [ -n "$DISPATCH_MODEL" ] || die "FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=systemone"
-    DISPATCH_BASE_URL=${FM_DISPATCH_BASE_URL:-}
-    [ -n "$DISPATCH_BASE_URL" ] || DISPATCH_BASE_URL=$(fmx_env_get FM_DISPATCH_BASE_URL "$FM_HOME/.env")
-    [ -n "$DISPATCH_BASE_URL" ] || die "FM_DISPATCH_BASE_URL required when FM_DISPATCH_PROVIDER=systemone"
-    case "$DISPATCH_BASE_URL" in
-      http://?*|https://?*) ;;
-      *) die "FM_DISPATCH_BASE_URL must start with http:// or https://" ;;
-    esac
-    DISPATCH_BASE_URL=${DISPATCH_BASE_URL%/}
-    # The key is optional: a local host may need none.
-    [ -n "$DISPATCH_API_KEY_PRIVATE" ] || DISPATCH_API_KEY_PRIVATE=$(fmx_env_get FM_DISPATCH_API_KEY "$FM_HOME/.env")
-    ;;
-  openai)
-    [ -n "$DISPATCH_MODEL" ] || die "FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=openai"
-    [ -n "$OPENAI_API_KEY_PRIVATE" ] || OPENAI_API_KEY_PRIVATE=$(fmx_env_get OPENAI_API_KEY "$FM_HOME/.env")
-    if [ -z "$OPENAI_API_KEY_PRIVATE" ]; then
-      echo "dispatch-resolve: off (OPENAI_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-      exit 0
-    fi
-    ;;
-  *) die "unknown FM_DISPATCH_PROVIDER: $DISPATCH_PROVIDER (expected typesafe, openrouter, systemone, or openai)" ;;
+gate_rc=0
+fm_decision_gate dispatch-resolve "$FM_HOME" || gate_rc=$?
+case "$gate_rc" in
+  0) ;;
+  1) exit 0 ;;
+  *) die "$FM_DECISION_ERROR" ;;
 esac
-case "$DISPATCH_PROVIDER" in
-  typesafe) ENDPOINT=$TS_BASE/v1/systemone TIMEOUT=$TS_TIMEOUT KEY_PRIVATE=$TYPESAFE_API_KEY_PRIVATE ;;
-  openrouter) ENDPOINT=$OR_BASE/alpha/decisions TIMEOUT=$OR_TIMEOUT KEY_PRIVATE=$OPENROUTER_API_KEY_PRIVATE ;;
-  systemone) ENDPOINT=$DISPATCH_BASE_URL/v1/systemone TIMEOUT=$SO_TIMEOUT KEY_PRIVATE=$DISPATCH_API_KEY_PRIVATE ;;
-  openai) ENDPOINT=$OA_BASE/v1/decisions TIMEOUT=$OA_TIMEOUT KEY_PRIVATE=$OPENAI_API_KEY_PRIVATE ;;
-esac
-export -n KEY_PRIVATE 2>/dev/null || true
+DISPATCH_PROVIDER=$FM_DECISION_PROVIDER
+DISPATCH_MODEL=$FM_DECISION_MODEL
 
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
@@ -339,44 +284,6 @@ TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
 SEND_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$TASK_TEXT"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$SEND_TEXT"' EXIT
 
-never_send_off() {
-  echo "dispatch-resolve: off ($1; nothing sent)" >&2
-  exit 0
-}
-
-# Checks the endpoint and every string the final request body carries,
-# including strings inside JSON text such as OpenAI's serialized input, so no
-# text reaches the network unchecked. grep's own stderr is discarded because
-# it can echo the pattern.
-never_send_check() {
-  local list value n=0 rc
-  [ -e "$NEVER_SEND_PATH" ] || [ -L "$NEVER_SEND_PATH" ] || return 0
-  { [ -f "$NEVER_SEND_PATH" ] && [ -r "$NEVER_SEND_PATH" ]; } \
-    || never_send_off "$NEVER_SEND_PATH is not a readable regular file"
-  # Collapse whitespace runs on both sides so a value the brief wraps across
-  # lines or spaces differently still matches
-  jq -r --arg endpoint "$ENDPOINT" '
-    $endpoint, (.. | strings | ., (try (fromjson | .. | strings) catch empty))
-    | gsub("\\s+"; " ")' <<<"$BODY" > "$SEND_TEXT" 2>/dev/null \
-    || never_send_off "could not extract the request text to check"
-  list=$(jq -Rr 'gsub("\\s+"; " ")' "$NEVER_SEND_PATH" 2>/dev/null) \
-    || never_send_off "could not read $NEVER_SEND_PATH"
-  while IFS= read -r value; do
-    n=$((n + 1))
-    value=${value# }
-    value=${value% }
-    case "$value" in
-      ''|'#'*) continue ;;
-    esac
-    grep -qiF -e "$value" "$SEND_TEXT" 2>/dev/null; rc=$?
-    case "$rc" in
-      0) never_send_off "brief text matches $NEVER_SEND_PATH line $n" ;;
-      1) ;;
-      *) never_send_off "could not check the request text against $NEVER_SEND_PATH line $n" ;;
-    esac
-  done <<<"$list"
-}
-
 # Send Jev only the task-specific sections bin/fm-brief.sh scaffolds, plus a
 # scout tag from the scout contract line; the rest of a scaffolded brief is
 # standard boilerplate whose safety language reads as high stakes on every task.
@@ -431,37 +338,27 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   else
     BODY=$REQUEST
   fi
-  never_send_check
-  T0=$(fm_timing_now_ms)
-  if [ -n "$KEY_PRIVATE" ]; then
-    HTTP=$(printf '%s' "$BODY" | curl -sS --max-time "$TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-      -X POST "$ENDPOINT" -H 'Content-Type: application/json' \
-      -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$KEY_PRIVATE") \
-      --data-binary @- 2>/dev/null) || HTTP=000
-  else
-    HTTP=$(printf '%s' "$BODY" | curl -sS --max-time "$TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-      -X POST "$ENDPOINT" -H 'Content-Type: application/json' \
-      --data-binary @- 2>/dev/null) || HTTP=000
-  fi
-  T1=$(fm_timing_now_ms)
-  LAT_MS=$(( T1 - T0 ))
-  if [ "$DISPATCH_PROVIDER" = typesafe ]; then
-    [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
-  else
-    [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms"
-  fi
+  # Checks the endpoint and every string the final request body carries,
+  # including strings inside JSON text such as OpenAI's serialized input; a
+  # withheld request is the same exit-0 off path as an absent key.
+  fm_decision_never_send dispatch-resolve "brief text" "$BODY" "$NEVER_SEND_PATH" "$SEND_TEXT" || exit 0
+  fm_decision_post "$BODY" "$RESP_FILE"
+  LAT_MS=$FM_DECISION_LAT_MS
+  [ "$FM_DECISION_HTTP" = 200 ] || emit_error "$(fm_decision_http_reason "$RESP_FILE")"
   # Map an OpenAI answer back to the System One shape the shared validation
   # below checks. A refusal, a missing or duplicated rule answer, or duplicated
   # option values is not a rule Choice answer. Usage is display-only, so it is
   # kept only when both token counts are numeric.
   if [ "$DISPATCH_PROVIDER" = openai ]; then
+    # The binding is grouped explicitly: jq 1.8 parses `A and B as $x | C` as
+    # `(A and B) as $x | C`, which would bind the boolean instead of the answers.
     jq -e '
       (.answers | type) == "array" and
-      ([.answers[] | select(type == "object" and .name == "rule")]) as $rule |
+      (([.answers[] | select(type == "object" and .name == "rule")]) as $rule |
       ($rule | length) == 1 and $rule[0].type == "choice" and
       ($rule[0].probabilities | type) == "array" and
       all($rule[0].probabilities[]; type == "object" and (.value | type) == "string") and
-      ($rule[0].probabilities | map(.value) | length) == ($rule[0].probabilities | map(.value) | unique | length)' \
+      ($rule[0].probabilities | map(.value) | length) == ($rule[0].probabilities | map(.value) | unique | length))' \
       "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
     if ! jq --arg model "$DISPATCH_MODEL" '
       ([.answers[] | select(type == "object" and .name == "rule")][0]) as $a |

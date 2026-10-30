@@ -14,8 +14,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--best-practices <owner>/<repo>|none] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--best-practices <owner>/<repo>|none] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -91,6 +91,22 @@
 # membership pinned when its watch is armed, because the merge watch follows one
 # change.
 # It defaults to squash on gerrit and is refused without it.
+# --best-practices <owner>/<repo> names the project's registered best-practices
+# pack, read at intake with bin/fm-project-mode.sh --best-practices and passed
+# here the way --forge is; `none`, the default, adds nothing, so a project
+# without the token gets exactly the brief it always did. This script never
+# looks the binding up, and bin/fm-spawn.sh refuses a brief whose value
+# disagrees with the registry. The value rides on the Delivery contract line as
+# " best-practices=<owner>/<repo>": appended to a ship's line, and on a scout
+# as its own "Delivery contract: kind=scout best-practices=<owner>/<repo>"
+# line at the top of the Definition of done. The practice section the pack's
+# adapter composes (bin/fm-best-practices-lib.sh) is appended after the home
+# brief additions, as the brief's last section, so every section above it takes
+# precedence; it carries the firstmate-owned line for
+# FM_BEST_PRACTICES_VERSION=missing. It is written with the adapter's static
+# behavior, and bin/fm-best-practices.sh route narrows it once the Task is
+# filled. Refused on --secondmate, and for a repository this firstmate carries
+# no adapter for.
 # --upstream-consent <host>/<owner>/<repo> records the captain's one-off
 # approval for this one task to publish to that repository when it is
 # firstmate's own upstream. It renders as an `upstream-consent=` token on the
@@ -235,6 +251,8 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 PROJECT_DIR=
 PROJECT_DIR_SET=0
+BEST_PRACTICES=none
+BEST_PRACTICES_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -251,6 +269,7 @@ for a in "$@"; do
       pr) PR_TEXT=$a; PR_TEXT_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
+      best-practices) BEST_PRACTICES=$a; BEST_PRACTICES_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -277,6 +296,8 @@ for a in "$@"; do
     --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
     --project) want_value="project" ;;
     --project=*) PROJECT_DIR=${a#--project=}; PROJECT_DIR_SET=1 ;;
+    --best-practices) want_value="best-practices" ;;
+    --best-practices=*) BEST_PRACTICES=${a#--best-practices=}; BEST_PRACTICES_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -402,6 +423,22 @@ if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
 fi
 printf -v BRANCH_Q '%q' "$BRANCH"
 
+# A best-practices pack is a project fact the captain confirmed, like the
+# forge; it applies to the work a ship or scout does and never to a charter.
+if [ "$BEST_PRACTICES_SET" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --best-practices applies only to ship and scout briefs; a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+if [ "$BEST_PRACTICES" != none ]; then
+  # shellcheck source=bin/fm-best-practices-lib.sh
+  . "$SCRIPT_DIR/fm-best-practices-lib.sh"
+  command -v jq >/dev/null 2>&1 || { echo "error: --best-practices needs jq to compose the pack's practice section" >&2; exit 1; }
+  fm_bp_known "$BEST_PRACTICES" || {
+    echo "error: --best-practices names '$BEST_PRACTICES', which this firstmate carries no adapter for; it carries: $(fm_bp_adapter_list_words), or pass none" >&2
+    exit 1
+  }
+fi
+
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
   exit 1
@@ -428,14 +465,28 @@ if [ "$KIND" != secondmate ] && { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_I
   [ -n "$(printf '%s' "$BRIEF_INCLUDE_BODY" | tr -d '[:space:]')" ] || BRIEF_INCLUDE_BODY=
 fi
 
-# Append the include as the last section of a ship or scout scaffold.
+# Append the include as the last section of a ship or scout scaffold, then
+# the pack's practice section after it, when the project registers a pack.
 append_brief_include() {
-  [ -n "$BRIEF_INCLUDE_BODY" ] || return 0
-  printf '\n%s\n%s\n%s\n' \
-    '# Home brief additions' \
-    "These are this home's standing additions; every other section of this brief takes precedence over anything here that conflicts." \
-    "$BRIEF_INCLUDE_BODY" >> "$BRIEF"
+  if [ -n "$BRIEF_INCLUDE_BODY" ]; then
+    printf '\n%s\n%s\n%s\n' \
+      '# Home brief additions' \
+      "These are this home's standing additions; every other section of this brief takes precedence over anything here that conflicts." \
+      "$BRIEF_INCLUDE_BODY" >> "$BRIEF"
+  fi
+  [ "$BEST_PRACTICES" != none ] || return 0
+  printf '\n%s\n' "$BEST_PRACTICES_SECTION" >> "$BRIEF"
 }
+
+# The practice section is composed before anything is written, so an adapter
+# that cannot compose never leaves a partial scaffold behind.
+BEST_PRACTICES_SECTION=
+if [ "$BEST_PRACTICES" != none ]; then
+  BEST_PRACTICES_SECTION=$(fm_bp_compose "$BEST_PRACTICES" "$KIND" "$MODE" "$FORGE") || {
+    echo "error: could not compose the practice section for $BEST_PRACTICES" >&2
+    exit 1
+  }
+fi
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
@@ -697,6 +748,8 @@ else
 fi
 
 if [ "$KIND" = scout ]; then
+SCOUT_CONTRACT_LINE=
+[ "$BEST_PRACTICES" = none ] || SCOUT_CONTRACT_LINE="Delivery contract: kind=scout best-practices=$BEST_PRACTICES"$'\n'
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
 else
@@ -741,7 +794,7 @@ $SHARED_NO_CD_RULE
 $WAIT_BLOCK$INBOX_SECTION
 
 # Definition of done
-Write your findings to \`$DATA/$ID/report.md\`.
+${SCOUT_CONTRACT_LINE}Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
@@ -753,7 +806,11 @@ When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\`
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
 append_brief_include
-echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
+if [ "$BEST_PRACTICES" = none ]; then
+  echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
+else
+  echo "scaffolded: $BRIEF (scout best-practices=$BEST_PRACTICES; replace {TASK} and {FIRSTMATE_SPEC})"
+fi
 exit 0
 fi
 
@@ -777,6 +834,13 @@ case "$MODE" in
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT") || exit 1
+# The pack rides on the same machine-read line as the mode and forge, so the
+# spawn's registry agreement reads every project fact from one place.
+if [ "$BEST_PRACTICES" != none ]; then
+  DOD=$(printf '%s\n' "$DOD" | awk -v bp=" best-practices=$BEST_PRACTICES" '
+    !done && /^Delivery contract: mode=/ { print $0 bp; done = 1; next }
+    { print }')
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -832,12 +896,14 @@ A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agen
 $DOD
 EOF
 append_brief_include
+BP_WORDS=
+[ "$BEST_PRACTICES" = none ] || BP_WORDS=" best-practices=$BEST_PRACTICES"
 if [ "$PR_TEXT" = manual ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE pr=manual; replace {TASK} and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE pr=manual$BP_WORDS; replace {TASK} and {FIRSTMATE_SPEC})"
 elif [ "$FORGE" = none ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE$BP_WORDS; replace {TASK} and {FIRSTMATE_SPEC})"
 elif [ "$FORGE" = gerrit ]; then
-  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK} and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE$BP_WORDS; replace {TASK} and {FIRSTMATE_SPEC})"
 else
-  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE; replace {TASK} and {FIRSTMATE_SPEC})"
+  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE$BP_WORDS; replace {TASK} and {FIRSTMATE_SPEC})"
 fi

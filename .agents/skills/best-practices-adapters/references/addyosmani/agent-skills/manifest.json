@@ -1,0 +1,558 @@
+{
+  "schema": "best-practices-adapter-v1",
+  "repository": "addyosmani/agent-skills",
+  "plugin": "agent-skills",
+  "versions": [
+    {
+      "tag": "0.6.14",
+      "commit": "eb07f19f"
+    }
+  ],
+  "skills": [
+    "api-and-interface-design",
+    "browser-testing-with-devtools",
+    "ci-cd-and-automation",
+    "code-review-and-quality",
+    "code-simplification",
+    "constraint-driven-development",
+    "context-engineering",
+    "debugging-and-error-recovery",
+    "deprecation-and-migration",
+    "documentation-and-adrs",
+    "doubt-driven-development",
+    "frontend-ui-engineering",
+    "git-workflow-and-versioning",
+    "idea-refine",
+    "incremental-implementation",
+    "interview-me",
+    "observability-and-instrumentation",
+    "performance-optimization",
+    "planning-and-task-breakdown",
+    "security-and-hardening",
+    "shipping-and-launch",
+    "source-driven-development",
+    "spec-driven-development",
+    "test-driven-development",
+    "using-agent-skills"
+  ],
+  "notes": "notes.md",
+  "harnesses": {
+    "claude": {
+      "shape": "plugin",
+      "read": "claude-plugin",
+      "marketplace": "addy-agent-skills",
+      "install": "claude plugin marketplace add addyosmani/agent-skills, then claude plugin install agent-skills@addy-agent-skills",
+      "enable": "claude plugin enable agent-skills@addy-agent-skills --scope user",
+      "proof": {
+        "status": "proven",
+        "date": "2026-10-29",
+        "harness_version": "Claude Code 2.1.312",
+        "evidence": "bin/fm-best-practices.sh read --harness claude agreed with claude plugin list --json in every case: read-only against a real user-scope install (tied through known_marketplaces.json and its marketplace's github source, its recorded version, enabledPlugins false read as disabled), and in an isolated CLAUDE_CONFIG_DIR after claude plugin marketplace add and plugin install at user and project scope (a project-scope install tied to its projectPath, its committed .claude/settings.json enabling it, a missing enabledPlugins entry read as disabled as the CLI reports it, and a worker copy at another path mapping back to the clone, where the CLI run inside that copy also reported the install enabled)",
+        "unproven": "a model session loading the pack inside a worker copy, which needs a login; the CLI's own plugin list run inside the copy stands in for it"
+      }
+    },
+    "codex": {
+      "shape": "plugin",
+      "read": "codex-config",
+      "marketplace": "agent-skills",
+      "install": "codex plugin marketplace add addyosmani/agent-skills, then codex plugin add agent-skills@agent-skills",
+      "enable": "set enabled = true in the [plugins.\"agent-skills@agent-skills\"] table of ~/.codex/config.toml (Codex has no enable command)",
+      "proof": {
+        "status": "proven",
+        "date": "2026-10-29",
+        "harness_version": "codex-cli 0.164.0",
+        "evidence": "in an isolated CODEX_HOME, codex plugin marketplace add addyosmani/agent-skills wrote [marketplaces.agent-skills] with source_type git and the repository's https URL, and codex plugin add agent-skills@agent-skills wrote the plugin's table and its plugins/cache copy; bin/fm-best-practices.sh read --harness codex agreed with codex plugin list in six configurations: no plugin table (not installed, cache present), a table with no enabled key (enabled), no key under _default false (disabled), enabled true under _default false (enabled), enabled false (disabled), and the table without its cache copy (not installed)"
+      }
+    },
+    "omp": {
+      "shape": "plugin",
+      "read": "omp-plugin",
+      "marketplace": "addy-agent-skills",
+      "install": "omp plugin marketplace add addyosmani/agent-skills, then omp plugin install agent-skills@addy-agent-skills",
+      "enable": "omp plugin enable agent-skills@addy-agent-skills",
+      "proof": {
+        "status": "proven",
+        "date": "2026-10-29",
+        "harness_version": "omp 18.13.3",
+        "evidence": "in an isolated HOME, omp plugin marketplace add addyosmani/agent-skills and omp plugin install agent-skills@addy-agent-skills (user, then --scope project in a scratch repository) wrote ~/.omp/marketplaces.json, ~/.omp/plugins/installed_plugins.json, and <project>/.omp/plugins/installed_plugins.json; omp plugin disable and enable by id wrote enabled false and true into those entries; bin/fm-best-practices.sh read --harness omp agreed in every case with the rules in omp's own plugin discovery source (src/discovery/helpers.ts): a committed project install shadows the user install only while it is enabled, and an entry recording enabled false is skipped",
+        "unproven": "plugins omp loads from Claude Code's registry when its own registries name no install, which this read does not count, so it can only under-report"
+      }
+    },
+    "agy": {
+      "shape": "plugin",
+      "read": "agy-plugin-list",
+      "install": "agy plugin install https://github.com/addyosmani/agent-skills.git",
+      "enable": "agy plugin enable agent-skills",
+      "proof": {
+        "status": "proven",
+        "date": "2026-10-29",
+        "harness_version": "Antigravity CLI 1.4.10",
+        "evidence": "bin/fm-best-practices.sh read addyosmani/agent-skills --harness agy, run read-only against agy plugin list --json for a real agy install: the pack's recorded version, its enabled state, and its copy under ~/.gemini/config/plugins/ agreed with the list, the install tied to addyosmani/agent-skills by the installed copy's .claude-plugin/plugin.json repository field, because the list record names no source repository and the copy's root plugin.json carries none"
+      }
+    },
+    "pi": {
+      "shape": "plugin",
+      "read": null,
+      "install": "pi install git:github.com/addyosmani/agent-skills",
+      "enable": null,
+      "proof": {
+        "status": "unproven",
+        "reason": "the pack documents pi install git:github.com/addyosmani/agent-skills, covering pi and pi-signed; firstmate has no read of that install yet, so it is not yet proven live"
+      }
+    },
+    "pi-signed": {
+      "shape": "plugin",
+      "read": null,
+      "install": "pi install git:github.com/addyosmani/agent-skills",
+      "enable": null,
+      "proof": {
+        "status": "unproven",
+        "reason": "the pack documents pi install git:github.com/addyosmani/agent-skills, covering pi and pi-signed; firstmate has no read of that install yet, so it is not yet proven live"
+      }
+    },
+    "gemini": {
+      "shape": "skills-dir",
+      "read": "skills-dir",
+      "user_dirs": [
+        "~/.gemini/skills",
+        "~/.agents/skills"
+      ],
+      "project_dirs": [
+        ".gemini/skills",
+        ".agents/skills"
+      ],
+      "install": "gemini skills install https://github.com/addyosmani/agent-skills.git --path skills",
+      "enable": "gemini skills enable <skill> for each of the pack's skills the switch disables",
+      "proof": {
+        "status": "proven",
+        "date": "2026-10-29",
+        "harness_version": "Gemini CLI 0.66.0",
+        "evidence": "in an isolated HOME, gemini skills install https://github.com/addyosmani/agent-skills.git --path skills --scope user --consent put all 25 skills in ~/.gemini/skills with no version record, gemini skills list reported each [Enabled], and gemini skills disable interview-me wrote skills.disabled in ~/.gemini/settings.json and the list then reported it [Disabled]; bin/fm-best-practices.sh read --harness gemini read the same presence and switch, and, the copy carrying no version record, matches it to the reviewed 0.6.14 release by its fingerprints; a deliberate edit to interview-me read as unreviewed naming interview-me, and reverting it read 0.6.14 again"
+      },
+      "switch": {
+        "user_settings": "~/.gemini/settings.json",
+        "project_settings": ".gemini/settings.json",
+        "disabled": [
+          "skills",
+          "disabled"
+        ]
+      }
+    },
+    "commandcode": {
+      "shape": "skills-dir",
+      "read": "skills-dir",
+      "user_dirs": [
+        "~/.commandcode/skills",
+        "~/.agents/skills"
+      ],
+      "project_dirs": [
+        ".commandcode/skills",
+        ".agents/skills"
+      ],
+      "switch": {
+        "user_settings": "~/.commandcode/settings.json",
+        "project_settings": ".commandcode/settings.json",
+        "disabled": [
+          "disabledSkills"
+        ]
+      },
+      "install": "cmd skills add addyosmani/agent-skills -s <skill> --global, for each of the pack's skills",
+      "enable": "remove the pack's skills from disabledSkills in ~/.commandcode/settings.json or the project's .commandcode/settings.json, or toggle them in /skills",
+      "proof": {
+        "status": "proven",
+        "date": "2026-10-29",
+        "harness_version": "Command Code 1.88.2",
+        "evidence": "in an isolated HOME, commandcode skills add addyosmani/agent-skills -s <skill> --global for each of the 25 skills wrote them to ~/.commandcode/skills with no version record, and commandcode skills list reported all 25 installed; its switch is the disabledSkills list its own bundled skills reference documents and its code reads from ~/.commandcode/settings.json, .commandcode/settings.json, and .commandcode/settings.local.json, and bin/fm-best-practices.sh read --harness commandcode reads the first two, which are what a worker copy carries; its copy, with no version record, matches the reviewed 0.6.14 release by its fingerprints",
+        "unproven": "commandcode skills list does not show the switch's state, so the switch is proven from Command Code's own documentation and code rather than its output"
+      }
+    },
+    "opencode": {
+      "shape": "skills-dir",
+      "read": "skills-dir",
+      "user_dirs": [
+        "~/.config/opencode/skills",
+        "~/.claude/skills",
+        "~/.agents/skills"
+      ],
+      "project_dirs": [
+        ".opencode/skills",
+        ".claude/skills",
+        ".agents/skills"
+      ],
+      "install": "copy the pack's skills/ directory into ~/.config/opencode/skills/",
+      "enable": null,
+      "proof": {
+        "status": "proven",
+        "date": "2026-10-29",
+        "harness_version": "OpenCode 1.19.5",
+        "evidence": "in an isolated HOME and XDG config, the pack's 0.6.14 release skills copied into ~/.config/opencode/skills were all listed by opencode debug skill (25 pack skills), as were copies committed into a scratch project's .opencode/skills, which shadow the user ones; bin/fm-best-practices.sh read --harness opencode found the user copy, ignored the project copy while it was uncommitted and found it once committed, and matched the user copy to 0.6.14 by its fingerprints"
+      }
+    },
+    "cursor": {
+      "shape": "skills-dir",
+      "read": "skills-dir",
+      "user_dirs": [
+        "~/.cursor/skills"
+      ],
+      "project_dirs": [
+        ".cursor/skills"
+      ],
+      "install": "copy the pack's skills/ directory into ~/.cursor/skills/",
+      "enable": null,
+      "proof": {
+        "status": "proven",
+        "date": "2026-10-29",
+        "harness_version": "Cursor Agent CLI 2026.10.22-27dcf5f",
+        "evidence": "with a logged-in Cursor, one print-mode prompt (cursor-agent -p --trust, asking which skills are available) run from a scratch repository whose committed .cursor/skills held the pack's 25 skills listed all of them; none of them existed in any user-level place Cursor reads (~/.cursor, ~/.agents/skills, ~/.claude/skills), and Cursor listed none of the skills that existed only in Claude Code's plugin cache, so the 25 came from the project's .cursor/skills; bin/fm-best-practices.sh read --harness cursor reads that committed copy at project scope",
+        "unproven_scopes": [
+          "user"
+        ],
+        "unproven": "the user-level ~/.cursor/skills read, because Cursor's login does not carry over to an isolated HOME, so proving it would mean writing the pack into a real user's ~/.cursor"
+      }
+    }
+  },
+  "facets": {
+    "intake.question": {
+      "action": "extend",
+      "reference": "intake-question.md"
+    },
+    "brief.practice": {
+      "action": "extend",
+      "reference": "brief-practice.md",
+      "kinds": [
+        "ship",
+        "scout"
+      ]
+    },
+    "brief.done": {
+      "action": "extend",
+      "reference": "brief-done.md",
+      "kinds": [
+        "ship"
+      ]
+    },
+    "launch.env": {
+      "action": "extend"
+    },
+    "work": {
+      "action": "extend",
+      "reference": "work.md",
+      "kinds": [
+        "ship"
+      ]
+    },
+    "verify": {
+      "action": "extend",
+      "reference": "verify.md",
+      "kinds": [
+        "ship"
+      ]
+    },
+    "scout.report": {
+      "action": "pair",
+      "order": "firstmate-first",
+      "reference": "scout-report.md",
+      "kinds": [
+        "scout"
+      ]
+    },
+    "handoff.review": {
+      "action": "extend",
+      "reference": "handoff-review.md"
+    },
+    "landing.post-merge": {
+      "action": "pair",
+      "order": "firstmate-first",
+      "reference": "landing-post-merge.md"
+    },
+    "cleanup.record": {
+      "action": "extend",
+      "reference": "cleanup-record.md"
+    }
+  },
+  "insert": [
+    {
+      "id": "reproduce",
+      "side": "worker",
+      "reference": "reproduce.md",
+      "kinds": [
+        "ship",
+        "scout"
+      ]
+    }
+  ],
+  "flow": [
+    "start",
+    "reproduce",
+    "work",
+    "verify",
+    "deliver",
+    "report"
+  ],
+  "routing": [
+    {
+      "id": "tier",
+      "facet": "intake.question",
+      "type": "choice",
+      "instructions": "How unclear is this ask? Read `task.ask`, the requester's own words.",
+      "options": {
+        "tier-1": "The ask is clear, or reversible enough to proceed on one stated assumption.",
+        "tier-2": "The ask has one real ambiguity that a single question would settle.",
+        "tier-3": "The ask is a big, underspecified build missing who it is for, why, what success looks like, or the binding constraint."
+      },
+      "fallback": "tier-2",
+      "words": {
+        "skip the interview": "tier-1",
+        "interview me": "tier-4",
+        "grill me": "tier-4"
+      }
+    },
+    {
+      "id": "idea",
+      "facet": "intake.question",
+      "type": "noul",
+      "instructions": "Is this ask an idea to explore, with no direction chosen yet, rather than a direction to build?",
+      "fallback": false,
+      "words": {
+        "ideate": true,
+        "refine this idea": true
+      }
+    },
+    {
+      "id": "bug-fix",
+      "facet": "reproduce",
+      "type": "noul",
+      "instructions": "Is this task a bug fix: something that works, or should work, is broken?",
+      "fallback": true,
+      "selects": [
+        "reproduce"
+      ]
+    },
+    {
+      "id": "trivial",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Is this task a trivial mechanical edit, such as a rename, a typo fix, or a formatting sweep?",
+      "fallback": true,
+      "selects": [
+        "trivial-edit"
+      ]
+    },
+    {
+      "id": "security",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Does this task touch authentication, authorization, input handling, secrets, or another security boundary?",
+      "fallback": true,
+      "selects": [
+        "security-and-hardening"
+      ]
+    },
+    {
+      "id": "performance",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Is this task about speed, load time, or resource use?",
+      "fallback": true,
+      "selects": [
+        "performance-optimization"
+      ]
+    },
+    {
+      "id": "api",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Does this task design or change an API, a public interface, or a module boundary?",
+      "fallback": true,
+      "selects": [
+        "api-and-interface-design"
+      ]
+    },
+    {
+      "id": "observability",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Does this task add or change logging, metrics, tracing, or error reporting?",
+      "fallback": true,
+      "selects": [
+        "observability-and-instrumentation"
+      ]
+    },
+    {
+      "id": "deprecation",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Does this task deprecate, remove, or migrate code, data, or an interface?",
+      "fallback": true,
+      "selects": [
+        "deprecation-and-migration"
+      ]
+    },
+    {
+      "id": "frontend",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Does this task build or change a user interface?",
+      "fallback": true,
+      "selects": [
+        "frontend-ui-engineering"
+      ]
+    },
+    {
+      "id": "browser",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Does this task need behavior checked in a real browser?",
+      "fallback": true,
+      "selects": [
+        "browser-testing-with-devtools"
+      ]
+    },
+    {
+      "id": "ci-cd",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Does this task change CI, build, or deployment automation?",
+      "fallback": true,
+      "selects": [
+        "ci-cd-and-automation"
+      ]
+    },
+    {
+      "id": "refactor",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Is this task itself a refactor: restructuring code without changing what it does?",
+      "fallback": true,
+      "selects": [
+        "code-simplification"
+      ]
+    },
+    {
+      "id": "source-driven",
+      "facet": "brief.practice",
+      "type": "noul",
+      "instructions": "Does this task depend on version-specific framework or library behavior, an upgrade, a migration, or a new library?",
+      "fallback": true,
+      "selects": [
+        "source-driven-development"
+      ]
+    },
+    {
+      "id": "source-citations",
+      "facet": "brief.done",
+      "type": "noul",
+      "instructions": "Does this task depend on version-specific framework or library behavior, an upgrade, a migration, or a new library?",
+      "fallback": true,
+      "selects": [
+        "source-citations"
+      ]
+    },
+    {
+      "id": "risky",
+      "facet": "brief.done",
+      "type": "noul",
+      "instructions": "Does this change carry irreversible blast radius: a production deploy path, a data migration, or a public API change?",
+      "fallback": true,
+      "selects": [
+        "rollout-rollback"
+      ]
+    },
+    {
+      "id": "doubt",
+      "facet": "work",
+      "type": "fact",
+      "gate": {
+        "mode": [
+          "no-mistakes"
+        ]
+      },
+      "selects": [
+        "doubt-cycle"
+      ]
+    },
+    {
+      "id": "map",
+      "facet": "scout.report",
+      "type": "noul",
+      "instructions": "Does this request span several independently testable capabilities, so that it needs a capability map before any spec?",
+      "fallback": false,
+      "selects": [
+        "map-only"
+      ],
+      "excludes": [
+        "spec-plan"
+      ]
+    },
+    {
+      "id": "idea-report",
+      "facet": "scout.report",
+      "type": "noul",
+      "instructions": "Is this ask an idea to explore, with no direction chosen yet, rather than a direction to build?",
+      "fallback": false,
+      "words": {
+        "ideate": true,
+        "refine this idea": true
+      },
+      "selects": [
+        "one-pager"
+      ],
+      "excludes": [
+        "spec-plan",
+        "map-only"
+      ]
+    }
+  ],
+  "fingerprints": {
+    "skills": [
+      "api-and-interface-design",
+      "browser-testing-with-devtools",
+      "ci-cd-and-automation",
+      "code-review-and-quality",
+      "code-simplification",
+      "constraint-driven-development",
+      "debugging-and-error-recovery",
+      "deprecation-and-migration",
+      "documentation-and-adrs",
+      "doubt-driven-development",
+      "frontend-ui-engineering",
+      "git-workflow-and-versioning",
+      "idea-refine",
+      "incremental-implementation",
+      "interview-me",
+      "observability-and-instrumentation",
+      "performance-optimization",
+      "planning-and-task-breakdown",
+      "security-and-hardening",
+      "shipping-and-launch",
+      "source-driven-development",
+      "spec-driven-development"
+    ],
+    "tags": {
+      "0.6.14": {
+        "api-and-interface-design": "cc5e2166c484b2c297e8253f56e7525e5031f81d66101ca4e760ef378ea6bad0",
+        "browser-testing-with-devtools": "4e3aacd6a380cd25bc6c2d67fdd1c926a9b22535b8a62109ecd33cefd909e3d9",
+        "ci-cd-and-automation": "5e0e55c059670a7838dc9d58dc20a3a645c0d43c974416490112af7de522df95",
+        "code-review-and-quality": "2db1e850379f255fd3091ef278cde24cd6c7d2ba23e360cc52ea522c40d4396e",
+        "code-simplification": "e13b433345e6bf425c3625442ac1b3507b371c18d7ea3e3db822da7a7f742a29",
+        "constraint-driven-development": "313323d6a746801ee4be4b59aa1e00ca15741f5fa131b279de55783f9d14d1d3",
+        "debugging-and-error-recovery": "01cff31fbd8796b444225f8a8386219792c25cebb5d4d76df664afd1d13ed610",
+        "deprecation-and-migration": "1896d7db836fc067e2856739664db9ff5bb642526fdff2126d08ec0d588da4b7",
+        "documentation-and-adrs": "6fccf3088d5042a3c889faa25113ffa47b9f7f999f4fc9e527d5e5226888442f",
+        "doubt-driven-development": "6fa1fcd8420c28daf7e53c5b08b0f20b907911efd2a6d9bce0b9740da20a4008",
+        "frontend-ui-engineering": "93a0ebffbb6075340d85255ae50724bc5e5e19b0fcbf2ae5d5857b9c5ddf9498",
+        "git-workflow-and-versioning": "b7465d187935c52546d39fdc7bd6ac36d94eda25a9500ef8c18b767d2eb116ea",
+        "idea-refine": "c226c1cd369bef2671073f5fd1f4108731691f725ef28f8c8c01d247c214d0c3",
+        "incremental-implementation": "df66536610071727feae1ca95f3c391c248ad828041750ccd3699cce763aa00b",
+        "interview-me": "ace4b675999bb504593d572e0f73f3d7e803ad6fddf318445598c82c11939db2",
+        "observability-and-instrumentation": "e7fcb0820306d46268de9594d676ad98e35040858926c412b7000faa52a61f87",
+        "performance-optimization": "82af71540457cf853893685211f64509cd1e781c0de09d0186f16960f2d6eeba",
+        "planning-and-task-breakdown": "ed0f90cc5951ddd4bcab7f871f64efec93a49af9279ef93bc470da77ad8da3f7",
+        "security-and-hardening": "2e3fc60eed5aba97fe416f3f3c9317fdb014a682925ec70a733c3ff99e4b9858",
+        "shipping-and-launch": "726f3e546369db289160b8d42195590f00b6432887e17bf19070dcc9a347fe39",
+        "source-driven-development": "df38a852658679a67c7a9e4840160570c95094a13a63307e834045ddbf8aa287",
+        "spec-driven-development": "b9d05b4259c14550bbffbaafd8201492129926d37ede716db352c6e4f91b404d"
+      }
+    }
+  }
+}

@@ -26,7 +26,19 @@
 #   AI trailers, and records forge=external, backup_remote=, and backup_prefix=
 #   in the task metadata for bin/fm-dod-lib.sh's ready-report gate. A
 #   registry entry the parser refuses stops the spawn rather than launching on a
-#   guessed posture. A
+#   guessed posture. A ship or scout spawn reads the project's registered
+#   best-practices pack the same way (bin/fm-project-mode.sh --best-practices)
+#   and refuses a brief whose Delivery contract `best-practices=` disagrees with
+#   it in either direction, or a registered value the parser refuses. With a
+#   pack registered it reads, once the worker copy is at its launch commit, the
+#   pack's installed version from the worker harness's registry or skills
+#   directory (bin/fm-best-practices.sh version),
+#   exports FM_BEST_PRACTICES=<owner>/<repo> and FM_BEST_PRACTICES_VERSION
+#   (the reviewed tag the copy's content matches, `unreviewed`, or `missing`)
+#   beside FM_TASK_INBOX, and on `unreviewed` or `missing` prints one notice
+#   and launches anyway; an `unreviewed` launch also appends the differing
+#   skills to the launch brief. A project without the token never causes a
+#   registry read. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
@@ -2819,15 +2831,16 @@ launch_template() {
   # spawn answers. The leading shell loop clears every foreign ORCA_*/FM_*
   # marker the pane actually carries at launch time (verified live: ORCA_*
   # values from the launching session's environment reach worker tool
-  # subprocesses through the pane), keeping the three launch-owned names
-  # (FM_TASK_ID, FM_TASK_INBOX, FM_ZELLIJ_SESSION) so the doorbell and backend
-  # plumbing keep working; the fixed `env -u` set clears every harness-identity
+  # subprocesses through the pane), keeping the launch-owned names
+  # (FM_TASK_ID, FM_TASK_INBOX, FM_ZELLIJ_SESSION, and the best-practices pack
+  # exports FM_BEST_PRACTICES and FM_BEST_PRACTICES_VERSION) so the doorbell,
+  # backend plumbing, and pack exports keep working; the fixed `env -u` set clears every harness-identity
   # marker, because polytoken publishes none of its own and does not clear
   # inherited ones. There is no `__EFFORTFLAG__`: polytoken encodes reasoning
   # effort inside the model reference as `<model>(<effort>)`, so the effort
   # axis rides `__MODELFLAG__` after mapping to the nearest compatible
   # level in the installed model's selectable set.
-  polytoken) printf '%s' 'for _fmv in $(env | cut -d= -f1 | grep -E '\''^(ORCA_|FM_)'\''); do case $_fmv in FM_TASK_ID|FM_TASK_INBOX|FM_ZELLIJ_SESSION) ;; *) unset $_fmv ;; esac; done; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u AGENT __POLYTOKENBIN__ --config-dir __POLYTOKENCONFIG__ new --sessions-dir __POLYTOKENSESSIONS__ --facet firstmate-worker --facets-dir __POLYTOKENFACETS__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  polytoken) printf '%s' 'for _fmv in $(env | cut -d= -f1 | grep -E '\''^(ORCA_|FM_)'\''); do case $_fmv in FM_TASK_ID|FM_TASK_INBOX|FM_ZELLIJ_SESSION|FM_BEST_PRACTICES|FM_BEST_PRACTICES_VERSION) ;; *) unset $_fmv ;; esac; done; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u AGENT __POLYTOKENBIN__ --config-dir __POLYTOKENCONFIG__ new --sessions-dir __POLYTOKENSESSIONS__ --facet firstmate-worker --facets-dir __POLYTOKENFACETS__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Command Code receives the typed launch envelope after -- as its initial
   # message. --yolo bypasses permission prompts, --trust skips the folder-trust
   # prompt of a fresh worktree, and --skip-onboarding skips taste onboarding.
@@ -4142,6 +4155,35 @@ if [ "$KIND" = ship ]; then
   STANDING_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$PROJ_NAME" 2>/dev/null) || STANDING_BRANCH=
   if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
     echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+# Best-practices pack (bin/fm-project-mode.sh --best-practices): a project fact
+# like the forge, never a per-task choice, so a ship or scout brief must carry
+# exactly the registered value on its Delivery contract line. A project without
+# the token never causes a plugin registry read. The pack read itself waits
+# for the prepared worker copy below.
+BEST_PRACTICES=none
+BEST_PRACTICES_VERSION=
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  BP_PROJ_NAME=$(basename "$PROJ_ABS")
+  if ! BEST_PRACTICES=$("$FM_ROOT/bin/fm-project-mode.sh" --best-practices "$BP_PROJ_NAME" 2>/dev/null); then
+    "$FM_ROOT/bin/fm-project-mode.sh" --best-practices "$BP_PROJ_NAME" >/dev/null || true
+    echo "error: $ID cannot launch: the best-practices token registered for $BP_PROJ_NAME does not resolve (see the refusal above); correct data/projects.md and spawn again" >&2
+    exit 1
+  fi
+  [ -n "$BEST_PRACTICES" ] || BEST_PRACTICES=none
+  BRIEF_BEST_PRACTICES=$(sed -n 's/^Delivery contract: .*[[:space:]]best-practices=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  [ -n "$BRIEF_BEST_PRACTICES" ] || BRIEF_BEST_PRACTICES=none
+  if [ "$BRIEF_BEST_PRACTICES" != "$BEST_PRACTICES" ]; then
+    if [ "$KIND" = scout ]; then
+      bp_scaffold="fm-brief.sh $ID $BP_PROJ_NAME --scout"
+    else
+      bp_scaffold="fm-brief.sh $ID $BP_PROJ_NAME --mode $MODE"
+    fi
+    [ "$BEST_PRACTICES" = none ] || bp_scaffold="$bp_scaffold --best-practices $BEST_PRACTICES"
+    echo "error: best-practices mismatch for $ID: $BP_PROJ_NAME is registered best-practices=$BEST_PRACTICES but ${SOURCE_BRIEF:-$BRIEF} records best-practices=$BRIEF_BEST_PRACTICES; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove the brief, re-scaffold it with $bp_scaffold (plus this task's other flags), then re-fill those two subsections" >&2
+    exit 1
   fi
 fi
 
@@ -5703,6 +5745,34 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code 
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
 fi
 
+# The best-practices pack read runs here because the worker copy is now at its
+# launch commit, and what that copy commits can differ from the project clone.
+# It reads the installed version from the worker harness's own registry or
+# skills directory (bin/fm-best-practices.sh version) to fill
+# FM_BEST_PRACTICES_VERSION below with one of three values: the reviewed tag the
+# copy's content matches; `unreviewed` when the pack is loaded but a file the
+# adapter depends on matches no reviewed text, where the adapter still applies,
+# one notice names the skills, and the launch brief lists them for the worker's
+# done summary; or `missing` when there is no usable copy, with one notice. The
+# read never blocks the launch and is not a pack check.
+if [ "$BEST_PRACTICES" != none ]; then
+  bp_read=$("$FM_ROOT/bin/fm-best-practices.sh" version "$BEST_PRACTICES" --harness "$HARNESS" --project "$WT" 2>/dev/null) ||
+    bp_read="missing: the pack read did not complete"
+  case "$bp_read" in
+    '' | missing*)
+      BEST_PRACTICES_VERSION=missing
+      echo "notice: $ID launches with FM_BEST_PRACTICES_VERSION=missing for $BEST_PRACTICES on $HARNESS (${bp_read#missing: }); the worker follows firstmate's defaults and says so in its done summary" >&2
+      ;;
+    unreviewed*)
+      BEST_PRACTICES_VERSION=unreviewed
+      echo "notice: $ID launches with FM_BEST_PRACTICES_VERSION=unreviewed for $BEST_PRACTICES on $HARNESS: ${bp_read#unreviewed: }; the adapter still applies and the worker names these skills in its done summary" >&2
+      printf '\n# Pack read at launch\nFM_BEST_PRACTICES_VERSION is unreviewed: %s.\nFollow the best-practices section anyway, and name these skills as unreviewed in your done summary.\n' \
+        "${bp_read#unreviewed: }" >> "$BRIEF"
+      ;;
+    *) BEST_PRACTICES_VERSION=$bp_read ;;
+  esac
+fi
+
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
 # adoption. This also updates Herdr's restored pane shell before any harness is
 # started, so a later host restart inherits the task worktree rather than the
@@ -7116,6 +7186,13 @@ fi
 # kill switch below it is an export statement, so it survives a compound raw
 # launch and the launch-env-allowlist `env -i` wrapper.
 LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
+# A project that registers a best-practices pack also exports the pack and its
+# installed version (or `missing`) at this same site, so the practice text and
+# the done summary can say what was active.
+if [ "$BEST_PRACTICES" != none ]; then
+  LAUNCH="export FM_BEST_PRACTICES_VERSION=$(shell_quote "$BEST_PRACTICES_VERSION"); $LAUNCH"
+  LAUNCH="export FM_BEST_PRACTICES=$(shell_quote "$BEST_PRACTICES"); $LAUNCH"
+fi
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 # When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
 # own environment, carry it into the launch command text so Claude Code's
@@ -7164,6 +7241,9 @@ if [ "$BACKEND" = t3code ]; then
   # record exists, the same delivered-implies-recorded invariant the pane path
   # keeps by unsetting it when the record fails.
   T3CODE_ENV=("GOTMPDIR=$TASK_TMP/gotmp" COMPACT_ADVISER_DISABLE=1 "FM_TASK_INBOX=$STATE_REAL/$ID.inbox")
+  if [ "$BEST_PRACTICES" != none ]; then
+    T3CODE_ENV+=("FM_BEST_PRACTICES=$BEST_PRACTICES" "FM_BEST_PRACTICES_VERSION=$BEST_PRACTICES_VERSION")
+  fi
   if [ "$GIT_HOOKS_INSTALLED" = 1 ]; then
     T3CODE_ENV+=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath "GIT_CONFIG_VALUE_0=$GIT_HOOKS_DIR")
   fi
