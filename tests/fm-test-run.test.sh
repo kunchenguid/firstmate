@@ -1677,6 +1677,72 @@ EOF
   pass "--stop kills children that ignore TERM before the run exits"
 }
 
+# A child pid that exits during the grace and is reused by an unrelated process
+# must not be killed: abort_run only KILLs pids whose start identity is the one
+# it recorded. A stubbed ps reports a changed start time for the fixture's
+# TERM-ignoring sleep, standing in for that reuse.
+test_stop_spares_a_pid_whose_identity_changed() {
+  local tmp repo runner sleeper fakebin out fix pid id rc w script_pid sleep_pid
+  tmp=$(fm_test_tmproot fm-test-run-stop-reuse) || fail "could not create the fixture root"
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  sleeper=tests/fm-sleep-fixture.test.sh
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fakebin"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/$sleeper" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 60 &
+printf "%s %s\n" "$$" "$!" >"$TMPDIR/fixture.pid"
+wait
+EOF
+  # The first start-time read of the sleep is real; every later one differs.
+  cat >"$fakebin/ps" <<SH
+#!/usr/bin/env bash
+victim=
+[ -s "\$TMPDIR/fixture.pid" ] && read -r _ victim <"\$TMPDIR/fixture.pid"
+if [ -n "\$victim" ] && [ "\$*" = "-o lstart= -p \$victim" ]; then
+  if [ -e "\$TMPDIR/victim.seen" ]; then
+    echo "Thu Jan  1 00:00:00 1970"
+    exit 0
+  fi
+  : >"\$TMPDIR/victim.seen"
+fi
+exec $(command -v ps) "\$@"
+SH
+  chmod +x "$runner" "$repo/$sleeper" "$fakebin/ps"
+  out="$tmp/run.out"
+  fix="$tmp/fixture.pid"
+  PATH="$fakebin:$PATH" TMPDIR="$tmp" "$runner" "$sleeper" >"$out" 2>&1 &
+  pid=$!
+  w=0
+  while [ ! -s "$fix" ] && [ "$w" -lt 100 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  [ -s "$fix" ] || fail "the fixture script never started"
+  read -r script_pid sleep_pid <"$fix"
+  id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$pid" '$2 == p {print $1}')
+  [ -n "$id" ] || fail "--stop did not list the live run"
+  TMPDIR="$tmp" "$runner" --stop "$id" >/dev/null || fail "--stop <run> failed"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 143 ] || fail "a stopped run must exit 143, got $rc: $(cat "$out")"
+  grep -q "FM_TEST_ABORTED signal=15 run=$id" "$out" \
+    || fail "stopped run did not report FM_TEST_ABORTED: $(cat "$out")"
+  case $(ps -o stat= -p "$script_pid" 2>/dev/null) in
+    ''|Z*) ;;
+    *) fail "the TERM-ignoring script $script_pid with an unchanged identity outlived the stopped run" ;;
+  esac
+  rc=0
+  kill -0 "$sleep_pid" 2>/dev/null || rc=1
+  kill -KILL "$sleep_pid" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "abort_run killed pid $sleep_pid although its start identity changed"
+  pass "--stop does not KILL a pid whose start identity changed"
+}
+
 # A registry directory the caller does not exclusively own is refused, never
 # trusted: a planted record could otherwise aim --stop at an unrelated process.
 test_stop_refuses_an_unprivate_registry() {
@@ -2147,6 +2213,7 @@ test_stop_refuses_an_unprivate_registry
 test_windows_bash_skips_run_registration
 test_term_to_runner_aborts_a_hung_suite
 test_stop_kills_term_ignoring_children
+test_stop_spares_a_pid_whose_identity_changed
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom
 test_max_wall_ms_is_a_result_not_advice
