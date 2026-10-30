@@ -90,6 +90,29 @@ fake_screen() {
     delivered)
       printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
       ;;
+    delivered-240)
+      # 2.4.0: an earlier welcome card, a ❯ user line, an empty composer, and
+      # the status footer under the box. context stays 0. The welcome card is
+      # a box with text, so only the bottom-most box may authorize delivery.
+      printf '╭────────────────────────────────╮\n│ Welcome to Kimi Code!          │\n╰────────────────────────────────╯\n❯ Read the brief at %s and follow it exactly.\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n Never Ask  %s\n                                                        context: 0%%\n' \
+        "$FM_FAKE_BRIEF_REAL" "$FM_FAKE_PANE_PATH"
+      ;;
+    delivered-context)
+      # Nonzero context, no echo, footer under a cleared box.
+      printf '╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n Never Ask  %s\n                                                        context: 1%%\n' \
+        "$FM_FAKE_PANE_PATH"
+      ;;
+    delivered-zero)
+      # A literal zero, including the 0.0 form, is not nonzero context.
+      printf '╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n                                                        context: 0.0%%\n'
+      ;;
+    pointer-expanded)
+      # Paste-burst newline: the pointer is still on the first content row, a
+      # blank row sits under it, and both the ❯ line and a nonzero context
+      # percentage are already on screen. Neither may confirm delivery.
+      printf '╭────────────────────────────────╮\n│ Welcome to Kimi Code!          │\n╰────────────────────────────────╯\n❯ Read the brief at %s and follow it exactly.\n╭────────────────────────────────╮\n│ > Read the brief at %s and follow it exactly. │\n│                                                  │\n╰────────────────────────────────╯\n Never Ask  %s\n                                                        context: 1%%\n' \
+        "$FM_FAKE_BRIEF_REAL" "$FM_FAKE_BRIEF_REAL" "$FM_FAKE_PANE_PATH"
+      ;;
     *)
       printf 'shell starting\n$ \n'
       ;;
@@ -146,6 +169,7 @@ case "${1:-}" in
           ;;
         *)
           printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
+          date +%s%3N > "$FM_FAKE_KIMI_TYPED_AT"
           case "$state" in
             trust|trust-wrapped|trust-partial|trust-decoy|trust-230|trust-230-rootmcp|trust-230-kimimcp|trust-230-small|trust-230-paged|trust-240|booting|banner-only|banner-first|blank-frame) ;;
             *) printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE" ;;
@@ -201,14 +225,34 @@ case "${1:-}" in
           ready|delivered)
             printf 'enter\n' >> "$FM_FAKE_KIMI_STRAY_ENTER_LOG"
             ;;
-          pointer-typed)
-            if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
+          pointer-typed|pointer-expanded)
+            printf 'enter\n' >> "$FM_FAKE_KIMI_SUBMIT_ENTER_LOG"
+            if [ "${FM_FAKE_KIMI_PASTE_BURST:-no}" = yes ]; then
+              # Kimi 2.4.0 suppresses Enter for 120ms after a fast paste.
+              now_ms=$(date +%s%3N)
+              typed_ms=$(cat "$FM_FAKE_KIMI_TYPED_AT")
+              if [ $((now_ms - typed_ms)) -lt 120 ]; then
+                printf 'pointer-expanded\n' > "$FM_FAKE_KIMI_STATE"
+              else
+                printf 'delivered-240\n' > "$FM_FAKE_KIMI_STATE"
+              fi
+            elif [ "$state" = pointer-expanded ]; then
+              :
+            elif [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
               if [ "${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" = yes ] \
                  && [ ! -f "$FM_FAKE_KIMI_SWALLOWED" ]; then
                 : > "$FM_FAKE_KIMI_SWALLOWED"
               else
                 printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
               fi
+            elif [ "${FM_FAKE_KIMI_DELIVERY:-}" = 240 ]; then
+              printf 'delivered-240\n' > "$FM_FAKE_KIMI_STATE"
+            elif [ "${FM_FAKE_KIMI_DELIVERY:-}" = context ]; then
+              printf 'delivered-context\n' > "$FM_FAKE_KIMI_STATE"
+            elif [ "${FM_FAKE_KIMI_DELIVERY:-}" = zero ]; then
+              printf 'delivered-zero\n' > "$FM_FAKE_KIMI_STATE"
+            elif [ "${FM_FAKE_KIMI_DELIVERY:-}" = draft ]; then
+              printf 'pointer-expanded\n' > "$FM_FAKE_KIMI_STATE"
             else
               printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
             fi
@@ -296,6 +340,14 @@ EOF
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
+  # The suite default settles immediately so only the paste-burst case pays
+  # for the production wait. FM_KIMI_TEST_REAL_SETTLE=yes leaves the variable
+  # unset and proves the production default instead.
+  if [ "${FM_KIMI_TEST_REAL_SETTLE:-}" = yes ]; then
+    unset FM_KIMI_SUBMIT_SETTLE
+  else
+    export FM_KIMI_SUBMIT_SETTLE="${FM_KIMI_SUBMIT_SETTLE:-0}"
+  fi
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -313,6 +365,9 @@ run_spawn() {
     FM_FAKE_TMUX_VISIBLE_FAILS="${FM_FAKE_TMUX_VISIBLE_FAILS:-no}" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
+    FM_FAKE_KIMI_PASTE_BURST="${FM_FAKE_KIMI_PASTE_BURST:-no}" \
+    FM_FAKE_KIMI_TYPED_AT="$case_dir/kimi.typed-at" \
+    FM_FAKE_KIMI_SUBMIT_ENTER_LOG="$case_dir/submit-enter.log" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_KIMI_CAPTURES="${FM_FAKE_KIMI_CAPTURES:-$ROOT/tests/captures/kimi-code-2.3.0}" \
     FM_FAKE_MCP_MARKER_LOG="$case_dir/marker.log" \
@@ -760,6 +815,102 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
   assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
     "unconfirmed kimi delivery did not leave a supervisor-visible failure"
   pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
+}
+
+kimi_delivery_case() { # <id> ; then the caller sets FM_FAKE_* and runs spawn
+  local id=$1 rec
+  rec=$(make_spawn_case "$id" "$id")
+  read_spawn_record "$rec"
+}
+
+test_kimi_240_arrow_echo_confirms_a_cleared_box_at_zero_context() {
+  local id out rc enters
+  id=kimi-240-echo-b1
+  kimi_delivery_case "$id"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=240 FM_KIMI_SUBMIT_RETRIES=1 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a cleared 2.4.0 box plus the arrow echo should confirm delivery: $out"
+  [ "$(cat "$CASE_DIR/kimi.state")" = delivered-240 ] \
+    || fail "2.4.0 delivery did not reach the arrow-echo screen: $(cat "$CASE_DIR/kimi.state")"
+  enters=$(wc -l < "$CASE_DIR/submit-enter.log" | tr -d ' ')
+  [ "$enters" = 1 ] || fail "2.4.0 arrow-echo delivery took $enters submitting Enters, not one"
+  pass "fm-spawn: Kimi 2.4.0 delivery is a cleared box plus the arrow echo, even at context 0%"
+}
+
+test_kimi_nonzero_context_confirms_a_cleared_box_without_an_echo() {
+  local id out rc
+  id=kimi-240-context-b2
+  kimi_delivery_case "$id"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=context FM_KIMI_SUBMIT_RETRIES=1 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "nonzero context on a cleared box should confirm delivery without an echo: $out"
+  [ "$(cat "$CASE_DIR/kimi.state")" = delivered-context ] \
+    || fail "context-only delivery did not reach that screen: $(cat "$CASE_DIR/kimi.state")"
+  pass "fm-spawn: nonzero context confirms Kimi delivery when the box is clear and no echo is shown"
+}
+
+test_kimi_echo_and_context_do_not_confirm_a_pointer_still_in_the_box() {
+  local id out rc
+  id=kimi-240-draft-b3
+  kimi_delivery_case "$id"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=draft FM_KIMI_SUBMIT_RETRIES=1 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a pointer still in the box confirmed delivery: $out"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "a draft still in the box lacked the delivery failure"
+  [ "$(cat "$CASE_DIR/kimi.state")" = pointer-expanded ] \
+    || fail "the draft screen was not the expanded composer: $(cat "$CASE_DIR/kimi.state")"
+  pass "fm-spawn: an arrow echo and nonzero context do not confirm delivery while the pointer is still typed"
+}
+
+test_kimi_literal_zero_context_without_an_echo_is_not_delivery() {
+  local id out rc
+  id=kimi-240-zero-b4
+  kimi_delivery_case "$id"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=zero FM_KIMI_SUBMIT_RETRIES=1 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "context 0.0% on a cleared box confirmed delivery: $out"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "a literal zero context lacked the delivery failure"
+  pass "fm-spawn: context 0.0% with no echo is not Kimi delivery"
+}
+
+test_kimi_one_enter_after_the_paste_window_submits() {
+  local id out rc enters
+  id=kimi-240-settle-b5
+  kimi_delivery_case "$id"
+  rc=0
+  out=$(FM_KIMI_TEST_REAL_SETTLE=yes FM_FAKE_KIMI_PASTE_BURST=yes \
+    FM_KIMI_SUBMIT_RETRIES=1 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "one Enter after the production settle should submit the 2.4.0 pointer: $out"
+  [ "$(cat "$CASE_DIR/kimi.state")" = delivered-240 ] \
+    || fail "the production settle did not reach the 2.4.0 delivered screen: $(cat "$CASE_DIR/kimi.state")"
+  enters=$(wc -l < "$CASE_DIR/submit-enter.log" | tr -d ' ')
+  [ "$enters" = 1 ] || fail "the production settle used $enters submitting Enters, not one"
+  pass "fm-spawn: the production settle waits out Kimi's paste burst so one Enter submits"
+}
+
+test_kimi_enter_inside_the_paste_window_does_not_submit() {
+  local id out rc enters
+  id=kimi-240-burst-b6
+  kimi_delivery_case "$id"
+  rc=0
+  out=$(FM_KIMI_SUBMIT_SETTLE=0 FM_FAKE_KIMI_PASTE_BURST=yes \
+    FM_KIMI_SUBMIT_RETRIES=1 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an Enter inside the paste burst confirmed delivery: $out"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "a paste-burst newline lacked the delivery failure"
+  [ "$(cat "$CASE_DIR/kimi.state")" = pointer-expanded ] \
+    || fail "the paste burst did not leave the expanded draft: $(cat "$CASE_DIR/kimi.state")"
+  enters=$(wc -l < "$CASE_DIR/submit-enter.log" | tr -d ' ')
+  [ "$enters" = 1 ] || fail "the paste-burst case sent $enters submitting Enters, not one"
+  pass "fm-spawn: an Enter inside Kimi's paste burst leaves the pointer typed"
 }
 
 test_kimi_readiness_gate_precedes_pointer() {
@@ -1292,6 +1443,12 @@ test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
+test_kimi_240_arrow_echo_confirms_a_cleared_box_at_zero_context
+test_kimi_nonzero_context_confirms_a_cleared_box_without_an_echo
+test_kimi_echo_and_context_do_not_confirm_a_pointer_still_in_the_box
+test_kimi_literal_zero_context_without_an_echo_is_not_delivery
+test_kimi_one_enter_after_the_paste_window_submits
+test_kimi_enter_inside_the_paste_window_does_not_submit
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_fresh_worktree_trust_is_answered_and_verified
 test_kimi_swallowed_trust_enter_is_retried_until_the_dialog_clears

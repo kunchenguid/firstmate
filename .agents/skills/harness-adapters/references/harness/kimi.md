@@ -3,6 +3,8 @@
 Verified on 2026-09-17 with Kimi Code CLI 2.0.0.
 The folder prompt was recorded again on 2026-10-23 with Kimi Code CLI 2.3.0 and 2.3.1, which reworded it; `tests/fm-kimi-trust-prompt-live-e2e.test.sh` refreshes that evidence against the installed binary.
 The same option pair was recorded again on 2026-10-29 with Kimi Code CLI 2.4.0, which shows `Load project instructions` over `Check: <path>` when the directory has project instructions such as `AGENTS.md`.
+Brief delivery was recorded again on 2026-10-29 with Kimi Code CLI 2.4.0, where a submitted user line leads with `❯` and the status footer sits under the composer box.
+`tests/fm-kimi-brief-delivery-live-e2e.test.sh` refreshes the paste-burst and one-Enter evidence against the installed binary.
 
 ## Operating facts
 
@@ -24,7 +26,7 @@ The same option pair was recorded again on 2026-10-29 with Kimi Code CLI 2.4.0, 
 
 ## Readiness-gated start
 
-`../../../bin/fm-spawn.sh` launches Kimi bare, handles the complete trust dialog when it appears in a wording `bin/fm-kimi-trust-lib.sh` recognizes, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
+`../../../bin/fm-spawn.sh` launches Kimi bare, handles the complete trust dialog when it appears in a wording `bin/fm-kimi-trust-lib.sh` recognizes, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and accepts delivery only when the bordered composer is clear and the pane shows the echoed submission (`❯` on 2.4.0, `✨` on earlier releases) or a nonzero context percentage.
 Kimi 2.3.0 reads a root `.mcp.json` at the git worktree root as a project MCP declaration in addition to `.kimi-code/mcp.json`, while its documentation names only the latter; the prompt names whichever file declared the servers on its `Config:` line, which is why the refusal reads the prompt rather than any file.
 Kimi 2.4.0 keeps that option pair and glyph, and when the directory has project instructions the disclosure reads `Load project instructions` over `Check: <path>` instead of the empty-directory line.
 That `Check:` line is not a project-server announcement, so the same Enter answer still applies.
@@ -37,9 +39,10 @@ The path must be absolute because the instructions live outside the task worktre
 
 Sending before readiness was reproduced as a silent drop with zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
 The startup input-readiness window is the established cause; the banner is not.
-An early Enter can expand the composer to multiple content rows, leaving pointer text on the first row and the cursor on an empty later row.
-The shared tmux reader therefore locates the complete bordered composer and treats real text on any content row as positive evidence that submission remains pending.
-No rendering signal proves Kimi will accept input during this window, so delivery retries Enter through the shared submit core and retains the postcondition verification rather than relaxing readiness.
+Kimi 2.4.0 arms a paste burst on a fast paste of at least 8 characters and treats Enter within 120ms of that burst as a newline, which expands the composer and leaves the pointer on the first content row.
+Spawn waits 0.25s after typing the pointer, past that window, and then sends one Enter.
+A cursorless read of the 2.4.0 screen is unknown for both a draft and a cleared composer, because the status footer (`Never Ask` and `context:`) sits under the box, so that read cannot retry a swallowed Enter.
+Delivery reads the bottom-most bordered box in the pane: any content row other than a blank or a bare `>` means the pointer is still typed, and a cleared box plus `❯ Read the brief at`, the earlier `✨` echo, or a nonzero context percentage confirms it.
 
 Observed spinner captures had optional leading whitespace, a moon-phase glyph, whitespace around `·`, and rotating tip text, including during tool execution.
 The delivery-only matcher requires the observed whitespace, deliberately excludes the unobserved zero-whitespace form, and does not require trailing tip text.

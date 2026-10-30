@@ -5532,14 +5532,17 @@ kimi_visible_capture() {
   fm_backend_visible_capture "$BACKEND" "$T" "$W"
 }
 
-# Kimi launch-readiness and delivery route their composer-emptiness half
-# through the shared classifier (bin/fm-composer-lib.sh via
-# fm_backend_composer_state), the same owner every steer and injection guard
-# reads. This retired a fourth, spawn-local copy of composer shape knowledge -
-# a hardcoded bordered `│ > │` regex that would have silently broken kimi
-# spawn readiness fleet-wide the day kimi's TUI goes borderless the way
-# claude's did. The banner and brief-echo greps below are launch-progress
-# signals, not composer shapes, so they stay here.
+# Readiness routes its composer-emptiness half through the shared classifier
+# (bin/fm-composer-lib.sh via fm_backend_composer_state), the same owner every
+# steer and injection guard reads. A local bordered-box regex here would break
+# readiness fleet-wide the day the composer goes borderless. Delivery cannot
+# use that classifier on Kimi 2.4.0: the status footer sits under the box, and
+# the cursorless classifier treats a non-empty row under a box as stale
+# scrollback, so it answers unknown for both a draft and a cleared composer.
+# Herdr is cursorless, so a shared empty verdict never arrives after a real
+# submit. kimi_delivery_composer_is_clear reads the bottom-most box instead and
+# fails closed when that box is missing. The banner and brief-echo checks stay
+# here because they are launch-progress signals, not composer shapes.
 kimi_composer_is_empty() {
   [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
 }
@@ -5639,13 +5642,63 @@ kimi_wait_for_ready() {
   return 1
 }
 
+# 0 when the bottom-most complete bordered composer has no draft. Rows outside
+# the box, including the 2.4.0 footer and an earlier welcome card, are not
+# composer text. A content row is clear only when it is blank or a bare ">".
+kimi_delivery_composer_is_clear() { # <plain-pane-capture>
+  local pane=$1 line in_box=0 closed=0 clear=1 content
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *╭*╮*)
+        in_box=1
+        closed=0
+        clear=1
+        ;;
+      *╰*╯*)
+        if [ "$in_box" -eq 1 ]; then
+          closed=1
+          in_box=0
+        fi
+        ;;
+      *)
+        [ "$in_box" -eq 1 ] || continue
+        case "$line" in
+          *│*) ;;
+          *) clear=0; continue ;;
+        esac
+        content=${line#*│}
+        content=${content%│*}
+        content=${content#"${content%%[![:space:]]*}"}
+        content=${content%"${content##*[![:space:]]}"}
+        case "$content" in
+          ''|'>') ;;
+          *) clear=0 ;;
+        esac
+        ;;
+    esac
+  done <<< "$pane"
+  if [ "$closed" -eq 1 ] && [ "$clear" -eq 1 ]; then
+    return 0
+  fi
+  return 1
+}
+
 kimi_delivery_is_confirmed() { # <plain-pane-capture>
   local pane=$1
-  kimi_composer_is_empty || return 1
-  if { printf '%s\n' "$pane" | grep -Fq '✨' &&
-    printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; } ||
-    printf '%s\n' "$pane" |
-    grep -qiE 'context:[[:space:]]*(0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*([.][0-9]+)?)[[:space:]]*%'; then
+  # The shared classifier stays unknown on a 2.4.0 screen, so emptiness is the
+  # box read above. The echo is the user line: U+276F on 2.4.0, the sparkle on
+  # earlier releases. Nonzero context remains the third signal, and a literal
+  # zero (including 0.0) is not it. Any one signal is enough once the box is clear.
+  kimi_delivery_composer_is_clear "$pane" || return 1
+  if printf '%s\n' "$pane" | grep -Fq '✨' &&
+    printf '%s\n' "$pane" | grep -Fq 'Read the brief at'; then
+    return 0
+  fi
+  if printf '%s\n' "$pane" | grep -Fq '❯ Read the brief at'; then
+    return 0
+  fi
+  if printf '%s\n' "$pane" | grep -qiE \
+    'context:[[:space:]]*(0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*([.][0-9]+)?)[[:space:]]*%'; then
     return 0
   fi
   return 1
@@ -5667,12 +5720,12 @@ kimi_spawn_fail() { # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
-# rovo mirrors kimi's launch-then-send shape exactly: a positional brief is
+# rovo mirrors kimi's launch-then-send shape: a positional brief is
 # dead-on-arrival, so rovo launches bare and takes its brief pointer only after a
-# readiness gate, then a delivery-confirmation gate. Both route their
-# composer-emptiness half through the shared classifier (fm_backend_composer_state)
-# like kimi. The banner and context-usage greps are launch-progress signals, not
-# composer shapes.
+# readiness gate, then a delivery-confirmation gate. Rovo still routes its
+# composer-emptiness half through the shared classifier. Kimi delivery does not;
+# kimi_delivery_composer_is_clear owns that read. The banner and context-usage
+# greps are launch-progress signals, not composer shapes.
 rovo_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -8012,7 +8065,12 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
-  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
+  # Kimi 2.4.0 treats Enter within 120ms of a fast paste of 8 or more characters
+  # as a newline. send-keys -l of this pointer arms that window, and a settle of
+  # 0 makes the only Enter insert a blank composer row. Herdr then stops: its
+  # cursorless read of the footer under the box is unknown, so it does not
+  # retry. 0.25s is past the window, so this one Enter submits.
+  KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0.25}
   if ! KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
     "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W"); then
