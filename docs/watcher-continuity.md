@@ -116,9 +116,8 @@ The beacon is `state/.last-watcher-beat`, which only the watcher process touches
   In that case the hook suppresses the arm output and continues silently.
 - Only an exhausted failure with no verified watcher commits one last-resort notice for the continuous failure episode.
 - A refused notice commit stays silent for a later retry.
-- After a successful notice, later Stop cycles exit 2 without repeating it until the turn-end guard consumes the attended fail-open.
 
-The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
+See [failure progression and block budget](turnend-guard.md#failure-progression-and-block-budget) and [attended fail-open](turnend-guard.md#attended-fail-open) for notice commits, session-bound interruptions, episode resets, and continuation limits.
 
 ### Supervision host
 
@@ -516,7 +515,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Exit-2 translation.
 - The handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake.
 - An unconfirmed successor reported in the banner without withholding the wake.
-- Host-timeout HUP/TERM/INT translation into the same durable failure handoff.
+- The [session-bound HUP/TERM/INT failure handoff](turnend-guard.md#failure-progression-and-block-budget) and replacement-session notice isolation.
 
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim.
 [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
