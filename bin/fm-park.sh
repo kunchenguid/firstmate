@@ -85,7 +85,10 @@
 # The request (state/<id>.review-park-land) records the merged PR as pr=, and
 # a land holding the lane lock drops a request whose pr= is not the lane's
 # current pr= without acting, so a stale request never tears down a lane that
-# has moved on to another PR. bin/fm-watch.sh runs
+# has moved on to another PR. Only the detached cleanup removes its request,
+# after its outcome report is saved (teardown leaves it), so a cleanup killed
+# mid-teardown is retried; a request whose task record is gone is dropped by
+# the tick. bin/fm-watch.sh runs
 # land --if-eligible --detach for every merged lane from its merged-poll path
 # after the merge outcome is recorded, also when bin/fm-pr-merge.sh recorded it
 # first, which makes the watcher the one owner of a merged lane's teardown.
