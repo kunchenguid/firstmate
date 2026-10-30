@@ -5527,10 +5527,29 @@ EOF
   return 1
 }
 
+# Rewrite <meta> into <out> without the <owned keys>, placing <line>... ahead
+# of the first pr= line so the PR region stays the record's tail that
+# fm_pr_metadata_identity_parse requires.
+spawn_meta_rewrite_before_pr() {  # <meta> <out> <owned keys> <line>...
+  local meta=$1 out=$2 keys=$3
+  shift 3
+  FM_SPAWN_META_LINES=$(printf '%s\n' "$@") awk -F= -v keys="$keys" '
+    BEGIN {
+      n = split(keys, k, " ")
+      for (i = 1; i <= n; i++) owned[k[i]] = 1
+      lines = ENVIRON["FM_SPAWN_META_LINES"]
+    }
+    $1 in owned { next }
+    !placed && $1 == "pr" { print lines; placed = 1 }
+    { print }
+    END { if (!placed) print lines }
+  ' "$meta" >"$out"
+}
+
 # Bind the discovered session into task metadata (the control verbs' durable
 # address), in the same locked-filter-and-publish shape spawn_record_traceparent
 # uses: an idempotent rewrite that drops any prior polytoken_* binding before
-# appending the fresh one.
+# writing the fresh one ahead of any PR region.
 spawn_record_polytoken_session() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
   if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -5541,12 +5560,9 @@ spawn_record_polytoken_session() {
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.polytoken.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "polytoken_session" && $1 != "polytoken_port" && $1 != "polytoken_credential"' "$meta" >"$SPAWN_META_TMP" ||
-    ! {
-      echo "polytoken_session=$POLYTOKEN_SESSION_ID"
-      echo "polytoken_port=$POLYTOKEN_SESSION_PORT"
-      echo "polytoken_credential=$POLYTOKEN_SESSION_CREDENTIAL"
-    } >>"$SPAWN_META_TMP" ||
+    ! spawn_meta_rewrite_before_pr "$meta" "$SPAWN_META_TMP" "polytoken_session polytoken_port polytoken_credential" \
+      "polytoken_session=$POLYTOKEN_SESSION_ID" "polytoken_port=$POLYTOKEN_SESSION_PORT" \
+      "polytoken_credential=$POLYTOKEN_SESSION_CREDENTIAL" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
@@ -6777,10 +6793,6 @@ preserve_relaunch_meta() {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
   exit 1
 }
-chmod 0600 "$SPAWN_META_PATH" || {
-  echo "error: task record for $ID could not be made private at $SPAWN_META_PATH" >&2
-  exit 1
-}
 if [ "$RELAUNCH" -eq 0 ]; then
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
@@ -7147,8 +7159,8 @@ spawn_record_traceparent() {
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "traceparent"' "$meta" >"$SPAWN_META_TMP" ||
-    ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >>"$SPAWN_META_TMP" ||
+    ! spawn_meta_rewrite_before_pr "$meta" "$SPAWN_META_TMP" traceparent \
+      "traceparent=$SPAWN_TRACEPARENT" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
