@@ -1672,7 +1672,7 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
     ') || unavailable "cannot normalize serve allowances"
     lock_or_refuse "$LOCK"
     registry_homes || unavailable "${REGISTRY_ERROR:-the secondmate registry cannot be read}"
-    [ ! -s "$TMPD/remote-ids" ] \
+    { [ ! -s "$TMPD/remote-ids" ] || [ "$(pool_count "$TMPD/delivered")" -eq 0 ]; } \
       || unavailable "remote descendants have unaccounted occupancy; this home cannot serve fleet seats"
     SERVED=$LEDGER/served.json
     if [ -e "$SERVED" ] || [ -L "$SERVED" ]; then
