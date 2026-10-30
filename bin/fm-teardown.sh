@@ -600,6 +600,7 @@ META_LOCK=
 META_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
 SLOT_RECORD_LOCK_PATHS=()
+TEARDOWN_RETAINED_SLOT_CLAIMS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
@@ -2611,6 +2612,24 @@ other_record_endpoint_proven_gone() {  # <meta-file> <task-id>
   return 1
 }
 
+teardown_retain_slot_claim() {  # <worktree>
+  local slot held
+  slot=$(canonical_existing_dir "$1") || return 1
+  for held in "${TEARDOWN_RETAINED_SLOT_CLAIMS[@]+"${TEARDOWN_RETAINED_SLOT_CLAIMS[@]}"}"; do
+    [ "$slot" != "$held" ] || return 0
+  done
+  TEARDOWN_RETAINED_SLOT_CLAIMS+=("$slot")
+}
+
+teardown_slot_claim_retained() {  # <worktree>
+  local slot held
+  slot=$(canonical_existing_dir "$1") || return 1
+  for held in "${TEARDOWN_RETAINED_SLOT_CLAIMS[@]+"${TEARDOWN_RETAINED_SLOT_CLAIMS[@]}"}"; do
+    [ "$slot" != "$held" ] || return 0
+  done
+  return 1
+}
+
 teardown_record_lock_held() {  # <lock-path>
   local lock=$1 held
   [ "$CONTROL_LOCK_HELD" != 1 ] || [ "$lock" != "$CONTROL_LOCK" ] || return 0
@@ -2699,7 +2718,8 @@ require_exclusive_worktree_slot_record() {
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
         if [ "$claimed" = 1 ] && other_record_endpoint_proven_gone "$other" "$other_id"; then
-          echo "warning: task $other_id's recorded $field also names $slot, but that slot's owner claim names $record_id, which took the slot after $other_id's record was written, and $other_id's recorded endpoint is not live; $other_id's record is stale and is left in place for its own teardown." >&2
+          teardown_retain_slot_claim "$slot" || return 1
+          echo "warning: task $other_id's recorded $field also names $slot, but that slot's owner claim names $record_id, which took the slot after $other_id's record was written, and $other_id's recorded endpoint is not live; $other_id's record is stale and is left in place for its own records-only teardown." >&2
           continue
         fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
@@ -3652,7 +3672,8 @@ cleanup_firstmate_home_children() {
           fm_treehouse_pool_slot "$child_proj" "$child_wt" && child_pool_slot=1
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
             [ "$child_pool_slot" = 0 ] || teardown_note_dirty_return "$child_wt"
-            fm_treehouse_slot_owner_release "$child_wt" "$child_id"
+            teardown_slot_claim_retained "$child_wt" \
+            || fm_treehouse_slot_owner_release "$child_wt" "$child_id"
           else
             child_return_rc=$?
             if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
@@ -4028,11 +4049,11 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     exit 1
   }
   [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
-  # The slot is back in the pool, so this task's claim on it is spent. Dropping
-  # it here - and only after a return that succeeded - keeps a returned slot
-  # unclaimed until its next holder claims it, and leaves the claim in place
-  # whenever the return did not actually happen.
-  fm_treehouse_slot_owner_release "$WT" "$ID"
+  # The slot is back in the pool, so this task's claim on it is spent unless a
+  # proven-stale record still needs that claim to block relaunch until its own
+  # records-only teardown. The next allocation replaces either claim.
+  teardown_slot_claim_retained "$WT" \
+    || fm_treehouse_slot_owner_release "$WT" "$ID"
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

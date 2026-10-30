@@ -8,6 +8,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
 REAL_TMUX=$(command -v tmux || true)
 
@@ -65,6 +66,13 @@ run_teardown() {  # <case> <id> [teardown args...]
 
 run_case() {  # <case> <id>
   run_teardown "$1" "$2" --force
+}
+
+run_relaunch() {  # <case> <id>
+  local dir=$1 id=$2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$SPAWN" "$id" --relaunch
 }
 
 assert_refused_without_mutation() {  # <case> <id> <description>
@@ -1163,10 +1171,12 @@ write_two_records_on_one_slot() {  # <case> <stale-id> <owner-id>
   mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$stale.meta" \
     "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "harness=claude"
   fm_write_meta "$dir/home/state/$owner.meta" \
     "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "harness=claude"
 }
 
 # A tmux whose inventory optionally lists <task-id>'s window with <command> in
@@ -1227,7 +1237,7 @@ assert_claimed_owner_tore_down_past_stale_record() {  # <case> <stale-id> <owner
   local dir=$1 stale=$2 owner=$3 label=$4
   assert_absent "$dir/home/state/$owner.meta" "$label: the owner's record was not removed"
   assert_present "$dir/home/state/$stale.meta" "$label: the stale task's record was removed by another task's teardown"
-  assert_absent "$dir/pool/1/.fm-slot-owner" "$label: the owner left its spent slot claim behind"
+  assert_present "$dir/pool/1/.fm-slot-owner" "$label: the protective slot claim was removed"
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "$label: the owner did not return its own pool slot: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "$stale" "$label: the warning should name the stale record"
@@ -1239,8 +1249,8 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
 
   # mine: the claim names the task being torn down and the other record's own
   # endpoint is present but agent-free, so that record is stale rather than
-  # ambiguous. The owner returns its own slot and drops its claim; the stale
-  # record is left for its own teardown.
+  # ambiguous. The owner returns its own slot and retains its spent claim so
+  # the stale record can run only its own records-only teardown.
   dir=$(make_case two-records-claim-mine)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
   claim_pool_slot "$dir" "$owner"
@@ -1251,6 +1261,18 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   set -e
   [ "$rc" -eq 0 ] || fail "teardown of the claimed owner refused over a stale record: $(cat "$dir/stderr")"
   assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine"
+  set +e
+  run_relaunch "$dir" "$stale" > "$dir/relaunch-stdout" 2> "$dir/relaunch-stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the stale task relaunched into the returned pool slot"
+  assert_contains "$(cat "$dir/relaunch-stderr")" "belongs to task $owner" \
+    "the stale task's relaunch refusal should name the retained slot owner"
+  make_tmux_endpoint "$dir" '' ''
+  run_case "$dir" "$stale" > "$dir/stale-stdout" 2> "$dir/stale-stderr" \
+    || fail "the stale record's records-only teardown failed: $(cat "$dir/stale-stderr")"
+  assert_absent "$dir/home/state/$stale.meta" "the stale record remained actionable after its own teardown"
+  assert_present "$dir/pool/1/.fm-slot-owner" "the stale record's teardown removed another task's protective claim"
 
   dir=$(make_case two-records-claim-mine-control-locked)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
