@@ -16,9 +16,9 @@
 #   3. the terminal must be KNOWN 7501-aware by its environment
 #      (HC_TERMINAL_ID = herdr-core, REX_BLOCK/REX_SESSION = Rex,
 #      TERM_PROGRAM=ghostty) or answer the `OSC 7501 ; ?` capability query;
-#      a backend=herdr pane is known to be unaware - old herdr does not
-#      implement the protocol - and a pane with no readable tty can never
-#      answer, so both exit before the query
+#      backend=herdr (old herdr has no protocol support) and backend=t3code
+#      (no task tty) exit before the query, as does an unknown terminal
+#      without a readable tty
 #   4. the harness must not already report natively: Claude Code >= 2.1.295
 #      and Pi >= 1.1.0 send their own records (herdr discussions #5073/#5106,
 #      verified 2026-10-30), so a firstmate record would only fight theirs
@@ -39,6 +39,7 @@
 #     failed              -> error
 #     done                -> done ("PR ready" when the note has a URL)
 #   otherwise idle activity -> idle, and unknown activity holds the last record
+#   A paused declaration has no separate mapping; activity decides as above.
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
