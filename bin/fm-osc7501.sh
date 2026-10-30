@@ -242,18 +242,11 @@ osc_mtime_ns() {
 }
 
 # osc_probe_version <bin> -> first x.y.z in `<bin> --version`, bounded by
-# FM_OSC7501_PROBE_SECS. The verdict is cached per resolved path + mtime in
-# <state>/.osc7501-probe so slow `--version` implementations cost once.
-osc_probe_version() { # <bin> <state>
-  local bin=$1 state=$2 cache="$2/.osc7501-probe" rp mt line tmp pid i ver
-  rp=$(command -v "$bin" 2>/dev/null) || rp=$bin
+# FM_OSC7501_PROBE_SECS and run at every launch.
+osc_probe_version() { # <bin>
+  local rp tmp pid i ver
+  rp=$(command -v "$1" 2>/dev/null) || rp=$1
   case "$rp" in /*) ;; *) return 1 ;; esac
-  mt=$(osc_mtime_ns "$rp")
-  line=$(awk -F'\t' -v p="$rp" '$1==p {print; exit}' "$cache" 2>/dev/null)
-  if [ -n "$line" ] && [ "$(printf '%s' "$line" | cut -f2)" = "$mt" ]; then
-    printf '%s' "$(printf '%s' "$line" | cut -f3)"
-    return 0
-  fi
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-osc7501.XXXXXX") || return 1
   ( "$rp" --version >"$tmp" 2>/dev/null ) & pid=$!
   i=0
@@ -270,16 +263,8 @@ osc_probe_version() { # <bin> <state>
     ver=$(grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' "$tmp" 2>/dev/null | head -1)
   fi
   rm -f "$tmp"
-  if [ -n "${ver:-}" ]; then
-    if { awk -F'\t' -v p="$rp" '$1 != p' "$cache" 2>/dev/null; printf '%s\t%s\t%s\n' "$rp" "$mt" "$ver"; } >"$cache.new.$$"; then
-      mv -f "$cache.new.$$" "$cache" 2>/dev/null || rm -f "$cache.new.$$"
-    else
-      rm -f "$cache.new.$$"
-    fi
-    printf '%s' "$ver"
-    return 0
-  fi
-  return 1
+  [ -n "${ver:-}" ] || return 1
+  printf '%s' "$ver"
 }
 
 # osc_version_ge <ver> <floor>
@@ -299,7 +284,7 @@ EOF
   [ "$v3" -ge "$f3" ]
 }
 
-# osc_native <harness> <agent-bin> <state>: 0 when the launched agent reports
+# osc_native <harness> <agent-bin>: 0 when the launched agent reports
 # OSC 7501 itself at the probed version. An unprobed or failed probe reads as
 # not native: coverage wins, and two writers on one record only ever produce
 # the newer state.
@@ -310,7 +295,7 @@ osc_native() {
     pi | pi-signed) floor=1.1.0 ;;
     *) return 1 ;;
   esac
-  ver=$(osc_probe_version "${2:-$1}" "$3") || return 1
+  ver=$(osc_probe_version "${2:-$1}") || return 1
   osc_version_ge "$ver" "$floor"
 }
 
@@ -587,7 +572,7 @@ osc_arm() { # --task --harness --backend --kind --state --config [--agent-bin]
   [ -w "$dev" ] || exit 0
   case "$backend" in herdr | t3code) exit 0 ;; esac
   # a natively reporting agent never sees a query or a competing record
-  osc_native "$harness" "${agent_bin:-$harness}" "$state" && exit 0
+  osc_native "$harness" "${agent_bin:-$harness}" && exit 0
   if ! osc_env_aware; then
     [ -r "$dev" ] || exit 0
     osc_query_supported || exit 0

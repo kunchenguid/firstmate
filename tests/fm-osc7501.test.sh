@@ -242,6 +242,33 @@ t_old_claude_uses_generic() {
   pass "native gate: claude below the floor uses the generic reporter"
 }
 
+# A harness upgraded in place across the native floor - the same symlink, its
+# target rewritten with a newer binary - must be re-probed at the next launch,
+# so the generic reporter stands down instead of competing with native records.
+t_inplace_upgrade_reprobes_native() {
+  local d=$TMP_ROOT/upgrade
+  mkhome "$d"
+  mkdir -p "$d/bin" "$d/install"
+  printf '#!/usr/bin/env bash\necho "pi 1.0.9"\n' >"$d/install/pi"
+  chmod +x "$d/install/pi"
+  ln -s "$d/install/pi" "$d/bin/pi"
+  start_term "$d" answer
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x PATH="$d/bin:$PATH" \
+    bash "$SCRIPT" arm --task t22 --harness pi --backend tmux --kind ship \
+    --state "$d/state" --config "$d/config" --agent-bin pi
+  local first
+  first=$(watcher_pid "$d/state") || fail "upgrade: pi below the floor armed no generic watcher"
+  printf '#!/usr/bin/env bash\necho "pi 1.1.0"\n' >"$d/install/pi"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x PATH="$d/bin:$PATH" \
+    bash "$SCRIPT" arm --task t22 --harness pi --backend tmux --kind ship \
+    --state "$d/state" --config "$d/config" --agent-bin pi
+  wait_gone "$first" || fail "upgrade: the old generic reporter survived the relaunch"
+  [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
+    || fail "upgrade: a native pi after an in-place upgrade still got a generic reporter"
+  stop_term
+  pass "native gate: an in-place harness upgrade is re-probed at the next launch"
+}
+
 # --- no corruption ------------------------------------------------------------
 
 # A terminal that answers late-ish still has its whole reply consumed inside
@@ -717,6 +744,7 @@ fm_test_run \
   t_final_idle_after_working \
   t_native_claude_skips_everything \
   t_old_claude_uses_generic \
+  t_inplace_upgrade_reprobes_native \
   t_reply_drained_for_next_program \
   t_config_off_disables \
   t_known_aware_skips_query \
