@@ -1669,6 +1669,21 @@ test_remote_descendants_prevent_incomplete_certificates() {
   out=$(reserve "$R_ROOT" contender pool-model-a 2>&1)
   expect_code 5 "$?" "primary admitted work despite unaccounted remote occupancy: $out"
   assert_present "$R_ROOT/state/fleet-seats/remote-theshop.pending" "incomplete serve left admission confirmed"
+  rm "$R_ROOT/config/fleet-seats"
+  out=$(serve_remotes 2>&1)
+  assert_contains "$out" "served theshop" "remote descendants prevented policy clearing"
+  assert_equals 0 "$(jq '.pools | length' "$policy")" "clearing retained remote caps"
+  out=$(FM_FLEET_SEATS_TEST_REMOTE_WAIT=2 reserve "$owner" cleared pool-model-a 2>&1)
+  expect_code 0 "$?" "cleared remote still required admission: $out"
+  assert_equals "" "$out" "cleared remote reserved a seat"
+  digest=$(jq -r .digest "$owner/state/fleet-seats/served.json")
+  epoch=$(jq -r '"\(.issuer).\(.seq)"' "$owner/state/fleet-seats/served.json")
+  out=$(seats "$owner" serve --digest "$digest" --epoch "$epoch" < "$policy" 2>&1)
+  expect_code 0 "$?" "empty-policy replay refused remote descendants: $out"
+  assert_equals true "$(printf '%s\n' "$out" | jq .complete)" "empty-policy replay was incomplete"
+  pools "$R_ROOT" 1
+  out=$(serve_remotes 2>&1)
+  assert_contains "$out" "unreachable theshop" "re-enabling pools bypassed descendant accounting"
   rm "$child/data/secondmates.md"
   serve_remotes >/dev/null || fail "serve did not recover after remote descendant removal"
   reserve "$R_ROOT" contender pool-model-a >/dev/null || fail "complete subtree blocked ordinary admission"
