@@ -701,7 +701,7 @@ check_herdr_server() {
 }
 
 check_claude_onboarding() {
-  local resolved config completed selection root pin_account account_err reason
+  local resolved config completed selection declared root pin_account pinned_ordinary account_err reason
   resolved=$(command -v claude 2>/dev/null || true)
   if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
     record claude-onboarding "skip: claude is not installed on this host, so its first-run onboarding does not apply"
@@ -712,18 +712,27 @@ check_claude_onboarding() {
   # bin/fm-spawn.sh launches Claude with CLAUDE_CONFIG_DIR set to that account's
   # root. Resolve it through the same read-only helper the launch uses, so the
   # check and the launch agree on which .claude.json is authoritative. An absent
-  # pin, or the ordinary account, leaves root empty and falls back to today's
-  # default store.
+  # pin leaves both empty and falls back to today's default store. A pin that
+  # names the ordinary account is different: bin/fm-spawn.sh unsets
+  # CLAUDE_CONFIG_DIR for it (see the WORKER_ACCOUNT_ROOT branch there), so the
+  # launch reads $HOME/.claude.json regardless of any CLAUDE_CONFIG_DIR exported
+  # into this run; this check must read the same store, not the inherited one.
   root=
   pin_account=
+  pinned_ordinary=
   if [ -n "${FM_HOME:-}" ]; then
     account_err=$(mktemp "${TMPDIR:-/tmp}/fm-doctor-account.XXXXXX" 2>/dev/null) || account_err=/dev/null
     if selection=$(fm_worker_account_resolve claude "$FM_HOME/config" "config/claude-account" 2>"$account_err"); then
       # declared<TAB>root<TAB>providers; root is empty for the ordinary account.
       if [ -n "$selection" ]; then
+        declared=${selection%%$'\t'*}
         root=${selection#*$'\t'}
         root=${root%%$'\t'*}
-        [ -z "$root" ] || pin_account="config/claude-account ($root)"
+        if [ -n "$root" ]; then
+          pin_account="config/claude-account ($root)"
+        elif [ "$declared" = ordinary ]; then
+          pinned_ordinary=1
+        fi
       fi
       [ "$account_err" = /dev/null ] || rm -f "$account_err"
     else
@@ -738,7 +747,13 @@ check_claude_onboarding() {
       return 0
     fi
   fi
-  config="${root:-${CLAUDE_CONFIG_DIR:-${HOME:-}}}/.claude.json"
+  if [ -n "$root" ]; then
+    config="$root/.claude.json"
+  elif [ -n "$pinned_ordinary" ]; then
+    config="${HOME:-}/.claude.json"
+  else
+    config="${CLAUDE_CONFIG_DIR:-${HOME:-}}/.claude.json"
+  fi
   if command -v jq >/dev/null 2>&1 && [ -f "$config" ]; then
     completed=$(jq -r '.hasCompletedOnboarding // false' "$config" 2>/dev/null || true)
     if [ "$completed" = true ]; then
@@ -752,7 +767,7 @@ check_claude_onboarding() {
   fi
   if [ -n "$root" ]; then
     record claude-onboarding "human: Claude Code's first-run onboarding is not complete for the account selected by $pin_account, so a launch stalls on the theme picker before it reads its instructions" \
-      "run 'CLAUDE_CONFIG_DIR=$root claude' once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
+      "run CLAUDE_CONFIG_DIR=$(launch_agent_shell_quote "$root") claude once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
   else
     record claude-onboarding "human: Claude Code's first-run onboarding is not complete on this host, so a launch stalls on the theme picker before it reads its instructions" \
       "run 'claude' once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"

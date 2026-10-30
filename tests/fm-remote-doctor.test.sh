@@ -978,7 +978,7 @@ expect_code 1 "$DOCTOR_RC" "an un-onboarded selected account was reported ready 
 assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the selected account's incomplete onboarding was not tagged human"
 assert_contains "$DOCTOR_OUT" "config/claude-account ($SELECTED)" "the onboarding gap did not name the selected account"
 assert_contains "$DOCTOR_OUT" "action: claude-onboarding:" "the onboarding gap came with no operator action"
-assert_contains "$DOCTOR_OUT" "CLAUDE_CONFIG_DIR=$SELECTED claude" "the onboarding action did not give the command for the selected account"
+assert_contains "$DOCTOR_OUT" "CLAUDE_CONFIG_DIR='$SELECTED' claude" "the onboarding action did not give the shell-quoted command for the selected account"
 assert_not_contains "$DOCTOR_OUT" 'fix claude-onboarding=applied' "--fix answered onboarding for the selected account"
 pass "an un-onboarded selected account is a human gap even when the default account is onboarded"
 
@@ -1024,4 +1024,67 @@ assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "an unresolvable 
 assert_contains "$DOCTOR_OUT" 'config/claude-account' "the unresolvable-pin gap did not name the pin"
 assert_contains "$DOCTOR_OUT" 'action: claude-onboarding:' "the unresolvable-pin gap came with no operator action"
 pass "a config/claude-account pin that cannot be resolved is a human gap, not a silent default-store check"
+
+# A pinned account directory with a space in its path still yields an operator
+# command a shell parses as one CLAUDE_CONFIG_DIR assignment: fm-spawn.sh quotes
+# it the same way, so an unquoted path would run the word after the space as a
+# command instead. Parse the command the way the operator would, not by grepping.
+new_case Darwin with-herdr gui
+SELECTED="$CASE_DIR/Claude Accounts/work"
+mkdir -p "$SELECTED" "$CASE_PROJECT_HOME/config"
+printf '%s\n' "$SELECTED" > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": false}\n' > "$SELECTED/.claude.json"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+doctor
+expect_code 1 "$DOCTOR_RC" "an un-onboarded selected account with a space in its path was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the spaced-path account's incomplete onboarding was not tagged human"
+action_line=$(printf '%s\n' "$DOCTOR_OUT" | grep 'action: claude-onboarding:') \
+  || fail "the spaced-path onboarding gap came with no operator action"
+# The command runs between "run " and " once interactively" in the prose.
+suggested_cmd=${action_line#*run }
+suggested_cmd=${suggested_cmd%% once interactively*}
+parsed_config=$(
+  # Shadow the real binary so eval exercises the assignment, not a launch.
+  # shellcheck disable=SC2329 # Invoked indirectly by the eval below.
+  claude() { printf '%s\n' "${CLAUDE_CONFIG_DIR:-}"; }
+  eval "$suggested_cmd"
+) || fail "the suggested command did not parse as a shell command: $suggested_cmd"
+[ "$parsed_config" = "$SELECTED" ] \
+  || fail "the suggested command set CLAUDE_CONFIG_DIR to '$parsed_config', not the full spaced path '$SELECTED'"
+pass "a pinned account path with a space produces a copy-pasteable operator command"
+
+# A pin naming the ordinary account launches with CLAUDE_CONFIG_DIR unset, so the
+# launch reads $HOME/.claude.json even when CLAUDE_CONFIG_DIR is exported to
+# another store. The check must read the same $HOME store: an un-onboarded
+# CLAUDE_CONFIG_DIR store must not make an onboarded $HOME host a gap.
+new_case Darwin with-herdr gui
+OTHER_CONFIG="$CASE_DIR/exported-config"
+mkdir -p "$OTHER_CONFIG" "$CASE_PROJECT_HOME/config"
+printf 'ordinary\n' > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": false}\n' > "$OTHER_CONFIG/.claude.json"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+export FM_TEST_CLAUDE_CONFIG_DIR="$OTHER_CONFIG"
+doctor --fix
+unset FM_TEST_CLAUDE_CONFIG_DIR
+expect_code 0 "$DOCTOR_RC" "a pinned-ordinary host read the exported CLAUDE_CONFIG_DIR store instead of \$HOME"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=ok:' "the pinned-ordinary account's onboarded \$HOME store was not recognized"
+assert_not_contains "$DOCTOR_OUT" 'config/claude-account (' "the ordinary account was reported as a pinned account directory"
+pass "a pin naming the ordinary account reads \$HOME/.claude.json, not an exported CLAUDE_CONFIG_DIR"
+
+# The unpinned path is unchanged: with no pin it still honors CLAUDE_CONFIG_DIR as
+# the default store, so an un-onboarded CLAUDE_CONFIG_DIR store is a gap even when
+# $HOME is onboarded. This is the exact mirror of the pinned-ordinary case above.
+new_case Darwin with-herdr gui
+OTHER_CONFIG="$CASE_DIR/exported-config"
+mkdir -p "$OTHER_CONFIG"
+printf '{"hasCompletedOnboarding": false}\n' > "$OTHER_CONFIG/.claude.json"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+export FM_TEST_CLAUDE_CONFIG_DIR="$OTHER_CONFIG"
+doctor
+unset FM_TEST_CLAUDE_CONFIG_DIR
+expect_code 1 "$DOCTOR_RC" "an unpinned host stopped honoring the exported CLAUDE_CONFIG_DIR store"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the unpinned CLAUDE_CONFIG_DIR store's incomplete onboarding was not tagged human"
+assert_contains "$DOCTOR_OUT" "run 'claude'" "the unpinned onboarding action changed"
+assert_not_contains "$DOCTOR_OUT" 'config/claude-account (' "an unpinned host named a pinned account"
+pass "with no pin the default-store path still honors CLAUDE_CONFIG_DIR unchanged"
 
