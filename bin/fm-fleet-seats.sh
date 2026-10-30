@@ -277,7 +277,8 @@ pool_ok() { jq -en --arg name "$1" "\$name | $POOL_NAME_RULE" >/dev/null 2>&1; }
 validate_pools() {
   local file=$1
   [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
-  jq -e "def pool_name_ok: $POOL_NAME_RULE;"'
+  jq -se "def pool_name_ok: $POOL_NAME_RULE;"'
+    length == 1 and (.[0] | type == "object" and (
     (.pools | type == "array")
     and all(.pools[];
       (.name | pool_name_ok)
@@ -286,7 +287,7 @@ validate_pools() {
            and all(.[]; type == "string" and length > 0)))
     and ([.pools[].name] | length == (unique | length))
     and ([.pools[].models[]] | length == (unique | length))
-    and ((has("primary_model") | not) or (.primary_model | type == "string" and length > 0))
+    and ((has("primary_model") | not) or (.primary_model | type == "string" and length > 0))))
   ' "$file" >/dev/null 2>&1
 }
 
@@ -1087,7 +1088,7 @@ declared() {
   [ -e "$POLICY" ] || [ -L "$POLICY" ] || return 1
   if [ -n "$DELIVERED" ] && [ "$POLICY" = "$DELIVERED" ] && [ -f "$DELIVERED" ] && [ ! -L "$DELIVERED" ] \
     && { cmp -s "$DELIVERED" <(printf '{"pools":[]}\n') \
-      || jq -e 'type == "object" and .pools == []' "$DELIVERED" >/dev/null 2>&1; }; then
+      || jq -se 'length == 1 and (.[0] | type == "object" and .pools == [])' "$DELIVERED" >/dev/null 2>&1; }; then
     return 1
   fi
   return 0
