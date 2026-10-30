@@ -874,9 +874,10 @@ export default function (pi: ExtensionAPI) {
   ): Promise<void> {
     try {
       // A failed restoration must reach main even if an old branch claim
-      // never settles. Do not append the same alarm to the later delivery.
-      const failureReported = Boolean(previousClaim && restoration.failure);
-      if (failureReported) surfaceFailure(owner, restoration.failure);
+      // never settles. It stays unreported until Pi accepts it.
+      const alarm = previousClaim && restoration.failure
+        ? sendWake(owner, restoration.failure).catch(() => false)
+        : Promise.resolve(false);
       // A replacement serializes delivery with the prior generation's claim,
       // while its watcher restoration remains free to handle later closes.
       const previousSettlement = previousClaim ? await previousClaim.settlement : "failed";
@@ -884,11 +885,14 @@ export default function (pi: ExtensionAPI) {
         settleClaim(previousSettlement);
         return;
       }
-      const message = restoration.failure && !failureReported ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-      const delivered = previousSettlement === "delivered" ||
-        await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration.recovery);
+      const unreportedFailure = await alarm ? "" : restoration.failure;
+      const message = unreportedFailure ? `${pending.message}\n\n${unreportedFailure}` : pending.message;
+      // The old branch handled the wake; an unreported alarm still reaches main.
+      const delivered = previousSettlement === "delivered"
+        ? !unreportedFailure || await sendWake(owner, unreportedFailure)
+        : await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration.recovery);
       if (!delivered) {
-        settleClaim("failed");
+        settleClaim(previousSettlement);
         return;
       }
       const awaitingConsumption = owner.unconsumedWakes.has(pending.token);
