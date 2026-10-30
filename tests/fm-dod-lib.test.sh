@@ -406,6 +406,22 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# Each general delivery mode names the scripted rebase with its own mode, and
+# a named base reaches the command so the worker never rebases onto the default.
+test_dod_names_the_scripted_rebase() {
+  local mode out
+  for mode in direct-PR no-mistakes local-only; do
+    out="$TMP_ROOT/dod-rebase-$mode.md"
+    fm_dod_block "$mode" dod-rebase-task > "$out"
+    assert_grep "bin/fm-auto-rebase.sh --mode $mode\`" "$out" "$mode: DoD must name the scripted rebase"
+  done
+  out="$TMP_ROOT/dod-rebase-base.md"
+  fm_dod_block direct-PR dod-rebase-task fm/dod-rebase-task none release/1 > "$out"
+  assert_grep "bin/fm-auto-rebase.sh --mode direct-PR --base release/1\`" "$out" \
+    "direct-PR: DoD must pass the recorded base to the scripted rebase"
+  pass "DoD names the scripted rebase for every general delivery mode"
+}
+
 # A scout spawned on a named base keeps that base through promotion: the ship
 # instructions start from it and the PR targets it; local-only cannot carry it.
 test_promotion_keeps_the_recorded_base_branch() {
@@ -467,6 +483,7 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_dod_names_the_scripted_rebase
 test_promotion_keeps_the_recorded_base_branch
 
 # The launch role is the generated text a worker receives. It must keep the

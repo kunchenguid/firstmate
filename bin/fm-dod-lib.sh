@@ -535,6 +535,15 @@ If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the 
 EOF
 }
 
+# One line telling the worker to rebase with bin/fm-auto-rebase.sh, which owns
+# the rebase, push, and conflict contract, before any hand-run rebase.
+fm_dod_rebase_line() {  # <mode> [<base>]
+  local cmd
+  printf -v cmd '%q --mode %q' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-auto-rebase.sh" "$1"
+  [ -z "${2:-}" ] || printf -v cmd '%s --base %q' "$cmd" "$2"
+  printf '%s\n' "Whenever you rebase this branch, run \`$cmd\` first; it rebases, pushes when your delivery needs it, and on a conflict (exit 1) aborts with the branch untouched - only then rebase by hand."
+}
+
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
@@ -652,6 +661,7 @@ Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+$(fm_dod_rebase_line direct-PR "$base")
 EOF
       ;;
     local-only:*)
@@ -663,6 +673,7 @@ This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 A \`done:\` is accepted when the named head is on this project's shared local branch, not only on a detached copy; the check tests that head, not merely that a branch moved.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+$(fm_dod_rebase_line local-only)
 When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
@@ -692,6 +703,7 @@ A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
+$(fm_dod_rebase_line no-mistakes "$base")
 EOF
       ;;
     *)
