@@ -43,10 +43,12 @@
 #   a working: line supplies the working message, and reads as working while
 #     the activity is unknown
 #   a failed/done/paused declaration yields to activity after it: once the
-#   watcher sees a turn begin later (a busy record stamped later, or a pulled
-#   transcript turning busy), or any steer (unhandled or in handled/) was
-#   enqueued later, the declaration is retired and activity and inbox map as
-#   above; an open decision or blocker always wins
+#   watcher sees a busy record written later, or any steer (unhandled or in
+#   handled/) was enqueued later, the declaration is retired and activity and
+#   inbox map as above; ordering uses nanosecond file times so activity in the
+#   declaration's own second still counts, and a pulled Cursor/Muse
+#   transcript, which records no turn start, never retires one; an open
+#   decision or blocker always wins
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
@@ -221,9 +223,23 @@ FM_OSC7501_QUERY_MATCH=$(printf '\033]7501')
 
 # --- native reporting ---------------------------------------------------------
 
-# osc_mtime <file> -> mtime epoch, portable.
-osc_mtime() {
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then /usr/bin/stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+# osc_mtime_ns <file> -> mtime in integer nanoseconds, portable.
+OSC_DARWIN=0
+[ "$(uname -s 2>/dev/null)" = Darwin ] && OSC_DARWIN=1
+osc_mtime_ns() {
+  local t s f
+  if [ "$OSC_DARWIN" = 1 ]; then
+    t=$(/usr/bin/stat -f %Fm "$1" 2>/dev/null) || return 1
+  else
+    t=$(stat -c '%Y %y' "$1" 2>/dev/null) || return 1
+    t=$(printf '%s' "$t" | awk '{n = split($3, a, "."); printf "%s.%s", $1, (n > 1 ? a[2] : "")}')
+  fi
+  s=${t%%.*}
+  f="${t#"$s"}"
+  f="${f#.}000000000"
+  f=${f:0:9}
+  case "$s$f" in '' | *[!0-9]*) return 1 ;; esac
+  printf '%s%s' "$s" "$f"
 }
 
 # osc_probe_version <bin> -> first x.y.z in `<bin> --version`, bounded by
@@ -233,7 +249,7 @@ osc_probe_version() { # <bin> <state>
   local bin=$1 state=$2 cache="$2/.osc7501-probe" rp mt line tmp pid i ver
   rp=$(command -v "$bin" 2>/dev/null) || rp=$bin
   case "$rp" in /*) ;; *) return 1 ;; esac
-  mt=$(osc_mtime "$rp")
+  mt=$(osc_mtime_ns "$rp")
   line=$(awk -F'\t' -v p="$rp" '$1==p {print; exit}' "$cache" 2>/dev/null)
   if [ -n "$line" ] && [ "$(printf '%s' "$line" | cut -f2)" = "$mt" ]; then
     printf '%s' "$(printf '%s' "$line" | cut -f3)"
@@ -303,7 +319,6 @@ osc_native() {
 
 LIBS_LOADED=0
 OSC_TURN_AT=0
-OSC_LAST_BS=
 osc_load_libs() {
   [ "$LIBS_LOADED" = 1 ] && return 0
   # shellcheck source=bin/fm-classify-lib.sh
@@ -313,24 +328,27 @@ osc_load_libs() {
   LIBS_LOADED=1
 }
 
-# osc_inbox_since <dir> <epoch>: 0 when a steer message in <dir> is newer than
-# <epoch> (0 = any message).
+# osc_inbox_since <dir> <ns>: 0 when a steer message in <dir> was written after
+# <ns> (0 = any message).
 osc_inbox_since() {
   local msg mt
   for msg in "$1"/*.msg; do
     [ -e "$msg" ] || continue
-    mt=$(osc_mtime "$msg") || continue
+    mt=$(osc_mtime_ns "$msg") || continue
     [ "${mt:-0}" -gt "$2" ] 2>/dev/null && return 0
   done
   return 1
 }
 
 # osc_plan sets W_STATE, W_KIND, W_MSG; returns 1 when nothing should be
-# emitted (no signal yet, or the activity is unknown). OSC_TURN_AT keeps the
-# latest turn start seen across polls: a busy record's stamp, or the poll
-# that saw a pulled transcript turn busy.
+# emitted (no signal yet, or the activity is unknown). Ordering is in
+# nanoseconds: OSC_TURN_AT keeps the latest busy record write seen across
+# polls (its file mtime when that shares the record's ts second, else the ts
+# second's start), and a declaration counts as written no later than its
+# status file's mtime or the end of its own stamped second. Pulled
+# transcripts carry no turn-start time, so only records advance OSC_TURN_AT.
 osc_plan() { # <task> <kind> <state> <harness>
-  local task=$1 kind=$2 state_dir=$3 line verb note held act bs bts since wmsg=''
+  local task=$1 kind=$2 state_dir=$3 line verb note held act bs bts bns since sf wmsg=''
   W_STATE=
   W_KIND=
   W_MSG=
@@ -339,14 +357,16 @@ osc_plan() { # <task> <kind> <state> <harness>
   bs=${act%% *}
   if [ "$bs" = busy ]; then
     case "${act#* }" in
-      cursor-transcript | muse-session-log)
-        [ "$OSC_LAST_BS" = busy ] || OSC_TURN_AT=$(date +%s) ;;
+      cursor-transcript | muse-session-log) ;;
       *)
         bts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state_dir/$task.busy-state" 2>/dev/null)
-        if [ "${bts:-0}" -gt "$OSC_TURN_AT" ]; then OSC_TURN_AT=$bts; fi ;;
+        if [ -n "$bts" ]; then
+          bns=$(osc_mtime_ns "$state_dir/$task.busy-state") || bns=0
+          [ "$((bns / 1000000000))" = "$bts" ] || bns=$((bts * 1000000000))
+          if [ "$bns" -gt "$OSC_TURN_AT" ]; then OSC_TURN_AT=$bns; fi
+        fi ;;
     esac
   fi
-  OSC_LAST_BS=$bs
   line=$(status_current_line "$state_dir/$task.status" "$kind" 2>/dev/null)
   verb=$(status_line_verb "$line" 2>/dev/null) || verb=
   note=$(status_line_note "$line" 2>/dev/null) || note=
@@ -385,6 +405,8 @@ osc_plan() { # <task> <kind> <state> <harness>
   esac
   if [ -n "$W_STATE" ]; then
     since=$(status_line_at_epoch "$line" 2>/dev/null) || return 0
+    since=$((since * 1000000000 + 999999999))
+    if sf=$(osc_mtime_ns "$state_dir/$task.status") && [ "$sf" -lt "$since" ]; then since=$sf; fi
     if [ "$OSC_TURN_AT" -le "$since" ] &&
       ! osc_inbox_since "$state_dir/$task.inbox" "$since" &&
       ! osc_inbox_since "$state_dir/$task.inbox/handled" "$since"; then

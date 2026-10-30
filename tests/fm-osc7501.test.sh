@@ -510,6 +510,73 @@ t_cursor_transcript_drives_activity() {
   pass "activity: a cursor worker reports from its transcript, with its working: note"
 }
 
+set_mtime_ns() { # <file> <ns>: exact file time, to order events inside one second
+  python3 -c 'import os, sys; n = int(sys.argv[2]); os.utime(sys.argv[1], ns=(n, n))' "$1" "$2"
+}
+
+# A pulled cursor transcript records no turn start: a done posted inside a
+# follow-up turn the reporter first sees busy must stand, not be retired by
+# the poll that happened to observe the turn.
+t_cursor_done_inside_observed_turn() {
+  local d=$TMP_ROOT/cursordone proj conv
+  mkhome "$d"
+  start_term "$d" answer
+  sleep 300 &
+  local holder=$!
+  proj=$d/cursor-projects/p1
+  conv=$proj/agent-transcripts/c1/c1.jsonl
+  mkdir -p "${conv%/*}"
+  printf '{"workspacePath":"%s"}\n' "$d/ws" >"$proj/.workspace-trusted"
+  printf 'projects_root=%s\nworkspace_root=%s\n' "$d/cursor-projects" "$d/ws" >"$d/state/t18.cursor-session"
+  printf '{"role":"user"}\n{"type":"turn_ended"}\n' >"$conv"
+  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t18 --kind ship --state "$d/state" --harness cursor \
+    --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=idle' "$d/cap" 60 || fail "cursordone: idle transcript not reported"
+  : >"$d/cap"
+  printf 'done [at=%s]: PR https://example.test/pr/3\n' "$(($(date +%s) - 1))" >"$d/state/t18.status"
+  printf '{"role":"user"}\n' >>"$conv"
+  wait_cap 'state=done' "$d/cap" 60 || fail "cursordone: done inside the observed turn was not reported"
+  printf '{"type":"turn_ended"}\n' >>"$conv"
+  sleep 2
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  assert_equals "state=done " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
+    "a done posted in the observed turn stands, live and as the final record"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  stop_term
+  pass "mapping: a cursor turn observed busy never retires a done posted inside it"
+}
+
+# A retry steer enqueued, acknowledged, and finished within the failure's own
+# second still retires it: ordering uses the files' nanosecond times.
+t_same_second_steer_retires_failure() {
+  local d=$TMP_ROOT/samesec t
+  mkhome "$d"
+  start_term "$d" answer
+  sleep 300 &
+  local holder=$!
+  t=$(date +%s)
+  busy_rec "$d/state" t19 idle "$t"
+  set_mtime_ns "$d/state/t19.busy-state" "${t}900000000"
+  printf 'failed [at=%s]: tests red\n' "$t" >"$d/state/t19.status"
+  set_mtime_ns "$d/state/t19.status" "${t}100000000"
+  mkdir -p "$d/state/t19.inbox/handled"
+  printf 'retry\n' >"$d/state/t19.inbox/handled/1.msg"
+  set_mtime_ns "$d/state/t19.inbox/handled/1.msg" "${t}500000000"
+  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t19 --kind ship --state "$d/state" --harness opencode \
+    --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=idle' "$d/cap" 60 || fail "samesec: the same-second retry left the failure up"
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  assert_equals "state=idle " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
+    "a failure retired within its own second never shows"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  stop_term
+  pass "mapping: a steer within the failure's own second still retires it"
+}
+
 # A reporter still folding a long status history when its pane is relaunched
 # finishes that fold and its final record late; the replacement must not arm
 # until it is gone, so none of its writes can land after the handoff.
@@ -598,6 +665,8 @@ fm_test_run \
   t_activity_after_done_and_idle_inbox \
   t_handled_steer_retires_failure \
   t_cursor_transcript_drives_activity \
+  t_cursor_done_inside_observed_turn \
+  t_same_second_steer_retires_failure \
   t_retire_waits_for_slow_reporter \
   t_interrupted_query_restores_mode \
   t_hc_terminal_with_inherited_herdr_markers
