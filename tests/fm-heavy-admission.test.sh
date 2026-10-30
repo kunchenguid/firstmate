@@ -18,6 +18,14 @@ cat > "$FAKEBIN/df" <<'SH'
 #!/usr/bin/env bash
 [ "${FAKE_DF_KB:-}" != fail ] || exit 1
 [ -z "${FAKE_DF_HANG_FILE:-}" ] || [ ! -e "$FAKE_DF_HANG_FILE" ] || /bin/sleep "${FAKE_DF_HANG_SECS:-30}"
+if [ -n "${FAKE_DF_BARRIER_DIR:-}" ]; then
+  touch "$FAKE_DF_BARRIER_DIR/$$"
+  while :; do
+    set -- "$FAKE_DF_BARRIER_DIR"/*
+    [ -e "$1" ] && [ "$#" -ge "${FAKE_DF_BARRIER_COUNT:-2}" ] && break
+    /bin/sleep 0.05
+  done
+fi
 printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
 printf '/dev/fake 999999999 1 %s 1%% /\n' "${FAKE_DF_KB:-104857600}"
 SH
@@ -138,6 +146,41 @@ assert_grep "decision=admit reason=ok" "$HOME_DIR/state/heavy-admission.log" "ad
 expect_hold "reason=ramp:remaining=" "second admission inside the ramp holds"
 assert_contains "$OUT" "samples=0" "ramp hold takes no readings"
 pass "a healthy host admits once, records the ramp, and holds the next admission"
+
+new_world ramp_secs=120
+ADMISSION_BARRIER="$TMP_ROOT/admission-barrier"
+mkdir -p "$ADMISSION_BARRIER"
+PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" FM_PROC_ROOT_OVERRIDE="$PROC" \
+  FAKE_DF_BARRIER_DIR="$ADMISSION_BARRIER" \
+  "$ADMIT" check --peak-gib 1 > "$TMP_ROOT/admission-check-1" 2> "$TMP_ROOT/admission-check-1.err" &
+ADMISSION_PID_1=$!
+PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" FM_PROC_ROOT_OVERRIDE="$PROC" \
+  FAKE_DF_BARRIER_DIR="$ADMISSION_BARRIER" \
+  "$ADMIT" check --peak-gib 2 > "$TMP_ROOT/admission-check-2" 2> "$TMP_ROOT/admission-check-2.err" &
+ADMISSION_PID_2=$!
+wait "$ADMISSION_PID_1"
+ADMISSION_RC_1=$?
+wait "$ADMISSION_PID_2"
+ADMISSION_RC_2=$?
+[ "$((ADMISSION_RC_1 + ADMISSION_RC_2))" -eq 1 ] || \
+  fail "competing checks did not produce one admit and one hold (rcs=$ADMISSION_RC_1,$ADMISSION_RC_2)"
+set -- "$ADMISSION_BARRIER"/*
+[ -e "$1" ] && [ "$#" -eq 2 ] || fail "competing checks did not reach the shared reading together"
+cat "$TMP_ROOT/admission-check-1" "$TMP_ROOT/admission-check-2" > "$TMP_ROOT/admission-checks"
+awk '
+  /decision=admit/ { admits++ }
+  /decision=hold/ && /reason=ramp:remaining=/ { holds++ }
+  /samples=1/ { sampled++ }
+  END { exit !(NR == 2 && admits == 1 && holds == 1 && sampled == 2) }
+' "$TMP_ROOT/admission-checks" || fail "competing check outcomes were not one sampled admit and one sampled ramp hold"
+awk '
+  /decision=admit/ { admits++ }
+  /decision=hold/ && /reason=ramp:remaining=/ { holds++ }
+  /peak_gib=1/ { first++ }
+  /peak_gib=2/ { second++ }
+  END { exit !(NR == 2 && admits == 1 && holds == 1 && first == 1 && second == 1) }
+' "$HOME_DIR/state/heavy-admission.log" || fail "evidence log did not preserve both competing decisions"
+pass "concurrent checks share one reading but only one consumes a nonzero ramp slot"
 
 new_world ramp_secs=0
 LOG_PAYLOAD=$(printf '%0140d' 0)
