@@ -26,7 +26,7 @@ When `bin/fm-procevent-quota.sh` reports `exhausted_now` for a live task, or a t
 The wake carries no quota document.
 In that turn, write the output of `quota-axi --json` to a file and pass that path as `--snapshot`.
 Do this for each live task that has a recorded array.
-Consider skips a task whose last status verb is `done`, `failed`, `needs-decision`, or `blocked`, unless that line is its own `midtask-fallback` report.
+Consider skips a finished task or a task that waits on the captain; `docs/configuration.md` (Mid-task fallback) owns the skip rule.
 Run that consider before `stuck-crewmate-recovery` relaunches the same profile.
 Status line text is not a signal.
 Pass `--pane-text-file` only when pane text was already captured and a limit-message adapter exists.
