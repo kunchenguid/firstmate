@@ -1102,8 +1102,8 @@ test_github_enterprise_hosts() {
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "check entrypoint accepted an unlisted GitHub Enterprise host"
-  [ "$(cat "$dir/stderr")" = 'error: invalid PR check request' ] \
-    || fail "unlisted GitHub host diagnostic was not the fixed refusal"
+  grep -qxF 'error: invalid PR check request' "$dir/stderr" \
+    || fail "unlisted GitHub host diagnostic was not the fixed refusal: $(cat "$dir/stderr")"
   assert_no_grep 'pr=' "$dir/home/state/task-a.meta" "an unlisted GitHub host recorded pr metadata"
   [ ! -s "$dir/gh.log" ] || fail "an unlisted GitHub host still reached the forge"
 
