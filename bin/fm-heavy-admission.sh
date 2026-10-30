@@ -82,9 +82,9 @@
 # records an admission, so it consumes no ramp slot and launches nothing.
 # wait repeats check until it admits or --timeout seconds pass (default 540,
 # inside a ten-minute command limit), printing a line only when the reason
-# changes. It starts a retry only while a full window_secs plus a margin for
-# readings and the ramp lock still fits before the timeout, so after its first
-# attempt it never runs past --timeout; when no retry fits it prints a stderr
+# changes. It starts a retry only while its sampling sleeps, bounded journal
+# reads, ramp lock, and a margin for other readings still fit before the timeout,
+# so after its first attempt it never runs past --timeout; when no retry fits it
 # note with the last hold reason and exits 1.
 #
 # Environment: FM_HOME and FM_CONFIG_OVERRIDE resolve this home as the other
@@ -447,10 +447,6 @@ decide() {
     remaining=$((remaining - 1))
     sleep "$(cfg sample_interval_secs)"
   done
-  if [ "$DRY_RUN" = 1 ]; then
-    DECISION=admit REASON=ok
-    return 0
-  fi
   if ! fm_lock_acquire_wait_bounded "$RAMP_LOCK" "$LOCK_TIMEOUT_SECS" >/dev/null 2>&1; then
     DECISION=hold REASON=unreadable:ramp-lock
     return 1
@@ -460,7 +456,7 @@ decide() {
     DECISION=hold REASON=$RAMP_REASON
     return 1
   fi
-  if ! record_admission; then
+  if [ "$DRY_RUN" != 1 ] && ! record_admission; then
     fm_lock_release "$RAMP_LOCK" >/dev/null 2>&1 || true
     DECISION=hold REASON=unreadable:ramp-record
     return 1
@@ -478,7 +474,9 @@ fi
 
 # wait
 wait_deadline=$(( $(date +%s) + WAIT_TIMEOUT ))
-latest_start=$(( wait_deadline - $(cfg window_secs) - WAIT_ATTEMPT_MARGIN_SECS ))
+window_intervals=$(( ($(cfg window_secs) + $(cfg sample_interval_secs) - 1) / $(cfg sample_interval_secs) ))
+attempt_bound=$(( window_intervals * $(cfg sample_interval_secs) + (window_intervals + 1) * 2 * JOURNAL_TIMEOUT_SECS + LOCK_TIMEOUT_SECS + WAIT_ATTEMPT_MARGIN_SECS ))
+latest_start=$(( wait_deadline - attempt_bound ))
 last_reason=
 while :; do
   if decide; then

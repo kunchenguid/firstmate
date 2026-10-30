@@ -130,6 +130,16 @@ run_admit check
 expect_code 0 "$RC" "dry-run consumed no ramp slot"
 pass "dry-run prints the decision without recording an admission"
 
+new_world window_secs=1 sample_interval_secs=1
+FAKE_SLEEP_HOOK="touch '$HOME_DIR/state/heavy-admission.last'" run_admit check --dry-run
+expect_code 1 "$RC" "dry-run rechecks a concurrent ramp admission"
+assert_contains "$OUT" "decision=hold reason=ramp:remaining=" "dry-run reports the concurrent ramp"
+new_world window_secs=1 sample_interval_secs=1
+FAKE_SLEEP_HOOK="touch '$HOME_DIR/state/heavy-admission.last'" run_admit wait --timeout 0 --dry-run
+expect_code 1 "$RC" "dry-run wait rechecks a concurrent ramp admission"
+assert_contains "$OUT" "decision=hold reason=ramp:remaining=" "dry-run wait reports the concurrent ramp"
+pass "dry-run uses the locked post-window ramp decision"
+
 # --- holds ----------------------------------------------------------------------
 new_world; set_load 21.50 10.00
 expect_hold "reason=trip:load1=21.50>=20" "load1 at the hold trigger"
@@ -261,6 +271,12 @@ expect_code 1 "$RC" "wait holds when no retry window fits"
 assert_contains "$OUT" "reason=trip:load1=30.00>=20" "wait holds with the last reason"
 assert_contains "$ERR" "still holding within the 70s timeout" "wait no-retry note"
 [ ! -s "$SLEEP_LOG" ] || fail "wait starts no retry whose window would outlive the timeout"
+new_world window_secs=1 sample_interval_secs=200; set_load 30.00 30.00
+: > "$SLEEP_LOG"
+FAKE_SLEEP_LOG="$SLEEP_LOG" run_admit wait --timeout 300
+expect_code 1 "$RC" "wait budgets the rounded sampling interval and bounded reads"
+assert_contains "$OUT" "reason=trip:load1=30.00>=20" "wait long-interval timeout evidence"
+[ ! -s "$SLEEP_LOG" ] || fail "wait starts no retry whose complete attempt would outlive the timeout"
 new_world window_secs=60; set_load 30.00 30.00
 : > "$SLEEP_LOG"
 FAKE_SLEEP_LOG="$SLEEP_LOG" FAKE_SLEEP_HOOK="printf '%s\n' '3.00 4.00 1.00 1/100 123' > '$PROC/loadavg'" \
