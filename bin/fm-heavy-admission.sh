@@ -59,10 +59,11 @@
 # key=value lines override the defaults printed by `defaults`, so the root home
 # sets the machine's policy and any home can override it. Blank lines and lines
 # starting with # are ignored; an unknown key or a malformed value is invalid.
-# With neither file present the policy is off and check admits at once with
-# reason=policy-off. `fm-heavy-admission.sh defaults > config/heavy-admission`
-# enables the approved policy. `policy` prints on or off for this home, which
-# bin/fm-brief.sh reads to decide whether a brief carries the heavy-phase rule.
+# When the root resolves and neither file is present, the policy is off and
+# check admits at once with reason=policy-off. An unresolved root is unknown.
+# `fm-heavy-admission.sh defaults > config/heavy-admission`
+# enables the approved policy. `policy` prints on, off, or unknown when the root
+# home cannot be resolved; bin/fm-brief.sh keeps the rule for on and unknown.
 # jest_max_workers and playwright_workers carry the initial validator-internal
 # parallelism bound: a caller running Jest or Playwright itself passes them as
 # --maxWorkers and --workers.
@@ -71,7 +72,7 @@
 # appends it best effort to the root home's state/heavy-admission.log (trimmed to its newest
 # 2000 lines past 256 KiB):
 #   heavy-admission: decision=<admit|hold> reason=<token>[,<token>...]
-#     policy=<on|off> config=<path|none> peak_gib=<n|unknown> samples=<n>
+#     policy=<on|off|unknown> config=<path|none> peak_gib=<n|unknown> samples=<n>
 #     load1=<x> load5=<x> mem_available_gib=<x> mem_psi_some_avg60=<x>
 #     io_psi_full_avg60=<x> disk_free_gib=<x> warnings=<n> dry_run=<0|1>
 #     jest_max_workers=<n> playwright_workers=<n> home=<path> ts=<epoch>
@@ -228,12 +229,15 @@ done
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 load_defaults
-ROOT_HOME=$(fm_firstmate_root_home "$FM_HOME" 2>/dev/null) || ROOT_HOME=
+ROOT_RESOLVED=1
+ROOT_HOME=$(fm_firstmate_root_home "$FM_HOME" 2>/dev/null) || { ROOT_HOME=; ROOT_RESOLVED=0; }
 POLICY=off
 CONFIG_FILE=none
 if [ -e "$CONFIG/heavy-admission" ] || [ -L "$CONFIG/heavy-admission" ]; then
   CONFIG_FILE="$CONFIG/heavy-admission"
-elif [ -n "$ROOT_HOME" ] && { [ -e "$ROOT_HOME/config/heavy-admission" ] || [ -L "$ROOT_HOME/config/heavy-admission" ]; }; then
+elif [ "$ROOT_RESOLVED" = 0 ]; then
+  POLICY=unknown
+elif [ -e "$ROOT_HOME/config/heavy-admission" ] || [ -L "$ROOT_HOME/config/heavy-admission" ]; then
   CONFIG_FILE="$ROOT_HOME/config/heavy-admission"
 fi
 if [ "$CONFIG_FILE" != none ]; then
@@ -426,6 +430,10 @@ decide() {
   local remaining
   SAMPLES=0
   R_LOAD1=na R_LOAD5=na R_MEM_KB=na R_MEM_PSI=na R_IO_PSI=na R_DISK_KB=na R_WARN=na
+  if [ "$POLICY" = unknown ]; then
+    DECISION=hold REASON=unreadable:root-home
+    return 1
+  fi
   if [ "$POLICY" = off ]; then
     DECISION=admit REASON=policy-off
     return 0

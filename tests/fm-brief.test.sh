@@ -1276,6 +1276,15 @@ test_heavy_admission_rule_follows_policy() {
     || fail "fm-brief.sh ship scaffold exited non-zero"
   assert_no_grep "# Heavy phases" "$home/data/brief-heavy-off/brief.md" \
     "a home without the admission policy still got the heavy-phase rule"
+  printf '%s\n' 'malformed parent binding' > "$home/.fm-secondmate-parent"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-heavy-unknown some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh indeterminate-policy scaffold exited non-zero"
+  assert_grep "# Heavy phases" "$home/data/brief-heavy-unknown/brief.md" \
+    "an indeterminate root omitted the heavy-phase rule"
+  assert_grep "FM_HOME='$home' '$ROOT/bin/fm-heavy-admission.sh' wait" \
+    "$home/data/brief-heavy-unknown/brief.md" \
+    "an indeterminate root did not preserve the admission wait"
+  rm -f "$home/.fm-secondmate-parent"
   "$ROOT/bin/fm-heavy-admission.sh" defaults > "$home/config/heavy-admission"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-heavy-ship some-proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "fm-brief.sh ship scaffold exited non-zero"

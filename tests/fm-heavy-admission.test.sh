@@ -101,6 +101,19 @@ assert_contains "$OUT" "decision=admit reason=policy-off policy=off config=none"
 assert_absent "$HOME_DIR/state/heavy-admission.last" "policy off records no admission"
 pass "absent config leaves the policy off and admits without readings"
 
+new_world none
+printf '%s\n' 'malformed parent binding' > "$HOME_DIR/.fm-secondmate-parent"
+run_admit policy
+expect_code 0 "$RC" "unresolvable root policy query"
+[ "$OUT" = unknown ] || fail "unresolvable root policy was not unknown: $OUT"
+run_admit check
+expect_code 1 "$RC" "unresolvable root check holds"
+assert_contains "$OUT" "decision=hold reason=unreadable:root-home policy=unknown" "unresolvable root check evidence"
+run_admit wait --timeout 0
+expect_code 1 "$RC" "unresolvable root wait holds"
+assert_contains "$OUT" "decision=hold reason=unreadable:root-home policy=unknown" "unresolvable root wait evidence"
+pass "an unresolvable root home never disables admission"
+
 # --- admit, ramp, evidence ----------------------------------------------------
 new_world
 run_admit check

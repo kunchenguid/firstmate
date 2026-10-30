@@ -508,10 +508,11 @@ if [ -e "$CONFIG/wait-no-turns" ]; then
   WAIT_BLOCK="$WAIT_SECTION"$'\n\n'
 fi
 
-# Ship and scout briefs carry the heavy-phase admission rule only when this
-# home's policy is on; bin/fm-heavy-admission.sh owns the policy and decision.
+# Ship and scout briefs omit the heavy-phase admission rule only when this
+# home's policy is known off; bin/fm-heavy-admission.sh owns the decision.
 HEAVY_BLOCK=
-if [ "$(FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-heavy-admission.sh" policy 2>/dev/null)" = on ]; then
+HEAVY_POLICY=$(FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-heavy-admission.sh" policy 2>/dev/null) || HEAVY_POLICY=unknown
+if [ "$HEAVY_POLICY" != off ]; then
   HEAVY_ADMIT="FM_HOME=$(shell_quote "$FM_HOME") $(shell_quote "$FM_ROOT/bin/fm-heavy-admission.sh") wait"
   IFS= read -r -d '' HEAVY_BLOCK <<EOF || true
 # Heavy phases
