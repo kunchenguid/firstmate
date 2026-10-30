@@ -193,11 +193,24 @@ touch "$LOG_LOCK_RELEASE"
 wait "$LOG_LOCK_PID" || fail "evidence log lock holder"
 expect_code 0 "$RC" "busy evidence log still admits"
 assert_contains "$OUT" "decision=admit reason=ok" "busy evidence log preserves the admission"
-assert_contains "$ERR" "evidence log lock stayed busy; skipped this log write" "busy evidence log reports the skipped write"
+assert_contains "$ERR" "evidence log operation exceeded its 2s deadline; skipped this log write" "busy evidence log reports the skipped write"
 [ "$(printf '%s\n' "$ERR" | wc -l | tr -d ' ')" = 1 ] || fail "busy evidence log did not emit exactly one stderr note: $ERR"
 [ "$ELAPSED" -le 4 ] || fail "busy evidence log delayed admission too long (${ELAPSED}s)"
 [ ! -s "$HOME_DIR/state/heavy-admission.log" ] || fail "busy evidence log was not skipped"
 pass "a busy evidence log is skipped after a bounded wait"
+
+new_world ramp_secs=0
+mkfifo "$HOME_DIR/state/heavy-admission.log"
+START=$(date +%s)
+run_admit check
+ELAPSED=$(( $(date +%s) - START ))
+expect_code 0 "$RC" "blocked evidence log open still admits"
+assert_contains "$OUT" "decision=admit reason=ok" "blocked evidence log open preserves the admission"
+assert_contains "$ERR" "evidence log operation exceeded its 2s deadline; skipped this log write" "blocked evidence log open reports the skipped write"
+[ "$(printf '%s\n' "$ERR" | wc -l | tr -d ' ')" = 1 ] || fail "blocked evidence log open did not emit exactly one stderr note: $ERR"
+[ "$ELAPSED" -le 4 ] || fail "blocked evidence log open delayed admission too long (${ELAPSED}s)"
+rm -f "$HOME_DIR/state/heavy-admission.log"
+pass "a blocked evidence log open is skipped after a bounded wait"
 
 new_world ramp_secs=0
 run_admit check

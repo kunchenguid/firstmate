@@ -71,8 +71,8 @@
 # Evidence: every decision prints one line on stdout and, with the policy on,
 # appends it best effort under a file lock to the root home's
 # state/heavy-admission.log (trimmed to its newest 2000 lines past 256 KiB).
-# If the lock stays busy for two seconds, the write is skipped with a stderr
-# note so evidence never holds up the admission decision:
+# If the evidence operation exceeds two seconds, the write is skipped with a
+# stderr note so evidence never holds up the admission decision:
 #   heavy-admission: decision=<admit|hold> reason=<token>[,<token>...]
 #     policy=<on|off|unknown> config=<path|none> peak_gib=<n|unknown> samples=<n>
 #     load1=<x> load5=<x> mem_available_gib=<x> mem_psi_some_avg60=<x>
@@ -105,6 +105,7 @@ PROC_ROOT="${FM_PROC_ROOT_OVERRIDE:-/proc}"
 JOURNAL_TIMEOUT_SECS=10
 DISK_TIMEOUT_SECS=10
 LOCK_TIMEOUT_SECS=10
+EVIDENCE_TIMEOUT_SECS=2
 LOG_MAX_BYTES=262144
 LOG_KEEP_LINES=2000
 WAIT_TIMEOUT_DEFAULT=540
@@ -412,28 +413,28 @@ record_admission() {
 
 # --- decision -----------------------------------------------------------------
 record_evidence() {  # <line>
-  local line=$1 lock_rc log tmp
+  local line=$1 log tmp rc
   [ "$POLICY" = on ] && [ -n "$ROOT_HOME" ] || return 0
   log="$ROOT_HOME/state/heavy-admission.log"
   tmp="$log.tmp.$$"
-  # The append descriptor deliberately remains open while the same inode is
-  # trimmed in place; replacing the file would let a waiting writer append to
-  # the unlinked inode after the trim.
-  # shellcheck disable=SC2094
-  (
-    flock -w 2 -x 9
-    lock_rc=$?
-    if [ "$lock_rc" -ne 0 ]; then
-      [ "$lock_rc" -ne 1 ] || echo "fm-heavy-admission: evidence log lock stayed busy; skipped this log write" >&8
-      exit 0
-    fi
-    if printf '%s\n' "$line" >&9; then
-      if [ "$(wc -c < "$log" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
-        { tail -n "$LOG_KEEP_LINES" "$log" > "$tmp" && cat "$tmp" > "$log"; } 2>/dev/null || true
+  if fm_run_timed "$EVIDENCE_TIMEOUT_SECS" bash -c '
+    line=$1 log=$2 tmp=$3 max_bytes=$4 keep_lines=$5
+    exec 9>> "$log" || exit 0
+    flock -x 9 || exit 0
+    if printf "%s\n" "$line" >&9; then
+      if [ "$(wc -c < "$log" 2>/dev/null || echo 0)" -gt "$max_bytes" ]; then
+        { tail -n "$keep_lines" "$log" > "$tmp" && cat "$tmp" > "$log"; } 2>/dev/null || true
         rm -f "$tmp" 2>/dev/null
       fi
     fi
-  ) 8>&2 9>> "$log" 2>/dev/null || true
+  ' _ "$line" "$log" "$tmp" "$LOG_MAX_BYTES" "$LOG_KEEP_LINES" 2>/dev/null; then
+    return 0
+  else
+    rc=$?
+  fi
+  if fm_timed_out "$rc"; then
+    echo "fm-heavy-admission: evidence log operation exceeded its ${EVIDENCE_TIMEOUT_SECS}s deadline; skipped this log write" >&2
+  fi
   return 0
 }
 
