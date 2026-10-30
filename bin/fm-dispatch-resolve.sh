@@ -581,7 +581,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def lane_of($c): quota_lane($c.harness; $c.model);
   def measured($p; $lane):
     (prov($p; $lane) != null and (["known", "partial"] | index(prov($p; $lane).quotaSemantics.status)) != null);
-  def devin_free($m): (["swe-2-high", "swe-2-medium", "swe-2-max"] | index(bare($m))) != null;
+  def devin_free($m): (["swe-2-high", "swe-2-medium", "swe-2-max"] | index($m)) != null;
   def applicable($p; $lane; $m):
     (bare($m)) as $bare |
     [rows($p; $lane)[] | select(

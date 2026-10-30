@@ -1,8 +1,7 @@
 # Devin CLI
 
 Verified on 2026-09-21 and 2026-09-22 with Devin CLI 3000.11.1 (cc4e349ca55e).
-On 2026-10-24 Devin CLI 3000.11.205 (6dea39440ae3) re-proved spawn, hook busy and idle, idle interrupt, exit, relaunch, and teardown on Free `swe-2-medium`.
-Resume, steering, the revert picker, busy interrupt, and the Herdr lab session remain the 3000.11.1 evidence.
+On 2026-10-24 Devin CLI 3000.11.205 (6dea39440ae3) re-checked only the Free and priced model listing below.
 The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
 [Verification evidence](../../../../../docs/verification/devin.md) and its live guard refresh the vendor facts below.
 
