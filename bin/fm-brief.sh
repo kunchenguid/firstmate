@@ -162,7 +162,7 @@
 # script: when config/brief-include.md exists under the active home, ship and
 # scout scaffolds append its text verbatim as their last section, "# Home brief
 # additions", which defers to every other section of the brief except a pack's
-# practice section, which ranks below it. It goes last
+# practice section, which follows it and ranks below it. It goes last
 # because the machine-read `# Task` heading resolves to its first match, so
 # appended text can never shadow it; a later scout promotion appends its ship
 # contract below it, which that position-free deference already covers. An

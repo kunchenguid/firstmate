@@ -5,8 +5,9 @@
 # This file is the single owner of how a brief's sections are read: the
 # `# Task` subsections bin/fm-brief.sh scaffolds feed the no-mistakes
 # `--intent` contract in bin/fm-dod-lib.sh, spawn and promotion validation,
-# and the task text bin/fm-dispatch-resolve.sh sends to the router, so every
-# consumer sees the same section bodies.
+# the task text bin/fm-dispatch-resolve.sh sends to the router, and the practice
+# section bin/fm-best-practices.sh route rewrites, so every consumer sees the
+# same section bodies.
 
 # The line rules every brief reader shares, as awk functions. brief_scan_line
 # strips up to three leading spaces into `scan` and tracks fences: `is_fence`
