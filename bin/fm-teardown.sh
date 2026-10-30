@@ -649,6 +649,7 @@ teardown_release_locks() {
 teardown_fork_spin_watchdog() {  # <pid> <cpu-seconds>
   local top=$1 limit=$2 args actions sig pid
   trap '' TERM INT HUP
+  cd / || return 0
   args=$(ps -o args= -p "$top") || return 0
   [ -n "$args" ] || return 0
   while kill -0 "$top" 2>/dev/null; do
