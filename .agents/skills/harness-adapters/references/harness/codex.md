@@ -19,9 +19,10 @@ These command-line and terminal facts apply to pane-backed sessions; for T3 Code
 | Approval posture | See [`Codex automatic approval review`](../../../../../docs/configuration.md#codex-automatic-approval-review) and [`persistent failover`](../../../../../docs/configuration.md#persistent-managed-policy-failover). |
 | Marker | None; identity comes from ancestry, and `../../../bin/fm-harness.sh` is what keeps a retained foreign `CLAUDECODE` from renaming it. Verified on 2026-09-01 with codex-cli 0.152.0: the pane process is the `node` npm shim and the native `codex` binary runs as its foreground child, so a tool subprocess reaches the native name directly while the shim itself is identified from its script path. |
 
-A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
-Accept it with Enter and verify the instructions begin processing.
-The decision persists for the repository, so later worktrees of the same project skip it.
+Firstmate pre-registers the exact directory a crewmate or secondmate launch starts in through `bin/fm-codex-trust.sh`, so the supported spawn path does not stop on Codex's directory trust dialog.
+The helper validates the active `config.toml`, preserves unrelated TOML fields, writes atomically, and refuses an invalid or out-of-scope target before launching the worker.
+For a crewmate or scout the target is an isolated linked worktree of the project, and for a secondmate it is the seeded home marked for that mate.
+Direct Codex launches outside Firstmate can still show the directory trust dialog; accept it with Enter and verify the instructions begin processing.
 
 ## Hook trust
 

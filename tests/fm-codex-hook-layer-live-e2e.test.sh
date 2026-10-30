@@ -66,6 +66,10 @@ test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmat
   launch=$(capture_codex_launch ship --mode no-mistakes --yolo off)
   flags=$(codex_global_flags "$launch")
   case " $flags " in
+    *' --no-daemon '*) ;;
+    *) fail "codex $CODEX_VERSION captured launch omitted --no-daemon for command-line overrides" ;;
+  esac
+  case " $flags " in
     *' --approve-for-me '*) ;;
     *) fail "codex $CODEX_VERSION captured launch omitted --approve-for-me" ;;
   esac

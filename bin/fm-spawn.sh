@@ -2650,6 +2650,8 @@ launch_template() {
     # naming it is passed. A record that cannot be published stops the spawn.
     printf '%s' '__MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
     ;;
+  # --no-daemon keeps command-line configuration overrides in the embedded
+  # worker process, including the notify override below.
   # --disable hooks (equivalent to -c features.hooks=false) requests that codex
   # turn its whole lifecycle-hook layer off for CREWMATE and SCOUT launches only.
   # Without it a crewmate launch parks forever on codex's hook-trust modal
@@ -2683,7 +2685,7 @@ launch_template() {
     if [ "$kind" = secondmate ]; then
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" --no-daemon "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' __OPENCODEBIN__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -5746,6 +5748,19 @@ claude*)
     exit 1
   fi
   ;;
+codex*)
+  if [ "$BACKEND" != t3code ]; then
+    if [ "$KIND" = secondmate ]; then
+      spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+    else
+      spawn_trust_args=("$WT" "$PROJ_ABS")
+    fi
+    if ! "$FM_ROOT/bin/fm-codex-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+      echo "error: could not pre-register Codex workspace trust for $WT; refusing to launch a codex worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
+      exit 1
+    fi
+  fi
+  ;;
 agy)
   if [ "$KIND" = secondmate ]; then
     spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
@@ -7027,6 +7042,12 @@ if [ -n "$WORKER_ACCOUNT" ]; then
   esac
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$HARNESS" = codex ] && [ "$BACKEND" != t3code ] && [ -n "${CODEX_HOME:-}" ]; then
+  case "$CODEX_HOME" in
+    /*) LAUNCH="CODEX_HOME=$(shell_quote "$CODEX_HOME") $LAUNCH" ;;
+    *) echo "error: CODEX_HOME must be absolute for a Codex worker launch" >&2; exit 1 ;;
+  esac
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
