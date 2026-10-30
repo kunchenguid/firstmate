@@ -217,7 +217,7 @@ test_spawn_isolation_abort() {
 # home is a linked worktree too, so the fact that the leased slot is a linked
 # worktree proves nothing about whether the marker is stale.
 test_spawn_clears_stale_secondmate_marker() {
-  local home other proj fakebin out status wt_stale wt_live wt_other wt_unbound
+  local home other proj fakebin out status wt_stale wt_linked wt_live wt_other wt_unbound
   home="$TMP_ROOT/spawn-marker-home"
   other="$TMP_ROOT/spawn-marker-other-home"
   mkdir -p "$home/data" "$other/data"
@@ -225,10 +225,12 @@ test_spawn_clears_stale_secondmate_marker() {
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-marker-fake")
 
   wt_stale="$TMP_ROOT/spawn-marker-stale"
+  wt_linked="$TMP_ROOT/spawn-marker-linked"
   wt_live="$TMP_ROOT/spawn-marker-live"
   wt_other="$TMP_ROOT/spawn-marker-other"
   wt_unbound="$TMP_ROOT/spawn-marker-unbound"
   git -C "$proj" worktree add -q --detach "$wt_stale" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$wt_linked" >/dev/null 2>&1
   git -C "$proj" worktree add -q --detach "$wt_live" >/dev/null 2>&1
   git -C "$proj" worktree add -q --detach "$wt_other" >/dev/null 2>&1
   git -C "$proj" worktree add -q --detach "$wt_unbound" >/dev/null 2>&1
@@ -237,6 +239,10 @@ test_spawn_clears_stale_secondmate_marker() {
   printf 'retired-mate\n' > "$wt_stale/.fm-secondmate-home"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
     > "$wt_stale/.fm-secondmate-parent"
+  printf 'linked-retired-mate\n' > "$wt_linked/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
+    > "$wt_linked/.fm-secondmate-parent"
+  ln -s "$home" "$TMP_ROOT/spawn-marker-home-link"
   printf 'livemate\n' > "$wt_live/.fm-secondmate-home"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
     > "$wt_live/.fm-secondmate-parent"
@@ -256,6 +262,13 @@ test_spawn_clears_stale_secondmate_marker() {
   assert_absent "$wt_stale/.fm-secondmate-parent" "stale parent binding was not cleared"
   assert_contains "$out" "cleared a stale secondmate-home marker ('retired-mate')" \
     "clearing a stale marker must be reported"
+
+  # The seed records the canonical parent_home, so the same home reached through
+  # a symlinked FM_HOME still owns that leak.
+  out=$(run_spawn "$TMP_ROOT/spawn-marker-home-link" marker-linked-gg8 "$proj" "$wt_linked" "$fakebin"); status=$?
+  expect_code 0 "$status" "spawn through a symlinked FM_HOME into this home's leak should proceed"
+  assert_absent "$wt_linked/.fm-secondmate-home" "symlinked-home leak marker was not cleared"
+  assert_absent "$wt_linked/.fm-secondmate-parent" "symlinked-home leak binding was not cleared"
 
   # Registered: the marker names a secondmate this home still registers, so the
   # pool handed out a provisioned home. That is a refusal, not something to clean

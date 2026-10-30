@@ -4202,7 +4202,7 @@ real_path_or_raw() { # <path>
 # and a binding naming another parent (or no readable local binding at all)
 # means only that parent can tell whether the home is retired.
 spawn_clear_stale_secondmate_marker() {  # <worktree> <source> <inspect-target>
-  local wt=$1 source=$2 inspect_target=$3 marker parent id bound_home
+  local wt=$1 source=$2 inspect_target=$3 marker parent id bound_home this_home
   # A secondmate spawn launches INTO a home whose marker is the point, so this
   # hygiene is for task worktrees only.
   [ "$KIND" != secondmate ] || return 0
@@ -4226,8 +4226,9 @@ spawn_clear_stale_secondmate_marker() {  # <worktree> <source> <inspect-target>
     echo "error: $source handed back '$wt', which carries the secondmate-home marker of '${id:-unreadable}' without a readable id and local parent binding (.fm-secondmate-parent), so this home cannot confirm it retired that secondmate; refusing to launch a task into it. Clean the slot from the parent home that provisioned it. Inspect target $inspect_target" >&2
     exit 1
   fi
-  if [ "$bound_home" != "$FM_HOME" ]; then
-    echo "error: $source handed back '$wt', which carries the identity of secondmate '$id' bound to parent home '$bound_home', not this home '$FM_HOME'; refusing to launch a task into it. Retire or clean that secondmate from '$bound_home'. Inspect target $inspect_target" >&2
+  this_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || this_home=$FM_HOME
+  if [ "$bound_home" != "$this_home" ]; then
+    echo "error: $source handed back '$wt', which carries the identity of secondmate '$id' bound to parent home '$bound_home', not this home '$this_home'; refusing to launch a task into it. Retire or clean that secondmate from '$bound_home'. Inspect target $inspect_target" >&2
     exit 1
   fi
   rm -f -- "$marker" "$parent" || {
