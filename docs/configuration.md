@@ -604,7 +604,7 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 
 - Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
 
-- A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
+- A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, `herdr_pane_id=`, and `herdr_terminal_id=` (see [`docs/herdr-backend.md`](herdr-backend.md#endpoint-metadata) for how that identity is checked).
 
 - A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 - A paseo task additionally records `paseo_terminal_id=` and `paseo_workspace_id=`, with the terminal NAME as routing authority (see [`docs/paseo-backend.md`](paseo-backend.md) "Task shape and metadata").

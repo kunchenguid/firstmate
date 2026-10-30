@@ -329,6 +329,7 @@ fi
 # endpoint-existence predicate.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
+fm_backend_bind_task_record "$META" "$BACKEND_TARGET"
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
