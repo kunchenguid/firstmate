@@ -4,6 +4,8 @@ This page covers running Firstmate workers on the Herdr runtime backend: setup, 
 Operators who choose Herdr, or who verify Firstmate against it, need it.
 
 Herdr is an agent-native terminal backend with native per-pane agent state and push events.
+This backend uses the existing `herdr` product line, not the separate preview products herdr-core (`hc`) and herdr-app.
+Those previews are not upgrades to `herdr` 0.9.x and are not currently supported by this adapter.
 Firstmate requires Herdr protocol 14 or newer.
 Broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0.
 Protocol-16 features remain gated by availability.
