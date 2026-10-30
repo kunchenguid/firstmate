@@ -3447,3 +3447,18 @@ The full run's native Ahoy cases depend on the model's own choices and failed wi
 
 A real `bin/fm-spawn.sh --scout --harness opencode --model opencode-go/deepseek-v4.1-flash` in a private tmux server recorded `opencode_version=1.18.20` (and `1.18.31` on the second release), launched the worker as `opencode --model opencode-go/deepseek-v4.1-flash --prompt <brief>` with no `--standalone`, and the worker answered its brief.
 `bin/fm-control.sh <task> exit` then resolved the typed `/exit` from that recorded major and returned both panes to the shell.
+
+### Codex catalog reasoning effort
+
+On 2026-10-28, Linux x86_64 with `codex-cli 0.165.0` returned the following from `bash tests/fm-codex-hook-layer-live-e2e.test.sh`:
+
+```text
+ok - codex codex-cli 0.165.0 still publishes the hook feature flag firstmate disables
+ok - codex codex-cli 0.165.0 accepts the requested hook disablement for a firstmate crewmate launch
+ok - codex codex-cli 0.165.0 thread retains gpt-6.1-sol max from the captured launch
+ok - codex codex-cli 0.165.0 thread retains gpt-6.1-sol ultra from the captured launch
+# all fm-codex-hook-layer-live-e2e tests passed
+```
+
+The guard chooses an installed catalog model advertising each level, captures the Firstmate launch flags, and verifies the resulting real Codex app-server thread's model and reasoning effort without submitting a prompt.
+A missing advertised level is reported as a capability skip.

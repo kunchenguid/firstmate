@@ -900,6 +900,78 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   pass "native Ultra relaunch preserves its profile and rejects an unsupported model before stopping"
 }
 
+test_codex_catalog_effort_relaunch() {
+  local dir out rc id effort allowed
+  for effort in max ultra; do
+    for allowed in empty listed; do
+      id="rl-filtered-$effort-$allowed"
+      dir=$(new_case "$id" "$id")
+      add_ship_task "$dir" "$id" codex
+      printf codex > "$dir/fake/command"
+      mkdir -p "$dir/home/config"
+      : > "$dir/home/config/launch-env-allowlist"
+      [ "$allowed" != listed ] || printf 'CODEX_HOME\n' > "$dir/home/config/launch-env-allowlist"
+      out=$(CODEX_HOME="$dir/catalog" run_control "$dir" "$id" relaunch --harness codex --model gpt-6.1-terra --effort "$effort" --note "filtered profile"); rc=$?
+      expect_code 1 "$rc" "filtered Codex $effort must refuse: $out"
+      assert_contains "$out" 'config/launch-env-allowlist' "filtered refusal did not name the config"
+      [ "$(cat "$dir/fake/command")" = codex ] || fail "filtered Codex relaunch stopped the agent"
+      [ ! -s "$dir/fake/literal" ] || fail "filtered Codex relaunch sent lifecycle input"
+    done
+  done
+  for allowed in empty listed; do
+    id="rl-filtered-luna-max-$allowed"
+    dir=$(new_case "$id" "$id")
+    add_ship_task "$dir" "$id" codex
+    printf codex > "$dir/fake/command"
+    printf codex > "$dir/fake/becomes"
+    mkdir -p "$dir/home/config"
+    : > "$dir/home/config/launch-env-allowlist"
+    [ "$allowed" != listed ] || printf 'CODEX_HOME\n' > "$dir/home/config/launch-env-allowlist"
+    out=$(CODEX_HOME="$dir/catalog" run_control "$dir" "$id" relaunch --harness codex --model gpt-5.6-luna --effort max --note "filtered Luna max"); rc=$?
+    expect_code 0 "$rc" "filtered Luna max relaunch failed: $out"
+    [ "$(meta_field "$dir" "$id" effort)" = max ] || fail "filtered Luna max relaunch lost effort"
+    assert_contains "$(cat "$dir/fake/literal")" 'model_reasoning_effort="max"' "filtered Luna max relaunch omitted effort"
+    assert_not_contains "$(cat "$dir/fake/literal")" "export CODEX_HOME=" "filtered Luna max relaunch injected the caller Codex home"
+  done
+  for effort in max ultra; do
+    id="rl-codex-$effort"
+    dir=$(new_case "$id" "$id")
+    add_ship_task "$dir" "$id" codex
+    printf codex > "$dir/fake/command"
+    printf codex > "$dir/fake/becomes"
+    mkdir -p "$dir/catalog"
+    printf '%s\n' '{"models":[{"slug":"gpt-6.1-terra","supported_reasoning_levels":[{"effort":"max"},{"effort":"ultra"}]}]}' > "$dir/catalog/models_cache.json"
+    if [ "$effort" = ultra ]; then
+      out=$(CODEX_HOME="$dir/catalog" run_control "$dir" "$id" relaunch --harness codex --model unsupported --effort "$effort" --note "unsupported profile"); rc=$?
+      expect_code 1 "$rc" "unsupported Codex ultra relaunch must fail: $out"
+      [ "$(cat "$dir/fake/command")" = codex ] || fail "unsupported Codex relaunch stopped the agent"
+      [ ! -s "$dir/fake/literal" ] || fail "unsupported Codex relaunch sent lifecycle input"
+    fi
+    # A relative CODEX_HOME names the caller's store, not one under the worktree.
+    out=$(cd "$dir" && CODEX_HOME=catalog run_control "$dir" "$id" relaunch --harness codex --model gpt-6.1-terra --effort "$effort" --note "supported profile"); rc=$?
+    expect_code 0 "$rc" "supported Codex relaunch failed: $out"
+    [ "$(meta_field "$dir" "$id" model)" = gpt-6.1-terra ] || fail "Codex relaunch lost model"
+    [ "$(meta_field "$dir" "$id" effort)" = "$effort" ] || fail "Codex relaunch lost effort"
+    assert_contains "$(cat "$dir/fake/literal")" "model_reasoning_effort=\"$effort\"" "Codex relaunch omitted effort"
+    assert_contains "$(cat "$dir/fake/literal")" "export CODEX_HOME='$dir/catalog'" "Codex relaunch did not keep the validated Codex home"
+  done
+  id=rl-codex-max-unsupported
+  dir=$(new_case "$id" "$id")
+  add_ship_task "$dir" "$id" codex
+  printf codex > "$dir/fake/command"
+  printf codex > "$dir/fake/becomes"
+  out=$(cd "$dir" && CODEX_HOME=missing run_control "$dir" "$id" relaunch --harness codex --model gpt-6.1-terra --effort ultra --note "missing catalog"); rc=$?
+  expect_code 1 "$rc" "Codex ultra relaunch without a catalog must fail: $out"
+  assert_contains "$out" "$dir/missing/models_cache.json is unavailable" "missing relative catalog was not resolved against the caller"
+  [ "$(cat "$dir/fake/command")" = codex ] || fail "missing-catalog Codex relaunch stopped the agent"
+  out=$(cd "$dir" && CODEX_HOME=missing run_control "$dir" "$id" relaunch --harness codex --model gpt-5 --effort max --note "unsupported max"); rc=$?
+  expect_code 0 "$rc" "unsupported Codex max relaunch should omit the effort: $out"
+  [ "$(meta_field "$dir" "$id" effort)" = max ] || fail "Codex max relaunch lost recorded effort"
+  assert_not_contains "$(cat "$dir/fake/literal")" "model_reasoning_effort" "unsupported Codex max relaunch threaded the effort"
+  assert_contains "$(cat "$dir/fake/literal")" "export CODEX_HOME='$dir/missing'" "Codex relaunch did not export the caller-resolved missing Codex home"
+  pass "Codex max and ultra relaunch keep the validated Codex home, omit unsupported max, and reject unsupported ultra before stopping"
+}
+
 # A fake claude that answers `claude auth status` the way the real runner
 # does: signed in only when the selected config root holds a stored login.
 make_claude_auth_stub() {  # <case-dir>
@@ -2988,6 +3060,7 @@ test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
+test_codex_catalog_effort_relaunch
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
