@@ -217,52 +217,75 @@ test_spawn_isolation_abort() {
 # home is a linked worktree too, so the fact that the leased slot is a linked
 # worktree proves nothing about whether the marker is stale.
 test_spawn_clears_stale_secondmate_marker() {
-  local home proj fakebin out status wt_stale wt_live wt_parent marker
+  local home other proj fakebin out status wt_stale wt_live wt_other wt_unbound
   home="$TMP_ROOT/spawn-marker-home"
-  mkdir -p "$home/data"
+  other="$TMP_ROOT/spawn-marker-other-home"
+  mkdir -p "$home/data" "$other/data"
   proj=$(make_repo "$TMP_ROOT/spawn-marker-proj")
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-marker-fake")
 
   wt_stale="$TMP_ROOT/spawn-marker-stale"
   wt_live="$TMP_ROOT/spawn-marker-live"
-  wt_parent="$TMP_ROOT/spawn-marker-parent"
+  wt_other="$TMP_ROOT/spawn-marker-other"
+  wt_unbound="$TMP_ROOT/spawn-marker-unbound"
   git -C "$proj" worktree add -q --detach "$wt_stale" >/dev/null 2>&1
   git -C "$proj" worktree add -q --detach "$wt_live" >/dev/null 2>&1
-  git -C "$proj" worktree add -q --detach "$wt_parent" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$wt_other" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$wt_unbound" >/dev/null 2>&1
+  # Every seed writes the parent binding beside the marker, so a slot leaked by
+  # a retirement that predates teardown's identity cleanup carries both files.
   printf 'retired-mate\n' > "$wt_stale/.fm-secondmate-home"
-  printf 'livemate\n' > "$wt_live/.fm-secondmate-home"
-  printf 'unregistered-child\n' > "$wt_parent/.fm-secondmate-home"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
-    > "$wt_parent/.fm-secondmate-parent"
-  mkdir -p "$home/data"
+    > "$wt_stale/.fm-secondmate-parent"
+  printf 'livemate\n' > "$wt_live/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
+    > "$wt_live/.fm-secondmate-parent"
+  printf 'other-child\n' > "$wt_other/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$other" \
+    > "$wt_other/.fm-secondmate-parent"
+  printf 'unbound-child\n' > "$wt_unbound/.fm-secondmate-home"
   printf -- '- livemate - test fixture (home: %s; scope: test fixture; projects: ; added 2026-08-05)\n' \
     "$(cd "$wt_live" && pwd -P)" >> "$home/data/secondmates.md"
 
-  # Stale: no registry entry and no parent binding, so the marker is a leftover.
-  # The spawn proceeds and the slot is restored to a plain task worktree.
+  # Legacy leak from this home: the binding names this home and the id is no
+  # longer registered here, so the secondmate was retired from here. The spawn
+  # proceeds and the slot is restored to a plain task worktree.
   out=$(run_spawn "$home" marker-stale-gg7 "$proj" "$wt_stale" "$fakebin"); status=$?
-  expect_code 0 "$status" "spawn into a slot with a stale marker should proceed"
+  expect_code 0 "$status" "spawn into a slot leaked by this home's retirement should proceed"
   assert_absent "$wt_stale/.fm-secondmate-home" "stale secondmate marker was not cleared"
-  assert_contains "$out" "cleared a stale secondmate-home marker" \
+  assert_absent "$wt_stale/.fm-secondmate-parent" "stale parent binding was not cleared"
+  assert_contains "$out" "cleared a stale secondmate-home marker ('retired-mate')" \
     "clearing a stale marker must be reported"
 
-  # Live: the marker names a secondmate this home still registers, so the pool
-  # handed out a provisioned home. That is a refusal, not something to clean up -
-  # and the home must keep its identity.
+  # Registered: the marker names a secondmate this home still registers, so the
+  # pool handed out a provisioned home. That is a refusal, not something to clean
+  # up - and the home must keep its identity.
   out=$(run_spawn "$home" marker-live-hh8 "$proj" "$wt_live" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a registered secondmate's home should abort"
-  assert_contains "$out" "live secondmate home" "live-home spawn lacked the refusal error"
+  assert_contains "$out" "still registered in" "registered-home refusal must say the id is registered"
+  assert_contains "$out" "Retire secondmate 'livemate' first" "registered-home refusal must say to retire it"
   assert_present "$wt_live/.fm-secondmate-home" "refused spawn destroyed a live home's marker"
+  assert_present "$wt_live/.fm-secondmate-parent" "refused spawn destroyed a live home's binding"
   assert_absent "$home/state/marker-live-hh8.meta" "aborted spawn must not record meta"
 
-  # Parent binding present: the home belongs to another parent's tree, so this
-  # home's registry cannot see it. Refuse on the binding alone.
-  out=$(run_spawn "$home" marker-parent-ii9 "$proj" "$wt_parent" "$fakebin"); status=$?
-  expect_code 1 "$status" "spawn into a home with a parent binding should abort"
-  assert_contains "$out" "live secondmate home" "parent-bound spawn lacked the refusal error"
-  assert_present "$wt_parent/.fm-secondmate-home" "refused spawn destroyed a bound home's marker"
+  # Other parent: this home's registry cannot see that secondmate, so only the
+  # named parent can retire or clean it.
+  out=$(run_spawn "$home" marker-other-ii9 "$proj" "$wt_other" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn into a home bound to another parent should abort"
+  assert_contains "$out" "bound to parent home '$(cd "$other" && pwd -P)'" \
+    "other-parent refusal must name the owning parent home"
+  assert_not_contains "$out" "still registered" "other-parent refusal must not claim the id is registered here"
+  assert_present "$wt_other/.fm-secondmate-home" "refused spawn destroyed a bound home's marker"
+  assert_present "$wt_other/.fm-secondmate-parent" "refused spawn destroyed a bound home's binding"
 
-  pass "fm-spawn: clears a leftover secondmate marker, refuses a still-provisioned home"
+  # No binding: nothing proves this home owned the marker, so it is refused too.
+  out=$(run_spawn "$home" marker-unbound-jj0 "$proj" "$wt_unbound" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn into a marker without a parent binding should abort"
+  assert_contains "$out" "cannot confirm it retired that secondmate" \
+    "unbound refusal must say ownership cannot be confirmed"
+  assert_present "$wt_unbound/.fm-secondmate-home" "refused spawn destroyed an unbound marker"
+
+  pass "fm-spawn: clears a secondmate marker this home retired, refuses every other leftover by cause"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------

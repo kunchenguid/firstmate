@@ -903,6 +903,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-kimi-trust-lib.sh
@@ -4192,14 +4194,15 @@ real_path_or_raw() { # <path>
 #
 # Decide by identity, never by shape. A genuine secondmate home is a linked
 # worktree too (docs/turnend-guard.md), so "linked worktree" cannot distinguish
-# a stale marker from a live home. An id this home still registers, or the
-# durable .fm-secondmate-parent binding a seed writes beside the marker, names a
-# home that is still provisioned: that is the pool handing out a LIVE
-# secondmate's home, which is a refusal rather than something to clean up.
-# Anything else is a leftover from a retired or never-provisioned home, and
-# removing it restores the slot to a plain task worktree.
+# a stale marker from a live home. The leftover is cleared only when this home
+# can prove it owned and retired it: the durable .fm-secondmate-parent binding a
+# seed writes beside the marker names this home as the parent, and the marker's
+# id is no longer registered here. Every other case is refused with its cause:
+# an id still registered here is the pool handing out a LIVE secondmate's home,
+# and a binding naming another parent (or no readable local binding at all)
+# means only that parent can tell whether the home is retired.
 spawn_clear_stale_secondmate_marker() {  # <worktree> <source> <inspect-target>
-  local wt=$1 source=$2 inspect_target=$3 marker parent id
+  local wt=$1 source=$2 inspect_target=$3 marker parent id bound_home
   # A secondmate spawn launches INTO a home whose marker is the point, so this
   # hygiene is for task worktrees only.
   [ "$KIND" != secondmate ] || return 0
@@ -4211,16 +4214,27 @@ spawn_clear_stale_secondmate_marker() {  # <worktree> <source> <inspect-target>
     IFS= read -r id < "$marker" 2>/dev/null || id=
     id=${id//[[:space:]]/}
   fi
-  if { [ -n "$id" ] && secondmate_registry_field "$DATA/secondmates.md" "$id" home >/dev/null 2>&1; } ||
-     [ -e "$parent" ] || [ -L "$parent" ]; then
-    echo "error: $source handed back '$wt', which is still the provisioned home of secondmate '${id:-unreadable}'; refusing to launch a task into a live secondmate home. Free that pool slot or retire the secondmate first. Inspect target $inspect_target" >&2
+  if [ -n "$id" ] && secondmate_registry_field "$DATA/secondmates.md" "$id" home >/dev/null 2>&1; then
+    echo "error: $source handed back '$wt', which is the home of secondmate '$id', still registered in $DATA/secondmates.md; refusing to launch a task into a live secondmate home. Retire secondmate '$id' first. Inspect target $inspect_target" >&2
     exit 1
   fi
-  rm -f -- "$marker" || {
-    echo "error: could not clear the stale secondmate-home marker at '$marker'; refusing to launch because every primary-home guard would misfire in this task worktree. Inspect target $inspect_target" >&2
+  bound_home=
+  if fm_secondmate_parent_record_parse "$parent" && [ "$FM_SECONDMATE_PARENT_ROUTE" = local ]; then
+    bound_home=$(cd "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || bound_home=$FM_SECONDMATE_PARENT_HOME
+  fi
+  if [ -z "$id" ] || [ -z "$bound_home" ]; then
+    echo "error: $source handed back '$wt', which carries the secondmate-home marker of '${id:-unreadable}' without a readable id and local parent binding (.fm-secondmate-parent), so this home cannot confirm it retired that secondmate; refusing to launch a task into it. Clean the slot from the parent home that provisioned it. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  if [ "$bound_home" != "$FM_HOME" ]; then
+    echo "error: $source handed back '$wt', which carries the identity of secondmate '$id' bound to parent home '$bound_home', not this home '$FM_HOME'; refusing to launch a task into it. Retire or clean that secondmate from '$bound_home'. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  rm -f -- "$marker" "$parent" || {
+    echo "error: could not clear the stale secondmate identity ('$marker', '$parent'); refusing to launch because every primary-home guard would misfire in this task worktree. Inspect target $inspect_target" >&2
     exit 1
   }
-  echo "notice: cleared a stale secondmate-home marker ('${id:-unreadable}') left in leased worktree $wt" >&2
+  echo "notice: cleared a stale secondmate-home marker ('$id') retired from this home, left in leased worktree $wt" >&2
 }
 
 # True when <path> is an isolated worktree of the spawning project: a real
