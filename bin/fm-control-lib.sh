@@ -504,6 +504,8 @@ fm_control_wait_for_startup() {
   }') || return 1
   (
     . "$lib_dir/fm-timeout-lib.sh"
+    # Keep expansions for the child shell, not this caller.
+    # shellcheck disable=SC2016
     fm_run_timed "$bound" bash -c '
       lib_dir=$1
       shift
