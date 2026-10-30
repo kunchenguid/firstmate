@@ -3510,6 +3510,23 @@ bin/fm-teardown.sh e2e1
 
 Before the launch-line fix the same spawn could not type `+`, which every launch line carries.
 
+### Placement beside Firstmate
+
+Measured on 2026-10-30 with `hc 0.1.14` on Linux (7.0.0, `bash` 5.3.9), against a private core as above.
+`tests/fm-backend-hc-smoke.test.sh` started a terminal labeled `herdr.space=smoke-space` as a stand-in for Firstmate's own, ran `fm_backend_hc_create_task` inside it, and ran it once more from outside any hc terminal:
+
+```text
+ok - hc smoke: create_task started fmt562734:t1
+ok - hc smoke: current_path follows the shell's cwd
+ok - hc smoke: send_text_line ran the command and capture shows its output
+ok - hc smoke: agent_state reads dead for a shell and alive for an agent-named foreground
+ok - hc smoke: kill closes and removes the terminal
+ok - hc smoke: a task created inside Firstmate's own hc terminal joins its space as its child
+FM_TEST_COMPLETE
+```
+
+The task created inside reported `parent` equal to the stand-in's address and `herdr.space=smoke-space`; the one created outside reported no parent and `herdr.space=fm-<hometag>`.
+
 ### Live guard
 
 `tests/fm-backend-hc-liveness-live-e2e.test.sh` on this host:

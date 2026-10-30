@@ -58,10 +58,12 @@ setup_case() {  # <name> -> sets D, FB, HOMEDIR
 }
 
 # hc_shell <script>: run <script> in bash with the adapter sourced against the
-# stub. HOMETAG is exported so the script can build matching labels.
+# stub, with no inherited HC_TERMINAL_ID (a case sets its own). HOMETAG is
+# exported so the script can build matching labels.
 hc_shell() {  # <script>
   FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
     HC_SESSION=fmtest bash -c '
+      unset HC_TERMINAL_ID
       . "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
       fm_backend_source hc || { echo "source failed" >&2; exit 90; }
       HOMETAG=$(fm_backend_hometag)
@@ -260,9 +262,70 @@ test_endpoint_validation_binds_hc_meta() {
   pass "hc: endpoint validation requires window to equal hc_session:hc_terminal"
 }
 
+# write_caller <dir> <address> <pid> <herdr.space>: the hc terminal Firstmate
+# itself would run in.
+write_caller() {
+  jq -n --arg a "$2" --argjson p "$3" --arg s "$4" '
+    {address: $a, state: "live", pid: $p, labels: (if $s == "" then {} else {"herdr.space": $s} end)}' > "$1/$2.json"
+}
+
+run_args() {  # -> the logged `hc run` line
+  grep $'\x1frun\x1f' "$D/log"
+}
+
+test_create_task_inside_firstmates_terminal_joins_its_space_as_child() {
+  local tag out sleeper
+  setup_case caller
+  tag=$(hometag_of)
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  # This test process is an ancestor of the adapter's shell, as Firstmate's
+  # terminal shell is of a real spawn.
+  write_caller "$D" t1 "$$" space-fm
+  hc_shell 'HC_TERMINAL_ID=t1 fm_backend_hc_create_task fmtest fm-a1 /proj' >/dev/null || fail "create_task failed inside a caller terminal"
+  out=$(run_args)
+  assert_contains "$out" $'\x1f--parent\x1ft1\x1f' "the task must be the caller terminal's child"
+  assert_not_contains "$out" --no-parent "a child must not also ask for no parent"
+  for want in --outlive-parent --no-notify "herdr.space=space-fm" "herdr.tab=$tag-fm-a1"; do
+    assert_contains "$out" "$want" "hc run must carry $want"
+  done
+
+  : > "$D/log"
+  hc_shell 'HC_TERMINAL_ID=t1 FM_HC_SPACE=chosen fm_backend_hc_create_task fmtest fm-a2 /proj' >/dev/null || fail "create_task failed with FM_HC_SPACE"
+  out=$(run_args)
+  assert_contains "$out" $'\x1f--parent\x1ft1\x1f' "an explicit space keeps the caller as parent"
+  assert_contains "$out" "herdr.space=chosen" "FM_HC_SPACE wins over the caller's space"
+
+  : > "$D/log"
+  write_caller "$D" t2 "$$" ""
+  hc_shell 'HC_TERMINAL_ID=t2 fm_backend_hc_create_task fmtest fm-a3 /proj' >/dev/null || fail "create_task failed under an unplaced caller"
+  out=$(run_args)
+  assert_contains "$out" $'\x1f--parent\x1ft2\x1f' "an unplaced caller is still the parent"
+  assert_contains "$out" "herdr.space=fm-$tag" "an unplaced caller falls back to the home's space"
+
+  # A live terminal whose shell is not an ancestor, and an id the core does
+  # not know, are both ignored. The divergence is asserted: t3 is live with a
+  # space, so only the ancestry check can reject it.
+  sleep 30 &
+  sleeper=$!
+  write_caller "$D" t3 "$sleeper" space-other
+  for id in t3 t8; do
+    : > "$D/log"
+    hc_shell "HC_TERMINAL_ID=$id fm_backend_hc_create_task fmtest fm-b-$id /proj" >/dev/null || fail "create_task failed with HC_TERMINAL_ID=$id"
+    out=$(run_args)
+    assert_contains "$out" --no-parent "HC_TERMINAL_ID=$id must not adopt a parent"
+    assert_not_contains "$out" --parent$'\x1f' "HC_TERMINAL_ID=$id must not adopt a parent"
+    assert_contains "$out" "herdr.space=fm-$tag" "HC_TERMINAL_ID=$id must not lend its space"
+    [ "$id" != t3 ] || assert_contains "$(cat "$D/log")" $'\x1fget\x1f--json\x1ft3' "the non-ancestor case must have read a live record"
+  done
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  pass "hc: inside Firstmate's own hc terminal a task joins its space as a child; a non-ancestor or unknown id is ignored"
+}
+
 fm_test_run \
   test_hc_is_spawn_capable_and_never_autodetected \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
+  test_create_task_inside_firstmates_terminal_joins_its_space_as_child \
   test_control_interrupt_delivers_the_harness_keys \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \
   test_invalid_session_never_reaches_hc \
