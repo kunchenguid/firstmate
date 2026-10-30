@@ -166,6 +166,40 @@ assert_grep 'peak_gib=2 samples=' "$HOME_DIR/state/heavy-admission.log" "trim ke
 pass "evidence append and trimming preserve concurrent decisions"
 
 new_world ramp_secs=0
+LOG_LOCK_READY="$TMP_ROOT/log-lock-ready"
+LOG_LOCK_RELEASE="$TMP_ROOT/log-lock-release"
+: > "$HOME_DIR/state/heavy-admission.log"
+(
+  exec 9>> "$HOME_DIR/state/heavy-admission.log"
+  flock -x 9 || exit 1
+  touch "$LOG_LOCK_READY"
+  LOCK_WAITS=0
+  while [ ! -e "$LOG_LOCK_RELEASE" ] && [ "$LOCK_WAITS" -lt 120 ]; do
+    /bin/sleep 0.05
+    LOCK_WAITS=$((LOCK_WAITS + 1))
+  done
+) &
+LOG_LOCK_PID=$!
+LOG_LOCK_WAITS=0
+while [ ! -e "$LOG_LOCK_READY" ] && [ "$LOG_LOCK_WAITS" -lt 100 ]; do
+  /bin/sleep 0.05
+  LOG_LOCK_WAITS=$((LOG_LOCK_WAITS + 1))
+done
+assert_present "$LOG_LOCK_READY" "evidence log lock holder acquired the lock"
+START=$(date +%s)
+run_admit wait --timeout 0
+ELAPSED=$(( $(date +%s) - START ))
+touch "$LOG_LOCK_RELEASE"
+wait "$LOG_LOCK_PID" || fail "evidence log lock holder"
+expect_code 0 "$RC" "busy evidence log still admits"
+assert_contains "$OUT" "decision=admit reason=ok" "busy evidence log preserves the admission"
+assert_contains "$ERR" "evidence log lock stayed busy; skipped this log write" "busy evidence log reports the skipped write"
+[ "$(printf '%s\n' "$ERR" | wc -l | tr -d ' ')" = 1 ] || fail "busy evidence log did not emit exactly one stderr note: $ERR"
+[ "$ELAPSED" -le 4 ] || fail "busy evidence log delayed admission too long (${ELAPSED}s)"
+[ ! -s "$HOME_DIR/state/heavy-admission.log" ] || fail "busy evidence log was not skipped"
+pass "a busy evidence log is skipped after a bounded wait"
+
+new_world ramp_secs=0
 run_admit check
 expect_code 0 "$RC" "first admission with no ramp"
 run_admit check
