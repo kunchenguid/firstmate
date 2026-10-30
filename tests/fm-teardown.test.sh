@@ -80,23 +80,10 @@ export REAL_PS_FOR_TEST
 # Where this host actually keeps lsof, PATH or not - macOS ships it only as
 # /usr/sbin/lsof and agent shells routinely drop /usr/sbin from PATH, so a
 # PATH-only lookup left REAL_LSOF_FOR_TEST empty and every fakebin lsof stub
-# that execs the real one silently failed. Empty when the host
-# genuinely has none.
-host_lsof_path() {
-  local resolved dir
-  if resolved=$(command -v lsof 2>/dev/null) && [ -n "$resolved" ]; then
-    printf '%s\n' "$resolved"
-    return 0
-  fi
-  for dir in /usr/sbin /sbin /usr/bin /bin; do
-    [ -x "$dir/lsof" ] || continue
-    printf '%s\n' "$dir/lsof"
-    return 0
-  done
-  printf '%s\n' ""
-}
-
-REAL_LSOF_FOR_TEST=$(host_lsof_path)
+# that execs the real one silently failed. Resolved through teardown's own
+# fm_lsof_bin so the fixture and production look in the same places. Empty
+# when the host genuinely has none.
+REAL_LSOF_FOR_TEST=$(unset FM_LSOF_FALLBACK_DIRS; . "$ROOT/bin/fm-lock-lib.sh"; fm_lsof_bin) || REAL_LSOF_FOR_TEST=
 export REAL_LSOF_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
@@ -5043,7 +5030,7 @@ EOF
 # survived teardown with nothing but a warning - in production, not only tests.
 test_lsof_off_path_but_installed_still_reaps_worktree_process() {
   local case_dir rc pid path_without_lsof fallback_dir lsof_real
-  lsof_real=$(host_lsof_path)
+  lsof_real=$(unset FM_LSOF_FALLBACK_DIRS; . "$ROOT/bin/fm-lock-lib.sh"; fm_lsof_bin) || lsof_real=
   if [ -z "$lsof_real" ]; then
     pass "an lsof installed off PATH still drives the reap (not exercised: this host has no lsof)"
     return 0
