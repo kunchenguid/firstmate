@@ -1266,8 +1266,8 @@ test_workers_wait_without_spending_turns() {
   pass "fm-brief: workers end the turn on a decision, wait in one bounded shell command, and never poll"
 }
 
-# Contract: ship and scout briefs route heavy phases through the host admission
-# check exactly when this home's config/heavy-admission turns the policy on.
+# Contract: ship and scout briefs route heavy phases through host admission
+# unless this home's policy is known off.
 test_heavy_admission_rule_follows_policy() {
   local home id brief
   home="$TMP_ROOT/heavy-admission-home"

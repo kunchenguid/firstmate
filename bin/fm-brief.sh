@@ -153,9 +153,9 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
-# When bin/fm-heavy-admission.sh reports this home's heavy-phase admission
-# policy on, ship and scout scaffolds add a "# Heavy phases" section that has
-# the worker wait for admission before each heavy phase.
+# Unless bin/fm-heavy-admission.sh reports this home's heavy-phase admission
+# policy known off, ship and scout scaffolds add a "# Heavy phases" section
+# that has the worker wait for admission before each heavy phase.
 # Refuses to overwrite an existing brief.
 set -eu
 
