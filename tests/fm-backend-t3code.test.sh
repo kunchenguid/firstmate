@@ -2155,9 +2155,11 @@ test_scout_teardown_stops_and_archives_before_slot_return() {
 }
 
 test_secondmate_teardown_archives_thread_before_home_removal_without_project_delete() {
-  local home data state config id out rc thread=mcp:4e0f2a6b-9d3c-4b5e-af4f-0123456789cd archive_line harness=${1:-claude} journal='' nolsof offpath
+  local home data state config id out rc thread=mcp:4e0f2a6b-9d3c-4b5e-af4f-0123456789cd archive_line harness=${1:-claude} journal='' nolsof offpath lsof_real
   t3_require_tomllib test_secondmate_teardown_archives_thread_before_home_removal_without_project_delete || return 0
-  command -v lsof >/dev/null 2>&1 || { printf 'note: %s skipped: lsof is required to prove a process left the home\n' "${FUNCNAME[0]}"; return 0; }
+  # Teardown finds lsof through fm_lsof_bin, which looks past PATH (macOS keeps it in /usr/sbin), so the skip check and the off-PATH symlink use the same resolver.
+  lsof_real=$(unset FM_LSOF_FALLBACK_DIRS; . "$ROOT/bin/fm-lock-lib.sh"; fm_lsof_bin) || lsof_real=
+  [ -n "$lsof_real" ] || { printf 'note: %s skipped: lsof is required to prove a process left the home\n' "${FUNCNAME[0]}"; return 0; }
   id=$(t3_uid "t3smtdz1-$harness")
   t3_case "teardown-secondmate-$harness" running
   t3_world "$(t3_thread_json "$thread" running false)"
@@ -2209,7 +2211,7 @@ test_secondmate_teardown_archives_thread_before_home_removal_without_project_del
   kill -0 "$PROVIDER_PID" 2>/dev/null || fail "the refused teardown must not have touched the provider"
   offpath="$CASE_DIR/off-path-sbin"
   mkdir -p "$offpath"
-  ln -sf "$(command -v lsof)" "$offpath/lsof"
+  ln -sf "$lsof_real" "$offpath/lsof"
   out=$( PATH="$(fm_test_base_path_sans "$PATH" lsof)" FM_LSOF_FALLBACK_DIRS="$offpath" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )

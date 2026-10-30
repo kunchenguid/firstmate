@@ -5070,6 +5070,11 @@ test_lsof_off_path_but_installed_still_reaps_worktree_process() {
   FM_TEARDOWN_TEST_PATH="$path_without_lsof" FM_LSOF_FALLBACK_DIRS="$fallback_dir" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
+  if [ "$rc" -ne 0 ]; then
+    # The sleeper is disowned, so a failed teardown must not leave it running past the test.
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
   expect_code 0 "$rc" "lsof-off-path-reap: teardown should succeed"
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
