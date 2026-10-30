@@ -3782,19 +3782,16 @@ if [ "$KIND" = secondmate ]; then
   # another home supervises. The one exception is the private parent-route
   # directory of the home being launched (bin/fm-remote-secondmate-control.sh),
   # recognized structurally: $DATA is that home's .parent-route child, $STATE
-  # (where the task record is written) is its state/parent-route child, and its
-  # identity marker names $ID.
+  # (where the task record is written) is its state/parent-route child.
   sm_data_abs=$(resolve_path "$DATA")
   sm_parent_route=$(resolve_path "$PROJ_ABS/data/.parent-route")
   sm_state_abs=$(resolve_path "$STATE")
   sm_parent_route_state=$(resolve_path "$PROJ_ABS/state/parent-route")
-  sm_home_marker=
-  [ ! -f "$PROJ_ABS/.fm-secondmate-home" ] || sm_home_marker=$(cat "$PROJ_ABS/.fm-secondmate-home")
-  if [ "$sm_data_abs" = "$sm_parent_route" ] && [ "$sm_state_abs" = "$sm_parent_route_state" ] && [ "$sm_home_marker" = "$ID" ]; then
+  if [ "$sm_data_abs" = "$sm_parent_route" ] && [ "$sm_state_abs" = "$sm_parent_route_state" ]; then
     : # delegated remote launch into this secondmate's own parent-route directory
   elif ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
     echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
-    echo "error: refusing to write state/$ID.meta into $FM_HOME, which does not register secondmate $ID" >&2
+    echo "error: refusing to write $ID.meta into $STATE: $DATA/secondmates.md does not register secondmate $ID" >&2
     exit 1
   else
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
