@@ -656,13 +656,14 @@ test_raw_claude_launch_gets_the_brief_doorbell() {
 }
 
 # Only a plain single command for a known harness gets the brief appended.
-# Compound, command-substituted, wrapped, quoted-operator and unknown-program
+# Compound, command-substituted, wrapped, quoted-operator, commented and unknown-program
 # commands launch exactly as given, with a warning suggesting __BRIEF__.
 test_other_raw_launches_launch_unchanged_with_a_warning() {
   local rec id out status raw launch n=0
   # shellcheck disable=SC2016 # the $( ) is literal launch text.
   for raw in "custom-agent --flag; cleanup" "custom-agent --flag && cleanup" "codex --flag | tee out" "codex --flag &" \
-    'codex --model $(pick-model | tr -d x)' "env -u CLAUDECODE rovo run --yolo" "codex -c 'notify=[a; b]'" "custom-agent --flag" "FOO=1 codex --flag"; do
+    'codex --model $(pick-model | tr -d x)' "env -u CLAUDECODE rovo run --yolo" "codex -c 'notify=[a; b]'" "custom-agent --flag" "FOO=1 codex --flag" \
+    "codex --model x # use default permissions"; do
     n=$((n + 1))
     id=raw-other-$n-z15
     rec=$(make_spawn_case "raw-other-$n" claude "$id")

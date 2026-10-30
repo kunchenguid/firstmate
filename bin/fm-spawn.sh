@@ -244,7 +244,7 @@
 #   is left alone, and kimi or rovo get their post-readiness brief pointer. Any other
 #   raw command gets the launch brief appended as its last argument only when it is
 #   a plain single command: its first word is a known harness that takes a positional
-#   prompt, it holds none of the shell metacharacters $( ` | ; & < > or a newline, and
+#   prompt, it holds none of the shell metacharacters $( ` | ; & < > # or a newline, and
 #   it does not start with a wrapper (env, nice, timeout, caffeinate, sudo, command,
 #   exec) or a VAR=value assignment. Every other raw command launches exactly as given,
 #   with a one-line warning suggesting __BRIEF__. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -2917,7 +2917,7 @@ launch_template() {
 # of its first word and must be a known harness that takes a positional prompt
 # (kimi and rovo deliver their brief after a readiness gate instead); the
 # command must not start with a VAR=value assignment, and must hold none of the
-# shell metacharacters $( ` | ; & < > or a newline. Wrappers such as env, nice,
+# shell metacharacters $( ` | ; & < > # or a newline. Wrappers such as env, nice,
 # timeout, caffeinate, sudo, command and exec are not known harnesses, so a
 # wrapped command never qualifies.
 raw_launch_takes_brief() {
@@ -2929,7 +2929,7 @@ raw_launch_takes_brief() {
   case "${cmd%% *}" in *=*) return 1 ;; esac
   # shellcheck disable=SC2016 # literal $( and backtick are the patterns
   case "$cmd" in
-  *'$('* | *'`'* | *'|'* | *';'* | *'&'* | *'<'* | *'>'* | *$'\n'*) return 1 ;;
+  *'$('* | *'`'* | *'|'* | *';'* | *'&'* | *'<'* | *'>'* | *'#'* | *$'\n'*) return 1 ;;
   esac
   return 0
 }
