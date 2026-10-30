@@ -201,6 +201,13 @@ case "${1:-}" in
   send-keys)
     prev=
     for a in "$@"; do
+      if [[ "$a" == *"FM_TREEHOUSE_READY_FILE="* ]]; then
+        ready=${a#*FM_TREEHOUSE_READY_FILE=}
+        ready=${ready%% FM_TREEHOUSE_REAL_SHELL=*}
+        ready=${ready#\'}
+        ready=${ready%\'}
+        printf '%s\n' "${FM_FAKE_PANE_PATH:-}" > "$ready"
+      fi
       if [ "$prev" = "-l" ]; then
         case "$a" in
           ". '"*"'")

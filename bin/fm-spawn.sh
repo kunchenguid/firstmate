@@ -1608,6 +1608,7 @@ GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
 SPAWN_STAGED_LAUNCH_FILE=
+SPAWN_TREEHOUSE_READY_FILE=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1651,6 +1652,10 @@ spawn_orca_reclaim_launch_file() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "$SPAWN_TREEHOUSE_READY_FILE" ]; then
+    rm -f -- "$SPAWN_TREEHOUSE_READY_FILE" 2>/dev/null || true
+    SPAWN_TREEHOUSE_READY_FILE=
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -5763,7 +5768,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     # The failure marker proves get returned unsuccessfully; a successful get
     # still enters its interactive shell exactly as before.
     wt_output_marker="FM_TH_GET_$$"
-    spawn_send_text_line "$WT_TARGET" "printf '\\n%s\\n' '${wt_output_marker}'; treehouse get || printf '\\n%s\\n%s\\n' \"\$COLUMNS\" '${wt_output_marker}_FAILED'"
+    SPAWN_TREEHOUSE_READY_FILE="$STATE/.$ID.treehouse-ready.${BASHPID:-$$}"
+    rm -f -- "$SPAWN_TREEHOUSE_READY_FILE"
+    spawn_send_text_line "$WT_TARGET" "printf '\\n%s\\n' '${wt_output_marker}'; FM_TREEHOUSE_READY_FILE=$(shell_quote "$SPAWN_TREEHOUSE_READY_FILE") FM_TREEHOUSE_REAL_SHELL=\"\$SHELL\" SHELL=$(shell_quote "$SCRIPT_DIR/fm-treehouse-shell.sh") treehouse get || printf '\\n%s\\n%s\\n' \"\$COLUMNS\" '${wt_output_marker}_FAILED'"
 
     # Captures can contain visual rows rather than logical lines. Rejoin rows
     # filling the reported pane width, restoring a trimmed wrap-boundary space.
@@ -5849,14 +5856,27 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         esac
         exit 1
       fi
+      wt_allocated=""
+      if [ -f "$SPAWN_TREEHOUSE_READY_FILE" ] && [ ! -L "$SPAWN_TREEHOUSE_READY_FILE" ]; then
+        IFS= read -r wt_allocated < "$SPAWN_TREEHOUSE_READY_FILE" || wt_allocated=""
+        [ -z "$wt_allocated" ] || wt_allocated=$(real_path_or_raw "$wt_allocated")
+      fi
       if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
         p_real=$(real_path_or_raw "$p")
-        last_reason="it is an isolated worktree, but no second read agreed with it"
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
+        if [ -z "$wt_allocated" ]; then
+          candidate=""
+          last_reason="treehouse get has not confirmed the worktree it allocated"
+        elif [ "$p_real" != "$wt_allocated" ]; then
+          candidate=""
+          last_reason="it does not match the worktree allocated by treehouse get ('$wt_allocated')"
+        else
+          last_reason="it is the allocated worktree, but no second read agreed with it"
+          if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+            WT="$p"
+            break
+          fi
+          candidate="$p_real"
         fi
-        candidate="$p_real"
       else
         candidate=""
         [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
@@ -5867,6 +5887,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
       exit 1
     fi
+    rm -f -- "$SPAWN_TREEHOUSE_READY_FILE"
+    SPAWN_TREEHOUSE_READY_FILE=
 
     if spawn_endpoint_closes_on_abort; then
       validate_spawn_worktree "treehouse get" "$WT ($(spawn_endpoint_hint))"

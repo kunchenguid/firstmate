@@ -68,13 +68,17 @@ case "${1:-}" in
   kill-window) : > "$window_file"; exit 0 ;;
   has-session|new-session) exit 0 ;;
   send-keys)
-    if [ -n "${FM_FAKE_TREEHOUSE_OUTPUT:-}" ]; then
-      for arg in "$@"; do
-        case "$arg" in
-          *'treehouse get'*) COLUMNS=${FM_FAKE_COLUMNS:-80} bash -c "$arg" >> "$FM_FAKE_TREEHOUSE_OUTPUT" 2>&1 ;;
-        esac
-      done
-    fi
+    for arg in "$@"; do
+      case "$arg" in
+        *'treehouse get'*)
+          if [ -n "${FM_FAKE_TREEHOUSE_OUTPUT:-}" ]; then
+            SHELL="$(dirname "$0")/login-shell" COLUMNS=${FM_FAKE_COLUMNS:-80} bash -c "$arg" >> "$FM_FAKE_TREEHOUSE_OUTPUT" 2>&1
+          else
+            SHELL="$(dirname "$0")/login-shell" COLUMNS=${FM_FAKE_COLUMNS:-80} bash -c "$arg" >/dev/null 2>&1
+          fi
+          ;;
+      esac
+    done
     exit 0 ;;
   capture-pane)
     if [ -f "${FM_FAKE_TREEHOUSE_OUTPUT:-}" ]; then
@@ -94,7 +98,16 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+cd "${FM_FAKE_TREEHOUSE_ALLOCATION:?}"
+"${SHELL:?}"
+SH
+  cat > "$fakebin/login-shell" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/login-shell"
   printf '%s\n' "$fakebin"
 }
 
@@ -143,6 +156,7 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_TREEHOUSE_ALLOCATION="$WT_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -312,11 +326,11 @@ SH
 
   out=$(FM_TEST_TREEHOUSE_ERROR="$message" \
     FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" \
-    FM_FAKE_TREEHOUSE_OUTPUT_AFTER_PANE_READS=2 run_settle_spawn "$id")
+    FM_FAKE_TREEHOUSE_OUTPUT_AFTER_PANE_READS=3 run_settle_spawn "$id")
   status=$?
   expect_code 1 "$status" "allocation failure should outrank a stable stale pane path"
   assert_contains "$out" "error: $message" "allocation failure was not reported"
-  [ "$(< "$COUNTFILE")" = 2 ] || fail "allocation failure was not detected on the confirming stale-path poll"
+  [ "$(< "$COUNTFILE")" = 3 ] || fail "spawn did not wait for invocation-bound allocation evidence before accepting the stale path"
   assert_absent "$HOME_DIR/state/$id.meta" "failed allocation published stale-path metadata"
   pass "a stable stale path cannot outrank a completed allocation failure"
 }
