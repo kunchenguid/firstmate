@@ -3571,6 +3571,7 @@ test_t3_bounded_digest_snapshot_retention() (
       state="$dir/state"
       ESCALATE_KEPT_FULL=''
       FM_SUPERVISOR_BACKEND=t3code
+      FM_DAEMON_PRIMARY_HARNESS=codex
       item='event: '
       while [ "${#item}" -lt 6000 ]; do item+='blocked waiting for review ; '; done
       escalate_add "$state" "$item"
@@ -3613,6 +3614,54 @@ test_t3_bounded_digest_snapshot_retention() (
     ) || return 1
   done
   pass "T3 bounded retries reuse snapshots and preparation failures remove allocations"
+)
+
+test_t3_digest_preserves_harness_carrier_on_retry() (
+  local harness dir state first request record msg kind
+  for harness in claude codex; do
+    dir=$(make_supercase "t3-carrier-$harness")
+    state="$dir/state"
+    FM_SUPERVISOR_BACKEND=t3code
+    FM_DAEMON_PRIMARY_HARNESS=$harness
+    LOG="$dir/daemon.log"
+    afk_enter "$state"
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { echo empty; }
+    fm_backend_send_text_submit() {
+      printf '%s' "$3" > "$dir/submitted"
+      printf '%s' "$FM_T3CODE_CLIENT_REQUEST_ID" > "$dir/request"
+      echo pending
+    }
+    escalate_add "$state" "event A: done"
+    if escalate_flush "$state"; then fail "unconfirmed digest was cleared"; fi
+    first=$(cat "$dir/submitted")
+    request=$(cat "$dir/request")
+    [ -n "$request" ] || fail "digest has no request identity"
+    if [ "$harness" = claude ]; then
+      fm_operational_doorbell_path "$first" record || fail "Claude received no record carrier"
+      msg=$(cat "$record")
+      fm_operational_input_kind "$msg" kind || fail "record lost its operational kind"
+    else
+      fm_operational_input_kind "$first" kind || fail "Codex lost its typed envelope"
+    fi
+    assert_equals away-supervisor "$kind" "digest changed operational kind"
+    should_exit_afk "$state" "$first" && fail "operational digest ended away mode"
+    escalate_add "$state" "event B: done"
+    if escalate_flush "$state"; then fail "unconfirmed retry was cleared"; fi
+    assert_equals "$first" "$(cat "$dir/submitted")" "retry changed the carrier"
+    assert_equals "$request" "$(cat "$dir/request")" "retry changed request identity"
+    fm_backend_send_text_submit() {
+      printf '%s' "$3" > "$dir/submitted"
+      printf '%s' "$FM_T3CODE_CLIENT_REQUEST_ID" > "$dir/request"
+      echo empty
+    }
+    escalate_flush_frozen "$state" "$state/.subsuper-escalations" || fail "accepted retry failed"
+    assert_equals "$first" "$(cat "$dir/submitted")" "accepted retry changed carrier"
+    assert_equals "$request" "$(cat "$dir/request")" "accepted retry changed identity"
+    assert_contains "$(cat "$state/.subsuper-escalations")" "event B" "retry lost later events"
+  done
+  pass "T3 retries preserve harness-specific carriers and request identities"
 )
 
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -3777,3 +3826,4 @@ test_dialog_name_joins_unseen_status_escalation
 test_dialog_name_after_demand_deep_inspection_still_escalates
 
 test_t3_bounded_digest_snapshot_retention
+test_t3_digest_preserves_harness_carrier_on_retry

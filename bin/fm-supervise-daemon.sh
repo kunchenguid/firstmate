@@ -992,7 +992,11 @@ escalate_flush() {  # <state>
   if [ "${FM_SUPERVISOR_BACKEND:-tmux}" = t3code ]; then
     id="fm-digest-$(_now)-$$-$RANDOM$RANDOM"
     msg=$(_collapse_newlines "$msg")
-    if ! fm_operational_input_encode away-supervisor "$msg" frozen_msg \
+    if ! { if fm_operational_harness_needs_record "$(fm_daemon_primary_harness)"; then
+      fm_operational_record_write "$state" away-supervisor "$msg" frozen_msg
+    else
+      fm_operational_input_encode away-supervisor "$msg" frozen_msg
+    fi; } \
       || ! escalate_freeze "$buf" "$frozen_msg" "$id"; then
       [ "$fresh" != 1 ] || rm -f "$full"
       return 1
