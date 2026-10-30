@@ -617,6 +617,19 @@
 # that count. A viewport read that fails outright fails readiness at once.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# Grok Build 1.0.70 also gates a fresh directory on an interactive trust dialog
+# ("Do you trust the contents of this directory?", Yes, proceed / No, quit),
+# whose complete wording bin/fm-grok-trust-lib.sh recognizes. The brief already
+# rides the launch command. The launch-readiness loop reads the visible
+# viewport, so the spawn refuses at preflight on a backend with no
+# viewport-bounded capture, sends y on every poll the complete dialog is still
+# there, withholds ready while any dialog marker remains on that pane, and
+# requires two consecutive captures that are each ready and dialog-free before
+# success. A blank viewport read proves nothing and restarts that count. A
+# viewport read that fails outright fails readiness at once. Ready is an empty
+# composer or the idle Shift+Tab:mode footer. Ctrl+c:cancel is Grok's mid-turn
+# tail and is not a ready signal. y is the option's own key: a mistaken y is a
+# composer character, not a submit.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse, gemini, devin, commandcode, cortex, and kiro are crewmate/scout only and are refused for --secondmate.
@@ -945,6 +958,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-kimi-trust-lib.sh
 . "$SCRIPT_DIR/fm-kimi-trust-lib.sh"
+# shellcheck source=bin/fm-grok-trust-lib.sh
+. "$SCRIPT_DIR/fm-grok-trust-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -3008,6 +3023,8 @@ launch_template() {
   # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
   # launch command - it is a Stop-event hook installed below (global hook +
   # per-task pointer), so the template is identical for ship/scout/secondmate.
+  # The post-launch gate answers Grok Build 1.0.70's directory-trust dialog
+  # from the visible pane (bin/fm-grok-trust-lib.sh) before reporting success.
   grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
   # --yolo does NOT cover and which would otherwise block every spawn, since
@@ -3878,6 +3895,13 @@ case "$LAUNCH" in
   fi
   ;;
 esac
+
+if [ "$HARNESS" = grok ]; then
+  fm_backend_visible_capture_supported "$BACKEND" || {
+    echo "error: refusing Grok spawn because backend '$BACKEND' has no verified viewport-bounded capture; Grok Build 1.0.70 gates a fresh directory on a trust dialog that can only be answered and confirmed cleared from a scrollback-free read of the live pane" >&2
+    exit 1
+  }
+fi
 
 case "$LAUNCH" in
 *__ROVOBIN__*)
@@ -5716,6 +5740,109 @@ kimi_wait_for_delivery() {
 }
 
 kimi_spawn_fail() { # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
+# Trust decisions read the visible pane only. The dialog is a TUI frame, so a
+# scrollback-backed capture keeps reporting it long after Grok redrew past it,
+# which would type y into a live composer and then fail an already trusted
+# spawn for a dialog that did clear. There is deliberately no fallback to the
+# bounded capture: the spawn refuses at preflight on a backend that cannot read
+# the viewport, a read that fails outright fails readiness with its exit status,
+# and only a successful empty read is absence of evidence.
+grok_visible_capture() {
+  fm_backend_visible_capture "$BACKEND" "$T" "$W"
+}
+
+# Launch-readiness routes its composer-emptiness half through the shared
+# classifier (bin/fm-composer-lib.sh via fm_backend_composer_state), the same
+# owner every steer and injection guard reads. The idle footer is a separate
+# session signal, not a composer shape, so it stays here. Ctrl+c:cancel is the
+# mid-turn tail and must not count as ready.
+grok_composer_is_empty() {
+  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
+}
+
+# The complete-dialog and marker predicates come from bin/fm-grok-trust-lib.sh.
+# The complete dialog decides whether to press y. Any single marker of it on
+# the visible pane decides whether that pane is safe to call ready.
+grok_ready_signal_is_present() { # <plain-pane-capture>
+  case "$1" in *'Shift+Tab:mode'*) return 0 ;; esac
+  grok_composer_is_empty
+}
+
+# A successful y is not evidence that Grok accepted trust. Only a later
+# visible capture without the dialog, followed by the ordinary ready signals,
+# proves advancement. The brief already rode the launch command, so this gate
+# does not send it again.
+grok_wait_for_ready() {
+  local pane capture_rc i=0 max=${FM_GROK_READY_POLLS:-60} interval=${FM_GROK_POLL_INTERVAL:-0.5}
+  local trust_answers=0 trust_seen=0 trust_still_visible=0 trust_markers_pending=0
+  local trust_affirmative='' trust_negative='' ready_captures=0
+  GROK_READY_FAILURE_DETAIL='grok did not show a verified ready signal'
+  while [ "$i" -lt "$max" ]; do
+    capture_rc=0
+    pane=$(grok_visible_capture) || capture_rc=$?
+    if [ "$capture_rc" -ne 0 ]; then
+      GROK_READY_FAILURE_DETAIL="grok readiness could not read the visible viewport of backend '$BACKEND' (viewport capture exited $capture_rc), so the trust dialog could neither be answered nor ruled out"
+      return 1
+    fi
+    if [ -z "$pane" ]; then
+      ready_captures=0
+      i=$((i + 1))
+      [ "$i" -ge "$max" ] || sleep "$interval"
+      continue
+    fi
+    if grok_trust_dialog_is_visible "$pane"; then
+      trust_seen=1
+      trust_still_visible=1
+      trust_markers_pending=0
+      ready_captures=0
+      trust_affirmative=$GROK_TRUST_AFFIRMATIVE
+      trust_negative=$GROK_TRUST_NEGATIVE
+      # Grok can swallow a keypress during its startup window, so y is re-sent
+      # on every poll the complete dialog is still on screen. The dialog's own
+      # disappearance is the postcondition: once it clears, this branch cannot
+      # fire again. y is the affirmative option's own key.
+      if ! spawn_send_key "$T" y; then
+        GROK_READY_FAILURE_DETAIL="grok trust dialog was seen but y could not be submitted"
+        return 1
+      fi
+      trust_answers=$((trust_answers + 1))
+    else
+      trust_still_visible=0
+      if grok_trust_marker_is_present "$pane"; then
+        trust_markers_pending=1
+        ready_captures=0
+      else
+        trust_markers_pending=0
+        # One ready-looking capture cannot be told apart from a pane whose
+        # dialog is one redraw away. Two consecutive captures that are each
+        # ready and free of dialog text can; any capture that is not ready
+        # restarts the count.
+        if grok_ready_signal_is_present "$pane"; then
+          ready_captures=$((ready_captures + 1))
+          [ "$ready_captures" -lt 2 ] || return 0
+        else
+          ready_captures=0
+        fi
+      fi
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  if [ "$trust_still_visible" -eq 1 ]; then
+    GROK_READY_FAILURE_DETAIL="grok trust dialog did not clear after sending y for '$trust_affirmative' on $trust_answers poll(s); saw 'Do you trust the contents of this directory?', 'posing security risks.', '$trust_affirmative', and '$trust_negative'"
+  elif [ "$trust_seen" -eq 1 ]; then
+    GROK_READY_FAILURE_DETAIL="grok trust dialog was answered but the pane never advanced to a verified ready signal; saw 'Do you trust the contents of this directory?', 'posing security risks.', '$trust_affirmative', and '$trust_negative'"
+  elif [ "$trust_markers_pending" -eq 1 ]; then
+    GROK_READY_FAILURE_DETAIL="grok did not show a verified ready signal; trust dialog text stayed on screen without the complete dialog, so the pane was never safe to answer or to treat as ready"
+  fi
+  return 1
+}
+
+grok_spawn_fail() { # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
 }
@@ -8054,6 +8181,12 @@ if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
       SPAWN_FRESH_COMMIT_PENDING=0
       echo "warning: could not close endpoint $T after the failed Hermes launch of $ID; its task record is kept so the worker stays reachable - inspect it, then tear it down" >&2
     fi
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = grok ]; then
+  if ! grok_wait_for_ready; then
+    grok_spawn_fail "$GROK_READY_FAILURE_DETAIL"
     exit 1
   fi
 fi

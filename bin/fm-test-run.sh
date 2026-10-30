@@ -1795,6 +1795,13 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
+    bin/fm-grok-trust-lib.sh)
+      # Grok's directory-trust predicates are vendor-rendered signal. The
+      # portable Grok suite replays the recorded 1.0.70 dialog through
+      # fm-spawn. There is no live guard: the wording was read from the
+      # installed binary, and answering it would launch a real session.
+      printf '%s\n' pure-contract-unit
+      ;;
     bin/fm-task-inbox-lib.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane
       # (backend-dispatch), the watcher's re-ring check (watcher-wake-lock),
