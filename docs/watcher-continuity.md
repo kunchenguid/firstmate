@@ -424,6 +424,18 @@ A live foreign holder therefore cannot strand a TERM'd watcher in this marker-lo
 The bounded wait allows itself one extra lock-freshness window past the bound when the only remaining blocker is a lock whose holder never published its pid: `fm_lock_mid_acquire_is_fresh` defers to that residue for a whole freshness window before it can be stolen, so a creator killed inside its claim write would otherwise consume the entire bound without ever becoming reclaimable.
 A published numeric pid, live or dead, grants no extension to the original wait bound.
 
+### Startup interruption window
+
+The watcher installs its EXIT cleanup trap immediately after claiming the singleton lock, before any recovery-marker or queue lock is touched, and publishes its home-bound lock identity (`fm-home`, `watcher-path`, `pid-identity`) right after.
+Everything past that point - marker transitions, queue reads, delivery records - runs inside the trap's coverage, so an interrupted startup can only ever abandon locks recorded against the watcher's own pid, which the cleanup releases outright before it attempts the same bounded downtime publication an ordinary exit performs.
+The only window a stop still cuts outside cleanup coverage is the singleton claim itself: a watcher killed mid-claim leaves its claim dirs and any steal mutex as ordinary dead evidence the next acquirer reaps.
+The arm treats that published identity as the startup safe point: it forwards a signal or its deadline TERM only once the child's identity matches (or the confirmation deadline itself expires), never mid-claim.
+
+Every lock the pre-identity watcher takes is bounded by `FM_WATCHER_STARTUP_LOCK_BOUND` (default 60 seconds): the downtime publish inside a `.watch.lock` steal, the recovery reopen and arm-check transitions, and the successor's queued-row check.
+A lock still held by a live foreign pid when its bound expires ends the child with the typed line `watcher: FAILED - startup lock <path> held by live pid <n>`, which the arm relays through its child-output path; a dying or clearing holder retries instead of failing, and the existing stale-holder diagnostics keep their shape.
+`FM_ARM_CONFIRM_TIMEOUT` is therefore a liveness backstop rather than a fork budget: it defaults to `FM_GUARD_GRACE` so host load stretches how long the arm waits, never how soon it kills.
+The successor hand-off wait remains on its own separate bound, `FM_ARM_SUCCESSOR_CONFIRM_TIMEOUT` (default 10 seconds, 30 on Git Bash/MSYS), which `bin/fm-claude-stop-autoarm.sh` also uses for its successor status wait.
+
 ## Regression coverage
 
 ### Pi and OpenCode watch extension
@@ -495,6 +507,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Recovery publication before stale-lock removal.
 - The typed self-eviction failure.
 - Bounded and successor-linked lifecycle rows.
+- Startup-stop resilience: a post-claim startup slower than the legacy confirm budget still confirms under the grace-tracked backstop, a live foreign startup-lock holder ends the child with the typed line the arm relays, and a stop forced before the safe point still ends with no dead lock evidence a re-arm cannot reclaim.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 
 ### Claude auto-arm and turn-end guard

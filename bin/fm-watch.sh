@@ -216,6 +216,7 @@ mkdir -p "$STATE"
 # this watcher claimed in. A host that cannot open a directory keeps reading a
 # lock with no holder as a teardown.
 WATCH_STATE_HELD=0
+WATCH_STATE_DEVINO=
 if { exec 6<"$STATE"; } 2>/dev/null; then
   WATCH_STATE_HELD=1
 fi
@@ -305,9 +306,17 @@ WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 # cannot shadow the BSD `-f` syntax.
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
+  stat_devino() { /usr/bin/stat -f '%d %i' "$1" 2>/dev/null; }  # device + inode pair
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
+  stat_devino() { stat -c '%d %i' "$1" 2>/dev/null; }
 fi
+# Record the held state directory's device+inode now that stat_devino exists.
+# The per-poll teardown check re-stats the path instead of comparing /dev/fd/6
+# with -ef: macOS devfs serves each descriptor entry on its own device, so -ef
+# never matches there and a missing lock pid alone read as a torn-down state
+# directory.
+[ "$WATCH_STATE_HELD" -ne 1 ] || WATCH_STATE_DEVINO=$(stat_devino "$STATE")
 # bin/fm-classify-lib.sh owns status reported-state signatures and presentation
 # markers, while bin/fm-wake-lib.sh owns their wake-facing routing, the legacy
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
@@ -349,6 +358,17 @@ case "$CLEANUP_LOCK_BOUND" in
   *) CLEANUP_LOCK_BOUND=$((10#$CLEANUP_LOCK_BOUND)) ;;
 esac
 [ "$CLEANUP_LOCK_BOUND" -gt 0 ] || CLEANUP_LOCK_BOUND=2
+# Seconds a pre-identity watcher waits on each recovery/queue lock before
+# failing with a typed line. Startup lock acquisition must be bounded even
+# though the arm now waits far longer than one bound: a live foreign holder
+# must not wedge a watcher past the arm's backstop, and a dying holder's locks
+# must not turn one slow start into a cascade of stale-lock reclaims.
+STARTUP_LOCK_BOUND=${FM_WATCHER_STARTUP_LOCK_BOUND:-60}
+case "$STARTUP_LOCK_BOUND" in
+  ''|*[!0-9]*) STARTUP_LOCK_BOUND=60 ;;
+  *) STARTUP_LOCK_BOUND=$((10#$STARTUP_LOCK_BOUND)) ;;
+esac
+[ "$STARTUP_LOCK_BOUND" -gt 0 ] || STARTUP_LOCK_BOUND=60
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
@@ -3374,7 +3394,17 @@ evict_stalled_holder() {
 EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
-while ! fm_lock_try_acquire "$WATCH_LOCK"; do
+while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
+  if [ -n "${FM_LOCK_HELD_PATH:-}" ]; then
+    # The steal's downtime publish could not take its marker lock inside the
+    # startup bound. A live holder is the typed startup failure; a dying or
+    # clearing one is worth another pass of the claim loop.
+    if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
+      echo "watcher: FAILED - startup lock $FM_LOCK_HELD_PATH held by live pid $FM_LOCK_HELD_PID"
+      exit 1
+    fi
+    continue
+  fi
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then
       beat_age=$(fm_path_age "$BEAT")
@@ -3404,79 +3434,16 @@ done
 if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
-handling_successor_has_queued_row() {
-  local queued=1
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  [ ! -s "$FM_WAKE_QUEUE" ] || queued=0
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-  return "$queued"
-}
-WATCHER_RECOVERY_PENDING=0
-if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
-  WATCHER_RECOVERY_PENDING=1
-fi
-if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] \
-  && [ "${FM_WATCH_FOREGROUND_CHECKPOINT:-0}" != 1 ]; then
-  if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
-    echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
-    exit 1
-  fi
-fi
-if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
-  echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
-  exit 1
-fi
-if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-  WATCHER_RECOVERY_PENDING=0
-elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
-  WATCHER_RECOVERY_PENDING=1
-fi
-# Side-band ledger publication, detached from the poll loop.
-#
-# The poll loop owns the liveness beacon below, and fm-guard.sh reads that
-# beacon's freshness as proof that supervision is alive. Publication is a
-# side-band nicety bounded by FM_HOME_SUMMARY_TIMEOUT, but that bound is far
-# larger than one poll and, in a home whose publication keeps failing, it is
-# paid on every poll - so running it inline puts up to a full publication
-# deadline between two beacon touches and can starve the guard's grace. Nothing
-# in the poll depends on the ledger, so start it and move on: the beacon keeps
-# advancing no matter how slow the publication is.
-#
-# The trade the detachment makes: a reader can briefly see a ledger that
-# predates the event this poll just surfaced, where the inline call published
-# first. Publication is eventually consistent by design and every reader
-# re-derives current state from the owning home anyway, while beacon freshness
-# is what the whole supervision chain rests on.
-HOME_SUMMARY_PID=
-home_summary_refresh_detached() {
-  if [ -n "$HOME_SUMMARY_PID" ]; then
-    if kill -0 "$HOME_SUMMARY_PID" 2>/dev/null; then
-      return 0
-    fi
-    wait "$HOME_SUMMARY_PID" 2>/dev/null || true
-    HOME_SUMMARY_PID=
-  fi
-  FM_HOME_SUMMARY_IF_IDLE=1 \
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
-  HOME_SUMMARY_PID=$!
-}
 
-# Opt-in lane capacity facts (docs/configuration.md "Lane capacity"): publish
-# state/lane-capacity.json detached for the same beacon-freshness reason as the
-# home summary above. bin/fm-capacity.sh's header owns the document.
-LANE_CAPACITY_PID=
-lane_capacity_publish_detached() {
-  if [ -n "$LANE_CAPACITY_PID" ]; then
-    if kill -0 "$LANE_CAPACITY_PID" 2>/dev/null; then
-      return 0
-    fi
-    wait "$LANE_CAPACITY_PID" 2>/dev/null || true
-    LANE_CAPACITY_PID=
-  fi
-  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
-    "$SCRIPT_DIR/fm-capacity.sh" --publish </dev/null >/dev/null 2>&1 &
-  LANE_CAPACITY_PID=$!
-}
+# The EXIT trap installs immediately after the singleton claim, before any
+# other lock is touched. Everything this watcher does past this line -
+# recovery-marker transitions, queue reads, delivery records - runs inside its
+# coverage, so an interruption can only ever abandon locks this same process
+# self-releases below; the only window a TERM still cuts mid-claim is the claim
+# itself, whose dirs reap as ordinary dead evidence. The arm forwards a stop
+# only once the identity record below is complete, so this is also the
+# startup safe point bin/fm-watch-arm.sh waits for.
+WATCHER_PID=${BASHPID:-$$}
 
 RECONCILE_REQUEST_PID=
 reconcile_requests_pending() {
@@ -3536,6 +3503,15 @@ watcher_cleanup() {
   fm_capture_output_cleanup
   fm_wait_tmp_cleanup
   fm_custom_check_snapshot_cleanup
+  # A stop can land inside a marker or queue critical section, leaving locks
+  # recorded against this very pid with no frame left to release them. Drop
+  # ours outright - identity-aware no-ops for any lock not ours - so the
+  # downtime publication below cannot self-block and no dead lock survives.
+  fm_lock_release "$WATCH_LOCK.steal" || true
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+  fm_lock_release "${WATCHER_DOWNTIME_MARKER}.lock" || true
+  fm_lock_release "${WATCHER_DOWNTIME_MARKER}.lock.steal" || true
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK.steal" || true
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
       downtime "$CLEANUP_LOCK_BOUND"; then
@@ -3546,16 +3522,108 @@ watcher_cleanup() {
 }
 trap watcher_cleanup EXIT
 watcher_stop_signals
+# Test seam: pause after the trap installs but before the lock identity
+# completes - the window bin/fm-watch-arm.sh calls the startup unsafe point.
+# Under the default backstop the arm waits it out; under a forced deadline the
+# arm may TERM here and the trap already owns cleanup either way.
+case "${FM_TEST_WATCHER_PRE_IDENTITY_DELAY:-0}" in
+  ''|*[!0-9]*|0) ;;
+  *) sleep "$FM_TEST_WATCHER_PRE_IDENTITY_DELAY" ;;
+esac
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
-WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+
+handling_successor_has_queued_row() {
+  local queued=1
+  if ! fm_recovery_lock_wait "$FM_WAKE_QUEUE_LOCK" "$STARTUP_LOCK_BOUND"; then
+    if [ -n "${FM_RECOVERY_HELD_PID:-}" ] && fm_pid_alive "$FM_RECOVERY_HELD_PID"; then
+      echo "watcher: startup lock $FM_WAKE_QUEUE_LOCK held by live pid $FM_RECOVERY_HELD_PID; skipping resurface check" >&2
+    fi
+    return 1
+  fi
+  [ ! -s "$FM_WAKE_QUEUE" ] || queued=0
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$queued"
+}
+# A bounded pre-identity lock failure reports the typed line the arm relays; a
+# transient or dead holder keeps the legacy stderr diagnostic.
+startup_lock_failed() {
+  if [ -n "${FM_RECOVERY_HELD_PID:-}" ] && fm_pid_alive "$FM_RECOVERY_HELD_PID"; then
+    echo "watcher: FAILED - startup lock ${FM_RECOVERY_HELD_LOCK:-unknown} held by live pid $FM_RECOVERY_HELD_PID"
+  else
+    echo "watcher: recovery state $1; retaining stale lock evidence" >&2
+  fi
+  exit 1
+}
+WATCHER_RECOVERY_PENDING=0
+if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
+  WATCHER_RECOVERY_PENDING=1
+fi
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] \
+  && [ "${FM_WATCH_FOREGROUND_CHECKPOINT:-0}" != 1 ]; then
+  fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER" "$STARTUP_LOCK_BOUND" \
+    || startup_lock_failed "could not be reopened safely"
+fi
+fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER" "$STARTUP_LOCK_BOUND" \
+  || startup_lock_failed "could not be consumed safely"
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  WATCHER_RECOVERY_PENDING=0
+elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
+  WATCHER_RECOVERY_PENDING=1
+fi
+# Side-band ledger publication, detached from the poll loop.
+#
+# The poll loop owns the liveness beacon below, and fm-guard.sh reads that
+# beacon's freshness as proof that supervision is alive. Publication is a
+# side-band nicety bounded by FM_HOME_SUMMARY_TIMEOUT, but that bound is far
+# larger than one poll and, in a home whose publication keeps failing, it is
+# paid on every poll - so running it inline puts up to a full publication
+# deadline between two beacon touches and can starve the guard's grace. Nothing
+# in the poll depends on the ledger, so start it and move on: the beacon keeps
+# advancing no matter how slow the publication is.
+#
+# The trade the detachment makes: a reader can briefly see a ledger that
+# predates the event this poll just surfaced, where the inline call published
+# first. Publication is eventually consistent by design and every reader
+# re-derives current state from the owning home anyway, while beacon freshness
+# is what the whole supervision chain rests on.
+HOME_SUMMARY_PID=
+home_summary_refresh_detached() {
+  if [ -n "$HOME_SUMMARY_PID" ]; then
+    if kill -0 "$HOME_SUMMARY_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$HOME_SUMMARY_PID" 2>/dev/null || true
+    HOME_SUMMARY_PID=
+  fi
+  FM_HOME_SUMMARY_IF_IDLE=1 \
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
+  HOME_SUMMARY_PID=$!
+}
+
+# Opt-in lane capacity facts (docs/configuration.md "Lane capacity"): publish
+# state/lane-capacity.json detached for the same beacon-freshness reason as the
+# home summary above. bin/fm-capacity.sh's header owns the document.
+LANE_CAPACITY_PID=
+lane_capacity_publish_detached() {
+  if [ -n "$LANE_CAPACITY_PID" ]; then
+    if kill -0 "$LANE_CAPACITY_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$LANE_CAPACITY_PID" 2>/dev/null || true
+    LANE_CAPACITY_PID=
+  fi
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-capacity.sh" --publish </dev/null >/dev/null 2>&1 &
+  LANE_CAPACITY_PID=$!
+}
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -3649,7 +3717,9 @@ while :; do
     echo "watcher: exiting - state directory no longer exists: $STATE" >&2
     exit 1
   elif [ ! -e "$WATCH_LOCK/pid" ] \
-    && { [ "$WATCH_STATE_HELD" -ne 1 ] || [ ! /dev/fd/6 -ef "$STATE" ]; }; then
+    && { [ -z "$WATCH_STATE_DEVINO" ] \
+      || { STATE_DEVINO_NOW=$(stat_devino "$STATE") \
+        && [ -n "$STATE_DEVINO_NOW" ] && [ "$STATE_DEVINO_NOW" != "$WATCH_STATE_DEVINO" ]; }; }; then
     echo "watcher: exiting - state directory was torn down (singleton lock removed): $STATE" >&2
     exit 1
   elif [ ! -d "$SCRIPT_DIR" ]; then

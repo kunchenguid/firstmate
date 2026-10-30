@@ -1041,12 +1041,34 @@ _fm_recovery_marker_ack() {
   fm_lock_release "$lock"
 }
 
+# Bounded-or-plain acquire for the recovery transitions a caller may bound.
+# On a bounded refusal it records which lock refused and the last holder the
+# acquire saw, so the caller can print the typed startup diagnostic
+# (bin/fm-watch.sh startup_lock_failed).
+# shellcheck disable=SC2034 # Read by sourcing callers after a bounded refusal.
+FM_RECOVERY_HELD_LOCK=
+# shellcheck disable=SC2034 # Read by sourcing callers after a bounded refusal.
+FM_RECOVERY_HELD_PID=
+fm_recovery_lock_wait() {  # <lockdir> <bound-seconds>
+  FM_RECOVERY_HELD_LOCK=
+  FM_RECOVERY_HELD_PID=
+  if [ -n "$2" ]; then
+    fm_lock_acquire_wait_max "$1" "$2" && return 0
+    # shellcheck disable=SC2034 # Read by sourcing callers after a bounded refusal.
+    FM_RECOVERY_HELD_LOCK=$1
+    # shellcheck disable=SC2034 # Read by sourcing callers after a bounded refusal.
+    FM_RECOVERY_HELD_PID=${FM_LOCK_HELD_PID:-}
+    return 1
+  fi
+  fm_lock_acquire_wait "$1"
+}
+
 _fm_recovery_marker_arm_check() {
-  local marker=$1 lock line quarantine
+  local marker=$1 bound=${2:-} lock line quarantine
   FM_RECOVERY_MARKER_ACTION='none'
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  if ! fm_lock_acquire_wait "$lock"; then
+  fm_recovery_lock_wait "$FM_WAKE_QUEUE_LOCK" "$bound" || return 1
+  if ! fm_recovery_lock_wait "$lock" "$bound"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
@@ -1119,10 +1141,10 @@ _fm_recovery_marker_arm_check() {
 # the queue read. Handling successors and foreground checkpoints must not call
 # this transition.
 _fm_recovery_marker_reopen_announced() {
-  local marker=$1 lock
+  local marker=$1 bound=${2:-} lock
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  if ! fm_lock_acquire_wait "$lock"; then
+  fm_recovery_lock_wait "$FM_WAKE_QUEUE_LOCK" "$bound" || return 1
+  if ! fm_recovery_lock_wait "$lock" "$bound"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
@@ -1210,10 +1232,10 @@ fm_recovery_transition() {
       _fm_recovery_marker_ack "$marker" "$target"
       ;;
     arm-check)
-      _fm_recovery_marker_arm_check "$marker"
+      _fm_recovery_marker_arm_check "$marker" "$bound"
       ;;
     reopen-announced)
-      _fm_recovery_marker_reopen_announced "$marker"
+      _fm_recovery_marker_reopen_announced "$marker" "$bound"
       ;;
     handling-settled)
       _fm_recovery_marker_handling_settled "$marker"
@@ -1271,11 +1293,11 @@ fm_recovery_marker_begin_handling() {
 }
 
 fm_recovery_marker_arm_check() {
-  fm_recovery_transition "$1" arm-check
+  fm_recovery_transition "$1" arm-check "" "" "${2:-}"
 }
 
 fm_recovery_marker_reopen_announced() {
-  fm_recovery_transition "$1" reopen-announced
+  fm_recovery_transition "$1" reopen-announced "" "" "${2:-}"
 }
 
 fm_recovery_marker_handover_restore() {  # <marker> <snapshot-token> <snapshot-seq>
@@ -1358,8 +1380,9 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  local lockdir=$1 marker_publish_bound=${2:-} pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
+  FM_LOCK_HELD_PATH=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
 
@@ -1435,9 +1458,17 @@ fm_lock_try_acquire() {
   fi
 
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
-    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
+    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound"; then
     fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$cur
+    if [ -n "$marker_publish_bound" ]; then
+      # The marker lock refused inside the caller's bound: surface it as the
+      # blocking lock rather than the dead watch-lock holder, and keep the
+      # holder pid the marker acquire last reported.
+      # shellcheck disable=SC2034 # Read by sourcing callers after try_acquire fails.
+      FM_LOCK_HELD_PATH="$STATE/.watcher-down.lock"
+    else
+      FM_LOCK_HELD_PID=$cur
+    fi
     FM_LOCK_OWNER_DIR=
     return 1
   fi

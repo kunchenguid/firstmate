@@ -51,6 +51,19 @@ drain_and_ack() {  # <state>
     --recovery-generation "$generation"
 }
 
+# 'watcher: started' arrives only after the child's whole fork-heavy startup on
+# a contended host, so this poll shares the failure-exit ceiling rather than the
+# 8s windows below; a passing case still returns as soon as the line lands.
+wait_for_started() {  # <output-file>
+  local i=0
+  while [ "$i" -lt "$ARM_FAIL_EXIT_POLLS" ]; do
+    grep -qF 'watcher: started pid=' "$1" 2>/dev/null && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 test_wait_deadline_reaps_a_stopped_child() {
   # A stopped TERM-resistant child cannot finish graceful cleanup. The helper waited
   # forever after its nominal deadline. An outer process-group deadline keeps
@@ -1765,7 +1778,10 @@ SH
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
     || fail "could not register cycle-ledger check"
 
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  # Same budget contract as the immediate-wake case above: the child's check
+  # fires on its first poll and it exits by wake, not beacon, so grace stays
+  # zero but the confirm deadline gets the explicit loaded-host budget.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=60 "$WATCH_ARM" > "$armout" &
   first_arm=$!
   wait "$first_arm" || fail "first ledger cycle did not surface its actionable wake"
   grep -q "arm_pid=$first_arm.*reason=actionable-check.*successor=none" "$state/.watch-cycle-exits.log" \
@@ -1776,12 +1792,7 @@ SH
   armout="$dir/successor-arm.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   successor_arm=$!
-  i=0
-  while [ "$i" -lt 80 ]; do
-    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
-    sleep 0.1
-    i=$((i + 1))
-  done
+  wait_for_started "$armout" || fail "successor ledger cycle did not start"
   successor_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   grep -qF "watcher: started pid=$successor_pid" "$armout" || fail "successor ledger cycle did not start"
   grep -q "arm_pid=$first_arm.*successor=started:$successor_pid" "$state/.watch-cycle-exits.log" \
@@ -1801,13 +1812,8 @@ SH
     armout="$dir/bounded-$iteration.out"
     PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
     successor_arm=$!
-    i=0
-    while [ "$i" -lt 80 ]; do
-      grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
-      sleep 0.1
-      i=$((i + 1))
-    done
-    grep -qF 'watcher: started pid=' "$armout" || fail "bounded ledger cycle $iteration did not start"
+    wait_for_started "$armout" \
+      || fail "bounded ledger cycle $iteration did not start"
     kill -HUP "$successor_arm" 2>/dev/null || true
     wait "$successor_arm" 2>/dev/null || true
     drain_and_ack "$state" \
@@ -1819,6 +1825,141 @@ SH
   ! grep -v '^arm_pid=.*watcher_pid=.*started_at=.*ended_at=.*exit_code=.*signal=.*reason=.*beacon_age=.*lock_before=.*lock_after=.*successor=' "$state/.watch-cycle-exits.log" | grep . >/dev/null \
     || fail "bounded lifecycle ledger contains a partial or malformed record"
   pass "cycle-exit ledger links a verified successor and remains size-capped"
+}
+
+# A child that claims the singleton quickly but is slow through the rest of
+# startup must still confirm: the backstop tracks the guard grace (300s here)
+# rather than the old 10s fork budget, so a stall above the legacy default is
+# waited out, never TERM'd. FM_TEST_WATCHER_PRE_IDENTITY_DELAY holds the child
+# after the claim before its lock identity exists.
+test_arm_confirms_a_slow_post_claim_startup() {
+  local dir state fakebin armout armpid lock_pid
+  dir=$(make_case arm-slow-startup-confirm)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_WATCHER_PRE_IDENTITY_DELAY=15 \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_started "$armout" \
+    || fail "arm did not confirm a startup slower than the legacy budget: $(cat "$armout")"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$lock_pid" "$armout" \
+    || fail "slow-startup arm named a different watcher pid"
+  kill -HUP "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  drain_and_ack "$state" || fail "drain after the slow-startup arm's interruption failed"
+  pass "arm confirms a watcher whose post-claim startup exceeds the legacy budget"
+}
+
+# A live foreign .wake-queue.lock holder makes the child's bounded startup
+# recovery read refuse inside FM_WATCHER_STARTUP_LOCK_BOUND; the child ends
+# with the typed line, the arm relays it verbatim, and the same clean exit
+# still publishes a drainable downtime.
+test_arm_relays_a_startup_lock_held_by_live_pid() {
+  local dir state fakebin armout holder status i
+  dir=$(make_case arm-startup-lock-held)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1" || exit 1
+    fm_lock_acquire_wait "$2" || exit 1
+    : > "$3"
+    i=0
+    while [ ! -e "$4" ] && [ "$i" -lt 1200 ]; do sleep 0.1; i=$((i + 1)); done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue.lock" \
+    "$dir/lock-held" "$dir/lock-release" &
+  holder=$!
+  i=0
+  while [ ! -e "$dir/lock-held" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  if [ ! -e "$dir/lock-held" ]; then
+    kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+    fail "the fixture could not take the wake-queue lock"
+  fi
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_WATCHER_STARTUP_LOCK_BOUND=2 \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" 2>&1 || status=$?
+  : > "$dir/lock-release"
+  wait "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ] || fail "arm exited zero while the child's startup lock was held"
+  grep -F "watcher: FAILED - startup lock $state/.wake-queue.lock held by live pid" "$armout" \
+    || fail "arm did not relay the typed startup-lock line: $(cat "$armout")"
+  [ ! -e "$state/.watch.lock" ] \
+    || fail "the refused child retained its singleton instead of publishing downtime"
+  drain_and_ack "$state" \
+    || fail "drain after the typed startup-lock failure did not present the downtime"
+  pass "arm relays a live-holder startup-lock refusal and keeps the downtime drainable"
+}
+
+# A deadline that forces TERM inside the claim window can leave ordinary
+# dead-pid evidence - a stale .watch.lock link or claim dirs - while a TERM
+# after the trap leaves nothing at all. Either outcome is recoverable: the
+# next arm reaps or overwrites it and confirms. The HUP arm below proves the
+# signal path defers until the safe point, so its ledger row must show
+# lock_after=pid:none on this host every time.
+test_forced_term_before_the_safe_point_stays_clean() {
+  local dir state fakebin armout status armpid lock_pid i
+  dir=$(make_case arm-pre-identity-term)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 FM_TEST_WATCHER_PRE_IDENTITY_DELAY=8 \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "deadline-forced arm exited zero"
+  grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" \
+    || fail "deadline-forced arm did not report its typed failure: $(cat "$armout")"
+  if [ -e "$state/.watch.lock" ] || [ -L "$state/.watch.lock" ]; then
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    is_live_non_zombie "$lock_pid" \
+      && fail "deadline-forced TERM left a LIVE singleton holder behind"
+  fi
+
+  armout="$dir/arm-rearm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_started "$armout" \
+    || fail "re-arm could not recover the forced startup TERM: $(cat "$armout")"
+  kill -HUP "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  drain_and_ack "$state" \
+    || fail "drain after the recovering arm's interruption failed"
+
+  armout="$dir/arm-hup.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_WATCHER_PRE_IDENTITY_DELAY=6 \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ ! -e "$state/.watch.lock" ] && [ ! -L "$state/.watch.lock" ] \
+    && [ "$i" -lt "$ARM_FAIL_EXIT_POLLS" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.watch.lock" ] || [ -L "$state/.watch.lock" ] \
+    || fail "the HUP arm's child never claimed the singleton"
+  kill -HUP "$armpid" 2>/dev/null || true
+  status=0
+  wait "$armpid" 2>/dev/null || status=$?
+  [ "$status" -eq 129 ] || fail "HUP'd arm exited with status $status, not 129"
+  grep -q 'reason=arm-interrupted.*lock_after=pid:none' "$state/.watch-cycle-exits.log" \
+    || fail "HUP-deferred TERM left lock evidence: $(cat "$state/.watch-cycle-exits.log")"
+  [ ! -e "$state/.watch.lock" ] \
+    || fail "the signal-interrupted child retained its singleton lock"
+  drain_and_ack "$state" \
+    || fail "drain after a signal-deferred startup TERM failed"
+  pass "a stop forced before the safe point still ends with no dead lock evidence"
 }
 
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
@@ -2092,4 +2233,7 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
+test_arm_confirms_a_slow_post_claim_startup
+test_arm_relays_a_startup_lock_held_by_live_pid
+test_forced_term_before_the_safe_point_stays_clean
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
