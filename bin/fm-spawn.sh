@@ -2433,10 +2433,17 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # Relaunch is the recorded-worktree adoption owner, including fm-control.
   # An absent claim remains compatible with records predating slot claims.
   fm_treehouse_slot_owner_state "$RELAUNCH_WT" "$ID"
-  if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ]; then
-    echo "error: task $ID's recorded worktree is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID; refusing to adopt another task's slot" >&2
-    exit 1
-  fi
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine | absent) ;;
+    other)
+      echo "error: task $ID's recorded worktree is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID; refusing to adopt another task's slot" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: task $ID's recorded worktree has an unreadable slot claim; refusing to adopt a slot whose owner cannot be verified" >&2
+      exit 1
+      ;;
+  esac
   if [ "$KIND" = secondmate ]; then
     FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)
     [ -n "$FIRSTMATE_HOME" ] || FIRSTMATE_HOME=$RELAUNCH_WT

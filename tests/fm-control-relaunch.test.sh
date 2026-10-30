@@ -2317,6 +2317,11 @@ test_spawn_relaunch_checks_slot_claim() {
   expect_code 1 "$rc" "relaunch must not adopt another task's slot"
   assert_contains "$out" "claimed by task new-owner" "refusal names the current owner"
   [ ! -s "$dir/fake/keys" ] || fail "refused adoption must not send terminal input"
+  : > "$dir/.fm-slot-owner"
+  out=$(run_spawn "$dir" rl-slotclaim --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunch must not adopt a slot with an unreadable claim"
+  assert_contains "$out" "unreadable slot claim" "refusal identifies unverifiable ownership"
+  [ ! -s "$dir/fake/keys" ] || fail "unverifiable ownership must not send terminal input"
   rm "$dir/.fm-slot-owner"
   out=$(run_spawn "$dir" rl-slotclaim --relaunch --harness claude); rc=$?
   expect_code 0 "$rc" "legacy absent claims must still allow relaunch: $out"
