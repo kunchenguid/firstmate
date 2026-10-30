@@ -437,6 +437,46 @@ SH
   pass "agy and skills-directory reads follow their own records and switches, and unproven or unsupported runtimes are named, never claimed"
 }
 
+test_read_takes_committed_files_from_the_checkout_given() {
+  local rec home proj copy r s
+  rec=$(fresh_case checkout-read)
+  IFS='|' read -r home proj <<<"$rec"
+  copy="$TMP_ROOT/checkout-read/copy"
+  git -C "$proj" worktree add -q -b copy "$copy"
+
+  # A project-scope install is identified by the clone, while the setting that
+  # enables it is committed only on the worker's branch.
+  claude_home "$home" '{"source":"github","repo":"addyosmani/agent-skills"}'
+  claude_install "$home" project 0.6.14 "$proj"
+  commit_file "$copy" .claude/settings.json '{"enabledPlugins": {"agent-skills@addy-agent-skills": true}}'
+  r=$(run_bp "$home" read "$PACK" --harness claude --project "$copy")
+  assert_equals "true true project" "$(jq -r '"\(.installed) \(.enabled) \(.enabled_source)"' <<<"$r")" "the worker branch's settings were not read, or its install was not identified by the clone"
+  assert_equals false "$(field "$(run_bp "$home" read "$PACK" --harness claude --project "$proj")" enabled)" "the clone read settings only the worker branch commits"
+
+  omp_home "$home"
+  omp_registry "$home/.omp/plugins/installed_plugins.json" user false
+  commit_file "$copy" .omp/plugins/installed_plugins.json "$(jq -n --arg i "$FIX_PACK" '{version: 2, plugins: {"agent-skills@addy-agent-skills": [{scope: "project", installPath: $i, version: "0.6.14"}]}}')"
+  assert_equals "true project" "$(jq -r '"\(.enabled) \(.enabled_source)"' <<<"$(run_bp "$home" read "$PACK" --harness omp --project "$copy")")" "the worker branch's omp registry was not read"
+  assert_equals false "$(field "$(run_bp "$home" read "$PACK" --harness omp --project "$proj")" enabled)" "the clone read an omp registry only the worker branch commits"
+
+  mkdir -p "$copy/.cursor" "$proj/.cursor"
+  pack_copy "$copy/.cursor/skills" skills
+  pack_copy "$proj/.cursor/skills" skills
+  printf 'an edit on the clone\n' >> "$proj/.cursor/skills/interview-me/SKILL.md"
+  for s in "$copy" "$proj"; do
+    git -C "$s" add -f .cursor
+    git -C "$s" -c user.name=t -c user.email=t@example.invalid commit -qm cursor
+  done
+  assert_equals 0.6.14 "$(run_bp "$home" version "$PACK" --harness cursor --project "$copy")" "the worker branch's skill content was not the content hashed"
+  assert_contains "$(run_bp "$home" version "$PACK" --harness cursor --project "$proj")" "unreviewed: interview-me differs" "the clone's own edit was not read from the clone"
+
+  pack_copy "$home/.gemini/skills" skills
+  commit_file "$proj" .gemini/settings.json '{"skills": {"disabled": ["interview-me"]}}'
+  assert_equals true "$(field "$(run_bp "$home" read "$PACK" --harness gemini --project "$copy")" enabled)" "a switch only the clone commits disabled the worker's pack"
+  assert_equals false "$(field "$(run_bp "$home" read "$PACK" --harness gemini --project "$proj")" enabled)" "the clone's committed switch was not read"
+  pass "read: settings, registries, switches, and skills come from the checkout given, and the clone only identifies a project-scope install"
+}
+
 test_propose_reads_only_what_the_project_commits() {
   local rec home proj out
   rec=$(fresh_case propose)
@@ -522,6 +562,15 @@ run_route() {  # <response-file> <http> <args...>
     PATH="$FAKEBIN:$PATH" FM_HOME="$TMP_ROOT/route-fm-home" FM_CONFIG_OVERRIDE="$TMP_ROOT/route-fm-home/config" "$BP" "$@"
 }
 
+narrowing_response() {  # <file>: a confident bug fix with every optional row answered no, frontend unsure
+  jq -n '{model: "jev-1.13.0", usage: {input_tokens: 600, output_tokens: 40},
+    answers: {"bug-fix": {type: "noul", noul: 0.97}, trivial: {type: "noul", noul: 0.02},
+      security: {type: "noul", noul: 0.03}, performance: {type: "noul", noul: 0.04}, api: {type: "noul", noul: 0.1},
+      observability: {type: "noul", noul: 0.05}, deprecation: {type: "noul", noul: 0.02}, frontend: {type: "noul", noul: 0.55},
+      browser: {type: "noul", noul: 0.02}, "ci-cd": {type: "noul", noul: 0.01}, refactor: {type: "noul", noul: 0.05},
+      "source-driven": {type: "noul", noul: 0.03}, "source-citations": {type: "noul", noul: 0.03}, risky: {type: "noul", noul: 0.04}}}' > "$1"
+}
+
 test_route_narrows_through_the_shared_provider_code() {
   local b before_head out resp="$TMP_ROOT/route-response.json" questions
   mkdir -p "$TMP_ROOT/route-fm-home/config"
@@ -533,12 +582,7 @@ test_route_narrows_through_the_shared_provider_code() {
   [ ! -e "$CURL_LOG/argv" ] || fail "routing with no key made a network call"
   assert_grep "security-and-hardening" "$b" "the static fallback dropped a routed row"
 
-  jq -n '{model: "jev-1.13.0", usage: {input_tokens: 600, output_tokens: 40},
-    answers: {"bug-fix": {type: "noul", noul: 0.97}, trivial: {type: "noul", noul: 0.02},
-      security: {type: "noul", noul: 0.03}, performance: {type: "noul", noul: 0.04}, api: {type: "noul", noul: 0.1},
-      observability: {type: "noul", noul: 0.05}, deprecation: {type: "noul", noul: 0.02}, frontend: {type: "noul", noul: 0.55},
-      browser: {type: "noul", noul: 0.02}, "ci-cd": {type: "noul", noul: 0.01}, refactor: {type: "noul", noul: 0.05},
-      "source-driven": {type: "noul", noul: 0.03}, "source-citations": {type: "noul", noul: 0.03}, risky: {type: "noul", noul: 0.04}}}' > "$resp"
+  narrowing_response "$resp"
   out=$(TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 route "$b" --project demo)
   assert_contains "$out" "status: routed" "a confident answer did not route"
   assert_contains "$out" "row: frontend = true (fallback: p=0.55 is inside the 0.6 floor)" "an unconfident row did not keep its fallback"
@@ -592,6 +636,35 @@ test_route_narrows_through_the_shared_provider_code() {
   assert_grep "idea-refine" "$b" "the one-pager shape is missing for an idea"
   assert_no_grep "Add a spec and plan in the pack's shape" "$b" "the one-pager did not replace the spec shape"
   pass "route: one request through the resolver's provider code narrows only on confidence, reads facts and words in code, and falls back on no key, never-send, or error"
+}
+
+test_route_rewrites_the_real_section_past_fenced_examples() {
+  local b out resp="$TMP_ROOT/fence-response.json" head="# Best practices: $PACK" spec
+  mkdir -p "$TMP_ROOT/route-fm-home/config"
+  narrowing_response "$resp"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  spec=$(printf '%s\n' 'Fix the pager, as these examples show.' '````markdown' '```' '````' '' '~~~markdown' "$head" '~~~')
+  b=$(route_case fence-1 --mode no-mistakes)
+  fill "$b" "The pager skips a page when the count is exact." "$spec"
+  out=$(TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 route "$b")
+  assert_contains "$out" "status: routed" "a brief with fenced examples did not route"
+  assert_no_grep "security-and-hardening" "$b" "a backtick example inside a longer fence hid the real section from the rewrite"
+  assert_equals 2 "$(grep -cxF "$head" "$b")" "the tilde-fenced example was not left as written"
+  assert_grep "Fix the pager, as these examples show." "$b" "the rewrite changed the task sections"
+
+  printf '\n~~~\n# Not a section\n~~~\n\n# Later section\nKept.\n' >> "$b"
+  TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 route "$b" >/dev/null
+  assert_no_grep "# Not a section" "$b" "a fenced line ended the practice section early"
+  assert_grep "# Later section" "$b" "the rewrite took the section after the practice section"
+  assert_grep "Kept." "$b" "the rewrite took the body of the section after the practice section"
+
+  b=$(route_case fence-2 --mode no-mistakes)
+  sed -i.bak '/^# Best practices: /,$d' "$b"
+  printf '~~~\n%s\n~~~\n' "$head" >> "$b"
+  out=$(run_route "$resp" 200 route "$b" 2>&1)
+  expect_code 2 $? "a heading only inside a fence was taken for the practice section"
+  assert_contains "$out" "has no '$head' section" "the refusal does not name the missing section"
+  pass "route: the rewrite follows the brief reader's fence rules, so examples never hide, replace, or cut the real section"
 }
 
 test_intake_tier_routing() {
@@ -701,6 +774,27 @@ test_spawn_agrees_with_the_registry_and_exports_the_pack() {
   pass "fm-spawn: the brief must carry the registered pack, the launch exports it with unreviewed or missing as the read finds it, and each launches with one notice"
 }
 
+test_spawn_reads_the_worker_copy_at_its_launch_commit() {
+  local rec home proj wt fakebin log out upstream
+  rec=$(spawn_case behind-origin " best-practices=$PACK")
+  IFS='|' read -r home proj wt fakebin log <<<"$rec"
+  # Origin has moved past the clone: only origin's tip, which the spawn resets
+  # the worker copy to, commits the setting that enables the pack.
+  upstream="$TMP_ROOT/spawn-behind-origin/upstream"
+  git clone -q "$proj.origin.git" "$upstream"
+  commit_file "$upstream" .claude/settings.json '{"enabledPlugins": {"agent-skills@addy-agent-skills": true}}'
+  git -C "$upstream" push -q origin HEAD
+  spawn_brief "$home" bp-behind --best-practices "$PACK"
+  out=$(run_case_spawn "$home" "$wt" "$fakebin" "$log" bp-behind "$proj")
+  expect_code 0 $? "a worker copy ahead of the clone did not launch: $out"
+  assert_absent "$proj/.claude/settings.json" "the clone was moved, so it no longer stands behind the worker copy"
+  assert_contains "$(git -C "$wt" show HEAD:.claude/settings.json)" "agent-skills@addy-agent-skills" "the worker copy did not reach origin's tip"
+  assert_contains "$(cat "$log")" "export FM_BEST_PRACTICES_VERSION='unreviewed';" "the read did not see what the worker copy commits at launch"
+  assert_not_contains "$out" "FM_BEST_PRACTICES_VERSION=missing" "the pack the worker copy enables was reported missing"
+  assert_grep "# Pack read at launch" "$home/data/bp-behind/launch-brief.md" "the launch brief does not carry the read made from the worker copy"
+  pass "fm-spawn: the pack read sees the worker copy at its launch commit, not the clone"
+}
+
 test_fingerprints_read_the_content_not_the_label() {
   local rec home proj copy out r crlf s
   rec=$(fresh_case fingerprints)
@@ -753,8 +847,11 @@ fm_test_run \
   test_omp_read_follows_its_registries_and_shadowing \
   test_agy_and_skills_dir_reads \
   test_fingerprints_read_the_content_not_the_label \
+  test_read_takes_committed_files_from_the_checkout_given \
   test_propose_reads_only_what_the_project_commits \
   test_brief_composes_the_practice_section_after_the_include \
   test_route_narrows_through_the_shared_provider_code \
+  test_route_rewrites_the_real_section_past_fenced_examples \
   test_intake_tier_routing \
-  test_spawn_agrees_with_the_registry_and_exports_the_pack
+  test_spawn_agrees_with_the_registry_and_exports_the_pack \
+  test_spawn_reads_the_worker_copy_at_its_launch_commit

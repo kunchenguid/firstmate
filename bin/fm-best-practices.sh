@@ -31,7 +31,9 @@
 #                 enabled, enabled_source (user or project), version, id, where,
 #                 supported (the harness is inside the adapter's runtime list),
 #                 and proof (whether firstmate's read for it is proven live).
-#                 Read-only; a worker copy's path maps back to its clone.
+#                 Read-only; committed files are read from the checkout given,
+#                 and a worker copy's path maps back to its clone only to
+#                 identify a project-scope install.
 # check           project-add step 8: the crew runtime is one both firstmate and
 #                 the pack support, firstmate's read for it is proven live, and
 #                 the pack is installed and enabled as a worker copy will see
@@ -426,7 +428,7 @@ cmd_route() {
     return 0
   fi
   known_or_die "$repo"
-  grep -qxF "# Best practices: $repo" "$brief" || die "$brief has no '# Best practices: $repo' section; re-scaffold it with bin/fm-brief.sh --best-practices $repo"
+  fm_brief_heading_present "$brief" "# Best practices: $repo" || die "$brief has no '# Best practices: $repo' section; re-scaffold it with bin/fm-brief.sh --best-practices $repo"
   case "$contract" in
     *' kind=scout'*) kind=scout mode='' ;;
     'Delivery contract: mode='*) kind=ship mode=$(printf '%s\n' "$contract" | sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p') ;;
@@ -460,13 +462,7 @@ cmd_route() {
   new_file="$ROUTE_TMP/section.md"
   fm_bp_compose "$repo" "$kind" "$mode" "$forge" "$values" > "$new_file" || die "could not compose the practice section for $repo"
   out_file="$(dirname "$brief")/.$(basename "$brief").route.$$"
-  awk -v head="# Best practices: $repo" -v newf="$new_file" '
-    BEGIN { while ((getline l < newf) > 0) body = body l "\n" }
-    /^```/ { fence = !fence }
-    !fence && !done && $0 == head { printf "%s", body; skipping = 1; done = 1; next }
-    skipping && !fence && /^# / { skipping = 0; print "" }
-    !skipping { print }
-  ' "$brief" > "$out_file" || { rm -f "$out_file"; die "could not rewrite $brief"; }
+  fm_brief_heading_replace "$brief" "# Best practices: $repo" "$new_file" > "$out_file" || { rm -f "$out_file"; die "could not rewrite $brief"; }
   mv "$out_file" "$brief" || { rm -f "$out_file"; die "could not rewrite $brief"; }
   printf '%s:\n  status: %s\n  repository: %s\n' "$ROUTE_LABEL" "$ROUTE_STATUS" "$repo"
   [ -z "$ROUTE_REASON" ] || printf '  reason: %s\n' "$ROUTE_REASON"

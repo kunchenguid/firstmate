@@ -30,8 +30,9 @@
 #   best-practices pack the same way (bin/fm-project-mode.sh --best-practices)
 #   and refuses a brief whose Delivery contract `best-practices=` disagrees with
 #   it in either direction, or a registered value the parser refuses. With a
-#   pack registered it reads the pack's installed version from the worker
-#   harness's registry or skills directory (bin/fm-best-practices.sh version),
+#   pack registered it reads, once the worker copy is at its launch commit, the
+#   pack's installed version from the worker harness's registry or skills
+#   directory (bin/fm-best-practices.sh version),
 #   exports FM_BEST_PRACTICES=<owner>/<repo> and FM_BEST_PRACTICES_VERSION
 #   (the reviewed tag the copy's content matches, `unreviewed`, or `missing`)
 #   beside FM_TASK_INBOX, and on `unreviewed` or `missing` prints one notice
@@ -4585,15 +4586,8 @@ fi
 # Best-practices pack (bin/fm-project-mode.sh --best-practices): a project fact
 # like the forge, never a per-task choice, so a ship or scout brief must carry
 # exactly the registered value on its Delivery contract line. A project without
-# the token never causes a plugin registry read. With one, the spawn reads the
-# installed version from the worker harness's own registry or skills directory
-# (bin/fm-best-practices.sh version) to fill FM_BEST_PRACTICES_VERSION below
-# with one of three values: the reviewed tag the copy's content matches;
-# `unreviewed` when the pack is loaded but a file the adapter depends on
-# matches no reviewed text, where the adapter still applies, one notice names
-# the skills, and the launch brief lists them for the worker's done summary;
-# or `missing` when there is no usable copy, with one notice. The read never
-# blocks the launch and is not a pack check.
+# the token never causes a plugin registry read. The pack read itself waits
+# for the prepared worker copy below.
 BEST_PRACTICES=none
 BEST_PRACTICES_VERSION=
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
@@ -4615,23 +4609,6 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     [ "$BEST_PRACTICES" = none ] || bp_scaffold="$bp_scaffold --best-practices $BEST_PRACTICES"
     echo "error: best-practices mismatch for $ID: $BP_PROJ_NAME is registered best-practices=$BEST_PRACTICES but ${SOURCE_BRIEF:-$BRIEF} records best-practices=$BRIEF_BEST_PRACTICES; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove the brief, re-scaffold it with $bp_scaffold (plus this task's other flags), then re-fill those two subsections" >&2
     exit 1
-  fi
-  if [ "$BEST_PRACTICES" != none ]; then
-    bp_read=$("$FM_ROOT/bin/fm-best-practices.sh" version "$BEST_PRACTICES" --harness "$HARNESS" --project "$PROJ_ABS" 2>/dev/null) ||
-      bp_read="missing: the pack read did not complete"
-    case "$bp_read" in
-      '' | missing*)
-        BEST_PRACTICES_VERSION=missing
-        echo "notice: $ID launches with FM_BEST_PRACTICES_VERSION=missing for $BEST_PRACTICES on $HARNESS (${bp_read#missing: }); the worker follows firstmate's defaults and says so in its done summary" >&2
-        ;;
-      unreviewed*)
-        BEST_PRACTICES_VERSION=unreviewed
-        echo "notice: $ID launches with FM_BEST_PRACTICES_VERSION=unreviewed for $BEST_PRACTICES on $HARNESS: ${bp_read#unreviewed: }; the adapter still applies and the worker names these skills in its done summary" >&2
-        printf '\n# Pack read at launch\nFM_BEST_PRACTICES_VERSION is unreviewed: %s.\nFollow the best-practices section anyway, and name these skills as unreviewed in your done summary.\n' \
-          "${bp_read#unreviewed: }" >> "$BRIEF"
-        ;;
-      *) BEST_PRACTICES_VERSION=$bp_read ;;
-    esac
   fi
 fi
 
@@ -6260,6 +6237,34 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
+fi
+
+# The best-practices pack read runs here because the worker copy is now at its
+# launch commit, and what that copy commits can differ from the project clone.
+# It reads the installed version from the worker harness's own registry or
+# skills directory (bin/fm-best-practices.sh version) to fill
+# FM_BEST_PRACTICES_VERSION below with one of three values: the reviewed tag the
+# copy's content matches; `unreviewed` when the pack is loaded but a file the
+# adapter depends on matches no reviewed text, where the adapter still applies,
+# one notice names the skills, and the launch brief lists them for the worker's
+# done summary; or `missing` when there is no usable copy, with one notice. The
+# read never blocks the launch and is not a pack check.
+if [ "$BEST_PRACTICES" != none ]; then
+  bp_read=$("$FM_ROOT/bin/fm-best-practices.sh" version "$BEST_PRACTICES" --harness "$HARNESS" --project "$WT" 2>/dev/null) ||
+    bp_read="missing: the pack read did not complete"
+  case "$bp_read" in
+    '' | missing*)
+      BEST_PRACTICES_VERSION=missing
+      echo "notice: $ID launches with FM_BEST_PRACTICES_VERSION=missing for $BEST_PRACTICES on $HARNESS (${bp_read#missing: }); the worker follows firstmate's defaults and says so in its done summary" >&2
+      ;;
+    unreviewed*)
+      BEST_PRACTICES_VERSION=unreviewed
+      echo "notice: $ID launches with FM_BEST_PRACTICES_VERSION=unreviewed for $BEST_PRACTICES on $HARNESS: ${bp_read#unreviewed: }; the adapter still applies and the worker names these skills in its done summary" >&2
+      printf '\n# Pack read at launch\nFM_BEST_PRACTICES_VERSION is unreviewed: %s.\nFollow the best-practices section anyway, and name these skills as unreviewed in your done summary.\n' \
+        "${bp_read#unreviewed: }" >> "$BRIEF"
+      ;;
+    *) BEST_PRACTICES_VERSION=$bp_read ;;
+  esac
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint

@@ -13,8 +13,10 @@
 #
 # Reads are read-only: they open a harness's registry or skills directory, or
 # run its own list command, and never install, enable, disable, or edit
-# anything. Detection runs against the project, never a worker copy's path:
-# a worktree maps back to its clone through its git common directory.
+# anything. Committed settings and skills are read from the checkout given,
+# which at spawn is the prepared worker copy, because its branch can differ from
+# the clone's. Only a project-scope install's identity is the clone: a worktree
+# maps back to it through its git common directory.
 
 FM_BP_SCHEMA='best-practices-adapter-v1'
 FM_BP_ROUTING_TAG='best-practices-adapter-routing-v1'
@@ -102,8 +104,9 @@ fm_bp_realdir() {  # <dir>
   (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"
 }
 
-# The project a path belongs to: a worker copy maps back to its clone through
-# its git common directory; anything else is its own real path.
+# The project a path belongs to, which identifies a project-scope install: a
+# worker copy maps back to its clone through its git common directory; anything
+# else is its own real path.
 fm_bp_project_root() {  # <dir>
   local dir common
   dir=$(fm_bp_realdir "$1")
@@ -117,9 +120,14 @@ fm_bp_project_root() {  # <dir>
   esac
 }
 
-# What the project commits at <path>, as a fresh worker copy sees it; prints
-# nothing and fails when the project is not a repository or does not commit it.
-fm_bp_committed_file() {  # <project-root> <path>
+# The top of the checkout a path sits in, whose HEAD holds what is committed.
+fm_bp_checkout_root() {  # <dir>
+  git -C "$1" rev-parse --show-toplevel 2>/dev/null || fm_bp_realdir "$1"
+}
+
+# What the checkout commits at <path>; prints nothing and fails when it is not
+# a repository or does not commit it.
+fm_bp_committed_file() {  # <checkout> <path>
   git -C "$1" rev-parse --verify --quiet HEAD >/dev/null 2>&1 || return 1
   git -C "$1" show "HEAD:$2" 2>/dev/null
 }
@@ -389,10 +397,10 @@ fm_bp_claude_enabled_value() {  # <settings-json-text> <key> -> on|off|none
 # <name>@<marketplace>; the tie to the repository runs through the marketplace
 # (known_marketplaces.json and its .claude-plugin/marketplace.json); user scope
 # and a project-scope install for this project count, local scope does not;
-# enablement is the user settings' enabledPlugins entry under the project's
+# enablement is the user settings' enabledPlugins entry under the checkout's
 # committed .claude/settings.json one, and settings.local.json is never read.
-fm_bp_read_claude() {  # <repo> <plugin> <project-root>
-  local repo=$1 plugin=$2 proj=$3 cdir installed known key market msrc loc mfile psrc mrepo lrepo
+fm_bp_read_claude() {  # <repo> <plugin> <project-root> <checkout>
+  local repo=$1 plugin=$2 proj=$3 checkout=$4 cdir installed known key market msrc loc mfile psrc mrepo lrepo
   local untied='' best='' best_rank=0 rank scope path ver ipath ver_user ver_proj copy_user copy_proj copy uval pval state src where installed_now best_candidate
   cdir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
   installed="$cdir/plugins/installed_plugins.json"
@@ -403,7 +411,7 @@ fm_bp_read_claude() {  # <repo> <plugin> <project-root>
     return 0
   fi
   uval=$(cat "$cdir/settings.json" 2>/dev/null) || uval='{}'
-  pval=$(fm_bp_committed_file "$proj" .claude/settings.json) || pval='{}'
+  pval=$(fm_bp_committed_file "$checkout" .claude/settings.json) || pval='{}'
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     market=${key#*@}
@@ -556,14 +564,14 @@ fm_bp_read_codex() {  # <repo> <plugin>
 # (sourceType and sourceUri) and the catalog copy it names. omp also loads
 # Claude Code's installed plugins when its own registries name no install,
 # which this read does not count, so it can only under-report a loaded pack.
-fm_bp_read_omp() {  # <repo> <plugin> <project-root>
-  local repo=$1 plugin=$2 proj=$3 ohome markets lrepo reg_text scope key market msrc catalog psrc mrepo enabled ver ipath copy where disabled=''
+fm_bp_read_omp() {  # <repo> <plugin> <checkout>
+  local repo=$1 plugin=$2 checkout=$3 ohome markets lrepo reg_text scope key market msrc catalog psrc mrepo enabled ver ipath copy where disabled=''
   ohome="$HOME/.omp"
   markets="$ohome/marketplaces.json"
   lrepo=$(fm_bp_lower "$repo")
   for scope in project user; do
     if [ "$scope" = project ]; then
-      reg_text=$(fm_bp_committed_file "$proj" .omp/plugins/installed_plugins.json) || continue
+      reg_text=$(fm_bp_committed_file "$checkout" .omp/plugins/installed_plugins.json) || continue
     else
       reg_text=$(cat "$ohome/plugins/installed_plugins.json" 2>/dev/null) || continue
     fi
@@ -642,22 +650,22 @@ fm_bp_read_agy() {  # <repo> <plugin>
 # disabled skill names at one key path in a user settings file and the
 # project's committed one) names any of the pack's skills; the version is a
 # plugin.json the copy carries, never inferred.
-fm_bp_read_skills_dir() {  # <repo> <plugin> <project-root> <harness-entry-json> <skills-json>
-  local repo=$1 plugin=$2 proj=$3 entry=$4 skills=$5 d dir listing missing s ver switch scope found='' disabled path user_file copy=null
+fm_bp_read_skills_dir() {  # <repo> <plugin> <checkout> <harness-entry-json> <skills-json>
+  local repo=$1 plugin=$2 checkout=$3 entry=$4 skills=$5 d dir listing missing s ver switch scope found='' disabled path user_file copy=null
   for scope in project user; do
     while IFS= read -r d; do
       [ -n "$d" ] || continue
       missing=0
       if [ "$scope" = project ]; then
-        listing=$(git -C "$proj" ls-files -- "$d" 2>/dev/null) || listing=
+        listing=$(git -C "$checkout" ls-files -- "$d" 2>/dev/null) || listing=
         while IFS= read -r s; do
           printf '%s\n' "$listing" | grep -qxF "$d/$s/SKILL.md" || { missing=1; break; }
         done < <(jq -r '.[]' <<<"$skills")
         [ "$missing" -eq 0 ] || continue
-        ver=$( { fm_bp_committed_file "$proj" "$d/.claude-plugin/plugin.json" || fm_bp_committed_file "$proj" "$d/plugin.json"; } \
+        ver=$( { fm_bp_committed_file "$checkout" "$d/.claude-plugin/plugin.json" || fm_bp_committed_file "$checkout" "$d/plugin.json"; } \
           | jq -r --arg p "$plugin" 'select(.name == $p) | .version // empty' 2>/dev/null) || ver=
         found="the pack's skills are committed in the project at $d"
-        copy=$(jq -cn --arg g "$proj" --arg p "$d" '{git: $g, prefix: $p}')
+        copy=$(jq -cn --arg g "$checkout" --arg p "$d" '{git: $g, prefix: $p}')
       else
         dir=$(fm_bp_expand_home "$d")
         while IFS= read -r s; do
@@ -679,7 +687,7 @@ fm_bp_read_skills_dir() {  # <repo> <plugin> <project-root> <harness-entry-json>
   if [ "$switch" != null ]; then
     path=$(jq -c '.disabled' <<<"$switch")
     user_file=$(fm_bp_expand_home "$(jq -r '.user_settings' <<<"$switch")")
-    disabled=$( { cat "$user_file" 2>/dev/null; echo; fm_bp_committed_file "$proj" "$(jq -r '.project_settings' <<<"$switch")"; } \
+    disabled=$( { cat "$user_file" 2>/dev/null; echo; fm_bp_committed_file "$checkout" "$(jq -r '.project_settings' <<<"$switch")"; } \
       | jq -rs --argjson path "$path" --argjson skills "$skills" '
           [.[] | objects | try getpath($path) catch null | select(type == "array") | .[] | strings]
           | map(select(. as $n | $skills | index($n) != null)) | unique | join(", ")' 2>/dev/null) || disabled=
@@ -792,7 +800,7 @@ fm_bp_fingerprint() {  # <manifest> <copy-json> <label>
 # adapter's runtime list, which side is missing when it is not, and whether
 # firstmate's read for it is proven live.
 fm_bp_read() {  # <owner/repo> <harness> <project-dir>
-  local repo=$1 harness=$2 project=$3 manifest plugin entry proj read side r
+  local repo=$1 harness=$2 project=$3 manifest plugin entry proj checkout read side r
   manifest=$(fm_bp_manifest "$repo")
   plugin=$(jq -r '.plugin' "$manifest")
   entry=$(jq -c --arg h "$harness" '.harnesses[$h] // null' "$manifest")
@@ -806,13 +814,14 @@ fm_bp_read() {  # <owner/repo> <harness> <project-dir>
     return 0
   fi
   proj=$(fm_bp_project_root "$project")
+  checkout=$(fm_bp_checkout_root "$project")
   read=$(jq -r '.read // empty' <<<"$entry")
   case "$read" in
-    claude-plugin) r=$(fm_bp_read_claude "$repo" "$plugin" "$proj") ;;
-    omp-plugin) r=$(fm_bp_read_omp "$repo" "$plugin" "$proj") ;;
+    claude-plugin) r=$(fm_bp_read_claude "$repo" "$plugin" "$proj" "$checkout") ;;
+    omp-plugin) r=$(fm_bp_read_omp "$repo" "$plugin" "$checkout") ;;
     codex-config) r=$(fm_bp_read_codex "$repo" "$plugin") ;;
     agy-plugin-list) r=$(fm_bp_read_agy "$repo" "$plugin") ;;
-    skills-dir) r=$(fm_bp_read_skills_dir "$repo" "$plugin" "$proj" "$entry" "$(jq -c '.skills' "$manifest")") ;;
+    skills-dir) r=$(fm_bp_read_skills_dir "$repo" "$plugin" "$checkout" "$entry" "$(jq -c '.skills' "$manifest")") ;;
     *) r=$(fm_bp_result false false "" "" "" "no read is implemented for $harness") ;;
   esac
   # The version is the pack's content, not the runtime's label: the files the

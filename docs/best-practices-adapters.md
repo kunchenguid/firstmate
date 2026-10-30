@@ -86,7 +86,7 @@ The read differs by install shape: a plugin registry (Claude Code's and Oh My Pi
 Which version is read from the content, not the runtime's label: the manifest's `fingerprints` hold the SHA-256 of each `SKILL.md` the adapter's own references name, with line endings normalized, generated from each reviewed tag's release by `bin/fm-best-practices.sh fingerprints` and never by hand, and the installed copy's files are hashed the same way in every install shape.
 A copy whose files all match a reviewed tag reads as that tag (the runtime's label only picks which tag to try first); one with any file that differs or is absent reads as `unreviewed`, naming those skills against the nearest reviewed tag; one holding none of them is no usable copy.
 There is no fuzzy matching.
-Enabled is judged as a worker copy will see it: user scope and what the project commits count, a gitignored local settings file does not, and a worker copy maps back to its clone through its git common directory.
+Enabled is judged as a worker copy will see it: user scope and what the project commits count, a gitignored local settings file does not, and committed settings and skills are read from the checkout itself, which at spawn is the prepared worker copy, so a worker whose branch differs from the clone's is read as it will run. Only a project-scope install's identity is the clone: a worker copy maps back to it through its git common directory.
 The supported-version list carries release tags only, and a tag is supported only once its fingerprints are generated.
 
 Each read is harness-dependent, so it is proven live against the real harness before the adapter ships for that harness, and the manifest records the read and its proof per harness.
