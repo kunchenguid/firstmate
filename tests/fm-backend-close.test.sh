@@ -13,6 +13,25 @@ check_close() {
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-close)
 
+(
+  . "$ROOT/bin/fm-backend.sh"
+  fm_backend_source() { :; }
+  fm_backend_tern_kill() { printf '%s\n' "$@" > "$TMP_ROOT/dispatch"; return "$dispatch_close_status"; }
+  fm_backend_hc_kill() { printf '%s\n' "$@" > "$TMP_ROOT/dispatch"; return "$dispatch_close_status"; }
+  fm_backend_t3code_kill() { printf '%s\n' "$@" > "$TMP_ROOT/dispatch"; return "$dispatch_close_status"; }
+  for backend in tern hc t3code; do
+    for dispatch_close_status in 0 1; do
+      rc=0
+      fm_backend_kill_confirmed "$backend" endpoint tab fm-task || rc=$?
+      expect_code "$dispatch_close_status" "$rc" "$backend confirmed dispatch lost the close verdict"
+      expected=$'endpoint\ntab\nfm-task'
+      [ "$backend" != t3code ] || expected=endpoint
+      assert_equals "$expected" "$(cat "$TMP_ROOT/dispatch")" "$backend confirmed close received incorrect arguments"
+    done
+  done
+) || exit 1
+pass "confirmed dispatch preserves Tern, HC and T3 Code close arguments and verdicts"
+
 # shellcheck disable=SC2329 # Fixture overrides are called through backend dispatch.
 (
   . "$ROOT/bin/backends/cmux.sh"

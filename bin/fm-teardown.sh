@@ -4061,6 +4061,7 @@ if [ "$BACKEND" = t3code ]; then
     echo "error: could not stop and archive T3 thread $T for $ID; start T3 Code (or archive the thread there) and re-run teardown" >&2
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
+  SOL_ENDPOINT_STOPPED=1
 fi
 # Whether this task holds a capped session occupancy that only a CONFIRMED
 # endpoint close may release. The capped-session guard reads the captain's
@@ -4163,9 +4164,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
 fi
 
 if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
-  ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
-    fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
-    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+  if ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
+    fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ); then
+    SOL_ENDPOINT_STOPPED=1
+  else
+    endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+  fi
 elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
   # (bin/fm-rex-marks.sh), so a pane the close cannot reach is not left showing

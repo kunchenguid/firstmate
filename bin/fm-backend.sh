@@ -1381,6 +1381,9 @@ fm_backend_kill_confirmed() {  # <backend> <target>
     cmux) fm_backend_cmux_kill_confirmed "$@" ;;
     paseo) fm_backend_paseo_kill_confirmed "$@" ;;
     rex) fm_backend_rex_kill "$@" ;;
+    t3code) fm_backend_t3code_kill "$1" ;;
+    tern) fm_backend_tern_kill "$@" ;;
+    hc) fm_backend_hc_kill "$@" ;;
     *) echo "error: no confirmed kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }

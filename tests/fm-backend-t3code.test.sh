@@ -2126,11 +2126,13 @@ test_scout_teardown_stops_and_archives_before_slot_return() {
   proj="$CASE_DIR/project"; wt="$CASE_DIR/wt"; data="$CASE_DIR/data"; state="$CASE_DIR/state"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$CASE_DIR/home/state"
+  printf 'max=1\nmodels=gpt-6.1-sol\n' > "$CONFIG/sol-cap"
+  printf '%s\tgpt-6.1-sol\t%s\t0\n' "$id" "$(date +%s)" > "$state/sol-sessions.tsv"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "worktree=$wt" "project=$proj" \
-    "harness=codex" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "harness=codex" "model=gpt-6.1-sol" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "backend=t3code" "t3_thread_id=$thread" "t3_project_id=proj-1" \
     "decisions_reviewed=1" "decision_keys="
   mkdir -p "$wt/.codex"
@@ -2152,6 +2154,8 @@ test_scout_teardown_stops_and_archives_before_slot_return() {
   [ "$return_line" -gt 0 ] || fail "teardown must return the slot through treehouse"
   [ "$archive_line" -lt "$return_line" ] || fail "the thread must be archived before the slot is returned (archive line $archive_line, return line $return_line)"
   assert_absent "$state/$id.meta" "teardown should remove task metadata"
+  [ "$(awk -F '\t' -v id="$id" '$1 == id { print $4 }' "$state/sol-sessions.tsv")" = -1 ] \
+    || fail "archived T3 thread retained capped occupancy"
   pass "fm-teardown.sh backend=t3code: interrupts and archives the thread with a proven close, then returns the slot"
 }
 
