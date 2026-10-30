@@ -567,13 +567,22 @@ teardown_release_seat() {
     case "$carrier" in "$lock|"*) FM_SUPERVISOR_LIFECYCLE_CARRIER=$carrier ;; esac
   done
   export FM_SUPERVISOR_LIFECYCLE_CARRIER
-  ledger=$(FM_HOME=$seat_home FM_STATE_OVERRIDE=$seat_state FM_CONFIG_OVERRIDE=$seat_config \
-    FM_DATA_OVERRIDE=$seat_data "$SCRIPT_DIR/fm-fleet-seats.sh" show "$seat_id") || return 1
-  if [ -n "$ledger" ]; then
-    generations=$(printf '%s\n' "$ledger" | jq -r '.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed") | .generation') || return 1
+  if ledger=$(FM_HOME=$seat_home FM_STATE_OVERRIDE=$seat_state FM_CONFIG_OVERRIDE=$seat_config \
+    FM_DATA_OVERRIDE=$seat_data "$SCRIPT_DIR/fm-fleet-seats.sh" show "$seat_id"); then
+    if [ -n "$ledger" ]; then
+      generations=$(printf '%s\n' "$ledger" | jq -r '.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed") | .generation') || return 1
+    else
+      generations=$(fm_meta_get "$meta" fleet_seat_generation)
+      [ -n "$generations" ] || generations=$(fm_meta_get "$meta" spawn_gen)
+    fi
   else
+    # Old records without a seat generation predate fleet-seat ownership; an
+    # unresolvable authority must not block their ordinary teardown. Managed
+    # generations remain fail-closed because the record provides their key.
     generations=$(fm_meta_get "$meta" fleet_seat_generation)
     [ -n "$generations" ] || generations=$(fm_meta_get "$meta" spawn_gen)
+    [ -z "$generations" ] && return 0
+    return 1
   fi
   [ -n "$generations" ] || return 0
   if [ -n "$ledger" ] && [ "${TEARDOWN_ENDPOINT_CLOSE_FAILED:-0}" = 1 ]; then
