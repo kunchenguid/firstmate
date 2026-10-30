@@ -939,7 +939,7 @@ test_no_mistakes_truly_unpushed_refuses() {
 }
 
 test_no_mistakes_mirror_only_branch_refuses() {
-  local case_dir rc
+  local case_dir rc local_head
   case_dir=$(make_case nm-mirror-only)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "mirror-only work"
@@ -950,6 +950,7 @@ test_no_mistakes_mirror_only_branch_refuses() {
   git -C "$case_dir/project" fetch -q no-mistakes
   git -C "$case_dir/wt" rev-parse --verify -q refs/remotes/no-mistakes/fm/task-x1 >/dev/null \
     || fail "nm-mirror-only: mirror remote-tracking ref was not created"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -957,6 +958,7 @@ test_no_mistakes_mirror_only_branch_refuses() {
   set -e
   expect_code 1 "$rc" "nm-mirror-only: teardown should refuse mirror-only work"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-mirror-only: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" nm-mirror-only "$local_head"
   pass "branch pushed only to the no-mistakes mirror is refused as unlanded"
 }
 
