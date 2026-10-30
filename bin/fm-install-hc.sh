@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# fm-install-herdr-core.sh - install a pinned, verified Herdr Core (`hc`) build.
+# fm-install-hc.sh - install a pinned, verified Herdr Core (`hc`) build.
 #
 # Single owner of the exact herdr-core version, official release asset URLs,
-# and SHA-256 pins used by the real herdr-core lab lane and by operators who
-# want the verified build. Never installs a floating latest, and never runs
-# upstream's install.sh or `hc update` - self-update is an operator-run step
-# (the manifest pins below change only with a re-verified matrix).
+# and SHA-256 pins used by the real-hc lab lane and by operators who want the
+# verified build. Never installs a floating latest, and never runs upstream's
+# install.sh or `hc update` - self-update is an operator-run step (the
+# manifest pins below change only with a re-verified matrix).
 #
 # Usage:
-#   fm-install-herdr-core.sh <destination-directory>
+#   fm-install-hc.sh <destination-directory>
 #
 # Pins herdr-core 0.1.14 (protocol generation 1), the suite-verified release.
 # Selects the official releases.herdr.dev tarball for the host OS/arch,
-# downloads with a bounded max size, verifies SHA-256 before install,
-# extracts the `herdr-core` binary, then refuses to finish unless the
-# installed binary reports `hc 0.1.14` exactly.
+# downloads with a bounded max size, verifies SHA-256 before install, extracts
+# the `herdr-core` binary, then refuses to finish unless the installed binary
+# reports `hc 0.1.14` exactly. The adapter (bin/backends/hc.sh) resolves
+# `herdr-core` before the `hc` alias, so the asset name is what gets installed.
 set -eu
 
 FM_HC_PIN_VERSION=0.1.14
@@ -24,11 +25,11 @@ FM_HC_MAX_BYTES=25000000
 FM_HC_RELEASES=https://releases.herdr.dev/core
 
 die() {
-  printf 'fm-install-herdr-core.sh: %s\n' "$*" >&2
+  printf 'fm-install-hc.sh: %s\n' "$*" >&2
   exit 1
 }
 
-DESTINATION=${1:?usage: fm-install-herdr-core.sh <destination-directory>}
+DESTINATION=${1:?usage: fm-install-hc.sh <destination-directory>}
 
 os=$(uname -s)
 arch=$(uname -m)
@@ -56,10 +57,10 @@ esac
 
 ASSET="herdr-core-${TARGET}.tar.gz"
 URL="${FM_HC_RELEASES}/${FM_HC_PIN_VERSION}/${ASSET}"
-TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-herdr-core.XXXXXX")
+TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-hc-install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
-printf 'fm-install-herdr-core.sh: downloading %s from %s\n' "$ASSET" "$URL" >&2
+printf 'fm-install-hc.sh: downloading %s from %s\n' "$ASSET" "$URL" >&2
 # --fail: HTTP errors; --location: follow redirects; --max-filesize: bound.
 curl -fsSL --max-filesize "$FM_HC_MAX_BYTES" "$URL" -o "$TMP/$ASSET" \
   || die "download failed for $URL (bounded at $FM_HC_MAX_BYTES bytes)"
@@ -85,5 +86,5 @@ install -m 0755 "$TMP/herdr-core" "$DESTINATION/herdr-core"
 installed_version=$("$DESTINATION/herdr-core" --version 2>/dev/null | awk '{print $2; exit}')
 [ "$installed_version" = "$FM_HC_PIN_VERSION" ] \
   || die "installed herdr-core reports version '$installed_version', expected $FM_HC_PIN_VERSION"
-printf 'fm-install-herdr-core.sh: installed herdr-core %s (protocol generation 1) to %s/herdr-core\n' \
+printf 'fm-install-hc.sh: installed herdr-core %s (protocol generation 1) to %s/herdr-core\n' \
   "$installed_version" "$DESTINATION" >&2

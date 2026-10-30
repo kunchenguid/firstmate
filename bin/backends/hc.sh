@@ -36,13 +36,19 @@
 # fm-<hometag>) and herdr.tab=<scoped label>, so a home's tasks group in one
 # space with one tab each. Naming the space needs the app window and is not done.
 #
-# Measured limits on hc 0.1.13 (docs/hc-backend.md "Limits"):
+# Measured limits on hc 0.1.13 and 0.1.14 (docs/hc-backend.md "Limits"):
 #   - `hc send` always presses Enter after pasting. There is no paste without
-#     submit, so hc cannot type without submitting.
+#     submit, so hc cannot type without submitting. `hc send --wait` reports
+#     the turn the send started natively, which is what send_text_submit reads.
 #   - hc reports one foreground process per terminal (`foreground` in
 #     `hc get`), not a process group; when that process is a launcher,
 #     agent_state also reads the rest of its process group from local `ps`.
 #   - hc has no event push this adapter consumes; supervision polls like tmux.
+#
+# Binary gate: FM_HC_BIN wins, else `herdr-core`, else `hc` (the release
+# asset's name and its CLI alias). `<bin> --version` must report `hc x.y.z`
+# at or above FM_BACKEND_HC_MIN_VERSION, and container_ensure additionally
+# proves the session speaks protocol generation 1 through `hello`.
 
 # shellcheck source=bin/fm-backend-hometag-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-backend-hometag-lib.sh"
@@ -51,21 +57,104 @@
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
 
+# The verified floor: the oldest herdr-core release every adapter surface
+# (including `send --wait` and the `hello` handshake) was exercised against.
+FM_BACKEND_HC_MIN_VERSION=0.1.14
+
+# The one protocol generation this adapter speaks.
+FM_BACKEND_HC_GENERATION=1
+
 # The hc session a new task is created on: the caller's HC_SESSION, else hc's
 # own default session name.
 fm_backend_hc_session() {
   printf '%s' "${HC_SESSION:-default}"
 }
 
+# fm_backend_hc_bin: the resolved herdr-core binary path, or failure. The
+# release asset's own name is `herdr-core`; `hc` is its CLI alias. FM_HC_BIN
+# wins so tests and the lab can pin a build; version_check still proves the
+# resolved file is herdr-core and no other tool.
+fm_backend_hc_bin() {
+  if [ -n "${FM_HC_BIN:-}" ]; then
+    [ -x "$FM_HC_BIN" ] || return 1
+    printf '%s' "$FM_HC_BIN"
+    return 0
+  fi
+  command -v herdr-core 2>/dev/null || command -v hc 2>/dev/null
+}
+
+# fm_backend_hc_version_check: refuse loudly on a missing, misnamed, or
+# older-than-verified binary. `<bin> --version` must print `hc x.y.z`.
+fm_backend_hc_version_check() {
+  local bin raw ver major rest minor patch cur min fmaj fmin fpat
+  bin=$(fm_backend_hc_bin) || {
+    echo "error: backend=hc selected but no 'herdr-core' or 'hc' binary was found on PATH (install Herdr Core per docs/hc-backend.md or set FM_HC_BIN)" >&2
+    return 1
+  }
+  raw=$("$bin" --version 2>/dev/null) \
+    || { echo "error: '$bin --version' failed; is herdr-core installed correctly?" >&2; return 1; }
+  case "$raw" in
+    'hc '[0-9]*.[0-9]*.[0-9]*)
+      ver=${raw#hc }
+      ver=${ver%%[[:space:]]*}
+      ;;
+    *)
+      echo "error: expected 'hc x.y.z' from '$bin --version' but got '$raw'; refusing to use a binary that is not Herdr Core" >&2
+      return 1
+      ;;
+  esac
+  major=${ver%%.*}
+  rest=${ver#*.}
+  minor=${rest%%.*}
+  case "$rest" in
+    *.*) patch=${rest#*.} ;;
+    *) patch=0 ;;
+  esac
+  patch=${patch%%[^0-9]*}
+  case "$major" in ''|*[!0-9]*) major=0 ;; esac
+  case "$minor" in ''|*[!0-9]*) minor=0 ;; esac
+  case "$patch" in ''|*[!0-9]*) patch=0 ;; esac
+  IFS=. read -r fmaj fmin fpat <<EOF
+$FM_BACKEND_HC_MIN_VERSION
+EOF
+  cur=$((major * 1000000 + minor * 1000 + patch))
+  min=$((fmaj * 1000000 + fmin * 1000 + fpat))
+  if [ "$cur" -lt "$min" ]; then
+    echo "error: herdr-core $ver is older than the verified minimum $FM_BACKEND_HC_MIN_VERSION; update herdr-core before using backend=hc" >&2
+    return 1
+  fi
+  return 0
+}
+
+# fm_backend_hc_env_run: run the resolved binary with exactly <session>'s env
+# pins. Ambient HC_TERMINAL_* routing markers are always stripped. An
+# inherited HC_SOCKET is stripped because hc lets it win over HC_SESSION;
+# FM_HC_SOCKET is the deliberate pin used by tests and the lab instead.
+fm_backend_hc_env_run() {  # <session> <args...>
+  local session=$1 bin
+  shift
+  bin=$(fm_backend_hc_bin) || {
+    echo "error: backend=hc selected but no 'herdr-core' or 'hc' binary was found on PATH (install Herdr Core per docs/hc-backend.md or set FM_HC_BIN)" >&2
+    return 1
+  }
+  if [ -n "${FM_HC_SOCKET:-}" ]; then
+    env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE \
+      HC_SESSION="$session" HC_SOCKET="$FM_HC_SOCKET" "$bin" "$@"
+  else
+    env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET \
+      HC_SESSION="$session" "$bin" "$@"
+  fi
+}
+
 # fm_backend_hc_cli: run hc against exactly <session>.
 # An invalid or empty session is refused: an empty HC_SESSION would let hc
-# fall back to whatever core the caller's environment names. HC_SOCKET is
-# dropped because hc lets it win over HC_SESSION.
+# fall back to whatever core the caller's environment names. stdin is
+# detached so hc never consumes a caller's loop input.
 fm_backend_hc_cli() {  # <session> <args...>
   local session=$1
   shift
   fm_backend_hc_atom_valid "$session" || { echo "error: refusing hc session '$session'" >&2; return 1; }
-  env -u HC_SOCKET HC_SESSION="$session" hc "$@"
+  fm_backend_hc_env_run "$session" "$@" </dev/null
 }
 
 fm_backend_hc_atom_valid() {  # <value>
@@ -149,14 +238,39 @@ fm_backend_hc_target_ready() {  # <target> [expected-label]
   [ "$(fm_backend_hc_endpoint_state "$1" "${2:-}")" = ready ] && fm_backend_hc_parse_target "$1"
 }
 
-# fm_backend_hc_container_ensure: make sure the session's core answers (hc
-# starts its own core on first use) and print the session name.
+# fm_backend_hc_hello: the generation handshake for <session> over `hc
+# connect`. Prints the negotiated generation, nothing on failure.
+fm_backend_hc_hello() {  # <session>
+  local session=$1 out gen
+  out=$(printf '{"jsonrpc":"2.0","method":"hello","params":{"generation":%s},"id":1}\n' \
+      "$FM_BACKEND_HC_GENERATION" \
+    | fm_backend_hc_env_run "$session" connect --session "$session" 2>/dev/null) || return 1
+  gen=$(printf '%s' "$out" | jq -r '.result.generation // empty' 2>/dev/null)
+  [ -n "$gen" ] || return 1
+  printf '%s' "$gen"
+}
+
+# fm_backend_hc_container_ensure: prove the binary is herdr-core at the
+# verified floor, make sure the session's core answers (hc starts its own
+# core on first use) and speaks protocol generation 1, then print the
+# session name.
 fm_backend_hc_container_ensure() {
-  local session
+  local session gen
+  fm_backend_hc_version_check || return 1
+  command -v jq >/dev/null 2>&1 \
+    || { echo "error: backend=hc selected but 'jq' is not installed (required to parse hc's JSON output)" >&2; return 1; }
   session=$(fm_backend_hc_session)
   fm_backend_hc_atom_valid "$session" || { echo "error: refusing hc session name '$session'" >&2; return 1; }
   fm_backend_hc_cli "$session" server status --json >/dev/null 2>&1 \
     || { echo "error: 'hc server status' failed for session '$session'; is herdr-core installed and startable?" >&2; return 1; }
+  gen=$(fm_backend_hc_hello "$session") || {
+    echo "error: herdr-core session '$session' did not answer the hello handshake; is the core reachable?" >&2
+    return 1
+  }
+  if [ "$gen" != "$FM_BACKEND_HC_GENERATION" ]; then
+    echo "error: herdr-core session '$session' speaks protocol generation '$gen', but this adapter requires generation $FM_BACKEND_HC_GENERATION" >&2
+    return 1
+  fi
   printf '%s' "$session"
 }
 
@@ -217,13 +331,14 @@ fm_backend_hc_normalize_key() {  # <key>
 fm_backend_hc_send_key() {  # <target> <key> [expected-label]
   fm_backend_hc_target_ready "$1" "${3:-}" || return 1
   fm_backend_hc_cli "$FM_BACKEND_HC_SESSION" keys --json "$FM_BACKEND_HC_ADDRESS" \
-    "$(fm_backend_hc_normalize_key "$2")" >/dev/null 2>&1
+    -- "$(fm_backend_hc_normalize_key "$2")" >/dev/null 2>&1
 }
 
-# fm_backend_hc_send_text_line: paste one line and submit it (`hc send`).
+# fm_backend_hc_send_text_line: paste one line and submit it (`hc send`). The
+# `--` delimiter keeps flag-looking text from being parsed as options.
 fm_backend_hc_send_text_line() {  # <target> <text> [expected-label]
   fm_backend_hc_target_ready "$1" "${3:-}" || return 1
-  fm_backend_hc_cli "$FM_BACKEND_HC_SESSION" send --json "$FM_BACKEND_HC_ADDRESS" "$2" >/dev/null 2>&1
+  fm_backend_hc_cli "$FM_BACKEND_HC_SESSION" send --json "$FM_BACKEND_HC_ADDRESS" -- "$2" >/dev/null 2>&1
 }
 
 fm_backend_hc_current_path() {  # <target> [expected-label]
@@ -245,20 +360,54 @@ fm_backend_hc_composer_state() {  # <target> [expected-label] -> empty|pending|p
   printf '%s' "$verdict"
 }
 
-# fm_backend_hc_send_text_submit: `hc send` pastes and presses Enter itself,
-# once nobody has typed for about three seconds. The composer is then read, and
-# only a proven pending composer gets Enter retries through the shared loop.
+# fm_backend_hc_send_text_submit: one `hc send --wait`, which pastes, presses
+# Enter, and reports the turn it started. Echoes
+# empty|pending|pending-unproven|unknown|send-failed, a subset of the
+# proof-carrying submit vocabulary.
+#
+# A started turn or a still-working wait confirms the submit natively, which
+# no composer text can fake. A program that never reports status answers
+# started:null once the bounded wait times out; the send still typed and
+# entered, so the verdict falls back to the composer screen, and only a
+# proven pending composer gets Enter retries through the shared loop. A
+# blocked terminal refuses with exit 9 before typing - a hard stop, never
+# forced. The other structured refusals (3 not_found, 11 finished) and any
+# other failure are send-failed.
 fm_backend_hc_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected=${6:-} state
-  fm_backend_hc_send_text_line "$target" "$text" "$expected" || { printf 'send-failed'; return 0; }
-  sleep "$settle"
-  state=$(fm_backend_hc_composer_state "$target" "$expected")
-  case "$state" in
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected=${6:-}
+  local wait_secs out rc started wait_status verdict
+  case "$retries" in ''|*[!0-9]*) retries=1 ;; esac
+  case "$sleep_s" in ''|*[!0-9.]*) sleep_s=0.4 ;; esac
+  case "$settle" in ''|*[!0-9.]*) settle=0 ;; esac
+  fm_backend_hc_target_ready "$target" "$expected" || { printf 'send-failed'; return 0; }
+  wait_secs=$(awk -v r="$retries" -v s="$sleep_s" 'BEGIN { v = r * s; if (v < 1) v = 1; printf "%d", (v == int(v) ? v : int(v) + 1) }' 2>/dev/null)
+  case "$wait_secs" in ''|*[!0-9]*|0) wait_secs=1 ;; esac
+  out=$(fm_backend_hc_cli "$FM_BACKEND_HC_SESSION" send --json "$FM_BACKEND_HC_ADDRESS" \
+    --wait --timeout "$wait_secs" -- "$text" 2>&1)
+  rc=$?
+  case "$rc" in
+    0) ;;
+    9)
+      echo "error: hc send refused $target - the terminal is blocked waiting on input (never forced): $out" >&2
+      printf 'unknown'
+      return 0
+      ;;
+    *) printf 'send-failed'; return 0 ;;
+  esac
+  started=$(printf '%s' "$out" | jq -r '.started // empty' 2>/dev/null)
+  wait_status=$(printf '%s' "$out" | jq -r '.wait.status // empty' 2>/dev/null)
+  if [ "$started" = true ] || [ "$wait_status" = working ]; then
+    printf 'empty'
+    return 0
+  fi
+  [ "$settle" = 0 ] || sleep "$settle"
+  verdict=$(fm_backend_hc_composer_state "$target" "$expected")
+  case "$verdict" in
     pending|pending-unproven)
       fm_composer_submit_retry_core fm_backend_hc_send_key fm_backend_hc_composer_state \
         "$target" "$retries" "$sleep_s" "$expected"
       ;;
-    *) printf '%s' "$state" ;;
+    *) printf '%s' "$verdict" ;;
   esac
 }
 

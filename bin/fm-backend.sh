@@ -98,16 +98,11 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # tern is EXPERIMENTAL and spawn-capable, session-provider-only like cmux
 # (docs/tern-backend.md); docs/verification/runtime-backends.md records what
 # was exercised against a real Tern.
-# herdr-core is EXPERIMENTAL and spawn-capable, session-provider-only - the
-# new Herdr Core (`hc`) product line, NOT an upgrade of `herdr` 0.9.x, which
-# the herdr adapter keeps driving unchanged (docs/herdr-core-backend.md);
-# docs/verification/runtime-backends.md records what was exercised against a
-# real herdr-core in its isolated lab.
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
 # hc is EXPERIMENTAL and spawn-capable, session-provider-only like tmux
 # (docs/hc-backend.md).
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex t3code tern hc herdr-core"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex t3code tern hc herdr-core"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -227,11 +222,6 @@ fm_backend_detect() {
   # Tern (docs/tern-backend.md "Selection is explicit").
   # hc is not detected either: HC_TERMINAL_ID reaches every process an hc
   # terminal starts (docs/hc-backend.md "Selection is explicit").
-  # Herdr Core is NOT detected here either: its HC_SESSION/HC_SOCKET/
-  # HC_TERMINAL_* markers reach every descendant of a core terminal (a tmux
-  # server started inside one inherits them), and the Herdr-TUI-vs-app signal
-  # this detection could not disambiguate is a later stage's problem
-  # (docs/herdr-core-backend.md "Selection is explicit").
   return 1
 }
 
@@ -395,7 +385,6 @@ fm_backend_required_tools() {  # <backend>
     rex)    printf '%s' 'rex jq treehouse' ;;
     tern)   printf '%s' 'tern jq treehouse' ;;
     hc)     printf '%s' 'hc jq treehouse' ;;
-    herdr-core) printf '%s' 'herdr-core jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     t3code) printf '%s' 'node treehouse' ;;
     *) return 1 ;;
@@ -418,11 +407,6 @@ fm_backend_required_tool_available() {  # <backend> <tool>
     rex:rex)
       fm_backend_source rex >/dev/null 2>&1 || return 1
       fm_backend_rex_bin >/dev/null 2>&1
-      ;;
-    herdr-core:herdr-core)
-      # FM_HC_BIN can name a binary that is not on PATH (labs, tests).
-      fm_backend_source herdr-core >/dev/null 2>&1 || return 1
-      fm_backend_herdr_core_bin >/dev/null 2>&1
       ;;
     *) command -v "$tool" >/dev/null 2>&1 ;;
   esac
@@ -775,25 +759,6 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       ;;
-    herdr-core)
-      [ "$binding" = "$id" ] || {
-        echo "REFUSED: legacy herdr-core endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
-        return 1
-      }
-      recorded_session=$(fm_backend_meta_exact_value "$meta" herdr_core_session) || recorded_session=
-      terminal=$(fm_backend_meta_exact_value "$meta" herdr_core_terminal) || terminal=
-      # Session names stay simple atoms (no colon/slash); the terminal address
-      # is a local `t<alnum>` id - a `machine/t7` remote address can never be
-      # recorded by this adapter.
-      case "$recorded_session" in *[:/]*|'') recorded_session= ;; esac
-      case "$terminal" in t[A-Za-z0-9]*) ;; *) terminal= ;; esac
-      if [ -z "$recorded_session" ] || [ -z "$terminal" ] \
-        || [ "$window" != "$recorded_session:$terminal" ] \
-        || ! fm_backend_endpoint_atom_valid "$recorded_session"; then
-        echo "REFUSED: herdr-core endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
-        return 1
-      fi
-      ;;
   esac
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_BACKEND_VALIDATED_BACKEND=$backend
@@ -928,9 +893,6 @@ fm_backend_source() {  # <name>
     hc)
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-cursor-lib.sh
       ;;
-    herdr-core)
-      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-agent-process-lib.sh
-      ;;
     *)
       return 1
       ;;
@@ -1011,13 +973,6 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_HC_SOURCED=1
       fi
       ;;
-    herdr-core)
-      if [ -z "${_FM_BACKEND_HERDR_CORE_SOURCED:-}" ]; then
-        # shellcheck source=/dev/null
-        . "$adapter" || return 1
-        _FM_BACKEND_HERDR_CORE_SOURCED=1
-      fi
-      ;;
   esac
 }
 
@@ -1095,7 +1050,6 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     t3code) fm_backend_t3code_capture "$@" ;;
     tern) fm_backend_tern_capture "$@" ;;
     hc) fm_backend_hc_capture "$@" ;;
-    herdr-core) fm_backend_herdr_core_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -1113,9 +1067,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 # tern reads the viewport with `tern capture --surfaces` and no `--scrollback`
 # (trimmed to the block's rows); its own capture opts into history with the flag.
 # hc reads the screen alone with `hc read --lines 0`.
-# herdr-core's `hc read` without --lines returns exactly the screen
-# (how=screen, ANSI stripped); its own capture opts into history with --lines.
-FM_BACKEND_VISIBLE_CAPTURE="tmux herdr zellij rex tern hc herdr-core"
+FM_BACKEND_VISIBLE_CAPTURE="tmux herdr zellij rex tern hc"
 
 # fm_backend_visible_capture_supported: whether <backend> can read the visible
 # viewport WITHOUT scrollback. Callers that must not mistake a scrolled-away
@@ -1135,9 +1087,7 @@ fm_backend_visible_capture() {  # <backend> <target> [expected-label]
     return 1
   }
   fm_backend_source "$backend" || return 1
-  # Dashed backend names cannot appear in a function name - normalize to the
-  # adapter's underscore spelling (herdr-core -> fm_backend_herdr_core_*).
-  "fm_backend_${backend//-/_}_visible_capture" "$@"
+  "fm_backend_${backend}_visible_capture" "$@"
 }
 
 # fm_backend_send_key: one backend-supported named special key.
@@ -1156,7 +1106,6 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     t3code) fm_backend_t3code_send_key "$@" ;;
     tern) fm_backend_tern_send_key "$@" ;;
     hc) fm_backend_hc_send_key "$@" ;;
-    herdr-core) fm_backend_herdr_core_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -1202,7 +1151,6 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     t3code) fm_backend_t3code_send_text_submit "$@" || rc=$? ;;
     tern) fm_backend_tern_send_text_submit "$@" || rc=$? ;;
     hc) fm_backend_hc_send_text_submit "$@" || rc=$? ;;
-    herdr-core) fm_backend_herdr_core_send_text_submit "$@" || rc=$? ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; rc=1 ;;
   esac
   fm_composer_dialog_sink_release
@@ -1240,7 +1188,6 @@ fm_backend_kill() {  # <backend> <target>
     t3code) fm_backend_t3code_kill "$1" ;;
     tern) fm_backend_tern_kill "$@" ;;
     hc) fm_backend_hc_kill "$@" ;;
-    herdr-core) fm_backend_herdr_core_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -1282,7 +1229,6 @@ fm_backend_busy_state() {  # <backend> <target>
     t3code) fm_backend_t3code_busy_state "$@" ;;
     tern) fm_backend_tern_busy_state "$@" ;;
     hc) fm_backend_hc_busy_state "$@" ;;
-    herdr-core) fm_backend_herdr_core_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1314,7 +1260,6 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     t3code) fm_backend_t3code_composer_state "$@" ;;
     tern) fm_backend_tern_composer_state "$@" ;;
     hc) fm_backend_hc_composer_state "$@" ;;
-    herdr-core) fm_backend_herdr_core_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1389,13 +1334,6 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source hc || return 1
       fm_backend_hc_target_ready "$target" "$expected_label"
       ;;
-    herdr-core)
-      # hc contact can auto-start that session's (possibly stopped) core,
-      # which only resumes the reader - it never creates or revives a
-      # terminal, so the record list still answers existence faithfully.
-      fm_backend_source herdr-core || return 1
-      fm_backend_herdr_core_target_ready "$target" "$expected_label"
-      ;;
     *)
       return 1
       ;;
@@ -1442,7 +1380,6 @@ fm_backend_agent_state() {  # <backend> <target>
     t3code) fm_backend_t3code_agent_state "$target" ;;
     tern) fm_backend_tern_agent_state "$target" ;;
     hc) fm_backend_hc_agent_state "$target" ;;
-    herdr-core) fm_backend_herdr_core_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }
@@ -1576,10 +1513,6 @@ fm_backend_runtime_check() {  # <backend>
   case "$1" in
     orca) fm_backend_orca_runtime_check ;;
     t3code) fm_backend_t3code_runtime_check ;;
-    # The binary-level gate (the `hc x.y.z` identity + version floor); the
-    # session/protocol-generation gate stays in container_ensure, which owns
-    # the session name.
-    herdr-core) fm_backend_herdr_core_version_check ;;
     *) return 0 ;;
   esac
 }

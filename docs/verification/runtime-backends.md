@@ -375,7 +375,6 @@ The refusal is reached only through a close that could not do its job, and each 
 | zellij | 0, silent | 0, not yet distinguishable |
 | cmux | 0, silent | 0, not yet distinguishable |
 | tern | 0, silent | 1 when its inventory re-read cannot run, the block moved to another session, its tab no longer carries the task's scoped title, or it is still listed after the close; portable fixtures only (`tests/fm-backend-tern.test.sh`), contract in [tern-backend.md](../tern-backend.md) |
-| herdr-core | 0, silent | 1 when the record cannot be read, the terminal lost its `fm.id` label, it is still live after `hc kill`, or it is still listed after `kill`+`rm`; portable fixtures (`tests/fm-backend-herdr-core.test.sh`) plus a real-lab smoke (`tests/fm-backend-herdr-core-smoke.test.sh`), contract in [herdr-core-backend.md](../herdr-core-backend.md) |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
 The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
@@ -2761,52 +2760,6 @@ This still does not claim a desktop-window native-agent or live spawn/steer/tear
 
 Safety: real tests may touch only sessions named `fm-test-*` through `tests/tern-test-safety.sh`, and must never close the captain's live remote Default blocks observed on this host.
 
-## herdr-core
-
-The compatibility floor documented with this adapter is Herdr Core 0.1.14 (the pinned installer's version).
-This host measured `hc 0.1.14` on 2026-10-30, macOS arm64, inside isolated `fm-hclab-*` lab sessions provisioned by `bin/fm-herdr-core-lab.sh` (scratch XDG roots plus a pinned `HC_SESSION`/`HC_SOCKET` under `/tmp/fm-hc-lab-$UID`; the user's real core state is never contacted and a file-inventory tripwire verifies that).
-
-### Host boundary measured here
-
-| Probe | Result |
-| --- | --- |
-| `hc --version` | `hc 0.1.14` |
-| `hc run --bg --json --cwd <dir> --no-parent --no-notify --label fm.id=<id> ...` | `{"address":"t<N>","agent":"zsh","state":"live",...}`; no argv runs the machine's shell. |
-| `hc get <t> --json` | `{address,argv,agent,cwd,foreground{argv,cwd,name,pid}\|null,labels,name,pid,state,status,reported,reason,turn,dimensions,screen}`; `foreground` populates only for programs that spawn children (shells); unknown address exits 3 `not_found`; a `finished` terminal still returns its record with rc 0. |
-| `hc ls --json --all --label K=V` | `{"hidden_finished":0,"terminals":[...]}`; label filters compose; records carry no `labels` echo (label reads go through `get`). |
-| `hc read <t> --json [--lines N]` | `{"complete":true,"how":"screen\|history","text"}` with ANSI stripped; `--lines N` returns N history lines plus the viewport. |
-| `hc send <t> -- <text>` | Atomic paste+Enter; merges with existing composer content; `--wait --timeout N` returns `{"started":<bool\|null>,"wait":{"status","ended","reason","timed_out"}}` bounded at N; blocked terminal exits 9; finished exits 11; unknown address exits 3; invalid params exit 6; unreachable core exits 5. |
-| `hc keys <t> [--] <keys...>` | Named keys `enter esc tab up down left right backspace delete home end pageup pagedown f1-f12 space ctrl+<letter> alt+<letter> shift+tab` plus literal `a-z A-Z 0-9 ' , - . / ; = [ ] `` ` and `shift+<letter>`; shifted punctuation (`_"`:` etc.) cannot be typed. |
-| `hc kill <t>` / `hc rm <t>` | kill is synchronous and idempotent (`{"state":"finished","exit_code":1,"reason":"killed"}`); rm removes a finished record (`{"removed":"t8"}`) and refuses a live one (exit 6). |
-| `hc interrupt <t>` | `{"key":"ctrl+c","outcome":"sent"}`. |
-| `hc server status/start/stop` | `server start` is idempotent; ANY session-scoped command auto-starts a stopped core for that session (a probe of `server status` did exactly that); `server stop` closes the API listener but deliberately leaves the session's `serve`/`hold` daemons and terminals alive for later recovery - full teardown requires terminating every process carrying `HC_SESSION=<name>` (found via `ps ewwax`) and removing `<name>.sock` plus `<name>.holder.*.sock`. |
-| `hc connect` hello | Line JSON-RPC; `{"method":"hello","params":{"generation":1}}` returns `{generation:1,version,methods,features}`; a mismatched request generation returns `unsupported_generation`. |
-| OSC 7501 status | `.status`/`.reported`/`.turn` carry `working\|idle\|blocked` only when the program emits OSC 7501; a non-reporting program has `status:null reported:false`. |
-| `hc events` | Streams JSON-RPC records (created, foreground, title, status, finished); NOT wired as a push-transition source in this stage. |
-| Name budget | `hc run --name` accepts at most 32 characters. |
-
-### Portable and smoke entry points
-
-```sh
-bash bin/fm-test-run.sh --family herdr-core
-FM_HC_BIN=/path/to/hc bash tests/fm-backend-herdr-core-smoke.test.sh
-```
-
-Recorded on 2026-10-30 against this worktree:
-
-- `tests/fm-backend-herdr-core.test.sh` - 20 fake-`hc` cases, all `ok` (stateful JSON registry fake; asserts call shape, pending-buffer semantics, OSC 7501 verdict mapping, endpoint metadata validation, and ambient `HC_*` isolation).
-- `tests/fm-backend-herdr-core-smoke.test.sh` - all checks passed against a real lab session: `container_ensure`, `create_task` (returned `t1`), `target_ready`, pending literal + Enter flush delivering `echo "a_b:c"` (shifted punctuation through `hc send`), `capture`, `list_live` reporting `<session>:<t> fm-<id>`, `agent_state` vocabulary, and idempotent `kill`; lab teardown left no processes, sockets, or session dirs.
-
-This record does **not** claim:
-
-- a full `fm-spawn.sh` end-to-end launch on this backend (the adapter's per-op contract is covered, not a complete task lifecycle);
-- a live OSC 7501-emitting harness (claude/codex) submit or busy proof - the fake and a bare zsh terminal cover the mapping, not a real agent's status stream;
-- any Herdr app presentation behavior;
-- `hc events` as a transition source (poll-only this stage);
-- recovery-grade `agent_state` - the backend is deliberately outside `state_verified`/relaunch support.
-
-Safety: real-core tests may touch only `fm-hclab-*` sessions through `tests/herdr-core-test-safety.sh` and `bin/fm-herdr-core-lab.sh`; the `default` session and any session without the lab's fleet-state tripwire are refused. A stale `fm-hclab-*` session created outside the helper carries no tripwire and must be removed by hand or by `bin/fm-herdr-core-ci-cleanup.sh`'s scoped sweep.
-
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.
@@ -3554,16 +3507,23 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 | `hc kill <t>` on a live shell | Exit 0; `hc get` then reports `state: finished`, `reason: killed`. |
 | `hc rm <t>` after kill | Exit 0; `hc get` then exits 3. |
 | `hc send <t> 'cd /usr'` | Pasted and submitted; `foreground.cwd` became `/usr`. |
+| `hc --version` (0.1.14, 2026-10-30) | Prints `hc 0.1.14`; the adapter's binary gate requires this `hc x.y.z` shape at or above 0.1.14. |
+| `hello` over `hc connect --session <s>` (0.1.14, 2026-10-30) | Answered `{"result":{"generation":1,...}}`; the adapter refuses any other generation. |
+| `hc send <t> --wait --timeout <n> -- <text>` (0.1.14, 2026-10-30) | Returns `{"started":<bool|null>,"wait":{"status",...}}`; `started:true` or `wait.status:working` natively confirms the submit. Exit 9 is `blocked` (never forced), 3 `not_found`, 11 `finished`; text after `--` survives leading dashes. |
+| `hc keys <t> -- <key>` (0.1.14, 2026-10-30) | Accepts the `--` delimiter before key names. |
+| `server stop` on a lab session (0.1.14, 2026-10-30) | Closes the API listener only; the session's `serve` and `hold` daemons stay by design and take ~30-60s to finish exiting after TERM/KILL. `bin/fm-hc-lab.sh` sweeps them by their exact `HC_SESSION=<name>` env token. |
 | `hc get` of a terminal running the user's `claude` wrapper | `foreground` was `{"name":"hats","argv":["/Users/fran/.cargo/bin/hats","run","--"]}`; the Claude process was another member of that process group. |
 
 ### Adapter lifecycle
 
-`tests/fm-backend-hc-smoke.test.sh` passed against its own private core, which it stopped on exit:
+`tests/fm-backend-hc-smoke.test.sh` passed inside a `bin/fm-hc-lab.sh` session (hc 0.1.14, 2026-10-30): an `fm-hclab-*` core with scratch XDG roots, a pinned `FM_HC_SOCKET`, and a fleet-state tripwire that verified real core state byte-identical afterward.
+Teardown swept the session's `serve`/`hold` daemons by their `HC_SESSION` env token.
 
 ```text
-ok - hc smoke: create_task started fmt55488:t1
+ok - hc smoke: create_task started fm-hclab-smoke-28051-8595:t1
 ok - hc smoke: current_path follows the shell's cwd
 ok - hc smoke: send_text_line ran the command and capture shows its output
+ok - hc smoke: send_text_submit delivers through send --wait (verdict empty)
 ok - hc smoke: agent_state reads dead for a shell and alive for an agent-named foreground
 ok - hc smoke: kill closes and removes the terminal
 FM_TEST_COMPLETE
@@ -3599,19 +3559,27 @@ Before the launch-line fix the same spawn could not type `+`, which every launch
 
 ### Live guard
 
-`tests/fm-backend-hc-liveness-live-e2e.test.sh` on this host:
+`tests/fm-backend-hc-liveness-live-e2e.test.sh` on this host inside an `fm-hclab-*` lab session (hc 0.1.14, 2026-10-30):
 
 ```text
-# claude 2.1.312 (Claude Code): foreground={"argv":["/Users/fran/.local/bin/claude"],"cwd":"/private/tmp/fmhl.gzWz93/wt","name":"2.1.312","pid":64496}
-ok - hc liveness: claude 2.1.312 (Claude Code) classifies alive in hc 0.1.13
-# codex codex-cli 0.163.0: foreground={"argv":["/Users/fran/.local/bin/codex"],"cwd":"/private/tmp/fmhl.gzWz93/wt","name":"codex","pid":65031}
-ok - hc liveness: codex codex-cli 0.163.0 classifies alive in hc 0.1.13
-# unverified on this machine (not installed): opencode pi grok kimi
+# claude 2.1.314 (Claude Code): foreground={"argv":["/Users/kunchen/.local/bin/claude"],"cwd":".../fm-hclab-liveness-75126-29941/wt","name":"2.1.314","pid":76277}
+ok - hc liveness: claude 2.1.314 (Claude Code) classifies alive in hc 0.1.14
+# codex codex-cli 0.155.1: foreground={"argv":["/opt/homebrew/bin/codex"],"cwd":".../fm-hclab-liveness-75126-29941/wt","name":"codex","pid":79249}
+ok - hc liveness: codex codex-cli 0.155.1 classifies alive in hc 0.1.14
+# opencode 1.18.32: foreground={"argv":["/opt/homebrew/bin/opencode"],"cwd":".../wt","name":"opencode","pid":83815}
+ok - hc liveness: opencode 1.18.32 classifies alive in hc 0.1.14
+# pi 0.82.0: foreground={"argv":["/opt/homebrew/bin/pi-signed"],"cwd":".../wt","name":"pi-launcher","pid":85772}
+ok - hc liveness: pi 0.82.0 classifies alive in hc 0.1.14
+# grok grok 1.0.41 (4220f3b224a6) [stable]: foreground={"argv":["/Users/kunchen/.local/bin/grok"],"cwd":".../wt","name":"grok-1.0.41-macos-aarch64","pid":87715}
+ok - hc liveness: grok grok 1.0.41 (4220f3b224a6) [stable] classifies alive in hc 0.1.14
+# unverified on this machine (not installed): kimi
 ```
+
+Teardown swept the session's serve/hold daemons plus the harness processes they held, and the fleet-state tripwire confirmed the real core untouched.
 
 ### Not verified
 
 - A ship spawn, and a spawn with a real harness rather than the stand-in.
-- Submit confirmation against a real harness composer, since no prompt was submitted.
+- `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
 - How the `herdr.space` and `herdr.tab` labels display in Herdr.app.

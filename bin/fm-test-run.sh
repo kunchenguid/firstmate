@@ -442,9 +442,6 @@ family_for_basename() {
     fm-backend-hc.test.sh|fm-backend-hc-smoke.test.sh)
       printf '%s\n' hc
       ;;
-    fm-backend-herdr-core.test.sh|fm-backend-herdr-core-smoke.test.sh)
-      printf '%s\n' herdr-core
-      ;;
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
     fm-busy-state.test.sh|fm-capacity.test.sh|fm-classify-corr-token.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
@@ -472,7 +469,7 @@ expected_gate_skip_for_family() {
   case "$1" in
     real-herdr-gated) printf '%s\n' herdr ;;
     live-harness-optin) printf '%s\n' live-capability ;;
-    cmux|zellij|orca|paseo|rex|tern|hc|herdr-core) printf '%s\n' optional-binary ;;
+    cmux|zellij|orca|paseo|rex|tern|hc) printf '%s\n' optional-binary ;;
     snapshot-bearings) printf '%s\n' optional-binary ;;
     *) printf '%s\n' none ;;
   esac
@@ -497,7 +494,6 @@ paseo
 rex
 tern
 hc
-herdr-core
 standalone
 unclassified
 EOF
@@ -739,8 +735,6 @@ tests/fm-backend-cmux.test.sh 3754
 tests/fm-backend-hc-liveness-live-e2e.test.sh 9000
 tests/fm-backend-hc-smoke.test.sh 3700
 tests/fm-backend-hc.test.sh 4000
-tests/fm-backend-herdr-core-smoke.test.sh 60
-tests/fm-backend-herdr-core.test.sh 12000
 tests/fm-backend-orca.test.sh 27102
 tests/fm-backend-paseo-smoke.test.sh 40
 tests/fm-backend-paseo.test.sh 8000
@@ -1516,12 +1510,6 @@ families_for_changed_path() {
     bin/fm-test-tap-verify.sh)
       printf '%s\n' "__script__:fm-test-tap-verify.test.sh"
       ;;
-    # The herdr-core arm MUST precede bin/backends/herdr*: the glob would
-    # otherwise swallow bin/backends/herdr-core.sh into the real-Herdr lane.
-    bin/backends/herdr-core*|bin/fm-herdr-core-lab.sh|bin/fm-install-herdr-core.sh|bin/fm-herdr-core-ci-cleanup.sh|tests/herdr-core-test-safety.sh)
-      printf '%s\n' herdr-core
-      printf '%s\n' backend-dispatch
-      ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh|tests/herdr-client-pair-fixture.sh)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
@@ -1552,10 +1540,16 @@ families_for_changed_path() {
       printf '%s\n' tern
       printf '%s\n' backend-dispatch
       ;;
-    bin/backends/hc.sh)
+    bin/backends/hc.sh|bin/fm-hc-lab.sh|tests/hc-test-safety.sh)
       printf '%s\n' hc
       printf '%s\n' backend-dispatch
       printf '%s\n' "__script__:fm-backend-hc-liveness-live-e2e.test.sh"
+      ;;
+    bin/fm-install-hc.sh|bin/fm-hc-ci-cleanup.sh)
+      printf '%s\n' pure-contract-unit
+      # Pin or cleanup changes also select the hc family so the real lane's
+      # coverage re-runs, mirroring the real-herdr-gated arm above.
+      printf '%s\n' hc
       ;;
     bin/backends/orca*|bin/backends/tmux.sh)
       printf '%s\n' backend-dispatch

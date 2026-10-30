@@ -11,7 +11,9 @@ The adapter header in `bin/backends/hc.sh` owns design decisions and measured CL
 
 Prerequisites:
 
-- `hc` on `PATH` (measured on `hc 0.1.13`); `hc` starts its own core on first use.
+- `herdr-core` on `PATH` under its own name or the `hc` alias, at version 0.1.14 or later (the adapter's verified floor; the gate refuses anything older, misnamed, or speaking another protocol generation).
+  `hc` starts its own core on first use.
+  `bin/fm-install-hc.sh <dir>` installs the pinned, checksum-verified build, and `FM_HC_BIN` pins a specific binary for tests and labs.
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
@@ -47,17 +49,19 @@ hc_terminal=<address>
 
 `<address>` is hc's terminal address such as `t7`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.
+`FM_HC_SOCKET` is the deliberate socket pin tests and labs use instead of an inherited `HC_SOCKET`.
 An input, capture, or close that carries the task label refuses a terminal whose `firstmate.task` or `firstmate.home` label does not match, and a close without a label still refuses a terminal that lacks this home's labels.
 
 ## Operations
 
 | Operation | hc command |
 | --- | --- |
-| Container ensure | `hc server status` |
+| Container ensure | `hc server status` plus the `hello` generation handshake over `hc connect` |
 | Create task | `hc run --bg --no-parent --outlive-parent --no-notify --cwd <project> --label ...` |
 | Capture | `hc read --lines <n>` |
 | Visible capture | `hc read --lines 0` |
 | Send a line and submit | `hc send` |
+| Submit with confirmation | `hc send --wait`, the started turn is the native proof |
 | Named key | `hc keys` |
 | Current path | `hc get`, the foreground process's `cwd` |
 | Busy state | `hc get`, native `status.state` (`working` is busy) |
@@ -68,7 +72,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 
 - `hc send` always presses Enter, so hc cannot type without submitting.
   `bin/fm-spawn.sh` pastes and submits the spawn launch line with `hc send` and consumes the Enter that follows it.
-- Submitting a message uses `hc send` and then reads the composer; only a proven pending composer gets Enter retries.
+- Submitting a message is one `hc send --wait`: a started turn or a still-working wait confirms it natively, a terminal that never reports status falls back to the composer screen, and a blocked terminal (exit 9) is a hard stop that is never forced.
 - hc reports one foreground process per terminal.
   When that process is a launcher, the adapter also reads the rest of its process group from `ps`, which works only for terminals on the local machine.
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.
@@ -81,4 +85,6 @@ An input, capture, or close that carries the task label refuses a terminal whose
 
 `tests/fm-backend-hc.test.sh` pins the adapter against a fake `hc`.
 `tests/fm-backend-hc-liveness-live-e2e.test.sh` is the default-on live guard: it launches every installed harness bare in a private core and requires `alive`.
-`tests/fm-backend-hc-smoke.test.sh` drives the real `hc` against a private core with its own `HC_SESSION` and scratch XDG directories, and skips when `hc` or `jq` is missing.
+`tests/fm-backend-hc-smoke.test.sh` drives the real `hc` inside a `bin/fm-hc-lab.sh` session: a private `fm-hclab-*` core with scratch XDG roots, a pinned socket, a fleet-state tripwire against real core state, and a teardown that sweeps the session's `serve`/`hold` daemons; `tests/hc-test-safety.sh` owns the only sanctioned teardown path.
+It skips when `hc` or `jq` is missing, and the `tests-hc` CI lane installs the pinned build and fails on that skip.
+`bin/fm-hc-ci-cleanup.sh` snapshots and removes job-owned lab sessions at job end.

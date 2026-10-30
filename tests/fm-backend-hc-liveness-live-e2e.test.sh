@@ -11,50 +11,87 @@
 # process group. A stub cannot show either surface drifting.
 #
 # Each harness is launched bare, with no prompt, so this consumes no model
-# tokens. Every terminal lives in a private core: a unique HC_SESSION, scratch
-# XDG directories, and no inherited HC_TERMINAL_* routing, so the captain's own
-# core is never touched. The private core is stopped on exit.
+# tokens. Every terminal lives in a lab core session provisioned by
+# bin/fm-hc-lab.sh: a unique fm-hclab-* HC_SESSION, scratch XDG roots, a
+# pinned FM_HC_SOCKET, a real-fleet tripwire, and a teardown that sweeps the
+# session's serve/hold daemons (and their harness children) by their
+# HC_SESSION env marker, so the captain's own core is never touched.
+# tests/hc-test-safety.sh owns the only sanctioned teardown path.
 # tests/fm-backend-hc.test.sh pins the classifier logic with a fake hc.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-
-fm_live_gate default-on FM_HC_LIVENESS_DRIFT hc jq
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$ROOT/tests/lib.sh"
 
-# hc's socket must fit a unix socket path, so the private root sits under /tmp.
-LAB=$(mktemp -d /tmp/fmhl.XXXXXX) || { echo "skip: no scratch directory"; exit 0; }
-mkdir -p "$LAB/wt" "$LAB/config" "$LAB/data" "$LAB/cache" "$LAB/home"
-unset HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE HC_SOCKET
-export HC_SESSION="fmhl$$"
-export XDG_STATE_HOME="$LAB" XDG_RUNTIME_DIR="$LAB" XDG_CONFIG_HOME="$LAB/config"
-export XDG_DATA_HOME="$LAB/data" XDG_CACHE_HOME="$LAB/cache"
-export FM_HOME="$LAB/home" FM_ROOT_OVERRIDE="$LAB/home"
-# A real claude started under a scratch XDG_DATA_HOME can self-update into it and
-# repoint the operator's ~/.local/bin/claude there; the link dangles once $LAB is gone.
-export DISABLE_AUTOUPDATER=1
+# Binary resolution identical to the adapter, installer, and lab: FM_HC_BIN
+# wins, then herdr-core, then the hc alias. The resolved binary's directory
+# goes on PATH so the live gate can verify it by name.
+HC_BIN=${FM_HC_BIN:-}
+[ -n "$HC_BIN" ] || HC_BIN=$(command -v herdr-core 2>/dev/null || true)
+[ -n "$HC_BIN" ] || HC_BIN=$(command -v hc 2>/dev/null || true)
+HC_TOOL=hc
+if [ -n "$HC_BIN" ] && [ -x "$HC_BIN" ]; then
+  export FM_HC_BIN=$HC_BIN
+  PATH="$(dirname "$HC_BIN"):$PATH"
+  HC_TOOL=$(basename "$HC_BIN")
+fi
+fm_live_gate default-on FM_HC_LIVENESS_DRIFT "$HC_TOOL" jq
+export FM_HC_BIN=${FM_HC_BIN:-$HC_BIN}
 
-cleanup_all() {
-  if [ "${XDG_STATE_HOME:-}" = "$LAB" ] && [ "${HC_SESSION:-}" = "fmhl$$" ]; then
-    hc server stop --json >/dev/null 2>&1 || true
-  fi
-  rm -rf "$LAB"
+# shellcheck source=tests/hc-test-safety.sh
+. "$ROOT/tests/hc-test-safety.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-backend-hc-liveness)
+
+HC_TEST_SES=$("$ROOT/bin/fm-hc-lab.sh" name liveness)
+
+# The teardown's own result propagates: a fleet-tripwire failure or surviving
+# session processes keep this run nonzero even on an otherwise-clean pass.
+cleanup_lab() {
+  local rc=$?
+  trap - EXIT
+  hc_test_safe_teardown "$ROOT" "$HC_TEST_SES" || rc=1
+  exit "$rc"
 }
-trap cleanup_all EXIT
+trap cleanup_lab EXIT
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 note() { printf '# %s\n' "$1"; }
 
-hc server status --json >/dev/null 2>&1 || fail "a private hc core could not start"
+"$ROOT/bin/fm-hc-lab.sh" provision "$HC_TEST_SES" \
+  || fail "hc lab could not provision with ${HC_BIN:-no binary}"
+HC_TEST_SOCK=$("$ROOT/bin/fm-hc-lab.sh" socket "$HC_TEST_SES")
+[ -n "$HC_TEST_SOCK" ] || fail "hc lab provisioned without a socket"
+hc_test_refuse_if_unsafe "$HC_TEST_SES" \
+  || fail "provisioned session '$HC_TEST_SES' does not satisfy the lab safety contract"
+
+# The adapter routes through FM_HC_SOCKET; pinning the lab's XDG roots as well
+# means even an auto-spawned serve (server down mid-call) lands inside the
+# lab dir rather than the real state root.
+HC_LAB_DIR=$(hc_test_lab_dir)/$HC_TEST_SES
+export HC_SESSION=$HC_TEST_SES FM_HC_SOCKET=$HC_TEST_SOCK
+export XDG_STATE_HOME="$HC_LAB_DIR/env/xdg-state" \
+  XDG_CONFIG_HOME="$HC_LAB_DIR/env/xdg-config" \
+  XDG_DATA_HOME="$HC_LAB_DIR/env/xdg-data"
+unset HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE HC_SOCKET
+mkdir -p "$HC_LAB_DIR/wt"
+
+FM_HOME_DIR=$TMP_ROOT/home
+mkdir -p "$FM_HOME_DIR"
+export FM_HOME=$FM_HOME_DIR FM_ROOT_OVERRIDE=$FM_HOME_DIR
+# A real claude started under a scratch XDG_DATA_HOME can self-update into it
+# and repoint the operator's ~/.local/bin/claude there; the lab dir is
+# removed on teardown, so the link must never be created.
+export DISABLE_AUTOUPDATER=1
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source hc || fail "fm_backend_source hc failed"
 
 CHECKED=0
 SKIPPED=
-HC_VERSION=$(hc --version 2>/dev/null | head -1)
+HC_VERSION=$("$HC_TOOL" --version 2>/dev/null | head -1)
 for harness in claude codex opencode pi grok kimi; do
   bin_path=$(command -v "$harness" 2>/dev/null || true)
   if [ -z "$bin_path" ] || [ ! -x "$bin_path" ]; then
@@ -65,7 +102,7 @@ for harness in claude codex opencode pi grok kimi; do
   version=$("$bin_path" --version 2>/dev/null | head -1 | tr -d '\r') || version=
   [ -n "$version" ] || version=unknown
   address=$(fm_backend_hc_cli "$HC_SESSION" run --bg --json --no-parent --outlive-parent --no-notify \
-    --cwd "$LAB/wt" --label "firstmate.task=fm-$harness" --label "firstmate.home=$(fm_backend_hometag)" \
+    --cwd "$HC_LAB_DIR/wt" --label "firstmate.task=fm-$harness" --label "firstmate.home=$(fm_backend_hometag)" \
     "$bin_path" | jq -r '.address // empty')
   fm_backend_hc_address_valid "$address" || fail "$harness ($version): hc did not start a terminal"
   target="$HC_SESSION:$address"
