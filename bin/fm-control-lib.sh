@@ -503,6 +503,7 @@ fm_control_wait_for_startup() {
     printf "%d", int(t) + (t > int(t))
   }') || return 1
   (
+    # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
     . "$lib_dir/fm-timeout-lib.sh"
     # Keep expansions for the child shell, not this caller.
     # shellcheck disable=SC2016
