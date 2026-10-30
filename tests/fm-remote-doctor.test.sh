@@ -290,6 +290,10 @@ SH
   # A ready account has completed Claude Code's first-run onboarding; the
   # onboarding-gate cases below override or remove this.
   printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+  # By default this home launches Claude, so the onboarding gate applies; the
+  # non-Claude-harness case below overrides this pin.
+  mkdir -p "$CASE_PROJECT_HOME/config"
+  printf 'claude\n' > "$CASE_PROJECT_HOME/config/crew-harness"
   cat > "$CASE_BIN/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -933,16 +937,48 @@ assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a missing onboar
 assert_absent "$CASE_HOME/.claude.json" "the doctor created a Claude onboarding record"
 pass "a missing Claude onboarding record is a human gap the doctor never creates"
 
-# Claude onboarding gates readiness only where claude is the installed harness;
-# a host running another harness is not blocked on it.
+# When claude is not installed at all the onboarding gate does not apply: there
+# is no Claude first run to stall on. (Removing the binary is what this proves;
+# it is not the harness-selection case, which is covered next.)
 new_case Darwin with-herdr gui
 rm -f "$CASE_BIN/claude" "$CASE_HOME/.claude.json"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE_BIN/codex"
 chmod +x "$CASE_BIN/codex"
 doctor --fix
-expect_code 0 "$DOCTOR_RC" "a host running a non-claude harness was blocked on claude onboarding"
+expect_code 0 "$DOCTOR_RC" "a host with no claude binary was blocked on claude onboarding"
 assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "claude onboarding was checked when claude was not installed"
-pass "claude onboarding does not gate a host whose harness is not claude"
+pass "claude onboarding does not apply when claude is not installed"
+
+# claude is installed, but this home pins no Claude account and runs a different
+# harness, so its launch never starts Claude; incomplete onboarding is then a
+# non-blocking note, so a host that is ready on main stays ready. The unknown
+# case (no harness pin at all) behaves the same way.
+new_case Darwin with-herdr gui
+printf 'codex\n' > "$CASE_PROJECT_HOME/config/crew-harness"
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "an un-onboarded host running a non-claude harness was blocked on claude onboarding"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "a non-claude-harness host was gated on claude onboarding"
+assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a non-claude-harness host was reported as a human onboarding gap"
+rm -f "$CASE_PROJECT_HOME/config/crew-harness"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "an un-onboarded host with an unknown harness was blocked on claude onboarding"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "a host with an unknown harness was gated on claude onboarding"
+pass "claude onboarding does not gate a host that pins no Claude account and runs a non-claude or unknown harness"
+
+# A per-mate "mate <id>: claude" override in config/secondmate-harness launches
+# claude for that secondmate even when the default line (and crew-harness) name
+# another harness, so the home does launch Claude and onboarding must gate it.
+# crew-harness is codex here so the override is the only thing that names claude.
+new_case Darwin with-herdr gui
+printf 'codex\n' > "$CASE_PROJECT_HOME/config/crew-harness"
+printf 'codex\nmate bob: claude\n' > "$CASE_PROJECT_HOME/config/secondmate-harness"
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a host whose secondmate-harness override launches claude was reported ready with onboarding incomplete"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a mate-override claude launch was not gated on claude onboarding"
+assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "a mate-override claude launch was treated as a non-claude host"
+pass "a mate <id>: claude override gates claude onboarding even when the default harness is not claude"
 
 # --- onboarding is checked against the account config/claude-account selects --
 
@@ -1070,6 +1106,24 @@ expect_code 0 "$DOCTOR_RC" "a pinned-ordinary host read the exported CLAUDE_CONF
 assert_contains "$DOCTOR_OUT" 'check claude-onboarding=ok:' "the pinned-ordinary account's onboarded \$HOME store was not recognized"
 assert_not_contains "$DOCTOR_OUT" 'config/claude-account (' "the ordinary account was reported as a pinned account directory"
 pass "a pin naming the ordinary account reads \$HOME/.claude.json, not an exported CLAUDE_CONFIG_DIR"
+
+# A pin naming the ordinary account whose $HOME store is not onboarded is a human
+# gap, and its action must shed CLAUDE_CONFIG_DIR the same way the launch does
+# (env -u CLAUDE_CONFIG_DIR claude), so an operator whose shell exports
+# CLAUDE_CONFIG_DIR onboards $HOME rather than that other store. It must not
+# suggest a CLAUDE_CONFIG_DIR=<root> form, which belongs to a pinned directory.
+new_case Darwin with-herdr gui
+mkdir -p "$CASE_PROJECT_HOME/config"
+printf 'ordinary\n' > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "an un-onboarded pinned-ordinary host was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the pinned-ordinary account's incomplete onboarding was not tagged human"
+assert_contains "$DOCTOR_OUT" 'action: claude-onboarding:' "the pinned-ordinary onboarding gap came with no operator action"
+assert_contains "$DOCTOR_OUT" 'run env -u CLAUDE_CONFIG_DIR claude once interactively' "the pinned-ordinary action did not shed CLAUDE_CONFIG_DIR the way the launch does"
+assert_not_contains "$DOCTOR_OUT" 'CLAUDE_CONFIG_DIR=' "the pinned-ordinary action suggested a CLAUDE_CONFIG_DIR=<root> assignment"
+assert_not_contains "$DOCTOR_OUT" 'fix claude-onboarding=applied' "--fix answered onboarding for the ordinary account"
+pass "an un-onboarded pinned-ordinary account sheds CLAUDE_CONFIG_DIR in its operator command"
 
 # The unpinned path is unchanged: with no pin it still honors CLAUDE_CONFIG_DIR as
 # the default store, so an un-onboarded CLAUDE_CONFIG_DIR store is a gap even when

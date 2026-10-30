@@ -49,9 +49,10 @@
 # both Firstmate-owned Aqua agents, starts the Linux workers where no Aqua agent
 # applies, recreates the entrypoint symlink, and may add an owned ~/.local/bin
 # wrapper for a required tool it can discover under nvm, asdf, or mise. It never
-# installs packages, creates a login session, writes an auto-login password,
-# changes FileVault, stores an account password, or replaces a non-Firstmate
-# wrapper; those remain reported gaps.
+# installs packages, creates a login session, answers Claude Code's first-run
+# onboarding, writes an auto-login password, changes FileVault, stores an
+# account password, or replaces a non-Firstmate wrapper; those remain reported
+# gaps.
 set -eu
 
 # Resolve this script's directory with builtins only: a host missing a required
@@ -700,8 +701,50 @@ check_herdr_server() {
     "rerun this command with --fix to start it"
 }
 
+# True only when this home's own configuration names claude as the harness it
+# launches: config/secondmate-harness's default line or any "mate <id>:" override
+# (fm-harness.sh's canonical parser honors both, and a per-mate override launches
+# claude for that secondmate just as the default does), then config/crew-harness.
+# Read the home's config directly rather than resolving a deferred "default" or
+# own-harness fallback, because the doctor runs under the entrypoint's env -i
+# with no way to detect a running firstmate; an absent, "default", or otherwise
+# unresolved harness is therefore treated as not-claude, so onboarding stays a
+# non-blocking note for it. fm-harness.sh's parser is not reused directly: it is
+# not source-safe (it reads $FM_HOME/config at load under set -u and runs a
+# command dispatch that falls to a process-tree walk), and its subcommands only
+# resolve the default or one named mate, with no "does any line name claude"
+# query, which is the whole question here.
+home_harness_is_claude() {
+  local config token
+  [ -n "${FM_HOME:-}" ] || return 1
+  config="$FM_HOME/config"
+  if [ -f "$config/secondmate-harness" ]; then
+    # Print "claude" when the default line (first token) or any "mate <id>:"
+    # override (first token after the colon) names claude; mirrors the override
+    # grammar in fm-harness.sh's secondmate_parse.
+    token=$(awk '
+      { sub(/^[[:space:]]+/, "") }
+      /^#/ || /^$/ { next }
+      /^mate[[:space:]]+[^:[:space:]]+[[:space:]]*:/ {
+        rest = $0
+        sub(/^mate[[:space:]]+[^:[:space:]]+[[:space:]]*:[[:space:]]*/, "", rest)
+        split(rest, a, /[[:space:]]+/)
+        if (a[1] == "claude") { print "claude"; exit }
+        next
+      }
+      $1 == "claude" { print "claude"; exit }
+    ' "$config/secondmate-harness" 2>/dev/null || true)
+    [ "$token" = claude ] && return 0
+  fi
+  if [ -f "$config/crew-harness" ]; then
+    token=$(tr -d '[:space:]' < "$config/crew-harness" 2>/dev/null || true)
+    [ "$token" = claude ] && return 0
+  fi
+  return 1
+}
+
 check_claude_onboarding() {
-  local resolved config completed selection declared root pin_account pinned_ordinary account_err reason
+  local resolved config completed selection declared root pin_account pinned_ordinary pinned account_err reason
   resolved=$(command -v claude 2>/dev/null || true)
   if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
     record claude-onboarding "skip: claude is not installed on this host, so its first-run onboarding does not apply"
@@ -720,11 +763,13 @@ check_claude_onboarding() {
   root=
   pin_account=
   pinned_ordinary=
+  pinned=
   if [ -n "${FM_HOME:-}" ]; then
     account_err=$(mktemp "${TMPDIR:-/tmp}/fm-doctor-account.XXXXXX" 2>/dev/null) || account_err=/dev/null
     if selection=$(fm_worker_account_resolve claude "$FM_HOME/config" "config/claude-account" 2>"$account_err"); then
       # declared<TAB>root<TAB>providers; root is empty for the ordinary account.
       if [ -n "$selection" ]; then
+        pinned=1
         declared=${selection%%$'\t'*}
         root=${selection#*$'\t'}
         root=${root%%$'\t'*}
@@ -747,6 +792,15 @@ check_claude_onboarding() {
       return 0
     fi
   fi
+  # Gate readiness only on a host this home will actually launch Claude on: one
+  # that pins a Claude account, or whose configured harness is claude. When
+  # claude is merely installed but this home pins no Claude account and runs a
+  # different (or unknown) harness, its first-run onboarding is a non-blocking
+  # note, so a host that is ready on main stays ready.
+  if [ -z "$pinned" ] && ! home_harness_is_claude; then
+    record claude-onboarding "skip: claude is installed, but this home pins no Claude account and its configured harness is not claude, so its first-run onboarding does not gate this host"
+    return 0
+  fi
   if [ -n "$root" ]; then
     config="$root/.claude.json"
   elif [ -n "$pinned_ordinary" ]; then
@@ -768,6 +822,13 @@ check_claude_onboarding() {
   if [ -n "$root" ]; then
     record claude-onboarding "human: Claude Code's first-run onboarding is not complete for the account selected by $pin_account, so a launch stalls on the theme picker before it reads its instructions" \
       "run CLAUDE_CONFIG_DIR=$(launch_agent_shell_quote "$root") claude once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
+  elif [ -n "$pinned_ordinary" ]; then
+    # config/claude-account pins the ordinary account, which bin/fm-spawn.sh
+    # launches with CLAUDE_CONFIG_DIR unset so Claude reads $HOME/.claude.json.
+    # Suggest the same shedding form the launch uses, so an operator whose shell
+    # exports CLAUDE_CONFIG_DIR still onboards $HOME rather than that other store.
+    record claude-onboarding "human: Claude Code's first-run onboarding is not complete for the ordinary Claude account config/claude-account pins, so a launch stalls on the theme picker before it reads its instructions" \
+      "run env -u CLAUDE_CONFIG_DIR claude once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
   else
     record claude-onboarding "human: Claude Code's first-run onboarding is not complete on this host, so a launch stalls on the theme picker before it reads its instructions" \
       "run 'claude' once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"

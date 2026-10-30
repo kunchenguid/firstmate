@@ -314,7 +314,8 @@ These steps are never automated and are always reported rather than silently att
 - FileVault, which holds a reboot at pre-boot authentication before any login session exists.
 - Installing any missing required tool that no safe wrapper can resolve.
 - Each worker runtime's own `/login`, and any keychain password prompt that login needs.
-- Claude Code's first-run onboarding for the account the home selects through [`config/claude-account`](configuration.md#worker-account-pin-configclaude-account-configpi-account), which only an interactive `claude` session against that account's `CLAUDE_CONFIG_DIR` can finish and which otherwise stalls a launch on the theme picker; the doctor names that account and the exact command in its report.
+- Claude Code's first-run onboarding, which only an interactive `claude` session can finish and which otherwise stalls a launch on the theme picker, for a home that will launch Claude: one that pins a Claude account through [`config/claude-account`](configuration.md#worker-account-pin-configclaude-account-configpi-account) or whose configured harness is `claude`; where `claude` is merely installed under another harness and no pin, the doctor reports a non-blocking skip instead.
+  The doctor names the account and the exact command, matching the launch: `CLAUDE_CONFIG_DIR=<root> claude` for a pinned directory, `env -u CLAUDE_CONFIG_DIR claude` for a pinned `ordinary` account, and plain `claude` for an unpinned Claude-harness home.
 
 Firstmate never writes an auto-login password, never changes FileVault, and never stores an account password.
 A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own symlink is reported for the operator to inspect and is never overwritten.

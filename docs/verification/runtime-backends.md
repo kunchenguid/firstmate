@@ -562,7 +562,8 @@ Verified 2026-10-28 on Claude Code 2.1.154.
 Separate from workspace trust, Claude Code gates a host where it has never run interactively behind a first-run onboarding (the theme picker); a launch there stalls on it before reading its instructions, and Firstmate's key plane cannot answer it.
 Claude records completion in the `hasCompletedOnboarding` key of `<config-dir>/.claude.json`, where `<config-dir>` is the account the launch selects: the root resolved from this home's [`config/claude-account`](../configuration.md#worker-account-pin-configclaude-account-configpi-account) pin through `bin/fm-worker-account-lib.sh`'s read-only `fm_worker_account_resolve`, which is the same root `bin/fm-spawn.sh` sets `CLAUDE_CONFIG_DIR` to for a pinned account.
 A pin that names the ordinary account reads `$HOME/.claude.json` explicitly, because `bin/fm-spawn.sh` launches that account with `CLAUDE_CONFIG_DIR` unset and Claude then reads `$HOME/.claude.json` regardless of any `CLAUDE_CONFIG_DIR` in the environment; an absent pin keeps today's default-store behavior of `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`.
-`bin/fm-remote-doctor.sh`'s `claude-onboarding` check reads that key from the selected account, not the default store, so a home that pins another Claude account is gated on that account's onboarding; it reports an incomplete host as a human gap rather than calling it ready, and names the selected account and the exact `CLAUDE_CONFIG_DIR=<root> claude` command in the operator step.
+`bin/fm-remote-doctor.sh`'s `claude-onboarding` check reads that key from the selected account, not the default store, so a home that pins another Claude account is gated on that account's onboarding; it reports an incomplete host as a human gap rather than calling it ready, and names the selected account and the exact onboarding command in the operator step.
+That command matches the launch: `CLAUDE_CONFIG_DIR=<root> claude` for a pinned directory, and `env -u CLAUDE_CONFIG_DIR claude` for the ordinary account, so an operator whose shell exports `CLAUDE_CONFIG_DIR` still onboards the `$HOME` store the ordinary launch reads.
 A pin that cannot be resolved (malformed, or naming a missing or unreadable directory) is itself a human gap, because the launch refuses it the same way.
 
 ```sh
@@ -579,9 +580,12 @@ jq '{hasCompletedOnboarding, theme}' "$HOME/.claude.json"
 ```
 
 `theme` is `null` on this fully onboarded account, so it is not a reliable completion signal; `hasCompletedOnboarding` is.
-The check fires only where `claude` resolves on the host PATH, because the doctor does not know a secondmate's chosen harness and a host running another harness must not be blocked on Claude's onboarding.
+The check gates readiness only on a host this home will actually launch Claude on: one that pins a Claude account through `config/claude-account`, or whose configured harness is `claude` — the default line or any `mate <id>:` override in `config/secondmate-harness`, then `config/crew-harness`.
+When `claude` is merely installed but this home pins no Claude account and runs a different or unknown harness, incomplete onboarding is reported as a non-blocking `skip`, so a host running another harness stays as ready as it is on `main`.
+With no pin the check reads the default store, `$HOME/.claude.json`: the doctor runs under the entrypoint's `env -i` with no `CLAUDE_CONFIG_DIR`, which matches an unpinned launch from a default environment.
 `tests/fm-remote-doctor.test.sh` pins the verdict against controlled account fixtures: a completed record is ready, and a false flag or a missing `.claude.json` is a human gap that `--fix` never answers and never creates.
 It also pins the selected-account cases: with a `config/claude-account` pin, an onboarded selected account is ready even when the default is not, an un-onboarded selected account is a human gap naming that account even when the default is onboarded, an unresolvable pin is a human gap, and the check writes to no config.
+It pins the gating rule too: a host with no Claude pin running a non-Claude or unknown harness is a non-blocking `skip` even with incomplete onboarding, and an un-onboarded pinned-ordinary account's operator step is `env -u CLAUDE_CONFIG_DIR claude` rather than a `CLAUDE_CONFIG_DIR=<root>` form.
 
 ## Pi seeded-secondmate project trust
 
