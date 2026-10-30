@@ -599,8 +599,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   # The unverified-adapter escape hatch is still an agent this fleet launched,
   # so it carries the compact-adviser floor and the AI-trailer strip; nothing
   # else may rewrite the captain's own command.
-  expected="export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$HOME_DIR" "$id")$(fm_test_launch_git_prefix "$launch")custom-agent --flag \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
-  [ "$launch" = "$expected" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$HOME_DIR" "$id")$(fm_test_launch_git_prefix "$launch")custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -621,19 +620,21 @@ test_raw_rovo_launch_gets_no_positional_brief() {
   pass "a raw rovo launch is not given the positional launch-brief argument"
 }
 
-test_raw_launch_named_like_rovo_still_gets_the_brief() {
+test_plain_raw_launch_of_a_known_harness_gets_the_brief() {
   local rec id out status launch
-  id="raw-rovo-dev-brief-z15"
-  rec=$(make_spawn_case raw-rovo-dev-brief claude "$id")
+  id="raw-known-plain-z15"
+  rec=$(make_spawn_case raw-known-plain claude "$id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "rovo-dev --flag")
+    "$id" "$PROJ_DIR" "codex --flag")
   status=$?
-  expect_code 0 "$status" "raw rovo-dev launch should spawn without rovo's readiness gate"
+  expect_code 0 "$status" "plain raw launch of a known harness should spawn: $out"
+  assert_not_contains "$out" "launch brief was not appended" "a plain known-harness command was warned about"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "rovo-dev --flag \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\"" "raw rovo-dev launch did not get the launch brief appended"
-  pass "a raw launch whose command only starts with rovo still gets the launch brief"
+  assert_contains "$launch" "codex --flag \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\"" \
+    "plain raw launch of a known harness did not get the brief appended"
+  pass "a plain single raw launch of a known harness gets the launch brief appended"
 }
 
 test_raw_claude_launch_gets_the_brief_doorbell() {
@@ -654,42 +655,28 @@ test_raw_claude_launch_gets_the_brief_doorbell() {
   pass "a raw claude launch gets the record-backed launch-brief doorbell"
 }
 
-# Appending the brief after a compound raw command would give it to the last
-# step, so the command launches unchanged with a warning instead.
-test_compound_raw_launch_without_brief_placeholder_launches_unchanged() {
+# Only a plain single command for a known harness gets the brief appended.
+# Compound, command-substituted, wrapped, quoted-operator and unknown-program
+# commands launch exactly as given, with a warning suggesting __BRIEF__.
+test_other_raw_launches_launch_unchanged_with_a_warning() {
   local rec id out status raw launch n=0
-  for raw in "custom-agent --flag; cleanup" "custom-agent --flag && cleanup" "custom-agent --flag | tee out" "custom-agent --flag &"; do
+  # shellcheck disable=SC2016 # the $( ) is literal launch text.
+  for raw in "custom-agent --flag; cleanup" "custom-agent --flag && cleanup" "codex --flag | tee out" "codex --flag &" \
+    'codex --model $(pick-model | tr -d x)' "env -u CLAUDECODE rovo run --yolo" "codex -c 'notify=[a; b]'" "custom-agent --flag" "FOO=1 codex --flag"; do
     n=$((n + 1))
-    id=raw-compound-$n-z15
-    rec=$(make_spawn_case "raw-compound-$n" claude "$id")
+    id=raw-other-$n-z15
+    rec=$(make_spawn_case "raw-other-$n" claude "$id")
     read_case_record "$rec"
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" "$raw" 2>&1)
     status=$?
-    expect_code 0 "$status" "compound raw launch should still spawn: $raw"
-    assert_contains "$out" "launch brief was not appended" "compound raw launch gave no warning: $raw"
+    expect_code 0 "$status" "raw launch should still spawn: $raw"$'\n'"$out"
+    assert_contains "$out" "launch brief was not appended" "raw launch gave no warning: $raw"
     launch=$(cat "$LAUNCH_LOG")
-    assert_contains "$launch" "$raw" "compound raw launch command was not emitted unchanged: $raw"
-    assert_not_contains "$launch" "launch-brief" "compound raw launch got the brief appended: $raw"
+    assert_contains "$launch" "$raw" "raw launch command was not emitted unchanged: $raw"
+    assert_not_contains "$launch" "launch-brief" "raw launch got the brief appended: $raw"
   done
-  pass "a compound raw launch without __BRIEF__ launches unchanged with a warning"
-}
-
-test_quoted_operator_in_raw_launch_still_gets_the_brief() {
-  local rec id out status launch
-  id="raw-quoted-op-z15"
-  rec=$(make_spawn_case raw-quoted-op claude "$id")
-  read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent -c 'notify=[a; b | c]' 2>&1" 2>&1)
-  status=$?
-  expect_code 0 "$status" "raw launch with a quoted operator should spawn: $out"
-  assert_not_contains "$out" "launch brief was not appended" "a quoted operator was treated as compound"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "custom-agent -c 'notify=[a; b | c]' 2>&1 \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\"" \
-    "raw launch with a quoted operator did not get the brief appended"
-  pass "a quoted operator or redirection in a raw launch still gets the brief appended"
+  pass "a raw launch that is not a plain single known-harness command launches unchanged with a warning"
 }
 
 test_compound_raw_launch_places_brief_at_placeholder() {
@@ -2837,10 +2824,9 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_rovo_launch_gets_no_positional_brief
-test_raw_launch_named_like_rovo_still_gets_the_brief
+test_plain_raw_launch_of_a_known_harness_gets_the_brief
 test_raw_claude_launch_gets_the_brief_doorbell
-test_compound_raw_launch_without_brief_placeholder_launches_unchanged
-test_quoted_operator_in_raw_launch_still_gets_the_brief
+test_other_raw_launches_launch_unchanged_with_a_warning
 test_compound_raw_launch_places_brief_at_placeholder
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort

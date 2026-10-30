@@ -240,11 +240,14 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. A raw command gets the launch brief appended as its last argument
-#   unless it already names __BRIEF__ or __BRIEFDOORBELL__ or its first word is
-#   exactly kimi or rovo (those get their post-readiness brief pointer); a
-#   compound one (an unquoted ;, |, & or newline) launches unchanged with a
-#   warning instead. For pi and pi-signed, fm-spawn resolves the selected executable
+#   new adapters. A raw command that already names __BRIEF__ or __BRIEFDOORBELL__
+#   is left alone, and kimi or rovo get their post-readiness brief pointer. Any other
+#   raw command gets the launch brief appended as its last argument only when it is
+#   a plain single command: its first word is a known harness that takes a positional
+#   prompt, it holds none of the shell metacharacters $( ` | ; & < > or a newline, and
+#   it does not start with a wrapper (env, nice, timeout, caffeinate, sudo, command,
+#   exec) or a VAR=value assignment. Every other raw command launches exactly as given,
+#   with a one-line warning suggesting __BRIEF__. For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -2909,30 +2912,26 @@ launch_template() {
   esac
 }
 
-# raw_launch_is_compound <command>: succeeds when <command> holds a shell
-# control operator (;, |, &, && or a newline) outside quotes. Redirections such
-# as 2>&1 and &> are not operators.
-raw_launch_is_compound() {
-  local s=$1 i c q='' n=${#1}
-  for ((i = 0; i < n; i++)); do
-    c=${s:i:1}
-    case "$q" in
-    \') [ "$c" = "'" ] && q=''
-      continue ;;
-    \") case "$c" in \\) i=$((i + 1)) ;; \") q='' ;; esac
-      continue ;;
-    esac
-    case "$c" in
-    \\) i=$((i + 1)) ;;
-    \' | \") q=$c ;;
-    ';' | '|' | $'\n') return 0 ;;
-    '&')
-      case "${s:0:i}" in *'>' | *'<') continue ;; esac
-      [ "${s:i+1:1}" = '>' ] || return 0
-      ;;
-    esac
-  done
-  return 1
+# raw_launch_takes_brief <command> <harness>: succeeds only for a plain single
+# command that is safe to append the launch brief to. <harness> is the basename
+# of its first word and must be a known harness that takes a positional prompt
+# (kimi and rovo deliver their brief after a readiness gate instead); the
+# command must not start with a VAR=value assignment, and must hold none of the
+# shell metacharacters $( ` | ; & < > or a newline. Wrappers such as env, nice,
+# timeout, caffeinate, sudo, command and exec are not known harnesses, so a
+# wrapped command never qualifies.
+raw_launch_takes_brief() {
+  local cmd=$1 harness=$2
+  case "$harness" in
+  claude | codex | opencode | pi | pi-signed | omp | agy | grok | cursor | gemini | devin | polytoken | commandcode | cortex | muse) : ;;
+  *) return 1 ;;
+  esac
+  case "${cmd%% *}" in *=*) return 1 ;; esac
+  # shellcheck disable=SC2016 # literal $( and backtick are the patterns
+  case "$cmd" in
+  *'$('* | *'`'* | *'|'* | *';'* | *'&'* | *'<'* | *'>'* | *$'\n'*) return 1 ;;
+  esac
+  return 0
 }
 
 case "$ARG3" in
@@ -2953,24 +2952,22 @@ case "$ARG3" in
   # prompt and get their brief pointer after their readiness gate, claude takes
   # the record-backed doorbell its named template uses, and a command that
   # already names __BRIEF__ or __BRIEFDOORBELL__ is left alone.
-  case "$HARNESS" in
-  kimi | rovo) : ;;
+  case "$LAUNCH" in
+  *__BRIEF__* | *__BRIEFDOORBELL__*) : ;;
   *)
-    # shellcheck disable=SC2016 # literal text, expanded by the launched shell
-    case "$LAUNCH" in
-    *__BRIEF__* | *__BRIEFDOORBELL__*) : ;;
-    *)
-      if raw_launch_is_compound "$LAUNCH"; then
-        # Appending after a compound command would hand the brief to whatever
-        # step comes last, not to the agent, so it launches unchanged.
-        echo "warning: raw launch command is compound (it contains an unquoted ;, |, &, && or newline), so the launch brief was not appended; put __BRIEF__ where the agent takes its prompt, for example: my-agent --flag \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"; cleanup" >&2
-      elif [ "$HARNESS" = claude ]; then
+    if [ "$HARNESS" = kimi ] || [ "$HARNESS" = rovo ]; then
+      : # delivers its brief pointer after the readiness gate
+    elif raw_launch_takes_brief "$LAUNCH" "$HARNESS"; then
+      if [ "$HARNESS" = claude ]; then
         LAUNCH="$LAUNCH __BRIEFDOORBELL__"
       else
+        # shellcheck disable=SC2016 # literal text, expanded by the launched shell
         LAUNCH=$LAUNCH' "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
-      ;;
-    esac
+    else
+      # shellcheck disable=SC2016 # literal text shown to the operator
+      echo "warning: raw launch command is not a plain single command for a known harness (it is compound, substituted, wrapped, or starts with an unknown program), so the launch brief was not appended; put __BRIEF__ where the agent takes its prompt, for example: my-agent --flag \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"" >&2
+    fi
     ;;
   esac
   ;;
