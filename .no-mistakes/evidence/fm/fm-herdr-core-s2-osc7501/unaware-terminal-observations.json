@@ -1,0 +1,13 @@
+{
+  "terminal": "real tmux, private worktree socket, 120x40",
+  "query_count": 2,
+  "scenarios": [
+    "unanswered capability query",
+    "interrupted capability query"
+  ],
+  "raw_output": "b'\\x1b]7501;?\\x1b\\\\READY-AFTER-PROBE\\r\\n\\x1b]7501;?\\x1b\\\\'",
+  "tty_mode_before": "gfmt1:cflag=4b00:iflag=6b02:lflag=5cb:oflag=3:discard=f:dsusp=19:eof=4:eol=ff:eol2=ff:erase=7f:intr=3:kill=15:lnext=16:min=1:quit=1c:reprint=12:start=11:status=14:stop=13:susp=1a:time=0:werase=17:ispeed=9600:ospeed=9600",
+  "tty_mode_after": "gfmt1:cflag=4b00:iflag=6b02:lflag=200005cb:oflag=3:discard=f:dsusp=19:eof=4:eol=ff:eol2=ff:erase=7f:intr=3:kill=15:lnext=16:min=1:quit=1c:reprint=12:start=11:status=14:stop=13:susp=1a:time=0:werase=17:ispeed=9600:ospeed=9600",
+  "tty_mode_after_interrupt": "gfmt1:cflag=4b00:iflag=6b02:lflag=200005cb:oflag=3:discard=f:dsusp=19:eof=4:eol=ff:eol2=ff:erase=7f:intr=3:kill=15:lnext=16:min=1:quit=1c:reprint=12:start=11:status=14:stop=13:susp=1a:time=0:werase=17:ispeed=9600:ospeed=9600",
+  "watchers": 0
+}

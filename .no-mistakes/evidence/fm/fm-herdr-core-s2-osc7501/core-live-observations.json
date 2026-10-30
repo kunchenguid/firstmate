@@ -1,0 +1,520 @@
+[
+  {
+    "check": "verified runtime",
+    "observed": {
+      "core": {
+        "id": "67892f86eb54166783099753431a94f4",
+        "name": "kuns-mac-mini"
+      },
+      "finished": 6,
+      "holder": null,
+      "holders": [],
+      "installed_by": null,
+      "live": 0,
+      "pid": 54198,
+      "uptime_ms": 55,
+      "version": "0.1.15"
+    }
+  },
+  {
+    "check": "terminal states",
+    "observed": {
+      "address": "t7",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "t7 -> working",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "working",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 0
+    }
+  },
+  {
+    "check": "t7 -> idle",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "idle",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "t7 -> blocked question",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "kind": "question",
+        "msg": "Needs your decision: ship it? ",
+        "state": "blocked",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "t7 -> idle",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "idle",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "t7 -> blocked permission",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "kind": "permission",
+        "msg": "Blocked: allow access to fixture ",
+        "state": "blocked",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "t7 -> idle",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "idle",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "t7 -> blocked auth",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "kind": "auth",
+        "msg": "Blocked: API key required ",
+        "state": "blocked",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "t7 -> idle",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "idle",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "t7 -> done",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "msg": "PR ready: PR https://example.test/pr/1",
+        "state": "done",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "t7 -> working",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "working",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "t7 -> done",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "msg": "PR ready: PR https://example.test/pr/1",
+        "state": "done",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 2
+    }
+  },
+  {
+    "check": "t7 -> error",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "msg": "Failed: fixture failure",
+        "state": "error",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 2
+    }
+  },
+  {
+    "check": "t7 -> idle",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "idle",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 2
+    }
+  },
+  {
+    "check": "t7 -> working",
+    "observed": {
+      "address": "t7",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "working",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 2
+    }
+  },
+  {
+    "check": "terminal pane-a",
+    "observed": {
+      "address": "t8",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "terminal pane-b",
+    "observed": {
+      "address": "t9",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "t8 -> working",
+    "observed": {
+      "address": "t8",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "working",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 0
+    }
+  },
+  {
+    "check": "t9 -> working",
+    "observed": {
+      "address": "t9",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "working",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 0
+    }
+  },
+  {
+    "check": "t8 -> idle",
+    "observed": {
+      "address": "t8",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "idle",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "t9 -> working",
+    "observed": {
+      "address": "t9",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "working",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 0
+    }
+  },
+  {
+    "check": "independent terminal cleanup",
+    "observed": {
+      "pane_a_watchers": 0,
+      "pane_b_watchers": 1
+    }
+  },
+  {
+    "check": "terminal query",
+    "observed": {
+      "address": "t10",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "t10 -> working",
+    "observed": {
+      "address": "t10",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "working",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 0
+    }
+  },
+  {
+    "check": "terminal off",
+    "observed": {
+      "address": "t11",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "off refuses reporter",
+    "observed": {
+      "reported": false,
+      "status": null,
+      "watchers": 0
+    }
+  },
+  {
+    "check": "terminal invalid",
+    "observed": {
+      "address": "t12",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "invalid refuses reporter",
+    "observed": {
+      "reported": false,
+      "status": null,
+      "watchers": 0
+    }
+  },
+  {
+    "check": "terminal legacy",
+    "observed": {
+      "address": "t13",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "legacy refuses reporter",
+    "observed": {
+      "reported": false,
+      "status": null,
+      "watchers": 0
+    }
+  },
+  {
+    "check": "terminal native",
+    "observed": {
+      "address": "t14",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "installed Claude native gate",
+    "observed": {
+      "version": "2.1.314 (Claude Code)",
+      "reported": false,
+      "watchers": 0
+    }
+  },
+  {
+    "check": "terminal unknown",
+    "observed": {
+      "address": "t15",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "unknown activity does not invent state",
+    "observed": {
+      "reported": false,
+      "status": null
+    }
+  },
+  {
+    "check": "terminal final-done",
+    "observed": {
+      "address": "t16",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "t16 -> working",
+    "observed": {
+      "address": "t16",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "working",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 0
+    }
+  },
+  {
+    "check": "t16 -> done",
+    "observed": {
+      "address": "t16",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "msg": "Done: retained result",
+        "state": "done",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "terminal final-error",
+    "observed": {
+      "address": "t17",
+      "agent": "env",
+      "cwd": "/Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M6766N8H82Z1ZJ3TPP8196PX",
+      "state": "live",
+      "turn": 0
+    }
+  },
+  {
+    "check": "t17 -> working",
+    "observed": {
+      "address": "t17",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "state": "working",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 0
+    }
+  },
+  {
+    "check": "t17 -> error",
+    "observed": {
+      "address": "t17",
+      "state": "live",
+      "status": {
+        "app": "firstmate-opencode",
+        "msg": "Failed: retained result",
+        "state": "error",
+        "title": "fm-task"
+      },
+      "reported": true,
+      "turn": 1
+    }
+  },
+  {
+    "check": "RESULT",
+    "observed": {
+      "pass": true
+    }
+  },
+  {
+    "check": "private core teardown",
+    "observed": {
+      "stopped": true
+    }
+  }
+]
