@@ -4120,12 +4120,12 @@ EOF
     fi
     # Parked-on-review lanes, close detection, opt-in automatic parking, and
     # the outcomes of detached park, relaunch, and cleanup actions
-    # (bin/fm-park.sh owns all of them and bounds the whole tick).
+    # (bin/fm-park.sh owns all of them, bounds the whole tick, and records its
+    # wake before printing it, so the watcher only rings).
     park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
     if [ -n "$park_out" ]; then
       reason="check: park-on-review: $(printf '%s' "$park_out" | paste -sd ';' - | sed 's/;/; /g')"
-      fm_wake_append check park-on-review "$reason" || exit 1
       touch "$STATE/.last-check"
       wake "$reason"
     fi
