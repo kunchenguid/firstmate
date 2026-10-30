@@ -1440,9 +1440,11 @@ test_degraded_wake_survives_an_unsaved_marker() {
   # the poll reported a new degraded transition.
   mkdir "$state/task-a.pr-poll-degraded"
   rm -f "$state/.last-check"
+  set +e
+  rc=0
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
-    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
-  rc=$?
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err" || rc=$?
+  set -e
   [ "$rc" -ne 0 ] || fail "watcher reported success although the degraded marker could not be saved"
   [ "$(grep -c 'degraded after ready: degraded pipeline=941' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
     || fail "a degraded transition whose marker could not be saved was not queued as a wake"
