@@ -944,3 +944,84 @@ expect_code 0 "$DOCTOR_RC" "a host running a non-claude harness was blocked on c
 assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "claude onboarding was checked when claude was not installed"
 pass "claude onboarding does not gate a host whose harness is not claude"
 
+# --- onboarding is checked against the account config/claude-account selects --
+
+# A home can pin another Claude account; fm-spawn.sh launches that account with
+# CLAUDE_CONFIG_DIR=<root>, so onboarding must be read from <root>/.claude.json,
+# not the default $HOME store. The home pin lives in this home's config dir,
+# which the doctor sees as $FM_HOME/config.
+
+# The selected account is onboarded while the default is not: the host is ready,
+# because the launch reads the selected account's store.
+new_case Darwin with-herdr gui
+SELECTED="$CASE_DIR/selected"
+mkdir -p "$SELECTED" "$CASE_PROJECT_HOME/config"
+printf '%s\n' "$SELECTED" > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": true}\n' > "$SELECTED/.claude.json"
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a selected onboarded account was not reported ready while the default was not onboarded"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=ok:' "the selected account's completed onboarding was not recognized"
+assert_contains "$DOCTOR_OUT" "config/claude-account ($SELECTED)" "the ready line did not name the selected account"
+pass "the doctor checks the account config/claude-account selects, not the default store"
+
+# The selected account is not onboarded while the default is: the host stalls on
+# launch, so this is a human gap naming the selected account and its command.
+new_case Darwin with-herdr gui
+SELECTED="$CASE_DIR/selected"
+mkdir -p "$SELECTED" "$CASE_PROJECT_HOME/config"
+printf '%s\n' "$SELECTED" > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": false}\n' > "$SELECTED/.claude.json"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "an un-onboarded selected account was reported ready because the default was onboarded"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the selected account's incomplete onboarding was not tagged human"
+assert_contains "$DOCTOR_OUT" "config/claude-account ($SELECTED)" "the onboarding gap did not name the selected account"
+assert_contains "$DOCTOR_OUT" "action: claude-onboarding:" "the onboarding gap came with no operator action"
+assert_contains "$DOCTOR_OUT" "CLAUDE_CONFIG_DIR=$SELECTED claude" "the onboarding action did not give the command for the selected account"
+assert_not_contains "$DOCTOR_OUT" 'fix claude-onboarding=applied' "--fix answered onboarding for the selected account"
+pass "an un-onboarded selected account is a human gap even when the default account is onboarded"
+
+# No account pinned: the doctor keeps today's default-store behavior and the
+# plain 'claude' operator step.
+new_case Darwin with-herdr gui
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "an un-onboarded default account with no pin was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the default account's incomplete onboarding was not tagged human"
+assert_contains "$DOCTOR_OUT" "run 'claude'" "the default onboarding action changed when no account was pinned"
+assert_not_contains "$DOCTOR_OUT" 'config/claude-account (' "an unpinned host named a pinned account in the onboarding report"
+pass "with no account pinned the doctor keeps the default-store onboarding behavior"
+
+# Resolving and checking the selected account writes to no config.
+new_case Darwin with-herdr gui
+SELECTED="$CASE_DIR/selected"
+mkdir -p "$SELECTED" "$CASE_PROJECT_HOME/config"
+printf '%s\n' "$SELECTED" > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": false}\n' > "$SELECTED/.claude.json"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+PIN_BEFORE=$(cat "$CASE_PROJECT_HOME/config/claude-account")
+SELECTED_BEFORE=$(cat "$SELECTED/.claude.json")
+DEFAULT_BEFORE=$(cat "$CASE_HOME/.claude.json")
+doctor --fix
+[ "$(cat "$CASE_PROJECT_HOME/config/claude-account")" = "$PIN_BEFORE" ] \
+  || fail "the doctor rewrote config/claude-account"
+[ "$(cat "$SELECTED/.claude.json")" = "$SELECTED_BEFORE" ] \
+  || fail "the doctor rewrote the selected account's onboarding config"
+[ "$(cat "$CASE_HOME/.claude.json")" = "$DEFAULT_BEFORE" ] \
+  || fail "the doctor rewrote the default account's onboarding config"
+assert_no_dangerous_calls "the selected-account onboarding check reached for auto-login, FileVault, or the keychain"
+pass "resolving and checking the selected account writes to no config"
+
+# A pin naming a missing directory cannot be resolved; the real launch refuses
+# it, so the doctor reports a human gap rather than silently reading the default.
+new_case Darwin with-herdr gui
+mkdir -p "$CASE_PROJECT_HOME/config"
+printf '%s\n' "$CASE_DIR/does-not-exist" > "$CASE_PROJECT_HOME/config/claude-account"
+doctor
+expect_code 1 "$DOCTOR_RC" "a pin naming a missing directory was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "an unresolvable account pin was not tagged human"
+assert_contains "$DOCTOR_OUT" 'config/claude-account' "the unresolvable-pin gap did not name the pin"
+assert_contains "$DOCTOR_OUT" 'action: claude-onboarding:' "the unresolvable-pin gap came with no operator action"
+pass "a config/claude-account pin that cannot be resolved is a human gap, not a silent default-store check"
+

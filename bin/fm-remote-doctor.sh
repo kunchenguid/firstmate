@@ -67,6 +67,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-remote-herdr-owner-lib.sh
 . "$SCRIPT_DIR/fm-remote-herdr-owner-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
 HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi omp)
 OPTIONAL_TOOLS=(tmux no-mistakes gh)
@@ -699,22 +701,62 @@ check_herdr_server() {
 }
 
 check_claude_onboarding() {
-  local resolved config completed
+  local resolved config completed selection root pin_account account_err reason
   resolved=$(command -v claude 2>/dev/null || true)
   if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
     record claude-onboarding "skip: claude is not installed on this host, so its first-run onboarding does not apply"
     return 0
   fi
-  config="${CLAUDE_CONFIG_DIR:-${HOME:-}}/.claude.json"
-  if command -v jq >/dev/null 2>&1 && [ -f "$config" ]; then
-    completed=$(jq -r '.hasCompletedOnboarding // false' "$config" 2>/dev/null || true)
-    if [ "$completed" = true ]; then
-      record claude-onboarding "ok: Claude Code first-run onboarding is complete"
+  # Check the account the launch selects, not just the default store: a remote
+  # home can pin another Claude account through config/claude-account, and
+  # bin/fm-spawn.sh launches Claude with CLAUDE_CONFIG_DIR set to that account's
+  # root. Resolve it through the same read-only helper the launch uses, so the
+  # check and the launch agree on which .claude.json is authoritative. An absent
+  # pin, or the ordinary account, leaves root empty and falls back to today's
+  # default store.
+  root=
+  pin_account=
+  if [ -n "${FM_HOME:-}" ]; then
+    account_err=$(mktemp "${TMPDIR:-/tmp}/fm-doctor-account.XXXXXX" 2>/dev/null) || account_err=/dev/null
+    if selection=$(fm_worker_account_resolve claude "$FM_HOME/config" "config/claude-account" 2>"$account_err"); then
+      # declared<TAB>root<TAB>providers; root is empty for the ordinary account.
+      if [ -n "$selection" ]; then
+        root=${selection#*$'\t'}
+        root=${root%%$'\t'*}
+        [ -z "$root" ] || pin_account="config/claude-account ($root)"
+      fi
+      [ "$account_err" = /dev/null ] || rm -f "$account_err"
+    else
+      # The pin is malformed, or names a directory that is missing or
+      # unreadable. The real launch refuses the same way, so this host is not
+      # ready rather than quietly reading the default store.
+      reason=$(sed -n '1s/^error: //p' "$account_err" 2>/dev/null || true)
+      [ "$account_err" = /dev/null ] || rm -f "$account_err"
+      [ -n "$reason" ] || reason="config/claude-account could not be resolved"
+      record claude-onboarding "human: the Claude account pinned by config/claude-account cannot be resolved, so a launch would refuse before onboarding: $reason" \
+        "fix config/claude-account in this home so it names 'ordinary' or a readable, signed-in account directory, then rerun this command"
       return 0
     fi
   fi
-  record claude-onboarding "human: Claude Code's first-run onboarding is not complete on this host, so a launch stalls on the theme picker before it reads its instructions" \
-    "run 'claude' once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
+  config="${root:-${CLAUDE_CONFIG_DIR:-${HOME:-}}}/.claude.json"
+  if command -v jq >/dev/null 2>&1 && [ -f "$config" ]; then
+    completed=$(jq -r '.hasCompletedOnboarding // false' "$config" 2>/dev/null || true)
+    if [ "$completed" = true ]; then
+      if [ -n "$pin_account" ]; then
+        record claude-onboarding "ok: Claude Code first-run onboarding is complete for the account selected by $pin_account"
+      else
+        record claude-onboarding "ok: Claude Code first-run onboarding is complete"
+      fi
+      return 0
+    fi
+  fi
+  if [ -n "$root" ]; then
+    record claude-onboarding "human: Claude Code's first-run onboarding is not complete for the account selected by $pin_account, so a launch stalls on the theme picker before it reads its instructions" \
+      "run 'CLAUDE_CONFIG_DIR=$root claude' once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
+  else
+    record claude-onboarding "human: Claude Code's first-run onboarding is not complete on this host, so a launch stalls on the theme picker before it reads its instructions" \
+      "run 'claude' once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
+  fi
 }
 
 check_entrypoint_link() {
