@@ -2815,6 +2815,9 @@ validate_firstmate_home_for_removal() {
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
+  # A retirement interrupted while it held the identity files aside would leave
+  # this retry looking at an unmarked directory; put them back first.
+  recover_firstmate_home_identity "$abs_home_path" "$label" || return 1
   if [ ! -f "$abs_home_path/$SUB_HOME_MARKER" ]; then
     echo "REFUSED: unsafe $label removal target $home is not a seeded secondmate home" >&2
     return 1
@@ -3017,20 +3020,30 @@ restore_firstmate_home_process_events() {
 # is the one moment that knows the home has stopped being a home, so clear the
 # identity here.
 #
-# Stash rather than delete outright: a failed return preserves the home, and a
-# preserved home must keep its identity.
+# Stash rather than delete outright: a failed or interrupted return preserves the
+# home, and a preserved home must keep its identity. The stash directory is named
+# after the home, not a random mktemp name, so a retry after a killed teardown
+# finds it again: validate_firstmate_home_for_removal restores it before it
+# decides whether the home is still a seeded secondmate home.
 FM_HOME_IDENTITY_FILES=".fm-secondmate-home .fm-secondmate-parent"
 
-stash_firstmate_home_identity() {
+firstmate_home_identity_backup_path() {  # <abs-home>
+  local home=$1 key
+  key=$(printf '%s' "$home" | cksum | awk '{print $1}')
+  printf '%s/.fm-identity-restore.%s.%s\n' "${home%/*}" "${home##*/}" "$key"
+}
+
+stash_firstmate_home_identity() {  # <abs-home> <label>
   local home=$1 label=$2 backup="" name path
   for name in $FM_HOME_IDENTITY_FILES; do
     path="$home/$name"
     [ -e "$path" ] || [ -L "$path" ] || continue
     if [ -z "$backup" ]; then
-      backup=$(umask 077; mktemp -d "${home%/*}/.fm-identity-restore.XXXXXX") || {
-        echo "REFUSED: cannot stage recoverable home-identity files for $label $home" >&2
+      backup=$(firstmate_home_identity_backup_path "$home")
+      if [ -e "$backup" ] || [ -L "$backup" ] || ! (umask 077; mkdir -- "$backup"); then
+        echo "REFUSED: cannot stage recoverable home-identity files for $label $home at $backup" >&2
         return 1
-      }
+      fi
     fi
     if ! mv -- "$path" "$backup/$name"; then
       restore_firstmate_home_identity "$home" "$label" "$backup" || true
@@ -3041,7 +3054,7 @@ stash_firstmate_home_identity() {
   printf '%s\n' "$backup"
 }
 
-restore_firstmate_home_identity() {
+restore_firstmate_home_identity() {  # <abs-home> <label> <backup>
   local home=$1 label=$2 backup=$3 name path
   [ -n "$backup" ] || return 0
   [ -d "$backup" ] && [ ! -L "$backup" ] || {
@@ -3051,12 +3064,23 @@ restore_firstmate_home_identity() {
   for name in $FM_HOME_IDENTITY_FILES; do
     path="$backup/$name"
     [ -e "$path" ] || [ -L "$path" ] || continue
-    if ! mv -- "$path" "$home/$name"; then
+    if [ -e "$home/$name" ] || [ -L "$home/$name" ] || ! mv -- "$path" "$home/$name"; then
       echo "error: home-identity restoration failed for $label $home; recover $name from $backup" >&2
       return 1
     fi
   done
   rm -rf -- "$backup"
+}
+
+# Put back identity files an earlier, interrupted retirement staged aside. A
+# backup that exists for this home means its lease was never confirmed returned,
+# because a confirmed return deletes the backup.
+recover_firstmate_home_identity() {  # <abs-home> <label>
+  local home=$1 label=$2 backup
+  backup=$(firstmate_home_identity_backup_path "$home")
+  [ -e "$backup" ] || [ -L "$backup" ] || return 0
+  restore_firstmate_home_identity "$home" "$label" "$backup" || return 1
+  echo "teardown: restored the interrupted retirement's home-identity files for $label $home" >&2
 }
 
 cleanup_firstmate_home_process_events() {
