@@ -477,6 +477,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/codex-checkpoint.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/cursor.md",
       "audience": "agent-runtime"
     },

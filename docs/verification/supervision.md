@@ -905,3 +905,48 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Codex native model-free park (2026-10-19)
+
+Verified on macOS arm64 with `codex-cli 0.163.0` in an isolated named Herdr lab, using the tracked project hooks and an embedded native TUI:
+
+```sh
+codex --no-daemon --no-alt-screen --dangerously-bypass-hook-trust \
+  -a never -s danger-full-access -C "$FM_HOME" '<isolated supervision smoke prompt>'
+codex queue --thread "$SESSION_ID" --message '<real watcher wake>'
+```
+
+The lab supplied a private `CODEX_HOME`, a disposable marked `FM_HOME`, and guarded Herdr lifecycle operations.
+The native SessionStart payload's transcript identified `originator=codex-tui`; the session registered before its first model turn.
+A synchronous Stop probe parked without tokens but delayed typed input until Escape.
+An asynchronous Stop probe allowed immediate input, but its exit status alone did not wake an idle model.
+Native `codex queue` delivered to the embedded TUI with no daemon running, providing the wake path used by `bin/fm-codex-stop-park.sh`.
+
+Provider calls were counted as unique `token_usage_record.payload.response_id` values in the native session JSONL, using half-open UTC windows and excluding startup.
+
+| Protocol | UTC idle window | Duration | Provider calls | Input tokens | Cached input tokens |
+|---|---|---:|---:|---:|---:|
+| Separate 180-second foreground checkpoints | 01:04:00 to 01:14:00 | 600 seconds | 25 | 419,305 | 406,656 |
+| Native asynchronous park | 01:36:30 to 01:46:30 | 600 seconds | 0 | 0 | 0 |
+
+Both windows were on 2026-10-19 with `gpt-6.1-sol`, low effort.
+The after window contained no task starts, and the same watcher survived 31 deliberately short host boundaries over the complete parked interval.
+Those boundaries were logged as `quiet-boundary` and retained the recovery generation without producing model input.
+The smaller lab context means the token totals are not a forecast of production fleet savings.
+
+An authenticated custom check then produced `LAB_REAL_EVENT`, which reached the model through the native queue.
+The model drained first and executed the exact printed `--ack-through 1 --recovery-generation <generation>` command; the queue was empty afterward and a replacement watcher was live.
+A SIGKILL of the lab's identity-verified park removed its old arm/host/watcher subtree; on the next user turn the model received a recovery notice, drained and acknowledged the recovery generation, and restored supervision.
+A healthy-park user message was processed without Escape or waiting for a checkpoint.
+Ordinary `/quit` also removed the park, host, arm and watcher: the watcher's owner-identity self-expiry covers native teardown that kills the hook and its timeout wrapper together.
+
+The synchronous guard waits up to fifty 0.2-second polls, about 10 seconds, for the asynchronous hook to publish its live claim before latching the session to foreground fallback.
+The retained successful native macOS arm64 Codex CLI 0.163.0 lab sessions recorded no fallback latch under the earlier grace of about 2 seconds (ten polls); 10 seconds is 5x that observation bound and the approved ceiling.
+This is derived from those no-latch observations, not from measured per-Stop minimum, median or maximum values or a cold-shell latency distribution.
+The retained native rollouts carry no paired hook-start and claim-publication timestamps, so no such measurement is claimed and the wait is not a strict wall-clock guarantee.
+
+The native mode is selected only in a home that opts in with `config/codex-stop-park`, for the verified CLI version and a registered TUI session owning this home's lock.
+Unverified sessions retain the foreground protocol, whose existing live guard remains `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh`.
+The native proof above was a real adapter smoke; it did not add a test case or modify the foreground live guard.
+`tests/fm-codex-stop-park.test.sh` separately covers the opt-in and version gates, single-flight claim, fallback latch, owner-gone watcher exit and retained quiet boundary against a fake `codex`.
+[The Codex protocol](../supervision-protocols/codex.md) owns operating instructions; script headers own registration, failure fallback and process ownership.

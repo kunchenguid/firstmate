@@ -317,6 +317,7 @@ family_for_basename() {
     fm-mail.test.sh|fm-mail-check.test.sh|\
     fm-turnend-foreign-owner-arm-fix.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
+    fm-codex-stop-park.test.sh|\
     fm-watch-inbox-meta.test.sh|fm-watch-open-decisions.test.sh|\
     fm-watch-triage.test.sh|fm-watch-triage-pause.test.sh|\
     fm-watch-triage-wedge-defer.test.sh|fm-task-inbox.test.sh|\
@@ -766,6 +767,7 @@ tests/fm-claude-trust.test.sh 12010
 tests/fm-cmux-claude-composer-live-e2e.test.sh 77
 tests/fm-codex-continuity-live-e2e.test.sh 108
 tests/fm-codex-hook-layer-live-e2e.test.sh 108
+tests/fm-codex-stop-park.test.sh 35000
 tests/fm-commandcode-harness.test.sh 8182
 tests/fm-commandcode-signals-live-e2e.test.sh 49
 tests/fm-composer-codex-idle-live-e2e.test.sh 77

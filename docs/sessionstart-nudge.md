@@ -26,10 +26,10 @@ The tier is a property of the harness surface, not of the home.
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor, Antigravity (agy) |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, verified native Codex TUI, Pi / pi-signed, omp, Cursor, Antigravity (agy) |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
-Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
+Codex's interactive TUI has verified session-open delivery only on the native version selected by `bin/fm-codex-stop-park.sh`; its compaction and re-emit surfaces remain unverified.
 
 ### Tier by harness
 
@@ -37,7 +37,7 @@ Codex's interactive TUI has no tracked session-open, compaction, or re-emit chan
 | --- | --- | --- |
 | Claude | Run | [Claude](#claude) |
 | Codex exec | Run | [Codex exec](#codex-exec) |
-| Codex interactive TUI | Uncovered | [Codex interactive TUI](#codex-interactive-tui) |
+| Codex interactive TUI | Run on the verified native version; otherwise uncovered | [Codex interactive TUI](#codex-interactive-tui) |
 | Pi / pi-signed | Run | [Pi and pi-signed](#pi-and-pi-signed) |
 | OpenCode | Nudge | [OpenCode](#opencode) |
 | Grok | Nudge | [Grok](#grok) |
@@ -257,10 +257,10 @@ Native stdout context injection is supported under `codex exec`.
 
 ### Codex interactive TUI
 
-The Codex interactive TUI is uncovered and has no tracked transport.
-Codex 0.146.0 does not fire the tracked project `SessionStart` hook in its interactive TUI.
-Firstmate ships no global hook and has no tracked compaction or re-emit channel for it.
-Firstmate does not claim instruction-refresh delivery for this surface.
+The verified native version fires the tracked project `SessionStart` hook and delivers the ordered digest before the first model call.
+The transport delegates through `bin/fm-codex-stop-park.sh --session-start`, whose [opt-in](configuration.md#codex-native-stop-park-configcodex-stop-park), version, and native-session receipt select the [Codex supervision protocol](supervision-protocols/codex.md).
+Earlier versions where project hooks do not fire retain the uncovered behavior and manual session start.
+Firstmate ships no global hook and does not claim compaction, re-emit, or instruction-refresh delivery for this surface.
 
 ### Pi and pi-signed
 
@@ -387,7 +387,7 @@ So it cannot inject a re-emit digest.
 Delivering one needs its own design and is deliberately deferred to a follow-up.
 A Cursor primary does not re-emit its digest after a compaction.
 
-Cursor's compaction surface is uncovered in the same sense as [Codex's interactive TUI](#codex-interactive-tui).
+Cursor's compaction surface is uncovered in the same sense as compaction in [Codex's interactive TUI](#codex-interactive-tui).
 Firstmate registers nothing for `preCompact`.
 So a compacted Cursor session keeps whatever context survived rather than receiving a fresh digest.
 
