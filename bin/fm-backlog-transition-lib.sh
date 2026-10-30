@@ -517,7 +517,7 @@ fm_backlog_start() {  # <data-dir> <id>
 }
 
 # tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull request
-# and refuses anything else, so a Gerrit change or GitLab merge request URL is
+# and refuses anything else, so a Gerrit change, GitLab merge request, or Bitbucket pull request URL is
 # recorded on the row as a note instead. Prints the note's label for such a URL
 # and fails for one tasks-axi accepts. The subshell keeps the parse from
 # overwriting a caller's FM_PR_* identity.
@@ -526,6 +526,7 @@ fm_backlog_pr_note_label() {  # <url>
     case "$FM_PR_PROVIDER" in
       gerrit) printf 'Gerrit change\n' ;;
       gitlab) printf 'GitLab merge request\n' ;;
+      bitbucket) printf 'Bitbucket pull request\n' ;;
       *) exit 1 ;;
     esac )
 }
