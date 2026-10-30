@@ -4,13 +4,14 @@
 # It emits exactly one merged line for a merged change. Bitbucket additionally
 # emits a terminal checks observation; bin/fm-pr-lib.sh owns its interpretation
 # and durable notification deduplication. Other states and every read error are
-# silent, so a failed lookup can never be read as a merge. The provider-tagged identity is data in the sidecar and is never
-# interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub, glab for
-# GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
-# needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
-# branches additionally need jq, which bin/fm-pr-check.sh refuses to arm those
-# watches without.
+# silent, so a failed lookup can never be read as a merge. The provider-tagged
+# identity is data in the sidecar and is never interpolated into this source:
+# these bytes are identical for every task.
+# Each provider is read through its own standard CLI, gh for GitHub, bkt for
+# Bitbucket Cloud, glab for GitLab, gerrit-axi for Gerrit, and tea for Forgejo,
+# so an upstream checkout needs no extra tooling to follow GitHub or GitLab.
+# The Bitbucket, Gerrit, and Forgejo branches additionally need jq, which
+# bin/fm-pr-check.sh refuses to arm those watches without.
 set -u
 LC_ALL=C
 export LC_ALL
