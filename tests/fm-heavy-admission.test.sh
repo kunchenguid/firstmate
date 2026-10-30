@@ -17,6 +17,7 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT") || fail "fakebin"
 cat > "$FAKEBIN/df" <<'SH'
 #!/usr/bin/env bash
 [ "${FAKE_DF_KB:-}" != fail ] || exit 1
+[ -z "${FAKE_DF_HANG_FILE:-}" ] || [ ! -e "$FAKE_DF_HANG_FILE" ] || /bin/sleep "${FAKE_DF_HANG_SECS:-30}"
 printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
 printf '/dev/fake 999999999 1 %s 1%% /\n' "${FAKE_DF_KB:-104857600}"
 SH
@@ -197,9 +198,12 @@ new_world
 FAKE_JOURNAL_STDERR='No journal files were opened due to insufficient permissions.' \
   expect_hold "reason=unreadable:journal" "journal with no readable files"
 new_world
-FAKE_JOURNAL_STDERR='Warning: journal file corrupted, task blocked for more than 120 seconds' run_admit check
-expect_code 0 "$RC" "a stderr notice is not a journal warning"
-assert_contains "$OUT" "warnings=0" "only journal entries are counted"
+FAKE_JOURNAL_STDERR='No journal files were found' \
+  expect_hold "reason=unreadable:journal" "journal with no files"
+new_world
+FAKE_JOURNAL_STDERR='Warning: journal file corrupted, task blocked for more than 120 seconds' \
+  expect_hold "reason=unreadable:journal" "journal reporting corrupted coverage"
+assert_contains "$OUT" "warnings=unknown" "journal diagnostics are not counted as warning entries"
 new_world
 NO_JOURNAL_PATH=$(fm_test_base_path_sans "$BASE_PATH" journalctl) || fail "path without journalctl"
 mkdir -p "$TMP_ROOT/no-journal-bin"
@@ -237,6 +241,12 @@ new_world window_secs=1 sample_interval_secs=1
 run_admit check
 expect_code 0 "$RC" "a steady window admits"
 assert_contains "$OUT" "samples=2" "a steady window takes every sample"
+new_world window_secs=1 sample_interval_secs=200
+LONG_INTERVAL_SLEEPS="$TMP_ROOT/long-interval-sleeps.log"
+: > "$LONG_INTERVAL_SLEEPS"
+FAKE_SLEEP_LOG="$LONG_INTERVAL_SLEEPS" run_admit check
+expect_code 0 "$RC" "a sampling interval longer than the window admits"
+[ "$(tr '\n' ' ' < "$LONG_INTERVAL_SLEEPS")" = "1 " ] || fail "the final sampling sleep stops at the window boundary"
 new_world window_secs=60
 WINDOW_SLEEPS="$TMP_ROOT/window-sleeps.log"
 : > "$WINDOW_SLEEPS"
@@ -271,12 +281,16 @@ expect_code 1 "$RC" "wait holds when no retry window fits"
 assert_contains "$OUT" "reason=trip:load1=30.00>=20" "wait holds with the last reason"
 assert_contains "$ERR" "still holding within the 70s timeout" "wait no-retry note"
 [ ! -s "$SLEEP_LOG" ] || fail "wait starts no retry whose window would outlive the timeout"
-new_world window_secs=1 sample_interval_secs=200; set_load 30.00 30.00
-: > "$SLEEP_LOG"
-FAKE_SLEEP_LOG="$SLEEP_LOG" run_admit wait --timeout 300
-expect_code 1 "$RC" "wait budgets the rounded sampling interval and bounded reads"
-assert_contains "$OUT" "reason=trip:load1=30.00>=20" "wait long-interval timeout evidence"
-[ ! -s "$SLEEP_LOG" ] || fail "wait starts no retry whose complete attempt would outlive the timeout"
+new_world sample_interval_secs=1; set_load 30.00 30.00
+HANG_FILE="$TMP_ROOT/hang-df"
+START=$(date +%s)
+FAKE_DF_HANG_FILE="$HANG_FILE" FAKE_SLEEP_HOOK="printf '%s\n' '3.00 4.00 1.00 1/100 123' > '$PROC/loadavg'; touch '$HANG_FILE'" \
+  run_admit wait --timeout 40
+ELAPSED=$(( $(date +%s) - START ))
+expect_code 1 "$RC" "wait stops a retry blocked in a host reading"
+assert_contains "$OUT" "decision=hold reason=unreadable:timeout" "blocked retry reports its timeout"
+assert_contains "$ERR" "attempt exceeded its 15s ceiling" "blocked retry names the attempt ceiling"
+[ "$ELAPSED" -le 20 ] || fail "blocked retry exceeded its hard ceiling (${ELAPSED}s)"
 new_world window_secs=60; set_load 30.00 30.00
 : > "$SLEEP_LOG"
 FAKE_SLEEP_LOG="$SLEEP_LOG" FAKE_SLEEP_HOOK="printf '%s\n' '3.00 4.00 1.00 1/100 123' > '$PROC/loadavg'" \

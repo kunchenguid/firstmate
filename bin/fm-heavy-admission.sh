@@ -82,10 +82,10 @@
 # records an admission, so it consumes no ramp slot and launches nothing.
 # wait repeats check until it admits or --timeout seconds pass (default 540,
 # inside a ten-minute command limit), printing a line only when the reason
-# changes. It starts a retry only while its sampling sleeps, bounded journal
-# reads, ramp lock, and a margin for other readings still fit before the timeout,
-# so after its first attempt it never runs past --timeout; when no retry fits it
-# note with the last hold reason and exits 1.
+# changes. Each wait attempt has a hard window_secs plus 15-second ceiling, and
+# it starts a retry only while that complete attempt fits before the timeout, so
+# after its first attempt it never runs past --timeout; when no retry fits it
+# prints a stderr note with the last hold reason and exits 1.
 #
 # Environment: FM_HOME and FM_CONFIG_OVERRIDE resolve this home as the other
 # bin/ scripts do; FM_PROC_ROOT_OVERRIDE replaces /proc, mainly for tests.
@@ -273,9 +273,7 @@ journal_matches() {  # <since-epoch> <pattern> <journalctl selector...>
   err=$(cat "$errf" 2>/dev/null) || err=
   rm -f "$errf" 2>/dev/null
   [ "$rc" -eq 0 ] || return 1
-  case "$err" in
-    *"insufficient permissions"*|*"not seeing messages from other users and the system"*) return 1 ;;
-  esac
+  [ -z "$err" ] || return 1
   printf '%s\n' "$out" | grep -Ec "$pattern" || true
 }
 
@@ -402,13 +400,8 @@ record_admission() {
 }
 
 # --- decision -----------------------------------------------------------------
-emit() {  # <decision> <reason>
-  local line peak mem disk log
-  peak=${PEAK_GIB:-unknown}
-  mem=$R_MEM_KB; num_ok "$mem" && mem=$(kb_to_gib "$mem")
-  disk=$R_DISK_KB; num_ok "$disk" && disk=$(kb_to_gib "$disk")
-  line="heavy-admission: decision=$1 reason=$2 policy=$POLICY config=$CONFIG_FILE peak_gib=$peak samples=$SAMPLES load1=$R_LOAD1 load5=$R_LOAD5 mem_available_gib=$mem mem_psi_some_avg60=$R_MEM_PSI io_psi_full_avg60=$R_IO_PSI disk_free_gib=$disk warnings=$R_WARN dry_run=$DRY_RUN jest_max_workers=$(cfg jest_max_workers) playwright_workers=$(cfg playwright_workers) home=$FM_HOME ts=$(date +%s)"
-  printf '%s\n' "$line"
+record_evidence() {  # <line>
+  local line=$1 log
   [ "$POLICY" = on ] && [ -n "$ROOT_HOME" ] || return 0
   log="$ROOT_HOME/state/heavy-admission.log"
   { printf '%s\n' "$line" >> "$log"; } 2>/dev/null || return 0
@@ -416,6 +409,16 @@ emit() {  # <decision> <reason>
     { tail -n "$LOG_KEEP_LINES" "$log" > "$log.tmp.$$" && mv -f "$log.tmp.$$" "$log"; } 2>/dev/null || rm -f "$log.tmp.$$" 2>/dev/null
   fi
   return 0
+}
+
+emit() {  # <decision> <reason>
+  local line peak mem disk
+  peak=${PEAK_GIB:-unknown}
+  mem=$R_MEM_KB; num_ok "$mem" && mem=$(kb_to_gib "$mem")
+  disk=$R_DISK_KB; num_ok "$disk" && disk=$(kb_to_gib "$disk")
+  line="heavy-admission: decision=$1 reason=$2 policy=$POLICY config=$CONFIG_FILE peak_gib=$peak samples=$SAMPLES load1=$R_LOAD1 load5=$R_LOAD5 mem_available_gib=$mem mem_psi_some_avg60=$R_MEM_PSI io_psi_full_avg60=$R_IO_PSI disk_free_gib=$disk warnings=$R_WARN dry_run=$DRY_RUN jest_max_workers=$(cfg jest_max_workers) playwright_workers=$(cfg playwright_workers) home=$FM_HOME ts=$(date +%s)"
+  printf '%s\n' "$line"
+  [ "${FM_HEAVY_ATTEMPT_CHILD:-0}" = 1 ] || record_evidence "$line"
 }
 
 # Sets DECISION and REASON for one admission attempt.
@@ -435,17 +438,20 @@ decide() {
     DECISION=hold REASON=$RAMP_REASON
     return 1
   fi
-  # A window of W seconds sampled every I seconds is ceil(W / I) + 1 samples,
-  # the first now and the last at or after W.
-  remaining=$(( ($(cfg window_secs) + $(cfg sample_interval_secs) - 1) / $(cfg sample_interval_secs) ))
+  remaining=$(cfg window_secs)
   while :; do
     if ! take_sample; then
       DECISION=hold REASON=$S_REASONS
       return 1
     fi
     [ "$remaining" -gt 0 ] || break
-    remaining=$((remaining - 1))
-    sleep "$(cfg sample_interval_secs)"
+    if [ "$remaining" -lt "$(cfg sample_interval_secs)" ]; then
+      sleep "$remaining"
+      remaining=0
+    else
+      sleep "$(cfg sample_interval_secs)"
+      remaining=$((remaining - $(cfg sample_interval_secs)))
+    fi
   done
   if ! fm_lock_acquire_wait_bounded "$RAMP_LOCK" "$LOCK_TIMEOUT_SECS" >/dev/null 2>&1; then
     DECISION=hold REASON=unreadable:ramp-lock
@@ -474,17 +480,30 @@ fi
 
 # wait
 wait_deadline=$(( $(date +%s) + WAIT_TIMEOUT ))
-window_intervals=$(( ($(cfg window_secs) + $(cfg sample_interval_secs) - 1) / $(cfg sample_interval_secs) ))
-attempt_bound=$(( window_intervals * $(cfg sample_interval_secs) + (window_intervals + 1) * 2 * JOURNAL_TIMEOUT_SECS + LOCK_TIMEOUT_SECS + WAIT_ATTEMPT_MARGIN_SECS ))
-latest_start=$(( wait_deadline - attempt_bound ))
+attempt_ceiling=$(( $(cfg window_secs) + WAIT_ATTEMPT_MARGIN_SECS ))
+attempt_bound=$((attempt_ceiling - 1))
+attempt_args=(check)
+[ -z "$PEAK_GIB" ] || attempt_args+=(--peak-gib "$PEAK_GIB")
+[ "$DRY_RUN" = 0 ] || attempt_args+=(--dry-run)
 last_reason=
 while :; do
-  if decide; then
+  attempt_out=$(fm_run_timed "$attempt_bound" env FM_HEAVY_ATTEMPT_CHILD=1 "$0" "${attempt_args[@]}") && rc=0 || rc=$?
+  if fm_timed_out "$rc"; then
+    DECISION=hold REASON=unreadable:timeout
     emit "$DECISION" "$REASON"
+    echo "fm-heavy-admission: admission attempt exceeded its ${attempt_ceiling}s ceiling" >&2
+    exit 1
+  fi
+  DECISION=$(printf '%s\n' "$attempt_out" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^decision=/) { sub(/^decision=/, "", $i); print $i; exit } }')
+  REASON=$(printf '%s\n' "$attempt_out" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^reason=/) { sub(/^reason=/, "", $i); print $i; exit } }')
+  if [ "$rc" -eq 0 ] && [ "$DECISION" = admit ]; then
+    printf '%s\n' "$attempt_out"
+    record_evidence "$attempt_out"
     exit 0
   fi
   if [ "$REASON" != "$last_reason" ]; then
-    emit "$DECISION" "$REASON"
+    printf '%s\n' "$attempt_out"
+    record_evidence "$attempt_out"
     last_reason=$REASON
   fi
   now=$(date +%s)
@@ -496,9 +515,14 @@ while :; do
       ;;
   esac
   [ "$pause" -gt 0 ] || pause=1
-  if [ $((now + pause)) -gt "$latest_start" ]; then
+  if [ $((now + pause + attempt_ceiling)) -gt "$wait_deadline" ]; then
     echo "fm-heavy-admission: still holding within the ${WAIT_TIMEOUT}s timeout (reason=$REASON); queue the phase and wait again" >&2
     exit 1
   fi
   sleep "$pause"
+  now=$(date +%s)
+  if [ $((now + attempt_ceiling)) -gt "$wait_deadline" ]; then
+    echo "fm-heavy-admission: still holding within the ${WAIT_TIMEOUT}s timeout (reason=$REASON); queue the phase and wait again" >&2
+    exit 1
+  fi
 done
