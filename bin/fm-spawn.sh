@@ -8182,14 +8182,7 @@ fi
 if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_POOLED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
   spawn_startup_state=unverified
   if fm_control_backend_state_verified "$BACKEND"; then
-    spawn_startup_elapsed=0
-    while :; do
-      spawn_startup_state=$(fm_control_endpoint_state "$BACKEND" "$T" "$STATE/$ID.meta" "${SPAWN_SEAT_SERVER:-}" || printf unreadable)
-      [ "$spawn_startup_state" != alive ] || break
-      awk -v e="$spawn_startup_elapsed" -v t="${FM_CONTROL_LAUNCH_WAIT:-90}" 'BEGIN{exit !(e < t)}' || break
-      sleep "${FM_CONTROL_POLL:-0.5}"
-      spawn_startup_elapsed=$(awk -v e="$spawn_startup_elapsed" -v p="${FM_CONTROL_POLL:-0.5}" 'BEGIN{printf "%.3f", e + p}')
-    done
+    spawn_startup_state=$(fm_control_wait_for_startup "$BACKEND" "$T" "$STATE/$ID.meta" "${SPAWN_SEAT_SERVER:-}") || spawn_startup_state=unverified
   fi
   if [ "$spawn_startup_state" != alive ]; then
     echo "error: secondmate $ID was launched into $T but its startup was not confirmed (endpoint reads '$spawn_startup_state'); its fleet seat stays counted and its route is preserved for recovery" >&2

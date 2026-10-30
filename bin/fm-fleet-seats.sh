@@ -1081,7 +1081,7 @@ declared() {
   [ -n "$POLICY" ] || return 1
   [ -e "$POLICY" ] || [ -L "$POLICY" ] || return 1
   if [ -n "$DELIVERED" ] && [ "$POLICY" = "$DELIVERED" ] && [ -f "$DELIVERED" ] && [ ! -L "$DELIVERED" ] \
-    && cmp -s "$DELIVERED" <(printf '{"pools":[]}\n'); then
+    && jq -e 'type == "object" and .pools == []' "$DELIVERED" >/dev/null 2>&1; then
     return 1
   fi
   return 0

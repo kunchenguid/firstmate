@@ -495,6 +495,32 @@ fm_control_endpoint_state() {
   printf '%s' "$state"
 }
 
+fm_control_wait_for_startup() {
+  local lib_dir bound
+  lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  bound=$(awk -v t="${FM_CONTROL_LAUNCH_WAIT:-90}" 'BEGIN {
+    if (t !~ /^[0-9]+([.][0-9]+)?$/ || t <= 0) exit 1
+    printf "%d", int(t) + (t > int(t))
+  }') || return 1
+  (
+    . "$lib_dir/fm-timeout-lib.sh"
+    fm_run_timed "$bound" bash -c '
+      lib_dir=$1
+      shift
+      . "$lib_dir/fm-backend.sh"
+      . "$lib_dir/fm-control-lib.sh"
+      while :; do
+        state=$(fm_control_endpoint_state "$@") || state=unreadable
+        if [ "$state" = alive ]; then
+          printf alive
+          exit 0
+        fi
+        sleep "${FM_CONTROL_POLL:-0.5}"
+      done
+    ' _ "$lib_dir" "$@"
+  )
+}
+
 fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta] [server-identity]
   local backend=${1-} target=${2-} meta=${3-}
   fm_backend_source "$backend" \
