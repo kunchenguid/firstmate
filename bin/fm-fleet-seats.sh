@@ -1671,6 +1671,9 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
       $policy[0].pools | map({key: .name, value: ($given[.name] // 0)}) | from_entries
     ') || unavailable "cannot normalize serve allowances"
     lock_or_refuse "$LOCK"
+    registry_homes || unavailable "${REGISTRY_ERROR:-the secondmate registry cannot be read}"
+    [ ! -s "$TMPD/remote-ids" ] \
+      || unavailable "remote descendants have unaccounted occupancy; this home cannot serve fleet seats"
     SERVED=$LEDGER/served.json
     if [ -e "$SERVED" ] || [ -L "$SERVED" ]; then
       if [ ! -f "$SERVED" ] || [ -L "$SERVED" ] \
