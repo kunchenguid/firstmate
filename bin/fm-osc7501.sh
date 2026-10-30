@@ -16,9 +16,9 @@
 #   3. the terminal must be KNOWN 7501-aware by its environment
 #      (HC_TERMINAL_ID = herdr-core, REX_BLOCK/REX_SESSION = Rex,
 #      TERM_PROGRAM=ghostty) or answer the `OSC 7501 ; ?` capability query;
-#      a herdr pane (HERDR_ENV/HERDR_PANE_ID, or backend=herdr) is known to be
-#      unaware - old herdr does not implement the protocol - and a pane with
-#      no readable tty can never answer, so both exit before the query
+#      a backend=herdr pane is known to be unaware - old herdr does not
+#      implement the protocol - and a pane with no readable tty can never
+#      answer, so both exit before the query
 #   4. the harness must not already report natively: Claude Code >= 2.1.295
 #      and Pi >= 1.1.0 send their own records (herdr discussions #5073/#5106,
 #      verified 2026-10-30), so a firstmate record would only fight theirs
@@ -38,9 +38,11 @@
 #     busy -> working, idle -> idle, unknown/missing -> hold the last record
 #   unhandled <id>.inbox/*.msg with an idle-or-silent busy record reads as
 #     working "Steering received"
-#   a failed/done/paused declaration yields to activity stamped after it: a
-#   busy turn that began later reads as working, and a later unhandled inbox
-#   message as "Steering received"; an open decision or blocker always wins
+#   a failed/done/paused declaration yields to activity after it: once the
+#   watcher sees a turn start (busy after non-busy) stamped later, the
+#   declaration is retired and the busy record and inbox map as above, and a
+#   later unhandled inbox message reads as "Steering received"; an open
+#   decision or blocker always wins
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
@@ -189,12 +191,6 @@ osc_env_aware() {
   return 1
 }
 
-# known-unaware environment: a herdr 0.9.x pane, whose emulator never answers
-# the query (upstream PR #5172 still open).
-osc_env_unaware() {
-  [ -n "${HERDR_ENV:-}" ] || [ -n "${HERDR_PANE_ID:-}" ]
-}
-
 # capability query: write `OSC 7501 ; ?`, read the answer, and restore the
 # saved terminal mode. The tty is set VMIN=0 VTIME=FM_OSC7501_QUERY_DS
 # (deciseconds) so each raw read() returns at the first byte or on a bounded
@@ -314,6 +310,8 @@ osc_native() {
 # --- signal -> state ----------------------------------------------------------
 
 LIBS_LOADED=0
+OSC_TURN_AT=0
+OSC_LAST_BS=
 osc_load_libs() {
   [ "$LIBS_LOADED" = 1 ] && return 0
   # shellcheck source=bin/fm-classify-lib.sh
@@ -334,13 +332,20 @@ osc_inbox_since() {
 }
 
 # osc_plan sets W_STATE, W_KIND, W_MSG; returns 1 when nothing should be
-# emitted (no signal yet, or the busy record is unknown).
+# emitted (no signal yet, or the busy record is unknown). OSC_TURN_AT keeps the
+# start of the latest turn seen across polls.
 osc_plan() { # <task> <kind> <state>
   local task=$1 kind=$2 state_dir=$3 line verb note held rec bs bts since=0
   W_STATE=
   W_KIND=
   W_MSG=
   osc_load_libs || return 1
+  rec=$(tr ' ' '\n' <"$state_dir/$task.busy-state" 2>/dev/null)
+  bs=$(printf '%s\n' "$rec" | sed -n 's/^state=//p' | tail -1)
+  bts=$(printf '%s\n' "$rec" | sed -n 's/^ts=//p' | tail -1)
+  case "$bts" in '' | *[!0-9]*) bts=0 ;; esac
+  if [ "$bs" = busy ] && [ "$OSC_LAST_BS" != busy ]; then OSC_TURN_AT=$bts; fi
+  OSC_LAST_BS=$bs
   line=$(status_current_line "$state_dir/$task.status" "$kind" 2>/dev/null)
   verb=$(status_line_verb "$line" 2>/dev/null) || verb=
   note=$(status_line_note "$line" 2>/dev/null) || note=
@@ -378,12 +383,13 @@ osc_plan() { # <task> <kind> <state>
   esac
   if [ -n "$W_STATE" ]; then
     since=$(status_line_at_epoch "$line" 2>/dev/null) || return 0
+    if [ "$OSC_TURN_AT" -gt "$since" ]; then
+      W_STATE=
+      W_MSG=
+      since=0
+    fi
   fi
-  rec=$(tr ' ' '\n' <"$state_dir/$task.busy-state" 2>/dev/null)
-  bs=$(printf '%s\n' "$rec" | sed -n 's/^state=//p' | tail -1)
-  bts=$(printf '%s\n' "$rec" | sed -n 's/^ts=//p' | tail -1)
-  case "$bts" in '' | *[!0-9]*) bts=0 ;; esac
-  if [ "$bs" = busy ] && { [ "$since" = 0 ] || [ "$bts" -gt "$since" ]; }; then
+  if [ "$bs" = busy ] && [ "$since" = 0 ]; then
     W_STATE=working
     W_KIND=
     W_MSG=
@@ -549,7 +555,6 @@ osc_arm() { # --task --harness --backend --kind --state --config [--agent-bin]
   local dev=${FM_OSC7501_TTY:-/dev/tty}
   [ -w "$dev" ] || exit 0
   case "$backend" in herdr | t3code) exit 0 ;; esac
-  osc_env_unaware && exit 0
   # a natively reporting agent never sees a query or a competing record
   osc_native "$harness" "${agent_bin:-$harness}" "$state" && exit 0
   if ! osc_env_aware; then
