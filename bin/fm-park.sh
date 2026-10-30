@@ -81,7 +81,11 @@
 # --if-eligible it does nothing unless the lane is eligible for merge-time
 # cleanup (land_eligible below: parked, or config/auto-land present). With
 # --detach it starts the land as a detached action (below), prints "automatic
-# cleanup started", and returns at once. bin/fm-watch.sh runs
+# cleanup started", and returns at once; with --queue it only saves the request.
+# The request (state/<id>.review-park-land) records the merged PR as pr=, and
+# a land holding the lane lock drops a request whose pr= is not the lane's
+# current pr= without acting, so a stale request never tears down a lane that
+# has moved on to another PR. bin/fm-watch.sh runs
 # land --if-eligible --detach for every merged lane from its merged-poll path
 # after the merge outcome is recorded, also when bin/fm-pr-merge.sh recorded it
 # first, which makes the watcher the one owner of a merged lane's teardown.
@@ -93,7 +97,7 @@
 #   - pending merged-lane cleanup requests (state/<id>.review-park-land) are
 #     retried when the lane lock is free; outcome reports survive task teardown;
 #   - the outcome lines detached actions published since the last tick are
-#     printed and removed;
+#     collected with this tick's close lines;
 #   - each parked lane gets one forge read; a trigger relaunches it, a merge is
 #     left to the merge poll, and a close without merge is reported once;
 #   - with config/auto-land or config/park-on-review, each other idle ship lane
@@ -105,9 +109,12 @@
 # requested, a merge conflict, any unresolved review thread, or any new
 # comment (inline review-thread replies included), review or note created or
 # edited after the park (an approval with
-# no body is not a comment). A branch merely behind its base is not a trigger. It prints
-# one line per outcome and close, which the watcher turns into one wake; a
-# quiet tick prints nothing.
+# no body is not a comment). A branch merely behind its base is not a trigger. It
+# records its outcome and close lines as one check park-on-review wake before
+# it removes the reports they came from or marks a close as reported, then
+# prints them for the watcher to ring; when the wake cannot be recorded it
+# removes and prints nothing, so the next tick retries. A quiet tick prints
+# nothing.
 #
 # A lane action started by tick (park, resume) or by the merge poll (land) runs
 # detached, as fm-park.sh run, in its own process group with stdio closed, so it
@@ -640,7 +647,7 @@ land_eligible() {  # <id>
 
 cmd_land() {
   local id=${1-} eligible=0 detach=0 queue=0 pr out rc=0 why
-  task_id_ok "$id" || die "usage: fm-park.sh land <task-id> [--if-eligible] [--detach]" 2
+  task_id_ok "$id" || die "usage: fm-park.sh land <task-id> [--if-eligible] [--detach] [--queue]" 2
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -653,12 +660,9 @@ cmd_land() {
   done
   [ "$eligible" = 0 ] || land_eligible "$id" || return 0
   [ -f "$STATE/$id.meta" ] || return 0
-  if [ "$queue" = 1 ]; then
-    : > "$STATE/$id.review-park-land"
-    return 0
-  fi
-  if [ "$detach" = 1 ]; then
-    : > "$STATE/$id.review-park-land"
+  if [ "$queue" = 1 ] || [ "$detach" = 1 ]; then
+    printf 'pr=%s\n' "$(fm_meta_get "$STATE/$id.meta" pr)" > "$STATE/$id.review-park-land"
+    [ "$detach" = 1 ] || return 0
     action_start "$id" land
     printf 'automatic cleanup started\n'
     return 0
@@ -672,6 +676,12 @@ cmd_land() {
   fi
   LOCKS_HELD="$LOCKS_HELD $(lane_lock "$id")"
   [ -f "$STATE/$id.meta" ] || return 0
+  pr=$(fm_meta_get "$STATE/$id.meta" pr)
+  if [ -e "$STATE/$id.review-park-land" ] \
+    && [ "$(fm_meta_get "$STATE/$id.review-park-land" pr)" != "$pr" ]; then
+    rm -f -- "$STATE/$id.review-park-land"
+    return 0
+  fi
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$TEARDOWN_BIN" "$id" 2>&1) || rc=$?
   case "$rc" in
     0) printf 'cleaned up %s: PR %s merged; lane torn down and its working copy returned\n' "$id" "$pr" ;;
@@ -703,10 +713,9 @@ cmd_run() {
 
 # --- tick ------------------------------------------------------------------
 
+# Prints a close once; the tick writes the marker after recording the wake.
 closed_once() {  # <id> <pr>
-  local marker="$STATE/.review-park-closed-$1"
-  [ ! -e "$marker" ] || return 0
-  : > "$marker"
+  [ ! -e "$STATE/.review-park-closed-$1" ] || return 0
   printf 'closed %s: PR %s was closed without merging; the lane needs a decision\n' "$1" "$2"
 }
 
@@ -805,10 +814,12 @@ cmd_tick() {
   command -v jq >/dev/null 2>&1 || return 0
   lock_try "$STATE/.review-park-tick.lock" || return 0
   DEADLINE=$(( $(date +%s) + TICK_SECS ))
+  local lines='' line
+  local -a reports=()
   for rec in "$STATE"/.review-park-report-*; do
     [ -f "$rec" ] || continue
-    cat -- "$rec"
-    rm -f -- "$rec"
+    reports+=("$rec")
+    lines+=$(cat -- "$rec")$'\n'
   done
   for rec in "$STATE"/*.review-park-land; do
     [ -e "$rec" ] || continue
@@ -825,16 +836,24 @@ cmd_tick() {
   # Reserve half the tick for unparked lanes; parked forge reads cannot starve them.
   local full_deadline=$DEADLINE
   DEADLINE=$(( $(date +%s) + (TICK_SECS + 1) / 2 ))
-  visit_lanes "$STATE/.review-park-tick-next" watch_parked ${parked[@]+"${parked[@]}"} || true
+  lines+=$(visit_lanes "$STATE/.review-park-tick-next" watch_parked ${parked[@]+"${parked[@]}"})$'\n' || true
   DEADLINE=$full_deadline
-  [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ] || return 0
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    fm_pr_task_id_valid "$id" || continue
-    unparked+=("$id")
-  done
-  visit_lanes "$STATE/.review-park-tick-next-unparked" watch_unparked ${unparked[@]+"${unparked[@]}"} || return 0
+  if [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]; then
+    for meta in "$STATE"/*.meta; do
+      [ -e "$meta" ] || continue
+      id=$(basename "$meta" .meta)
+      fm_pr_task_id_valid "$id" || continue
+      unparked+=("$id")
+    done
+    lines+=$(visit_lanes "$STATE/.review-park-tick-next-unparked" watch_unparked ${unparked[@]+"${unparked[@]}"})$'\n' || true
+  fi
+  lines=$(printf '%s' "$lines" | grep -v '^$') || return 0
+  fm_wake_append check park-on-review "check: park-on-review: $(printf '%s\n' "$lines" | paste -sd ';' - | sed 's/;/; /g')" || return 0
+  rm -f -- ${reports[@]+"${reports[@]}"}
+  while IFS= read -r line; do
+    case "$line" in "closed "*:*) line=${line#closed }; : > "$STATE/.review-park-closed-${line%%:*}" ;; esac
+  done <<< "$lines"
+  printf '%s\n' "$lines"
 }
 
 cmd_list() {

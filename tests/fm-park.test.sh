@@ -658,17 +658,17 @@ test_slow_relaunch_is_never_cut_short_by_the_tick() {
   local w out start took
   w=$(make_world tick-slow-relaunch "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
-  printf '#!/usr/bin/env bash\nsleep 6\nprintf "%%s\\n" "$*" >> "%s/control.log"\n' "$w" > "$w/fakebin/fm-control.sh"
+  printf '#!/usr/bin/env bash\nsleep 8\nprintf "%%s\\n" "$*" >> "%s/control.log"\n' "$w" > "$w/fakebin/fm-control.sh"
   start=$(date +%s)
-  out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
+  out=$(FM_PARK_TICK_SECS=6 run_park "$w" tick 2>&1)
   took=$(( $(date +%s) - start ))
   [ -z "$out" ] || fail "slow-relaunch: the starting tick printed: $out"
-  [ ! -e "$w/control.log" ] && [ "$took" -lt 6 ] || fail "slow-relaunch: the tick waited ${took}s for the relaunch"
+  [ ! -e "$w/control.log" ] && [ "$took" -lt 8 ] || fail "slow-relaunch: the tick waited ${took}s for the relaunch"
   # A tick while the relaunch runs leaves the busy lane alone.
-  out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
+  out=$(FM_PARK_TICK_SECS=6 run_park "$w" tick 2>&1)
   [ -z "$out" ] || fail "slow-relaunch: a tick during the relaunch printed: $out"
   wait_report "$w" slow-relaunch
-  out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
+  out=$(FM_PARK_TICK_SECS=6 run_park "$w" tick 2>&1)
   case "$out" in "relaunched lane: PR $GH_URL - checks are failing"*) ;; *) fail "slow-relaunch: report: $out" ;; esac
   [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "slow-relaunch: relaunch calls: $(cat "$w/control.log")"
   [ ! -e "$w/state/lane.review-park" ] || fail "slow-relaunch: the record of a relaunched lane was kept: $(cat "$w/state/lane.review-park")"
@@ -683,11 +683,11 @@ test_tick_resumes_where_the_last_one_ran_out_of_time() {
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
   # The first lane's read outlasts the whole tick; in the next tick the second
   # lane visited is the slow one, so only the lane that tick starts at relaunches.
-  printf 'sleep 4\n' > "$w/gh.1.sh"
-  printf 'sleep 4\n' > "$w/gh.3.sh"
-  out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
+  printf 'sleep 8\n' > "$w/gh.1.sh"
+  printf 'sleep 8\n' > "$w/gh.3.sh"
+  out=$(FM_PARK_TICK_SECS=6 run_park "$w" tick 2>&1)
   [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "rotate: the slow tick acted: $out"
-  FM_PARK_TICK_SECS=2 run_park "$w" tick >/dev/null 2>&1
+  FM_PARK_TICK_SECS=6 run_park "$w" tick >/dev/null 2>&1
   wait_report "$w" rotate
   [ "$(grep ' relaunch ' "$w/control.log" | cut -d' ' -f1)" = lane2 ] \
     || fail "rotate: the next tick did not start at the lane the last one never reached: $(grep ' relaunch ' "$w/control.log")"
@@ -812,7 +812,7 @@ test_pending_land_recovers_after_watcher_restart() {
   local w out
   w=$(make_world land-recovery "$GH_URL"); gh_fixture "$w/gh.1.json"
   : > "$w/config/auto-land"
-  : > "$w/state/lane.review-park-land"
+  printf 'pr=%s\n' "$GH_URL" > "$w/state/lane.review-park-land"
   cat > "$w/fakebin/fm-teardown.sh" <<SH
 #!/usr/bin/env bash
 : > "$w/teardown.started"
@@ -838,7 +838,7 @@ test_pending_land_retries_after_control_lock_refusal() {
   local w out
   w=$(make_world land-lock-retry "$GH_URL"); gh_fixture "$w/gh.1.json"
   : > "$w/config/auto-land"
-  : > "$w/state/lane.review-park-land"
+  printf 'pr=%s\n' "$GH_URL" > "$w/state/lane.review-park-land"
   cat > "$w/fakebin/fm-teardown.sh" <<SH
 #!/usr/bin/env bash
 n=\$(cat "$w/teardown.count" 2>/dev/null || echo 0)
@@ -866,6 +866,50 @@ SH
   [ "$out" = "cleaned up lane: PR $GH_URL merged; lane torn down and its working copy returned" ] || fail "land-lock-retry: outcome: $out"
   [ "$(cat "$w/teardown.count")" = 2 ] || fail "land-lock-retry: teardown calls: $(cat "$w/teardown.count")"
   pass "a temporary control-lock refusal stays pending and retries to one reported cleanup outcome"
+}
+
+# A cleanup request names the PR that merged. When the lane has since moved on
+# to another PR, the request is dropped without tearing anything down.
+test_stale_cleanup_request_for_another_pr_is_dropped() {
+  local w out
+  w=$(make_world land-stale "$GH_URL"); gh_fixture "$w/gh.1.json"
+  : > "$w/config/auto-land"
+  printf 'pr=%s\n' "$GH_URL" > "$w/state/lane.review-park-land"
+  sed -i.bak "s#^pr=.*#pr=${GH_URL%/*}/8#" "$w/state/lane.meta" && rm -f "$w/state/lane.meta.bak"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-stale: tick printed: $out"
+  for _ in $(seq 1 200); do
+    [ -e "$w/state/lane.review-park-land" ] || break
+    sleep 0.1
+  done
+  [ ! -e "$w/state/lane.review-park-land" ] || fail "land-stale: the stale request was not dropped within 20s"
+  [ ! -e "$w/teardown.log" ] || fail "land-stale: a stale request tore down the lane: $(cat "$w/teardown.log")"
+  ! compgen -G "$w/state/.review-park-report-*" >/dev/null || fail "land-stale: a stale request reported: $(cat "$w"/state/.review-park-report-*)"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-stale: a later tick printed: $out"
+  pass "a cleanup request for a PR the lane no longer names is dropped without a teardown or a report"
+}
+
+# The tick records its wake before it removes the reports behind it, so a
+# failed record loses nothing: the reports stay for the next tick.
+test_reports_survive_until_their_wake_is_recorded() {
+  local w out report
+  w=$(make_world report-durable "$GH_URL")
+  report="$w/state/.review-park-report-lane-1-1"
+  printf 'cleanup-refused lane: PR %s merged; automatic cleanup refused: REFUSED\n' "$GH_URL" > "$report"
+  mkdir "$w/state/.wake-queue"
+  out=$(run_park "$w" tick 2>/dev/null)
+  [ -z "$out" ] || fail "report-durable: a tick that could not record its wake printed: $out"
+  [ -e "$report" ] || fail "report-durable: the report was removed although its wake was not recorded"
+  rmdir "$w/state/.wake-queue"
+  out=$(run_park "$w" tick 2>&1)
+  [ "$out" = "cleanup-refused lane: PR $GH_URL merged; automatic cleanup refused: REFUSED" ] || fail "report-durable: retry: $out"
+  [ ! -e "$report" ] || fail "report-durable: the report survived its recorded wake"
+  [ "$(awk -F '\t' '$3 == "check" && $4 == "park-on-review"' "$w/state/.wake-queue" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "report-durable: wake queue: $(cat "$w/state/.wake-queue")"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "report-durable: reported twice: $out"
+  pass "an action report survives until the tick has recorded its wake, then is reported once"
 }
 
 # A merge-time cleanup that lands while a relaunch of the same lane is under
@@ -912,4 +956,6 @@ fm_test_run \
   test_detached_land_returns_at_once_and_the_tick_reports_it \
   test_pending_land_recovers_after_watcher_restart \
   test_pending_land_retries_after_control_lock_refusal \
+  test_stale_cleanup_request_for_another_pr_is_dropped \
+  test_reports_survive_until_their_wake_is_recorded \
   test_land_waits_for_an_action_under_way
