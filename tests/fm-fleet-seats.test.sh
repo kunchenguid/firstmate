@@ -160,7 +160,8 @@ reserve_without_jq() {
       if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then return 1; fi
       builtin command "$@"
     }
-    export -f command
+    jq() { echo "jq: command not found" >&2; return 127; }
+    export -f command jq
     exec "$SEATS" "$@"
   ' _ "$@"
 }
@@ -2047,10 +2048,33 @@ REX
   pass "empty delivered policies opt out and startup probes share the wait budget"
 }
 
+test_generationless_predecessor_stays_counted() {
+  local home="$TMP_ROOT/generationless" out phase digest cert policy="$TMP_ROOT/generationless-policy.json"
+  make_home "$home"
+  pools "$home" 1
+  cp "$home/config/fleet-seats" "$policy"
+  task_record "$home" legacy pool-model-a
+  new_holder
+  reserve_gen "$home" legacy candidate - unrelated-model >/dev/null || fail "unpooled replacement refused"
+  for phase in reserved released; do
+    if [ "$phase" = released ]; then
+      seats "$home" release legacy --generation candidate --reason prelaunch >/dev/null || fail "candidate rollback failed"
+    fi
+    out=$(reserve "$home" contender pool-model-a 2>&1)
+    expect_code 4 "$?" "$phase candidate hid its generationless predecessor: $out"
+  done
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=primary\n' > "$home/.fm-secondmate-parent"
+  printf 'legacy-remote\n' > "$home/.fm-secondmate-home"
+  digest=$(jq -cS . "$policy" | cksum | awk '{print $1 "-" $2}')
+  cert=$(seats "$home" serve --digest "$digest" --epoch legacy.1 --allowance shared=1 < "$policy") || fail "generationless remote serve failed"
+  assert_equals true "$(printf '%s\n' "$cert" | jq 'any(.holders[]; .task == "legacy" and .model == "pool-model-a")')" "remote certificate omitted generationless predecessor"
+  pass "generationless predecessors remain counted beside reserved and terminal replacements"
+}
+
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_generationless_predecessor_stays_counted|test_remote_without_pools_confirms_unpooled_models|test_managed_records_and_legacy_import|test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -2116,3 +2140,5 @@ test_metadata_free_rex_routes_prove_destruction
 test_live_and_dead_routes_require_creation_server
 
 test_empty_delivered_policy_and_bounded_startup
+
+test_generationless_predecessor_stays_counted

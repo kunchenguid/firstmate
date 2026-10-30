@@ -658,9 +658,9 @@ pooled_records() {
     id=${meta##*/}
     id=${id%.meta}
     id_ok "$id" || continue
-    if awk -F '\t' -v s="$home_state" -v t="$id" '$1 == s && $2 == t { found = 1 } END { exit !found }' "$TMPD/ledger"; then
-      gen=$(meta_generation "$meta")
-      if [ -z "$gen" ] || awk -F '\t' -v s="$home_state" -v t="$id" -v g="$gen" \
+    gen=$(meta_generation "$meta")
+    if [ -n "$gen" ] && awk -F '\t' -v s="$home_state" -v t="$id" '$1 == s && $2 == t { found = 1 } END { exit !found }' "$TMPD/ledger"; then
+      if awk -F '\t' -v s="$home_state" -v t="$id" -v g="$gen" \
           '$1 == s && $2 == t && $3 == g { found = 1 } END { exit !found }' "$TMPD/ledger"; then
         continue
       fi
@@ -1081,7 +1081,8 @@ declared() {
   [ -n "$POLICY" ] || return 1
   [ -e "$POLICY" ] || [ -L "$POLICY" ] || return 1
   if [ -n "$DELIVERED" ] && [ "$POLICY" = "$DELIVERED" ] && [ -f "$DELIVERED" ] && [ ! -L "$DELIVERED" ] \
-    && jq -e 'type == "object" and .pools == []' "$DELIVERED" >/dev/null 2>&1; then
+    && { cmp -s "$DELIVERED" <(printf '{"pools":[]}\n') \
+      || jq -e 'type == "object" and .pools == []' "$DELIVERED" >/dev/null 2>&1; }; then
     return 1
   fi
   return 0
