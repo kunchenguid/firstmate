@@ -581,11 +581,12 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def lane_of($c): quota_lane($c.harness; $c.model);
   def measured($p; $lane):
     (prov($p; $lane) != null and (["known", "partial"] | index(prov($p; $lane).quotaSemantics.status)) != null);
+  def devin_free($m): (["swe-2-high", "swe-2-medium", "swe-2-max"] | index(bare($m))) != null;
   def applicable($p; $lane; $m):
     (bare($m)) as $bare |
     [rows($p; $lane)[] | select(
       .scope == "all_models" or .scope == "all_products" or
-      (.scope == "included_quota" and (["swe-2-high", "swe-2-medium", "swe-2-max"] | index($bare)) == null) or
+      (.scope == "included_quota" and $m != "" and (devin_free($m) | not)) or
       ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare)))
     )];
   def floor_state($f; $p; $lane):
@@ -720,6 +721,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       (if $sq then ($elig | first) else ($elig | max_by(.spendPriority)) end) as $best |
       (if $sq then 1 else ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) end) as $ties |
       if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
+      elif $best.profile.harness == "devin" and (devin_free($best.profile.model // "") | not) then $ev + {status: "escalate",
+        reason: "devin:\($best.profile.model // "-") is not a Free SWE-2 line: a priced Devin launch requires the captain'"'"'s explicit approval before dispatch and is allowed only when the native Claude or Codex quota is exhausted",
+        note: $sel.note, candidates: $cands}
       else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
         + (if ($unranked | length) > 0 then
              {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[].provider] | unique | join(", ")))"}

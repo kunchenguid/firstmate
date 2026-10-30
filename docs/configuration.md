@@ -1811,7 +1811,9 @@ Typed resolution additively recognizes `gemini` because AGENTS.md section 4 veri
 Devin's mapped provider is `devin`.
 The typed resolver ranks a priced Devin line on the `included_quota` plan window.
 A Free `swe-2-high`, `swe-2-medium`, or `swe-2-max` line draws on no Devin window, so no row applies to it and it stays eligible but unranked, even when `included_quota` is exhausted.
+A Devin profile with no `model` gets no row either and stays eligible but unranked.
 Devin's `credits` balance is never read as `included_quota` headroom.
+When the chosen candidate is any other Devin profile, including one with no `model`, the resolver escalates instead of clearing, under `shared_quota` too: a priced Devin launch needs the captain's explicit approval and is allowed only when the native Claude or Codex quota is exhausted.
 This single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
 
 **Profile quota floors**
@@ -1954,7 +1956,7 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 | --- | --- |
 | `clear` | A `profile:` line ready for `fm-spawn.sh`. |
 | `ambiguous` | Confidence below the floor with no runner-up taken. |
-| `escalate` | An approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie. |
+| `escalate` | An approval-gated rule, a chosen Devin line that is not Free, unverifiable rule floor, nothing rankable, or a genuine tie. |
 | `error` | API, network, malformed response metadata, rendering, quota-axi failure, or a declared credential source that cannot supply its key. |
 
 Every result above exits 0.

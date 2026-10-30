@@ -1846,6 +1846,8 @@ reset_log
 DEVIN_RULES="$TMP_ROOT/devin-rules.json"
 DEVIN_QUOTA="$TMP_ROOT/devin-quota.json"
 DEVIN_FREE_UNRANKED='candidate: devin:swe-2-medium  provider=devin  -> eligible, unranked: no applicable quota row for provider devin: disclosed uncertainty'
+DEVIN_MODELLESS_UNRANKED='candidate: devin:-  provider=devin  -> eligible, unranked: no applicable quota row for provider devin: disclosed uncertainty'
+DEVIN_PRICED_APPROVAL='  reason: devin:fusion-claude-fable-5-1-high-sidekick-swe-2-medium is not a Free SWE-2 line: a priced Devin launch requires the captain'"'"'s explicit approval before dispatch and is allowed only when the native Claude or Codex quota is exhausted'
 cat > "$DEVIN_RULES" <<'JSON'
 {
   "rules": [
@@ -1853,6 +1855,7 @@ cat > "$DEVIN_RULES" <<'JSON'
       "when": "Devin work.",
       "use": [
         { "harness": "devin", "model": "swe-2-medium" },
+        { "harness": "devin" },
         { "harness": "devin", "model": "fusion-claude-fable-5-1-high-sidekick-swe-2-medium" },
         { "harness": "claude", "model": "sonnet", "effort": "high" }
       ]
@@ -1871,19 +1874,33 @@ jq '.providers += [{"provider":"devin","state":{"status":"fresh"},"quotaSemantic
   {"scope":"included_quota","status":"known","effectivePercentRemaining":100,"runway":{"status":"through_reset"},"selection":{"spendPriority":12.9}}
 ]}}]' "$QUOTA" > "$DEVIN_QUOTA"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$DEVIN_QUOTA" run code out err "$BRIEF"
-assert_contains "$out" '  status: clear' "devin included quota resolves"
+assert_contains "$out" '  status: escalate' "a winning priced devin line escalates"
+assert_contains "$out" "$DEVIN_PRICED_APPROVAL" "the escalation names the priced Devin approval gate"
+assert_not_contains "$out" '  profile:' "a priced devin pick emits no dispatchable profile"
 assert_contains "$out" "$DEVIN_FREE_UNRANKED" "a Free SWE-2 line draws on no included_quota row"
+assert_contains "$out" "$DEVIN_MODELLESS_UNRANKED" "a devin profile with no model draws on no included_quota row"
 assert_contains "$out" 'candidate: devin:fusion-claude-fable-5-1-high-sidekick-swe-2-medium  provider=devin  scope=included_quota  remaining=100%  spendPriority=12.9  runway=through_reset  -> eligible' "a priced devin line ranks on included_quota"
-assert_contains "$out" "  profile: --harness 'devin' --model 'fusion-claude-fable-5-1-high-sidekick-swe-2-medium'" "the included window outranks a tighter provider"
 
 DEVIN_EXHAUSTED="$TMP_ROOT/devin-exhausted.json"
 jq '(.providers[] | select(.provider == "devin") | .quotaSemantics.effectiveAvailability[] | select(.scope == "included_quota")) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$DEVIN_QUOTA" > "$DEVIN_EXHAUSTED"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$DEVIN_EXHAUSTED" run code out err "$BRIEF"
 assert_contains "$out" "$DEVIN_FREE_UNRANKED" "an exhausted included window never vetoes a Free SWE-2 line"
+assert_contains "$out" "$DEVIN_MODELLESS_UNRANKED" "an exhausted included window never vetoes a devin profile with no model"
 assert_contains "$out" 'candidate: devin:fusion-claude-fable-5-1-high-sidekick-swe-2-medium  provider=devin  scope=included_quota  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at included_quota' "an exhausted included window vetoes a priced devin line"
 assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "a healthy other provider still clears"
+
+jq '.shared_quota = true | .rules[0].use |= [.[2], .[0], .[3]]' "$DEVIN_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "shared-quota never clears a priced devin line"
+assert_contains "$out" "$DEVIN_PRICED_APPROVAL" "shared-quota names the priced Devin approval gate"
+assert_not_contains "$out" '  profile:' "shared-quota emits no profile for a priced devin line"
+jq '.shared_quota = true' "$DEVIN_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "shared-quota clears a Free devin line"
+assert_contains "$out" "  profile: --harness 'devin' --model 'swe-2-medium'" "shared-quota dispatches the first declared Free devin line"
 cp "$BASE_RULES" "$RULES"
 write_response "$RESPONSE" rule_4 0.9
-pass "devin maps to provider devin, ranks priced lines on included_quota, and keeps Free lines eligible"
+pass "devin ranks priced lines on included_quota but escalates them for approval, and keeps Free and modelless lines eligible"
 
 printf '# all fm-dispatch-resolve tests passed\n'

@@ -81,7 +81,7 @@ Devin's `included_quota` scope is the included plan window, and it bounds only p
 `devin models list` marks `swe-2-high`, `swe-2-medium`, and `swe-2-max` Free.
 A Free line draws on no Devin window, so the typed resolver applies no row to it, and an exhausted `included_quota` never vetoes it.
 It stays eligible but unranked.
-A catalog line with a token price is pay-per-token, and the typed resolver ranks it on `included_quota`.
+A catalog line with a token price is pay-per-token, and the typed resolver ranks it on `included_quota` but escalates instead of clearing when it wins.
 Devin's separate `credits` balance is the overage purse that pays priced usage past a zeroed included window, and is never read as `included_quota` headroom.
 A priced Devin launch can spend `credits`, so it needs the captain's explicit approval before launch.
 A Claude or GPT model may use harness `devin` only when its native Claude or Codex quota is exhausted, and a Grok or Gemini model never falls back through harness `devin`; [Model and effort](../harness-adapters/references/common/model-and-effort.md) owns that rule.
