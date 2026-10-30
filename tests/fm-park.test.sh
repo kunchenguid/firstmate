@@ -727,15 +727,15 @@ test_closed_pr_is_reported_once() {
   [ -z "$out" ] || fail "closed: reported twice: $out"
   [ ! -e "$w/control.log" ] || fail "closed: a lifecycle call was made"
 
-  w=$(make_world closed-opted-out "$GL_URL"); gl_fixture "$w" state=closed
-  : > "$w/config/no-auto-land"
+  w=$(make_world closed-default-off "$GL_URL"); gl_fixture "$w" state=closed
   out=$(run_park "$w" tick 2>&1)
-  [ -z "$out" ] && [ ! -e "$w/glab.log" ] || fail "closed-opted-out: tick acted under config/no-auto-land: $out"
+  [ -z "$out" ] && [ ! -e "$w/glab.log" ] || fail "closed-default-off: tick acted without opt-in: $out"
 
   w=$(make_world closed-unparked "$GL_URL"); gl_fixture "$w" state=closed
+  : > "$w/config/auto-land"
   out=$(run_park "$w" tick 2>&1)
   [ "$out" = "closed lane: PR $GL_URL was closed without merging; the lane needs a decision" ] || fail "closed-unparked: $out"
-  pass "a PR or MR closed without merging is reported once by default, parked or not, never relaunched, and silent under config/no-auto-land"
+  pass "closed-without-merge reporting for unparked lanes requires a feature flag"
 }
 
 test_tick_parks_clean_idle_lanes_only_when_opted_in() {
@@ -743,9 +743,9 @@ test_tick_parks_clean_idle_lanes_only_when_opted_in() {
   w=$(make_world auto-park "$GL_URL"); gl_fixture "$w"
   out=$(run_park "$w" tick 2>&1)
   [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "auto-park: tick parked without config/park-on-review: $out"
-  : > "$w/config/no-auto-land"; rm -f "$w/glab.log"
+  : > "$w/config/auto-land"; rm -f "$w/glab.log"
   out=$(run_park "$w" tick 2>&1)
-  [ -z "$out" ] && [ ! -e "$w/glab.log" ] || fail "auto-park: tick read under config/no-auto-land alone: $out"
+  [ -z "$out" ] || fail "auto-park: unexpected output while auto-land is enabled: $out"
   : > "$w/config/park-on-review"
   gl_fixture "$w" pstatus=running
   out=$(run_park "$w" tick 2>&1)
@@ -757,24 +757,22 @@ test_tick_parks_clean_idle_lanes_only_when_opted_in() {
   pass "tick parks nothing without opt-in, reads nothing when opted out of cleanup too, never parks an unclean lane, and parks a clean idle one under config/park-on-review"
 }
 
-test_land_cleans_up_by_default_unless_opted_out() {
+test_land_requires_opt_in_but_always_cleans_parked() {
   local w out rc
   w=$(make_world land-off "$GH_URL")
-  : > "$w/config/no-auto-land"
   out=$(run_park "$w" land lane --if-eligible 2>&1)
-  [ -z "$out" ] && [ ! -e "$w/teardown.log" ] || fail "land: acted on an unparked lane under config/no-auto-land: $out"
-  rm -f "$w/config/no-auto-land"
+  [ -z "$out" ] && [ ! -e "$w/teardown.log" ] || fail "land: acted without config/auto-land: $out"
+  : > "$w/config/auto-land"
   out=$(run_park "$w" land lane --if-eligible 2>&1)
   [ "$out" = "cleaned up lane: PR $GH_URL merged; lane torn down and its working copy returned" ] || fail "land: $out"
   [ "$(cat "$w/teardown.log")" = lane ] || fail "land: teardown was not called exactly once without --force: $(cat "$w/teardown.log")"
 
   w=$(make_world land-parked "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-  : > "$w/config/no-auto-land"
   : > "$w/teardown.refuse"
   rc=0; out=$(run_park "$w" land lane --if-eligible 2>&1) || rc=$?
   [ "$rc" = 1 ] || fail "land-refused: exit $rc"
   [ "$out" = "cleanup-refused lane: PR $GH_URL merged; automatic cleanup refused: REFUSED: worktree has work not on any remote and not landed." ] || fail "land-refused: $out"
-  pass "merge-time cleanup tears down every lane by default and a parked lane even under config/no-auto-land, through teardown's own gates, and surfaces a refusal"
+  pass "merge-time cleanup requires opt-in for unparked lanes and always cleans parked lanes"
 }
 
 # The merge poll's land only starts a detached teardown: it returns at once
@@ -783,7 +781,6 @@ test_land_cleans_up_by_default_unless_opted_out() {
 test_detached_land_returns_at_once_and_the_tick_reports_it() {
   local w out start took
   w=$(make_world land-detached "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
-  : > "$w/config/no-auto-land"
   printf '#!/usr/bin/env bash\nsleep 6\nprintf "%%s\\n" "$*" >> "%s/teardown.log"\nrm -f "%s/state/lane.review-park" "%s/state/lane.meta"\n' "$w" "$w" "$w" > "$w/fakebin/fm-teardown.sh"
   start=$(date +%s)
   out=$(run_park "$w" land lane --if-eligible --detach 2>&1)
@@ -840,6 +837,6 @@ fm_test_run \
   test_failed_relaunch_keeps_record_and_stops_retrying \
   test_closed_pr_is_reported_once \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
-  test_land_cleans_up_by_default_unless_opted_out \
+  test_land_requires_opt_in_but_always_cleans_parked \
   test_detached_land_returns_at_once_and_the_tick_reports_it \
   test_land_waits_for_an_action_under_way

@@ -79,7 +79,7 @@
 # bin/fm-teardown.sh <task-id> (never --force), so every teardown gate still
 # applies, and prints one outcome line naming the lane and its PR. With
 # --if-eligible it does nothing unless the lane is eligible for merge-time
-# cleanup (land_eligible below: parked, or config/no-auto-land absent). With
+# cleanup (land_eligible below: parked, or config/auto-land present). With
 # --detach it starts the land as a detached action (below), prints "automatic
 # cleanup started", and returns at once. bin/fm-watch.sh runs
 # land --if-eligible --detach for every merged lane from its merged-poll path
@@ -87,7 +87,7 @@
 # first, which makes the watcher the one owner of a merged lane's teardown.
 #
 # tick is what bin/fm-watch.sh runs every check interval. With
-# config/no-auto-land, no config/park-on-review, and no park record it exits
+# neither config/auto-land nor config/park-on-review, and no park record, it exits
 # after those file tests. Otherwise, holding state/.review-park-tick.lock (a
 # held lock exits silently):
 #   - pending merged-lane cleanup requests (state/<id>.review-park-land) are
@@ -96,8 +96,8 @@
 #     printed and removed;
 #   - each parked lane gets one forge read; a trigger relaunches it, a merge is
 #     left to the merge poll, and a close without merge is reported once;
-#   - unless config/no-auto-land exists without config/park-on-review, each
-#     other idle ship lane with pr= and an armed merge poll gets one forge read:
+#   - with config/auto-land or config/park-on-review, each other idle ship lane
+#     with pr= and an armed merge poll gets one forge read:
 #     a close without merge is reported once (marker
 #     state/.review-park-closed-<id>), and with config/park-on-review a clean
 #     gate parks it.
@@ -633,26 +633,30 @@ cmd_resume() {
 
 # --- land ------------------------------------------------------------------
 
-# The one merge-time cleanup eligibility rule: a parked lane always (no agent is
-# left to clean it up), any other lane unless config/no-auto-land opts out.
+# Parked lanes always clean up; other lanes require explicit home opt-in.
 land_eligible() {  # <id>
-  [ -e "$(record_path "$1")" ] || [ ! -e "$CONFIG/no-auto-land" ]
+  [ -e "$(record_path "$1")" ] || [ -e "$CONFIG/auto-land" ]
 }
 
 cmd_land() {
-  local id=${1-} eligible=0 detach=0 pr out rc=0 why
+  local id=${1-} eligible=0 detach=0 queue=0 pr out rc=0 why
   task_id_ok "$id" || die "usage: fm-park.sh land <task-id> [--if-eligible] [--detach]" 2
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --if-eligible) eligible=1 ;;
       --detach) detach=1 ;;
-      *) die "usage: fm-park.sh land <task-id> [--if-eligible] [--detach]" 2 ;;
+      --queue) queue=1 ;;
+      *) die "usage: fm-park.sh land <task-id> [--if-eligible] [--detach] [--queue]" 2 ;;
     esac
     shift
   done
   [ "$eligible" = 0 ] || land_eligible "$id" || return 0
   [ -f "$STATE/$id.meta" ] || return 0
+  if [ "$queue" = 1 ]; then
+    : > "$STATE/$id.review-park-land"
+    return 0
+  fi
   if [ "$detach" = 1 ]; then
     : > "$STATE/$id.review-park-land"
     action_start "$id" land
@@ -689,6 +693,7 @@ cmd_run() {
   shift 2
   out=$( LOCKS_HELD=; trap release_locks EXIT; "cmd_$verb" "$id" "$@" 2>/dev/null ) || true
   if [ -n "$out" ]; then
+    case "$out" in *"another lifecycle action is already running"*|*"another park action still holds"*) return 0 ;; esac
     report_write "$id" "$out"
     [ "$verb" != land ] || rm -f -- "$STATE/$id.review-park-land"
   elif [ "$verb" = land ] && [ ! -e "$STATE/$id.meta" ]; then
@@ -796,7 +801,7 @@ cmd_tick() {
   local rec id meta any=0
   local -a parked=() unparked=()
   for rec in "$STATE"/*.review-park "$STATE"/*.review-park-land "$STATE"/.review-park-report-*; do [ -e "$rec" ] && any=1 && break; done
-  [ "$any" = 1 ] || [ -e "$CONFIG/park-on-review" ] || [ ! -e "$CONFIG/no-auto-land" ] || return 0
+  [ "$any" = 1 ] || [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   lock_try "$STATE/.review-park-tick.lock" || return 0
   DEADLINE=$(( $(date +%s) + TICK_SECS ))
@@ -822,7 +827,7 @@ cmd_tick() {
   DEADLINE=$(( $(date +%s) + (TICK_SECS + 1) / 2 ))
   visit_lanes "$STATE/.review-park-tick-next" watch_parked ${parked[@]+"${parked[@]}"} || true
   DEADLINE=$full_deadline
-  [ -e "$CONFIG/park-on-review" ] || [ ! -e "$CONFIG/no-auto-land" ] || return 0
+  [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ] || return 0
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
