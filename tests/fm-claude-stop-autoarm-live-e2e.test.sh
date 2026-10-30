@@ -5,9 +5,11 @@
 # registration: a fresh session with in-flight work, no watcher, and a stale
 # session lock receives the full session-start digest through the tracked
 # SessionStart hook; session start reclaims the dead owner; at least two
-# tokenless auto-arm and rewake cycles then complete with zero model-issued arm
-# commands; and the cooperative guard consumes no forced continuation while the
-# hook's launch is healthy.
+# tokenless auto-arm and rewake cycles then complete with zero model-issued arm,
+# drain, or acknowledgement commands, each rewake carrying the hook's own drain
+# and each completed handling turn's Stop acknowledging exactly that drain; and
+# the cooperative guard consumes no forced continuation while the hook's launch
+# is healthy.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication. No live fleet home, worktree, or session is touched.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -71,6 +73,9 @@ SH
 chmod +x "$PROJECT/bin/tool-logger.sh"
 
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/data"
+# The arm fixture below scripts the plain Stop-owned arm's runs, which the
+# supervision host's own handling successor would consume, so the lab opts out.
+: > "$HOME_DIR/config/supervision-host-off"
 printf 'project=fixture\nwindow=fixture\nbackend=tmux\n' > "$HOME_DIR/state/task.meta"
 # A numeric pid above the supported OS pid range is a demonstrably dead prior
 # harness owner under fm_harness_pid_alive, matching the reproduced incident.
@@ -78,9 +83,16 @@ printf '9999999\n' > "$HOME_DIR/state/.lock"
 
 # Rapid-death arm fixture: started plus an immediate actionable reason, the
 # exact spent-Stop edge shape. Runs 1-2 close actionable; run 3 closes clean so
-# a misbehaving session can never loop forever.
+# a misbehaving session can never loop forever. The hook's handling successor
+# for each actionable close only reports a parked watcher, so it never consumes
+# a counted run.
 cat > "$PROJECT/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  echo "successor pid=$$ predecessor=$FM_WATCH_PREDECESSOR_ARM_PID" >> "$FM_HOME/state/successor-ran"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  exit 0
+fi
 N=$(cat "$FM_HOME/state/arm-count" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$FM_HOME/state/arm-count"
 echo "arm-run=$N pid=$$" >> "$FM_HOME/state/arm-ran"
 if [ "$N" -ge 3 ]; then
@@ -94,21 +106,27 @@ printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-rapid-%s\n' "$N"
 exit 0
 SH
-# Drain fixture: session start invokes it once, then the model invokes it once
-# per rewake. The third total drain ends the in-flight need after two complete
-# Stop-owned cycles.
+# Drain fixture: session start invokes it once, then the hook invokes it once
+# per rewake and acknowledges each drain after its handling turn completes. The
+# third total drain ends the in-flight need after two complete Stop-owned
+# cycles. Each drain's acknowledgement cutoff is its run number.
 cat > "$PROJECT/bin/fm-wake-drain.sh" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --ack-through ]; then
+  printf '%s\n' "$*" >> "$FM_HOME/state/drain-acks"
+  exit 0
+fi
 N=$(cat "$FM_HOME/state/drain-count" 2>/dev/null || echo 0); N=$((N+1)); echo "$N" > "$FM_HOME/state/drain-count"
 echo "drain-run=$N" >> "$FM_HOME/state/drain-ran"
 if [ "$N" -ge 3 ]; then
   rm -f "$FM_HOME/state/task.meta"
 fi
 printf 'stale: fixture-rapid drained\n'
+printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation fixture-generation\n' "$N" >&2
 SH
 chmod +x "$PROJECT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-wake-drain.sh"
 
-PROMPT='After reading the complete session-start digest, reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
+PROMPT='After reading the complete session-start digest, reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, follow its instructions about the wake drain and its acknowledgement, using Bash only for a command it tells you to run, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
 
 (
   cd "$PROJECT" || exit 1
@@ -119,8 +137,16 @@ PROMPT='After reading the complete session-start digest, reply with exactly CYCL
 
 ARM_RUNS=$(wc -l < "$HOME_DIR/state/arm-ran" 2>/dev/null | tr -d ' ')
 [ "$ARM_RUNS" = 2 ] || fail "expected exactly 2 hook-owned arm cycles, got $ARM_RUNS: $(cat "$HOME_DIR/state/arm-ran" 2>/dev/null)"
+SUCCESSOR_RUNS=$(wc -l < "$HOME_DIR/state/successor-ran" 2>/dev/null | tr -d ' ')
+[ "$SUCCESSOR_RUNS" = 2 ] || fail "expected one handling successor per actionable close, got $SUCCESSOR_RUNS"
 DRAIN_RUNS=$(wc -l < "$HOME_DIR/state/drain-ran" 2>/dev/null | tr -d ' ')
-[ "$DRAIN_RUNS" = 3 ] || fail "expected one session-start drain plus two model wake drains, got $DRAIN_RUNS drains"
+[ "$DRAIN_RUNS" = 3 ] || fail "expected one session-start drain plus two hook wake drains, got $DRAIN_RUNS drains"
+ACKS=$(cat "$HOME_DIR/state/drain-acks" 2>/dev/null)
+[ "$ACKS" = "--ack-through 2 --recovery-generation fixture-generation
+--ack-through 3 --recovery-generation fixture-generation" ] \
+  || fail "expected the hook to acknowledge each wake drain once after its handling turn, got: $ACKS"
+TICKETED=$(grep -o 'The wake drain already ran (ticket fmwake-[0-9a-f]*)' "$TRANSCRIPT" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+[ "$TICKETED" -ge 2 ] || fail "expected two rewakes carrying a hook-acknowledged drain, got $TICKETED"
 REWAKES=$(jq -r '
   select(.type == "user")
   | .message.content[]?
@@ -130,9 +156,7 @@ REWAKES=$(jq -r '
 [ "$REWAKES" -ge 2 ] || fail "expected at least 2 exit-2 rewake deliveries, got $REWAKES"
 grep -q 'stale: fixture-rapid-1' "$TRANSCRIPT" || fail "first rapid rewake reason missing from the transcript"
 grep -q 'stale: fixture-rapid-2' "$TRANSCRIPT" || fail "second rapid rewake reason missing from the transcript"
-[ -s "$HOME_DIR/state/tool-calls.log" ] \
-  || fail "Claude emitted no logged Bash tool calls"
-! grep -q 'fm-session-start.sh' "$HOME_DIR/state/tool-calls.log" \
+! grep -q 'fm-session-start.sh' "$HOME_DIR/state/tool-calls.log" 2>/dev/null \
   || fail "model issued a redundant session-start command: $(cat "$HOME_DIR/state/tool-calls.log")"
 DIGEST_EVENTS=$(jq -c --arg heading "SESSION START - $HOME_DIR" '
   select(.type == "system" and .subtype == "hook_response" and .hook_event == "SessionStart")
@@ -152,6 +176,8 @@ printf '%s' "$DIGEST" | grep -q '^The digest above is complete for this session 
 if [ -f "$HOME_DIR/state/tool-calls.log" ]; then
   ! grep -q 'fm-watch-arm.sh' "$HOME_DIR/state/tool-calls.log" \
     || fail "model issued an arm command despite Stop-owned continuity: $(cat "$HOME_DIR/state/tool-calls.log")"
+  ! grep -q 'fm-wake-drain.sh' "$HOME_DIR/state/tool-calls.log" \
+    || fail "model ran a drain or acknowledgement the hook already owned: $(cat "$HOME_DIR/state/tool-calls.log")"
   ! grep -q '&' "$HOME_DIR/state/tool-calls.log" \
     || fail "model used a shell ampersand: $(cat "$HOME_DIR/state/tool-calls.log")"
 fi
@@ -183,4 +209,4 @@ printf '%s\n' '{"session_id":"live-owner-control"}' \
 [ ! -s "$LAB/live-owner.out" ] && [ ! -s "$LAB/live-owner.err" ] || fail "competing Stop hook produced a rewake while another live session owned the home"
 wait "$LIVE_OWNER_PID"
 
-printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
+printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles with hook-owned drains and acknowledgements, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"

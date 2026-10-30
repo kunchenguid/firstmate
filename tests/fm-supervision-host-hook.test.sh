@@ -149,8 +149,8 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
   wait_until_deadline 60 hook_exited "$home" || fail "closed successor: the Stop hook did not finish: $(cat "$home/state/.supervision-host.log")"
   assert_re '^supervision-host: branch-outcome: ' "$home/hook.err" "the host must hand its captain outcome to main"
   expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must rewake main after the successor closed"
-  assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" \
-    "the closed handling successor must leave a deliverable downtime episode"
+  assert_hook_drain_owes_episode "$home" \
+    "the closed handling successor's episode must reach main through the hook's drain"
   pass "host+hook: a successor closed before exit_to_main does not suppress the branch-outcome rewake"
 }
 
@@ -181,8 +181,8 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn() {
   expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must rewake main after the successor closed"
   assert_re '^epoch=[0-9]+ owner_pid=[0-9]+ outcome=rewake ' "$home/state/.claude-autoarm-epoch" \
     "the hand-back must commit the rewake"
-  assert_re '^(pending|announced):downtime:' "$home/state/.watcher-down" \
-    "the closed handling successor must leave a deliverable downtime episode"
+  assert_hook_drain_owes_episode "$home" \
+    "the closed handling successor's episode must reach main through the hook's drain"
   pass "host+hook: a successor that closes during a held engine turn does not suppress the branch-outcome rewake"
 }
 

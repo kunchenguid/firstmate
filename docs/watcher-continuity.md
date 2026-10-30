@@ -89,6 +89,8 @@ On each Stop, an eligible primary with supervision need admits one home-scoped o
 If a session exits mid-cycle and leaves an orphaned Stop hook, the replacement session's first eligible Stop supersedes its claim, attaches to the running watcher through `bin/fm-watch-arm.sh`, and delivers the cycle's close.
 [`turnend-guard.md`](turnend-guard.md#auto-arm-generation-claim) owns the open-claim definition.
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
+That rewake carries the winning generation's own `bin/fm-wake-drain.sh` output, and the hook runs its `WAKE_ACK_REQUIRED` acknowledgement at a later Stop only when the transcript proves the turn that received the rewake ended normally; an interrupted turn leaves the rows durable, and anything the hook cannot prove falls back to the model running the drain or acknowledgement itself.
+The hook header owns that ticket contract.
 
 ### Claude session-lock ownership
 
@@ -541,6 +543,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - The handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake.
 - An unconfirmed successor reported in the banner without withholding the wake.
 - The [session-bound HUP/TERM/INT failure handoff](turnend-guard.md#failure-progression-and-block-budget) and replacement-session notice isolation.
+- The inline drain, its acknowledgement after the receiving turn completes (idle or mid-turn delivery), no acknowledgement after an interrupted turn, and the model-owned fallbacks.
 
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim.
 [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
@@ -549,7 +552,7 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 
 1. Starts with the reproduced stale-lock state.
 2. Receives session start through the tracked SessionStart hook.
-3. Completes two tokenless cycles.
+3. Completes two tokenless cycles whose drains and acknowledgements the hook owns.
 4. Checks the competing-live-owner negative control.
 
 `tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including:

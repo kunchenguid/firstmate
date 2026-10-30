@@ -87,6 +87,13 @@
 #     A refused generation exits 0 silently even after printing. A close that
 #     reports no actionable reason is benign when a live identity-matched
 #     watcher still has a fresh beacon.
+#   - Inline drain and acknowledgement: the winning rewake runs
+#     bin/fm-wake-drain.sh itself and carries its output, so the handling turn
+#     starts from the presented wakes. When the Stop payload can prove it, the
+#     Stop that ends the turn which received that delivery runs the exact
+#     --ack-through acknowledgement; an interrupted or failed turn fires no
+#     Stop, so its rows stay durable. The ticket contract after the identity
+#     gate owns the proof; any doubt leaves the acknowledgement to the model.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
@@ -178,6 +185,8 @@ esac
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 # fm-watch.sh touches the liveness beacon once per cycle, immediately before
 # its terminal wait, so a healthy watcher's beacon can legitimately age up to
@@ -209,9 +218,16 @@ fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 # own session file under .pi/, which a Claude transcript path never contains.
 # Fail direction matches the guard above: no payload, no jq, or no
 # transcript_path means the hook RUNS.
+# The same payload names the turn that just ended (prompt_id), which the
+# hook-owned wake acknowledgement below uses as its completion proof.
+TRANSCRIPT=
+PROMPT_ID=
 if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
-  printf '%s' "$PAYLOAD" | jq -e '(.transcript_path // "") | type == "string" and contains("/.pi/")' >/dev/null 2>&1 && exit 0
+  TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty | strings' 2>/dev/null)
+  PROMPT_ID=$(printf '%s' "$PAYLOAD" | jq -r '.prompt_id // empty | strings' 2>/dev/null)
 fi
+case "$TRANSCRIPT" in */.pi/*) exit 0 ;; esac
+case "$PROMPT_ID" in *[!A-Za-z0-9._-]*) PROMPT_ID= ;; esac
 
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
@@ -232,6 +248,80 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   fm_session_lock_pid_blocks_reclaim "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
 fi
+
+# --- hook-owned wake acknowledgement -----------------------------------------
+# A won rewake below runs bin/fm-wake-drain.sh itself and delivers the output.
+# When this payload can later prove the receiving turn completed, the delivery
+# drops the WAKE_ACK_REQUIRED line and carries a random nonce, and the ticket
+# file records that nonce with the exact --ack-through cutoff and recovery
+# generation. Claude fires Stop only when a turn finishes responding: never on
+# a user interrupt, and an API error fires StopFailure instead. So a Stop whose
+# prompt_id names the turn the transcript shows receiving the nonce proves the
+# wakes were handled, and only then does the hook run the acknowledgement.
+# Every other outcome leaves the rows durable for the next drain to present
+# again: a missing field, an undelivered nonce, a Stop for another turn, or a
+# newer drain, which presents the same unacknowledged rows under a new ticket.
+ACK_TICKET="$STATE/.claude-autoarm-ack-ticket"
+WAKE_DRAIN_TIMEOUT=120
+
+run_wake_drain() {  # [drain args...]
+  fm_run_timed "$WAKE_DRAIN_TIMEOUT" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_SUPERVISION_ACTOR=main "$SCRIPT_DIR/fm-wake-drain.sh" "$@" </dev/null
+}
+
+# Print what the transcript says about the delivery carrying <nonce> for the
+# turn <stop> that just ended: handled when that turn received it, superseded
+# when that turn began after another turn received it (an interrupt), and
+# pending otherwise. An idle rewake is a user entry that is its own turn; a
+# rewake queued into a running turn is a queued_command attachment of the
+# latest prompt's turn. Queue bookkeeping, request copies, tool results, and
+# assistant text that merely quote the nonce are not deliveries.
+delivery_verdict() {  # <transcript> <nonce> <stop prompt id>
+  grep -F -e '"promptId"' -e "$2" "$1" 2>/dev/null | jq -n -R -r --arg nonce "$2" --arg stop "$3" '
+    def text: if type == "string" then .
+      elif type == "array" then [.[]? | objects | select(.type == "text") | .text | strings] | join("\n")
+      else "" end;
+    reduce (inputs | fromjson? | objects | select(.isSidechain != true)) as $r (
+      {turn: null, delivered: null, later: false};
+      if $r.type == "user" and ($r.promptId | type) == "string" then
+        .turn = $r.promptId
+        | if .delivered == null and ($r.message.content | text | contains($nonce)) then .delivered = $r.promptId
+          elif .delivered != null and $r.promptId == $stop then .later = true
+          else . end
+      elif .delivered == null and .turn != null and $r.type == "attachment"
+        and $r.attachment.type == "queued_command" and ($r.attachment.prompt | text | contains($nonce)) then
+        .delivered = .turn
+      else . end)
+    | if .delivered == $stop then "handled" elif .delivered != null and .later then "superseded"
+      else "pending" end' 2>/dev/null
+}
+
+settle_ack_ticket() {
+  local claimed nonce ack generation verdict
+  [ -f "$ACK_TICKET" ] && [ -n "$PROMPT_ID" ] && [ -r "$TRANSCRIPT" ] || return 0
+  claimed="$ACK_TICKET.settling.$$"
+  mv -f "$ACK_TICKET" "$claimed" 2>/dev/null || return 0
+  nonce=$(sed -n 's/^nonce=\([A-Za-z0-9-][A-Za-z0-9-]*\)$/\1/p' "$claimed" 2>/dev/null)
+  ack=$(sed -n 's/^ack=\([0-9][0-9]*\)$/\1/p' "$claimed" 2>/dev/null)
+  generation=$(sed -n 's/^generation=\([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$claimed" 2>/dev/null)
+  if [ -n "$nonce" ] && [ -n "$ack" ] && [ -n "$generation" ]; then
+    verdict=$(delivery_verdict "$TRANSCRIPT" "$nonce" "$PROMPT_ID")
+    case "$verdict" in
+      handled)
+        run_wake_drain --ack-through "$ack" --recovery-generation "$generation" >/dev/null 2>&1 || true
+        ;;
+      superseded) ;;
+      # Not yet received, or received by a later turn: keep it for a later
+      # Stop, unless a newer drain has already replaced it.
+      *) ln "$claimed" "$ACK_TICKET" 2>/dev/null || true ;;
+    esac
+  fi
+  rm -f "$claimed" 2>/dev/null || true
+}
+
+# Settle before the AFK and need gates: the handling turn may itself have
+# entered the away posture or retired the last supervised work.
+[ "$RECOVER_SESSION_LOCK" -eq 1 ] || settle_ack_ticket
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
 [ -e "$STATE/.afk" ] && exit 0
@@ -549,6 +639,63 @@ start_handling_successor() {  # <closed-arm-pid>
   return 1
 }
 
+# --- inline drain --------------------------------------------------------------
+# Only a generation whose rewake already won drains, so no losing generation
+# claims rows it never delivers. The output rides the rewake under the ticket
+# contract above when this payload can prove the receiving turn later;
+# otherwise the model runs the printed acknowledgement itself. Output past the
+# delivery bound (a live probe delivered 60 KB intact on Claude Code 2.1.311)
+# is left in a file for the model to read, and a drain that printed no
+# acknowledgement falls back to the model running the drain itself.
+CONTINUITY_NOTE='This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.'
+MODEL_DRAIN_LINE="Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. $CONTINUITY_NOTE"
+DRAIN_DELIVERY_MAX=48000
+DRAIN_OVERFLOW="$STATE/.claude-autoarm-drain-output"
+deliver_inline_drain() {
+  local out='' line ack='' generation='' nonce ticket stale=0
+  # A ticket still waiting here has no proof its turn completed, perhaps
+  # because the transcript format changed: this delivery leaves its
+  # acknowledgement to the model rather than let unproven tickets keep rows
+  # unacknowledged. Either way this drain presents the earlier ticket's rows
+  # again.
+  if [ -e "$ACK_TICKET" ]; then
+    stale=1
+    rm -f "$ACK_TICKET" 2>/dev/null || true
+  fi
+  if out=$(mktemp "$STATE/.claude-autoarm-drain.XXXXXX"); then
+    run_wake_drain >"$out" 2>&1
+    line=$(sed -n 's/^WAKE_ACK_REQUIRED:.* --ack-through \([0-9][0-9]*\) --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1 \2/p' "$out" | tail -n 1)
+    ack=${line%% *}
+    generation=${line#* }
+  else
+    out=
+  fi
+  if [ -z "$ack" ]; then
+    [ -z "$out" ] || rm -f "$out" 2>/dev/null || true
+    printf '%s\n' "$MODEL_DRAIN_LINE"
+    return 0
+  fi
+  if [ "$(wc -c < "$out")" -gt "$DRAIN_DELIVERY_MAX" ] && mv -f "$out" "$DRAIN_OVERFLOW" 2>/dev/null; then
+    printf 'The wake drain already ran, but its output is too large to carry here: read %s in full, handle it, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. %s\n' "$DRAIN_OVERFLOW" "$CONTINUITY_NOTE"
+    return 0
+  fi
+  nonce=fmwake-$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  if [ "$stale" -eq 0 ] && [ "${#nonce}" -eq 23 ] && [ -n "$PROMPT_ID" ] && [ -r "$TRANSCRIPT" ] \
+    && [ "$(wc -c < "$out")" -le "$DRAIN_DELIVERY_MAX" ] \
+    && ticket=$(mktemp "$ACK_TICKET.tmp.XXXXXX") \
+    && printf 'nonce=%s\nack=%s\ngeneration=%s\n' "$nonce" "$ack" "$generation" > "$ticket" \
+    && mv -f "$ticket" "$ACK_TICKET"; then
+    rm -f "$ACK_TICKET".settling.* 2>/dev/null || true
+    printf 'The wake drain already ran (ticket %s) and its output follows: handle it without running bin/fm-wake-drain.sh or an --ack-through command. This hook acknowledges these wakes once this turn ends normally; an interrupted turn leaves them durable for re-handling. %s\n' "$nonce" "$CONTINUITY_NOTE"
+    grep -v '^WAKE_ACK_REQUIRED:' "$out"
+  else
+    [ -z "${ticket:-}" ] || rm -f "$ticket" 2>/dev/null || true
+    printf 'The wake drain already ran and its output follows: handle it, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. %s\n' "$CONTINUITY_NOTE"
+    cat "$out"
+  fi
+  rm -f "$out" 2>/dev/null || true
+}
+
 OUT=
 ACTIONABLE=0
 HEALTHY=0
@@ -575,7 +722,7 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     HOST_RC=0
     FM_SUPERVISION_HOST_AUTOARM_GEN=$MY_GEN FM_SUPERVISION_HOST_OWNER_PID=$$ \
       FM_SUPERVISION_HOST_PRIMARY=claude FM_GUARD_GRACE="$GRACE" \
-      FM_WARM_COMPACT_TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty' 2>/dev/null) \
+      FM_WARM_COMPACT_TRANSCRIPT=$TRANSCRIPT \
       "$SCRIPT_DIR/fm-supervision-host.sh" park >"${OUT:-/dev/null}" 2>&1 || HOST_RC=$?
   else
     run_arm "$OUT"
@@ -682,16 +829,21 @@ if [ "$ACTIONABLE" -eq 1 ]; then
       printf 'This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.\n'
     fi
     [ -z "$SUCCESSOR_FAILURE" ] || printf '%s\n' "$SUCCESSOR_FAILURE"
-    printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
+    # The exit status is committed: a signal from here on must not rewrite
+    # the ledger, and only this winning generation drains.
+    trap - HUP TERM INT
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    deliver_inline_drain >&2
     exit 2
   fi
   if [ "$HOST_MODE" -eq 1 ] && fm_autoarm_still_owner "$STATE" "$MY_GEN" \
     && fm_recovery_marker_snapshot "$STATE/.watcher-down" \
     && [[ "$FM_RECOVERY_MARKER_TOKEN" == pending:handling:* || "$FM_RECOVERY_MARKER_TOKEN" == announced:handling:* ]] \
     && ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+    # No drain ran for this lost hand-back, so the turn runs its own.
+    printf '%s\n' "$MODEL_DRAIN_LINE" >&2
     [ ! -e "$FAILURE_NOTICE" ] \
       || autoarm_exit_suppressed 'firstmate watcher auto-arm hand-back still uncommitted - the supervision host returned an actionable wake, but its rewake could not be committed, and the failure episode notice was already consumed'
     printf 'firstmate watcher auto-arm FAILED - the supervision host returned an actionable wake, but its rewake could not be committed.\n' >&2
