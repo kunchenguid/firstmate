@@ -63,12 +63,13 @@ case "$1 $2" in
     wt="$DIR/orca-worktrees/$name"
     mkdir -p "$DIR/orca-worktrees"
     # FM_TEST_ORCA_RETURN_PATH makes Orca hand back a worktree that already
-    # exists (the shape of a checkout still held by another task).
+    # exists, with its terminal (the shape of a checkout still held by another
+    # task).
     if [ -n "${FM_TEST_ORCA_RETURN_PATH:-}" ]; then
-      wt=$FM_TEST_ORCA_RETURN_PATH
-    else
-      git -C "$DIR/project" worktree add --quiet -b "orca-$name" "$wt" >&2 || exit 1
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"},"terminal":{"handle":"term-sibling"}}}\n' "$name" "$FM_TEST_ORCA_RETURN_PATH"
+      exit 0
     fi
+    git -C "$DIR/project" worktree add --quiet -b "orca-$name" "$wt" >&2 || exit 1
     printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' "$name" "$wt"
     exit 0
     ;;
