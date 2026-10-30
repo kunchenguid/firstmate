@@ -77,14 +77,13 @@ start_term() { # <dir> <mode> [cmd...]
 stop_term() { kill "$TERM_PID" 2>/dev/null; wait "$TERM_PID" 2>/dev/null || true; }
 
 # Strip every env var that could make the pane look known-aware or
-# known-unaware, so the tests below control detection explicitly.
+# known-unaware, so the tests below control detection explicitly. Callers run
+# `env "${CLEAN_UNSET[@]}" ...` directly so a backgrounded watcher's $! is the
+# watcher itself.
 CLEAN_UNSET=(-u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SESSION
   -u HC_SOCKET -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION
   -u HERDR_SOCKET_PATH -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID
   -u REX_BLOCK -u REX_SESSION -u TERM_PROGRAM)
-clean_env() { # <cmd...>
-  env "${CLEAN_UNSET[@]}" "$@"
-}
 
 mkhome() { # <dir>: a minimal config/state pair
   mkdir -p "$1/config" "$1/state"
@@ -112,7 +111,7 @@ t_query_unaware_terminal_silent() {
   local d=$TMP_ROOT/unaware
   mkhome "$d"
   start_term "$d" silent
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
     --task t1 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   sleep 0.3
@@ -131,7 +130,7 @@ t_query_answered_arms_watcher() {
   local d=$TMP_ROOT/aware
   mkhome "$d"
   start_term "$d" answer
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
     --task t2 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   assert_present "$(echo "$d/state"/.osc7501watch-* | head -1)" "aware: watcher pidfile recorded"
@@ -156,7 +155,7 @@ t_status_transitions_and_final_done() {
   local holder
   sleep 300 &
   holder=$!
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t3 --kind ship --state "$d/state" --harness opencode \
     --parent "$holder" &
   local wpid=$!
@@ -186,7 +185,7 @@ t_final_idle_after_working() {
   sleep 300 &
   local holder=$!
   busy_rec "$d/state" t4 busy
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t4 --kind ship --state "$d/state" --harness opencode \
     --parent "$holder" &
   local wpid=$!
@@ -216,7 +215,7 @@ t_native_claude_skips_everything() {
   local d=$TMP_ROOT/native
   mkhome "$d"; mkfake "$d" claude 'claude 2.1.295'
   start_term "$d" answer
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" \
     PATH="$d/bin:$PATH" bash "$SCRIPT" arm \
     --task t5 --harness claude --backend tmux --kind ship \
     --state "$d/state" --config "$d/config" --agent-bin claude
@@ -234,7 +233,7 @@ t_old_claude_uses_generic() {
   local d=$TMP_ROOT/oldclaude
   mkhome "$d"; mkfake "$d" claude 'claude 1.9.9'
   start_term "$d" answer
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" \
     PATH="$d/bin:$PATH" bash "$SCRIPT" arm \
     --task t6 --harness claude --backend tmux --kind ship \
     --state "$d/state" --config "$d/config" --agent-bin claude
@@ -253,7 +252,7 @@ t_reply_drained_for_next_program() {
   local d=$TMP_ROOT/drain
   mkhome "$d"
   start_term "$d" answer
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
     --task t7 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   # the arm armed a watcher; everything since must be complete records only:
@@ -278,7 +277,7 @@ t_config_off_disables() {
   local d=$TMP_ROOT/cfgoff
   mkhome "$d"; printf 'off\n' >"$d/config/osc7501-status"
   start_term "$d" answer
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
     --task t8 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   sleep 0.3
@@ -363,13 +362,13 @@ t_disarm_after_agent_exit_parks_idle() {
   mkhome "$d"
   start_term "$d" answer
   busy_rec "$d/state" t10 busy
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
     --task t10 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   local wpid
   wpid=$(watcher_pid "$d/state") || fail "disarm: no watcher armed"
   wait_cap 'state=working' "$d/cap" 60 || fail "disarm: no working record"
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" disarm --state "$d/state"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" disarm --state "$d/state"
   wait_gone "$wpid" || fail "disarm left the reporter running"
   local tail
   tail=$(tail -c 4000 "$d/cap" | grep -o 'state=[a-z]*' | tail -1)
@@ -386,18 +385,18 @@ t_rearm_retires_previous_reporter() {
   local d=$TMP_ROOT/rearm
   mkhome "$d"; mkfake "$d" claude 'claude 2.1.295'
   start_term "$d" answer
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x bash "$SCRIPT" arm \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x bash "$SCRIPT" arm \
     --task t11 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   local first second
   first=$(watcher_pid "$d/state") || fail "rearm: no first watcher"
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x bash "$SCRIPT" arm \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x bash "$SCRIPT" arm \
     --task t11 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   second=$(watcher_pid "$d/state") || fail "rearm: same-task relaunch armed no watcher"
   [ "$first" != "$second" ] || fail "rearm: same-task relaunch kept the old reporter"
   wait_gone "$first" || fail "rearm: old reporter still running after same-task relaunch"
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x PATH="$d/bin:$PATH" \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x PATH="$d/bin:$PATH" \
     bash "$SCRIPT" arm --task t11 --harness claude --backend tmux --kind ship \
     --state "$d/state" --config "$d/config" --agent-bin claude
   wait_gone "$second" || fail "rearm: native relaunch left the firstmate reporter running"
@@ -417,14 +416,16 @@ t_activity_after_done_and_idle_inbox() {
   now=$(date +%s)
   busy_rec "$d/state" t12 busy "$((now - 20))"
   printf 'done [at=%s]: PR https://example.test/pr/2\n' "$((now - 10))" >"$d/state/t12.status"
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t12 --kind ship --state "$d/state" --harness opencode \
     --parent "$holder" &
   local wpid=$!
   wait_cap 'state=done' "$d/cap" 60 || fail "steer: done not reported"
-  busy_rec "$d/state" t12 busy "$now"
-  wait_cap 'state=working' "$d/cap" 60 || fail "steer: a busy turn after done still reads done"
+  mkdir -p "$d/state/t12.inbox/handled"
+  printf 'follow up\n' >"$d/state/t12.inbox/1.msg"
+  wait_cap 'state=working' "$d/cap" 60 || fail "steer: a follow-up steer after done still reads done"
   : >"$d/cap"
+  mv "$d/state/t12.inbox/1.msg" "$d/state/t12.inbox/handled/1.msg"
   busy_rec "$d/state" t12 idle "$((now + 1))"
   wait_cap 'state=idle' "$d/cap" 60 || fail "steer: the finished follow-up turn did not read idle"
   kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
@@ -433,10 +434,11 @@ t_activity_after_done_and_idle_inbox() {
   assert_equals "state=idle " "$states" "a retired done never reappears, live or as the final record"
   : >"$d/cap"
   rm -f "$d/state/t12.status"
+  rm -rf "$d/state/t12.inbox"
   busy_rec "$d/state" t12 idle "$now"
   mkdir -p "$d/state/t12.inbox"
   printf 'steer\n' >"$d/state/t12.inbox/1.msg"
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t12 --kind ship --state "$d/state" --harness opencode \
     --parent "$holder" &
   wpid=$!
@@ -445,7 +447,7 @@ t_activity_after_done_and_idle_inbox() {
   kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
   stop_term
-  pass "mapping: later activity overrides done; idle + inbox reads as steering"
+  pass "mapping: a follow-up steer overrides done; idle + inbox reads as steering"
 }
 
 tty_input_mode() { # <tty> -> canonical-input and echo flags as stty names them
@@ -463,7 +465,7 @@ t_handled_steer_retires_failure() {
   now=$(date +%s)
   busy_rec "$d/state" t15 idle "$((now - 20))"
   printf 'failed [at=%s]: tests red\n' "$((now - 10))" >"$d/state/t15.status"
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t15 --kind ship --state "$d/state" --harness opencode \
     --parent "$holder" &
   local wpid=$!
@@ -496,7 +498,7 @@ t_cursor_transcript_drives_activity() {
   printf 'projects_root=%s\nworkspace_root=%s\n' "$d/cursor-projects" "$d/ws" >"$d/state/t16.cursor-session"
   printf '{"role":"user"}\n' >"$conv"
   printf 'working [at=%s]: rebasing\n' "$(date +%s)" >"$d/state/t16.status"
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t16 --kind ship --state "$d/state" --harness cursor \
     --parent "$holder" &
   local wpid=$!
@@ -529,7 +531,7 @@ t_cursor_done_inside_observed_turn() {
   printf '{"workspacePath":"%s"}\n' "$d/ws" >"$proj/.workspace-trusted"
   printf 'projects_root=%s\nworkspace_root=%s\n' "$d/cursor-projects" "$d/ws" >"$d/state/t18.cursor-session"
   printf '{"role":"user"}\n{"type":"turn_ended"}\n' >"$conv"
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t18 --kind ship --state "$d/state" --harness cursor \
     --parent "$holder" &
   local wpid=$!
@@ -564,7 +566,7 @@ t_same_second_steer_retires_failure() {
   mkdir -p "$d/state/t19.inbox/handled"
   printf 'retry\n' >"$d/state/t19.inbox/handled/1.msg"
   set_mtime_ns "$d/state/t19.inbox/handled/1.msg" "${t}500000000"
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t19 --kind ship --state "$d/state" --harness opencode \
     --parent "$holder" &
   local wpid=$!
@@ -575,6 +577,65 @@ t_same_second_steer_retires_failure() {
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
   stop_term
   pass "mapping: a steer within the failure's own second still retires it"
+}
+
+# A busy record rewritten inside the same turn (a Polytoken pre_model_turn, an
+# OpenCode retry) is not a follow-up: the done it follows stands.
+t_busy_rewrite_keeps_done() {
+  local d=$TMP_ROOT/rewrite now
+  mkhome "$d"
+  start_term "$d" answer
+  sleep 300 &
+  local holder=$!
+  now=$(date +%s)
+  busy_rec "$d/state" t20 busy "$((now - 20))"
+  printf 'done [at=%s]: PR https://example.test/pr/4\n' "$((now - 10))" >"$d/state/t20.status"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t20 --kind ship --state "$d/state" --harness opencode \
+    --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=done' "$d/cap" 60 || fail "rewrite: done not reported"
+  busy_rec "$d/state" t20 busy "$(date +%s)"
+  sleep 6
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  assert_equals "state=done " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
+    "a mid-turn busy rewrite never retires the done, live or as the final record"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  stop_term
+  pass "mapping: a busy-record rewrite after done keeps reporting done"
+}
+
+# Once a follow-up retired a pause, an unrelated status append that keeps the
+# pause as the current line must not move its time and resurrect Waiting. A
+# regular capture file stands in for the terminal (the FM_OSC7501_TTY seam),
+# so the final record is in place the moment the watcher exits.
+t_retired_pause_stays_retired() {
+  local d=$TMP_ROOT/pause t
+  mkhome "$d"
+  : >"$d/cap"
+  sleep 300 &
+  local holder=$!
+  t=$(date +%s)
+  busy_rec "$d/state" t21 idle "$t"
+  printf 'paused [at=%s]: waiting on CI\n' "$t" >"$d/state/t21.status"
+  set_mtime_ns "$d/state/t21.status" "${t}100000000"
+  mkdir -p "$d/state/t21.inbox/handled"
+  printf 'go on\n' >"$d/state/t21.inbox/handled/1.msg"
+  set_mtime_ns "$d/state/t21.inbox/handled/1.msg" "${t}500000000"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t21 --kind ship --state "$d/state" --harness opencode \
+    --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=idle' "$d/cap" 300 || fail "pause: the follow-up did not retire the pause"
+  : >"$d/cap"
+  printf 'resolved [at=%s] [key=zz]: unrelated\n' "$((t + 1))" >>"$d/state/t21.status"
+  set_mtime_ns "$d/state/t21.status" "$((t + 1))000000000"
+  sleep 3
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  assert_equals "state=idle " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
+    "a retired pause stays retired after an unrelated append"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  pass "mapping: an unrelated status append never resurrects a retired pause"
 }
 
 # A reporter still folding a long status history when its pane is relaunched
@@ -588,12 +649,12 @@ t_retire_waits_for_slow_reporter() {
     printf 'needs-decision [at=%s] [key=k%s]: q%s\nresolved [at=%s] [key=k%s]: a%s\n' "$i" "$i" "$i" "$i" "$i" "$i"
   done >"$d/state/t17.status"
   busy_rec "$d/state" t17 busy
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
     --task t17 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   first=$(watcher_pid "$d/state") || fail "slow: no first watcher"
   wait_cap 'state=working' "$d/cap" 200 || fail "slow: the first reporter never reported"
-  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
     --task t17 --harness opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   if kill -0 "$first" 2>/dev/null; then
@@ -636,7 +697,7 @@ t_hc_terminal_with_inherited_herdr_markers() {
   local d=$TMP_ROOT/hcinherit
   mkhome "$d"
   start_term "$d" silent
-  clean_env env HC_TERMINAL_ID=t-2 HERDR_ENV=1 HERDR_PANE_ID=p-1 \
+  env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=t-2 HERDR_ENV=1 HERDR_PANE_ID=p-1 \
     FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
     --task t14 --harness opencode --backend hc --kind ship \
     --state "$d/state" --config "$d/config"
@@ -667,6 +728,8 @@ fm_test_run \
   t_cursor_transcript_drives_activity \
   t_cursor_done_inside_observed_turn \
   t_same_second_steer_retires_failure \
+  t_busy_rewrite_keeps_done \
+  t_retired_pause_stays_retired \
   t_retire_waits_for_slow_reporter \
   t_interrupted_query_restores_mode \
   t_hc_terminal_with_inherited_herdr_markers
