@@ -350,6 +350,8 @@ cmd_bind() {
   fi
   printf '%s\n' "$array" | jq -e 'type == "array" and length > 0 and all(.[]; (.harness | type) == "string" and (.harness | length) > 0)' >/dev/null \
     || die "the matched profile set is empty or has no harness"
+  printf '%s\n' "$array" | jq -e 'all(.[]; (.harness | IN("pi", "pi-signed") | not) or ((.provider // "") | length) > 0)' >/dev/null \
+    || die "pi and pi-signed profiles need a provider to enable mid-task fallback"
   printf 'dispatch_array=%s\ndispatch_fallback=on\n' "$array" >> "$meta"
   printf 'bound: %s\n' "$id"
 }
