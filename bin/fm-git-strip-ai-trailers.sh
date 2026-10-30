@@ -316,6 +316,11 @@ write_env_file() {
 # cannot run twice on one stack either. A re-entrant commit-msg exits before
 # the strip; the outer message was already stripped on the first entry, and a
 # nested commit inside a hook is the integrator's business, not a typed message.
+# Known limit: the marker is a plain exported variable, not scoped to the hook
+# stack. A long-lived process first started inside a wrapped hook, such as a
+# bd daemon or a tmux server, inherits FM_GIT_HOOK_ACTIVE, so its later commits
+# skip the AI-trailer strip and the repository hooks with no error. The -ef
+# self-copy guard alone has no such leak.
 sentinel_body() {
   cat <<'SENTINEL_EOF'
 # Re-entrancy sentinel: exit at once when a hook is already running above us
