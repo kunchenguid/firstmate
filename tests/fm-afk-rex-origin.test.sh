@@ -25,7 +25,10 @@ CURRENT=server-a
 fm_afk_launch_close_recorded || fail "matching origin did not finalize an absent endpoint"
 assert_absent "$FM_AFK_LAUNCH_RECORD" "confirmed absence retained the route"
 printf 'rex\ts:b\tsession:s\n' > "$FM_AFK_LAUNCH_RECORD"
-fm_afk_launch_record_read || fail "legacy record was not readable"
+unset FM_AFK_LEGACY_REX_SERVER
+fm_afk_launch_record_read
+[ "$?" -eq 2 ] || fail "unverified legacy record was not refused"
+[ "$(cat "$FM_AFK_LAUNCH_RECORD")" = $'rex\ts:b\tsession:s' ] || fail "refused legacy record was changed"
 fm_afk_launch_close_recorded && fail "an unproven legacy origin finalized its route"
 assert_present "$FM_AFK_LAUNCH_RECORD" "unproven origin lost its route"
 pass "AFK Rex lifecycle requires the recorded creation server"
