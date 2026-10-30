@@ -184,6 +184,18 @@ So a truncated digest does neither of these:
 - They source `bin/fm-gate-refuse-lib.sh` and stay silent for a no-mistakes gate agent identified by `NO_MISTAKES_GATE` or a `.no-mistakes/repos/*.git` git-common-dir.
 - They share `bin/fm-primary-scope-lib.sh` with `bin/fm-turnend-guard.sh`, so every hook uses one primary-detection owner.
 
+The run wrapper also stands down silently, before any state or lock work, for a session that is never the captain's primary:
+
+- An unattended Claude session, such as a plugin's background reviewer launched with `claude -p` or an Agent SDK script whose cwd is the home.
+  Without this, that session would take the session lock and leave the captain's interactive session read-only.
+  The signal is `CLAUDE_CODE_SESSION_ATTENDED=0`, honored only when the payload's `session_id` equals `CLAUDE_CODE_SESSION_ID`.
+  Claude Code recomputes that value for every session, so interactive sessions and the attended VS Code and desktop hosts still take the helm, and a value inherited into another harness's hook is ignored.
+  `CLAUDE_CODE_ENTRYPOINT` is not used because an interactive session keeps an inherited `sdk-cli` value.
+- A session marked `FM_NO_LOCK=1`, the generic opt-out for any tool that launches Claude in the home and must not take the fleet lock.
+
+`FM_SESSIONSTART_ALLOW_UNATTENDED=1` opts an unattended Claude session back in, for Firstmate's own live checks that drive a throwaway primary through `claude -p`; it never overrides `FM_NO_LOCK=1`.
+The signal evidence lives in [`verification/runtime-backends.md`](verification/runtime-backends.md#claude-unattended-session-signal).
+
 A fresh clone has no gitignored state directory yet.
 When the root otherwise qualifies as primary, the run wrapper creates the state directory before the unchanged scope check, so the first session takes the helm without a manual `mkdir state`.
 If that creation fails, the run wrapper prints one stderr line naming the state directory and the reason, then stands down as it would for any ineligible root.
@@ -408,6 +420,8 @@ It also proves the nudge wrapper's exact U+2063 `FIRSTMATE_OP:`-prefixed, `sessi
 It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree, including the internal Pi prerequisite's explicit silent stand-down.
 It proves the run wrapper creates a missing state directory on a fresh primary and delivers the full digest, while an unmarked linked worktree gets none.
 It proves a fresh primary whose state directory cannot be created reports that on one stderr line and stands down without a digest.
+It proves an unattended Claude payload and `FM_NO_LOCK=1` stand down without creating state or taking the lock, while attended, inherited-value, and `FM_SESSIONSTART_ALLOW_UNATTENDED=1` opens still take the helm.
+The opt-in live guard `tests/fm-sessionstart-unattended-live-e2e.test.sh` proves the same stand-down and override against a real `claude -p`.
 
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including:
 

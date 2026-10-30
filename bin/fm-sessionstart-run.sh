@@ -42,6 +42,10 @@
 # preflight. A lock another live session holds and a truncated digest are
 # reported inside the digest, while broken GitHub auth arrives through the
 # deferred network result inline or as a wake, for exactly that reason.
+# An unattended Claude session (CLAUDE_CODE_SESSION_ATTENDED=0 bound to the
+# payload's session_id) and an FM_NO_LOCK=1 session stand down before any
+# state or lock work; FM_SESSIONSTART_ALLOW_UNATTENDED=1 opts an unattended
+# Claude session back in. docs/sessionstart-nudge.md owns why.
 # A fresh clone has no gitignored state dir yet; a root that otherwise
 # qualifies as primary gets one created here before the scope check runs, so
 # the first session takes the helm without a manual `mkdir state`.
@@ -90,6 +94,44 @@ stand_down() {
 # they do not own. Pi's preflight-only status preserves that intentional silence
 # without mistaking it for a failed eligible attempt that needs the manual nudge.
 fm_is_gate_agent "$FM_ROOT" && stand_down
+[ "${FM_NO_LOCK:-}" = 1 ] && stand_down
+
+# Print the string value of the first key $1 in $PAYLOAD.
+# Splitting on the quote character finds the FIRST such key and its value
+# without depending on greedy-regex luck, and it cannot mistake a string VALUE
+# for the key, because only a key is followed by a bare colon.
+payload_field() {  # <key>
+  printf '%s' "$PAYLOAD" | awk -v key="$1" '
+    BEGIN { RS = "\"" }
+    seen == 2 { print; exit }
+    seen == 1 && $0 ~ /^[[:space:]]*:[[:space:]]*$/ { seen = 2; next }
+    seen == 1 { seen = 0 }
+    $0 == key { seen = 1 }
+  '
+}
+
+if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
+  # Claude and Codex both deliver a JSON SessionStart payload on stdin whose
+  # `source` field carries startup|resume|clear|compact. Parsed without jq so a
+  # host missing it still gets correct routing rather than silent full runs.
+  # A terminal stdin is skipped outright: a hook always pipes its payload, and
+  # an operator running this by hand must not be left waiting on a read.
+  PAYLOAD=$(cat 2>/dev/null || true)
+  # Cursor loads the tracked Claude settings as well as its own registration,
+  # so a Cursor-delivered payload here is the duplicate: bin/fm-sessionstart-
+  # cursor.sh already owns that session open and calls this wrapper with an
+  # explicit --source and no payload. Running twice would take the helm twice
+  # and repeat every startup sweep.
+  if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+    exit 0
+  fi
+  if [ "${CLAUDE_CODE_SESSION_ATTENDED:-}" = 0 ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] &&
+    [ "${FM_SESSIONSTART_ALLOW_UNATTENDED:-}" != 1 ] &&
+    [ "$(payload_field session_id)" = "$CLAUDE_CODE_SESSION_ID" ]; then
+    stand_down
+  fi
+  SOURCE=$(payload_field source)
+fi
 if [ ! -d "$STATE" ] && fm_primary_root_matches "$FM_ROOT"; then
   if ! MKDIR_ERR=$(mkdir -p "$STATE" 2>&1); then
     printf 'fm-sessionstart-run: startup could not create the state directory %s: %s\n' \
@@ -109,33 +151,6 @@ session_start_completed() {
   fm_session_pid_valid "$lock_pid" || return 1
   [ "$completion_pid" = "$lock_pid" ]
 }
-
-if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
-  # Claude and Codex both deliver a JSON SessionStart payload on stdin whose
-  # `source` field carries startup|resume|clear|compact. Parsed without jq so a
-  # host missing it still gets correct routing rather than silent full runs.
-  # A terminal stdin is skipped outright: a hook always pipes its payload, and
-  # an operator running this by hand must not be left waiting on a read.
-  # Splitting on the quote character finds the FIRST "source" key and its value
-  # without depending on greedy-regex luck, and it cannot mistake a string VALUE
-  # of "source" for the key, because only a key is followed by a bare colon.
-  PAYLOAD=$(cat 2>/dev/null || true)
-  # Cursor loads the tracked Claude settings as well as its own registration,
-  # so a Cursor-delivered payload here is the duplicate: bin/fm-sessionstart-
-  # cursor.sh already owns that session open and calls this wrapper with an
-  # explicit --source and no payload. Running twice would take the helm twice
-  # and repeat every startup sweep.
-  if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
-    exit 0
-  fi
-  SOURCE=$(printf '%s' "$PAYLOAD" | awk '
-    BEGIN { RS = "\"" }
-    seen == 2 { print; exit }
-    seen == 1 && $0 ~ /^[[:space:]]*:[[:space:]]*$/ { seen = 2; next }
-    seen == 1 { seen = 0 }
-    $0 == "source" { seen = 1 }
-  ')
-fi
 
 case "$SOURCE" in
   resume|reload|fork)
