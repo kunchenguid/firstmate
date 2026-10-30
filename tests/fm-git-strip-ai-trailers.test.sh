@@ -7,9 +7,10 @@
 # way a fleet-launched pane does.
 set -u
 
-# A fleet pane already carries GIT_CONFIG core.hooksPath. These cases set that
-# override themselves, so drop the inherited one before any git command.
-unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
+# A fleet pane already carries GIT_CONFIG core.hooksPath, and a wrapped hook
+# exports FM_GIT_HOOK_ACTIVE. These cases control both themselves, so drop the
+# inherited values before any git command.
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS FM_GIT_HOOK_ACTIVE
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
