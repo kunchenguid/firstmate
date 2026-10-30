@@ -2614,10 +2614,28 @@ PID_FILE="$PID_DIR/$RUN_ID.pid"
 # Invoked indirectly by the TERM/INT trap below.
 # shellcheck disable=SC2329
 abort_run() {
-  local sig=$1 p
+  local sig=$1 p pids live w=0
   trap - TERM INT
-  for p in $(descendants_of "$$"); do
+  pids=$(descendants_of "$$")
+  for p in $pids; do
     kill -TERM "$p" 2>/dev/null || true
+  done
+  # Children that ignore TERM get a short grace, then KILL, so none outlive the
+  # record that would let --stop find them again.
+  while :; do
+    live=
+    for p in $pids; do
+      case $(ps -o stat= -p "$p" 2>/dev/null) in
+        ''|Z*) ;;
+        *) live="$live $p" ;;
+      esac
+    done
+    [ -n "$live" ] && [ "$w" -lt 20 ] || break
+    sleep 0.1
+    w=$((w + 1))
+  done
+  for p in $live; do
+    kill -KILL "$p" 2>/dev/null || true
   done
   printf 'FM_TEST_ABORTED signal=%s run=%s\n' "$sig" "$RUN_ID"
   exit $((128 + sig))
