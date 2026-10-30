@@ -2580,15 +2580,6 @@ collect_local_firstmate_states() {
   TREEHOUSE_OWNER_STATES=("${FM_LOCAL_FIRSTMATE_STATES[@]}")
 }
 
-# Whether a slot claim's recorded home is the home whose state directory holds
-# the record being torn down. Anything unresolvable is not that home.
-slot_claim_home_owns_state() {  # <claim-home> <record-state>
-  local claim_home=$1 record_state=$2
-  [ -n "$claim_home" ] && [ -d "$claim_home" ] || return 1
-  [ "$claim_home/state" -ef "$record_state" ] && return 0
-  [ "$record_state" -ef "$STATE" ] && [ "$claim_home" -ef "$FM_HOME" ]
-}
-
 # Whether another task record's own recorded endpoint is proven not live: its
 # endpoint metadata validates and the recovery-grade classifier reads it dead,
 # or the backend-specific absence authority proves a missing endpoint gone.
@@ -2670,7 +2661,7 @@ require_exclusive_worktree_slot_record() {
   # unprovable endpoint still refuses. A matching task id from any other home
   # proves nothing, so the scan still refuses there.
   if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] \
-     && slot_claim_home_owns_state "$FM_TREEHOUSE_SLOT_OWNER_HOME" "$record_state"; then
+     && fm_treehouse_slot_claim_home_owns_state "$FM_TREEHOUSE_SLOT_OWNER_HOME" "$record_state" "$STATE" "$FM_HOME"; then
     claimed=1
   fi
   collect_local_firstmate_states "$record_state" || return 1

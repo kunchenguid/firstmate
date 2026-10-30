@@ -2430,20 +2430,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
   }
-  # Relaunch is the recorded-worktree adoption owner, including fm-control.
-  # An absent claim remains compatible with records predating slot claims.
-  fm_treehouse_slot_owner_state "$RELAUNCH_WT" "$ID"
-  case "$FM_TREEHOUSE_SLOT_OWNER" in
-    mine | absent) ;;
-    other)
-      echo "error: task $ID's recorded worktree is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID; refusing to adopt another task's slot" >&2
-      exit 1
-      ;;
-    *)
-      echo "error: task $ID's recorded worktree has an unreadable slot claim; refusing to adopt a slot whose owner cannot be verified" >&2
-      exit 1
-      ;;
-  esac
   if [ "$KIND" = secondmate ]; then
     FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)
     [ -n "$FIRSTMATE_HOME" ] || FIRSTMATE_HOME=$RELAUNCH_WT
@@ -2453,7 +2439,38 @@ if [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID has no recorded project; refusing to relaunch" >&2
       exit 1
     }
+    if fm_treehouse_pool_slot "$PROJ" "$RELAUNCH_WT"; then
+      SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") || {
+        echo "error: could not resolve the shared Treehouse project lock for $PROJ" >&2
+        exit 1
+      }
+      if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+        echo "error: another Treehouse slot allocation or return is in progress for $PROJ; refusing to race it" >&2
+        exit 1
+      fi
+      SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+    fi
   fi
+  # Relaunch is the recorded-worktree adoption owner, including fm-control.
+  # An absent claim remains compatible with records predating slot claims.
+  fm_treehouse_slot_owner_state "$RELAUNCH_WT" "$ID"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    absent) ;;
+    mine)
+      if ! fm_treehouse_slot_claim_home_owns_state "$FM_TREEHOUSE_SLOT_OWNER_HOME" "$STATE" "$STATE" "$FM_HOME"; then
+        echo "error: task $ID's recorded worktree has a slot claim from another Firstmate home; refusing to adopt a slot whose owner cannot be verified" >&2
+        exit 1
+      fi
+      ;;
+    other)
+      echo "error: task $ID's recorded worktree is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID; refusing to adopt another task's slot" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: task $ID's recorded worktree has an unreadable slot claim; refusing to adopt a slot whose owner cannot be verified" >&2
+      exit 1
+      ;;
+  esac
   if [ "$BACKEND" = herdr ]; then
     # fm-spawn uses HERDR_PANE_ID for the TASK's pane, while the herdr adapter
     # reads that SAME name as the pane THIS process is itself running in
