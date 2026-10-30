@@ -42,13 +42,12 @@
 #     working "Steering received"
 #   a working: line supplies the working message, and reads as working while
 #     the activity is unknown
-#   a failed/done/paused declaration yields to activity after it: once the
-#   watcher sees a busy record written later, or any steer (unhandled or in
-#   handled/) was enqueued later, the declaration is retired and activity and
-#   inbox map as above; ordering uses nanosecond file times so activity in the
-#   declaration's own second still counts, and a pulled Cursor/Muse
-#   transcript, which records no turn start, never retires one; an open
-#   decision or blocker always wins
+#   a failed/done/paused declaration yields only to a follow-up: once any
+#   steer (unhandled or in handled/) was enqueued after it, the declaration is
+#   retired and activity and inbox map as above. Busy-state writes never
+#   retire one - a mid-turn rewrite looks the same as a new turn - and
+#   ordering uses nanosecond file times so a steer in the declaration's own
+#   second still counts; an open decision or blocker always wins
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
@@ -318,7 +317,8 @@ osc_native() {
 # --- signal -> state ----------------------------------------------------------
 
 LIBS_LOADED=0
-OSC_TURN_AT=0
+OSC_DECL_LINE=
+OSC_DECL_AT=0
 osc_load_libs() {
   [ "$LIBS_LOADED" = 1 ] && return 0
   # shellcheck source=bin/fm-classify-lib.sh
@@ -341,32 +341,18 @@ osc_inbox_since() {
 }
 
 # osc_plan sets W_STATE, W_KIND, W_MSG; returns 1 when nothing should be
-# emitted (no signal yet, or the activity is unknown). Ordering is in
-# nanoseconds: OSC_TURN_AT keeps the latest busy record write seen across
-# polls (its file mtime when that shares the record's ts second, else the ts
-# second's start), and a declaration counts as written no later than its
-# status file's mtime or the end of its own stamped second. Pulled
-# transcripts carry no turn-start time, so only records advance OSC_TURN_AT.
+# emitted (no signal yet, or the activity is unknown). A declaration's time,
+# in nanoseconds, is fixed the first poll that sees its line (OSC_DECL_LINE /
+# OSC_DECL_AT): no later than the status file's mtime then, nor than the end
+# of its own stamped second, so later unrelated appends never move it.
 osc_plan() { # <task> <kind> <state> <harness>
-  local task=$1 kind=$2 state_dir=$3 line verb note held act bs bts bns since sf wmsg=''
+  local task=$1 kind=$2 state_dir=$3 line verb note held act bs since sf wmsg=''
   W_STATE=
   W_KIND=
   W_MSG=
   osc_load_libs || return 1
   act=$(fm_busy_classify '' '' "$4" "$task" "$state_dir" 2>/dev/null) || act=
   bs=${act%% *}
-  if [ "$bs" = busy ]; then
-    case "${act#* }" in
-      cursor-transcript | muse-session-log) ;;
-      *)
-        bts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state_dir/$task.busy-state" 2>/dev/null)
-        if [ -n "$bts" ]; then
-          bns=$(osc_mtime_ns "$state_dir/$task.busy-state") || bns=0
-          [ "$((bns / 1000000000))" = "$bts" ] || bns=$((bts * 1000000000))
-          if [ "$bns" -gt "$OSC_TURN_AT" ]; then OSC_TURN_AT=$bns; fi
-        fi ;;
-    esac
-  fi
   line=$(status_current_line "$state_dir/$task.status" "$kind" 2>/dev/null)
   verb=$(status_line_verb "$line" 2>/dev/null) || verb=
   note=$(status_line_note "$line" 2>/dev/null) || note=
@@ -404,12 +390,15 @@ osc_plan() { # <task> <kind> <state> <harness>
     working) wmsg=$note ;;
   esac
   if [ -n "$W_STATE" ]; then
-    since=$(status_line_at_epoch "$line" 2>/dev/null) || return 0
-    since=$((since * 1000000000 + 999999999))
-    if sf=$(osc_mtime_ns "$state_dir/$task.status") && [ "$sf" -lt "$since" ]; then since=$sf; fi
-    if [ "$OSC_TURN_AT" -le "$since" ] &&
-      ! osc_inbox_since "$state_dir/$task.inbox" "$since" &&
-      ! osc_inbox_since "$state_dir/$task.inbox/handled" "$since"; then
+    if [ "$line" != "$OSC_DECL_LINE" ]; then
+      since=$(status_line_at_epoch "$line" 2>/dev/null) || return 0
+      since=$((since * 1000000000 + 999999999))
+      if sf=$(osc_mtime_ns "$state_dir/$task.status") && [ "$sf" -lt "$since" ]; then since=$sf; fi
+      OSC_DECL_LINE=$line
+      OSC_DECL_AT=$since
+    fi
+    if ! osc_inbox_since "$state_dir/$task.inbox" "$OSC_DECL_AT" &&
+      ! osc_inbox_since "$state_dir/$task.inbox/handled" "$OSC_DECL_AT"; then
       return 0
     fi
     W_STATE=
