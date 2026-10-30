@@ -26,13 +26,13 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KIRO_BIN=$(command -v kiro-cli 2>/dev/null || true)
-REAL_TMUX=$(command -v tmux 2>/dev/null || true)
+KIRO_BIN=
+REAL_TMUX=
 LAB=
 SOCKET="fm-kiro-signals-$$"
 SESSION=kiro-signals
 TARGET="$SESSION:kiro"
-KIRO_VERSION=$([ -n "$KIRO_BIN" ] && "$KIRO_BIN" --version 2>/dev/null | head -1 || echo "kiro-cli(unknown)")
+KIRO_VERSION='kiro-cli(unknown)'
 
 cleanup() {
   [ -n "$REAL_TMUX" ] && "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
@@ -50,7 +50,10 @@ pass() {
 }
 
 fm_live_gate opt-in FM_KIRO_SIGNALS_LIVE kiro-cli tmux
+KIRO_BIN=$(command -v kiro-cli 2>/dev/null || true)
+REAL_TMUX=$(command -v tmux 2>/dev/null || true)
 [ -n "$KIRO_BIN" ] || fail "kiro-cli is not installed"
+KIRO_VERSION=$("$KIRO_BIN" --version 2>/dev/null | head -1 || echo "kiro-cli(unknown)")
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-kiro-signals.XXXXXX") || fail "could not create the isolated kiro lab"
 trap cleanup EXIT

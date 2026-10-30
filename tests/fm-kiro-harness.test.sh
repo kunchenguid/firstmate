@@ -712,6 +712,34 @@ test_kiro_teardown_removes_the_per_task_home() {
   pass "fm-teardown: kiro's per-task home is removed on teardown"
 }
 
+# The live e2e guard is opt-in because it submits real prompts. An opted-out
+# run must not start kiro-cli at all, including a --version probe, or a stuck
+# wrapper can block the skip. Drive the real guard with a recording stub so
+# the assertion is about process start, not source text.
+test_kiro_live_e2e_does_not_start_kiro_when_gated_off() {
+  local fakebin marker out rc
+  fakebin=$(fm_fakebin "$TMP_ROOT/live-gate")
+  marker="$TMP_ROOT/live-gate/kiro-started"
+  cat >"$fakebin/kiro-cli" <<SH
+#!/usr/bin/env bash
+printf 'started\n' >> "$marker"
+printf 'kiro-cli 0.0.0\n'
+exit 0
+SH
+  chmod +x "$fakebin/kiro-cli"
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_KIRO_SIGNALS_LIVE=0 FM_LIVE=0 \
+    bash "$ROOT/tests/fm-kiro-signals-live-e2e.test.sh" 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "the gated-off live e2e must skip cleanly: $out"
+  assert_contains "$out" "skip: live:" \
+    "the gated-off live e2e must print the shared live-gate skip"
+  [ ! -e "$marker" ] || \
+    fail "the gated-off live e2e started kiro-cli before skipping"$'\n'"$(cat "$marker")"
+  pass "fm-kiro-signals-live-e2e: an opted-out run never starts kiro-cli"
+}
+
 test_kiro_ancestry_detects_the_native_command_name
 test_kiro_ancestry_rejects_unrelated_mentions
 test_kiro_ancestry_outranks_inherited_claude_marker
@@ -733,3 +761,4 @@ test_kiro_unreachable_listing_launches_unvalidated
 test_kiro_hung_listing_is_cut_off_and_launches
 test_kiro_secondmate_is_refused
 test_kiro_teardown_removes_the_per_task_home
+test_kiro_live_e2e_does_not_start_kiro_when_gated_off
