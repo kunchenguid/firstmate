@@ -2605,6 +2605,7 @@ test_self_merged_lane_is_still_cleaned_up_by_the_poll() {
   url=https://github.com/o/r/pull/1
   dir=$(make_case self-merge-cleanup)
   state="$dir/home/state"
+  : > "$dir/home/config/auto-land"
   write_task_meta "$dir" task-a
   run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/seed.err" \
     || fail "self-merge-cleanup: could not arm merge poll"

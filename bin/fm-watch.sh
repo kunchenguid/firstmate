@@ -4087,11 +4087,13 @@ EOF
             triage_log "published merge outcome for $id but could not retire its authority record"
             exit 1
           fi
-          # Persist the cleanup request before retiring its only retry trigger.
+          # Persist before retiring the poll; start only after releasing its control lock.
           FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
-            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --detach >/dev/null 2>&1 || true
+            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --queue >/dev/null 2>&1 || true
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --detach >/dev/null 2>&1 || true
           touch "$STATE/.last-check"
           # A merged lane eligible for merge-time cleanup, also one
           # bin/fm-pr-merge.sh already recorded, is torn down by a detached
