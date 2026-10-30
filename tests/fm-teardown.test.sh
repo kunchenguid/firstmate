@@ -4920,6 +4920,49 @@ test_own_autonomous_run_is_left_alone() {
   pass "a task-owned autonomous running step is left alone rather than aborted"
 }
 
+# A fork child that faults before exec spins at full CPU forever under stock macOS
+# Bash 3.2 once an EXIT trap is set, holding every lock. The stub below stands in
+# for that child: a bash copy with the teardown's exact command line that spins
+# (through BASH_ENV, bounded to 120 s) so the watchdog is exercised without macOS
+# or fault injection. A process that rewrites its own argv would not match, because
+# macOS pads it and appends the environment to the argv that ps reports.
+test_fork_spin_child_is_cut_off_and_locks_are_released() {
+  local case_dir rc=0 start elapsed leftover
+  case_dir=$(make_case fork-spin)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  # shellcheck disable=SC2016
+  printf '%s\n' 'SECONDS=0; while [ "$SECONDS" -lt 120 ]; do :; done; exit 0' > "$case_dir/spin.env"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+BASH_ENV="$FORK_SPIN_ENV" bash "$FORK_SPIN_TEARDOWN" task-x1 &
+echo "$!" > "$FORK_SPIN_PID"
+wait
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  # fail exits the whole script, so every assertion here reaps the fixture first.
+  spin_fail() { pkill -KILL -f "$case_dir" 2>/dev/null || true; fail "$1"; }
+  start=$(date +%s)
+  FORK_SPIN_ENV="$case_dir/spin.env" FORK_SPIN_TEARDOWN="$TEARDOWN" FORK_SPIN_PID="$case_dir/spin.pid" \
+  FM_TEARDOWN_FORK_SPIN_CPU=2 FM_SUPERVISION_ACTOR=main \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  elapsed=$(( $(date +%s) - start ))
+
+  [ -s "$case_dir/spin.pid" ] || spin_fail "fork-spin: the spinning stub child never started"
+  [ "$rc" = 143 ] || spin_fail "fork-spin: teardown exited $rc, expected 143 (a watchdog cut-off)"
+  [ "$elapsed" -le 30 ] || spin_fail "fork-spin: teardown took ${elapsed}s to stop"
+  if kill -0 "$(cat "$case_dir/spin.pid")" 2>/dev/null; then
+    spin_fail "fork-spin: the spinning child survived the watchdog"
+  fi
+  [ ! -e "$case_dir/state/.control-task-x1.lock" ] || spin_fail "fork-spin: the control lock was left held"
+  [ ! -e "$case_dir/state/.fm-lease-command.lock" ] || spin_fail "fork-spin: the lease lock was left held"
+  [ -d "$case_dir/wt" ] || spin_fail "fork-spin: the working copy was removed"
+  [ -z "$(git -C "$case_dir/wt" status --porcelain)" ] || spin_fail "fork-spin: the working copy changed"
+  leftover=$(pgrep -f "$case_dir" || true)
+  [ -z "$leftover" ] || spin_fail "fork-spin: processes using the fixture survived: $leftover"
+  pass "a spinning unexec'd fork copy is cut off, teardown exits 143, locks are released and the working copy is intact"
+}
+
 test_leaked_worktree_process_is_reaped() {
   local case_dir rc pid
   case_dir=$(make_case leaked-process-reap)
@@ -6080,6 +6123,7 @@ test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion
 test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
+test_fork_spin_child_is_cut_off_and_locks_are_released
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
