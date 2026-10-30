@@ -347,6 +347,7 @@ Ordinary non-projected task removal:
 
 Task cleanup acquires that session lock before the task's isolated copy is returned.
 So a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
+Because a task pane's top-level shell sits in its worktree, cleanup closes that pane under the lock before it reaps the worktree's processes or returns the copy, so the reap never removes the pane outside the focus-preserving close.
 
 Forced secondmate cleanup recursively preflights every Herdr child endpoint and acquires every affected named-session lock before mutating any child.
 It then retains each child's durable identity unless that exact pane returns structured not-found after its close.
@@ -816,6 +817,12 @@ Stopping and restarting a named Herdr server preserves workspace, tab, pane, and
 The underlying harness processes and live agent registrations do not survive.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
 
+Herdr restores each pane's shell, and resumes any agent it restores there, in the cwd of that pane's top-level shell.
+So spawn leases a fresh crewmate or scout task's worktree before opening its pane and opens the pane in that worktree, never in the spawning project.
+That lease outlives the pane, so a same-identity recovery after a restart whose recorded pane holds no agent reuses the worktree its record still holds, untouched, rather than leasing a second one.
+A relaunch whose recorded pane is gone opens its new pane in the recorded worktree, and a secondmate's pane opens in its own home.
+A pane created before this ordering, including one a relaunch reuses in place, keeps its original cwd until it is re-created, and a restart resumes only the agents Herdr itself restores.
+
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
@@ -824,7 +831,7 @@ This prevents closing the workspace's last tab before a replacement exists.
 A registration alone never proves an agent.
 Herdr keeps a Pi registration after the Pi process has exited to a plain shell, whenever a nested interactive shell sits under the pane's top shell.
 In that case `agent get` still reports `agent=pi` with its last status.
-That nested shell is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
+That nested shell is the crew shape an interactive `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
 It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:

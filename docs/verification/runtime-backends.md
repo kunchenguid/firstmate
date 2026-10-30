@@ -1584,6 +1584,51 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: a restored no-agent tab was replaced create-before-close, while a registered live agent caused refusal.
 
+### Restored pane cwd
+
+Measured 2026-10-27 on Linux x86_64 against Herdr 0.9.5 and Claude Code 2.1.296, in isolated `fm-lab-` sessions (`bin/fm-herdr-lab.sh`).
+Herdr saves each pane's `cwd` - its top-level shell's cwd, the `cwd` that `pane get` reports - in the session's `session.json` with the pane's `agent_session`.
+On restart it starts the pane's shell in that saved `cwd`, and with `[session] resume_agents_on_restore` on (the 0.9.5 default) it runs the agent's resume command there.
+A `cd` into a child shell, as an interactive `treehouse get` opens, changes only `foreground_cwd`, which is not saved.
+
+A real Claude crewmate was spawned through `bin/fm-spawn.sh` with `--backend herdr` into a lab home, left idle after one turn, and the lab session was stopped and provisioned again with a config copy that kept agent resume on.
+The pane `cwd` and the resumed process were read with:
+
+```sh
+jq -c '[.. | objects | select(.agent_session? != null)] | map({cwd, agent_session})' session.json
+bin/fm-herdr-lab.sh run "$LAB" pane get "$PANE" | jq -r '.result.pane.cwd'
+bin/fm-herdr-lab.sh run "$LAB" pane process-info --pane "$PANE"
+readlink "/proc/$CLAUDE_PID/cwd"
+```
+
+On the code before this change, which opened the pane in the project and typed `treehouse get` into it:
+
+```text
+before restart: pane cwd=<home>/projects/demo foreground_cwd=<treehouse>/demo-d5d3dd/1/demo
+saved pane: [{"cwd":"<home>/projects/demo","agent_session":{"source":"herdr:claude","agent":"claude","kind":"id","value":"a7789ca4-..."}}]
+resumed agent cmd=claude --resume a7789ca4-...
+resumed agent cwd=<home>/projects/demo
+```
+
+With the fresh task's slot leased first and its pane opened in the worktree:
+
+```text
+before restart: pane cwd=<treehouse>/demo-3e02e2/1/demo foreground_cwd=<treehouse>/demo-3e02e2/1/demo
+saved pane: [{"cwd":"<treehouse>/demo-3e02e2/1/demo","agent_session":{"source":"herdr:claude","agent":"claude","kind":"id","value":"08e7a130-..."}}]
+resumed agent cmd=claude --resume 08e7a130-...
+resumed agent cwd=<treehouse>/demo-3e02e2/1/demo
+```
+
+The restored-cwd regression is owned by the restart cases of:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+Observed guarantee: after a lab restart, a fresh projected task's pane is restored with `cwd` in its recorded worktree, and an opted-out flat spawn creates its task tab with `--cwd` set to that worktree.
+A same-identity reclaim after the restart reuses the worktree still leased to that task, and teardown leaves no pool slot leased to it.
+
 ### Launcher workspace placement
 
 Herdr exports its pane identity into every process it manages, checked on 2026-07-30 against Herdr 0.7.5 protocol 17 inside a guarded lab pane:
