@@ -1517,7 +1517,7 @@ test_concurrent_runs_are_ordered_longest_first() {
 }
 
 test_stop_is_scoped_to_one_run() {
-  local tmp repo runner sleeper a_out b_out a_id a_pid b_id b_pid a_fix b_fix a_rc w pid_dir
+  local tmp repo runner sleeper a_out b_out a_id a_pid b_id b_pid a_fix b_fix a_rc w pid_dir lister_pid
   # Registered before any background launch so a failure below still reaps the
   # fixture root and every process naming it.
   tmp=$(fm_test_tmproot fm-test-run-stop) || fail "could not create the stop fixture root"
@@ -1542,6 +1542,10 @@ EOF
   b_out="$tmp/b.out"
   a_fix="$tmp/fixture-a.pid"
   b_fix="$tmp/fixture-b.pid"
+  # A lister polls the registry while both runs start, so a record it caught
+  # half-written would be discarded as stale and the run missing below.
+  (while [ ! -e "$tmp/lister.done" ]; do TMPDIR="$tmp" "$runner" --stop >/dev/null 2>&1; done) &
+  lister_pid=$!
   # The run and --stop use different time zones, as a harness and an agent may.
   FM_STOP_MARK=a TZ=UTC TMPDIR="$tmp" "$runner" "$sleeper" >"$a_out" 2>&1 &
   a_pid=$!
@@ -1552,6 +1556,8 @@ EOF
     sleep 0.1
     w=$((w + 1))
   done
+  : >"$tmp/lister.done"
+  wait "$lister_pid" 2>/dev/null || true
   [ -s "$a_fix" ] && [ -s "$b_fix" ] || fail "the fixture scripts never started"
   [ -z "$(find "$pid_dir" -maxdepth 0 ! -perm 700)" ] || fail "the run registry must be mode 700"
   a_id=$(TZ=Pacific/Kiritimati TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$a_pid" '$2 == p {print $1}')
@@ -1576,6 +1582,50 @@ EOF
   TMPDIR="$tmp" "$runner" --stop "$b_id" >/dev/null 2>&1 || true
   wait "$b_pid" 2>/dev/null || true
   pass "--stop kills one run, emits FM_TEST_ABORTED with exit 143, spares siblings"
+}
+
+# A TERM sent straight to the runner must abort it while a script hangs, not
+# once that script ends on its own.
+test_term_to_runner_aborts_a_hung_suite() {
+  local tmp repo runner sleeper out fix pid rc w started elapsed
+  tmp=$(fm_test_tmproot fm-test-run-term) || fail "could not create the TERM fixture root"
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  sleeper=tests/fm-sleep-fixture.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/$sleeper" <<'EOF'
+#!/usr/bin/env bash
+printf "%s\n" "$$" >"$TMPDIR/fixture.pid"
+sleep 60
+EOF
+  chmod +x "$runner" "$repo/$sleeper"
+  out="$tmp/run.out"
+  fix="$tmp/fixture.pid"
+  TMPDIR="$tmp" "$runner" "$sleeper" >"$out" 2>&1 &
+  pid=$!
+  w=0
+  while [ ! -s "$fix" ] && [ "$w" -lt 100 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  [ -s "$fix" ] || fail "the fixture script never started"
+  started=$(date +%s)
+  kill -TERM "$pid"
+  rc=0
+  wait "$pid" || rc=$?
+  elapsed=$(($(date +%s) - started))
+  [ "$elapsed" -le 5 ] || fail "TERM took ${elapsed}s to abort the runner"
+  [ "$rc" -eq 143 ] || fail "a TERMed run must exit 143, got $rc: $(cat "$out")"
+  grep -q "FM_TEST_ABORTED signal=15 " "$out" || fail "TERMed run did not report FM_TEST_ABORTED: $(cat "$out")"
+  w=0
+  while kill -0 "$(cat "$fix")" 2>/dev/null && [ "$w" -lt 50 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  ! kill -0 "$(cat "$fix")" 2>/dev/null || fail "the TERMed run's script is still running"
+  pass "a TERM sent to the runner aborts a hung script promptly with exit 143"
 }
 
 # A registry directory the caller does not exclusively own is refused, never
@@ -2010,6 +2060,7 @@ test_changed_t3_sources_select_their_readers
 test_concurrent_runs_are_ordered_longest_first
 test_stop_is_scoped_to_one_run
 test_stop_refuses_an_unprivate_registry
+test_term_to_runner_aborts_a_hung_suite
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom
 test_max_wall_ms_is_a_result_not_advice

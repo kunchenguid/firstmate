@@ -35,9 +35,8 @@
 #   exits 128+n, so callers can tell an aborted run from a failed one.
 #   Runs register in a private per-user directory (mode 700, owned by the
 #   caller; any other directory is refused) keyed by pid plus process start
-#   time, so a reused pid is never signalled. Bash defers a trap until its
-#   foreground child exits, so a TERM sent straight to the runner takes effect
-#   only after the script now running ends; --stop signals the descendants too.
+#   time, so a reused pid is never signalled. A TERM sent straight to the
+#   runner aborts it the same way and stops the script now running.
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run. Each
@@ -240,6 +239,8 @@ usage() {
 
 PID_DIR="${TMPDIR:-/tmp}/fm-test-run-pids-$(id -u)"
 
+# Invoked by abort_run, which only the TERM/INT trap reaches.
+# shellcheck disable=SC2329
 descendants_of() {
   local c
   for c in $(pgrep -P "$1" 2>/dev/null); do
@@ -263,7 +264,7 @@ pid_dir_is_private() {
 
 # Lists live runs (no argument) or stops exactly one run and its descendants.
 stop_runs() {
-  local want=${1:-} f id line pid start live=0 victims
+  local want=${1:-} f id line pid start live=0
   if [ ! -e "$PID_DIR" ] && [ ! -L "$PID_DIR" ]; then
     [ -n "$want" ] || { printf 'fm-test-run: no live runs\n' >&2; return 0; }
     printf 'fm-test-run: no live run %s\n' "$want" >&2
@@ -294,12 +295,7 @@ stop_runs() {
     if [ -z "$want" ]; then
       printf '%s pid=%s\n' "$id" "$pid"
     elif [ "$id" = "$want" ]; then
-      # Bash defers a trap until its foreground child exits, so signal the
-      # runner first, then its descendants, which lets the trap run promptly.
-      victims=$(descendants_of "$pid")
       kill -TERM "$pid" 2>/dev/null || true
-      # shellcheck disable=SC2086
-      [ -z "$victims" ] || kill -TERM $victims 2>/dev/null || true
       printf 'fm-test-run: stopped %s\n' "$id"
       return 0
     fi
@@ -2595,7 +2591,7 @@ declare -a WORKER_SCRIPTS=()
 # shellcheck disable=SC2329
 cleanup_run() {
   rm -rf "$RUN_TMP"
-  rm -f "${PID_FILE:-}"
+  rm -f "${PID_FILE:-}" "${PID_FILE:-}.tmp"
 }
 
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
@@ -2621,7 +2617,10 @@ trap 'abort_run 2' INT
 (umask 077 && mkdir -p "$PID_DIR") 2>/dev/null
 pid_dir_is_private \
   || die "refusing run registry $PID_DIR: it must be a real directory owned by you with mode 700"
-printf '%s %s\n' "$$" "$(process_start_identity "$$")" >"$PID_FILE"
+# The record is written whole and renamed into place, so a concurrent --stop
+# never reads a partial record and discards a live run as stale.
+printf '%s %s\n' "$$" "$(process_start_identity "$$")" >"$PID_FILE.tmp"
+mv "$PID_FILE.tmp" "$PID_FILE"
 TOTAL=0
 FAILED=0
 SKIPPED_GATE=0
@@ -2753,8 +2752,12 @@ run_one_serial() {
     "$begin_iso" "$script" "$family" "$expected"
 
   set +e
-  # Stream live output while retaining a copy for gate-skip detection.
-  run_script_bounded "$script" "$out" 1 "s$TOTAL"
+  # Stream live output while retaining a copy for gate-skip detection. Bash
+  # defers a trap until a foreground child exits, so the script runs in the
+  # background (keeping the caller's stdin) behind a wait a TERM or INT
+  # interrupts, which lets abort_run stop a hung script promptly.
+  run_script_bounded "$script" "$out" 1 "s$TOTAL" <&0 &
+  wait "$!"
   rc=$?
   set -e
   : "${rc:=1}"
