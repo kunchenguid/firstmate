@@ -1316,6 +1316,90 @@ test_pr_check_records_remote_head_when_local_lags() {
   pass "fm-pr-check records the remote PR head when the local worktree lags"
 }
 
+# Exercise Git's capability/error boundary through the real teardown entry point.
+# Only merge-tree is intercepted; history, fetches, and preservation checks are real.
+test_content_fallback_git_capability_boundary() {
+  local mode case_dir rc head
+  for mode in unsupported contained conflict unlanded error; do
+    case_dir=$(make_case "content-git-$mode")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    case "$mode" in
+      conflict) land_on_origin_main "$case_dir" feature.txt different ;;
+      unlanded) ;;
+      *) land_on_origin_main "$case_dir" feature.txt hello ;;
+    esac
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+args=("$@")
+if [ "${1:-}" = -C ]; then shift 2; fi
+if [ "${1:-}" = merge-tree ]; then
+  printf '%s\n' "$*" >> "${FM_TEST_MERGE_TREE_LOG:?}"
+  case "${FM_TEST_MERGE_TREE_MODE:?}" in
+    unsupported)
+      echo "error: unknown option 'write-tree'" >&2
+      exit 129 ;;
+    error)
+      echo 'fatal: unable to read tree object' >&2
+      exit 128 ;;
+  esac
+fi
+exec "$REAL_GIT_FOR_TEST" "${args[@]}"
+SH
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_TREEHOUSE_LOG:?}"
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/git" "$case_dir/fakebin/treehouse"
+
+    set +e
+    FM_TEST_MERGE_TREE_MODE="$mode" \
+      FM_TEST_MERGE_TREE_LOG="$case_dir/merge-tree.log" \
+      FM_TEST_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    grep -q -- 'merge-tree --write-tree' "$case_dir/merge-tree.log" \
+      || fail "content-git-$mode: never attempted the containment proof"
+    if [ "$mode" = contained ]; then
+      expect_code 0 "$rc" "content-git-contained: supported containment should allow cleanup"
+      assert_present "$case_dir/treehouse.log" "content-git-contained: cleanup never ran"
+      assert_absent "$case_dir/state/task-x1.meta" "content-git-contained: task record survived cleanup"
+      continue
+    fi
+    expect_code 1 "$rc" "content-git-$mode: teardown must refuse"
+    assert_refusal_retained_task_state "$case_dir" "content-git-$mode" "$head"
+    assert_absent "$case_dir/treehouse.log" "content-git-$mode: cleanup ran despite refusal"
+    case "$mode" in
+      unsupported|error)
+        grep -q 'content-landed proof unavailable' "$case_dir/stderr" \
+          || fail "content-git-$mode: unavailable proof was reported as unlanded work"
+        ! grep -q 'not landed' "$case_dir/stderr" \
+          || fail "content-git-$mode: unavailable proof still claims work is not landed"
+        if [ "$mode" = unsupported ]; then
+          grep -q -- 'merge-tree --write-tree.*Git 2.38' "$case_dir/stderr" \
+            || fail 'content-git-unsupported: missing capability and Git requirement were not named'
+        else
+          grep -q 'Git exit 128' "$case_dir/stderr" \
+            || fail 'content-git-error: unrelated Git failure was not identified'
+          ! grep -q 'Git 2.38' "$case_dir/stderr" \
+            || fail 'content-git-error: unrelated failure was mislabeled as old Git'
+        fi
+        ;;
+      *)
+        grep -q 'not landed' "$case_dir/stderr" \
+          || fail "content-git-$mode: genuine unlanded-work refusal changed"
+        ! grep -q 'proof unavailable' "$case_dir/stderr" \
+          || fail "content-git-$mode: supported Git was reported as unavailable"
+        ;;
+    esac
+  done
+  pass 'content fallback distinguishes unavailable Git proof, containment, conflicts, and unlanded content'
+}
+
 test_content_in_default_fallback_allows() {
   local case_dir rc
   case_dir=$(make_case content-landed)
@@ -6085,6 +6169,7 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
 fi
 
 test_hidden_untracked_work_refuses_before_return
+test_content_fallback_git_capability_boundary
 test_status_archive_opt_in
 test_record_export_config_absent_never_reads_the_exporter
 test_record_export_unopted_symlinked_config_does_not_block_teardown
