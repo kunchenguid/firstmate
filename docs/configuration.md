@@ -812,7 +812,7 @@ Without the flag, `bin/fm-park.sh park <task-id>` still parks one lane on reques
 
 By default every ship lane is cleaned up automatically when its merge poll sees the PR or merge request merged, including squash and merge-train merges and merges made through `bin/fm-pr-merge.sh`: the lane is torn down through `bin/fm-teardown.sh` (never forced, so unlanded or uncommitted work still refuses) and its local copy returned.
 The cleanup outcome or teardown refusal follows the merge notification as its own notification.
-Parking, relaunching, and cleanup run detached from the watcher, one at a time per lane, so a slow agent stop, relaunch, or teardown never delays supervision and is never cut short by the watcher's time budget.
+Parking, relaunching, and cleanup run detached from the watcher, one at a time per lane, so a slow agent stop, relaunch, or teardown never delays supervision and is never cut short by the watcher's time budget. A merged lane's cleanup request is persisted in `state/<id>.review-park-land` before its merge poll is retired and retried by the tick until an outcome is reported.
 A PR or merge request closed without merging is reported once.
 The optional local, gitignored `config/no-auto-land` presence flag opts out of both for lanes that are not parked; a parked lane is always cleaned up, because no agent is left to do it.
 GitHub pull requests and GitLab merge requests are supported.

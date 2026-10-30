@@ -90,6 +90,8 @@
 # config/no-auto-land, no config/park-on-review, and no park record it exits
 # after those file tests. Otherwise, holding state/.review-park-tick.lock (a
 # held lock exits silently):
+#   - pending merged-lane cleanup requests (state/<id>.review-park-land) are
+#     retried when the lane lock is free; outcome reports survive task teardown;
 #   - the outcome lines detached actions published since the last tick are
 #     printed and removed;
 #   - each parked lane gets one forge read; a trigger relaunches it, a merge is
@@ -122,7 +124,9 @@
 # and action starts and ends within FM_PARK_TICK_SECS (default 180), well under
 # the watcher's stale grace: every read is cut to what the tick has left. A tick
 # that runs out of time saves the lane it did not reach
-# (state/.review-park-tick-next, -unparked for other lanes) and the next tick
+# (state/.review-park-tick-next) and the next tick starts there.
+# Parked lanes use only the first half of the tick, reserving the rest for
+# unparked lanes.
 # starts there.
 #
 # list prints each parked lane: id, PR, parked head, and when it parked.
@@ -650,6 +654,7 @@ cmd_land() {
   [ "$eligible" = 0 ] || land_eligible "$id" || return 0
   [ -f "$STATE/$id.meta" ] || return 0
   if [ "$detach" = 1 ]; then
+    : > "$STATE/$id.review-park-land"
     action_start "$id" land
     printf 'automatic cleanup started\n'
     return 0
@@ -683,7 +688,12 @@ cmd_run() {
   case "$verb" in park|resume|land) ;; *) die "usage: fm-park.sh run <task-id> park|resume|land [<args>...]" 2 ;; esac
   shift 2
   out=$( LOCKS_HELD=; trap release_locks EXIT; "cmd_$verb" "$id" "$@" 2>/dev/null ) || true
-  [ -z "$out" ] || report_write "$id" "$out"
+  if [ -n "$out" ]; then
+    report_write "$id" "$out"
+    [ "$verb" != land ] || rm -f -- "$STATE/$id.review-park-land"
+  elif [ "$verb" = land ] && [ ! -e "$STATE/$id.meta" ]; then
+    rm -f -- "$STATE/$id.review-park-land"
+  fi
 }
 
 # --- tick ------------------------------------------------------------------
@@ -727,7 +737,9 @@ watch_unparked() {  # <id>
   [ -n "$pr" ] && [ -f "$STATE/$id.check.sh" ] || return 0
   [ ! -e "$(record_path "$id")" ] || return 0
   ! lane_busy "$id" || return 0
-  agent_idle "$id" || return 0
+  local idle_secs
+  idle_secs=$(step_secs "$READ_SECS") || return 0
+  fm_run_timed "$idle_secs" "$SCRIPT_DIR/fm-park.sh" idle-check "$id" >/dev/null 2>&1 || return 0
   snap=$(snapshot "$pr") || return 0
   state=$(printf '%s' "$snap" | jq -r .state)
   [ "$state" != closed ] || { closed_once "$id" "$pr"; return 0; }
@@ -783,7 +795,7 @@ visit_lanes() {  # <cursor> <visit> <id>...
 cmd_tick() {
   local rec id meta any=0
   local -a parked=() unparked=()
-  for rec in "$STATE"/*.review-park "$STATE"/.review-park-report-*; do [ -e "$rec" ] && any=1 && break; done
+  for rec in "$STATE"/*.review-park "$STATE"/*.review-park-land "$STATE"/.review-park-report-*; do [ -e "$rec" ] && any=1 && break; done
   [ "$any" = 1 ] || [ -e "$CONFIG/park-on-review" ] || [ ! -e "$CONFIG/no-auto-land" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   lock_try "$STATE/.review-park-tick.lock" || return 0
@@ -793,13 +805,23 @@ cmd_tick() {
     cat -- "$rec"
     rm -f -- "$rec"
   done
+  for rec in "$STATE"/*.review-park-land; do
+    [ -e "$rec" ] || continue
+    id=$(basename "$rec" .review-park-land)
+    fm_pr_task_id_valid "$id" && [ -f "$STATE/$id.meta" ] || { rm -f -- "$rec"; continue; }
+    lane_busy "$id" || action_start "$id" land
+  done
   for rec in "$STATE"/*.review-park; do
     [ -e "$rec" ] || continue
     id=$(basename "$rec" .review-park)
     fm_pr_task_id_valid "$id" && [ -f "$STATE/$id.meta" ] || continue
     parked+=("$id")
   done
-  visit_lanes "$STATE/.review-park-tick-next" watch_parked ${parked[@]+"${parked[@]}"} || return 0
+  # Reserve half the tick for unparked lanes; parked forge reads cannot starve them.
+  local full_deadline=$DEADLINE
+  DEADLINE=$(( $(date +%s) + (TICK_SECS + 1) / 2 ))
+  visit_lanes "$STATE/.review-park-tick-next" watch_parked ${parked[@]+"${parked[@]}"} || true
+  DEADLINE=$full_deadline
   [ -e "$CONFIG/park-on-review" ] || [ ! -e "$CONFIG/no-auto-land" ] || return 0
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -823,6 +845,7 @@ cmd_list() {
 }
 
 case "${1:-}" in
+  idle-check) shift; agent_idle "${1:?}" ;;
   -h|--help) usage ;;
   gate) shift; cmd_gate "$@" ;;
   park) shift; cmd_park "$@" ;;
