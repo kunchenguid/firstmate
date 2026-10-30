@@ -5675,7 +5675,8 @@ EOF
 
 # Rewrite <meta> into <out> without the <owned keys>, placing <line>... ahead
 # of the first pr= line so the PR region stays the record's tail that
-# fm_pr_metadata_identity_parse requires.
+# fm_pr_metadata_identity_parse requires. Preserved PR metadata must remain
+# the record tail or the armed merge poll stops validating relaunched lanes.
 spawn_meta_rewrite_before_pr() {  # <meta> <out> <owned keys> <line>...
   local meta=$1 out=$2 keys=$3
   shift 3
@@ -7069,7 +7070,8 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
   # Preserved lines go last so an armed pr= identity block stays last, as
-  # fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh) requires.
+  # fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh) requires; otherwise the
+  # armed merge poll stops validating relaunched lanes.
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
   fi
@@ -7434,24 +7436,6 @@ fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
-
-# Copy <meta> without the keys <drop-keys> names (space separated), then the
-# lines read from stdin, then the record's PR trailer: a recorded pr= must stay
-# the tail that bin/fm-pr-lib.sh fm_pr_metadata_identity_parse validates, or the
-# armed merge poll stops running and the lane's merge goes unseen.
-spawn_meta_rewrite_keep_pr_tail() {  # <meta> <drop-keys>
-  awk -F= -v drop="$2" '
-    BEGIN { n = split(drop, d, " "); for (i = 1; i <= n; i++) dropped[d[i]] = 1 }
-    FILENAME == "-" { added[++a] = $0; next }
-    $1 in dropped { next }
-    $1 == "pr" || $1 == "pr_head" || $1 ~ /^x_(request|request_ts|followups|platform|reply_max_chars)$/ { tail[++t] = $0; next }
-    { print }
-    END {
-      for (i = 1; i <= a; i++) print added[i]
-      for (i = 1; i <= t; i++) print tail[i]
-    }
-  ' - "$1"
-}
 
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
