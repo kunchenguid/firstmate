@@ -70,11 +70,18 @@ case "${1:-}" in
   send-keys)
     for arg in "$@"; do
       case "$arg" in
-        *'treehouse get'*)
+        *'fm-treehouse-shell.sh'*)
           if [ -n "${FM_FAKE_TREEHOUSE_OUTPUT:-}" ]; then
             SHELL="$(dirname "$0")/login-shell" COLUMNS=${FM_FAKE_COLUMNS:-80} bash -c "$arg" >> "$FM_FAKE_TREEHOUSE_OUTPUT" 2>&1
           else
             SHELL="$(dirname "$0")/login-shell" COLUMNS=${FM_FAKE_COLUMNS:-80} bash -c "$arg" >/dev/null 2>&1
+          fi
+          if [ "${FM_FAKE_DROP_TREEHOUSE_FAILURE_FILE:-0}" = 1 ]; then
+            failure=${arg#*FM_TREEHOUSE_FAILURE_FILE=}
+            failure=${failure%% FM_TREEHOUSE_REAL_SHELL=*}
+            failure=${failure#\'}
+            failure=${failure%\'}
+            rm -f -- "$failure"
           fi
           ;;
       esac
@@ -282,7 +289,7 @@ printf '%s\n' "$FM_TEST_TREEHOUSE_ERROR" >&2
 exit 1
 SH
   message="all 16 worktrees are in use or dirty (max_trees = 16). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml"
-  for cols in 70 80; do
+  for cols in 20 70 80; do
     rm -f "$COUNTFILE" "$COUNTFILE.window"
     out=$(FM_TEST_TREEHOUSE_ERROR="$message" FM_FAKE_COLUMNS="$cols" \
       FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" run_settle_spawn "$id")
@@ -293,6 +300,13 @@ SH
     [ "$(< "$COUNTFILE")" = 1 ] || fail "failed get was not detected on the first poll"
     assert_absent "$HOME_DIR/state/$id.meta" "failed get published metadata"
   done
+  rm -f "$COUNTFILE" "$COUNTFILE.window"
+  out=$(FM_TEST_TREEHOUSE_ERROR="$message" FM_FAKE_COLUMNS=20 \
+    FM_FAKE_DROP_TREEHOUSE_FAILURE_FILE=1 \
+    FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" run_settle_spawn "$id")
+  expect_code 1 "$?" "narrow-pane fallback should stop spawn"
+  assert_contains "$out" "error: $message" "narrow-pane fallback did not reconstruct the wrapped failure marker and diagnostic"
+  [ "$(< "$COUNTFILE")" = 1 ] || fail "narrow-pane fallback was not immediate"
   rm -f "$COUNTFILE" "$COUNTFILE.window"
   message='Error: cannot read treehouse.toml: permission denied'
   out=$(FM_TEST_TREEHOUSE_ERROR="$message" FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" run_settle_spawn "$id")
@@ -330,7 +344,7 @@ SH
   status=$?
   expect_code 1 "$status" "allocation failure should outrank a stable stale pane path"
   assert_contains "$out" "error: $message" "allocation failure was not reported"
-  [ "$(< "$COUNTFILE")" = 3 ] || fail "spawn did not wait for invocation-bound allocation evidence before accepting the stale path"
+  [ "$(< "$COUNTFILE")" = 1 ] || fail "spawn did not stop on the invocation-bound allocation failure before considering the stale path"
   assert_absent "$HOME_DIR/state/$id.meta" "failed allocation published stale-path metadata"
   pass "a stable stale path cannot outrank a completed allocation failure"
 }

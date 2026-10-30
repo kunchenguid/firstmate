@@ -203,7 +203,7 @@ case "${1:-}" in
     for a in "$@"; do
       if [[ "$a" == *"FM_TREEHOUSE_READY_FILE="* ]]; then
         ready=${a#*FM_TREEHOUSE_READY_FILE=}
-        ready=${ready%% FM_TREEHOUSE_REAL_SHELL=*}
+        ready=${ready%% FM_TREEHOUSE_FAILURE_FILE=*}
         ready=${ready#\'}
         ready=${ready%\'}
         printf '%s\n' "${FM_FAKE_PANE_PATH:-}" > "$ready"
