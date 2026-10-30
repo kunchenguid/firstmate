@@ -3,9 +3,9 @@
 Audience: maintainer verification.
 
 Verified 2026-09-21 and re-verified 2026-09-22 on macOS arm64 with `devin 3000.11.1 (cc4e349ca55e)`.
-Re-checked 2026-10-24 on macOS arm64 with `devin 3000.11.205 (6dea39440ae3)` for the Free-model scout below.
+Re-checked 2026-10-24 on macOS arm64 with `devin 3000.11.205 (6dea39440ae3)` for the model listing and quota semantics below.
 The [adapter reference](../../.agents/skills/harness-adapters/references/harness/devin.md) owns operating facts; executable owners carry launch and state mechanics.
-This verification covers crewmates and scouts, with tmux as the exercised runtime backend and a Herdr 0.9.0 lab session for the 3000.11.1 lifecycle checks below.
+This verification covers crewmates and scouts, with tmux as the exercised runtime backend and a Herdr 0.9.0 lab session for the lifecycle checks below.
 Primary, secondmate, and ACP integration are outside this guarantee.
 
 ## Refresh commands
@@ -40,34 +40,12 @@ ok - devin 3000.11.1 (cc4e349ca55e): double Escape cancels, preserves agent, and
 ok - devin 3000.11.1 (cc4e349ca55e): /quit and native -r session resume
 ```
 
-## 2026-10-24 Free-model scout
+## 2026-10-24 model listing and quota semantics
 
 `devin --version` printed `devin 3000.11.205 (6dea39440ae3)`.
-`devin --help` on that build still documents a prompt after `--`, `--prompt-file`, `--permission-mode`, `--respect-workspace-trust`, `--model` (`DEVIN_MODEL`), and `-r`/`--resume`.
-That help text still has no effort flag.
 `devin models list` marks `swe-2-high`, `swe-2-medium`, and `swe-2-max` Free and prices every other family, including SWE-2 Lightning.
-The same listing prices Claude, GPT, Gemini, and Grok families, and this scout selected none of them.
+The same listing prices Claude, GPT, Gemini, and Grok families.
 quota-axi 0.1.67 describes its Devin `included_quota` scope as the daily and weekly included windows, which Free models do not draw on and which priced usage continues past once zeroed.
-
-The scout was `bin/fm-spawn.sh --scout --harness devin --model swe-2-medium --effort low` against a scratch git repository, on a private tmux socket.
-The generated launch pinned `--permission-mode dangerous --respect-workspace-trust false --model 'swe-2-medium'` and named no priced family.
-The task slept 12 seconds, then wrote only `done` into `answer.txt`.
-Classification reported `busy devin-hook` during the turn and `idle devin-hook` after that file contained only `done`.
-`bin/fm-control.sh devin-proof interrupt`, then `exit`, then `relaunch --harness devin --model swe-2-medium` with a note to write only `relaunched` into `relaunched.txt`.
-That file contained only `relaunched`.
-
-```text
-spawned devin-proof harness=devin kind=scout window=firstmate:fm-devin-proof worktree=/private/tmp/dvproof.UEyxNS/wt
-interrupt-delivered devin-proof harness=devin backend=tmux verified=agent-alive cancel=not-running
-stopped devin-proof harness=devin backend=tmux endpoint=firstmate:fm-devin-proof worktree=/private/tmp/dvproof.UEyxNS/wt
-relaunched devin-proof harness=devin from=devin model=swe-2-medium effort=low backend=tmux endpoint=firstmate:fm-devin-proof worktree=/private/tmp/dvproof.UEyxNS/wt
-teardown devin-proof complete (window firstmate:fm-devin-proof, worktree /private/tmp/dvproof.UEyxNS/wt)
-```
-
-The real `treehouse return` refuses a scratch worktree the fixture never leased, so teardown completed only after a return shim exited 0.
-This run did not repeat busy interrupt, the revert picker, `fm-send`, native `devin -r` resume, or the Herdr lab session.
-Those remain the 3000.11.1 results above.
-Herdr `exit` was not re-tested on 3000.11.205.
 
 ## Observed vendor surfaces
 
