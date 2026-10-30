@@ -48,10 +48,11 @@
 # measured headroom. The ramp is re-read and the record written under
 # state/.heavy-admission.lock in that same root home.
 #
-# Fail closed: an unreadable loadavg, meminfo, or pressure file, unusable df
-# output, a journal query that fails, cannot see system messages, or outlives
-# its bound, an unresolvable root home, or a ramp record or lock that cannot be
-# used holds with unreadable:<reading>. A malformed config holds with
+# Fail closed: an unreadable loadavg, meminfo, or pressure file; a df query
+# that fails, returns unusable output, or exceeds its ten-second bound; a
+# journal query that fails, cannot see system messages, or outlives its bound;
+# an unresolvable root home; or a ramp record or lock that cannot be used holds
+# with unreadable:<reading>. A malformed config holds with
 # config-invalid:<detail>.
 #
 # Policy and config: this home's config/heavy-admission, or when absent the
