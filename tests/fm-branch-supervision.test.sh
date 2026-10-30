@@ -154,15 +154,15 @@ test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
 }
 
 # Away words that are empty or silent authorize no new spawn. The one exception
-# is a recurring backlog item whose captain hold already records a standing
-# order to start it while away, whatever the words say. The emitted prompt is
+# is a recurring read-only scout backlog item whose captain hold reason already
+# records the captain's standing order to start it while away, whatever the words say. The emitted prompt is
 # that contract.
 test_branch_prompt_dispatches_dated_standing_hold_whatever_the_away_words_say() {
   local prompt
   prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
 
   assert_contains "$prompt" \
-    "Whatever the away words say or leave empty, dispatch also proceeds for one class: a recurring backlog item whose captain hold records a standing order to start that item while away, and whose hold date has arrived." \
+    "Whatever the away words say or leave empty, dispatch also proceeds for one class: a recurring backlog item that dispatches a read-only scout (no pull request, no project change), whose captain hold reason records the captain's own standing order to start it while away, and whose hold date has arrived. A ship or any other recurring item still waits for the return." \
     "branch prompt does not dispatch a dated standing hold whatever the away words say"
   assert_contains "$prompt" \
     "File and dispatch only the run that hold names, within the record's spend cap, through \`bin/fm-spawn.sh\`, then re-hold the item until the next day the way that hold already says." \
