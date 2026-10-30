@@ -605,9 +605,9 @@ ROWS
 }
 
 test_stale_no_mistakes_daemon() {
-  local label status order mode case_dir fakebin out expect n daemon_pid
+  local label status order mode etime case_dir fakebin out expect n daemon_pid
   n=0
-  while IFS='^' read -r label status order mode; do
+  while IFS='^' read -r label status order mode etime; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/nm-daemon-$n"
@@ -620,6 +620,10 @@ test_stale_no_mistakes_daemon() {
     fi
     sleep 300 &
     daemon_pid=$!
+    if [ -n "$etime" ]; then
+      printf '#!/bin/sh\necho "%s"\n' "$etime" > "$fakebin/ps"
+      chmod +x "$fakebin/ps"
+    fi
     if [ "$order" = daemon_first ]; then
       sleep 3
       touch -d @1 "$fakebin/no-mistakes"
@@ -638,6 +642,9 @@ binary installed after the daemon start reports despite epoch mtime^daemon runni
 no daemon running stays silent^daemon not running^daemon_first^silent
 unreadable daemon pid stays silent^daemon running (pid 99999999)^daemon_first^silent
 unparseable daemon status stays silent^something else entirely^daemon_first^silent
+hours with leading zeros are parsed^daemon running (pid PID)^daemon_first^stale^08:09:09
+days with leading zeros are parsed^daemon running (pid PID)^daemon_first^stale^2-08:09:09
+minutes with leading zeros are parsed^daemon running (pid PID)^daemon_first^stale^09:08
 ROWS
   pass "bootstrap reports a no-mistakes daemon older than the installed binary"
 }
