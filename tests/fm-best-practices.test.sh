@@ -211,6 +211,7 @@ test_manifest_check_holds_the_off_limits_boundary() {
   manifest_refusal commit-pin '.versions = [{tag: "aeac41d4"}]' "the supported list carries tags only"
   manifest_refusal row-outside '.routing += [{id: "deploy", facet: "deploy", type: "noul", instructions: "x", fallback: true, selects: ["floor"]}]' "routing row deploy facet deploy is outside"
   manifest_refusal row-missing-block '.routing[2].selects = ["no-such-block"]' "selects no-such-block, which is not a block"
+  manifest_refusal row-floor-range '(.routing[] | select(.id == "tier")).min_confidence = 2' "routing row tier min_confidence must be from 0 through 1"
   manifest_refusal unverified-harness '.harnesses.copilot = .harnesses.claude' "harness copilot is not one firstmate verifies"
   manifest_refusal unearned-proof '.harnesses.cursor.read = null | .harnesses.cursor.proof = {status: "proven", date: "2026-10-29", evidence: "none"}' "harness cursor is marked proven without a read"
   manifest_refusal bad-scope '.harnesses.cursor.proof.unproven_scopes = ["global"]' "harness cursor unproven_scopes must list user or project"
@@ -703,6 +704,54 @@ test_intake_tier_routing() {
   pass "intake: the tier is one Choice with a none option, the captain's words win, and anything short of confidence keeps one question"
 }
 
+tier_answer() {  # <file> <picked> <confidence> <tier-1> <tier-2> <tier-3> <none>
+  jq -n --arg c "$2" --argjson conf "$3" --argjson t1 "$4" --argjson t2 "$5" --argjson t3 "$6" --argjson none "$7" \
+    '{answers: {tier: {type: "choice", choice: $c, confidence: $conf, probabilities: {"tier-1": $t1, "tier-2": $t2, "tier-3": $t3, none: $none}}, idea: {type: "noul", noul: 0.1}}}' > "$1"
+}
+
+idea_answer() {  # <file> <noul>
+  jq -n --argjson p "$2" '{answers: {tier: {type: "choice", choice: "tier-3", confidence: 0.9, probabilities: {"tier-1": 0.02, "tier-2": 0.05, "tier-3": 0.9, none: 0.03}}, idea: {type: "noul", noul: $p}}}' > "$1"
+}
+
+test_row_floor_and_runner_up() {
+  local ask="$TMP_ROOT/floor-ask.txt" out resp="$TMP_ROOT/floor-response.json" root
+  mkdir -p "$TMP_ROOT/route-fm-home/config"
+  printf 'Build a billing system for us.\n' > "$ask"
+
+  root=$(mutated_root row-floor-high '(.routing[] | select(.id == "tier" or .id == "idea")).min_confidence = 0.75')
+  idea_answer "$resp" 0.75
+  out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
+  assert_contains "$out" "row: idea = true (routed p=0.75)" "a noul at the row's floor was not a yes"
+  idea_answer "$resp" 0.25
+  out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
+  assert_contains "$out" "row: idea = false (routed p=0.25)" "a noul at the mirror of the row's floor was not a no"
+  idea_answer "$resp" 0.7
+  out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
+  assert_contains "$out" "row: idea = false (fallback: p=0.7 is inside the 0.75 floor)" "a yes below the row's floor was taken on the global floor"
+  idea_answer "$resp" 0.3
+  out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
+  assert_contains "$out" "row: idea = false (fallback: p=0.3 is inside the 0.75 floor)" "a no above the row's floor was taken on the global floor"
+
+  tier_answer "$resp" tier-3 0.5 0.1 0.05 0.8 0.05
+  out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
+  assert_contains "$out" "row: tier = tier-3 (routed confidence 0.5)" "a pick clearing the row's floor was not taken on its own probability"
+  tier_answer "$resp" tier-3 0.7 0.1 0.1 0.7 0.1
+  out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
+  assert_contains "$out" "row: tier = tier-2 (fallback: no option clears 0.75)" "a row with no option at its floor did not fall back"
+
+  root=$(mutated_root row-floor-low '(.routing[] | select(.id == "tier")).min_confidence = 0.4')
+  tier_answer "$resp" tier-3 0.3 0.6 0.05 0.3 0.05
+  out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
+  assert_contains "$out" "row: tier = tier-1 (routed runner-up confidence 0.3)" "the option clearing the row's floor was not taken as the runner-up"
+  tier_answer "$resp" tier-3 0.3 0.05 0.05 0.3 0.6
+  out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
+  assert_contains "$out" "row: tier = tier-2 (fallback: no listed option applies)" "a none runner-up was taken as an option"
+  tier_answer "$resp" tier-3 0.3 0.45 0.45 0.05 0.05
+  out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
+  assert_contains "$out" "row: tier = tier-2 (fallback: runner-up tie)" "a runner-up tie did not fall back"
+  pass "routing: a row's own floor thresholds a noul on both sides and a choice on each option's probability, a clearing runner-up is taken, and no clearing option or a runner-up tie keeps the fallback"
+}
+
 spawn_case() {  # <name> <registry-line-suffix> -> "<home>|<proj>|<wt>|<fakebin>|<launchlog>"
   local dir="$TMP_ROOT/spawn-$1" home proj wt fakebin
   home="$dir/home"
@@ -864,5 +913,6 @@ fm_test_run \
   test_route_narrows_through_the_shared_provider_code \
   test_route_rewrites_the_real_section_past_fenced_examples \
   test_intake_tier_routing \
+  test_row_floor_and_runner_up \
   test_spawn_agrees_with_the_registry_and_exports_the_pack \
   test_spawn_reads_the_worker_copy_at_its_launch_commit

@@ -36,10 +36,10 @@
 #                 Read-only; committed files are read from the checkout given,
 #                 and a worker copy's path maps back to its clone only to
 #                 identify a project-scope install.
-# check           project-add step 8: the crew runtime is one both firstmate and
-#                 the pack support, firstmate's read for it is proven live, and
-#                 the pack is installed and enabled as a worker copy will see
-#                 it. Prints status ok with the reviewed tag its content
+# check           after project add writes the registry entry: the crew runtime
+#                 is one both firstmate and the pack support, firstmate's read
+#                 for it is proven live, and the pack is installed and enabled
+#                 as a worker copy will see it. Prints status ok with the reviewed tag its content
 #                 matches; status unreviewed, a fact rather than a refusal,
 #                 naming the skills whose files match no reviewed text and the
 #                 runtime's own label; or one problem with what was found and
@@ -50,8 +50,8 @@
 #                 or "missing: <why>" when there is no usable copy (not
 #                 installed, disabled, the runtime outside the adapter's list,
 #                 or a read not yet proven live). Exit 0 either way.
-# propose         project-add step 4: proposes best-practices=<owner>/<repo>
-#                 only when a carried pack is installed and enabled by what the
+# propose         at project add, once the clone exists: proposes
+#                 best-practices=<owner>/<repo> only when a carried pack is installed and enabled by what the
 #                 project itself commits; a pack only installed on the machine,
 #                 or enabled only in user settings, proposes nothing. Prints
 #                 "propose: none" and the carried repositories otherwise.

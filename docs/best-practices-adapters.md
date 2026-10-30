@@ -78,6 +78,7 @@ An adapter may declare routing rows per facet, each naming a condition and the r
 A row whose condition is a fact firstmate already holds (task kind, delivery mode, forge) is a `fact` row read in code, and the requester's own words a row names (`words`) are matched in code on word boundaries and win.
 Every other row goes to the typed-decision provider through [`bin/fm-decision-provider-lib.sh`](../bin/fm-decision-provider-lib.sh), the same key handling, never-send check, and POST that [`bin/fm-dispatch-resolve.sh`](../bin/fm-dispatch-resolve.sh) uses, with all of a composition's rows in one request carrying the brief's task sections as state.
 A mutually exclusive pick is a `choice` with a fixed `none` option firstmate adds; a yes-or-no, and each label of a multi-label pick, is a `noul` thresholded in code at the row's `min_confidence`, 0.6 by default.
+A `choice` row's floor and runner-up follow the [typed dispatch resolution rule](configuration.md#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model), with the row's `min_confidence` applying to each of its options, `none` included.
 A confident answer narrows what is composed; low confidence, no key, a never-send match, an error, or a timeout keeps each row's declared `fallback`, which is the adapter's static behavior, so routing never composes less than the adapter would without it.
 Routing happens only when firstmate composes, at intake and on the filled brief, never inside a worker, so a worker's brief stays fixed for its life.
 

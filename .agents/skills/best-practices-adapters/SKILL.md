@@ -30,7 +30,7 @@ Never install, enable, disable, or edit a pack in any harness yourself; the capt
 
 ## Where each position runs
 
-- At project add, step 4 proposes the token with `bin/fm-best-practices.sh propose projects/<name>` and step 8 checks the pack with `bin/fm-best-practices.sh check`; the `project-management` skill owns where those steps sit.
+- At project add, once the clone exists, propose the token with `bin/fm-best-practices.sh propose projects/<name>`, and after the registry entry is written, check the pack with `bin/fm-best-practices.sh check`; the `project-management` skill owns where those steps sit.
 - At intake, read the token with `bin/fm-project-mode.sh --best-practices <project>`, load the pack's `intake.question` reference, and route the ask with `bin/fm-best-practices.sh intake <owner>/<repo> <ask-file>`.
 - At briefing, pass the token to `bin/fm-brief.sh --best-practices`, fill the brief, then run `bin/fm-best-practices.sh route <brief>` on the written brief in the same turn as `bin/fm-dispatch-resolve.sh`.
 - At launch, `bin/fm-spawn.sh` checks the brief against the registry, exports `FM_BEST_PRACTICES` and `FM_BEST_PRACTICES_VERSION`, and prints one notice when it writes `unreviewed` or `missing`; relay that notice at the start of the task.
