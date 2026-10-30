@@ -797,6 +797,63 @@ test_detached_land_returns_at_once_and_the_tick_reports_it() {
   pass "a detached merge-time cleanup returns at once, runs its slow teardown to completion, and the next tick reports it once"
 }
 
+test_pending_land_recovers_after_watcher_restart() {
+  local w out
+  w=$(make_world land-recovery "$GH_URL"); gh_fixture "$w/gh.1.json"
+  : > "$w/config/auto-land"
+  : > "$w/state/lane.review-park-land"
+  cat > "$w/fakebin/fm-teardown.sh" <<SH
+#!/usr/bin/env bash
+: > "$w/teardown.started"
+while [ ! -e "$w/teardown.release" ]; do sleep 0.05; done
+echo "Torn down \$1"
+SH
+  chmod +x "$w/fakebin/fm-teardown.sh"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-recovery: starting tick printed: $out"
+  for _ in $(seq 1 100); do [ -e "$w/teardown.started" ] && break; sleep 0.1; done
+  [ -e "$w/teardown.started" ] || fail "land-recovery: cleanup did not start"
+  [ -e "$w/state/lane.review-park-land" ] || fail "land-recovery: request removed before cleanup outcome"
+  : > "$w/teardown.release"
+  wait_report "$w" land-recovery
+  [ ! -e "$w/state/lane.review-park-land" ] || fail "land-recovery: request kept after outcome"
+  out=$(run_park "$w" tick 2>&1)
+  [ "$out" = "cleaned up lane: PR $GH_URL merged; lane torn down and its working copy returned" ] || fail "land-recovery: outcome: $out"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-recovery: outcome reported twice: $out"
+  pass "a pending merged-lane cleanup survives watcher restart and reports its outcome once"
+}
+
+test_pending_land_retries_after_control_lock_refusal() {
+  local w out
+  w=$(make_world land-lock-retry "$GH_URL"); gh_fixture "$w/gh.1.json"
+  : > "$w/config/auto-land"
+  : > "$w/state/lane.review-park-land"
+  cat > "$w/fakebin/fm-teardown.sh" <<SH
+#!/usr/bin/env bash
+n=\$(cat "$w/teardown.count" 2>/dev/null || echo 0)
+n=\$((n + 1)); printf '%s\\n' "\$n" > "$w/teardown.count"
+[ "\$n" != 1 ] || { echo 'error: another lifecycle action is already running for task lane; nothing was changed'; exit 1; }
+echo "Torn down \$1"
+SH
+  chmod +x "$w/fakebin/fm-teardown.sh"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-lock-retry: first tick printed: $out"
+  for _ in $(seq 1 100); do [ "$(cat "$w/teardown.count" 2>/dev/null || echo 0)" -ge 1 ] && break; sleep 0.1; done
+  [ "$(cat "$w/teardown.count")" = 1 ] || fail "land-lock-retry: first teardown did not run"
+  sleep 0.2
+  [ -e "$w/state/lane.review-park-land" ] || fail "land-lock-retry: lock refusal removed pending request"
+  [ ! -e "$w/state/.review-park-report-lane" ] || fail "land-lock-retry: lock refusal was reported as final"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-lock-retry: retry tick printed: $out"
+  wait_report "$w" land-lock-retry
+  [ ! -e "$w/state/lane.review-park-land" ] || fail "land-lock-retry: successful outcome kept pending request"
+  out=$(run_park "$w" tick 2>&1)
+  [ "$out" = "cleaned up lane: PR $GH_URL merged; lane torn down and its working copy returned" ] || fail "land-lock-retry: outcome: $out"
+  [ "$(cat "$w/teardown.count")" = 2 ] || fail "land-lock-retry: teardown calls: $(cat "$w/teardown.count")"
+  pass "a temporary control-lock refusal stays pending and retries to one reported cleanup outcome"
+}
+
 # A merge-time cleanup that lands while a relaunch of the same lane is under
 # way waits for it instead of tearing the lane down mid-relaunch.
 test_land_waits_for_an_action_under_way() {
@@ -839,4 +896,6 @@ fm_test_run \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
   test_land_requires_opt_in_but_always_cleans_parked \
   test_detached_land_returns_at_once_and_the_tick_reports_it \
+  test_pending_land_recovers_after_watcher_restart \
+  test_pending_land_retries_after_control_lock_refusal \
   test_land_waits_for_an_action_under_way
