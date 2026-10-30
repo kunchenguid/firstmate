@@ -1841,17 +1841,19 @@ assert_contains "$out" 'spendPriority=' "shared_quota false prints quota evidenc
 pass "shared_quota false keeps the unchanged quota-ranked behavior"
 cp "$BASE_RULES" "$RULES"
 
-# --- devin included_quota ranks without an explicit provider -----------------
+# --- devin: priced lines rank on included_quota, Free lines draw on no window --
 reset_log
 DEVIN_RULES="$TMP_ROOT/devin-rules.json"
 DEVIN_QUOTA="$TMP_ROOT/devin-quota.json"
+DEVIN_FREE_UNRANKED='candidate: devin:swe-2-medium  provider=devin  -> eligible, unranked: no applicable quota row for provider devin: disclosed uncertainty'
 cat > "$DEVIN_RULES" <<'JSON'
 {
   "rules": [
     {
-      "when": "Included SWE-2 work.",
+      "when": "Devin work.",
       "use": [
         { "harness": "devin", "model": "swe-2-medium" },
+        { "harness": "devin", "model": "fusion-claude-fable-5-1-high-sidekick-swe-2-medium" },
         { "harness": "claude", "model": "sonnet", "effort": "high" }
       ]
     }
@@ -1870,16 +1872,18 @@ jq '.providers += [{"provider":"devin","state":{"status":"fresh"},"quotaSemantic
 ]}}]' "$QUOTA" > "$DEVIN_QUOTA"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$DEVIN_QUOTA" run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "devin included quota resolves"
-assert_contains "$out" 'candidate: devin:swe-2-medium  provider=devin  scope=included_quota  remaining=100%  spendPriority=12.9  runway=through_reset  -> eligible' "included_quota is the devin plan window"
-assert_contains "$out" "  profile: --harness 'devin' --model 'swe-2-medium'" "the included window outranks a tighter provider"
+assert_contains "$out" "$DEVIN_FREE_UNRANKED" "a Free SWE-2 line draws on no included_quota row"
+assert_contains "$out" 'candidate: devin:fusion-claude-fable-5-1-high-sidekick-swe-2-medium  provider=devin  scope=included_quota  remaining=100%  spendPriority=12.9  runway=through_reset  -> eligible' "a priced devin line ranks on included_quota"
+assert_contains "$out" "  profile: --harness 'devin' --model 'fusion-claude-fable-5-1-high-sidekick-swe-2-medium'" "the included window outranks a tighter provider"
 
 DEVIN_EXHAUSTED="$TMP_ROOT/devin-exhausted.json"
 jq '(.providers[] | select(.provider == "devin") | .quotaSemantics.effectiveAvailability[] | select(.scope == "included_quota")) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$DEVIN_QUOTA" > "$DEVIN_EXHAUSTED"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$DEVIN_EXHAUSTED" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: devin:swe-2-medium  provider=devin  scope=included_quota  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at included_quota' "an exhausted included window vetoes devin"
+assert_contains "$out" "$DEVIN_FREE_UNRANKED" "an exhausted included window never vetoes a Free SWE-2 line"
+assert_contains "$out" 'candidate: devin:fusion-claude-fable-5-1-high-sidekick-swe-2-medium  provider=devin  scope=included_quota  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at included_quota' "an exhausted included window vetoes a priced devin line"
 assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "a healthy other provider still clears"
 cp "$BASE_RULES" "$RULES"
 write_response "$RESPONSE" rule_4 0.9
-pass "devin maps to provider devin and ranks on included_quota"
+pass "devin maps to provider devin, ranks priced lines on included_quota, and keeps Free lines eligible"
 
 printf '# all fm-dispatch-resolve tests passed\n'

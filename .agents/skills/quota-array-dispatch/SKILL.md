@@ -75,14 +75,16 @@ You establish the remaining relations yourself, in the open, from the candidate'
 Confirm the catalog lists the candidate's model and record the provider family it reports.
 A model the catalog does not list is concrete contradictory evidence: block that candidate and quote the catalog result.
 Apply quota at the granularity the vendor actually supplies.
-A provider-level `all_models`, `all_products`, or `included_quota` scope bounds every model you established in that family within the candidate's matched account, including one with no window of its own.
-`bin/fm-quota-axi-lib.sh`'s single-provider table maps harness `devin` to quota-axi provider `devin`, and the typed resolver ranks that provider on `included_quota`.
-That scope is the included plan window.
-`devin models list` marks SWE-2 High, Medium, and Max as Free, and those are the models this window covers.
-[Model and effort](../harness-adapters/references/common/model-and-effort.md) owns native-harness preference and when an exhausted native Claude or Codex window may use harness `devin`.
-A catalog line with a token price is pay-per-token and sits outside `included_quota`.
-quota-axi publishes no separate pay-per-token scope for that CLI.
-Devin's separate `credits` balance is that pay-per-token purse, not the included window, and is never read as `included_quota` headroom.
+A provider-level `all_models` or `all_products` scope bounds every model you established in that family within the candidate's matched account, including one with no window of its own.
+`bin/fm-quota-axi-lib.sh`'s single-provider table maps harness `devin` to quota-axi provider `devin`.
+Devin's `included_quota` scope is the included plan window, and it bounds only priced Devin lines.
+`devin models list` marks `swe-2-high`, `swe-2-medium`, and `swe-2-max` Free.
+A Free line draws on no Devin window, so the typed resolver applies no row to it, and an exhausted `included_quota` never vetoes it.
+It stays eligible but unranked.
+A catalog line with a token price is pay-per-token, and the typed resolver ranks it on `included_quota`.
+Devin's separate `credits` balance is the overage purse that pays priced usage past a zeroed included window, and is never read as `included_quota` headroom.
+A priced Devin launch can spend `credits`, so it needs the captain's explicit approval before launch.
+A Claude or GPT model may use harness `devin` only when its native Claude or Codex quota is exhausted, and a Grok or Gemini model never falls back through harness `devin`; [Model and effort](../harness-adapters/references/common/model-and-effort.md) owns that rule.
 The frozen helper map has no Devin row, so `fm-quota-choose.sh` still refuses a `devin:` candidate.
 A named-model or named-product scope is an additional bound for that model alone.
 Match the candidate to its `quota[]` row by that established provider, its `accountKey` when the snapshot is schema 6 (a Pi lane's auth provider id such as `openai-codex-work`, or `codex-home` for native Codex including Pi's `codex-native/` adapter, then the `default` row, else unmeasured; never a row picked by position, never rows summed across accounts), and scope; a stale, auth-required, or unmeasurable scope is named in `attention[]` instead of a fabricated number.

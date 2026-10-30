@@ -147,8 +147,10 @@ fm_quota_json_valid() {
 # Resolver map of harness -> one quota-axi provider. Separate from the frozen
 # helper map in fm_quota_provider_for_harness: a row added here must not be
 # copied there, because that would change no-key routing in fm-quota-choose.sh.
-# devin -> devin. The typed resolver ranks that provider on scope
-# included_quota (the included plan window), not on the separate credits purse.
+# devin -> devin. The typed resolver ranks a priced Devin line on scope
+# included_quota (the included plan window). The Free swe-2-high, swe-2-medium,
+# and swe-2-max lines draw on no Devin window, so that row never applies to
+# them. The separate credits purse is never read as included_quota headroom.
 fm_quota_single_provider_table() {
   printf '%s\n' \
     'claude claude' \

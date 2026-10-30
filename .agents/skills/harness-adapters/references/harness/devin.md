@@ -1,7 +1,7 @@
 # Devin CLI
 
 Verified on 2026-09-21 and 2026-09-22 with Devin CLI 3000.11.1 (cc4e349ca55e).
-On 2026-10-24 Devin CLI 3000.11.205 (6dea39440ae3) re-proved spawn, hook busy and idle, idle interrupt, exit, relaunch, and teardown on included `swe-2-medium`.
+On 2026-10-24 Devin CLI 3000.11.205 (6dea39440ae3) re-proved spawn, hook busy and idle, idle interrupt, exit, relaunch, and teardown on Free `swe-2-medium`.
 Resume, steering, the revert picker, busy interrupt, and the Herdr lab session remain the 3000.11.1 evidence.
 The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
 [Verification evidence](../../../../../docs/verification/devin.md) and its live guard refresh the vendor facts below.
@@ -15,16 +15,18 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Interrupt | One Esc, then a second only after the running turn renders `esc again to interrupt` and at least 0.5 seconds later; no restored draft and no clear key. An idle agent gets one press and `cancel=not-running`, because a fast idle pair opens the `/revert` picker, where Enter reverts file changes. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Devin discovers Firstmate's user skills from `~/.agents/skills`, and `fm-send` types the slash form through its popup settle. |
 | Resume | `devin -r <session-id>`; `--model` may switch the resumed session's model. |
-| Model flag | `--model <model-id>`, with `devin models list` marking included `swe-2-high`, `swe-2-medium`, and `swe-2-max` Free and pricing every other line, including SWE-2 Lightning. |
+| Model flag | `--model <model-id>`, with `devin models list` marking `swe-2-high`, `swe-2-medium`, and `swe-2-max` Free and pricing every other line, including SWE-2 Lightning and Fusion. |
 | Effort flag | None; effort is encoded in the model id, and Firstmate records the independent axis without passing it. |
 | Model discovery | `devin models list`; authentication preflight is `devin auth status`. |
-| Quota | quota-axi provider `devin` and scope `included_quota` (the weekly included plan window), with the separate credits balance outside that window and the harness mapping owned by `bin/fm-quota-axi-lib.sh`. |
+| Quota | quota-axi provider `devin`, whose scope `included_quota` (the included plan window) bounds priced lines only; Free lines draw on no Devin window and get no row. The separate `credits` balance is the overage purse past a zeroed window and is never `included_quota` headroom. `bin/fm-quota-axi-lib.sh` owns the harness mapping. |
 | Marker | None; anchored native `devin` ancestry identifies the adapter and outranks foreign inherited markers. |
 | Trust dialogs | The launch skips workspace trust for this run; the spawn owner carries the exact flags. |
 | Imported config | The worker config sets `read_config_from.claude` false, so no Claude Code hook, `CLAUDE.md` rule, `.claude/skills`, or Claude MCP entry is imported; `AGENTS.md` and `.agents/skills` still load. |
 | Commit attribution | Unless the home sets `config/keep-ai-trailers` (`../../../../../docs/configuration.md` "Commit attribution"), the worker config sets `attribution` false, Devin's switch for its `Co-Authored-By` trailer and `Generated with Devin` line; with the flag, the user config's setting (default on) is kept. |
 
-[Model and effort](../common/model-and-effort.md) owns which models prefer a native harness and when an exhausted native Claude or Codex window may use this adapter.
+A priced line can spend `credits`, so it needs the captain's explicit approval before launch.
+A Claude or GPT model may use this adapter only when its native Claude or Codex quota is exhausted, and a Grok or Gemini model never does.
+[Model and effort](../common/model-and-effort.md) owns that native-harness preference.
 
 ## Worker lifecycle limits
 

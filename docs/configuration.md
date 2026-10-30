@@ -1809,7 +1809,9 @@ Typed resolution additively recognizes `gemini` because AGENTS.md section 4 veri
 | Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, `commandcode`, `cortex`, and `kiro`; omission is an actionable configuration error before any request. |
 
 Devin's mapped provider is `devin`.
-The typed resolver ranks that provider on the `included_quota` plan window.
+The typed resolver ranks a priced Devin line on the `included_quota` plan window.
+A Free `swe-2-high`, `swe-2-medium`, or `swe-2-max` line draws on no Devin window, so no row applies to it and it stays eligible but unranked, even when `included_quota` is exhausted.
+Devin's `credits` balance is never read as `included_quota` headroom.
 This single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
 
 **Profile quota floors**
