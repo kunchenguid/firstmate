@@ -449,6 +449,20 @@ fm_afk_launch_record_read() {
     none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
     *) return 2 ;;
   esac || { fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"; return 2; }
+  if [ "$FM_AFK_REC_BACKEND" = rex ] && [ -z "$FM_AFK_REC_SERVER" ]; then
+    local legacy_server=${FM_AFK_LEGACY_REX_SERVER:-}
+    if [ -z "$legacy_server" ] || ! fm_backend_source rex \
+      || [ "$(fm_backend_rex_server_endpoint)" != "$legacy_server" ]; then
+      fm_afk_launch_log "legacy Rex terminal record has no creation server; set FM_AFK_LEGACY_REX_SERVER to the verified creation endpoint to recover it"
+      return 2
+    fi
+    FM_AFK_REC_SERVER=$legacy_server
+    fm_afk_launch_record_write rex "$FM_AFK_REC_TARGET" "$FM_AFK_REC_EXTRA" "$FM_AFK_REC_SERVER" || {
+      FM_AFK_REC_SERVER=""
+      fm_afk_launch_log "failed to migrate legacy Rex terminal record; refusing to act on it"
+      return 2
+    }
+  fi
 }
 
 fm_afk_launch_record_validate_if_present() {

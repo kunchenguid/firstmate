@@ -1351,6 +1351,32 @@ unit_record_publication_atomic() {
   rm -rf "$st"
 }
 
+unit_legacy_rex_record_requires_verified_server_migration() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-legacy-rex.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'rex\tsession-1:block-1\tsession:session-1\n' > "$st/state/.afk-daemon-terminal"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_backend_source() { [ "$1" = rex ]; }
+    fm_backend_rex_server_endpoint() { printf "%s" "${CURRENT_REX_SERVER:-}"; }
+    CURRENT_REX_SERVER=unix:///unrelated.sock
+    ! fm_afk_launch_record_read || exit 1
+    [ "$(wc -l < "$FM_AFK_LAUNCH_RECORD")" -eq 1 ] || exit 1
+    CURRENT_REX_SERVER=unix:///created.sock
+    ! fm_afk_launch_record_read || exit 1
+    FM_AFK_LEGACY_REX_SERVER=unix:///created.sock
+    fm_afk_launch_record_read || exit 1
+    [ "$FM_AFK_REC_SERVER" = "$FM_AFK_LEGACY_REX_SERVER" ] || exit 1
+    [ "$(awk -F "\\t" "{print NF}" "$FM_AFK_LAUNCH_RECORD")" -eq 4 ]
+  ' _ "$LAUNCH"; then
+    pass "record read: legacy Rex routes migrate only with an explicitly verified creation endpoint"
+  else
+    fail "record read: legacy Rex route trusted an unrelated endpoint or failed verified migration"
+  fi
+  rm -rf "$st"
+}
+
 unit_malformed_record_fails_closed() {
   local st acted
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-malformed.XXXXXX")
@@ -1827,6 +1853,7 @@ unit_supervision_host_quiet_failed_start
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
 unit_record_publication_atomic
+unit_legacy_rex_record_requires_verified_server_migration
 unit_malformed_record_fails_closed
 unit_stop_malformed_record_fails_closed
 unit_tmux_planned_record_and_collision
