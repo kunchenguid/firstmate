@@ -29,7 +29,7 @@
 #   fm-test-run.sh --aggregate-json <out.json> <lane.json> [more lane.json...]
 #
 # Scoped stop (kills only that run and its descendants, never sibling suites):
-#   fm-test-run.sh --stop [run-id]   (no run-id: list live runs; one run: stop it)
+#   fm-test-run.sh --stop [run-id]   (no run-id: list live runs; run-id: stop it)
 #   fm-test-run.sh --stop=<run-id>
 #   A run stopped by TERM or INT prints FM_TEST_ABORTED signal=<n> run=<id> and
 #   exits 128+n, so callers can tell an aborted run from a failed one.
