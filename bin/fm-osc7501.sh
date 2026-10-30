@@ -32,8 +32,9 @@
 #     blocked             -> blocked kind=permission (kind=auth when the note
 #                            names a credential)
 #   otherwise the task's activity as fm_busy_classify reads it
-#   (bin/fm-busy-lib.sh owns every source: the busy-state record, or
-#   Cursor's transcript / Muse's session log): busy -> working
+#   (bin/fm-busy-lib.sh owns every source: the busy-state record, Cursor's
+#   transcript / Muse's session log, or the rendered pane fm-backend.sh
+#   captures for Grok/Rovo/Agy): busy -> working
 #   otherwise the latest status line, when it is terminal:
 #     failed              -> error
 #     done                -> done ("PR ready" when the note has a URL)
@@ -64,9 +65,10 @@
 #
 # Subcommands:
 #   arm --task <id> --harness <h> --backend <b> --kind <k> --state <dir>
-#       --config <dir> [--agent-bin <path>]   detect + spawn watcher; exit 0
+#       --config <dir> [--target <t>] [--agent-bin <path>]
+#                                            detect + spawn watcher; exit 0
 #   watch --task <id> --kind <k> --state <dir> --harness <h> --parent <pid>
-#                                            the reporter loop (internal)
+#       [--backend <b> --target <t>]         the reporter loop (internal)
 #   disarm --state <dir>                     retire this terminal's watcher
 #
 # Test seams: FM_OSC7501_TTY replaces /dev/tty as the emit/query device (a
@@ -90,8 +92,8 @@ FM_OSC7501_UNKNOWN_PREFIX=.osc7501-gate-
 
 usage() {
   {
-    echo "usage: fm-osc7501.sh arm --task <id> --harness <h> --backend <b> --kind <k> --state <dir> --config <dir> [--agent-bin <path>]"
-    echo "       fm-osc7501.sh watch --task <id> --kind <k> --state <dir> --harness <h> --parent <pid>"
+    echo "usage: fm-osc7501.sh arm --task <id> --harness <h> --backend <b> --kind <k> --state <dir> --config <dir> [--target <t>] [--agent-bin <path>]"
+    echo "       fm-osc7501.sh watch --task <id> --kind <k> --state <dir> --harness <h> --parent <pid> [--backend <b> --target <t>]"
     echo "       fm-osc7501.sh disarm --state <dir>"
   } >&2
   exit 2
@@ -279,13 +281,16 @@ osc_load_libs() {
   . "$SCRIPT_DIR/fm-classify-lib.sh" || return 1
   # shellcheck source=bin/fm-busy-lib.sh
   . "$SCRIPT_DIR/fm-busy-lib.sh" || return 1
+  # shellcheck source=bin/fm-backend.sh
+  . "$SCRIPT_DIR/fm-backend.sh" || return 1
   LIBS_LOADED=1
 }
 
 # osc_plan sets W_STATE, W_KIND, W_MSG; returns 1 when nothing should be
 # emitted (no signal yet, or the activity is unknown). An empty harness means
-# no live agent, so activity is not read.
-osc_plan() { # <task> <kind> <state> <harness>
+# no live agent, so activity is not read; backend and target let the classifier
+# reach a harness whose only activity source is its rendered pane.
+osc_plan() { # <task> <kind> <state> <harness> [backend] [target]
   local task=$1 kind=$2 state_dir=$3 file line verb note held act=
   file="$state_dir/$task.status"
   W_STATE=
@@ -311,7 +316,7 @@ osc_plan() { # <task> <kind> <state> <harness>
       return 0
       ;;
   esac
-  [ -z "$4" ] || act=$(fm_busy_classify '' '' "$4" "$task" "$state_dir" 2>/dev/null) || act=
+  [ -z "$4" ] || act=$(fm_busy_classify "${5:-}" "${6:-}" "$4" "$task" "$state_dir" 2>/dev/null) || act=
   if [ "${act%% *}" = busy ]; then
     W_STATE=working
     return 0
@@ -358,6 +363,8 @@ osc_watch() { # --task --kind --state --harness --parent
   WATCH_KIND=
   WATCH_STATE=
   WATCH_HARNESS=
+  WATCH_BACKEND=
+  WATCH_TARGET=
   WATCH_PARENT=
   while [ $# -gt 0 ]; do
     opt=$1
@@ -367,6 +374,8 @@ osc_watch() { # --task --kind --state --harness --parent
       --kind) WATCH_KIND=$1 ;;
       --state) WATCH_STATE=$1 ;;
       --harness) WATCH_HARNESS=$1 ;;
+      --backend) WATCH_BACKEND=$1 ;;
+      --target) WATCH_TARGET=$1 ;;
       --parent) WATCH_PARENT=$1 ;;
       *) usage ;;
     esac
@@ -391,7 +400,7 @@ osc_watch() { # --task --kind --state --harness --parent
       osc_final
       break
     fi
-    if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" "$WATCH_HARNESS"; then
+    if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" "$WATCH_HARNESS" "$WATCH_BACKEND" "$WATCH_TARGET"; then
       seq=$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")
       if [ "$seq" != "$last" ]; then
         printf '%s' "$seq" >&3 2>/dev/null
@@ -478,8 +487,8 @@ osc_disarm() { # --state <dir>
   exit 0
 }
 
-osc_arm() { # --task --harness --backend --kind --state --config [--agent-bin]
-  local opt task='' harness='' backend='' kind='' state='' config='' agent_bin=''
+osc_arm() { # --task --harness --backend --kind --state --config [--target] [--agent-bin]
+  local opt task='' harness='' backend='' kind='' state='' config='' target='' agent_bin=''
   while [ $# -gt 0 ]; do
     opt=$1
     shift
@@ -490,6 +499,7 @@ osc_arm() { # --task --harness --backend --kind --state --config [--agent-bin]
       --kind) kind=$1 ;;
       --state) state=$1 ;;
       --config) config=$1 ;;
+      --target) target=$1 ;;
       --agent-bin) agent_bin=$1 ;;
       *) usage ;;
     esac
@@ -515,6 +525,7 @@ osc_arm() { # --task --harness --backend --kind --state --config [--agent-bin]
   fi
   FM_OSC7501_WATCHER=1 nohup bash "$SCRIPT_DIR/fm-osc7501.sh" watch \
     --task "$task" --kind "$kind" --state "$state" --harness "$harness" \
+    --backend "$backend" --target "$target" \
     --parent "$PPID" </dev/null >/dev/null 2>&1 &
   printf '%s %s %s\n' "$!" "$task" "$$" >"$pidfile" 2>/dev/null || true
   exit 0

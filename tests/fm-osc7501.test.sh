@@ -464,6 +464,35 @@ t_cursor_transcript_drives_activity() {
   pass "activity: a cursor worker reports working and idle from its transcript"
 }
 
+# Grok has no busy-state writer; the classifier reads its rendered pane through
+# the backend, so a follow-up turn showing Grok's busy footer reads as working
+# over an earlier done, and done returns once the footer clears.
+t_grok_pane_drives_activity() {
+  local d=$TMP_ROOT/grok
+  mkhome "$d"
+  mkdir -p "$d/bin"
+  : >"$d/cap"
+  : >"$d/pane"
+  # shellcheck disable=SC2016
+  printf '#!/usr/bin/env bash\n[ "$1" = capture-pane ] && cat %q\n' "$d/pane" >"$d/bin/tmux"
+  chmod +x "$d/bin/tmux"
+  sleep 300 &
+  local holder=$!
+  printf 'done [at=%s]: PR https://example.test/pr/6\n' "$(date +%s)" >"$d/state/t25.status"
+  printf 'working on it\n  Ctrl+c:cancel\n' >"$d/pane"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 PATH="$d/bin:$PATH" \
+    bash "$SCRIPT" watch --task t25 --kind ship --state "$d/state" --harness grok \
+    --backend tmux --target '%9' --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=working:app=firstmate-grok' "$d/cap" 300 \
+    || fail "grok: a pane showing the busy footer did not read as working"
+  printf 'ready\n> \n' >"$d/pane"
+  wait_cap 'state=done' "$d/cap" 300 || fail "grok: done did not return once the footer cleared"
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  pass "activity: a grok worker reports working from its rendered pane"
+}
+
 # Single-source precedence: a running turn reads as working even after a done
 # line, the done returns once the turn ends, and the final record keeps it
 # even when the agent died with its busy record still open.
@@ -603,6 +632,7 @@ fm_test_run \
   t_disarm_after_agent_exit_parks_idle \
   t_rearm_retires_previous_reporter \
   t_cursor_transcript_drives_activity \
+  t_grok_pane_drives_activity \
   t_turn_then_terminal_line \
   t_paused_reads_from_busy_state \
   t_retire_waits_for_slow_reporter \
