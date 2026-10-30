@@ -1649,6 +1649,32 @@ test_unpooled_grants_exist_before_certificate_publication() {
   pass "unpooled grants are materialized before certificates and remain counted across policy changes"
 }
 
+test_remote_descendants_prevent_incomplete_certificates() {
+  local out owner child digest epoch policy
+  make_remote_fleet remote-nested-refusal 1
+  serve_remotes >/dev/null || fail "initial serve without remote descendants"
+  owner=$R_REMOTE
+  policy=$owner/state/fleet-seats/policy.json
+  digest=$(jq -r .digest "$owner/state/fleet-seats/served.json")
+  epoch=$(jq -r '"\(.issuer).\(.seq)"' "$owner/state/fleet-seats/served.json")
+  child="$owner/local-child"
+  make_local_secondmate "$child" "$owner" local-child
+  printf -- '- remote-child - Nested remote. (host: other; root: /code; home: /remote-child; scope: tests; projects: ; added 2026-09-28)\n' > "$child/data/secondmates.md"
+  out=$(seats "$owner" serve --digest "$digest" --epoch "$epoch" --allowance shared=0 < "$policy" 2>&1)
+  expect_code 5 "$?" "cached serve with unaccounted remote descendants: $out"
+  assert_contains "$out" "remote descendants have unaccounted occupancy" "cached serve refusal reason"
+  out=$(serve_remotes 2>&1)
+  assert_contains "$out" "unreachable theshop" "nested remote occupancy was certified complete"
+  new_holder
+  out=$(reserve "$R_ROOT" contender pool-model-a 2>&1)
+  expect_code 5 "$?" "primary admitted work despite unaccounted remote occupancy: $out"
+  assert_present "$R_ROOT/state/fleet-seats/remote-theshop.pending" "incomplete serve left admission confirmed"
+  rm "$child/data/secondmates.md"
+  serve_remotes >/dev/null || fail "serve did not recover after remote descendant removal"
+  reserve "$R_ROOT" contender pool-model-a >/dev/null || fail "complete subtree blocked ordinary admission"
+  pass "remote descendants block new and replayed certificates until occupancy is accountably complete"
+}
+
 test_remote_descendants_use_one_authority() {
   local base="$TMP_ROOT/remote-descendants" child pid out n
   make_remote_fleet remote-descendants 2
@@ -2074,7 +2100,7 @@ test_generationless_predecessor_stays_counted() {
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_generationless_predecessor_stays_counted|test_remote_without_pools_confirms_unpooled_models|test_managed_records_and_legacy_import|test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_remote_descendants_prevent_incomplete_certificates|test_generationless_predecessor_stays_counted|test_remote_without_pools_confirms_unpooled_models|test_managed_records_and_legacy_import|test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -2123,6 +2149,7 @@ test_serve_delivery_releases_fleet_lock
 
 test_unpooled_grants_exist_before_certificate_publication
 test_remote_descendants_use_one_authority
+test_remote_descendants_prevent_incomplete_certificates
 test_opt_out_records_only_existing_holder_successors
 
 test_terminal_holders_survive_opt_out_readmission
