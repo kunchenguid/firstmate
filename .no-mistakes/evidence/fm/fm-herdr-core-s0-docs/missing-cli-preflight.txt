@@ -1,0 +1,2 @@
+error: backend=herdr selected but the 'herdr' CLI is not installed (https://herdr.dev) (Apache-2.0)
+Herdr preflight exit status: 1
