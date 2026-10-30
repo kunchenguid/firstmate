@@ -734,7 +734,7 @@ test_row_floor_and_runner_up() {
 
   tier_answer "$resp" tier-3 0.5 0.1 0.05 0.8 0.05
   out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
-  assert_contains "$out" "row: tier = tier-3 (routed confidence 0.5)" "a pick clearing the row's floor was not taken on its own probability"
+  assert_contains "$out" "row: tier = tier-3 (routed p=0.8)" "a pick clearing the row's floor was not taken on its own probability"
   tier_answer "$resp" tier-3 0.7 0.1 0.1 0.7 0.1
   out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
   assert_contains "$out" "row: tier = tier-2 (fallback: no option clears 0.75)" "a row with no option at its floor did not fall back"
@@ -742,7 +742,7 @@ test_row_floor_and_runner_up() {
   root=$(mutated_root row-floor-low '(.routing[] | select(.id == "tier")).min_confidence = 0.4')
   tier_answer "$resp" tier-3 0.3 0.6 0.05 0.3 0.05
   out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
-  assert_contains "$out" "row: tier = tier-1 (routed runner-up confidence 0.3)" "the option clearing the row's floor was not taken as the runner-up"
+  assert_contains "$out" "row: tier = tier-1 (routed runner-up p=0.6)" "the option clearing the row's floor was not taken as the runner-up"
   tier_answer "$resp" tier-3 0.3 0.05 0.05 0.3 0.6
   out=$(FM_ROOT_OVERRIDE="$root" TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")
   assert_contains "$out" "row: tier = tier-2 (fallback: no listed option applies)" "a none runner-up was taken as an option"

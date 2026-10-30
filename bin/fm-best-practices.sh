@@ -330,17 +330,17 @@ route_answers() {  # <rows-json> <response-file>
             else
               ($a.choice) as $c
               | (if ($r | has("min_confidence")) then
-                   (if $a.probabilities[$c] >= $r.min_confidence then {pick: $c}
+                   (if $a.probabilities[$c] >= $r.min_confidence then {pick: $c, p: $a.probabilities[$c]}
                     else ([$a.probabilities | to_entries[] | select(.key != $c and .value >= $r.min_confidence)] | sort_by(-.value)) as $ok
                       | if ($ok | length) == 0 then {pick: null, why: "no option clears \($r.min_confidence)"}
                         elif ($ok | length) > 1 and $ok[0].value == $ok[1].value then {pick: null, why: "runner-up tie"}
-                        else {pick: $ok[0].key, runner: true} end
+                        else {pick: $ok[0].key, runner: true, p: $ok[0].value} end
                     end)
                  elif $a.confidence >= $global then {pick: $c}
                  else {pick: null, why: "confidence \($a.confidence) below \($global)"} end) as $g
               | if $g.pick == null then {value: $r.fallback, source: "fallback: \($g.why)"}
                 elif $g.pick == "none" then {value: $r.fallback, source: "fallback: no listed option applies"}
-                else {value: $g.pick, source: "routed \(if $g.runner then "runner-up " else "" end)confidence \($a.confidence)"} end
+                else {value: $g.pick, source: "routed \(if $g.runner then "runner-up " else "" end)\(if $g.p then "p=\($g.p)" else "confidence \($a.confidence)" end)"} end
             end)} ]
       | from_entries
     end' "$2" 2>/dev/null
