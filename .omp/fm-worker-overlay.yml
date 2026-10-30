@@ -9,9 +9,9 @@
 # or make its composer unreadable to bin/fm-composer-lib.sh. Verified against
 # omp 18.1.11's own settings schema (`omp config list`).
 composer:
-  # Renders a bare `❯` (U+276F) row, a glyph the shared composer classifier
-  # already reads; the shipped default `band` and six other shapes are not in
-  # its catalogue, and the shape is otherwise a captain-level setting.
+  # Keep the composer within bin/fm-composer-lib.sh's supported shapes;
+  # docs/verification/runtime-backends.md owns the versioned captures.
+  # The shipped default `band` and other shapes remain unverified.
   shape: borderless
 plan:
   # `plan.defaultOnStartup: true` opens every session read-only; a worker that

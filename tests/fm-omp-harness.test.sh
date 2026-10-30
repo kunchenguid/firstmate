@@ -29,7 +29,8 @@
 #   6. The turn-end guard extension compels one continuation on exit 2 and
 #      stands down when the payload already carries stop_hook_active.
 #   7. The watch extension arms through fm_watch_arm_omp and delivers an
-#      actionable close as one follow-up.
+#      actionable close as one follow-up; while state/.afk exists it stands
+#      down for the daemon and re-arms itself once the flag is gone.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -681,6 +682,211 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+# While state/.afk exists the daemon owns supervision: an arm request launches
+# no child, a child armed before the flag appeared stands down at its one-shot
+# close without delivering that wake to main or starting a successor, and the
+# extension re-arms by itself at the next session event once the flag is gone.
+test_watch_extension_stands_down_for_the_daemon_and_rearms() {
+  local repo home log out status
+  repo="$TMP_ROOT/watch-daemon/repo"; home="$TMP_ROOT/watch-daemon/home"; log="$TMP_ROOT/watch-daemon/arm.log"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  # Every arm reports a ready watcher; one that sees state/.afk appear exits
+  # one-shot with the wake it queued for the daemon, as bin/fm-watch.sh does.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+i=0
+while [ "$i" -lt 300 ]; do
+  if [ -e "${FM_HOME:?}/state/.afk" ]; then
+    printf 'signal: omp-quiet handoff\n'
+    exit 0
+  fi
+  sleep 0.1
+  i=$((i + 1))
+done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, unlinkSync, existsSync, readFileSync } from "node:fs";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool = null; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const arms = () => (existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm=")).length : 0);
+const daemonOwned = /^watcher: unchanged - the daemon owns supervision while state\/\.afk exists/;
+const waitFor = async (check, what) => {
+  for (let i = 0; i < 50; i += 1) {
+    if (await check()) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(what);
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+// Armed under the flag: the daemon owns supervision and no child starts.
+writeFileSync(`${state}/.afk`, "quiet\n");
+const under = await tool.execute();
+if (!daemonOwned.test(under.content[0].text)) throw new Error(`arm under state/.afk did not stand down: ${under.content[0].text}`);
+if (arms() !== 0) throw new Error(`arm under state/.afk launched ${arms()} child(ren)`);
+// Quiet ends: the next session event re-arms without a tool call.
+unlinkSync(`${state}/.afk`);
+await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "captain: carry on" }, {});
+await waitFor(() => arms() === 1, "removing state/.afk did not re-arm at before_agent_start");
+const armed = await tool.execute();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(armed.content[0].text)) throw new Error(`the re-armed child was not owned: ${armed.content[0].text}`);
+// Quiet begins while armed: the one-shot close of that child is a stand-down,
+// not a continuity failure, and the wake it queued stays with the daemon.
+writeFileSync(`${state}/.afk`, "quiet\n");
+await waitFor(async () => daemonOwned.test((await tool.execute()).content[0].text), "the armed child did not stand down after state/.afk appeared");
+await new Promise((r) => setTimeout(r, 500));
+if (sent.length !== 0) throw new Error(`a daemon-owned wake reached main: ${JSON.stringify(sent)}`);
+if (arms() !== 1) throw new Error(`a successor was launched beside the daemon: ${arms()} arms`);
+// Quiet ends again: the assistant message after the return tool call re-arms.
+unlinkSync(`${state}/.afk`);
+await handlers.get("message_start")({ type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "quiet mode is off" }] } }, {});
+await waitFor(() => arms() === 2, "removing state/.afk did not re-arm at message_start");
+await handlers.get("session_shutdown")({}, {});
+if (sent.length !== 0) throw new Error(`shutdown delivered a daemon-owned wake: ${JSON.stringify(sent)}`);
+if (existsSync(`${state}/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a daemon-owned wake must not ride the replacement handoff");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension daemon stand-down: $out"
+  [ -z "$out" ] || fail "omp watch extension daemon stand-down test printed output: $out"
+  pass ".omp watch extension: stands down while state/.afk exists, leaves the one-shot wake to the daemon, and re-arms once the flag is gone"
+}
+
+test_watch_extension_hands_off_during_successor_restoration() {
+  local mode=${1:-arm} transition=${2:-readiness} repo home log out status
+  repo="$TMP_ROOT/watch-restoration-$mode-$transition/repo"; home="$TMP_ROOT/watch-restoration-$mode-$transition/home"; log="$TMP_ROOT/watch-restoration-$mode-$transition/arm.log"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/config"
+  [ "$mode" != host ] || : > "$home/config/supervision-host"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+state="${FM_HOME:?}/state"
+export FM_ROOT_OVERRIDE="${FM_TEST_ROOT:?}" FM_STATE_OVERRIDE="$state"
+. "$FM_TEST_ROOT/bin/fm-wake-lib.sh"
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirm\n' >> "${FM_ARM_LOG:?}"
+  [ "${FM_RACE_MODE:?}" != retirement ] || exit 1
+  fm_recovery_marker_begin_handling "$state/.watcher-down" "$2" || exit 1
+  printf 'quiet\n' > "$state/.afk"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" = 1 ]; then
+  printf 'watcher: attached pid=%s\n' "$$"
+  while [ ! -e "$state/fire" ]; do sleep 0.02; done
+  fm_wake_append check restoration 'check: restoration handoff' || exit 1
+  printf 'check: restoration handoff\n'
+  exit 0
+fi
+rm -f "$state/.last-watcher-beat"
+FM_WATCH_HANDLING_SUCCESSOR=1 "$FM_TEST_ROOT/bin/fm-watch.sh" > "$state/successor.out" 2>&1 &
+child=$!
+trap 'touch "$state/retiring"; while [ ! -e "$state/retired" ]; do sleep 0.02; done; kill -TERM "$child" 2>/dev/null; wait "$child" 2>/dev/null; exit 0' TERM
+while [ ! -e "$state/.last-watcher-beat" ]; do
+  kill -0 "$child" 2>/dev/null || exit 1
+  sleep 0.02
+done
+while [ ! -e "$state/ready" ]; do sleep 0.02; done
+fm_recovery_marker_snapshot "$state/.watcher-down" || exit 1
+pid=$child
+[ "${FM_RACE_MODE:?}" != retirement ] || pid=99999999
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=%s\n' "$pid" "${FM_RECOVERY_MARKER_TOKEN##*:}"
+touch "$state/published"
+wait "$child"
+SH
+  cp "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_TEST_ROOT="$ROOT" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_ARM_LOG="$log" FM_RACE_MODE="$transition" FM_OMP_ARM_READY_TIMEOUT_MS=10000 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=25 FM_WATCH_REARM_RETRY_MAX_MS=25 FM_POLL=0.2 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync, unlinkSync, existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+const handlers = new Map(); let tool; const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool(t) { tool = t; },
+  sendUserMessage(m) { sent.push(m); },
+};
+const log = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8") : "";
+const arms = () => log().split("\n").filter((row) => row.startsWith("arm=")).length;
+const waitFor = async (check, what) => {
+  for (let i = 0; i < 600; i += 1) {
+    if (check()) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(what);
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+try {
+await tool.execute();
+await waitFor(() => arms() === 1, "the predecessor did not start");
+writeFileSync(`${state}/fire`, "");
+await waitFor(() => arms() === 2, "restoration did not start a successor before quiet entry");
+if (process.env.FM_RACE_MODE === "readiness") writeFileSync(`${state}/.afk`, "quiet\n");
+writeFileSync(`${state}/ready`, "");
+await waitFor(() => existsSync(`${state}/published`), "the successor did not publish readiness");
+if (process.env.FM_RACE_MODE === "retirement") {
+  await waitFor(() => existsSync(`${state}/retiring`), "failed confirmation did not retire the successor");
+  writeFileSync(`${state}/.afk`, "quiet\n");
+} else if (process.env.FM_RACE_MODE === "readiness" && log().includes("confirm\n")) {
+  throw new Error("daemon-owned recovery was acknowledged by the extension");
+}
+await waitFor(() => existsSync(`${state}/retiring`), "quiet ownership did not retire the successor");
+if (!readFileSync(`${state}/.wake-queue`, "utf8").includes("check: restoration handoff")) throw new Error("retirement lost the queued check");
+const episode = process.env.FM_RACE_MODE === "confirmation" ? "handling" : "downtime";
+if (!readFileSync(`${state}/.watcher-down`, "utf8").startsWith(`announced:${episode}:`)) throw new Error(`the successor did not retain its ${episode} recovery episode`);
+const daemonEnv = { ...process.env, FM_ROOT_OVERRIDE: process.env.FM_TEST_ROOT, FM_ESCALATE_BATCH_SECS: "999999" };
+const blocked = spawnSync(`${process.env.FM_TEST_ROOT}/bin/fm-watch.sh`, [], { env: daemonEnv, encoding: "utf8", timeout: 10000 });
+if (blocked.status !== 0 || !blocked.stdout.includes("watcher: already running")) throw new Error(`the successor did not hold the daemon's watcher lock: ${blocked.stdout} ${blocked.stderr}`);
+writeFileSync(`${state}/retired`, "");
+await waitFor(() => !existsSync(`${state}/.watch.lock`), "the retired successor still blocks the daemon");
+const watcher = spawnSync(`${process.env.FM_TEST_ROOT}/bin/fm-watch.sh`, [], { env: daemonEnv, encoding: "utf8", timeout: 10000 });
+if (watcher.status !== 0 || watcher.stdout.trim() !== "check: rearm-resurface") throw new Error(`the daemon watcher did not resurface the original check: ${watcher.stdout} ${watcher.stderr}`);
+const consumed = spawnSync("bash", ["-c", '. "$FM_TEST_ROOT/bin/fm-supervise-daemon.sh"; LOG="$FM_HOME/state/daemon.log"; handle_durable_wakes "$1" "$FM_HOME/state"', "_", watcher.stdout.trim()], { env: daemonEnv, encoding: "utf8", timeout: 10000 });
+if (consumed.status !== 0) throw new Error(`the daemon could not consume the handed-off check: ${consumed.stdout} ${consumed.stderr}`);
+if (readFileSync(`${state}/.wake-queue`, "utf8").trim() !== "") throw new Error("the daemon left the original check queued");
+if (!readFileSync(`${state}/.subsuper-escalations`, "utf8").includes("restoration handoff")) throw new Error("the daemon did not route the original check");
+await new Promise((r) => setTimeout(r, 500));
+if (sent.length !== 0) throw new Error(`quiet entry during restoration woke main: ${JSON.stringify(sent)}`);
+await handlers.get("session_shutdown")({}, {});
+if (existsSync(`${state}/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a silently handed-off wake survived in replacement state");
+unlinkSync(`${state}/.afk`);
+await handlers.get("session_start")({}, {});
+await waitFor(() => arms() === 3, "attended supervision did not resume after the handoff");
+await new Promise((r) => setTimeout(r, 100));
+if (sent.length !== 0) throw new Error(`the handed-off wake replayed after quiet exit: ${JSON.stringify(sent)}`);
+} finally {
+  writeFileSync(`${state}/retired`, "");
+  await handlers.get("session_shutdown")({}, {});
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch extension $mode $transition handoff: $out"
+  [ -z "$out" ] || fail "omp watch extension restoration handoff printed output: $out"
+  pass ".omp watch extension: quiet entry during $mode $transition retires its successor and lets the daemon consume the queued check"
+}
+
 # An opted-in home spawns the supervision host in the arm's place; its streamed
 # status line drives readiness and the handling handoff, and a handed-back
 # wake is delivered with every host line and the away note.
@@ -977,6 +1183,13 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_stands_down_for_the_daemon_and_rearms
+test_watch_extension_hands_off_during_successor_restoration arm readiness
+test_watch_extension_hands_off_during_successor_restoration host readiness
+test_watch_extension_hands_off_during_successor_restoration arm confirmation
+test_watch_extension_hands_off_during_successor_restoration host confirmation
+test_watch_extension_hands_off_during_successor_restoration arm retirement
+test_watch_extension_hands_off_during_successor_restoration host retirement
 test_watch_extension_runs_the_supervision_host
 test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off

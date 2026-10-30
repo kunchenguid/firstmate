@@ -68,8 +68,15 @@
 #                rounded typed model/effort title with ` · always-approve`; Grok 1.0.5's
 #                typed title also permits its proven three-column overhang.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
-#                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
+#                codex `›`, muse `⟩`, cursor `→`, omp 18.8's `╰─` corner). The
+#                agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
+#                omp's corner is the one glyph that is NOT proof on its own:
+#                omp closes transcript frames with the same lone dim `╰─`, so
+#                the corner anchors a composer only on the row directly
+#                beneath omp's status row, the two-row shape omp 18.8 draws
+#                (status row above, `╰─ ` prompt below, wrapped input on
+#                three-space-indented rows beneath).
 #                A bare composer's WRAP region (typed input continuing on the
 #                rows beneath the glyph row) is bounded by blank rows, by
 #                structural edges, and by the FURNITURE rows a harness draws
@@ -495,11 +502,15 @@ fm_busy_lines_match() {  # [harness]
 }
 
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
-# AGENT glyphs are a genuine empty agent composer on any row, bordered or bare.
+# The global AGENT list below proves a composer on bordered or bare rows.
 # SHELL glyphs are one only INSIDE a composer container; on a bare row they are
 # a dead-shell prompt and must never read `empty`. Newline-separated and
 # consumed by `read` rather than word splitting, so `$`, `%`, and `#` stay
 # literal and no entry is ever exposed to pathname expansion.
+# omp's corner stays outside that list; see THE SHAPE CATALOGUE for anchoring.
+# Its unicode and nerd presets share the corner; ascii's `+-` is unverified.
+FM_COMPOSER_OMP_PROMPT_GLYPH='╰─'
+FM_COMPOSER_OMP_EFFORT_KEYS='󰘶 󰌒'
 FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→' '❭')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 
@@ -520,9 +531,20 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # Command Code renders the anchored `Ask your question...`
 # after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
 # bright for the default ghost ceiling, so fm_composer_classify_screen reads its
-# screen with a raised one. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
+# screen with a raised one. omp 18.8.7 right-aligns a learn-once hint on its
+# `╰─` prompt row until the feature has been used three times: the keybinding
+# cell in accent colour, then the label in dim italics. Ghost stripping
+# removes the dim label but keeps the bright key cell, so the key cell is
+# judged as the remnant of the anchored hint. Only the one rendering captured
+# live through tmux is accepted, byte for byte: the nerd pair `󰘶 󰌒` before
+# `to change thinking effort`. omp's composer-hints table lists other hints
+# (`<key> to see N running agents` while subagents run), but no key cell for
+# them has been captured, and a free key-cell token would let a typed word
+# read as the hint; a false `empty` is the dangerous direction, so an
+# uncaptured hint degrades to `pending`/`unknown` until it is captured.
+# FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$|^'"$FM_COMPOSER_OMP_EFFORT_KEYS"' to change thinking effort$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -543,9 +565,9 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # is deliberately not matched - and the marker is quantifier-free so the same
 # bytes match under LC_ALL=C as under a UTF-8 locale.
 FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
-# omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
+# omp 18.1.11 draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
-# git, and context cells. Verified live through Herdr on omp 18.1.11:
+# git, and context cells. Verified live through Herdr:
 # ` π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)`
 # idle under the unicode preset, ` 󰵗  ·  qwen3:8b ·  … ·  36.7%/41K` under
 # nerd, and ` ⠧ 11s  · …` while busy. Without this rule the bare composer's
@@ -559,9 +581,18 @@ FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
 # ` - `, so its status row never carries a middle dot and a `pi ·` alternative
 # could only ever match typed text), when it opens with one of omp's spinner
 # frames then an elapsed cell, or when it carries the context-usage cell after
-# a middle dot. It is consulted only as the boundary BELOW a bare composer,
-# never on the composer row itself.
-FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
+# a middle dot.
+# omp 18.8.7 moved the status row ABOVE its `╰─` prompt and redraws it as
+# powerline segments with the context cells embedded in a `─` rule that runs
+# to the right edge: ` 󰵗  MAI Pro (F2 stage, Kimi)  ⇄ collab:1  fm-lab
+# ────8%──────…──󰁨───────262K─` under nerd, verified live through tmux. That
+# form is recognised by its rule-embedded context-usage cell (`─N%─`, or
+# `─N.N%─`) on a row that closes with the rule; omp's symbol tables keep the
+# `─` rule and `π` identity cell under the unicode preset, while the ascii
+# preset's `-` rules are unverified and not claimed. It is consulted as the
+# boundary BELOW a bare composer and as the proof directly ABOVE omp's corner
+# prompt, never on the composer row itself.
+FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K|─[0-9]+(\.[0-9]+)?%─.*─$'
 # Pi's footer stats row opens at column 0 with the session cost when every
 # token counter is zero (`$0.000 (sub) 5.4%/272k (auto)` on pi 0.85.1).
 # That leading `$` is a cost cell, not a dead-shell prompt, only when a digit
@@ -872,11 +903,24 @@ _fm_composer_titled_rule_row() {  # <trimmed-row> <plain-rule-spaces>
   [ "$spaces" = "$expected" ]
 }
 
+_fm_composer_anchored_agent_glyph_var() {
+  local FM_COMPOSER_AGENT_PROMPT_GLYPHS=$FM_COMPOSER_AGENT_PROMPT_GLYPHS
+  case "$2" in
+    "$FM_COMPOSER_OMP_PROMPT_GLYPH"|"$FM_COMPOSER_OMP_PROMPT_GLYPH "*)
+      if _fm_composer_row_is_omp_status "$3"; then
+        FM_COMPOSER_AGENT_PROMPT_GLYPHS="$FM_COMPOSER_AGENT_PROMPT_GLYPHS
+$FM_COMPOSER_OMP_PROMPT_GLYPH"
+      fi
+      ;;
+  esac
+  fm_composer_leading_agent_glyph_var "$1" "$2"
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] [cortex]
   local pane=$1 cy=${2:-} cortex_proven=${4:-0}
-  local line indent left_stripped trimmed kind family side_family
+  local line indent left_stripped trimmed kind family side_family prev_trimmed=''
   local top_inner top_spaces='' geometry_check=0 geometry_ambiguous=0 titled_top=0 titled_cand=0
   local content_inner content_spaces bottom_inner bottom_spaces glyph
   local current_indent='' current_family='' row=0 top=-1 valid=0 content_rows=0
@@ -935,6 +979,14 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
       '┗'*'┛') kind=bottom; family=heavy ;;
       '+'*'+') kind=ascii; family=ascii ;;
     esac
+    case "$trimmed" in
+      "$FM_COMPOSER_OMP_PROMPT_GLYPH "*)
+        if _fm_composer_row_is_omp_status "$prev_trimmed"; then
+          kind=
+          family=
+        fi
+        ;;
+    esac
     # This row's glyph proof, computed once for every envelope that contains
     # it: the same side-border strip _fm_composer_row_content performs, then
     # the agent-glyph test. A border row never carries a proof.
@@ -950,7 +1002,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
         '┃'*) probe=${probe#┃} ;;
       esac
       fm_composer_normalize_trim_var probe
-      if fm_composer_leading_agent_glyph_var glyph "$probe"; then
+      if _fm_composer_anchored_agent_glyph_var glyph "$probe" "$prev_trimmed"; then
         row_glyph=$glyph
         row_glyph_row=$row
       fi
@@ -1004,7 +1056,9 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
         ;;
       *) leftbar_start=-1 ;;
     esac
-    # Bare agent-glyph rows: the glyph itself is the container proof. Bare
+    # Bare agent-glyph rows: the glyph itself is the container proof (omp's
+    # corner only directly beneath omp's status row, and a border row - a
+    # rounded box bottom also opens with `╰─` - is never a candidate). Bare
     # shell glyphs are deliberately not candidates (dead-shell rule). Keep
     # lower shell prompts as staleness evidence for cursorless selection.
     # Pi's cost footer can open with `$0.000`; that is furniture, not a prompt.
@@ -1012,7 +1066,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
        && ! _fm_composer_row_is_pi_status "$trimmed" \
        && ! _fm_composer_row_is_cortex_status "$trimmed"; then
       FM_COMPOSER_SCAN_SHELL_ROW=$row
-    elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
+    elif [ -z "$kind" ] && _fm_composer_anchored_agent_glyph_var glyph "$trimmed" "$prev_trimmed"; then
       FM_COMPOSER_SCAN_BARE_ROW=$row
     fi
     # Cursor safety: a cursor sitting on a structural edge row is never an
@@ -1168,6 +1222,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
         *) valid=0 ;;
       esac
     fi
+    prev_trimmed=$trimmed
     row=$((row + 1))
   done <<EOF
 $pane
@@ -1313,17 +1368,51 @@ _fm_composer_screen_row() {  # <n> <screen>
   printf '%s\n' "$2" | sed -n "$(($1 + 1))p"
 }
 
-# _fm_composer_row_content: extract the classification content of one raw row:
-# ghost-strip when styled, plain otherwise, normalize-trim, and strip one
-# matching pair of side border glyphs.
-_fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
-  local raw=$1 styled=$2 stripped
+# _fm_composer_row_content: extract the classification content of one raw row.
+# On a proven bare prompt row, preserve actual prompt identity and styling
+# across ghost stripping: a bright payload glyph must not become the prompt
+# after a dim real prompt disappears. Then normalize-trim and strip one matching
+# pair of side border glyphs.
+_fm_composer_row_content() {  # <raw-row> <styled> [bare-prompt] -> content on stdout
+  local raw=$1 styled=$2 stripped plain prompt='' prompt_raw=''
+  if [ "${3:-0}" = 1 ]; then
+    plain=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
+    fm_composer_normalize_trim_var plain
+    if fm_composer_leading_agent_glyph_var prompt "$plain"; then
+      prompt_raw=${raw%%"$prompt"*}$prompt
+      raw=${raw/"$prompt"/}
+    fi
+  fi
   if [ "$styled" = 1 ]; then
     stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
   else
     stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ansi)
   fi
   fm_composer_normalize_trim_var stripped
+  if [ "$styled" = 1 ] && [ "$prompt" = "$FM_COMPOSER_OMP_PROMPT_GLYPH" ]; then
+    case "$stripped" in
+      *"$FM_COMPOSER_OMP_EFFORT_KEYS")
+        local prefix hint="$FM_COMPOSER_OMP_EFFORT_KEYS to change thinking effort"
+        case "$plain" in
+          "$FM_COMPOSER_OMP_PROMPT_GLYPH "*"$hint")
+            plain=${plain#"$FM_COMPOSER_OMP_PROMPT_GLYPH"}
+            plain=${plain%"$hint"}
+            prefix=${stripped%"$FM_COMPOSER_OMP_EFFORT_KEYS"}
+            fm_composer_normalize_trim_var plain
+            fm_composer_normalize_trim_var prefix
+            if [ "$prefix" = "$plain" ]; then stripped=$prefix; fi
+            ;;
+        esac
+        ;;
+    esac
+  fi
+  if [ -n "$prompt" ] && [ -z "$stripped" ] && [ "$plain" != "$prompt" ]; then
+    prompt_raw=$(printf '%s\n' "$prompt_raw" | fm_composer_strip_ghost)
+    fm_composer_normalize_trim_var prompt_raw
+  fi
+  if [ -n "$prompt" ] && { [ -n "$stripped" ] || [ "$plain" = "$prompt" ] || [ -n "$prompt_raw" ]; }; then
+    stripped="$prompt $stripped"
+  fi
   case "$stripped" in
     '│'*'│') stripped=${stripped#│}; stripped=${stripped%│} ;;
     '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
@@ -1370,9 +1459,11 @@ _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <las
 # `Use /skills ...`), so it must read `unknown` rather than a false `pending`.
 _fm_composer_classify_bare_row() {  # <screen> <styled> <row>
   local screen=$1 styled=$2 row=$3 raw content plain state
+  local FM_COMPOSER_AGENT_PROMPT_GLYPHS="$FM_COMPOSER_AGENT_PROMPT_GLYPHS
+$FM_COMPOSER_OMP_PROMPT_GLYPH"
   raw=$(_fm_composer_screen_row "$row" "$screen")
-  content=$(_fm_composer_row_content "$raw" "$styled")
-  plain=$(_fm_composer_row_content "$raw" 0)
+  content=$(_fm_composer_row_content "$raw" "$styled" 1)
+  plain=$(_fm_composer_row_content "$raw" 0 1)
   _fm_composer_bare_row_strip_furniture_var content
   _fm_composer_bare_row_strip_furniture_var plain
   state=$(fm_composer_classify_content 0 "$content" \
@@ -1470,10 +1561,12 @@ _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
 # glyph row itself).
 _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row>
   local screen=$1 styled=$2 g=$3 cy=$4 row raw content glyph='' text_seen=0
+  local FM_COMPOSER_AGENT_PROMPT_GLYPHS="$FM_COMPOSER_AGENT_PROMPT_GLYPHS
+$FM_COMPOSER_OMP_PROMPT_GLYPH"
   row=$g
   while [ "$row" -le "$cy" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
-    content=$(_fm_composer_row_content "$raw" "$styled")
+    content=$(_fm_composer_row_content "$raw" "$styled" "$((row == g))")
     if [ "$row" -eq "$g" ]; then
       _fm_composer_bare_row_strip_furniture_var content
       if fm_composer_leading_agent_glyph_var glyph "$content"; then
@@ -1956,7 +2049,8 @@ _fm_composer_select_cursorless() {
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
-  local leading_blank=1 placeholder_position=0 prompt_is_shell=0 cwd_start
+  local leading_blank=1 placeholder_position=0 prompt_is_shell=0 cwd_start bare_prompt
+  local FM_COMPOSER_AGENT_PROMPT_GLYPHS=$FM_COMPOSER_AGENT_PROMPT_GLYPHS
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1966,6 +2060,10 @@ EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" '' 1
   _fm_composer_select_cursorless "$plain" || return 1
+  if [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
+    FM_COMPOSER_AGENT_PROMPT_GLYPHS="$FM_COMPOSER_AGENT_PROMPT_GLYPHS
+$FM_COMPOSER_OMP_PROMPT_GLYPH"
+  fi
   row=$FM_COMPOSER_SELECTED_FIRST
   cwd_start=-1
   if [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ]; then
@@ -1974,7 +2072,11 @@ EOF
   fi
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
-    content=$(_fm_composer_row_content "$raw" "$styled")
+    bare_prompt=0
+    if [ "$FM_COMPOSER_SELECTED_KIND" = bare ] && [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ]; then
+      bare_prompt=1
+    fi
+    content=$(_fm_composer_row_content "$raw" "$styled" "$bare_prompt")
     placeholder_position=0
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)

@@ -1143,16 +1143,6 @@ test_captain_held_never_rechecked_while_away_record_exists() {
   pass "a captain-held item is never rechecked while the away-posture record exists, and the recheck returns once the record is archived"
 }
 
-# Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
-# QUIET), so it silences nothing: the same hold is rechecked with that record
-# live, both on the watcher's own cadence and through the one-shot handoff a
-# running quiet daemon owns.
-write_quiet_record() {  # <state>
-  if ! FM_HOME="$(dirname "$1")" FM_STATE_OVERRIDE="$1" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1; then
-    fail "could not write quiet mode's record in $1"
-  fi
-}
-
 test_captain_held_rechecked_under_a_quiet_record() {
   local dir state fakebin out capture_file statusf window key back pid
   dir=$(make_case quiet-record-held); state="$dir/state"; fakebin="$dir/fakebin"

@@ -208,7 +208,7 @@ test_matrix_claude_named_session_titled_rule() {
   # A multiword session name renders the same way, at the same width.
   multi='────────────────── Andrew Chen ─'
   assert_screen "multiword named claude idle on herdr" empty "$CAPS_STYLED" \
-    "${idle/"$titled"/"$multi"}" '' "$claude_idle"
+    "transcript line"$'\n'"$multi"$'\n'"❯$NBSP"$'\n'"$rule"$'\n  ⏵⏵ auto mode on (shift+tab to cycle)' '' "$claude_idle"
   assert_screen "multiword named claude typed on herdr" pending "$CAPS_STYLED" \
     "transcript line"$'\n'"$multi"$'\n'"❯ fix the login bug"$'\n'"$rule" '' "$claude_idle"
   # Claude's prompt suggestion is dim ghost text, not input.
@@ -486,6 +486,39 @@ test_matrix_cursor_fully_dim_placeholder() {
   pass "matrix: cursor's fully dim placeholder reads empty; typed text stays pending"
 }
 
+test_matrix_bare_prompt_payload_identity() {
+  local prompt message screen row out plain
+  for prompt in '→' '❯' '›' '⟩' '❭'; do
+    for message in '╰─' '╰─ explain this' '→' '→ explain this' '❯' '›' '⟩' '❭' '>' '$' '%' '#' '│retain│'; do
+      row="${ESC}[2m${prompt} ${ESC}[0m${ESC}[38;2;224;222;244m${message}${ESC}[0m"
+      screen=$'transcript\n\n'"$row"
+      assert_screen "bright payload after dim $prompt on tmux: $message" pending "$CAPS_TMUX" "$screen" 2
+      assert_screen "bright payload after dim $prompt on herdr: $message" pending "$CAPS_STYLED" "$screen"
+      assert_screen "bright payload after dim $prompt on zellij: $message" pending "$CAPS_STYLED_NOID" "$screen"
+      out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+      [ "$out" = "$message" ] || fail "bare $prompt extraction must preserve '$message', got '$out'"
+      out=$(LC_ALL=C fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+      [ "$out" = "$message" ] || fail "byte-locale bare $prompt extraction must preserve '$message', got '$out'"
+      plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+      assert_screen "plain $prompt payload remains unproven: $message" unknown "$CAPS_PLAIN" "$plain"
+      out=$(fm_composer_extract_selected_content "$CAPS_PLAIN" "$plain")
+      [ "$out" = "$message" ] || fail "plain bare $prompt extraction must preserve '$message', got '$out'"
+      screen="$screen"$'\n'"${ESC}[2m   suggested continuation${ESC}[0m"
+      assert_screen "wrapped bright payload after dim $prompt on tmux: $message" pending "$CAPS_TMUX" "$screen" 3
+      assert_screen "wrapped bright payload after dim $prompt, cursorless: $message" pending "$CAPS_STYLED_NOID" "$screen"
+      out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+      [ "$out" = "$message" ] || fail "wrapped bare $prompt extraction must preserve '$message', got '$out'"
+    done
+  done
+  row="${ESC}[2m→ ${ESC}[0m${ESC}[38;2;224;222;244m╰─${ESC}[0m"
+  screen=$'transcript\n ▄▄▄▄▄▄▄▄\n'"$row"$'\n ▀▀▀▀▀▀▀▀\n  Auto · 64%  Run Everything\n  ~/wt · <branch>\n'
+  assert_screen "Cursor blank cursor stays unproven with a draft" unknown "$CAPS_TMUX" "$screen" 6
+  assert_screen "Cursor tmux cursorless reclassification preserves a draft" pending "$CAPS_TMUX" "$screen" ''
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = '╰─' ] || fail "Cursor framed draft extraction must preserve its corner, got '$out'"
+  pass "matrix: bare prompt identity survives ghost stripping without consuming bright payload"
+}
+
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   # Herdr draws a composer's rules with half-block glyphs (▄ above, ▀ below)
   # rather than the box-drawing family. Without treating those as edges, a bare
@@ -571,6 +604,162 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   wrapped=$'transcript line\n\n❯ document the constants in the order\npi · e · phi with one example each'
   assert_screen "wrapped typed text opening 'pi ·' stays pending" pending "$CAPS_TMUX" "$wrapped" 3
   pass "matrix: omp's status row bounds the bare composer's wrap region"
+}
+
+test_matrix_omp_corner_prompt_row() {
+  # omp 18.8.7 (nerd preset) captured byte-for-byte through tmux
+  # (`capture-pane -p -e`, 180x45) on 2026-10-09: the status row now sits
+  # directly ABOVE the prompt as powerline segments with the context cells
+  # embedded in a `─` rule, and the prompt row is a dark-grey (38;2;74;80;88,
+  # below the ghost-luma ceiling) `╰─` corner, one space, then the typed text;
+  # wrapped input continues on three-space-indented rows. A fresh session
+  # right-aligns `󰘶 󰌒 to change thinking effort` on the prompt row (accent
+  # key cell, dim italic label) until the conversation starts, and omp's
+  # inline suggestion (`'s`) follows typed text in the same dim grey.
+  # Before this shape was taught the real fm_tmux_composer_state read the idle
+  # pane `unknown`: the corner is neither an agent glyph nor a complete
+  # border, and the cursor sits on an edge row. The quiet-mode daemon on an
+  # omp primary therefore deferred its failure escalation 146 times and
+  # raised its wedge alarm instead of reaching the captain.
+  local cap sep capr omp_icon model_icon path_icon ctx_icon key_a key_b
+  local plain_status status dim grey hint prompt_idle prompt_hint prompt_typed wrap1 wrap2
+  local head screen plain out
+  cap=$(printf '\356\202\266'); sep=$(printf '\356\202\261'); capr=$(printf '\356\202\260')
+  omp_icon=$(printf '\363\260\265\227'); model_icon=$(printf '\357\201\236')
+  path_icon=$(printf '\357\200\224'); ctx_icon=$(printf '\363\260\201\250')
+  key_a=$(printf '\363\260\230\266'); key_b=$(printf '\363\260\214\222')
+  plain_status=" $cap $omp_icon $sep $model_icon MAI Pro (F2 stage, Kimi) $sep ⇄ collab:1 $sep $path_icon fm-lab-repo.tBArxP ${capr}────8%──────────────────────────────${ctx_icon}───────────────262K─"
+  status="${ESC}[38;2;15;18;22m${cap}${ESC}[39m${ESC}[48;2;15;18;22m ${ESC}[38;2;107;114;128m${omp_icon}${ESC}[39m ${ESC}[38;2;42;48;56m${sep}${ESC}[39m ${ESC}[38;2;0;180;255m${model_icon} MAI Pro (F2 stage, Kimi)${ESC}[39m ${ESC}[38;2;42;48;56m${sep}${ESC}[39m ${ESC}[38;2;0;180;255m⇄ collab:1${ESC}[39m ${ESC}[38;2;42;48;56m${sep}${ESC}[39m ${ESC}[38;2;232;236;244m${path_icon} fm-lab-repo.tBArxP${ESC}[39m ${ESC}[38;2;15;18;22m${ESC}[49m${capr}${ESC}[38;2;0;180;255m────8%${ESC}[38;2;42;48;56m──────────────────────────────${ESC}[38;2;57;152;191m${ctx_icon}${ESC}[38;2;42;48;56m───────────────${ESC}[38;2;57;152;191m262K${ESC}[38;2;42;48;56m─"
+  dim="${ESC}[38;2;74;80;88m"; grey="${ESC}[38;2;229;229;231m"
+  prompt_idle="${dim}╰─ ${grey}"
+  hint="${ESC}[38;2;0;180;255m${key_a} ${key_b}${grey} ${ESC}[3m${ESC}[38;2;107;114;128mto change thinking effort"
+  prompt_hint="${dim}╰─ ${grey}$(printf '%*s' 120 '')${hint}"
+  prompt_typed="${dim}╰─ ${grey}hello captain${ESC}[38;2;107;114;128m's${ESC}[39m"
+  wrap1="${dim}╰─ ${grey}word word word word word word word word "
+  wrap2="${dim}   ${grey}word word word${ESC}[39m"
+  head=$'Tip: Type `/` at the start of your prompt to browse every command\n'
+  # Non-vacuousness: the 18.8.7 status row is real non-blank content, and it
+  # is what proves the corner beneath it; ordinary text carrying a percentage
+  # is not that row.
+  _fm_composer_row_is_omp_status "${plain_status# }" \
+    || fail "the omp 18.8.7 powerline status row must be recognized as omp status furniture"
+  _fm_composer_row_is_omp_status 'rollout ──8%── of the fleet is done' \
+    && fail "prose with a rule-wrapped percentage that does not close on the rule must not be omp status"
+  _fm_composer_row_is_omp_status 'retry at 8% capacity' \
+    && fail "ordinary text with a percentage must not be mistaken for omp status furniture"
+  out=$(classify 0 '╰─'); [ "$out" != empty ] || fail "an unproven omp corner must not read empty"
+  out=$(classify 0 '╰─ hello'); [ "$out" = pending ] || fail "omp corner with text should read pending, got '$out'"
+  out=$(classify 0 '' '' sensitive '╰─'); [ "$out" = unknown ] || fail "a stripped unproven omp corner must remain unknown, got '$out'"
+  # The hint remnant is the captured nerd pair, byte for byte. Any other key
+  # cell (a guessed single token, a typed word plus a token, the uncaptured
+  # running-agents hint) is a draft until it is captured: it must not read
+  # empty.
+  out=$(classify 0 "$key_a $key_b" "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive "$key_a $key_b to change thinking effort" 0 1)
+  [ "$out" = empty ] || fail "the stripped nerd-pair hint remnant should read empty, got '$out'"
+  out=$(classify 0 'shift+tab' "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive 'shift+tab to change thinking effort' 0 1)
+  [ "$out" = pending ] || fail "an uncaptured single-token key cell remnant must read pending, got '$out'"
+  out=$(classify 0 'hi shift+tab' "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive 'hi shift+tab to change thinking effort' 0 1)
+  [ "$out" = pending ] || fail "a typed word before a one-token key cell must read pending, got '$out'"
+  out=$(classify 0 "$key_a" "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive "$key_a to see 3 running agents" 0 1)
+  [ "$out" = pending ] || fail "the uncaptured running-agents hint remnant must read pending, got '$out'"
+  out=$(classify 1 'I want to see 3 running agents' "$FM_COMPOSER_IDLE_RE_DEFAULT" insensitive 'I want to see 3 running agents' 1 0)
+  [ "$out" = pending ] || fail "typed text ending in the running-agents label on a plain bordered row must read pending, got '$out'"
+  # Fresh session, hint on the prompt row. Rows: 0 tip, 1 blank, 2 status,
+  # 3 prompt (cursor), 4-5 blank.
+  screen="$head"$'\n'"$status"$'\n'"$prompt_hint"$'\n\n'
+  assert_screen "idle omp 18.8.7 with hint on tmux" empty "$CAPS_TMUX" "$screen" 3 probe-absent
+  assert_screen "idle omp 18.8.7 with hint on herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "idle omp 18.8.7 with hint on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ -z "$out" ] || fail "the idle omp hint must not be extracted as user input, got '$out'"
+  local before=$out after message='hello captain'
+  screen="$head"$'\n'"$status"$'\n'"${dim}╰─ ${grey}${message}$(printf '%*s' 100 '')${hint}"$'\n\n'
+  assert_screen "typed omp text before its effort hint" pending "$CAPS_STYLED_NOID" "$screen"
+  after=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$after" = "${before}${message}" ] || fail "a successful paste before the omp hint must satisfy the exact content proof, got '$after'"
+  screen="$head"$'\n'"$status"$'\n'"${dim}╰─ ${grey}${message}${ESC}[0m"$'\n\n'
+  after=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$after" = "${before}${message}" ] || fail "a successful paste that hides the omp hint must satisfy the exact content proof, got '$after'"
+  for message in "$key_a $key_b" "$key_a $key_b to change thinking effort" 'shift+tab to change thinking effort' "$key_a to see 3 running agents"; do
+    screen="$head"$'\n'"$status"$'\n'"${dim}╰─ ${grey}${message}${ESC}[0m"$'\n\n'
+    assert_screen "bright hint-like omp user text: $message" pending "$CAPS_STYLED_NOID" "$screen"
+    out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" = "$message" ] || fail "bright hint-like user text must remain byte-exact, got '$out'"
+  done
+  screen="$head"$'\n'"$status"$'\n'"${dim}╰─ ${grey}shift+tab ${ESC}[2mto change thinking effort${ESC}[0m"$'\n\n'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'shift+tab' ] || fail "an uncaptured key-cell remnant must remain input, got '$out'"
+  local hint_tail
+  for hint_tail in '' "$(printf '%*s' 100 '')${hint}"; do
+    for message in '→' '→ explain this' '❯' '›' '⟩' '❭' '╰─' '>' '$' '%' '#' 'Please print ╯' '│retain│'; do
+      screen="$head"$'\n'"$status"$'\n'"${dim}╰─ ${grey}${message}${hint_tail}${ESC}[0m"$'\n\n'
+      assert_screen "omp payload with preserved prompt on tmux: $message" pending "$CAPS_TMUX" "$screen" 3 probe-absent
+      assert_screen "omp payload with preserved prompt on herdr: $message" pending "$CAPS_STYLED" "$screen" '' probe-absent
+      assert_screen "omp payload with preserved prompt on zellij: $message" pending "$CAPS_STYLED_NOID" "$screen"
+      out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+      [ "$out" = "$message" ] || fail "omp payload must survive prompt and hint removal byte-exactly, expected '$message', got '$out'"
+      out=$(LC_ALL=C fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+      [ "$out" = "$message" ] || fail "omp payload must survive byte-locale extraction, expected '$message', got '$out'"
+      plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+      assert_screen "nonempty omp payload on a plain capture: $message" unknown "$CAPS_PLAIN" "$plain"
+      out=$(fm_composer_extract_selected_content "$CAPS_PLAIN" "$plain")
+      [ "$out" = "${message}${hint_tail:+ $key_a $key_b to change thinking effort}" ] \
+        || fail "plain omp extraction must preserve payload and unproven hint, got '$out'"
+    done
+    screen="$head"$'\n'"$status"$'\n'"${dim}╰─ ${grey}→${hint_tail}${ESC}[0m"$'\n'"${dim}   suggested continuation${ESC}[0m"$'\n\n'
+    assert_screen "omp user glyph before a ghost continuation on tmux" pending "$CAPS_TMUX" "$screen" 4 probe-absent
+    assert_screen "omp user glyph before a ghost continuation, cursorless" pending "$CAPS_STYLED_NOID" "$screen"
+    out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" = '→' ] || fail "wrapped omp extraction must preserve the user glyph, got '$out'"
+  done
+  screen="$head"$'\n'"$status"$'\n'"${grey}╰─ → explain this${ESC}[0m"$'\n\n'
+  assert_screen "omp bright prompt and bright user glyph" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = '→ explain this' ] || fail "a bright actual omp prompt must be removed exactly once, got '$out'"
+  screen="$head"$'\n'"$status"$'\n'"$prompt_hint"$'\n\n'
+  # A plain capture cannot tell the hint from typed text: degrade, never fabricate.
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  assert_screen "idle omp 18.8.7 with hint on a plain capture" unknown "$CAPS_PLAIN" "$plain"
+  out=$(fm_composer_extract_selected_content "$CAPS_PLAIN" "$plain")
+  [ "$out" = "$key_a $key_b to change thinking effort" ] || fail "a plain hint has no styling proof and must not be removed, got '$out'"
+  # After the first turn the hint is gone and the prompt row is the bare corner.
+  screen="$head"$'\n'"$status"$'\n'"$prompt_idle"$'\n\n'
+  assert_screen "idle omp 18.8.7 on tmux" empty "$CAPS_TMUX" "$screen" 3 probe-absent
+  assert_screen "idle omp 18.8.7 on herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  assert_screen "idle omp 18.8.7 on a plain capture" empty "$CAPS_PLAIN" "$plain"
+  # Typed text is pending; omp's dim inline suggestion is not part of it.
+  screen="$head"$'\n'"$status"$'\n'"$prompt_typed"$'\n\n'
+  assert_screen "typed omp 18.8.7 on tmux" pending "$CAPS_TMUX" "$screen" 3 probe-absent
+  assert_screen "typed omp 18.8.7 on herdr" pending "$CAPS_STYLED" "$screen" '' probe-absent
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  assert_screen "typed omp 18.8.7 on a plain capture" unknown "$CAPS_PLAIN" "$plain"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'hello captain' ] || fail "the typed omp text must be extracted without the corner or the suggestion, got '$out'"
+  # Wrapped input: the cursor sits on the indented continuation row.
+  screen="$head"$'\n'"$status"$'\n'"$wrap1"$'\n'"$wrap2"$'\n\n'
+  assert_screen "wrapped omp 18.8.7 input on tmux" pending "$CAPS_TMUX" "$screen" 4 probe-absent
+  assert_screen "wrapped omp 18.8.7 input on herdr" pending "$CAPS_STYLED" "$screen" '' probe-absent
+  # The corner is not proof on its own: omp closes a transcript frame with the
+  # same lone dim corner, and a frame footer must never be a composer, whether
+  # the cursor is parked on it or it is the bottom-most row.
+  screen=$'transcript\n╭─ subtask\n│ step one\n'"${dim}╰─${ESC}[39m"$'\n'
+  assert_screen "a lone omp frame footer under the cursor" unknown "$CAPS_TMUX" "$screen" 3 probe-absent
+  assert_screen "a lone omp frame footer as the bottom row" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  screen=$'transcript\n╭─ subtask\n│ step one\n╰─ 3 files\n'
+  assert_screen "a labelled omp frame footer as the bottom row" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  # The same frame above the live composer never outranks it.
+  screen=$'╭─ subtask\n│ step one\n╰─\n\n'"$status"$'\n'"$prompt_idle"$'\n\n'
+  assert_screen "omp frame footer above the idle composer" empty "$CAPS_TMUX" "$screen" 5 probe-absent
+  assert_screen "omp frame footer above the idle composer, cursorless" empty "$CAPS_STYLED" "$screen" '' probe-absent
+  # A rounded box bottom opens with the same bytes and is a border, never a
+  # bare composer: a typed bordered composer stays pending.
+  screen=$'╭────────╮\n│ ❯ hi   │\n╰────────╯'
+  assert_screen "a rounded box bottom is not an empty omp corner" pending "$CAPS_STYLED" "$screen" '' probe-absent
+  screen="$status"$'\n╰────────╯'
+  assert_screen "a genuine rounded border below omp status, cursorless" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "a genuine rounded border below omp status under the cursor" unknown "$CAPS_TMUX" "$screen" 1 probe-absent
+  pass "matrix: omp 18.8.7's corner prompt beneath its status row reads empty idle, pending typed, and never from a frame footer"
 }
 
 # codex_cell <grey> <glyph>: one codex 0.154 starfield cell exactly as the
@@ -1472,8 +1661,10 @@ test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_cursor_fully_dim_placeholder
+test_matrix_bare_prompt_payload_identity
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
+test_matrix_omp_corner_prompt_row
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty

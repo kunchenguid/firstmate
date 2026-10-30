@@ -279,3 +279,14 @@ archive_away_record() {  # <state>
   FM_HOME="$(dirname "$1")" FM_STATE_OVERRIDE="$1" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null 2>&1 \
     || fail "could not archive the away-posture record in $1"
 }
+
+# Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
+# QUIET), so it silences nothing: the same hold is rechecked with that record
+# live, both on the watcher's own cadence and through the one-shot handoff a
+# running quiet daemon owns.
+write_quiet_record() {  # <state>
+  if ! FM_HOME="$(dirname "$1")" FM_STATE_OVERRIDE="$1" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1; then
+    fail "could not write quiet mode's record in $1"
+  fi
+}
+

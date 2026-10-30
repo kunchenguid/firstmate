@@ -35,7 +35,7 @@ On a non-Pi primary, a home that runs the supervision host also changes what the
 ### Pi, omp, and OpenCode adapters
 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts`, omp's `.omp/extensions/fm-primary-omp-watch.ts`, and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
-Each adapter:
+While an adapter owns supervision, it:
 
 - Starts the next arm before delivering the wake prompt.
 - Checks current session-lock ownership at launch.
@@ -73,6 +73,7 @@ omp's replacement follows its own generation-owner contract in `.omp/extensions/
 
 - It retires the predecessor arm at replacement shutdown instead of retaining it across the handoff.
 - It reports no shutdown reason, so every shutdown with a pending actionable close persists the handoff for the next owning `session_start` to replay.
+- Rule 12 of the [omp supervision protocol](supervision-protocols/omp.md) owns daemon handoff and return, including quiet entry during successor restoration.
 
 ### Cursor stop hook
 
