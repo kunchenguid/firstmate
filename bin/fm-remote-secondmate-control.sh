@@ -200,7 +200,8 @@ host_pools_enabled() {
   local delivered="$TARGET_HOME/state/fleet-seats/policy.json"
   if [ -e "$delivered" ] || [ -L "$delivered" ]; then
     [ -f "$delivered" ] && [ ! -L "$delivered" ] \
-      && jq -e 'type == "object" and .pools == []' "$delivered" >/dev/null 2>&1 && return 1
+      && { cmp -s "$delivered" <(printf '{"pools":[]}\n') \
+        || jq -e 'type == "object" and .pools == []' "$delivered" >/dev/null 2>&1; } && return 1
     return 0
   fi
   [ -e "$TARGET_HOME/config/fleet-seats" ] || [ -L "$TARGET_HOME/config/fleet-seats" ]
