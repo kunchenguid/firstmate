@@ -691,7 +691,7 @@ SH
 
 test_raw_rovo_launch_gets_no_positional_brief() {
   local rec id out status launch
-  id=raw-rovo-nobrief-z15
+  id="raw-rovo-nobrief-z15"
   rec=$(make_spawn_case raw-rovo-nobrief claude "$id")
   read_case_record "$rec"
 
@@ -708,7 +708,7 @@ test_raw_rovo_launch_gets_no_positional_brief() {
 
 test_raw_launch_named_like_rovo_still_gets_the_brief() {
   local rec id out status launch
-  id=raw-rovo-dev-brief-z15
+  id="raw-rovo-dev-brief-z15"
   rec=$(make_spawn_case raw-rovo-dev-brief claude "$id")
   read_case_record "$rec"
 
@@ -723,7 +723,7 @@ test_raw_launch_named_like_rovo_still_gets_the_brief() {
 
 test_raw_claude_launch_gets_the_brief_doorbell() {
   local rec id out status launch doorbell
-  id=raw-claude-doorbell-z15
+  id="raw-claude-doorbell-z15"
   rec=$(make_spawn_case raw-claude-doorbell claude "$id")
   read_case_record "$rec"
 
@@ -762,7 +762,7 @@ test_compound_raw_launch_without_brief_placeholder_launches_unchanged() {
 
 test_quoted_operator_in_raw_launch_still_gets_the_brief() {
   local rec id out status launch
-  id=raw-quoted-op-z15
+  id="raw-quoted-op-z15"
   rec=$(make_spawn_case raw-quoted-op claude "$id")
   read_case_record "$rec"
 
@@ -779,10 +779,11 @@ test_quoted_operator_in_raw_launch_still_gets_the_brief() {
 
 test_compound_raw_launch_places_brief_at_placeholder() {
   local rec id out status launch
-  id=raw-compound-placeholder-z15
+  id="raw-compound-placeholder-z15"
   rec=$(make_spawn_case raw-compound-placeholder claude "$id")
   read_case_record "$rec"
 
+  # shellcheck disable=SC2016 # __OPINPUT__ and __BRIEF__ are literal launch placeholders.
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" 'custom-agent --flag "$(__OPINPUT__ encode launch-brief < __BRIEF__)"; cleanup' 2>&1)
   status=$?
