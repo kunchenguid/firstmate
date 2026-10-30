@@ -1531,7 +1531,12 @@ test_stop_is_scoped_to_one_run() {
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   # The fixture records its own pid so the test waits for it to be running, and
   # sleeps in the foreground the way a long suite script does.
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$$" >"$TMPDIR/fixture-$FM_STOP_MARK.pid"\necho "ok - sleeping"\nsleep 60\n' >"$repo/$sleeper"
+  cat >"$repo/$sleeper" <<'EOF'
+#!/usr/bin/env bash
+printf "%s\n" "$$" >"$TMPDIR/fixture-$FM_STOP_MARK.pid"
+echo "ok - sleeping"
+sleep 60
+EOF
   chmod +x "$runner" "$repo/$sleeper"
   a_out="$tmp/a.out"
   b_out="$tmp/b.out"
