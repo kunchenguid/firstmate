@@ -1518,8 +1518,8 @@ SH
   pass "arm defers TERM until startup watcher can run its lock cleanup"
 }
 
-test_arm_term_bounds_wait_for_stalled_startup() {
-  local dir state fakebin armout pidfile release armpid i status
+test_arm_term_waits_out_a_stalled_claim() {
+  local dir state fakebin armout pidfile release armpid status
   dir=$(make_case arm-term-stalled-startup)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1550,21 +1550,19 @@ SH
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
   armpid=$!
   printf '%s\n' "$armpid" > "$pidfile"
-  i=0
-  while [ "$i" -lt 100 ] && is_live_non_zombie "$armpid"; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  if is_live_non_zombie "$armpid"; then
+  sleep 5
+  if ! is_live_non_zombie "$armpid"; then
     : > "$release"
-    wait_for_exit "$armpid" 50 >/dev/null 2>&1 || true
-    fail "arm TERM waited past the confirmation deadline for a stalled startup"
+    fail "arm TERM'd a startup still inside its singleton claim once the deadline passed"
   fi
   : > "$release"
   status=0
-  wait "$armpid" 2>/dev/null || status=$?
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS" || status=$?
   [ "$status" -eq 143 ] || fail "arm did not finish with TERM after a stalled startup (status $status)"
-  pass "arm TERM stops a startup watcher that never becomes cleanup-ready"
+  grep -q 'reason=arm-interrupted.*lock_after=pid:none' "$state/.watch-cycle-exits.log" \
+    || fail "stalled-claim TERM left lock evidence: $(cat "$state/.watch-cycle-exits.log")"
+  assert_no_startup_lock_evidence "$state" "stalled-claim TERM"
+  pass "arm TERM waits out a stalled singleton claim past the deadline and leaves no lock evidence"
 }
 
 test_arm_starts_and_self_heals() {
@@ -1902,14 +1900,23 @@ test_arm_relays_a_startup_lock_held_by_live_pid() {
   pass "arm relays a live-holder startup-lock refusal and keeps the downtime drainable"
 }
 
-# A deadline that forces TERM inside the claim window can leave ordinary
-# dead-pid evidence - a stale .watch.lock link or claim dirs - while a TERM
-# after the trap leaves nothing at all. Either outcome is recoverable: the
-# next arm reaps or overwrites it and confirms. The HUP arm below proves the
-# signal path defers until the safe point, so its ledger row must show
-# lock_after=pid:none on this host every time.
+# A stop forced before the startup safe point - by the confirmation deadline
+# (the FM_ARM_CONFIRM_TIMEOUT home override, here far below the startup) or by
+# a signal - must wait for the child's published identity and TERM it there,
+# so the child exits through its own cleanup and leaves no dead lock evidence
+# at all: no singleton, no steal mutex, no micro-lock.
+assert_no_startup_lock_evidence() {  # <state> <label>
+  local state=$1 label=$2 lock
+  for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal \
+    .watcher-down.lock .watcher-down.lock.steal; do
+    if [ -e "$state/$lock" ] || [ -L "$state/$lock" ]; then
+      fail "$label left $lock behind (pid $(cat "$state/$lock/pid" 2>/dev/null || echo none))"
+    fi
+  done
+}
+
 test_forced_term_before_the_safe_point_stays_clean() {
-  local dir state fakebin armout status armpid lock_pid i
+  local dir state fakebin armout status armpid i
   dir=$(make_case arm-pre-identity-term)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1922,23 +1929,11 @@ test_forced_term_before_the_safe_point_stays_clean() {
   [ "$status" -ne 0 ] || fail "deadline-forced arm exited zero"
   grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" \
     || fail "deadline-forced arm did not report its typed failure: $(cat "$armout")"
-  if [ -e "$state/.watch.lock" ] || [ -L "$state/.watch.lock" ]; then
-    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-    is_live_non_zombie "$lock_pid" \
-      && fail "deadline-forced TERM left a LIVE singleton holder behind"
-  fi
-
-  armout="$dir/arm-rearm.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
-    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$WATCH_ARM" > "$armout" &
-  armpid=$!
-  wait_for_started "$armout" \
-    || fail "re-arm could not recover the forced startup TERM: $(cat "$armout")"
-  kill -HUP "$armpid" 2>/dev/null || true
-  wait "$armpid" 2>/dev/null || true
+  grep -q 'reason=confirmation-timeout.*lock_after=pid:none' "$state/.watch-cycle-exits.log" \
+    || fail "deadline-forced TERM left lock evidence: $(cat "$state/.watch-cycle-exits.log")"
+  assert_no_startup_lock_evidence "$state" "deadline-forced TERM"
   drain_and_ack "$state" \
-    || fail "drain after the recovering arm's interruption failed"
+    || fail "drain after the deadline-forced startup TERM failed"
 
   armout="$dir/arm-hup.out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
@@ -1960,11 +1955,10 @@ test_forced_term_before_the_safe_point_stays_clean() {
   [ "$status" -eq 129 ] || fail "HUP'd arm exited with status $status, not 129"
   grep -q 'reason=arm-interrupted.*lock_after=pid:none' "$state/.watch-cycle-exits.log" \
     || fail "HUP-deferred TERM left lock evidence: $(cat "$state/.watch-cycle-exits.log")"
-  [ ! -e "$state/.watch.lock" ] \
-    || fail "the signal-interrupted child retained its singleton lock"
+  assert_no_startup_lock_evidence "$state" "signal-deferred TERM"
   drain_and_ack "$state" \
     || fail "drain after a signal-deferred startup TERM failed"
-  pass "a stop forced before the safe point still ends with no dead lock evidence"
+  pass "a stop forced before the safe point waits for it and leaves no lock evidence"
 }
 
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
@@ -2233,7 +2227,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_term_during_steal_waits_for_watcher_cleanup_trap
-test_arm_term_bounds_wait_for_stalled_startup
+test_arm_term_waits_out_a_stalled_claim
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

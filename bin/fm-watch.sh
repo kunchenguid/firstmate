@@ -3436,14 +3436,22 @@ if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
 
+# Test seam: pause after the singleton claim but before the EXIT trap and the
+# lock identity exist - the window bin/fm-watch-arm.sh calls the startup unsafe
+# point. The arm waits it out even past a forced deadline, then TERMs at the
+# safe point.
+case "${FM_TEST_WATCHER_PRE_IDENTITY_DELAY:-0}" in
+  ''|*[!0-9]*|0) ;;
+  *) sleep "$FM_TEST_WATCHER_PRE_IDENTITY_DELAY" ;;
+esac
+
 # The EXIT trap installs immediately after the singleton claim, before any
 # other lock is touched. Everything this watcher does past this line -
 # recovery-marker transitions, queue reads, delivery records - runs inside its
 # coverage, so an interruption can only ever abandon locks this same process
-# self-releases below; the only window a TERM still cuts mid-claim is the claim
-# itself, whose dirs reap as ordinary dead evidence. The arm forwards a stop
-# only once the identity record below is complete, so this is also the
-# startup safe point bin/fm-watch-arm.sh waits for.
+# self-releases below. The arm forwards a stop only once the identity record
+# below is complete - never inside the claim itself, even past its deadline -
+# so this is also the startup safe point bin/fm-watch-arm.sh waits for.
 WATCHER_PID=${BASHPID:-$$}
 
 RECONCILE_REQUEST_PID=
@@ -3523,14 +3531,6 @@ watcher_cleanup() {
 }
 trap watcher_cleanup EXIT
 watcher_stop_signals
-# Test seam: pause after the trap installs but before the lock identity
-# completes - the window bin/fm-watch-arm.sh calls the startup unsafe point.
-# Under the default backstop the arm waits it out; under a forced deadline the
-# arm may TERM here and the trap already owns cleanup either way.
-case "${FM_TEST_WATCHER_PRE_IDENTITY_DELAY:-0}" in
-  ''|*[!0-9]*|0) ;;
-  *) sleep "$FM_TEST_WATCHER_PRE_IDENTITY_DELAY" ;;
-esac
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.

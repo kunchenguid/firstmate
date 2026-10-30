@@ -55,8 +55,9 @@
 # it TERM's only at the startup safe point: the child's published lock identity,
 # which the child writes immediately after installing its EXIT cleanup trap, so
 # the stop runs through the same downtime publication and lock release as an
-# ordinary exit. A child still wedged before that point at the deadline is
-# killed outright; its claim dirs reap as ordinary dead evidence.
+# ordinary exit. A child still before that point when the deadline expires is
+# waited for, never killed mid-claim: every pre-identity wait is itself bounded
+# by FM_WATCHER_STARTUP_LOCK_BOUND, so the child reaches the safe point or exits.
 # attached, a stale beacon alone does not end the followed cycle: while that
 # holder is alive and the lock still names it under the same identity, the arm
 # keeps following it, as a started arm waits out a slow child, until the lock
@@ -748,10 +749,10 @@ cleanup_child() {
 # singleton and publishes its home-bound lock identity right after that. TERM
 # before that identity is complete can still land mid-claim - abandoning the
 # steal mutex or a startup lock - so a stop is forwarded only once the
-# identity matches the child (the startup safe point), the child exits on its
-# own, or the confirmation deadline forces the issue. When the deadline is
-# already past this reduces to an immediate TERM, which is correct: the child
-# has had the whole backstop to become cleanup-ready.
+# identity matches the child (the startup safe point) or once the state
+# directory holding those locks is gone; otherwise this waits for the child to
+# exit on its own. No deadline overrides it: the child's pre-identity waits are
+# all bounded, so it always reaches one of those ends.
 term_child_at_safe_point() {
   # The cheap gate reads only files the child itself writes after its trap
   # installs: the claimed pid plus all three identity records. The full
@@ -759,7 +760,7 @@ term_child_at_safe_point() {
   # needed here - our own child pid cannot be recycled while it still lives -
   # and would add a ps fork per iteration on a host that is already loaded.
   while fm_pid_alive "$child"; do
-    if [ "$(date +%s)" -ge "${deadline:-0}" ]; then
+    if [ ! -d "$STATE" ]; then
       kill -TERM "$child" 2>/dev/null || true
       break
     fi
@@ -912,8 +913,8 @@ while :; do
     exit $?
   fi
   if arm_ground_gone; then
+    term_child_at_safe_point
     cleanup_child
-    wait "$child" 2>/dev/null || true
     fail_arm_ground_gone
     exit 1
   fi
@@ -921,12 +922,9 @@ while :; do
   sleep 0.2
 done
 
-trap - HUP TERM INT
 print_watch_output "$child_out"
 # The backstop expired: forward the stop only at the same safe point the
-# signal path waits for. A child that is already cleanup-ready exits through
-# watcher_cleanup; one still wedged in the claim loop is killed outright and
-# its lock dirs reap as ordinary dead evidence.
+# signal path waits for, so the child always exits through watcher_cleanup.
 if [ -n "$child" ] && fm_pid_alive "$child"; then
   term_child_at_safe_point
   rc=$?
@@ -934,6 +932,7 @@ else
   wait "$child" 2>/dev/null
   rc=$?
 fi
+trap - HUP TERM INT
 cleanup_child
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
 echo "watcher: FAILED - no live watcher with a fresh beacon"
