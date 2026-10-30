@@ -73,7 +73,7 @@ No facet sits at the merge decision: `handoff.review` comes before it and `landi
 ## Routing
 
 An adapter may declare routing rows per facet, each naming a condition and the reference blocks it selects.
-A row whose condition is a fact firstmate already holds (task kind, delivery mode, forge) is a `fact` row read in code, and the requester's own words a row names (`words`) are matched in code and win.
+A row whose condition is a fact firstmate already holds (task kind, delivery mode, forge) is a `fact` row read in code, and the requester's own words a row names (`words`) are matched in code on word boundaries and win.
 Every other row goes to the typed-decision provider through [`bin/fm-decision-provider-lib.sh`](../bin/fm-decision-provider-lib.sh), the same key handling, never-send check, and POST that [`bin/fm-dispatch-resolve.sh`](../bin/fm-dispatch-resolve.sh) uses, with all of a composition's rows in one request carrying the brief's task sections as state.
 A mutually exclusive pick is a `choice` with a fixed `none` option firstmate adds; a yes-or-no, and each label of a multi-label pick, is a `noul` thresholded in code at the row's `min_confidence`, 0.6 by default.
 A confident answer narrows what is composed; low confidence, no key, a never-send match, an error, or a timeout keeps each row's declared `fallback`, which is the adapter's static behavior, so routing never composes less than the adapter would without it.
