@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
@@ -467,27 +469,44 @@ test_relaunch_from_linked_home_preserves_recorded_worktree() {
 }
 
 test_relaunch_preserves_durable_task_metadata() {
-  local dir out rc
+  local dir out rc mode
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
   {
-    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
-    printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
+    printf '%s\n' 'pr_head=0123456789012345678901234567890123456789'
   } >> "$dir/home/state/rl19.meta"
+  chmod 0600 "$dir/home/state/rl19.meta"
+  fm_pr_poll_prepare "$dir/home/state" rl19 github \
+    https://github.com/example/repo/pull/19 github.com example/repo 19 \
+    "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not prepare the PR poll fixture for relaunch"
+  fm_pr_poll_publish_prepared \
+    || fail "could not publish the PR poll fixture for relaunch"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl19 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the PR poll fixture did not authenticate before relaunch"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
   expect_code 0 "$rc" "relaunch should preserve durable metadata"$'\n'"$out"
   [ "$(meta_field "$dir" rl19 pr)" = "https://github.com/example/repo/pull/19" ] \
     || fail "the task PR must survive relaunch"
-  [ "$(meta_field "$dir" rl19 pr_head)" = "feature/relaunch" ] \
+  [ "$(meta_field "$dir" rl19 pr_head)" = "0123456789012345678901234567890123456789" ] \
     || fail "the task PR head must survive relaunch"
   [ "$(meta_field "$dir" rl19 x_request)" = "request-19" ] \
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
-  pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl19 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "relaunch must keep an armed PR poll authenticated"
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$dir/home/state/rl19.meta")
+  else
+    mode=$(stat -c %a "$dir/home/state/rl19.meta")
+  fi
+  [ "$mode" = 600 ] || fail "relaunch must keep PR metadata private, got mode $mode"
+  pass "fm-control relaunch: an armed PR poll survives replacement launch publication"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
