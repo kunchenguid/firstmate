@@ -4927,7 +4927,7 @@ test_own_autonomous_run_is_left_alone() {
 # or fault injection. A process that rewrites its own argv would not match, because
 # macOS pads it and appends the environment to the argv that ps reports.
 test_fork_spin_child_is_cut_off_and_locks_are_released() {
-  local case_dir rc=0 start elapsed leftover
+  local case_dir long_dir long_teardown rc=0 start elapsed leftover
   case_dir=$(make_case fork-spin)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -4940,12 +4940,16 @@ echo "$!" > "$FORK_SPIN_PID"
 wait
 SH
   chmod +x "$case_dir/fakebin/tmux"
+  # A long script path makes the child's command line exceed any default ps width.
+  long_dir="$case_dir/$(printf 'long-checkout-path-%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)"
+  ln -s "$(dirname "$TEARDOWN")" "$long_dir"
+  long_teardown="$long_dir/$(basename "$TEARDOWN")"
   # fail exits the whole script, so every assertion here reaps the fixture first.
   spin_fail() { pkill -KILL -f "$case_dir" 2>/dev/null || true; fail "$1"; }
   start=$(date +%s)
-  FORK_SPIN_ENV="$case_dir/spin.env" FORK_SPIN_TEARDOWN="$TEARDOWN" FORK_SPIN_PID="$case_dir/spin.pid" \
+  FORK_SPIN_ENV="$case_dir/spin.env" FORK_SPIN_TEARDOWN="$long_teardown" FORK_SPIN_PID="$case_dir/spin.pid" \
   FM_TEARDOWN_FORK_SPIN_CPU=2 FM_SUPERVISION_ACTOR=main \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    TEARDOWN="$long_teardown" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   elapsed=$(( $(date +%s) - start ))
 
   [ -s "$case_dir/spin.pid" ] || spin_fail "fork-spin: the spinning stub child never started"

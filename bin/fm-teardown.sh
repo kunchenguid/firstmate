@@ -650,11 +650,11 @@ teardown_fork_spin_watchdog() {  # <pid> <cpu-seconds>
   local top=$1 limit=$2 args actions sig pid
   trap '' TERM INT HUP
   cd / || return 0
-  args=$(ps -o args= -p "$top") || return 0
+  args=$(ps -ww -o args= -p "$top") || return 0
   [ -n "$args" ] || return 0
   while kill -0 "$top" 2>/dev/null; do
     sleep 2
-    actions=$(ps -Ao pid=,ppid=,time=,args= | awk -v top="$top" -v args="$args" -v limit="$limit" '
+    actions=$(ps -wwAo pid=,ppid=,time=,args= | awk -v top="$top" -v args="$args" -v limit="$limit" '
       function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
       function secs(t,   n, p, i, s, d) {
         d = 0
