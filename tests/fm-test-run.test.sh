@@ -1642,6 +1642,41 @@ test_stop_refuses_an_unprivate_registry() {
   pass "--stop refuses a run registry that is not private to the caller"
 }
 
+# Native Windows Bash cannot read process identity, so a run there registers
+# nothing and works as before, and --stop refuses instead of guessing.
+test_windows_bash_skips_run_registration() {
+  local tmp repo runner fakebin out rc form
+  tmp=$(fm_test_tmproot fm-test-run-stop-windows) || fail "could not create the fixture root"
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fakebin"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MINGW64_NT-10.0
+SH
+  cat >"$repo/tests/fm-ok-fixture.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - ran"
+SH
+  chmod +x "$runner" "$fakebin/uname" "$repo/tests/fm-ok-fixture.test.sh"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" TMPDIR="$tmp" "$runner" tests/fm-ok-fixture.test.sh 2>&1) || rc=$?
+  expect_code 0 "$rc" "a run on native Windows Bash"
+  assert_contains "$out" "FM_TEST_SUMMARY total=1 failed=0" "the run on native Windows Bash did not complete"
+  [ ! -e "$tmp/fm-test-run-pids-$(id -u)" ] || fail "a run on native Windows Bash must not create a run registry"
+  for form in --stop "--stop some-run" --stop=some-run; do
+    rc=0
+    # shellcheck disable=SC2086
+    out=$(PATH="$fakebin:$PATH" TMPDIR="$tmp" "$runner" $form 2>&1) || rc=$?
+    [ "$rc" -eq 1 ] || fail "$form must refuse on native Windows Bash, got $rc: $out"
+    case "$out" in *"unsupported on native Windows Bash"*) ;; *) fail "$form refusal must say why: $out" ;; esac
+  done
+  pass "native Windows Bash runs without a registry and --stop refuses"
+}
+
 # --max-wall-ms is checked after the run, so it cannot end a run that never
 # finishes. A hung script has to become a bounded failure, because an unbounded
 # suite is exactly what silently outruns its caller's invocation budget.
@@ -2060,6 +2095,7 @@ test_changed_t3_sources_select_their_readers
 test_concurrent_runs_are_ordered_longest_first
 test_stop_is_scoped_to_one_run
 test_stop_refuses_an_unprivate_registry
+test_windows_bash_skips_run_registration
 test_term_to_runner_aborts_a_hung_suite
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom

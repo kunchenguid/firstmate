@@ -37,6 +37,8 @@
 #   caller; any other directory is refused) keyed by pid plus process start
 #   time, so a reused pid is never signalled. A TERM sent straight to the
 #   runner aborts it the same way and stops the script now running.
+#   Native Windows Bash layers (MINGW/MSYS) cannot read process identity, so
+#   runs there are not registered and --stop refuses.
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run. Each
@@ -239,6 +241,14 @@ usage() {
 
 PID_DIR="${TMPDIR:-/tmp}/fm-test-run-pids-$(id -u)"
 
+# Native Windows Bash layers report synthetic POSIX modes and have no `ps -o`.
+host_is_native_windows_bash() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Invoked by abort_run, which only the TERM/INT trap reaches.
 # shellcheck disable=SC2329
 descendants_of() {
@@ -265,6 +275,10 @@ pid_dir_is_private() {
 # Lists live runs (no argument) or stops exactly one run and its descendants.
 stop_runs() {
   local want=${1:-} f id line pid start live=0
+  if host_is_native_windows_bash; then
+    printf 'fm-test-run: --stop is unsupported on native Windows Bash: process identity cannot be read\n' >&2
+    return 1
+  fi
   if [ ! -e "$PID_DIR" ] && [ ! -L "$PID_DIR" ]; then
     [ -n "$want" ] || { printf 'fm-test-run: no live runs\n' >&2; return 0; }
     printf 'fm-test-run: no live run %s\n' "$want" >&2
@@ -2614,13 +2628,15 @@ abort_run() {
 trap cleanup_run EXIT
 trap 'abort_run 15' TERM
 trap 'abort_run 2' INT
-(umask 077 && mkdir -p "$PID_DIR") 2>/dev/null
-pid_dir_is_private \
-  || die "refusing run registry $PID_DIR: it must be a real directory owned by you with mode 700"
-# The record is written whole and renamed into place, so a concurrent --stop
-# never reads a partial record and discards a live run as stale.
-printf '%s %s\n' "$$" "$(process_start_identity "$$")" >"$PID_FILE.tmp"
-mv "$PID_FILE.tmp" "$PID_FILE"
+if ! host_is_native_windows_bash; then
+  (umask 077 && mkdir -p "$PID_DIR") 2>/dev/null
+  pid_dir_is_private \
+    || die "refusing run registry $PID_DIR: it must be a real directory owned by you with mode 700"
+  # The record is written whole and renamed into place, so a concurrent --stop
+  # never reads a partial record and discards a live run as stale.
+  printf '%s %s\n' "$$" "$(process_start_identity "$$")" >"$PID_FILE.tmp"
+  mv "$PID_FILE.tmp" "$PID_FILE"
+fi
 TOTAL=0
 FAILED=0
 SKIPPED_GATE=0
@@ -2785,10 +2801,7 @@ else
   active_workers=0
 
   worker_root_mode_is_enforceable() {
-    case "$(uname -s)" in
-      MINGW*|MSYS*) return 1 ;;
-      *) return 0 ;;
-    esac
+    ! host_is_native_windows_bash
   }
 
   wait_one_job_worker() {
