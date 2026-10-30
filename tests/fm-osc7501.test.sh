@@ -432,86 +432,12 @@ t_rearm_retires_previous_reporter() {
   pass "lifecycle: relaunch retires the previous reporter before native/off gates"
 }
 
-# A done declaration yields to a steer that came after it: a newer busy turn
-# reads as working, and a pending message beside an idle record as steering.
-t_activity_after_done_and_idle_inbox() {
-  local d=$TMP_ROOT/steer now
-  mkhome "$d"
-  start_term "$d" answer
-  sleep 300 &
-  local holder=$!
-  now=$(date +%s)
-  busy_rec "$d/state" t12 busy "$((now - 20))"
-  printf 'done [at=%s]: PR https://example.test/pr/2\n' "$((now - 10))" >"$d/state/t12.status"
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
-    bash "$SCRIPT" watch --task t12 --kind ship --state "$d/state" --harness opencode \
-    --parent "$holder" &
-  local wpid=$!
-  wait_cap 'state=done' "$d/cap" 60 || fail "steer: done not reported"
-  mkdir -p "$d/state/t12.inbox/handled"
-  printf 'follow up\n' >"$d/state/t12.inbox/1.msg"
-  wait_cap 'state=working' "$d/cap" 60 || fail "steer: a follow-up steer after done still reads done"
-  : >"$d/cap"
-  mv "$d/state/t12.inbox/1.msg" "$d/state/t12.inbox/handled/1.msg"
-  busy_rec "$d/state" t12 idle "$((now + 1))"
-  wait_cap 'state=idle' "$d/cap" 60 || fail "steer: the finished follow-up turn did not read idle"
-  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
-  local states
-  states=$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')
-  assert_equals "state=idle " "$states" "a retired done never reappears, live or as the final record"
-  : >"$d/cap"
-  rm -f "$d/state/t12.status"
-  rm -rf "$d/state/t12.inbox"
-  busy_rec "$d/state" t12 idle "$now"
-  mkdir -p "$d/state/t12.inbox"
-  printf 'steer\n' >"$d/state/t12.inbox/1.msg"
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
-    bash "$SCRIPT" watch --task t12 --kind ship --state "$d/state" --harness opencode \
-    --parent "$holder" &
-  wpid=$!
-  wait_cap "msg=$(printf 'Steering received' | base64 | tr -d '\n')" "$d/cap" 60 \
-    || fail "steer: a pending message beside an idle record did not read as steering"
-  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
-  stop_term
-  pass "mapping: a follow-up steer overrides done; idle + inbox reads as steering"
-}
-
 tty_input_mode() { # <tty> -> canonical-input and echo flags as stty names them
   stty -a <"$1" | tr -s ' \t;' '\n' | grep -Ex -- '-?(icanon|echo)' | sort
 }
 
-# A steer the worker acknowledged and finished between two polls - the busy
-# snapshot never observed - still retires the earlier failure.
-t_handled_steer_retires_failure() {
-  local d=$TMP_ROOT/handled now
-  mkhome "$d"
-  start_term "$d" answer
-  sleep 300 &
-  local holder=$!
-  now=$(date +%s)
-  busy_rec "$d/state" t15 idle "$((now - 20))"
-  printf 'failed [at=%s]: tests red\n' "$((now - 10))" >"$d/state/t15.status"
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
-    bash "$SCRIPT" watch --task t15 --kind ship --state "$d/state" --harness opencode \
-    --parent "$holder" &
-  local wpid=$!
-  wait_cap 'state=error' "$d/cap" 60 || fail "handled: failed not reported"
-  : >"$d/cap"
-  mkdir -p "$d/state/t15.inbox/handled"
-  printf 'retry\n' >"$d/state/t15.inbox/handled/1.msg"
-  busy_rec "$d/state" t15 idle "$((now + 1))"
-  wait_cap 'state=idle' "$d/cap" 60 || fail "handled: an acknowledged follow-up left the old error up"
-  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
-  assert_equals "state=idle " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
-    "a retired failure never reappears, live or as the final record"
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
-  stop_term
-  pass "mapping: an acknowledged follow-up steer retires an earlier failure"
-}
-
 # Cursor arms no busy-state record; its own conversation transcript is the
-# activity source, and the worker's working: line supplies the message.
+# activity source.
 t_cursor_transcript_drives_activity() {
   local d=$TMP_ROOT/cursor proj conv
   mkhome "$d"
@@ -524,145 +450,70 @@ t_cursor_transcript_drives_activity() {
   printf '{"workspacePath":"%s"}\n' "$d/ws" >"$proj/.workspace-trusted"
   printf 'projects_root=%s\nworkspace_root=%s\n' "$d/cursor-projects" "$d/ws" >"$d/state/t16.cursor-session"
   printf '{"role":"user"}\n' >"$conv"
-  printf 'working [at=%s]: rebasing\n' "$(date +%s)" >"$d/state/t16.status"
   env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t16 --kind ship --state "$d/state" --harness cursor \
     --parent "$holder" &
   local wpid=$!
-  wait_cap "state=working:app=firstmate-cursor:title=$(printf 'fm-t16' | base64 | tr -d '\n'):msg=$(printf 'rebasing' | base64 | tr -d '\n')" "$d/cap" 60 \
-    || fail "cursor: an open transcript turn did not read as working with the working: note"
+  wait_cap "state=working:app=firstmate-cursor" "$d/cap" 60 \
+    || fail "cursor: an open transcript turn did not read as working"
   printf '{"type":"turn_ended"}\n' >>"$conv"
   wait_cap 'state=idle' "$d/cap" 60 || fail "cursor: a closed transcript turn did not read as idle"
   kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
   stop_term
-  pass "activity: a cursor worker reports from its transcript, with its working: note"
+  pass "activity: a cursor worker reports working and idle from its transcript"
 }
 
-set_mtime_ns() { # <file> <ns>: exact file time, to order events inside one second
-  python3 -c 'import os, sys; n = int(sys.argv[2]); os.utime(sys.argv[1], ns=(n, n))' "$1" "$2"
-}
-
-# A pulled cursor transcript records no turn start: a done posted inside a
-# follow-up turn the reporter first sees busy must stand, not be retired by
-# the poll that happened to observe the turn.
-t_cursor_done_inside_observed_turn() {
-  local d=$TMP_ROOT/cursordone proj conv
-  mkhome "$d"
-  start_term "$d" answer
-  sleep 300 &
-  local holder=$!
-  proj=$d/cursor-projects/p1
-  conv=$proj/agent-transcripts/c1/c1.jsonl
-  mkdir -p "${conv%/*}"
-  printf '{"workspacePath":"%s"}\n' "$d/ws" >"$proj/.workspace-trusted"
-  printf 'projects_root=%s\nworkspace_root=%s\n' "$d/cursor-projects" "$d/ws" >"$d/state/t18.cursor-session"
-  printf '{"role":"user"}\n{"type":"turn_ended"}\n' >"$conv"
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
-    bash "$SCRIPT" watch --task t18 --kind ship --state "$d/state" --harness cursor \
-    --parent "$holder" &
-  local wpid=$!
-  wait_cap 'state=idle' "$d/cap" 60 || fail "cursordone: idle transcript not reported"
-  : >"$d/cap"
-  printf 'done [at=%s]: PR https://example.test/pr/3\n' "$(($(date +%s) - 1))" >"$d/state/t18.status"
-  printf '{"role":"user"}\n' >>"$conv"
-  wait_cap 'state=done' "$d/cap" 60 || fail "cursordone: done inside the observed turn was not reported"
-  printf '{"type":"turn_ended"}\n' >>"$conv"
-  sleep 2
-  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
-  assert_equals "state=done " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
-    "a done posted in the observed turn stands, live and as the final record"
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
-  stop_term
-  pass "mapping: a cursor turn observed busy never retires a done posted inside it"
-}
-
-# A retry steer enqueued, acknowledged, and finished within the failure's own
-# second still retires it: ordering uses the files' nanosecond times.
-t_same_second_steer_retires_failure() {
-  local d=$TMP_ROOT/samesec t
-  mkhome "$d"
-  start_term "$d" answer
-  sleep 300 &
-  local holder=$!
-  t=$(date +%s)
-  busy_rec "$d/state" t19 idle "$t"
-  set_mtime_ns "$d/state/t19.busy-state" "${t}900000000"
-  printf 'failed [at=%s]: tests red\n' "$t" >"$d/state/t19.status"
-  set_mtime_ns "$d/state/t19.status" "${t}100000000"
-  mkdir -p "$d/state/t19.inbox/handled"
-  printf 'retry\n' >"$d/state/t19.inbox/handled/1.msg"
-  set_mtime_ns "$d/state/t19.inbox/handled/1.msg" "${t}500000000"
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
-    bash "$SCRIPT" watch --task t19 --kind ship --state "$d/state" --harness opencode \
-    --parent "$holder" &
-  local wpid=$!
-  wait_cap 'state=idle' "$d/cap" 60 || fail "samesec: the same-second retry left the failure up"
-  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
-  assert_equals "state=idle " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
-    "a failure retired within its own second never shows"
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
-  stop_term
-  pass "mapping: a steer within the failure's own second still retires it"
-}
-
-# A busy record rewritten inside the same turn (a Polytoken pre_model_turn, an
-# OpenCode retry) is not a follow-up: the done it follows stands.
-t_busy_rewrite_keeps_done() {
-  local d=$TMP_ROOT/rewrite now
-  mkhome "$d"
-  start_term "$d" answer
-  sleep 300 &
-  local holder=$!
-  now=$(date +%s)
-  busy_rec "$d/state" t20 busy "$((now - 20))"
-  printf 'done [at=%s]: PR https://example.test/pr/4\n' "$((now - 10))" >"$d/state/t20.status"
-  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
-    bash "$SCRIPT" watch --task t20 --kind ship --state "$d/state" --harness opencode \
-    --parent "$holder" &
-  local wpid=$!
-  wait_cap 'state=done' "$d/cap" 60 || fail "rewrite: done not reported"
-  busy_rec "$d/state" t20 busy "$(date +%s)"
-  sleep 6
-  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
-  assert_equals "state=done " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
-    "a mid-turn busy rewrite never retires the done, live or as the final record"
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
-  stop_term
-  pass "mapping: a busy-record rewrite after done keeps reporting done"
-}
-
-# Once a follow-up retired a pause, an unrelated status append that keeps the
-# pause as the current line must not move its time and resurrect Waiting. A
-# regular capture file stands in for the terminal (the FM_OSC7501_TTY seam),
-# so the final record is in place the moment the watcher exits.
-t_retired_pause_stays_retired() {
-  local d=$TMP_ROOT/pause t
+# Single-source precedence: a running turn reads as working even after a done
+# line, the done returns once the turn ends, and the final record keeps it
+# even when the agent died with its busy record still open.
+t_turn_then_terminal_line() {
+  local d=$TMP_ROOT/precedence
   mkhome "$d"
   : >"$d/cap"
   sleep 300 &
   local holder=$!
-  t=$(date +%s)
-  busy_rec "$d/state" t21 idle "$t"
-  printf 'paused [at=%s]: waiting on CI\n' "$t" >"$d/state/t21.status"
-  set_mtime_ns "$d/state/t21.status" "${t}100000000"
-  mkdir -p "$d/state/t21.inbox/handled"
-  printf 'go on\n' >"$d/state/t21.inbox/handled/1.msg"
-  set_mtime_ns "$d/state/t21.inbox/handled/1.msg" "${t}500000000"
+  busy_rec "$d/state" t23 busy
+  printf 'done [at=%s]: PR https://example.test/pr/5\n' "$(date +%s)" >"$d/state/t23.status"
   env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 \
-    bash "$SCRIPT" watch --task t21 --kind ship --state "$d/state" --harness opencode \
+    bash "$SCRIPT" watch --task t23 --kind ship --state "$d/state" --harness opencode \
     --parent "$holder" &
   local wpid=$!
-  wait_cap 'state=idle' "$d/cap" 300 || fail "pause: the follow-up did not retire the pause"
+  wait_cap 'state=working' "$d/cap" 300 || fail "precedence: a running turn did not read as working"
+  busy_rec "$d/state" t23 idle
+  wait_cap 'state=done' "$d/cap" 300 || fail "precedence: the done line did not return after the turn"
   : >"$d/cap"
-  printf 'resolved [at=%s] [key=zz]: unrelated\n' "$((t + 1))" >>"$d/state/t21.status"
-  set_mtime_ns "$d/state/t21.status" "$((t + 1))000000000"
-  sleep 3
+  busy_rec "$d/state" t23 busy
+  wait_cap 'state=working' "$d/cap" 300 || fail "precedence: a second turn did not read as working"
+  : >"$d/cap"
   kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
-  assert_equals "state=idle " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
-    "a retired pause stays retired after an unrelated append"
+  assert_equals "state=done " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
+    "the final record keeps done although the busy record was left open"
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
-  pass "mapping: an unrelated status append never resurrects a retired pause"
+  pass "mapping: working while a turn runs, done after it, done as the final record"
+}
+
+# A paused worker reports from its busy state like any other worker.
+t_paused_reads_from_busy_state() {
+  local d=$TMP_ROOT/paused
+  mkhome "$d"
+  : >"$d/cap"
+  sleep 300 &
+  local holder=$!
+  busy_rec "$d/state" t24 idle
+  printf 'paused [at=%s]: waiting on CI\n' "$(date +%s)" >"$d/state/t24.status"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t24 --kind ship --state "$d/state" --harness opencode \
+    --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=idle' "$d/cap" 300 || fail "paused: an idle paused worker did not read as idle"
+  busy_rec "$d/state" t24 busy
+  wait_cap 'state=working' "$d/cap" 300 || fail "paused: a busy paused worker did not read as working"
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  assert_equals "state=idle state=working " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
+    "a paused worker never reports a separate waiting state"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  pass "mapping: a paused worker reports working or idle from its busy state"
 }
 
 # A reporter still folding a long status history when its pane is relaunched
@@ -751,13 +602,9 @@ fm_test_run \
   t_concurrent_panes_keep_their_reporters \
   t_disarm_after_agent_exit_parks_idle \
   t_rearm_retires_previous_reporter \
-  t_activity_after_done_and_idle_inbox \
-  t_handled_steer_retires_failure \
   t_cursor_transcript_drives_activity \
-  t_cursor_done_inside_observed_turn \
-  t_same_second_steer_retires_failure \
-  t_busy_rewrite_keeps_done \
-  t_retired_pause_stays_retired \
+  t_turn_then_terminal_line \
+  t_paused_reads_from_busy_state \
   t_retire_waits_for_slow_reporter \
   t_interrupted_query_restores_mode \
   t_hc_terminal_with_inherited_herdr_markers
