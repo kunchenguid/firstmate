@@ -69,7 +69,7 @@
 #          no-mistakes is OUTDATED when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          STALE_DAEMON is read-only: the running no-mistakes daemon started
-#          before the installed no-mistakes binary on PATH was last modified, so
+#          before the installed no-mistakes binary on PATH was last replaced (inode change time), so
 #          its next pipeline run can fail on config only the new build knows.
 #          It names the supervisor remedy and never restarts the daemon; it is
 #          silent when no daemon runs or its pid or start time cannot be read.
@@ -1541,16 +1541,16 @@ etime_seconds() {
 }
 
 detect_stale_no_mistakes_daemon() {
-  local bin pid etime age mtime
+  local bin pid etime age ctime
   bin=$(command -v no-mistakes 2>/dev/null) || return 0
   pid=$(no-mistakes daemon status 2>/dev/null | sed -n 's/.*daemon running (pid \([0-9][0-9]*\)).*/\1/p' | head -n 1)
   [ -n "$pid" ] || return 0
   etime=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
   [ -n "$etime" ] || return 0
   age=$(etime_seconds "$etime" 2>/dev/null) || return 0
-  mtime=$(stat -L -c %Z "$bin" 2>/dev/null || stat -L -f %c "$bin" 2>/dev/null) || return 0
-  [ -n "$mtime" ] || return 0
-  if [ $(( $(date +%s) - age )) -lt "$mtime" ]; then
+  ctime=$(stat -L -c %Z "$bin" 2>/dev/null || stat -L -f %c "$bin" 2>/dev/null) || return 0
+  [ -n "$ctime" ] || return 0
+  if [ $(( $(date +%s) - age )) -lt "$ctime" ]; then
     echo "STALE_DAEMON: no-mistakes daemon (pid $pid) started before the installed no-mistakes was replaced; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
   fi
 }
