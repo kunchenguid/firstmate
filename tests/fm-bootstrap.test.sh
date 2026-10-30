@@ -97,6 +97,10 @@ if [ "${1:-}" = --version ]; then
   printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z}"
   exit 0
 fi
+if [ "${1:-}" = daemon ] && [ "${2:-}" = status ]; then
+  printf '%s\n' "${FM_FAKE_NM_DAEMON_STATUS:-daemon not running}"
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
@@ -598,6 +602,37 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.45.4 (fake)^ou
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^outdated^unparseable
 ROWS
   pass "bootstrap separates an absent no-mistakes from one below its version floor"
+}
+
+test_stale_no_mistakes_daemon() {
+  local label status binary_mtime mode case_dir fakebin out expect n daemon_pid
+  sleep 300 &
+  daemon_pid=$!
+  n=0
+  expect="STALE_DAEMON: no-mistakes daemon (pid $daemon_pid) started before the installed no-mistakes was replaced; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
+  while IFS='^' read -r label status binary_mtime mode; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/nm-daemon-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    touch -d "$binary_mtime" "$fakebin/no-mistakes"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NM_DAEMON_STATUS="${status//PID/$daemon_pid}" "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      silent) [ -z "$out" ] || { kill "$daemon_pid"; fail "$label: expected silence, got: $out"; } ;;
+      stale) [ "$out" = "$expect" ] || { kill "$daemon_pid"; fail "$label: expected '$expect', got: $out"; } ;;
+    esac
+  done <<'ROWS'
+binary older than the daemon start matches^daemon running (pid PID)^1 hour ago^silent
+binary replaced after the daemon start mismatches^daemon running (pid PID)^1 hour from now^stale
+no daemon running stays silent^daemon not running^1 hour from now^silent
+unreadable daemon pid stays silent^daemon running (pid 99999999)^1 hour from now^silent
+unparseable daemon status stays silent^something else entirely^1 hour from now^silent
+ROWS
+  kill "$daemon_pid" 2>/dev/null
+  pass "bootstrap reports a no-mistakes daemon older than the installed binary"
 }
 
 test_gh_axi_min_version() {
@@ -1925,6 +1960,7 @@ test_treehouse_pool_report_needs_its_flag
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version
 test_gh_axi_min_version
+test_stale_no_mistakes_daemon
 test_lavish_axi_min_version
 test_tasks_axi_min_version
 test_quota_axi_min_version
