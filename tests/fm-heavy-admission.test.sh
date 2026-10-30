@@ -26,6 +26,8 @@ SH
 # does, and exits $FAKE_JOURNAL_RC.
 cat > "$FAKEBIN/journalctl" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FAKE_JOURNAL_DELAY_SECS:-}" ] || /bin/sleep "$FAKE_JOURNAL_DELAY_SECS"
+[ -z "${FAKE_JOURNAL_HOOK:-}" ] || sh -c "$FAKE_JOURNAL_HOOK"
 case " $* " in
   *" -k "*) [ -z "${FAKE_JOURNAL_KERNEL:-}" ] || printf '%s\n' "$FAKE_JOURNAL_KERNEL" ;;
   *" -u "*) [ -z "${FAKE_JOURNAL_UNIT:-}" ] || printf '%s\n' "$FAKE_JOURNAL_UNIT" ;;
@@ -44,7 +46,16 @@ cat > "$FAKEBIN/sleep" <<'SH'
 [ -z "${FAKE_SLEEP_HOOK:-}" ] || sh -c "$FAKE_SLEEP_HOOK"
 exit 0
 SH
-chmod +x "${FAKEBIN:?}"/df "$FAKEBIN"/journalctl "$FAKEBIN"/sleep
+REAL_TAIL=$(command -v tail) || fail "tail is required"
+cat > "$FAKEBIN/tail" <<SH
+#!/usr/bin/env bash
+"$REAL_TAIL" "\$@"
+if [ -n "\${FAKE_TAIL_READY_FILE:-}" ]; then
+  touch "\$FAKE_TAIL_READY_FILE"
+  while [ ! -e "\${FAKE_TAIL_RELEASE_FILE:?}" ]; do /bin/sleep 0.05; done
+fi
+SH
+chmod +x "${FAKEBIN:?}"/df "$FAKEBIN"/journalctl "$FAKEBIN"/sleep "$FAKEBIN"/tail
 
 N=0
 # new_world [config-lines...]: a fresh home and /proc with healthy readings.
@@ -129,6 +140,32 @@ assert_contains "$OUT" "samples=0" "ramp hold takes no readings"
 pass "a healthy host admits once, records the ramp, and holds the next admission"
 
 new_world ramp_secs=0
+LOG_PAYLOAD=$(printf '%0140d' 0)
+awk -v payload="$LOG_PAYLOAD" 'BEGIN { for (i = 1; i <= 2100; i++) print "seed=" i " " payload }' > "$HOME_DIR/state/heavy-admission.log"
+TAIL_READY="$TMP_ROOT/tail-ready"
+TAIL_RELEASE="$TMP_ROOT/tail-release"
+PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" FM_PROC_ROOT_OVERRIDE="$PROC" \
+  FAKE_TAIL_READY_FILE="$TAIL_READY" FAKE_TAIL_RELEASE_FILE="$TAIL_RELEASE" \
+  "$ADMIT" check --peak-gib 1 > "$TMP_ROOT/log-check-1" 2>&1 &
+LOG_PID_1=$!
+TAIL_WAITS=0
+while [ ! -e "$TAIL_READY" ] && [ "$TAIL_WAITS" -lt 100 ]; do
+  /bin/sleep 0.05
+  TAIL_WAITS=$((TAIL_WAITS + 1))
+done
+assert_present "$TAIL_READY" "log trim reached the locked replacement point"
+PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" FM_PROC_ROOT_OVERRIDE="$PROC" \
+  "$ADMIT" check --peak-gib 2 > "$TMP_ROOT/log-check-2" 2>&1 &
+LOG_PID_2=$!
+/bin/sleep 0.2
+touch "$TAIL_RELEASE"
+wait "$LOG_PID_1" || fail "first concurrent evidence writer"
+wait "$LOG_PID_2" || fail "second concurrent evidence writer"
+assert_grep 'peak_gib=1 samples=' "$HOME_DIR/state/heavy-admission.log" "trim keeps the decision that triggered it"
+assert_grep 'peak_gib=2 samples=' "$HOME_DIR/state/heavy-admission.log" "trim keeps a concurrent decision"
+pass "evidence append and trimming preserve concurrent decisions"
+
+new_world ramp_secs=0
 run_admit check
 expect_code 0 "$RC" "first admission with no ramp"
 run_admit check
@@ -145,11 +182,11 @@ expect_code 0 "$RC" "dry-run consumed no ramp slot"
 pass "dry-run prints the decision without recording an admission"
 
 new_world window_secs=1 sample_interval_secs=1
-FAKE_SLEEP_HOOK="touch '$HOME_DIR/state/heavy-admission.last'" run_admit check --dry-run
+FAKE_JOURNAL_HOOK="touch '$HOME_DIR/state/heavy-admission.last'" run_admit check --dry-run
 expect_code 1 "$RC" "dry-run rechecks a concurrent ramp admission"
 assert_contains "$OUT" "decision=hold reason=ramp:remaining=" "dry-run reports the concurrent ramp"
 new_world window_secs=1 sample_interval_secs=1
-FAKE_SLEEP_HOOK="touch '$HOME_DIR/state/heavy-admission.last'" run_admit wait --timeout 0 --dry-run
+FAKE_JOURNAL_HOOK="touch '$HOME_DIR/state/heavy-admission.last'" run_admit wait --timeout 0 --dry-run
 expect_code 1 "$RC" "dry-run wait rechecks a concurrent ramp admission"
 assert_contains "$OUT" "decision=hold reason=ramp:remaining=" "dry-run wait reports the concurrent ramp"
 pass "dry-run uses the locked post-window ramp decision"
@@ -246,36 +283,44 @@ FAKE_SLEEP_LOG="$ZERO_SLEEPS" run_admit check
 expect_code 0 "$RC" "leading-zero window admits"
 assert_contains "$OUT" "decision=admit reason=ok" "leading-zero window prints its evidence line"
 assert_contains "$OUT" "samples=2" "leading-zero window is read in base 10"
-[ "$(tr '\n' ' ' < "$ZERO_SLEEPS")" = "8 " ] || fail "leading-zero interval sleeps in base 10"
+awk 'NR == 1 && $1 > 0 && $1 <= 8 { ok = 1 } END { exit !ok }' "$ZERO_SLEEPS" || fail "leading-zero interval is not bounded as base 10"
 expect_hold "reason=ramp:remaining=" "leading-zero ramp holds"
 REMAINING=$(printf '%s\n' "$OUT" | sed -n 's/.*ramp:remaining=\([0-9]*\)s.*/\1/p')
 [ "${REMAINING:-0}" -gt 80 ] || fail "ramp_secs=0120 is read as 120, not octal 80 (remaining=$REMAINING)"
 pass "leading-zero integer config values are read in base 10"
 
 # --- sampled window ---------------------------------------------------------------
-new_world window_secs=1 sample_interval_secs=1
+new_world window_secs=3 sample_interval_secs=1
 FAKE_SLEEP_HOOK="printf '%s\n' '18.00 4.00 1.00 1/100 123' > '$PROC/loadavg'" \
   expect_hold "reason=below-admit:load1=18.00>=16" "load rising inside the window"
 assert_contains "$OUT" "samples=2" "the window sampled again before deciding"
 assert_absent "$HOME_DIR/state/heavy-admission.last" "a hold inside the window records nothing"
-new_world window_secs=1 sample_interval_secs=1
+new_world window_secs=3 sample_interval_secs=1
 run_admit check
 expect_code 0 "$RC" "a steady window admits"
-assert_contains "$OUT" "samples=2" "a steady window takes every sample"
+printf '%s\n' "$OUT" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^samples=/) { sub(/^samples=/, "", $i); if ($i >= 2) ok = 1 } } END { exit !ok }' || fail "a steady window did not sample repeatedly"
 new_world window_secs=1 sample_interval_secs=200
 LONG_INTERVAL_SLEEPS="$TMP_ROOT/long-interval-sleeps.log"
 : > "$LONG_INTERVAL_SLEEPS"
 FAKE_SLEEP_LOG="$LONG_INTERVAL_SLEEPS" run_admit check
 expect_code 0 "$RC" "a sampling interval longer than the window admits"
-[ "$(tr '\n' ' ' < "$LONG_INTERVAL_SLEEPS")" = "1 " ] || fail "the final sampling sleep stops at the window boundary"
+awk '{ total += $1 } END { exit !(total <= 1) }' "$LONG_INTERVAL_SLEEPS" || fail "the final sampling sleep passed the window boundary"
 new_world window_secs=60
 WINDOW_SLEEPS="$TMP_ROOT/window-sleeps.log"
 : > "$WINDOW_SLEEPS"
 FAKE_SLEEP_LOG="$WINDOW_SLEEPS" run_admit check
 expect_code 0 "$RC" "the default window admits a steady host"
 assert_contains "$OUT" "samples=7" "the default window samples seven times"
-[ "$(tr '\n' ' ' < "$WINDOW_SLEEPS")" = "10 10 10 10 10 10 " ] || fail "the default window waits ten seconds between samples"
-pass "admission requires the conditions in every sample across the window"
+[ "$(wc -l < "$WINDOW_SLEEPS" | tr -d ' ')" = 6 ] || fail "the default window did not schedule six sampling pauses"
+awk '{ total += $1; if ($1 <= 0 || $1 > 10) bad = 1 } END { exit bad || total > 60 }' "$WINDOW_SLEEPS" || fail "the default sampling pauses exceeded their interval or window"
+new_world window_secs=1 sample_interval_secs=1
+READING_WINDOW_SLEEPS="$TMP_ROOT/reading-window-sleeps.log"
+: > "$READING_WINDOW_SLEEPS"
+FAKE_JOURNAL_DELAY_SECS=1 FAKE_SLEEP_LOG="$READING_WINDOW_SLEEPS" run_admit check
+expect_code 0 "$RC" "reading time completes the sampling window"
+assert_contains "$OUT" "samples=1" "elapsed reading time avoids an extra sample"
+[ ! -s "$READING_WINDOW_SLEEPS" ] || fail "elapsed reading time still added a sampling sleep"
+pass "admission requires healthy conditions across elapsed wall time"
 
 # --- wait -----------------------------------------------------------------------------
 new_world
@@ -317,7 +362,8 @@ new_world window_secs=60; set_load 30.00 30.00
 FAKE_SLEEP_LOG="$SLEEP_LOG" FAKE_SLEEP_HOOK="printf '%s\n' '3.00 4.00 1.00 1/100 123' > '$PROC/loadavg'" \
   run_admit wait --timeout 300
 expect_code 0 "$RC" "wait retries while a full window fits"
-[ "$(tr '\n' ' ' < "$SLEEP_LOG")" = "10 10 10 10 10 10 10 " ] || fail "wait pauses once, then samples a full window"
+[ "$(wc -l < "$SLEEP_LOG" | tr -d ' ')" = 7 ] || fail "wait did not pause once and then sample across the window"
+awk '{ total += $1 } END { exit !(total >= 60 && total <= 70) }' "$SLEEP_LOG" || fail "wait did not count reading time within the sampling window"
 pass "wait retries until admission or its timeout"
 
 # --- root home config ---------------------------------------------------------------

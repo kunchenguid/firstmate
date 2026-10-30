@@ -69,8 +69,8 @@
 # --maxWorkers and --workers.
 #
 # Evidence: every decision prints one line on stdout and, with the policy on,
-# appends it best effort to the root home's state/heavy-admission.log (trimmed to its newest
-# 2000 lines past 256 KiB):
+# appends it best effort under a file lock to the root home's
+# state/heavy-admission.log (trimmed to its newest 2000 lines past 256 KiB):
 #   heavy-admission: decision=<admit|hold> reason=<token>[,<token>...]
 #     policy=<on|off|unknown> config=<path|none> peak_gib=<n|unknown> samples=<n>
 #     load1=<x> load5=<x> mem_available_gib=<x> mem_psi_some_avg60=<x>
@@ -410,13 +410,23 @@ record_admission() {
 
 # --- decision -----------------------------------------------------------------
 record_evidence() {  # <line>
-  local line=$1 log
+  local line=$1 log tmp
   [ "$POLICY" = on ] && [ -n "$ROOT_HOME" ] || return 0
   log="$ROOT_HOME/state/heavy-admission.log"
-  { printf '%s\n' "$line" >> "$log"; } 2>/dev/null || return 0
-  if [ "$(wc -c < "$log" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
-    { tail -n "$LOG_KEEP_LINES" "$log" > "$log.tmp.$$" && mv -f "$log.tmp.$$" "$log"; } 2>/dev/null || rm -f "$log.tmp.$$" 2>/dev/null
-  fi
+  tmp="$log.tmp.$$"
+  # The append descriptor deliberately remains open while the same inode is
+  # trimmed in place; replacing the file would let a waiting writer append to
+  # the unlinked inode after the trim.
+  # shellcheck disable=SC2094
+  (
+    flock -x 9 || exit 0
+    if printf '%s\n' "$line" >&9; then
+      if [ "$(wc -c < "$log" 2>/dev/null || echo 0)" -gt "$LOG_MAX_BYTES" ]; then
+        { tail -n "$LOG_KEEP_LINES" "$log" > "$tmp" && cat "$tmp" > "$log"; } 2>/dev/null || true
+        rm -f "$tmp" 2>/dev/null
+      fi
+    fi
+  ) 9>> "$log" 2>/dev/null || true
   return 0
 }
 
@@ -432,7 +442,7 @@ emit() {  # <decision> <reason>
 
 # Sets DECISION and REASON for one admission attempt.
 decide() {
-  local remaining
+  local elapsed now sleep_for window_start
   SAMPLES=0
   R_LOAD1=na R_LOAD5=na R_MEM_KB=na R_MEM_PSI=na R_IO_PSI=na R_DISK_KB=na R_WARN=na
   if [ "$POLICY" = unknown ]; then
@@ -451,20 +461,21 @@ decide() {
     DECISION=hold REASON=$RAMP_REASON
     return 1
   fi
-  remaining=$(cfg window_secs)
+  window_start=$(date +%s)
+  elapsed=0
   while :; do
     if ! take_sample; then
       DECISION=hold REASON=$S_REASONS
       return 1
     fi
-    [ "$remaining" -gt 0 ] || break
-    if [ "$remaining" -lt "$(cfg sample_interval_secs)" ]; then
-      sleep "$remaining"
-      remaining=0
-    else
-      sleep "$(cfg sample_interval_secs)"
-      remaining=$((remaining - $(cfg sample_interval_secs)))
-    fi
+    now=$(date +%s)
+    [ $((now - window_start)) -le "$elapsed" ] || elapsed=$((now - window_start))
+    [ "$elapsed" -ge "$(cfg window_secs)" ] && break
+    sleep_for=$(cfg sample_interval_secs)
+    [ "$sleep_for" -le $(($(cfg window_secs) - elapsed)) ] || sleep_for=$(($(cfg window_secs) - elapsed))
+    [ "$sleep_for" -gt 0 ] || break
+    sleep "$sleep_for"
+    elapsed=$((elapsed + sleep_for))
   done
   if ! fm_lock_acquire_wait_bounded "$RAMP_LOCK" "$LOCK_TIMEOUT_SECS" >/dev/null 2>&1; then
     DECISION=hold REASON=unreadable:ramp-lock
