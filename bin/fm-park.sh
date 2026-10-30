@@ -134,7 +134,6 @@
 # (state/.review-park-tick-next) and the next tick starts there.
 # Parked lanes use only the first half of the tick, reserving the rest for
 # unparked lanes.
-# starts there.
 #
 # list prints each parked lane: id, PR, parked head, and when it parked.
 #
