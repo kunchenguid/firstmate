@@ -737,7 +737,13 @@ check_claude_onboarding() {
   pin_account=
   pinned_ordinary=
   pinned=
-  if [ -n "${FM_HOME:-}" ]; then
+  # Only resolve a pin that is actually present. The resolver shells out to perl
+  # to read the file; a home with no config/claude-account is unpinned, and a
+  # launch that selects another harness must stay ready even where perl is
+  # missing, so an absent pin skips the resolver entirely rather than letting a
+  # missing-perl error masquerade as an unresolvable pin. A pin that exists but
+  # cannot be read still reaches the resolver and remains a human gap below.
+  if [ -n "${FM_HOME:-}" ] && [ -e "$FM_HOME/config/claude-account" ]; then
     account_err=$(mktemp "${TMPDIR:-/tmp}/fm-doctor-account.XXXXXX" 2>/dev/null) || account_err=/dev/null
     if selection=$(fm_worker_account_resolve claude "$FM_HOME/config" "config/claude-account" 2>"$account_err"); then
       # declared<TAB>root<TAB>providers; root is empty for the ordinary account.

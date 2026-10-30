@@ -982,6 +982,27 @@ assert_contains "$DOCTOR_OUT" 'this launch selects the codex harness' "the skip 
 assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a codex launch was reported as a human onboarding gap"
 pass "a passed non-claude harness skips claude onboarding and ignores the remote home crew-harness"
 
+# A host without perl still skips a non-Claude launch when no account is pinned.
+# The account resolver shells out to perl to read config/claude-account, so an
+# absent pin must never reach the resolver; otherwise a missing perl surfaces as
+# an unresolvable-pin error and blocks an otherwise-ready Codex launch. claude is
+# installed and un-onboarded to prove the skip comes from the harness-and-pin
+# decision, not from the not-installed short-circuit. The fake perl exits 127,
+# exactly as a missing command would, so reaching the resolver at all would be a
+# human gap and fail this case.
+new_case Darwin with-herdr gui
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+cat > "$CASE_BIN/perl" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+chmod +x "$CASE_BIN/perl"
+doctor --harness codex --fix
+expect_code 0 "$DOCTOR_RC" "a codex launch on a host without perl and no account pin was blocked"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "a codex launch without perl was gated on claude onboarding"
+assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a missing perl with no account pin was reported as an onboarding gap"
+pass "with no account pin the doctor never calls the perl resolver, so a missing perl cannot block a non-Claude launch"
+
 # No harness is passed at all (a manual or seed run) and no account is pinned:
 # the gate has nothing to key on and falls back to the account pin alone, so it
 # skips. The remote home's crew-harness=claude line must not resurrect the gate.
