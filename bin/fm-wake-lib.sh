@@ -1808,11 +1808,9 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # exiting - so a slot whose lease has lapsed reads identical whether it is still
 # this task's or has since been handed to another one. Firstmate therefore keeps
 # its own claim on top: one file naming the task that took the slot, written by
-# bin/fm-spawn.sh under the same project lock that allocates the slot. Teardown
-# releases it when the slot goes back to the pool unless a proven-stale record
-# still needs it to refuse relaunch; the next allocation atomically replaces
-# either form. Moving crewmate spawns onto the durable lease is separate
-# follow-up work.
+# bin/fm-spawn.sh under the same project lock that allocates the slot and
+# released by bin/fm-teardown.sh when the slot goes back to the pool. Moving
+# crewmate spawns onto the durable lease is separate follow-up work.
 #
 # The claim lives at <pool>/<slot>/.fm-slot-owner - a sibling of the repo
 # checkout rather than a file inside it - so claiming a slot can never dirty the
@@ -1883,9 +1881,9 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   fi
 }
 
-# Drop a task's own claim once its slot is back in the pool and no stale record
-# still relies on it. Never removes another task's claim, so a misdirected
-# release cannot strip the evidence that protects the slot's real owner.
+# Drop a task's own claim once its slot is back in the pool. Never removes
+# another task's claim, so a misdirected release cannot strip the evidence that
+# protects the slot's real owner.
 fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   local worktree=$1 id=$2 marker
   fm_treehouse_slot_owner_state "$worktree" "$id"

@@ -1182,9 +1182,14 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line retired_by retired_at
   local -a spawn_args
 
+  retired_by=$(fm_meta_get "$META" retired_by)
+  if [ -n "$retired_by" ]; then
+    retired_at=$(fm_meta_get "$META" retired_at)
+    die "task $ID was retired by task $retired_by${retired_at:+ at epoch $retired_at} after its recorded slot was returned; refusing to relaunch a retired record"
+  fi
   require_state_verified_backend relaunch
   fm_control_backend_relaunch_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, where a thread keeps its conversation and a new turn or provider change continues the same agent, so no fresh replacement can be launched into its endpoint; 'interrupt' ends its turn, and a fresh task needs a teardown and a new dispatch"

@@ -2213,6 +2213,21 @@ if [ "$RELAUNCH" -eq 0 ]; then
   spawn_refuse_if_away_spend_cap
   spawn_require_relocated_queued_work
 fi
+if [ "$RELAUNCH" -eq 0 ] && [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
+  fm_backlog_record_present "$STATE/$ID.meta" "task record" "$STATE" || {
+    echo "error: spawn refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1
+  }
+  SPAWN_RETIRED_BY=$(fm_meta_get "$STATE/$ID.meta" retired_by)
+  if [ -n "$SPAWN_RETIRED_BY" ]; then
+    SPAWN_RETIRED_AT=$(fm_meta_get "$STATE/$ID.meta" retired_at)
+    echo "error: task $ID was retired by task $SPAWN_RETIRED_BY${SPAWN_RETIRED_AT:+ at epoch $SPAWN_RETIRED_AT} after its recorded slot was returned; refusing to adopt or replace a retired record" >&2
+    exit 1
+  fi
+fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
     exit 0
@@ -2326,6 +2341,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
     exit 1
   }
+  RELAUNCH_RETIRED_BY=$(fm_meta_get "$RELAUNCH_META" retired_by)
+  if [ -n "$RELAUNCH_RETIRED_BY" ]; then
+    RELAUNCH_RETIRED_AT=$(fm_meta_get "$RELAUNCH_META" retired_at)
+    echo "error: task $ID was retired by task $RELAUNCH_RETIRED_BY${RELAUNCH_RETIRED_AT:+ at epoch $RELAUNCH_RETIRED_AT} after its recorded slot was returned; refusing to relaunch a retired record" >&2
+    exit 1
+  fi
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET

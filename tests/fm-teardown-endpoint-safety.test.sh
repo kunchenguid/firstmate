@@ -9,6 +9,7 @@ set -u
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
+CONTROL="$ROOT/bin/fm-control.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
 REAL_TMUX=$(command -v tmux || true)
 
@@ -73,6 +74,13 @@ run_relaunch() {  # <case> <id>
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
   FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
     "$SPAWN" "$id" --relaunch
+}
+
+run_control_relaunch() {  # <case> <id>
+  local dir=$1 id=$2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$CONTROL" "$id" relaunch --note retired-record-check
 }
 
 assert_refused_without_mutation() {  # <case> <id> <description>
@@ -1233,15 +1241,25 @@ stop_lock_holder() {
   LOCK_HOLDER_PID=
 }
 
-assert_claimed_owner_tore_down_past_stale_record() {  # <case> <stale-id> <owner-id> <label>
-  local dir=$1 stale=$2 owner=$3 label=$4
+record_field() {  # <meta> <field>
+  awk -F= -v key="$2" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$1"
+}
+
+assert_claimed_owner_retired_stale_record() {  # <case> <stale-id> <owner-id> <label>
+  local dir=$1 stale=$2 owner=$3 label=$4 retired_at
   assert_absent "$dir/home/state/$owner.meta" "$label: the owner's record was not removed"
-  assert_present "$dir/home/state/$stale.meta" "$label: the stale task's record was removed by another task's teardown"
-  assert_present "$dir/pool/1/.fm-slot-owner" "$label: the protective slot claim was removed"
+  assert_present "$dir/home/state/$stale.meta" "$label: the stale task's historical record was removed"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "$label: the returned slot kept its spent owner claim"
+  [ "$(record_field "$dir/home/state/$stale.meta" retired_by)" = "$owner" ] \
+    || fail "$label: the stale record does not name $owner as its retiring task"
+  retired_at=$(record_field "$dir/home/state/$stale.meta" retired_at)
+  case "$retired_at" in
+    ''|*[!0-9]*) fail "$label: the stale record has no numeric retirement epoch" ;;
+  esac
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "$label: the owner did not return its own pool slot: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "$stale" "$label: the warning should name the stale record"
-  assert_contains "$(cat "$dir/stderr")" "stale" "$label: the warning should call the other record stale"
+  assert_contains "$(cat "$dir/stderr")" "retired" "$label: the warning should call the other record retired"
 }
 
 test_two_records_on_one_slot_follow_the_owner_claim() {
@@ -1249,8 +1267,8 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
 
   # mine: the claim names the task being torn down and the other record's own
   # endpoint is present but agent-free, so that record is stale rather than
-  # ambiguous. The owner returns its own slot and retains its spent claim so
-  # the stale record can run only its own records-only teardown.
+  # ambiguous. The owner durably retires the stale record, returns its own slot,
+  # and releases the spent claim.
   dir=$(make_case two-records-claim-mine)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
   claim_pool_slot "$dir" "$owner"
@@ -1260,19 +1278,29 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "teardown of the claimed owner refused over a stale record: $(cat "$dir/stderr")"
-  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine"
+  assert_claimed_owner_retired_stale_record "$dir" "$stale" "$owner" "mine"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_treehouse_slot_owner_claim "$dir/worktree" replacement-task "$dir/home" \
+      && fm_treehouse_slot_owner_release "$dir/worktree" replacement-task
+  ) || fail "could not stage a failed allocation's claim replacement and rollback"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "the failed allocation did not leave the slot unclaimed"
+  set +e
+  run_control_relaunch "$dir" "$stale" > "$dir/control-stdout" 2> "$dir/control-stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "fm-control relaunched the retired task"
+  assert_contains "$(cat "$dir/control-stderr")" "retired by task $owner" \
+    "fm-control's retired-task refusal should name the task that retired it"
   set +e
   run_relaunch "$dir" "$stale" > "$dir/relaunch-stdout" 2> "$dir/relaunch-stderr"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "the stale task relaunched into the returned pool slot"
-  assert_contains "$(cat "$dir/relaunch-stderr")" "belongs to task $owner" \
-    "the stale task's relaunch refusal should name the retained slot owner"
-  make_tmux_endpoint "$dir" '' ''
-  run_case "$dir" "$stale" > "$dir/stale-stdout" 2> "$dir/stale-stderr" \
-    || fail "the stale record's records-only teardown failed: $(cat "$dir/stale-stderr")"
-  assert_absent "$dir/home/state/$stale.meta" "the stale record remained actionable after its own teardown"
-  assert_present "$dir/pool/1/.fm-slot-owner" "the stale record's teardown removed another task's protective claim"
+  [ "$rc" -ne 0 ] || fail "the retired task relaunched after a failed allocation removed the replacement claim"
+  assert_contains "$(cat "$dir/relaunch-stderr")" "retired by task $owner" \
+    "the direct relaunch refusal should name the task that retired it"
+  assert_present "$dir/home/state/$stale.meta" "the relaunch refusals removed the retired historical record"
 
   dir=$(make_case two-records-claim-mine-control-locked)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
@@ -1284,7 +1312,7 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   : > "$dir/stderr"
   run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "owner teardown did not recover after the stale lifecycle action finished: $(cat "$dir/stderr")"
-  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine after lifecycle contention"
+  assert_claimed_owner_retired_stale_record "$dir" "$stale" "$owner" "mine after lifecycle contention"
 
   dir=$(make_case two-records-claim-mine-meta-locked)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
@@ -1296,7 +1324,7 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   : > "$dir/stderr"
   run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "owner teardown did not recover after the stale metadata update finished: $(cat "$dir/stderr")"
-  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine after metadata contention"
+  assert_claimed_owner_retired_stale_record "$dir" "$stale" "$owner" "mine after metadata contention"
 
   # The same teardown without --force, the path that keeps the unlanded-work
   # check, also gets past the scan.
@@ -1314,7 +1342,7 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "unforced teardown of the claimed owner refused over a stale record: $(cat "$dir/stderr")"
-  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine, unforced"
+  assert_claimed_owner_retired_stale_record "$dir" "$stale" "$owner" "mine, unforced"
 
   # mine, but tmux reports the other record missing without carrying the socket
   # identity needed to prove that endpoint gone, so the scan refuses.
