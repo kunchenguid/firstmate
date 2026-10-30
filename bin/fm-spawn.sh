@@ -1983,7 +1983,7 @@ spawn_abort_cleanup() {
     fi
   elif [ "$T3CODE_ABORT_CLEANUP" = 1 ]; then
     T3CODE_ABORT_CLEANUP=0
-    if ! fm_backend_kill t3code "$T"; then
+    if ! spawn_close_endpoint t3code "$T"; then
       T3CODE_HOME_ENV=0
       if [ "$T3CODE_LEASED" = 1 ]; then
         T3CODE_LEASED=0
@@ -8126,6 +8126,9 @@ if [ "$BACKEND" = t3code ]; then
   # thread's model selection at launch instead of CLI flags, so nothing is
   # staged for a shell to source.
   T3CODE_BRIEF_TEXT=$("$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief < "$BRIEF") || exit 1
+  if [ "$FM_SOL_CLAIM_CREATED" = "$ID" ]; then
+    fm_sol_cap_promote "$ID" 0 "$STATE" || exit 1
+  fi
   SPAWN_LAUNCH_SENT=1
   fm_backend_t3code_turn_start "$T" "$T3CODE_BRIEF_TEXT" "$T3CODE_MODEL_SELECTION" || {
     if [ "$?" -ne 7 ]; then
@@ -8134,9 +8137,6 @@ if [ "$BACKEND" = t3code ]; then
     fi
     T3CODE_LAUNCH_UNCONFIRMED=1
   }
-  if [ "$FM_SOL_CLAIM_CREATED" = "$ID" ]; then
-    fm_sol_cap_promote "$ID" 0 "$STATE" || exit 1
-  fi
   T3CODE_ABORT_CLEANUP=0
   T3CODE_LEASED=0
   T3CODE_HOME_ENV=0

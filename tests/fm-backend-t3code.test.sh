@@ -1998,6 +1998,7 @@ test_refused_launch_turn_archives_thread_and_returns_lease() {
     case "$harness" in claude) model=claude-sonnet-5 ;; codex) model=gpt-5.6-sol ;; esac
     id=$(t3_uid "t3turnz$harness")
     t3_case "spawn-launch-turn-refused-$harness"
+    printf 'max=1\nmodels=%s\n' "$model" > "$CONFIG/sol-cap"
     t3_world_set 'w.failTools = { t3_thread_send: { code: "turn_refused", message: "launch turn refused" } }'
     t3_worker_setup "$id"
     out=$(t3_worker_spawn "$id" "$harness" --model "$model"); rc=$?
@@ -2008,6 +2009,8 @@ test_refused_launch_turn_archives_thread_and_returns_lease() {
     [ "$(t3_log_line_of 'r.tool === "treehouse" && r.args.indexOf("return --force") === 0')" -gt \
       "$(t3_log_line_of 'r.tool === "t3_thread_organize"')" ] || fail "the lease must return after the archive"$'\n'"$out"
     assert_absent "$CASE_DIR/state/$id.meta" "the rolled-back dispatch leaves no record"
+    [ -z "$(awk -F '\t' -v id="$id" '$1 == id && $4 != -1 { print }' "$CASE_DIR/state/sol-sessions.tsv")" ] \
+      || fail "confirmed T3 abort retained capped occupancy"
     assert_absent "$WORKER_WT/.claude/settings.local.json" "a returned $harness slot must not keep the aborted spawn's Claude settings"
     assert_absent "$WORKER_WT/CLAUDE.local.md" "a returned $harness slot must not keep the aborted spawn's channel statement"
     assert_absent "$WORKER_WT/.codex/config.toml" "a returned $harness slot must not keep the aborted spawn's Codex environment"

@@ -411,9 +411,9 @@ fm_sol_cap_adopt_workers() (
       target=$(fm_backend_target_of_meta "$meta") || return 1
       if [ -n "$target" ]; then
         verdict=$(FM_HOME="$home" fm_backend_agent_state "$backend" "$target") || verdict=unreadable
-        if [ "$verdict" = missing ]; then
+        if [ "$verdict" = missing ] || { command -v fm_control_absence_recheck_applies >/dev/null 2>&1 && fm_control_absence_recheck_applies "$backend" "$verdict"; }; then
           if command -v fm_control_endpoint_absence_verdict >/dev/null 2>&1; then
-            absence=$(FM_HOME="$home" fm_control_endpoint_absence_verdict "$backend" "$target") || absence=unknown
+            absence=$(FM_HOME="$home" fm_control_endpoint_absence_verdict "$backend" "$target" "$meta") || absence=unknown
             case "${absence%%$'\t'*}" in gone|dead) verdict=dead ;; *) verdict=unreadable ;; esac
           else
             verdict=unreadable
@@ -797,8 +797,8 @@ fm_sol_cap_reconcile_local() {
   target=$(fm_backend_target_of_meta "$meta") || return 1
   [ -n "$target" ] || return 0
   verdict=$(fm_backend_agent_state "$backend" "$target") || return 0
-  if [ "$verdict" = missing ]; then
-    absence=$(fm_control_endpoint_absence_verdict "$backend" "$target") || return 0
+  if [ "$verdict" = missing ] || { command -v fm_control_absence_recheck_applies >/dev/null 2>&1 && fm_control_absence_recheck_applies "$backend" "$verdict"; }; then
+    absence=$(fm_control_endpoint_absence_verdict "$backend" "$target" "$meta") || return 0
     case "${absence%%$'\t'*}" in
       gone) verdict=missing ;;
       dead) verdict=dead ;;
