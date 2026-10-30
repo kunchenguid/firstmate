@@ -732,7 +732,10 @@ home_harness_is_claude() {
         if (a[1] == "claude") { print "claude"; exit }
         next
       }
-      $1 == "claude" { print "claude"; exit }
+      !seen_default {
+        seen_default = 1
+        if ($1 == "claude") { print "claude"; exit }
+      }
     ' "$config/secondmate-harness" 2>/dev/null || true)
     [ "$token" = claude ] && return 0
   fi

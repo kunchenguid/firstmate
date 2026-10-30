@@ -980,6 +980,20 @@ assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a mate-override 
 assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "a mate-override claude launch was treated as a non-claude host"
 pass "a mate <id>: claude override gates claude onboarding even when the default harness is not claude"
 
+# A legacy secondmate-harness with no "mate <id>:" override follows first-line-wins
+# parsing: the default line (codex) launches at runtime and later bare lines are
+# ignored, so a trailing bare "claude" line must not make the doctor gate claude
+# onboarding on a host that actually launches codex.
+new_case Darwin with-herdr gui
+printf 'codex\n' > "$CASE_PROJECT_HOME/config/crew-harness"
+printf 'codex\nclaude\n' > "$CASE_PROJECT_HOME/config/secondmate-harness"
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "an un-onboarded host whose default harness is codex was blocked by a later bare claude line"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "a later bare claude line made the doctor gate a codex host on claude onboarding"
+assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a later bare claude line was treated as a claude launch"
+pass "a trailing bare claude line in a legacy secondmate-harness does not gate a codex host on claude onboarding"
+
 # --- onboarding is checked against the account config/claude-account selects --
 
 # A home can pin another Claude account; fm-spawn.sh launches that account with
