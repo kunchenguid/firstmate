@@ -41,7 +41,8 @@ Prerequisites:
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 - `python3` only for optional protocol-16 presentation-space ordering, native event subscription, and opt-in [project groups](#project-groups) agent-view transport.
 
-Herdr is dual-licensed AGPL-3.0-or-later or commercial.
+Herdr is Apache-2.0 licensed.
+Releases before 0.8.0 were dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
 
 ### Selecting Herdr
