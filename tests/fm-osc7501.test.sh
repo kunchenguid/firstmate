@@ -446,6 +446,35 @@ tty_input_mode() { # <tty> -> canonical-input and echo flags as stty names them
   stty -a <"$1" | tr -s ' \t;' '\n' | grep -Ex -- '-?(icanon|echo)' | sort
 }
 
+# A steer the worker acknowledged and finished between two polls - the busy
+# snapshot never observed - still retires the earlier failure.
+t_handled_steer_retires_failure() {
+  local d=$TMP_ROOT/handled now
+  mkhome "$d"
+  start_term "$d" answer
+  sleep 300 &
+  local holder=$!
+  now=$(date +%s)
+  printf 'state=idle ts=%s\n' "$((now - 20))" >"$d/state/t15.busy-state"
+  printf 'failed [at=%s]: tests red\n' "$((now - 10))" >"$d/state/t15.status"
+  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t15 --kind ship --state "$d/state" --harness codex \
+    --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=error' "$d/cap" 60 || fail "handled: failed not reported"
+  : >"$d/cap"
+  mkdir -p "$d/state/t15.inbox/handled"
+  printf 'retry\n' >"$d/state/t15.inbox/handled/1.msg"
+  printf 'state=idle ts=%s\n' "$((now + 1))" >"$d/state/t15.busy-state"
+  wait_cap 'state=idle' "$d/cap" 60 || fail "handled: an acknowledged follow-up left the old error up"
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  assert_equals "state=idle " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
+    "a retired failure never reappears, live or as the final record"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  stop_term
+  pass "mapping: an acknowledged follow-up steer retires an earlier failure"
+}
+
 # A launch interrupted while the capability query holds the terminal raw
 # must leave the pane's canonical input and echo as it found them.
 t_interrupted_query_restores_mode() {
@@ -501,5 +530,6 @@ fm_test_run \
   t_disarm_after_agent_exit_parks_idle \
   t_rearm_retires_previous_reporter \
   t_activity_after_done_and_idle_inbox \
+  t_handled_steer_retires_failure \
   t_interrupted_query_restores_mode \
   t_hc_terminal_with_inherited_herdr_markers
