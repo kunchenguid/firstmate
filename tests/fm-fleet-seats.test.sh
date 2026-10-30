@@ -2112,9 +2112,61 @@ test_generationless_predecessor_stays_counted() {
   pass "generationless predecessors remain counted beside reserved and terminal replacements"
 }
 
+test_reservation_uses_one_policy_snapshot() {
+  local home="$TMP_ROOT/policy-snapshot" fakebin real_jq out rc mode
+  make_home "$home"
+  new_holder
+  real_jq=$(command -v jq)
+  fakebin=$(fm_fakebin "$TMP_ROOT/policy-snapshot-tools")
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+"$REAL_JQ" "$@"
+rc=$?
+case "$*" in
+  *'select(.models | index($m))'*)
+    if [ ! -e "$POLICY_EDITED" ]; then
+      cp "$POLICY_REPLACEMENT" "$POLICY_DECLARATION" || exit 1
+      : > "$POLICY_EDITED"
+    fi
+    ;;
+esac
+exit "$rc"
+SH
+  chmod +x "$fakebin/jq"
+  for mode in mapping capacity primary; do
+    case "$mode" in
+      mapping) printf '{"pools":[{"name":"shared","capacity":1,"models":["pool-model-a"]}]}\n' ;;
+      capacity) pools "$home" 2; cat "$home/config/fleet-seats" ;;
+      primary) pools "$home" 1; cat "$home/config/fleet-seats" ;;
+    esac > "$home/initial-policy"
+    cp "$home/initial-policy" "$home/config/fleet-seats"
+    task_record "$home" occupied pool-model-a
+    pools "$home" 1
+    [ "$mode" != primary ] || pools "$home" 1 ',"primary_model":"pool-model-b"'
+    cp "$home/config/fleet-seats" "$home/replacement-policy"
+    cp "$home/initial-policy" "$home/config/fleet-seats"
+    rm -f "$home/edited"
+    rc=0
+    out=$(PATH="$fakebin:$PATH" REAL_JQ="$real_jq" POLICY_EDITED="$home/edited" \
+      POLICY_REPLACEMENT="$home/replacement-policy" POLICY_DECLARATION="$home/config/fleet-seats" \
+      reserve "$home" "candidate-$mode" pool-model-b 2>&1) || rc=$?
+    assert_present "$home/edited" "$mode policy race was not exercised"
+    expect_code 5 "$rc" "$mode policy changed during admission: $out"
+    assert_contains "$out" "policy changed" "$mode edit was not detected"
+    out=$(seats "$home" show "candidate-$mode")
+    assert_equals '' "$out" "$mode race created a holder"
+    out=$(reserve "$home" "candidate-$mode" pool-model-b 2>&1)
+    expect_code 4 "$?" "$mode current policy did not enforce capacity: $out"
+  done
+  rm -f "$home/state/occupied.meta"
+  reserve "$home" ordinary pool-model-b >/dev/null || fail "unchanged policy refused available capacity"
+  pass "admission rejects mixed policy versions and accepts unchanged policy"
+}
+
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
+      test_reservation_uses_one_policy_snapshot) "$focused_test" ;;
       test_remote_descendants_prevent_incomplete_certificates|test_generationless_predecessor_stays_counted|test_remote_without_pools_confirms_unpooled_models|test_managed_records_and_legacy_import|test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
@@ -2123,6 +2175,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 test_no_pool_configured_is_off
+test_reservation_uses_one_policy_snapshot
 test_pool_names_do_not_escape_the_seat_directory
 test_legacy_unresolved_models_count_in_every_pool
 test_one_capacity_across_homes
