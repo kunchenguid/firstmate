@@ -1953,6 +1953,7 @@ Firstmate writes that snapshot from `quota-axi --json` on a quota wake, or when 
 A version-pinned adapter under `FM_LIMIT_MESSAGE_DIR` that matches captured pane text is the other trigger. No adapter ships.
 Status line text is never a signal.
 Consider skips a task whose last status verb is `done`, `failed`, `needs-decision`, or `blocked`, unless that line is its own `midtask-fallback` report.
+It also skips a task with any other open decision.
 A successful switch closes an open `midtask-fallback` decision with a `resolved` line.
 Consider prints the outcome on stdout, and firstmate relays it to the captain.
 This path does not re-rank the array.
