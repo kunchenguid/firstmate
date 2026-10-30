@@ -2923,7 +2923,7 @@ launch_template() {
 raw_launch_takes_brief() {
   local cmd=$1 harness=$2
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | omp | agy | grok | cursor | gemini | devin | polytoken | commandcode | cortex | muse) : ;;
+  claude | codex | pi | pi-signed | omp | grok | cursor | gemini | devin | commandcode | cortex | muse) : ;;
   *) return 1 ;;
   esac
   case "${cmd%% *}" in *=*) return 1 ;; esac
