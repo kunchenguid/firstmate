@@ -868,6 +868,54 @@ SH
   pass "a temporary control-lock refusal stays pending and retries to one reported cleanup outcome"
 }
 
+# A cleanup killed partway through its teardown leaves its request behind, so
+# the next tick retries it and reports the outcome once.
+test_killed_cleanup_is_retried_and_reported_once() {
+  local w out pgid
+  w=$(make_world land-killed "$GH_URL"); gh_fixture "$w/gh.1.json"
+  : > "$w/config/auto-land"
+  printf 'pr=%s\n' "$GH_URL" > "$w/state/lane.review-park-land"
+  cat > "$w/fakebin/fm-teardown.sh" <<SH
+#!/usr/bin/env bash
+n=\$(cat "$w/teardown.count" 2>/dev/null || echo 0)
+n=\$((n + 1)); printf '%s\\n' "\$n" > "$w/teardown.count"
+if [ "\$n" = 1 ]; then
+  # Record the detached cleanup's own process group: the nearest ancestor
+  # running fm-park.sh run.
+  p=\$\$
+  while p=\$(ps -o ppid= -p "\$p" | tr -d ' ') && [ "\${p:-1}" -gt 1 ]; do
+    case "\$(ps -o command= -p "\$p")" in *"fm-park.sh run lane land"*) ps -o pgid= -p "\$p" | tr -d ' ' > "$w/cleanup.pgid"; break ;; esac
+  done
+  : > "$w/teardown.started"
+  sleep 30
+fi
+echo "Torn down \$1"
+SH
+  chmod +x "$w/fakebin/fm-teardown.sh"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-killed: first tick printed: $out"
+  for _ in $(seq 1 100); do [ -e "$w/teardown.started" ] && break; sleep 0.1; done
+  pgid=$(cat "$w/cleanup.pgid" 2>/dev/null)
+  [ -n "$pgid" ] && [ "$pgid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] || fail "land-killed: no detached cleanup process group found: '$pgid'"
+  kill -KILL -- "-$pgid"
+  sleep 0.5
+  [ -e "$w/state/lane.review-park-land" ] || fail "land-killed: the killed cleanup lost its request"
+  ! compgen -G "$w/state/.review-park-report-*" >/dev/null || fail "land-killed: the killed cleanup published an outcome"
+  for _ in $(seq 1 200); do
+    [ "$(cat "$w/teardown.count")" = 1 ] || break
+    out=$(run_park "$w" tick 2>&1)
+    [ -z "$out" ] || fail "land-killed: a retry tick printed: $out"
+    sleep 0.1
+  done
+  [ "$(cat "$w/teardown.count")" = 2 ] || fail "land-killed: the killed cleanup was never retried"
+  wait_land_settled "$w" land-killed
+  out=$(run_park "$w" tick 2>&1)
+  [ "$out" = "cleaned up lane: PR $GH_URL merged; lane torn down and its working copy returned" ] || fail "land-killed: outcome: $out"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-killed: reported twice: $out"
+  pass "a cleanup killed during its teardown keeps its request, and the next tick retries it and reports once"
+}
+
 # A cleanup request names the PR that merged. When the lane has since moved on
 # to another PR, the request is dropped without tearing anything down.
 test_stale_cleanup_request_for_another_pr_is_dropped() {
@@ -956,6 +1004,7 @@ fm_test_run \
   test_detached_land_returns_at_once_and_the_tick_reports_it \
   test_pending_land_recovers_after_watcher_restart \
   test_pending_land_retries_after_control_lock_refusal \
+  test_killed_cleanup_is_retried_and_reported_once \
   test_stale_cleanup_request_for_another_pr_is_dropped \
   test_reports_survive_until_their_wake_is_recorded \
   test_land_waits_for_an_action_under_way
