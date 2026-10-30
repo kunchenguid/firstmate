@@ -34,14 +34,19 @@
 #     failed              -> error
 #     done                -> done ("PR ready" when the note has a URL)
 #     paused              -> working, msg "Waiting: <note>"
-#   otherwise state/<id>.busy-state (bin/fm-busy-lib.sh owns the record):
-#     busy -> working, idle -> idle, unknown/missing -> hold the last record
-#   unhandled <id>.inbox/*.msg with an idle-or-silent busy record reads as
+#   otherwise the task's activity as fm_busy_classify reads it
+#   (bin/fm-busy-lib.sh owns every source: the busy-state record, or
+#   Cursor's transcript / Muse's session log):
+#     busy -> working, idle -> idle, unknown -> hold the last record
+#   unhandled <id>.inbox/*.msg with idle or unknown activity reads as
 #     working "Steering received"
+#   a working: line supplies the working message, and reads as working while
+#     the activity is unknown
 #   a failed/done/paused declaration yields to activity after it: once the
-#   watcher sees a busy record stamped later, or any steer (unhandled or in
-#   handled/) was enqueued later, the declaration is retired and the busy
-#   record and inbox map as above; an open decision or blocker always wins
+#   watcher sees a turn begin later (a busy record stamped later, or a pulled
+#   transcript turning busy), or any steer (unhandled or in handled/) was
+#   enqueued later, the declaration is retired and activity and inbox map as
+#   above; an open decision or blocker always wins
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
@@ -298,10 +303,13 @@ osc_native() {
 
 LIBS_LOADED=0
 OSC_TURN_AT=0
+OSC_LAST_BS=
 osc_load_libs() {
   [ "$LIBS_LOADED" = 1 ] && return 0
   # shellcheck source=bin/fm-classify-lib.sh
   . "$SCRIPT_DIR/fm-classify-lib.sh" || return 1
+  # shellcheck source=bin/fm-busy-lib.sh
+  . "$SCRIPT_DIR/fm-busy-lib.sh" || return 1
   LIBS_LOADED=1
 }
 
@@ -318,19 +326,27 @@ osc_inbox_since() {
 }
 
 # osc_plan sets W_STATE, W_KIND, W_MSG; returns 1 when nothing should be
-# emitted (no signal yet, or the busy record is unknown). OSC_TURN_AT keeps the
-# newest busy record stamp seen across polls.
-osc_plan() { # <task> <kind> <state>
-  local task=$1 kind=$2 state_dir=$3 line verb note held rec bs bts since
+# emitted (no signal yet, or the activity is unknown). OSC_TURN_AT keeps the
+# latest turn start seen across polls: a busy record's stamp, or the poll
+# that saw a pulled transcript turn busy.
+osc_plan() { # <task> <kind> <state> <harness>
+  local task=$1 kind=$2 state_dir=$3 line verb note held act bs bts since wmsg=''
   W_STATE=
   W_KIND=
   W_MSG=
   osc_load_libs || return 1
-  rec=$(tr ' ' '\n' <"$state_dir/$task.busy-state" 2>/dev/null)
-  bs=$(printf '%s\n' "$rec" | sed -n 's/^state=//p' | tail -1)
-  bts=$(printf '%s\n' "$rec" | sed -n 's/^ts=//p' | tail -1)
-  case "$bts" in '' | *[!0-9]*) bts=0 ;; esac
-  if [ "$bs" = busy ] && [ "$bts" -gt "$OSC_TURN_AT" ]; then OSC_TURN_AT=$bts; fi
+  act=$(fm_busy_classify '' '' "$4" "$task" "$state_dir" 2>/dev/null) || act=
+  bs=${act%% *}
+  if [ "$bs" = busy ]; then
+    case "${act#* }" in
+      cursor-transcript | muse-session-log)
+        [ "$OSC_LAST_BS" = busy ] || OSC_TURN_AT=$(date +%s) ;;
+      *)
+        bts=$(sed -n 's/.* ts=\([0-9][0-9]*\)$/\1/p' "$state_dir/$task.busy-state" 2>/dev/null)
+        if [ "${bts:-0}" -gt "$OSC_TURN_AT" ]; then OSC_TURN_AT=$bts; fi ;;
+    esac
+  fi
+  OSC_LAST_BS=$bs
   line=$(status_current_line "$state_dir/$task.status" "$kind" 2>/dev/null)
   verb=$(status_line_verb "$line" 2>/dev/null) || verb=
   note=$(status_line_note "$line" 2>/dev/null) || note=
@@ -365,6 +381,7 @@ osc_plan() { # <task> <kind> <state>
       W_STATE=working
       W_MSG="Waiting: $note"
       ;;
+    working) wmsg=$note ;;
   esac
   if [ -n "$W_STATE" ]; then
     since=$(status_line_at_epoch "$line" 2>/dev/null) || return 0
@@ -378,11 +395,15 @@ osc_plan() { # <task> <kind> <state>
   fi
   if [ "$bs" = busy ]; then
     W_STATE=working
+    W_MSG=$wmsg
   elif osc_inbox_since "$state_dir/$task.inbox" 0; then
     W_STATE=working
     W_MSG="Steering received"
   elif [ "$bs" = idle ]; then
     W_STATE=idle
+  elif [ "$verb" = working ]; then
+    W_STATE=working
+    W_MSG=$wmsg
   fi
   [ -n "$W_STATE" ]
 }
@@ -392,7 +413,7 @@ osc_plan() { # <task> <kind> <state>
 # final record before exit: keep a result worth finding (done/error) and park
 # everything else at idle, never clearing records another program owns.
 osc_final() {
-  if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" && { [ "$W_STATE" = 'done' ] || [ "$W_STATE" = error ]; }; then
+  if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" "$WATCH_HARNESS" && { [ "$W_STATE" = 'done' ] || [ "$W_STATE" = error ]; }; then
     printf '%s' "$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")" >&3 2>/dev/null
   else
     printf '%s' "$(osc_seq idle '' '' '' "$WATCH_TITLE" '')" >&3 2>/dev/null
@@ -438,7 +459,7 @@ osc_watch() { # --task --kind --state --harness --parent
       osc_final
       break
     fi
-    if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE"; then
+    if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" "$WATCH_HARNESS"; then
       seq=$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")
       if [ "$seq" != "$last" ]; then
         printf '%s' "$seq" >&3 2>/dev/null
@@ -474,8 +495,20 @@ osc_tty_key() {
   printf '%s' "${key//\//_}"
 }
 
+# osc_gone <pid> <ticks>: 0 once <pid> has exited, polling every 0.1s.
+osc_gone() {
+  local i=0
+  while kill -0 "$1" 2>/dev/null; do
+    [ "$i" -ge "$2" ] && return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
 # osc_retire <pidfile>: stop the watcher it records (its TERM trap emits the
-# final record) and forget it.
+# final record), confirm it exited - a watcher still busy past the grace is
+# killed so it can never write after the next owner - and forget it. Returns
+# 1, keeping the pidfile, when the watcher survives.
 osc_retire() {
   local opid=''
   [ -f "$1" ] || return 0
@@ -485,7 +518,10 @@ osc_retire() {
     *)
       if kill -0 "$opid" 2>/dev/null && ps -o command= -p "$opid" 2>/dev/null | grep -q 'fm-osc7501\.sh'; then
         kill "$opid" 2>/dev/null || true
-        sleep 0.2
+        if ! osc_gone "$opid" 50; then
+          kill -KILL "$opid" 2>/dev/null || true
+          osc_gone "$opid" 10 || return 1
+        fi
       fi
       ;;
   esac
@@ -532,7 +568,7 @@ osc_arm() { # --task --harness --backend --kind --state --config [--agent-bin]
   local key pidfile
   key=$(osc_tty_key) || exit 0
   pidfile="$state/.osc7501watch-$key"
-  osc_retire "$pidfile"
+  osc_retire "$pidfile" || exit 0
   osc_gate "$config" "$state" || exit 0
   # a pane without a writable tty can never report, and one without a readable
   # tty can never answer the capability query either
