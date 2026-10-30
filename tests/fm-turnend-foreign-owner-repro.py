@@ -196,6 +196,8 @@ try:
         pi_result = guard(env, f"nonowner pi stop {number}", flag="--pi", payload=pi_payload)
         require(pi_result.returncode == 0, f"foreign-owner Pi Stop {number} must end safely")
         require("TURN WOULD END BLIND" not in pi_result.stderr and not pi_result.stderr.strip(), "foreign-owner Pi Stop must not emit a block banner")
+        require("SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" in pi_result.stdout, "foreign-owner Pi Stop lost its clear diagnostic")
+        require("cannot and should not arm or repair" in pi_result.stdout, "Pi diagnostic did not explain the safe ownership boundary")
     print("FIXED Pi non-owner Stops end safely", flush=True)
 
     beat.touch()
