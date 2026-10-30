@@ -203,6 +203,14 @@ expect_hold "reason=unreadable:io_pressure" "missing I/O PSI"
 new_world
 FAKE_DF_KB=fail expect_hold "reason=unreadable:disk" "failing df"
 new_world
+DIRECT_HANG_FILE="$TMP_ROOT/direct-hang-df"
+touch "$DIRECT_HANG_FILE"
+FM_TIMEOUT_MECHANISM_OVERRIDE=bash FAKE_DF_HANG_FILE="$DIRECT_HANG_FILE" \
+  expect_hold "reason=unreadable:disk" "timed-out df"
+FM_TIMEOUT_MECHANISM_OVERRIDE=bash FAKE_DF_HANG_FILE="$DIRECT_HANG_FILE" run_admit check --dry-run
+expect_code 1 "$RC" "dry-run timed-out df holds"
+assert_contains "$OUT" "decision=hold reason=unreadable:disk" "dry-run timed-out df evidence"
+new_world
 FAKE_JOURNAL_RC=1 expect_hold "reason=unreadable:journal" "failing journal query"
 new_world
 FAKE_JOURNAL_STDERR='Hint: You are currently not seeing messages from other users and the system.' \
@@ -298,12 +306,12 @@ new_world sample_interval_secs=1; set_load 30.00 30.00
 HANG_FILE="$TMP_ROOT/hang-df"
 START=$(date +%s)
 FAKE_DF_HANG_FILE="$HANG_FILE" FAKE_SLEEP_HOOK="printf '%s\n' '3.00 4.00 1.00 1/100 123' > '$PROC/loadavg'; touch '$HANG_FILE'" \
-  run_admit wait --timeout 40
+  run_admit wait --timeout 20
 ELAPSED=$(( $(date +%s) - START ))
 expect_code 1 "$RC" "wait stops a retry blocked in a host reading"
-assert_contains "$OUT" "decision=hold reason=unreadable:timeout" "blocked retry reports its timeout"
-assert_contains "$ERR" "attempt exceeded its 15s ceiling" "blocked retry names the attempt ceiling"
-[ "$ELAPSED" -le 20 ] || fail "blocked retry exceeded its hard ceiling (${ELAPSED}s)"
+assert_contains "$OUT" "decision=hold reason=unreadable:disk" "blocked retry reports its disk reading"
+assert_contains "$ERR" "still holding within the 20s timeout" "blocked retry preserves the wait timeout"
+[ "$ELAPSED" -le 15 ] || fail "blocked disk reading exceeded its bound (${ELAPSED}s)"
 new_world window_secs=60; set_load 30.00 30.00
 : > "$SLEEP_LOG"
 FAKE_SLEEP_LOG="$SLEEP_LOG" FAKE_SLEEP_HOOK="printf '%s\n' '3.00 4.00 1.00 1/100 123' > '$PROC/loadavg'" \

@@ -101,6 +101,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PROC_ROOT="${FM_PROC_ROOT_OVERRIDE:-/proc}"
 JOURNAL_TIMEOUT_SECS=10
+DISK_TIMEOUT_SECS=10
 LOCK_TIMEOUT_SECS=10
 LOG_MAX_BYTES=262144
 LOG_KEEP_LINES=2000
@@ -284,7 +285,7 @@ journal_matches() {  # <since-epoch> <pattern> <journalctl selector...>
 add_reason() { S_REASONS=${S_REASONS:+$S_REASONS,}$1; }
 
 take_sample() {
-  local v w1 w2 since peak_kb need_kb
+  local v w1 w2 since peak_kb need_kb disk_out
   S_REASONS=
   SAMPLES=$((SAMPLES + 1))
 
@@ -340,7 +341,11 @@ take_sample() {
     add_reason "unreadable:io_pressure"
   fi
 
-  R_DISK_KB=$(df -Pk -- "$(cfg disk_path)" 2>/dev/null | awk 'NR == 2 { print $4 }')
+  if disk_out=$(fm_run_timed "$DISK_TIMEOUT_SECS" df -Pk -- "$(cfg disk_path)" 2>/dev/null); then
+    R_DISK_KB=$(printf '%s\n' "$disk_out" | awk 'NR == 2 { print $4 }')
+  else
+    R_DISK_KB=unknown
+  fi
   if num_ok "$R_DISK_KB"; then
     le "$R_DISK_KB" "$(gib_to_kb "$(cfg admit_disk_free_above_gib)")" \
       && add_reason "below-admit:disk_free_gib=$(kb_to_gib "$R_DISK_KB")<=$(cfg admit_disk_free_above_gib)"
