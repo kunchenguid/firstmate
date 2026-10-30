@@ -7328,13 +7328,10 @@ fi
 # launch before the agent command: the arm must run while the pane shell
 # still owns the terminal's input, because the capability query it may send
 # is answered on that input stream and any earlier agent could read the reply
-# as typed text. It is silent and never fatal, self-gates on the terminal's
-# proven or answered support, and stands down for harnesses that report
-# natively (claude >= 2.1.295, pi >= 1.1.0 - probed against the resolved
-# binary where one is pinned), so an unaware terminal only ever sees the one
-# capability probe and no extra process stays behind. The `disarm` after the
-# agent command retires the reporter when the agent exits, because the pane
-# shell that sourced the launch outlives it.
+# as typed text. The reporter header owns eligibility and native-version
+# gates; pass the resolved binary where one is pinned. The `disarm` after
+# the agent command retires the reporter when the agent exits, because the
+# pane shell that sourced the launch outlives it.
 OSC7501_AGENT_BIN=
 case "$HARNESS" in
   claude) OSC7501_AGENT_BIN=claude ;;
