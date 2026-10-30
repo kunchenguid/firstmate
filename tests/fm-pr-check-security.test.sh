@@ -2596,6 +2596,57 @@ test_merged_poll_retries_a_failed_upward_report() {
   pass "a failed upward merge report keeps its poll armed for repair and retry"
 }
 
+# A merge this home performed through bin/fm-pr-merge.sh is recorded before the
+# poll sees it; the poll absorbs the duplicate notification but still starts the
+# lane's merge-time cleanup, detached so even a slow teardown never holds the
+# watcher iteration, and the next park tick reports its outcome.
+test_self_merged_lane_is_still_cleaned_up_by_the_poll() {
+  local dir state url rc start took
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case self-merge-cleanup)
+  state="$dir/home/state"
+  : > "$dir/home/config/auto-land"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/seed.err" \
+    || fail "self-merge-cleanup: could not arm merge poll"
+  run_merge_entry "$dir" task-a "$url" >"$dir/merge.out" 2>"$dir/merge.err" \
+    || fail "self-merge-cleanup: merge entrypoint failed: $(cat "$dir/merge.err")"
+  [ -f "$state/task-a.pr-poll-merge-notified" ] \
+    || fail "self-merge-cleanup: the merge entrypoint did not record the outcome first"
+  printf '#!/usr/bin/env bash\nsleep 8\nprintf "%%s\\n" "$*" >> "%s/teardown.log"\n' "$dir" > "$dir/teardown-stub"
+  chmod +x "$dir/teardown-stub"
+  retire_contributions_observer "$dir"
+  add_stop_custom_check "$dir"
+  # The merge entrypoint's queued outcome surfaces as a recovery wake first.
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" >"$dir/recovery.out" 2>"$dir/recovery.err" \
+    || fail "self-merge-cleanup: recovery cycle failed: $(cat "$dir/recovery.err")"
+  grep -F 'check: rearm-resurface' "$dir/recovery.out" >/dev/null \
+    || fail "self-merge-cleanup: the recorded merge did not surface as a recovery wake: $(cat "$dir/recovery.out")"
+  ack_watcher_cycle "$state" || fail "self-merge-cleanup: recovery acknowledgement failed"
+  rm -f "$state/.last-check"
+  set +e
+  start=$(date +%s)
+  FM_PARK_TEARDOWN_BIN="$dir/teardown-stub" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" >"$dir/watch.out" 2>"$dir/watch.err"
+  rc=$?
+  took=$(( $(date +%s) - start ))
+  set -e
+  [ "$rc" -eq 0 ] || fail "self-merge-cleanup: watcher failed: $(cat "$dir/watch.err")"
+  [ ! -e "$dir/teardown.log" ] && [ "$took" -lt 8 ] \
+    || fail "self-merge-cleanup: the watcher iteration waited ${took}s for the teardown"
+  assert_grep 'stop-cycle' "$dir/watch.out" \
+    "self-merge-cleanup: the absorbed duplicate did not fall through to the next check"
+  assert_poll_absent "$state" task-a
+  for _ in $(seq 1 200); do compgen -G "$state/.review-park-report-*" >/dev/null && break; sleep 0.1; done
+  [ "$(cat "$dir/teardown.log" 2>/dev/null)" = task-a ] \
+    || fail "self-merge-cleanup: the poll did not clean up the self-merged lane: $(cat "$dir/teardown.log" 2>/dev/null)"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-park.sh" tick >"$dir/tick.out" 2>&1 \
+    || fail "self-merge-cleanup: the reporting tick failed: $(cat "$dir/tick.out")"
+  assert_grep "cleaned up task-a: PR $url merged" "$dir/tick.out" \
+    "self-merge-cleanup: the cleanup outcome did not reach the captain"
+  pass "a lane merged through bin/fm-pr-merge.sh is still cleaned up when its poll sees the merge"
+}
+
 test_self_merge_and_poll_publish_one_outcome() {
   local dir state replies url rc
   url=https://github.com/o/r/pull/1
@@ -3773,6 +3824,7 @@ test_gerrit_nm_ready_gate_requires_recovered_custody
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
+test_self_merged_lane_is_still_cleaned_up_by_the_poll
 test_self_merge_and_poll_publish_one_outcome
 test_merged_poll_row_carries_the_merge_authority
 test_merged_poll_row_names_no_authority_when_no_record_grants_one

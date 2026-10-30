@@ -46,7 +46,8 @@
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
+# the forge (GitHub, a GitLab merge request, or Forgejo) reports a PR head that
+# contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main. A task whose meta records
@@ -1656,12 +1657,25 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
+# GitLab serves a merge request's head as refs/merge-requests/<n>/head; GitHub
+# and Forgejo serve a pull request's as refs/pull/<n>/head.
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n ref
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
+  case "$target" in
+    *"/-/merge_requests/"*)
+      n=${target##*/-/merge_requests/}
+      n=${n%%[!0-9]*}
+      [ -n "$n" ] || return 1
+      ref="refs/merge-requests/$n/head"
+      ;;
+    *)
+      n=$(pr_number_from_target "$target") || return 1
+      ref="refs/pull/$n/head"
+      ;;
+  esac
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "$ref" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -1702,7 +1716,10 @@ EOF
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
 # forge for both the PR state and head: a recorded Forgejo URL is read through
-# tea (fm_pr_forgejo_read_record), and everything else through GitHub. Returns
+# tea (fm_pr_forgejo_read_record), a recorded GitLab merge request through glab
+# (fm_pr_gitlab_read_record, whose head is the MR's own head rather than the
+# squash or merge-train commit main received), and everything else through
+# GitHub. Returns
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then
 # falls back to the content check.
@@ -1716,6 +1733,12 @@ pr_is_merged() {
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
     fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    [ "$FM_PR_RECORD_MERGED" = true ] || return 1
+    head=$FM_PR_RECORD_HEAD
+    fm_pr_head_valid "$head" || return 1
+    resolved_url=$FM_PR_URL
+  elif fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
+    fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1
     head=$FM_PR_RECORD_HEAD
     fm_pr_head_valid "$head" || return 1
@@ -4100,6 +4123,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/$ID.claude-settings.json" "$STATE/$ID.devin-config.json" \
   "$STATE/$ID.polytoken-busy.sh" \
+  "$STATE/$ID.review-park" "$STATE/.review-park-closed-$ID" \
   "$STATE/.$ID.branch-outcome-index" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
 # kiro's per-task home is a directory (its relocated KIRO_HOME holds the hook

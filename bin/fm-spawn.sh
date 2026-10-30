@@ -5687,12 +5687,11 @@ spawn_record_polytoken_session() {
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.polytoken.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "polytoken_session" && $1 != "polytoken_port" && $1 != "polytoken_credential"' "$meta" >"$SPAWN_META_TMP" ||
     ! {
       echo "polytoken_session=$POLYTOKEN_SESSION_ID"
       echo "polytoken_port=$POLYTOKEN_SESSION_PORT"
       echo "polytoken_credential=$POLYTOKEN_SESSION_CREDENTIAL"
-    } >>"$SPAWN_META_TMP" ||
+    } | spawn_meta_rewrite_keep_pr_tail "$meta" "polytoken_session polytoken_port polytoken_credential" >"$SPAWN_META_TMP" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
@@ -6980,11 +6979,14 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
-  fi
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+  # Preserved lines come last: a recorded pr= must stay the record's tail
+  # (bin/fm-pr-lib.sh fm_pr_metadata_identity_parse), or the armed merge poll
+  # stops validating and a relaunched lane's merge goes unseen.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    preserve_relaunch_meta
   fi
 } >"$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
@@ -7348,6 +7350,24 @@ if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
 
+# Copy <meta> without the keys <drop-keys> names (space separated), then the
+# lines read from stdin, then the record's PR trailer: a recorded pr= must stay
+# the tail that bin/fm-pr-lib.sh fm_pr_metadata_identity_parse validates, or the
+# armed merge poll stops running and the lane's merge goes unseen.
+spawn_meta_rewrite_keep_pr_tail() {  # <meta> <drop-keys>
+  awk -F= -v drop="$2" '
+    BEGIN { n = split(drop, d, " "); for (i = 1; i <= n; i++) dropped[d[i]] = 1 }
+    FILENAME == "-" { added[++a] = $0; next }
+    $1 in dropped { next }
+    $1 == "pr" || $1 == "pr_head" || $1 ~ /^x_(request|request_ts|followups|platform|reply_max_chars)$/ { tail[++t] = $0; next }
+    { print }
+    END {
+      for (i = 1; i <= a; i++) print added[i]
+      for (i = 1; i <= t; i++) print tail[i]
+    }
+  ' - "$1"
+}
+
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
   # Fresh publication still owns the lock. Relaunch deliberately uses a short
@@ -7360,8 +7380,8 @@ spawn_record_traceparent() {
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "traceparent"' "$meta" >"$SPAWN_META_TMP" ||
-    ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >>"$SPAWN_META_TMP" ||
+    ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" \
+      | spawn_meta_rewrite_keep_pr_tail "$meta" traceparent >"$SPAWN_META_TMP" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true

@@ -153,6 +153,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated pull-request, merge-request, and Gerrit-change poll sidecars |
 | `fm-contributions.sh`    | Observe owned publications, retain exact-head judgments, measure required actors, and wake on maintainer or configured review-bot signals |
 | `fm-pr-health.sh`        | Opt-in: enroll the PRs this home owns from creation and notify once per condition per latest commit for a conflict or failing required check (see [configuration.md](configuration.md#pr-health-monitor-configpr-health-monitor)) |
+| `fm-park.sh`             | Park a ship lane whose PR or MR only awaits human review from a verified clean state, relaunch a fresh worker on review activity, and clean it up on merge (see [configuration.md](configuration.md#park-on-review-configpark-on-review-configauto-land)) |
 | `fm-pr-check.sh`         | Record validated task `pr=` and `pr_head=` values, then atomically arm a static merge poll; refuses GitHub drafts and persistent secondmate records (see [architecture.md](architecture.md)) |
 | `fm-review-check.sh`    | Record a forge=external task's validated `review=` and `review_head=` without arming a merge watch ([design](external-review-forge.md)) |
 | `fm-external-review-lib.sh` | Shared readers for the forge=external review tool adapter, ready-URL pattern, backup remote, and remote URLs |
