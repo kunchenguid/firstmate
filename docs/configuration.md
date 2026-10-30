@@ -2418,6 +2418,7 @@ Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 
 With the opt-in [Treehouse pool report](#treehouse-pool-report-configtreehouse-pool-report), bootstrap also prints `TREEHOUSE_POOL_REPORT:` findings.
+Bootstrap reports a `STALE_DAEMON:` line when the running `no-mistakes` daemon started before the installed binary was replaced; the supervisor restarts the daemon, and workers never do. [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh)'s header owns the exact detection rules.
 
 **Project refresh at startup**
 

@@ -69,8 +69,8 @@
 #          no-mistakes is OUTDATED when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          STALE_DAEMON is read-only: the running no-mistakes daemon started
-#          before the installed no-mistakes binary on PATH was last replaced (inode change time), so
-#          its next pipeline run can fail on config only the new build knows.
+#          before the installed no-mistakes binary on PATH was last replaced
+#          (inode change time), so its next pipeline run can fail on config only the new build knows.
 #          It names the supervisor remedy and never restarts the daemon; it is
 #          silent when no daemon runs or its pid or start time cannot be read.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
