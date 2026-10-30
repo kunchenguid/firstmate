@@ -418,7 +418,7 @@ That second rule still bounds an inert auto-arm when a hook never fires or fails
 Charging only epoch changes let the count freeze with that ledger, so the remaining inert-hook cases could re-block without limit and make the attended fail-open unreachable.
 `budget_account_current_epoch` in `bin/fm-turnend-guard.sh` owns the rule.
 A verified live foreign session-lock owner takes the earlier diagnostic safe exit instead and never reaches this budget path.
-Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
+Whenever both coordination locks are needed, positive auto-arm recovery, the terminal check, and the auto-arm's attended-alarm commit acquire the auto-arm owner lock before the budget lock.
 
 #### Attended fail-open
 
@@ -429,8 +429,14 @@ The one loud attended fail-open is available only when all of these hold:
 - The block budget is exhausted.
 - A final check finds neither a healthy watcher nor an automatic continuation.
 
+Two writers can commit `state/.claude-autoarm-failure-alarmed`, both under the same owner-then-budget lock order:
+
+- The guard's `terminal_fail_open`, when a Stop reaches it with the budget already exhausted and no live open generation claim.
+- The Stop auto-arm's own terminal failure: the exhausted continuation is the one participant that knows no automatic continuation remains, so when this session's consumed block count is already over budget it commits the alarm in the same owned critical section as its `failed-suppressed` ledger write and delivers the one loud final rewake. This is also the path a recurring automatic-continuation failure always reaches: the guard's claim-open step-aside would otherwise leave the alarm unwritten on every Stop.
+
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
+Every suppressed continuation in the episode emits one reason line instead of an empty rewake body.
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 

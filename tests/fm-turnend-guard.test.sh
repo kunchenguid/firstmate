@@ -1778,7 +1778,8 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   for i in 1 2 3 4; do
     out=$(run_integrated_autoarm "$dir"); status=$?
     expect_code 2 "$status" "failed epoch $i must retain the automatic retry handoff"
-    [ -z "$out" ] || fail "failed epoch $i repeated the operator notice: $out"
+    assert_contains "$out" "suppressed continuation" "failed epoch $i did not carry its one-line reason: $out"
+    assert_not_contains "$out" "automatic supervision mechanism is broken" "failed epoch $i repeated the operator notice: $out"
     guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
     if [ "$i" -lt 4 ]; then
       expect_code 2 "$guard_status" "failed epoch $i must consume a bounded blind-stop block"
@@ -1792,7 +1793,8 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
 
   out=$(run_integrated_autoarm "$dir"); status=$?
   expect_code 0 "$status" "the auto-arm must not re-trigger continuation after the final fail-open"
-  [ -z "$out" ] || fail "post-fail-open auto-arm produced continuation output: $out"
+  assert_contains "$out" "suppressed continuation" "post-fail-open auto-arm did not carry its one-line reason: $out"
+  assert_not_contains "$out" "automatic supervision mechanism is broken" "post-fail-open auto-arm repeated the operator notice: $out"
   guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); guard_status=$?
   expect_code 2 "$guard_status" "a later unhealthy stop in the same episode must remain attended"
   assert_not_contains "$guard_out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the attended alarm repeated in the same episode"
@@ -1987,6 +1989,97 @@ test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
   assert_absent "$dir/state/.claude-autoarm.lock" "concurrent recovery left the owner lock"
   assert_absent "$dir/state/.turnend-claude-blocks.lock" "concurrent recovery left the budget lock"
   pass "fm-turnend-guard --claude: concurrent auto-arm and guard resets are idempotent and deadlock-free"
+}
+
+# The production failure shape: the same-Stop auto-arm's open generation claim
+# makes the synchronous guard step aside on every firing, so terminal_fail_open
+# is never reached while the automatic continuation keeps exhausting. The
+# exhausted auto-arm is then the only participant that knows no automatic
+# continuation remains, so it commits the attended alarm itself. Both hooks
+# fire per Stop here - the slow fixture arm keeps each generation claim open
+# while the guard runs, so the guard deterministically takes its step-aside
+# observe branch: one failure notice, then reasoned suppressed continuations,
+# then exactly one loud final rewake carrying the alarm the auto-arm wrote, and
+# quiet suppressed generations after it.
+test_hook_claude_mode_autoarm_commits_attended_alarm_on_exhausted_continuation() {
+  local dir i auto_pid guard_status auto_status pid identity
+  local alarmed=-1 loud=0 suppressed_reasons=0 empty=0
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-autoarm-alarm")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 1
+printf 'watcher: FAILED - persistent fixture failure\n'
+exit 1
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  local claim_outcome waited
+  for i in 1 2 3 4 5 6 7; do
+    (FM_CLAUDE_AUTOARM_ATTEMPTS=1 run_integrated_autoarm "$dir" > "$dir/auto-$i.out"; printf '%s' "$?" > "$dir/auto-$i.status") &
+    auto_pid=$!
+    # Fire the guard only once this generation's claim is observed open, so the
+    # guard deterministically takes its step-aside observe branch instead of
+    # racing the pre-claim ledger (the arm below still runs for another ~1s).
+    claim_outcome=
+    waited=0
+    while [ "$waited" -lt 100 ]; do
+      claim_outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$dir/state/.claude-autoarm-epoch" 2>/dev/null || true)
+      [ "$claim_outcome" = arming ] && break
+      sleep 0.05
+      waited=$((waited + 1))
+    done
+    [ "$claim_outcome" = arming ] || fail "the auto-arm never opened its generation claim (stop $i)"
+    FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" false > "$dir/guard-$i.out"
+    guard_status=$?
+    wait "$auto_pid"
+    auto_status=$(cat "$dir/auto-$i.status")
+    # The guard either steps aside for the open claim (0) or, on a transient
+    # probe failure, takes its bounded re-block (2) - both paths charge this
+    # new generation exactly once, and neither can alarm mid-claim because the
+    # verified-failure gate reads outcome=arming.
+    case "$guard_status" in
+      0|2) : ;;
+      *) fail "the guard returned an unsafe status $guard_status while the auto-arm's claim was open (stop $i)" ;;
+    esac
+    case "$auto_status" in
+      0|2) : ;;
+      *) fail "the auto-arm returned an unsafe status $auto_status (stop $i): $(cat "$dir/auto-$i.out")" ;;
+    esac
+    if [ -e "$dir/state/.claude-autoarm-failure-alarmed" ] && [ "$alarmed" -lt 0 ]; then
+      alarmed=$i
+    fi
+    grep -q 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "$dir/auto-$i.out" && loud=$((loud + 1))
+    grep -q 'suppressed continuation' "$dir/auto-$i.out" && suppressed_reasons=$((suppressed_reasons + 1))
+    { [ "$auto_status" -eq 2 ] && [ ! -s "$dir/auto-$i.out" ]; } && empty=$((empty + 1))
+  done
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "the failure episode notice was never consumed"
+  [ "$alarmed" -ge 0 ] || fail "the auto-arm never committed the attended alarm"
+  [ "$loud" -eq 1 ] || fail "the final supervision-down rewake fired $loud times instead of once"
+  [ "$suppressed_reasons" -ge 1 ] || fail "no suppressed continuation carried its one-line reason"
+  [ "$empty" -eq 0 ] || fail "$empty rewake-triggering continuations carried an empty body"
+  expect_code 2 "$(cat "$dir/auto-1.status")" "the first exhausted failure must still notify"
+  assert_contains "$(cat "$dir/auto-1.out")" "automatic supervision mechanism is broken" "the first failure omitted its notice"
+  [ "$alarmed" -ge 2 ] || fail "the alarm cannot precede the consumed failure notice, it fired at stop $alarmed"
+  for i in $(seq $((alarmed + 1)) 7); do
+    expect_code 0 "$(cat "$dir/auto-$i.status")" "a post-alarm generation must stay suppressed, not rewake (stop $i)"
+    assert_not_contains "$(cat "$dir/auto-$i.out")" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the attended alarm repeated after commit (stop $i)"
+  done
+  # Positive recovery clears the whole episode - notice, alarm, and budget - so
+  # the next failure episode restarts its own attended budget.
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify recovery watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  auto_status=$(FM_CLAUDE_AUTOARM_ATTEMPTS=1 run_integrated_autoarm "$dir" > "$dir/auto-recovery.out"; printf '%s' "$?")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$auto_status" "a healthy watcher must close the alarmed episode cleanly"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "positive recovery left the failure notice"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "positive recovery left the attended alarm"
+  assert_absent "$dir/state/.turnend-claude-blocks" "positive recovery left the block budget"
+  pass "fm-turnend-guard --claude: the exhausted auto-arm commits the attended alarm once, then stays suppressed until recovery"
 }
 
 test_hook_claude_mode_stale_rewake_epoch_blocks() {
@@ -2448,6 +2541,7 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open
 test_hook_claude_mode_frozen_epoch_without_verified_failure_spends_budget_and_keeps_blocking
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
+test_hook_claude_mode_autoarm_commits_attended_alarm_on_exhausted_continuation
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
