@@ -38,22 +38,28 @@
 #     busy -> working, idle -> idle, unknown/missing -> hold the last record
 #   unhandled <id>.inbox/*.msg with an idle-or-silent busy record reads as
 #     working "Steering received"
+#   a failed/done/paused declaration yields to activity stamped after it: a
+#   busy turn that began later reads as working, and a later unhandled inbox
+#   message as "Steering received"; an open decision or blocker always wins
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
 # firstmate's own id=fm attention marks on Rex are a separate supervisor-side
 # feature (bin/fm-rex-marks.sh) and compose unchanged. The watcher re-emits
 # only on change plus a heartbeat (records outlive resends, but a terminal
-# that dropped one is repaired). It exits when its recorded parent - the
-# pane's launch shell - dies, after a final emit that keeps done/error and
-# otherwise parks the record at idle, and a TERM/HUP removes it the same way.
-# Per-tty dedup (<state>/.osc7501watch-<tty>) makes a re-arm replace a stale
-# watcher instead of stacking, which also clears a previous task's reporter
-# from a reused pane.
+# that dropped one is repaired). Its lifetime is the agent incarnation: the
+# launch runs `disarm` right after the agent command returns, and the watcher
+# also exits when its recorded parent - the shell running the launch - dies.
+# Either way a final emit keeps done/error and otherwise parks the record at
+# idle; a TERM/HUP retires it the same way. One watcher per controlling
+# terminal (<state>/.osc7501watch-<tty>): every arm retires the pane's
+# previous watcher before any gate, so a relaunch rebinds to the new agent and
+# a natively reporting agent never shares the pane with a stale writer.
 #
 # Safety: the capability query is the ONLY terminal-input read; it runs while
 # the pane shell still owns the tty (before the agent launches), sets
-# -icanon -echo for under a second, restores the saved mode, and drains any
+# -icanon -echo for under a second, restores the saved mode (also when a
+# signal interrupts it), and drains any
 # straggler bytes so nothing escape-shaped reaches the worker's composer or
 # the agent's input later. Every record write is one small write() to the
 # pane's tty in the output direction - the same channel fm-rex-marks.sh uses -
@@ -64,6 +70,7 @@
 #       --config <dir> [--agent-bin <path>]   detect + spawn watcher; exit 0
 #   watch --task <id> --kind <k> --state <dir> --harness <h> --parent <pid>
 #                                            the reporter loop (internal)
+#   disarm --state <dir>                     retire this terminal's watcher
 #   report <state> [kind] [msg]              emit one root record now with
 #                                            app=firstmate (testing, debug)
 #
@@ -90,6 +97,7 @@ usage() {
   {
     echo "usage: fm-osc7501.sh arm --task <id> --harness <h> --backend <b> --kind <k> --state <dir> --config <dir> [--agent-bin <path>]"
     echo "       fm-osc7501.sh watch --task <id> --kind <k> --state <dir> --harness <h> --parent <pid>"
+    echo "       fm-osc7501.sh disarm --state <dir>"
     echo "       fm-osc7501.sh report <state> [kind] [msg]"
   } >&2
   exit 2
@@ -196,9 +204,18 @@ osc_env_unaware() {
 # starts. A second gap-bounded read mops up a response that straddled a
 # silence so no escape-shaped bytes are left for the next program on the
 # pane to read.
+osc_query_restore() { # <signal>: restore the saved mode, then die by it
+  stty "$old" <"$dev" 2>/dev/null
+  trap - "$1"
+  kill -"$1" "$$"
+}
+
 osc_query_supported() {
   local dev=${FM_OSC7501_TTY:-/dev/tty} old reply='' more
   old=$(stty -g <"$dev" 2>/dev/null) || return 1
+  trap 'osc_query_restore INT' INT
+  trap 'osc_query_restore TERM' TERM
+  trap 'osc_query_restore HUP' HUP
   if stty -icanon -echo min 0 time "$FM_OSC7501_QUERY_DS" <"$dev" 2>/dev/null; then
     printf '\033]7501;?\033\134' >"$dev" 2>/dev/null
     reply=$(dd bs=1 count=8192 if="$dev" 2>/dev/null)
@@ -208,6 +225,7 @@ osc_query_supported() {
     fi
   fi
   stty "$old" <"$dev" 2>/dev/null || true
+  trap - INT TERM HUP
   case "$reply" in *"$FM_OSC7501_QUERY_MATCH"*) return 0 ;; esac
   return 1
 }
@@ -303,10 +321,22 @@ osc_load_libs() {
   LIBS_LOADED=1
 }
 
+# osc_inbox_since <inbox> <epoch>: 0 when an unhandled message is newer than
+# <epoch> (0 = any unhandled message).
+osc_inbox_since() {
+  local msg mt
+  for msg in "$1"/*.msg; do
+    [ -e "$msg" ] || continue
+    mt=$(osc_mtime "$msg") || continue
+    [ "${mt:-0}" -gt "$2" ] 2>/dev/null && return 0
+  done
+  return 1
+}
+
 # osc_plan sets W_STATE, W_KIND, W_MSG; returns 1 when nothing should be
 # emitted (no signal yet, or the busy record is unknown).
 osc_plan() { # <task> <kind> <state>
-  local task=$1 kind=$2 state_dir=$3 line verb note held bs
+  local task=$1 kind=$2 state_dir=$3 line verb note held rec bs bts since=0
   W_STATE=
   W_KIND=
   W_MSG=
@@ -321,12 +351,14 @@ osc_plan() { # <task> <kind> <state>
       W_STATE=blocked
       W_KIND=question
       W_MSG="Needs your decision: $note"
+      return 0
       ;;
     blocked)
       W_STATE=blocked
       W_KIND=permission
       if printf '%s' "$note" | grep -Eiq "$FM_OSC7501_AUTH_RE"; then W_KIND=auth; fi
       W_MSG="Blocked: $note"
+      return 0
       ;;
     failed)
       W_STATE=error
@@ -343,24 +375,26 @@ osc_plan() { # <task> <kind> <state>
       W_STATE=working
       W_MSG="Waiting: $note"
       ;;
-    *)
-      bs=$(tr ' ' '\n' <"$state_dir/$task.busy-state" 2>/dev/null | sed -n 's/^state=//p' | tail -1)
-      case "$bs" in
-        busy) W_STATE=working ;;
-        idle) W_STATE=idle ;;
-        *)
-          set -- "$state_dir/$task.inbox"/*.msg
-          if [ -e "$1" ]; then
-            W_STATE=working
-            W_MSG="Steering received"
-          else
-            return 1
-          fi
-          ;;
-      esac
-      ;;
   esac
-  return 0
+  if [ -n "$W_STATE" ]; then
+    since=$(status_line_at_epoch "$line" 2>/dev/null) || return 0
+  fi
+  rec=$(tr ' ' '\n' <"$state_dir/$task.busy-state" 2>/dev/null)
+  bs=$(printf '%s\n' "$rec" | sed -n 's/^state=//p' | tail -1)
+  bts=$(printf '%s\n' "$rec" | sed -n 's/^ts=//p' | tail -1)
+  case "$bts" in '' | *[!0-9]*) bts=0 ;; esac
+  if [ "$bs" = busy ] && { [ "$since" = 0 ] || [ "$bts" -gt "$since" ]; }; then
+    W_STATE=working
+    W_KIND=
+    W_MSG=
+  elif osc_inbox_since "$state_dir/$task.inbox" "$since"; then
+    W_STATE=working
+    W_KIND=
+    W_MSG="Steering received"
+  elif [ "$since" = 0 ] && [ "$bs" = idle ]; then
+    W_STATE=idle
+  fi
+  [ -n "$W_STATE" ]
 }
 
 # --- watcher ------------------------------------------------------------------
@@ -368,17 +402,11 @@ osc_plan() { # <task> <kind> <state>
 # final record before exit: keep a result worth finding (done/error) and park
 # everything else at idle, never clearing records another program owns.
 osc_final() {
-  local line verb
-  line=$(status_current_line "$WATCH_STATUS_FILE" "$WATCH_KIND" 2>/dev/null)
-  verb=$(status_line_verb "$line" 2>/dev/null) || verb=
-  case "$verb" in
-    done | failed)
-      if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE"; then
-        printf '%s' "$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")" >&3 2>/dev/null
-      fi
-      ;;
-    *) printf '%s' "$(osc_seq idle '' '' '' "$WATCH_TITLE" '')" >&3 2>/dev/null ;;
-  esac
+  if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" && { [ "$W_STATE" = 'done' ] || [ "$W_STATE" = error ]; }; then
+    printf '%s' "$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")" >&3 2>/dev/null
+  else
+    printf '%s' "$(osc_seq idle '' '' '' "$WATCH_TITLE" '')" >&3 2>/dev/null
+  fi
 }
 
 osc_watch() { # --task --kind --state --harness --parent
@@ -408,7 +436,6 @@ osc_watch() { # --task --kind --state --harness --parent
   FM_OSC_APP="firstmate-$WATCH_HARNESS"
   FM_OSC_APP="${FM_OSC_APP:0:$FM_OSC7501_APP_MAX}"
   WATCH_TITLE="fm-$WATCH_TASK"
-  WATCH_STATUS_FILE="$WATCH_STATE/$WATCH_TASK.status"
   local dev=${FM_OSC7501_TTY:-/dev/tty} hb=0 hb_ticks last='' seq
   exec 3>>"$dev" 2>/dev/null || exit 0
   osc_load_libs || exit 0
@@ -440,7 +467,58 @@ osc_watch() { # --task --kind --state --harness --parent
   done
 }
 
-# --- arm ----------------------------------------------------------------------
+# --- arm / disarm -------------------------------------------------------------
+
+# osc_tty_key -> pidfile key naming this process's controlling terminal (the
+# device /dev/tty opens), or the FM_OSC7501_TTY stand-in; 1 without one.
+osc_tty_key() {
+  local key
+  if [ -n "${FM_OSC7501_TTY:-}" ]; then
+    key=$FM_OSC7501_TTY
+  else
+    key=$(ps -o tty= -p "$$" 2>/dev/null) || return 1
+    key=${key//[[:space:]]/}
+  fi
+  case "$key" in '' | *'?'*) return 1 ;; esac
+  key=${key#/dev/}
+  printf '%s' "${key//\//_}"
+}
+
+# osc_retire <pidfile>: stop the watcher it records (its TERM trap emits the
+# final record) and forget it.
+osc_retire() {
+  local opid=''
+  [ -f "$1" ] || return 0
+  read -r opid _ <"$1" 2>/dev/null || opid=
+  case "$opid" in
+    '' | *[!0-9]*) ;;
+    *)
+      if kill -0 "$opid" 2>/dev/null && ps -o command= -p "$opid" 2>/dev/null | grep -q 'fm-osc7501\.sh'; then
+        kill "$opid" 2>/dev/null || true
+        sleep 0.2
+      fi
+      ;;
+  esac
+  rm -f "$1"
+}
+
+osc_disarm() { # --state <dir>
+  local opt state=''
+  while [ $# -gt 0 ]; do
+    opt=$1
+    shift
+    case "$opt" in
+      --state) state=$1 ;;
+      *) usage ;;
+    esac
+    shift
+  done
+  [ -d "$state" ] || exit 0
+  local key
+  key=$(osc_tty_key) || exit 0
+  osc_retire "$state/.osc7501watch-$key"
+  exit 0
+}
 
 osc_arm() { # --task --harness --backend --kind --state --config [--agent-bin]
   local opt task='' harness='' backend='' kind='' state='' config='' agent_bin=''
@@ -461,6 +539,10 @@ osc_arm() { # --task --harness --backend --kind --state --config [--agent-bin]
   done
   task_ok "$task" || exit 0
   [ -d "$state" ] || exit 0
+  local key pidfile
+  key=$(osc_tty_key) || exit 0
+  pidfile="$state/.osc7501watch-$key"
+  osc_retire "$pidfile"
   osc_gate "$config" "$state" || exit 0
   # a pane without a writable tty can never report, and one without a readable
   # tty can never answer the capability query either
@@ -473,25 +555,6 @@ osc_arm() { # --task --harness --backend --kind --state --config [--agent-bin]
   if ! osc_env_aware; then
     [ -r "$dev" ] || exit 0
     osc_query_supported || exit 0
-  fi
-  # one watcher per tty: replace a stale or foreign-task reporter
-  local key pidfile opid='' otask=''
-  key=$(tty <"$dev" 2>/dev/null) || key="$$"
-  key=${key#/dev/}
-  key=${key//\//_}
-  pidfile="$state/.osc7501watch-$key"
-  if [ -f "$pidfile" ]; then
-    read -r opid otask _ <"$pidfile" 2>/dev/null || opid=
-    case "$opid" in
-      '' | *[!0-9]*) ;;
-      *)
-        if kill -0 "$opid" 2>/dev/null && ps -o command= -p "$opid" 2>/dev/null | grep -q 'fm-osc7501\.sh'; then
-          [ "$otask" = "$task" ] && exit 0
-          kill "$opid" 2>/dev/null || true
-          sleep 0.2
-        fi
-        ;;
-    esac
   fi
   FM_OSC7501_WATCHER=1 nohup bash "$SCRIPT_DIR/fm-osc7501.sh" watch \
     --task "$task" --kind "$kind" --state "$state" --harness "$harness" \
@@ -521,6 +584,9 @@ case "${1:-}" in
   watch)
     shift
     osc_watch "$@" ;;
+  disarm)
+    shift
+    osc_disarm "$@" ;;
   report)
     shift
     osc_report "$@" ;;
