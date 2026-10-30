@@ -1871,7 +1871,7 @@ test_pi_exclude_tools_malformed_entry_refuses_before_endpoint() {
 
 test_pi_exclude_tools_server_shape_refuses_before_endpoint() {
   local rec id out status bad n=0
-  for bad in 'mcp__iqx-jira__editJiraIssue' 'mcp__my.srv__tool' 'mcp__a-b'; do
+  for bad in 'mcp__my-tracker__editIssue' 'mcp__my.srv__tool' 'mcp__a-b'; do
     n=$((n + 1))
     id="excl-shape-$n-z9s"
     rec=$(make_spawn_case "excl-shape-$n" pi "$id")
