@@ -510,7 +510,7 @@ test_launch_preserves_inherited_git_config() {
   rec=$(make_spawn_case "$id" codex "$id")
   read_case_record "$rec"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness 'echo WORKER-RAN >&2; git config --get-all credential.helper; git config --get core.hooksPath; :')
+    "$id" "$PROJ_DIR" --harness 'echo WORKER-RAN >&2; git config --get-all credential.helper; git config --get core.hooksPath; : __BRIEF__')
   status=$?
   expect_code 0 "$status" "Git configuration probe should spawn: $out"
   launch=$(cat "$LAUNCH_LOG")
@@ -621,6 +621,27 @@ test_raw_rovo_launch_gets_no_positional_brief() {
   pass "a raw rovo launch is not given the positional launch-brief argument"
 }
 
+# Appending the brief after a compound raw command would give it to the last
+# step (or leave a bare quoted word to run), so the spawn refuses and points at
+# __BRIEF__ instead.
+test_compound_raw_launch_without_brief_placeholder_is_refused() {
+  local rec id out status raw
+  id=raw-compound-z15
+  rec=$(make_spawn_case raw-compound claude "$id")
+  read_case_record "$rec"
+
+  for raw in "custom-agent --flag; cleanup" "custom-agent --flag;" "custom-agent --flag && cleanup" "custom-agent --flag | tee out"; do
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$raw")
+    status=$?
+    expect_code 1 "$status" "compound raw launch should be refused: $raw"
+    assert_contains "$out" "raw launch command is compound" "refusal did not explain the compound command: $raw"
+    assert_contains "$out" "__BRIEF__" "refusal did not point at __BRIEF__: $raw"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused compound raw launch still published state/$id.meta: $raw"
+  done
+  pass "a compound raw launch without __BRIEF__ is refused with guidance"
+}
+
 test_chained_raw_launch_strips_ai_trailer_in_every_step() {
   local rec id out status launch body
   id=chained-raw-z15
@@ -628,7 +649,7 @@ test_chained_raw_launch_strips_ai_trailer_in_every_step() {
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "cd . && git commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: chained raw launch' && true")
+    "$id" "$PROJ_DIR" "cd . && git commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: chained raw launch' && : __BRIEF__")
   status=$?
   expect_code 0 "$status" "chained raw launch should spawn: $out"
   launch=$(cat "$LAUNCH_LOG")
@@ -2748,6 +2769,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_rovo_launch_gets_no_positional_brief
+test_compound_raw_launch_without_brief_placeholder_is_refused
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort

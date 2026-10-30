@@ -2928,6 +2928,12 @@ case "$ARG3" in
     # shellcheck disable=SC2016 # literal text, expanded by the launched shell
     case "$LAUNCH" in
     *__BRIEF__*) : ;;
+    *\;* | *\|* | *'&&'* | *' & '* | *' &' | *$'\n'*)
+      # Appending after a compound command would hand the brief to whatever
+      # step comes last (or leave a bare quoted word), not to the agent.
+      echo "error: raw launch command is compound (it contains ;, |, &&, & or a newline), so the launch brief cannot be appended to the agent's argv; put __BRIEF__ where the agent takes its prompt, for example: my-agent --flag \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"; cleanup" >&2
+      exit 1
+      ;;
     *) LAUNCH=$LAUNCH' "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     esac
     ;;
