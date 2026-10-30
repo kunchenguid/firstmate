@@ -2590,13 +2590,23 @@ slot_claim_home_owns_state() {  # <claim-home> <record-state>
 }
 
 # Whether another task record's own recorded endpoint is proven not live: its
-# endpoint metadata validates and the recovery-grade classifier reads it dead
-# or missing. Every other answer, including a validation failure, is not proof.
+# endpoint metadata validates and the recovery-grade classifier reads it dead,
+# or the backend-specific absence authority proves a missing endpoint gone.
+# Every other answer, including a validation failure, is not proof.
 other_record_endpoint_proven_gone() {  # <meta-file> <task-id>
+  local meta=$1 task_id=$2 state verdict
   local FM_BACKEND_VALIDATED_BACKEND FM_BACKEND_VALIDATED_TARGET
-  fm_backend_validate_task_endpoint "$1" "$2" 2>/dev/null || return 1
-  case "$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")" in
-    dead|missing) return 0 ;;
+  fm_backend_validate_task_endpoint "$meta" "$task_id" 2>/dev/null || return 1
+  state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")
+  case "$state" in
+    dead) return 0 ;;
+    missing)
+      verdict=$(fm_control_endpoint_absence_verdict \
+        "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$meta")
+      case "${verdict%%$'\t'*}" in
+        gone|dead) return 0 ;;
+      esac
+      ;;
   esac
   return 1
 }

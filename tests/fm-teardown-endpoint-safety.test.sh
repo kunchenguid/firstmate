@@ -1169,20 +1169,24 @@ write_two_records_on_one_slot() {  # <case> <stale-id> <owner-id>
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
 }
 
-# A tmux whose inventory lists <task-id>'s window with a harness in the
-# foreground, so that task's recorded endpoint reads live. Read-only queries
-# are answered silently; anything else is logged as a runtime mutation.
-make_live_tmux_endpoint() {  # <case> <task-id>
-  local dir=$1 id=$2
+# A tmux whose inventory optionally lists <task-id>'s window with <command> in
+# the foreground. Read-only queries are answered silently; anything else is
+# logged as a runtime mutation.
+make_tmux_endpoint() {  # <case> <task-id-or-empty> <command-or-empty>
+  local dir=$1 id=$2 command=$3
   cat > "$dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
 case "\$1" in
-  list-windows) printf 'fm-%s\\n' '$id'; exit 0 ;;
+  list-windows)
+    [ -z '$id' ] || printf 'fm-%s\\n' '$id'
+    exit 0
+    ;;
   display-message)
     case "\$*" in
-      *pane_current_command*) printf 'claude\\n' ;;
+      *pane_current_command*) [ -z '$command' ] || printf '%s\\n' '$command' ;;
     esac
-    exit 0 ;;
+    exit 0
+    ;;
 esac
 printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
@@ -1234,12 +1238,13 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   local dir stale=stale-task owner=owner-task rc
 
   # mine: the claim names the task being torn down and the other record's own
-  # endpoint is gone (the case's tmux inventory lists no window), so that
-  # record is stale rather than ambiguous. The owner returns its own slot and
-  # drops its claim; the stale record is left for its own teardown.
+  # endpoint is present but agent-free, so that record is stale rather than
+  # ambiguous. The owner returns its own slot and drops its claim; the stale
+  # record is left for its own teardown.
   dir=$(make_case two-records-claim-mine)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
   claim_pool_slot "$dir" "$owner"
+  make_tmux_endpoint "$dir" "$stale" bash
   set +e
   run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
@@ -1250,6 +1255,7 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   dir=$(make_case two-records-claim-mine-control-locked)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
   claim_pool_slot "$dir" "$owner"
+  make_tmux_endpoint "$dir" "$stale" bash
   start_lock_holder "$dir/home/state/.control-$stale.lock"
   assert_refused_without_mutation "$dir" "$owner" "mine with stale record lifecycle lock held"
   stop_lock_holder
@@ -1261,6 +1267,7 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   dir=$(make_case two-records-claim-mine-meta-locked)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
   claim_pool_slot "$dir" "$owner"
+  make_tmux_endpoint "$dir" "$stale" bash
   start_lock_holder "$dir/home/state/.meta-$stale.lock"
   assert_refused_without_mutation "$dir" "$owner" "mine with stale record metadata lock held"
   stop_lock_holder
@@ -1274,6 +1281,7 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   dir=$(make_case two-records-claim-mine-unforced)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
   claim_pool_slot "$dir" "$owner"
+  make_tmux_endpoint "$dir" "$stale" bash
   mkdir -p "$dir/home/data/$owner"
   printf 'scout report\n' > "$dir/home/data/$owner/report.md"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/home" PATH="$dir/fakebin:$PATH" \
@@ -1286,13 +1294,25 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   [ "$rc" -eq 0 ] || fail "unforced teardown of the claimed owner refused over a stale record: $(cat "$dir/stderr")"
   assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine, unforced"
 
+  # mine, but tmux reports the other record missing without carrying the socket
+  # identity needed to prove that endpoint gone, so the scan refuses.
+  dir=$(make_case two-records-claim-mine-other-missing)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  make_tmux_endpoint "$dir" '' ''
+  assert_refused_without_mutation "$dir" "$owner" "mine with an unproven missing other record: owner teardown"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
+    "mine with an unproven missing other record: the refusal should name the other record"
+  assert_present "$dir/pool/1/.fm-slot-owner" "mine with an unproven missing other record: the claim was removed"
+  assert_present "$dir/home/state/$stale.meta" "mine with an unproven missing other record: the other record was removed"
+
   # mine, but the other record's endpoint is live: a home whose allocator wrote
   # no claim may have taken the slot after this claim, so the claim alone is
   # not proof and the record scan refuses exactly as before.
   dir=$(make_case two-records-claim-mine-other-live)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
   claim_pool_slot "$dir" "$owner"
-  make_live_tmux_endpoint "$dir" "$stale"
+  make_tmux_endpoint "$dir" "$stale" claude
   assert_refused_without_mutation "$dir" "$owner" "mine with a live other record: owner teardown"
   assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
     "mine with a live other record: the refusal should name the other record"
