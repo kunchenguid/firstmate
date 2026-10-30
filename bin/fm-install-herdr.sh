@@ -21,7 +21,7 @@ FM_HERDR_CI_TAG="v${FM_HERDR_CI_VERSION}"
 FM_HERDR_CI_MIN_PROTOCOL=16
 # Bounded download ceiling (bytes). The largest official 0.7.4 asset is under 20 MiB.
 FM_HERDR_CI_MAX_BYTES=25000000
-FM_HERDR_CI_REPO=ogulcancelik/herdr
+FM_HERDR_CI_REPO=herdrdev/herdr
 
 die() {
   printf 'fm-install-herdr.sh: %s\n' "$*" >&2
