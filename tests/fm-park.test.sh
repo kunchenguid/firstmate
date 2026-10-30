@@ -559,6 +559,17 @@ wait_report() {  # <world> <label>
   fail "$2: no detached action reported within 20s"
 }
 
+# Waits for a detached land to settle. It publishes its report before it
+# removes the pending request, so a removed request means the report exists.
+wait_land_settled() {  # <world> <label>
+  for _ in $(seq 1 200); do
+    [ -e "$1/state/lane.review-park-land" ] || break
+    sleep 0.1
+  done
+  [ ! -e "$1/state/lane.review-park-land" ] || fail "$2: the pending cleanup request was not cleared within 20s"
+  compgen -G "$1/state/.review-park-report-*" >/dev/null || fail "$2: the pending request was cleared without a reported outcome"
+}
+
 # One tick that starts a lane action, then the next tick, which reports its
 # outcome; prints that report.
 tick_and_report() {  # <world> <label>
@@ -788,7 +799,7 @@ test_detached_land_returns_at_once_and_the_tick_reports_it() {
   [ "$out" = "automatic cleanup started" ] || fail "land-detached: $out"
   [ "$took" -lt 6 ] || fail "land-detached: the caller waited ${took}s for the teardown"
   [ ! -e "$w/teardown.log" ] || fail "land-detached: the teardown finished before the caller returned"
-  wait_report "$w" land-detached
+  wait_land_settled "$w" land-detached
   [ "$(cat "$w/teardown.log")" = lane ] || fail "land-detached: teardown calls: $(cat "$w/teardown.log")"
   out=$(run_park "$w" tick 2>&1)
   [ "$out" = "cleaned up lane: PR $GH_URL merged; lane torn down and its working copy returned" ] || fail "land-detached: report: $out"
@@ -815,8 +826,7 @@ SH
   [ -e "$w/teardown.started" ] || fail "land-recovery: cleanup did not start"
   [ -e "$w/state/lane.review-park-land" ] || fail "land-recovery: request removed before cleanup outcome"
   : > "$w/teardown.release"
-  wait_report "$w" land-recovery
-  [ ! -e "$w/state/lane.review-park-land" ] || fail "land-recovery: request kept after outcome"
+  wait_land_settled "$w" land-recovery
   out=$(run_park "$w" tick 2>&1)
   [ "$out" = "cleaned up lane: PR $GH_URL merged; lane torn down and its working copy returned" ] || fail "land-recovery: outcome: $out"
   out=$(run_park "$w" tick 2>&1)
@@ -841,13 +851,17 @@ SH
   [ -z "$out" ] || fail "land-lock-retry: first tick printed: $out"
   for _ in $(seq 1 100); do [ "$(cat "$w/teardown.count" 2>/dev/null || echo 0)" -ge 1 ] && break; sleep 0.1; done
   [ "$(cat "$w/teardown.count")" = 1 ] || fail "land-lock-retry: first teardown did not run"
-  sleep 0.2
-  [ -e "$w/state/lane.review-park-land" ] || fail "land-lock-retry: lock refusal removed pending request"
-  [ ! -e "$w/state/.review-park-report-lane" ] || fail "land-lock-retry: lock refusal was reported as final"
-  out=$(run_park "$w" tick 2>&1)
-  [ -z "$out" ] || fail "land-lock-retry: retry tick printed: $out"
-  wait_report "$w" land-lock-retry
-  [ ! -e "$w/state/lane.review-park-land" ] || fail "land-lock-retry: successful outcome kept pending request"
+  # A tick skips the lane while the first attempt still holds it, and drains
+  # any report it published, so tick until the retry runs: every tick must stay
+  # silent and the pending request must survive the refusal.
+  for _ in $(seq 1 200); do
+    [ "$(cat "$w/teardown.count")" = 1 ] || break
+    out=$(run_park "$w" tick 2>&1)
+    [ -z "$out" ] || fail "land-lock-retry: the lock refusal was reported as an outcome: $out"
+    sleep 0.1
+  done
+  [ "$(cat "$w/teardown.count")" = 2 ] || fail "land-lock-retry: the pending request was never retried"
+  wait_land_settled "$w" land-lock-retry
   out=$(run_park "$w" tick 2>&1)
   [ "$out" = "cleaned up lane: PR $GH_URL merged; lane torn down and its working copy returned" ] || fail "land-lock-retry: outcome: $out"
   [ "$(cat "$w/teardown.count")" = 2 ] || fail "land-lock-retry: teardown calls: $(cat "$w/teardown.count")"
