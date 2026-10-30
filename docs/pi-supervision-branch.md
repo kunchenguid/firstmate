@@ -606,7 +606,7 @@ The captain's away words are the whole mandate:
 - It holds with verdict captain on doubt.
 
 `bin/fm-branch-prompt.sh` "Postures" owns those execution rules.
-That owner also names the one standing-order scout dispatch that the away words, whatever they say, never cancel.
+That owner also names the one standing-order scout dispatch that only an explicit refusal in the away words cancels; words that merely name other work do not, and a current explicit captain instruction outranks the order.
 It requires every action taken under the words to open its outcome summary with "per your away instructions:".
 
 Each relocated script keeps its own gate, enforcing exactly what a script can check without reading words:

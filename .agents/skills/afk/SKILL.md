@@ -101,7 +101,7 @@ Away authority never releases a captain hold, and it expires when the away recor
 A merge under away authority must be synchronous; `fm-pr-merge.sh` refuses auto-merge and any GitHub queue state that cannot prove an immediate merge while the away record exists.
 The same gates bind whichever actor performs the action: on Pi the parked main's standing authority relocates to the supervision branch, which meets exactly these rules, and the spend cap recorded at entry is enforced by `fm-spawn.sh` for both actors while the away record exists.
 The captain's away words are their explicit instruction given before leaving, recorded verbatim and acted on by the away session's judgment at the moment an event makes them relevant; the words cover nothing they do not say, are never applied by analogy, and die at archive.
-Away words that are empty or silent on it still authorize no merge and no other new spawn; `bin/fm-branch-prompt.sh` "Postures" owns the one standing-order dispatch they never cancel.
+Away words that are empty or silent on it still authorize no merge and no other new spawn; `bin/fm-branch-prompt.sh` "Postures" owns the one standing-order dispatch that only an explicit refusal cancels.
 Destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.
 
 ## The daemon, where it still runs

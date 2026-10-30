@@ -155,15 +155,15 @@ test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
 
 # Away words that are empty or silent authorize no new spawn. The one exception
 # is a recurring read-only scout backlog item whose captain hold reason already
-# records the captain's standing order to start it while away, whatever the words say. The emitted prompt is
+# records the captain's standing order to start it while away, unless the words explicitly forbid it. The emitted prompt is
 # that contract.
-test_branch_prompt_dispatches_dated_standing_hold_whatever_the_away_words_say() {
+test_branch_prompt_dispatches_dated_standing_hold_unless_the_away_words_forbid_it() {
   local prompt
   prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
 
   assert_contains "$prompt" \
-    "Whatever the away words say or leave empty, dispatch also proceeds for one class: a recurring backlog item that dispatches a read-only scout (no pull request, no project change), whose captain hold reason records the captain's own standing order to start it while away, and whose hold date has arrived. A ship or any other recurring item still waits for the return." \
-    "branch prompt does not dispatch a dated standing hold whatever the away words say"
+    "Unless the away words explicitly forbid starting it (or all new work) for this absence, dispatch also proceeds for one class: a recurring backlog item that dispatches a read-only scout (no pull request, no project change), whose captain hold reason records the captain's own standing order to start it while away, and whose hold date has arrived; words that merely name other work do not stop it, and a current explicit captain instruction outranks the standing order. A ship or any other recurring item still waits for the return." \
+    "branch prompt does not state the explicit-forbid exception for a dated standing hold"
   assert_contains "$prompt" \
     "File and dispatch only the run that hold names, within the record's spend cap, through \`bin/fm-spawn.sh\`, then re-hold the item until the next day the way that hold already says." \
     "branch prompt does not keep the standing-hold dispatch on the guarded spawn path"
@@ -176,7 +176,7 @@ test_branch_prompt_dispatches_dated_standing_hold_whatever_the_away_words_say() 
   assert_not_contains "$prompt" \
     "empty words cancel no standing grant" \
     "branch prompt reopened every standing grant under silent away words"
-  pass "emitted branch prompt dispatches only a dated standing hold whatever the away words say"
+  pass "emitted branch prompt dispatches a dated standing hold unless the away words explicitly forbid it"
 }
 
 # --- append-only outcome store ------------------------------------------------
@@ -1684,7 +1684,7 @@ WRAPPER
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_branch_prompt_home_include_is_appended_last
 test_branch_prompt_routes_completed_scouts_through_guarded_cleanup
-test_branch_prompt_dispatches_dated_standing_hold_whatever_the_away_words_say
+test_branch_prompt_dispatches_dated_standing_hold_unless_the_away_words_forbid_it
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget
