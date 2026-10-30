@@ -3522,9 +3522,49 @@ ok - hc liveness: codex codex-cli 0.163.0 classifies alive in hc 0.1.13
 # unverified on this machine (not installed): opencode pi grok kimi
 ```
 
+### Linux and several machines
+
+Measured on 2026-10-30 with `hc 0.1.14` on two Linux hosts (7.0.0, `bash` 5.3.9) on one private network, each with its own account and core; the release archive matched the SHA-256 in `https://releases.herdr.dev/core/latest.json`.
+`tests/fm-backend-hc-smoke.test.sh` passed unchanged on the first host:
+
+```text
+ok - hc smoke: create_task started fmt1193638:t1
+ok - hc smoke: current_path follows the shell's cwd
+ok - hc smoke: send_text_line ran the command and capture shows its output
+ok - hc smoke: agent_state reads dead for a shell and alive for an agent-named foreground
+ok - hc smoke: kill closes and removes the terminal
+FM_TEST_COMPLETE
+```
+
+`tests/fm-backend-hc-liveness-live-e2e.test.sh` passed on the same host, and `~/.local/bin/claude` named the same version before and after:
+
+```text
+# claude 2.1.314 (Claude Code): foreground={"argv":["<home>/.local/bin/claude"],"cwd":"/tmp/fmhl.XlY5Ex/wt","name":"claude","pid":675909}
+ok - hc liveness: claude 2.1.314 (Claude Code) classifies alive in hc 0.1.14
+# codex codex-cli 0.164.0: foreground={"argv":["node","/usr/bin/codex"],"cwd":"/tmp/fmhl.XlY5Ex/wt","name":"MainThread","pid":676430}
+ok - hc liveness: codex codex-cli 0.164.0 classifies alive in hc 0.1.14
+# unverified on this machine (not installed): opencode pi grok kimi
+```
+
+On Linux hc names Codex's foreground after its main thread (`MainThread`), and the shared classifier still reads it as alive.
+
+On the second host, `fm_backend_hc_create_task fmverify fm-node2-1 <dir>` created a task terminal in a private session `fmverify`, and `fm_backend_hc_send_text_line` started a stand-in agent that reports OSC 7501 status.
+On the first host, a scratch viewer core reached it over plain SSH with a key:
+
+```text
+$ hc machine add <user>@<node2> --name node2 --session fmverify
+{"host":"<node2>","id":"49c3921790e4a9c2f1cf76464a779802","name":"node2","session":"fmverify","target":"<user>@<node2>","temporary":false,"version":"0.1.14","via":false}
+$ hc ls --json --label firstmate.task=fm-node2-1
+{"hidden_finished":0,"machines":[{"name":"node2","state":"connected"}],"terminals":[{"address":"node2/t1","agent":"fake-agent","cwd":"<home>/fmverify/proj","state":"live","status":"idle","turn":0}]}
+```
+
+After the second host's adapter submitted one line to the task, the viewer's `hc events --json --label firstmate.task=fm-node2-1` carried `node2/t1` status `working`, then `idle`, then a `turn` event with `turn: 1`, and `hc read node2/t1` showed the submitted line and the stand-in's reply.
+The first time each account's core started, hc printed `hc: turned on linger for <user>, so the core outlives your logins`, and `/var/lib/systemd/linger/<user>` existed afterwards.
+
 ### Not verified
 
 - A ship spawn, and a spawn with a real harness rather than the stand-in.
+- A task spawned through `bin/fm-spawn.sh` on Linux, and WSL2.
 - Submit confirmation against a real harness composer, since no prompt was submitted.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
 - How the `herdr.space` and `herdr.tab` labels display in Herdr.app.

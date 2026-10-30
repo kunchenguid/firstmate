@@ -64,6 +64,22 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Agent state | `hc get`, the foreground process and its process group, through the shared classifier |
 | Close | `hc kill`, then `hc rm`, then `hc get` must answer not found |
 
+## Several machines
+
+Firstmate never starts a task terminal on another machine: each task's worktree and harness live on its home's machine, and the adapter records only local addresses such as `t7`.
+To watch crews on several machines together, run a home with this backend on each machine's own core, and add those machines to the core that does the watching, such as Herdr.app's on a laptop or `hc` on one node:
+
+```sh
+hc machine add <user>@<node> --name <node>
+hc ls --label firstmate.task=fm-<id>
+hc read <node>/t3 --lines 40
+```
+
+The watching core merges terminal lists and status events, so `hc ls` and `hc events` show `t3` beside `<node>/t3`, and label filters apply across machines; Firstmate needs no configuration for this.
+Add `--session <name>` when that node's home runs on a core session other than `default`.
+Herdr.app adds machines the same way from Settings → Machines.
+On Linux, hc turns on systemd linger for the account the first time its core starts, so the core outlives logins; retiring a node account also needs `loginctl disable-linger <user>`.
+
 ## Limits
 
 - `hc send` always presses Enter, so hc cannot type without submitting.
