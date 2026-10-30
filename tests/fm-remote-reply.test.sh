@@ -56,6 +56,12 @@ fi
   printf 'A\000 connection attempt failed because the connected party did not properly respond\000 Error code: Bash/Service/WSAETIMEDOUT\000\n'
   exit 255
 }
+[ "${FM_REMOTE_REPLY_HANG:-}" != 1 ] || { sleep 30; exit 255; }
+[ "${FM_REMOTE_REPLY_BANNER:-}" != 1 ] || {
+  printf 'Welcome to remote-mac\n'
+  exit 0
+}
+[ -n "${FM_REMOTE_REPLY_FAIL_READ_STATUS:-}" ] && exit "$FM_REMOTE_REPLY_FAIL_READ_STATUS"
 [ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
 host=$1
 entry=$2
@@ -168,11 +174,56 @@ transport_error_rc=$?
 FM_REMOTE_REPLY_FAIL_READ=1 remote_env "$ADAPTER" source ios > "$TMP_ROOT/ssh-255.result"
 ssh_255_rc=$?
 set -e
-[ "$transport_error_rc" -ne 0 ] || fail "a non-schema transport diagnostic returned success"
+[ "$transport_error_rc" -eq 75 ] || fail "a non-schema transport diagnostic returned $transport_error_rc instead of an empty-window status"
 [ ! -s "$TMP_ROOT/transport-error.result" ] || fail "a non-schema transport diagnostic was emitted as a result"
-[ "$ssh_255_rc" -ne 0 ] || fail "ssh exit 255 returned success"
+[ "$ssh_255_rc" -eq 75 ] || fail "ssh exit 255 returned $ssh_255_rc instead of an empty-window status"
 [ ! -s "$TMP_ROOT/ssh-255.result" ] || fail "ssh exit 255 emitted a result"
-pass "transport failures and non-schema diagnostics stay out of captured results"
+for failed_status in 1 2; do
+  set +e
+  FM_REMOTE_REPLY_FAIL_READ_STATUS="$failed_status" remote_env "$ADAPTER" source ios > "$TMP_ROOT/ssh-$failed_status.result"
+  failed_rc=$?
+  set -e
+  [ "$failed_rc" -eq 75 ] || fail "remote exit $failed_status returned $failed_rc instead of an empty-window status"
+  [ ! -s "$TMP_ROOT/ssh-$failed_status.result" ] || fail "remote exit $failed_status emitted a result"
+done
+pass "transport failures and remote read failures become transient empty windows"
+
+set +e
+FM_REMOTE_REPLY_FAIL_READ_STATUS=127 remote_env "$ADAPTER" source ios > "$TMP_ROOT/ssh-127.result"
+missing_reader_rc=$?
+FM_REMOTE_REPLY_BANNER=1 remote_env "$ADAPTER" source ios > "$TMP_ROOT/banner.result"
+banner_rc=$?
+set -e
+[ "$missing_reader_rc" -eq 127 ] || fail "remote exit 127 returned $missing_reader_rc instead of its own status"
+[ ! -s "$TMP_ROOT/ssh-127.result" ] || fail "remote exit 127 emitted a result"
+[ "$banner_rc" -eq 1 ] || fail "a successful non-schema leg returned $banner_rc instead of a failed read"
+[ ! -s "$TMP_ROOT/banner.result" ] || fail "a successful non-schema leg emitted a result"
+pass "other failed or non-schema remote legs stay failed reads"
+
+# Stopping a source during its blocked remote read must remove the staged
+# output file through the adapter's signal and EXIT traps.
+SOURCE_TMP="$TMP_ROOT/source-tmp"
+mkdir -p "$SOURCE_TMP"
+set -m
+FM_REMOTE_REPLY_HANG=1 TMPDIR="$SOURCE_TMP" remote_env "$ADAPTER" source ios >/dev/null 2>&1 &
+hung_source=$!
+set +m
+staged=''
+for _ in $(seq 1 100); do
+  staged=$(find "$SOURCE_TMP" -name 'fm-remote-reply-source.*' -print -quit 2>/dev/null || true)
+  [ -n "$staged" ] && break
+  sleep 0.05
+done
+[ -n "$staged" ] || fail "the blocked source never staged its output"
+kill -TERM -- -"$hung_source" 2>/dev/null || true
+wait "$hung_source" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  staged=$(find "$SOURCE_TMP" -name 'fm-remote-reply-source.*' -print -quit 2>/dev/null || true)
+  [ -z "$staged" ] && break
+  sleep 0.05
+done
+[ -z "$staged" ] || fail "a terminated source left staged output behind"
+pass "a terminated source removes its staged output"
 
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"
@@ -853,18 +904,44 @@ fi
 stop_reply_listener || fail "the continuity listener did not stop"
 pass "a remote reply listener stays owned across empty waits and a delta"
 
-# A failed transport is not an empty wait: do not launch a second read under
-# the same owner, even when the launch floor is short.
-: > "$TMP_ROOT/failed-polls"
-FM_REMOTE_REPLY_FAIL_READ=1 FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/failed-polls" \
-  FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
-  remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
-failed_reader=$!
-wait "$failed_reader" || fail "failed reader did not leave the runner"
-sleep 2
-[ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -eq 1 ] \
-  || fail "failed reader relaunched within the launch floor"
-pass "a failed remote read exits instead of relistening"
+# Failed SSH and remote reader exits are transient empty windows. The same
+# listener keeps its claim and relistens without producing a capture.
+for failure_mode in ssh255 exit1 exit2; do
+  : > "$TMP_ROOT/failed-polls"
+  case "$failure_mode" in
+    ssh255)
+      FM_REMOTE_REPLY_FAIL_READ=1 FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/failed-polls" \
+        FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
+        remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+      ;;
+    exit1)
+      FM_REMOTE_REPLY_FAIL_READ_STATUS=1 FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/failed-polls" \
+        FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
+        remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+      ;;
+    exit2)
+      FM_REMOTE_REPLY_FAIL_READ_STATUS=2 FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/failed-polls" \
+        FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
+        remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+      ;;
+  esac
+  failed_reader=$!
+  wait_for "$CLAIMS/$SID.claim" || fail "$failure_mode reader never claimed the source"
+  failed_polls=0
+  for _ in $(seq 1 120); do
+    failed_polls=$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')
+    [ "$failed_polls" -ge 2 ] && break
+    sleep 0.25
+  done
+  [ "$failed_polls" -ge 2 ] || fail "$failure_mode reader did not relisten"
+  case "$(ps -p "$failed_reader" -o stat= 2>/dev/null)" in
+    ''|Z*) fail "$failure_mode ended the reply listener" ;;
+  esac
+  [ "$(reply_owner)" = live ] || fail "$failure_mode released the reply listener claim"
+  stop_reply_listener || fail "$failure_mode listener did not stop"
+  wait "$failed_reader" 2>/dev/null || true
+done
+pass "failed SSH and remote reader legs relisten without ending the listener"
 
 # Make local ingestion persistently fail after the delta has been captured.
 # Its durable generation must remain the only copy until reconciliation.
