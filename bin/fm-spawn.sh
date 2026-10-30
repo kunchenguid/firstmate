@@ -78,22 +78,26 @@
 #   model, and effort may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with both a recovery-grade agent-state classifier
-#   and replacement-agent support (tmux or herdr), and clears the previous
+#   and replacement-agent support (tmux, herdr, or rex), and clears the previous
 #   harness's per-task wiring before arming the new incarnation. T3 Code has
 #   the classifier but refuses relaunch because a thread keeps its conversation
 #   across turns and provider changes. Two verdicts are agent-free: a `dead`
 #   endpoint is ADOPTED as-is, while an endpoint PROVEN gone is RE-CREATED in the recorded
 #   worktree and the republished record rebinds the task to it. That proof is
 #   its own step, because a backend's `missing` also covers an endpoint that is
-#   merely unreachable from here - and it is only available on HERDR, which must
-#   still read the recorded pane as gone once that session's server is running
-#   again. A tmux `missing` always refuses: a task record carries no socket
+#   merely unreachable from here - and it is available only on Herdr and Rex.
+#   Herdr must still read the recorded pane as gone once that session's server is
+#   running again; Rex requires an authoritative not-found from the recorded
+#   server. A tmux `missing` always refuses: a task record carries no socket
 #   identity for its endpoint, so no read here can tell a destroyed window from
 #   one on a tmux server this process cannot address. An endpoint that turns out
 #   to have survived refuses too. The worktree is reused untouched either way; a
 #   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
-#   (`--secondmate`, driven by the session-start liveness sweep).
+#   (`--secondmate`, driven by the session-start liveness sweep). Before adopting
+#   a Treehouse pool worktree, relaunch holds the shared project lock and accepts
+#   only an absent legacy claim or this task's claim from this task's own home;
+#   contradictory, unreadable, and unverifiable-home claims refuse before launch.
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
@@ -200,8 +204,9 @@
 #   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
 #   root Firstmate home's state directory before slot allocation and holds it through
 #   task metadata publication. Teardown holds that same lock while proving and
-#   returning a slot, so allocation cannot reuse a slot before its owner record
-#   is published. Under that same lock it writes the slot's owner claim, which is
+#   returning a slot, and a relaunch of an actual pool slot holds it through
+#   recorded-worktree adoption and publication, so none can race another slot
+#   assignment. Under that same lock a fresh spawn writes the slot's owner claim, which is
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
