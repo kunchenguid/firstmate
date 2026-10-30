@@ -418,6 +418,7 @@ record_evidence() {  # <line>
   [ "$POLICY" = on ] && [ -n "$ROOT_HOME" ] || return 0
   log="$ROOT_HOME/state/heavy-admission.log"
   tmp="$log.tmp.$$"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   if fm_run_timed "$EVIDENCE_TIMEOUT_SECS" bash -c '
     line=$1 log=$2 tmp=$3 max_bytes=$4 keep_lines=$5
     exec 9>> "$log" || exit 0
