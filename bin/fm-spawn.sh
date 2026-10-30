@@ -5833,18 +5833,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     for _ in $(seq 1 60); do
       p=$(spawn_current_path "$WT_TARGET" || true)
       [ -z "$p" ] || last_seen="$p"
-      if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
-        p_real=$(real_path_or_raw "$p")
-        last_reason="it is an isolated worktree, but no second read agreed with it"
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
-        [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
-      fi
       if [ "$BACKEND" = tmux ]; then
         # Join terminal soft wraps so long treehouse diagnostics stay verbatim.
         wt_pane=$(tmux capture-pane -p -J -t "$WT_TARGET" -S -200 2>/dev/null || true)
@@ -5860,6 +5848,18 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
           *) printf 'Check that treehouse itself is working in %s, then retry.\n' "$PROJ_ABS" >&2 ;;
         esac
         exit 1
+      fi
+      if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
+        p_real=$(real_path_or_raw "$p")
+        last_reason="it is an isolated worktree, but no second read agreed with it"
+        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+          WT="$p"
+          break
+        fi
+        candidate="$p_real"
+      else
+        candidate=""
+        [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
       sleep 1
     done

@@ -78,11 +78,16 @@ case "${1:-}" in
     exit 0 ;;
   capture-pane)
     if [ -f "${FM_FAKE_TREEHOUSE_OUTPUT:-}" ]; then
-      if [ -n "${FM_FAKE_COLUMNS:-}" ]; then
-        fold -w "$FM_FAKE_COLUMNS" "$FM_FAKE_TREEHOUSE_OUTPUT"
-      else
-        cat "$FM_FAKE_TREEHOUSE_OUTPUT"
-      fi
+      visible_after=${FM_FAKE_TREEHOUSE_OUTPUT_AFTER_PANE_READS:-0}
+      pane_reads=0
+      [ ! -f "${FM_FAKE_PANE_COUNTFILE:-}" ] || pane_reads=$(cat "$FM_FAKE_PANE_COUNTFILE")
+      [ "$pane_reads" -lt "$visible_after" ] || {
+        if [ -n "${FM_FAKE_COLUMNS:-}" ]; then
+          fold -w "$FM_FAKE_COLUMNS" "$FM_FAKE_TREEHOUSE_OUTPUT"
+        else
+          cat "$FM_FAKE_TREEHOUSE_OUTPUT"
+        fi
+      }
     fi
     exit 0 ;;
 esac
@@ -292,6 +297,30 @@ SH
 
 test_treehouse_failure_and_timeout
 
+test_stable_stale_path_does_not_outrank_failure() {
+  local rec id out status message
+  id=settle-stale-then-failed
+  rec=$(make_settle_case stale-then-failed "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TEST_TREEHOUSE_ERROR:?}" >&2
+exit 1
+SH
+  message='all 16 worktrees are in use or dirty'
+
+  out=$(FM_TEST_TREEHOUSE_ERROR="$message" \
+    FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" \
+    FM_FAKE_TREEHOUSE_OUTPUT_AFTER_PANE_READS=2 run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "allocation failure should outrank a stable stale pane path"
+  assert_contains "$out" "error: $message" "allocation failure was not reported"
+  [ "$(< "$COUNTFILE")" = 2 ] || fail "allocation failure was not detected on the confirming stale-path poll"
+  assert_absent "$HOME_DIR/state/$id.meta" "failed allocation published stale-path metadata"
+  pass "a stable stale path cannot outrank a completed allocation failure"
+}
+
 test_unborn_head_project_is_refused_at_once() {
   local rec id out status started elapsed
   id=settle-unborn-head-z5
@@ -317,6 +346,7 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_stable_stale_path_does_not_outrank_failure
 test_unborn_head_project_is_refused_at_once
 
 echo "# all fm-spawn-worktree-settle tests passed"
