@@ -106,6 +106,7 @@ The spawn's version read is not a pack check and never blocks: it fills `FM_BEST
 
 The off-limits rules hold whichever value a launch carries, and firstmate relays a notice at the start of the task.
 A change to the registry line takes effect at the next launch, and a running worker keeps what it launched with.
+A scout promoted with `bin/fm-promote.sh` keeps its scout composition: promoted work follows firstmate's defaults for now, and the adapter's done-summary, doubt-cycle, and constraints expectations do not apply to it at handoff.
 
 ## Adding or changing an adapter
 

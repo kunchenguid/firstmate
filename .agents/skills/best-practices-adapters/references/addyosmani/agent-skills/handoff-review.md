@@ -5,7 +5,8 @@ Nothing here is a gate on the pipeline or a reason to hold work outside it.
 
 ## Every ship
 
-Check that the done summary carries what the brief's practice section asks for: the checks run, the author's own review, the verification story, the doubt cycles and whether cross-model review was skipped, whether a `CONSTRAINTS.md` was present and followed, the sources when `source-driven-development` was routed, the "noticed but not touching" list, and the follow-up list with any code the change left unused.
+A ship promoted from a scout through `bin/fm-promote.sh` is exempt from this section: its brief keeps the scout's composition, so its worker was never asked for any of this, and for now it follows firstmate's defaults at handoff.
+For every other ship, check that the done summary carries what the brief's practice section asks for: the checks run, the author's own review, the verification story, the doubt cycles and whether cross-model review was skipped, whether a `CONSTRAINTS.md` was present and followed, the sources when `source-driven-development` was routed, the "noticed but not touching" list, and the follow-up list with any code the change left unused.
 On a risky change to a project that deploys from its default branch, check that the rollout and rollback plans are there.
 When the worker launched with `FM_BEST_PRACTICES_VERSION=missing`, check that the summary says it followed firstmate's defaults; when it launched with `unreviewed`, check that the summary names the unreviewed skills the spawn's notice named.
 File each follow-up as its own work item with `bin/fm-tasks-axi.sh add`.

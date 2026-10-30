@@ -173,7 +173,7 @@ cmd_check() {
   elif [ "$(field proof)" != proven ]; then
     problem='read-unproven'
     reason=$(field proof_reason)
-    remedy="firstmate's read of $HARNESS where the pack was found is not yet proven live ($reason), so the adapter cannot confirm the pack there; harnesses with a proven read: $(proven_harnesses "$repo")"
+    remedy="firstmate's read of $HARNESS is not yet proven live ($reason), so the adapter cannot confirm the pack; harnesses with a proven read: $(proven_harnesses "$repo")"
   elif [ "$(field installed)" != true ]; then
     problem='not-installed'
     remedy="install it: $install"
@@ -400,12 +400,12 @@ route_ask() {  # <rows-json> <state-json> <subject> -> sets ROUTE_ANSWERS
 }
 
 # Rows whose value comes from the requester's own words, matched in code,
-# case-insensitively, in <text>; the first phrase found wins.
+# case-insensitively and as whole words, in <text>; the first phrase found wins.
 route_words() {  # <rows-json> <text>
   jq -c --arg text "$2" '
     ($text | ascii_downcase) as $t
     | [ .[] | . as $r
-        | ([($r.words // {}) | to_entries[] | select((.key | ascii_downcase) as $k | ($t | index($k)) != null)] | first) as $w
+        | ([($r.words // {}) | to_entries[] | select((.key | ascii_downcase | gsub("(?<c>[^[:alnum:] ])"; "\\\(.c)")) as $k | $t | test("(?<!\\w)\($k)(?!\\w)"))] | first) as $w
         | select($w != null)
         | {key: $r.id, value: {value: $w.value, source: "words \"\($w.key)\""}} ]
     | from_entries' <<<"$1"

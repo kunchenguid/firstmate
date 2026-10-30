@@ -423,9 +423,15 @@ SH
   cp -R "$home/.cursor/skills" "$proj/.cursor/"
   git -C "$proj" add .cursor && git -C "$proj" -c user.name=t -c user.email=t@example.invalid commit -qm cursor
   assert_equals 0.6.14 "$(run_bp "$home" version "$PACK" --harness cursor --project "$proj")" "a committed project-level Cursor copy, the proven scope, was not read by its content"
-  out=$(run_bp "$home" check "$PACK" --harness pi --project "$proj")
+  for h in pi pi-signed; do
+    out=$(run_bp "$home" check "$PACK" --harness "$h" --project "$proj")
+    assert_contains "$out" "problem: read-unproven" "$h, a harness the pack documents an install for, was not reported unproven"
+    assert_contains "$out" "pi install git:github.com/addyosmani/agent-skills" "the unproven $h read does not name the pack's install path"
+    assert_contains "$(run_bp "$home" version "$PACK" --harness "$h" --project "$proj")" "missing: firstmate's read of $h is not yet proven live" "an unproven $h read reported a version"
+  done
+  out=$(run_bp "$home" check "$PACK" --harness grok --project "$proj")
   assert_contains "$out" "problem: runtime-unsupported" "a harness the pack does not ship for passed"
-  assert_contains "$out" "the pack ships no install path for pi" "the unsupported runtime does not name the missing side"
+  assert_contains "$out" "the pack ships no install path for grok" "the unsupported runtime does not name the missing side"
   assert_contains "$out" "claude, codex" "the unsupported runtime does not name the harnesses both support"
   assert_contains "$(run_bp "$home" check "$PACK" --harness copilot --project "$proj")" "firstmate has not verified copilot" "an unverified harness was not named as firstmate's missing side"
   pass "agy and skills-directory reads follow their own records and switches, and unproven or unsupported runtimes are named, never claimed"
@@ -473,6 +479,10 @@ test_brief_composes_the_practice_section_after_the_include() {
   assert_grep "Delivery contract: kind=scout best-practices=$PACK" "$b" "the scout does not carry the pack on a contract line"
   assert_grep "## Report (pairs with firstmate's report, firstmate's first)" "$b" "the scout report pair is missing"
   assert_no_grep "## Done summary" "$b" "a ship-only facet reached the scout"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'Run the work in this order: `start`, `reproduce`, `work`, `verify`, `scout.report`, `report`.' "$b" "the scout's flow does not name its report position"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_no_grep '`deliver`' "$b" "a scout brief names a deliver step it does not have"
   FM_HOME="$home" "$BRIEF" s4 demo --mode direct-PR >/dev/null
   FM_HOME="$home" "$BRIEF" s5 demo --mode direct-PR --best-practices none >/dev/null
   plain=$(sed 's/s4/ID/g' "$home/data/s4/brief.md")
@@ -593,6 +603,9 @@ test_intake_tier_routing() {
   printf 'Grill me on this billing system.\n' > "$ask"
   out=$(run_route "$resp" 200 intake "$PACK" "$ask" 2>/dev/null)
   assert_contains "$out" 'row: tier = tier-4 (words "grill me")' "the captain's own words did not win"
+  printf 'Add interview metrics to the candidate page and update the grill menu.\n' > "$ask"
+  out=$(run_route "$resp" 200 intake "$PACK" "$ask" 2>/dev/null)
+  assert_contains "$out" "row: tier = tier-2 (fallback)" "a phrase inside a longer word was taken as the captain's words"
   printf 'Build a billing system for us.\n' > "$ask"
   jq -n '{answers: {tier: {type: "choice", choice: "tier-3", confidence: 0.9, probabilities: {"tier-1": 0.02, "tier-2": 0.05, "tier-3": 0.9, none: 0.03}}, idea: {type: "noul", noul: 0.1}}}' > "$resp"
   out=$(TYPESAFE_API_KEY=ts-secret-key run_route "$resp" 200 intake "$PACK" "$ask")

@@ -902,10 +902,10 @@ fm_bp_compose() {  # <owner/repo> <kind> <mode> <forge> [answers-json]
     def action_code($e): if $e.action == "pair" then "pair-\($e.order)" else $e.action end;
     ($m.facets // {}) as $f
     | ([($m.insert // [])[] | select(.side == "worker" and kinds_ok(.) and (blocks_of(.id) | length) > 0) | .id]) as $live_ins
-    | (if $kind == "scout" then "scout.report" else "deliver" end) as $deliver
     | ([($m.flow // ($wflow | split(" ")))[] | select(. as $p | (($m.insert // []) | map(.id) | index($p)) == null or ($live_ins | index($p)) != null)]) as $flow
-    | (if $flow != ($wflow | split(" ")) then "flow\t\($flow | map("`\(.)`") | join(", "))" else empty end),
-      ((["brief.practice"] + [$flow[] | if . == "deliver" then $deliver else . end] + ["brief.done"])[] as $name
+    | ($flow | map(if . == "deliver" and $kind == "scout" then "scout.report" else . end)) as $steps
+    | (if $flow != ($wflow | split(" ")) then "flow\t\($steps | map("`\(.)`") | join(", "))" else empty end),
+      ((["brief.practice"] + $steps + ["brief.done"])[] as $name
        | if ($f | has($name)) and $name != "launch.env" and kinds_ok($f[$name]) then
            (blocks_of($name)) as $bl
            | if ($bl | length) == 0 then empty
@@ -913,8 +913,8 @@ fm_bp_compose() {  # <owner/repo> <kind> <mode> <forge> [answers-json]
              end
          elif ($live_ins | index($name)) != null then
            ([($m.insert // [])[] | select(.id == $name)] | first) as $e
-           | ($flow | index($name)) as $at
-           | ("pos\t\($name)\tinsert:\($flow[$at + 1])\t\($e.reference)", (blocks_of($name)[] | "block\t\(.)"))
+           | ($steps | index($name)) as $at
+           | ("pos\t\($name)\tinsert:\($steps[$at + 1])\t\($e.reference)", (blocks_of($name)[] | "block\t\(.)"))
          else empty end)
   ' "$manifest") || return 1
   printf '# Best practices: %s\n' "$repo"

@@ -90,6 +90,26 @@
         "evidence": "bin/fm-best-practices.sh read addyosmani/agent-skills --harness agy, run read-only against agy plugin list --json for a real agy install: the pack's recorded version, its enabled state, and its copy under ~/.gemini/config/plugins/ agreed with the list, the install tied to addyosmani/agent-skills by the installed copy's .claude-plugin/plugin.json repository field, because the list record names no source repository and the copy's root plugin.json carries none"
       }
     },
+    "pi": {
+      "shape": "plugin",
+      "read": null,
+      "install": "pi install git:github.com/addyosmani/agent-skills",
+      "enable": null,
+      "proof": {
+        "status": "unproven",
+        "reason": "the pack documents pi install git:github.com/addyosmani/agent-skills, covering pi and pi-signed; firstmate has no read of that install yet, so it is not yet proven live"
+      }
+    },
+    "pi-signed": {
+      "shape": "plugin",
+      "read": null,
+      "install": "pi install git:github.com/addyosmani/agent-skills",
+      "enable": null,
+      "proof": {
+        "status": "unproven",
+        "reason": "the pack documents pi install git:github.com/addyosmani/agent-skills, covering pi and pi-signed; firstmate has no read of that install yet, so it is not yet proven live"
+      }
+    },
     "gemini": {
       "shape": "skills-dir",
       "read": "skills-dir",

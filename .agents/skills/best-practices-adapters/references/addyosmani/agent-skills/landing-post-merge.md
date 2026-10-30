@@ -5,7 +5,7 @@ A project that does not deploy from its default branch gets firstmate's landing 
 
 ## Dispatch a verification scout
 
-Firstmate does no project work itself, so file one work item and dispatch a small verification scout through the path it already has: `bin/fm-brief.sh <id> <project> --scout`, `bin/fm-spawn.sh <id> <project-dir> --scout`, and the report back through `scout-completion`.
+Firstmate does no project work itself, so file one work item and dispatch a small verification scout through the path it already has: `bin/fm-brief.sh <id> <project> --scout --best-practices addyosmani/agent-skills`, `bin/fm-spawn.sh <id> <project-dir> --scout`, and the report back through `scout-completion`.
 The scout is its own task with its own flow and no delivery or landing of its own, and the ship's own `cleanup.record` does not wait for it.
 
 ## What the scout checks
