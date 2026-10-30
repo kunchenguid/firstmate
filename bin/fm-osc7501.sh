@@ -39,10 +39,9 @@
 #   unhandled <id>.inbox/*.msg with an idle-or-silent busy record reads as
 #     working "Steering received"
 #   a failed/done/paused declaration yields to activity after it: once the
-#   watcher sees a busy record stamped later, the declaration is retired and
-#   the busy record and inbox map as above, and a later unhandled inbox
-#   message reads as "Steering received"; an open decision or blocker always
-#   wins
+#   watcher sees a busy record stamped later, or any steer (unhandled or in
+#   handled/) was enqueued later, the declaration is retired and the busy
+#   record and inbox map as above; an open decision or blocker always wins
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
@@ -73,8 +72,6 @@
 #   watch --task <id> --kind <k> --state <dir> --harness <h> --parent <pid>
 #                                            the reporter loop (internal)
 #   disarm --state <dir>                     retire this terminal's watcher
-#   report <state> [kind] [msg]              emit one root record now with
-#                                            app=firstmate (testing, debug)
 #
 # Test seams: FM_OSC7501_TTY replaces /dev/tty as the emit/query device (a
 # regular file then captures exactly what a terminal would receive), and
@@ -100,7 +97,6 @@ usage() {
     echo "usage: fm-osc7501.sh arm --task <id> --harness <h> --backend <b> --kind <k> --state <dir> --config <dir> [--agent-bin <path>]"
     echo "       fm-osc7501.sh watch --task <id> --kind <k> --state <dir> --harness <h> --parent <pid>"
     echo "       fm-osc7501.sh disarm --state <dir>"
-    echo "       fm-osc7501.sh report <state> [kind] [msg]"
   } >&2
   exit 2
 }
@@ -130,30 +126,21 @@ osc_seq() {
   case "${3:-}" in '') ;; *) f="$f:kind=$3" ;; esac
   f="$f:app=$FM_OSC_APP"
   case "$2" in '') ;; *) f="$f:id=$2" ;; esac
-  if [ "$1" != clear ]; then
-    case "$1:${4:-}" in
-      working:[0-9] | working:[1-9][0-9] | working:100 | blocked:[0-9] | blocked:[1-9][0-9] | blocked:100)
-        f="$f:progress=$4" ;;
-    esac
-    case "${5:-}" in '') ;; *)
-      local t
-      t=$(osc_clean "${5:0:$FM_OSC7501_TITLE_MAX}")
-      f="$f:title=$(osc_b64 "$t")" ;;
-    esac
-    case "${6:-}" in '') ;; *)
-      local m
-      m=$(osc_clean "${6:0:$FM_OSC7501_MSG_MAX}")
-      f="$f:msg=$(osc_b64 "$m")" ;;
-    esac
-  fi
+  case "$1:${4:-}" in
+    working:[0-9] | working:[1-9][0-9] | working:100 | blocked:[0-9] | blocked:[1-9][0-9] | blocked:100)
+      f="$f:progress=$4" ;;
+  esac
+  case "${5:-}" in '') ;; *)
+    local t
+    t=$(osc_clean "${5:0:$FM_OSC7501_TITLE_MAX}")
+    f="$f:title=$(osc_b64 "$t")" ;;
+  esac
+  case "${6:-}" in '') ;; *)
+    local m
+    m=$(osc_clean "${6:0:$FM_OSC7501_MSG_MAX}")
+    f="$f:msg=$(osc_b64 "$m")" ;;
+  esac
   printf '\033]7501;%s\033\134' "$f"
-}
-
-# osc_emit <seq>: one small write to the emit device. A regular file standing
-# in for a tty keeps every write (append), exactly as the rex marks rely on.
-osc_emit() { # <seq>
-  local dev=${FM_OSC7501_TTY:-/dev/tty}
-  { printf '%s' "$1" >>"$dev"; } 2>/dev/null
 }
 
 # --- gates --------------------------------------------------------------------
@@ -318,8 +305,8 @@ osc_load_libs() {
   LIBS_LOADED=1
 }
 
-# osc_inbox_since <inbox> <epoch>: 0 when an unhandled message is newer than
-# <epoch> (0 = any unhandled message).
+# osc_inbox_since <dir> <epoch>: 0 when a steer message in <dir> is newer than
+# <epoch> (0 = any message).
 osc_inbox_since() {
   local msg mt
   for msg in "$1"/*.msg; do
@@ -334,7 +321,7 @@ osc_inbox_since() {
 # emitted (no signal yet, or the busy record is unknown). OSC_TURN_AT keeps the
 # newest busy record stamp seen across polls.
 osc_plan() { # <task> <kind> <state>
-  local task=$1 kind=$2 state_dir=$3 line verb note held rec bs bts since=0
+  local task=$1 kind=$2 state_dir=$3 line verb note held rec bs bts since
   W_STATE=
   W_KIND=
   W_MSG=
@@ -381,21 +368,20 @@ osc_plan() { # <task> <kind> <state>
   esac
   if [ -n "$W_STATE" ]; then
     since=$(status_line_at_epoch "$line" 2>/dev/null) || return 0
-    if [ "$OSC_TURN_AT" -gt "$since" ]; then
-      W_STATE=
-      W_MSG=
-      since=0
+    if [ "$OSC_TURN_AT" -le "$since" ] &&
+      ! osc_inbox_since "$state_dir/$task.inbox" "$since" &&
+      ! osc_inbox_since "$state_dir/$task.inbox/handled" "$since"; then
+      return 0
     fi
-  fi
-  if [ "$bs" = busy ] && [ "$since" = 0 ]; then
-    W_STATE=working
-    W_KIND=
+    W_STATE=
     W_MSG=
-  elif osc_inbox_since "$state_dir/$task.inbox" "$since"; then
+  fi
+  if [ "$bs" = busy ]; then
     W_STATE=working
-    W_KIND=
+  elif osc_inbox_since "$state_dir/$task.inbox" 0; then
+    W_STATE=working
     W_MSG="Steering received"
-  elif [ "$since" = 0 ] && [ "$bs" = idle ]; then
+  elif [ "$bs" = idle ]; then
     W_STATE=idle
   fi
   [ -n "$W_STATE" ]
@@ -566,17 +552,6 @@ osc_arm() { # --task --harness --backend --kind --state --config [--agent-bin]
   exit 0
 }
 
-# --- report -------------------------------------------------------------------
-
-osc_report() { # <state> [kind] [msg]
-  case "$1" in
-    idle | working | done | blocked | error | clear) ;;
-    *) usage ;;
-  esac
-  FM_OSC_APP=${FM_OSC7501_APP_OVERRIDE:-firstmate}
-  osc_emit "$(osc_seq "$1" '' "${2:-}" '' '' "${3:-}")"
-}
-
 case "${1:-}" in
   -h | --help | help)
     sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'
@@ -590,8 +565,5 @@ case "${1:-}" in
   disarm)
     shift
     osc_disarm "$@" ;;
-  report)
-    shift
-    osc_report "$@" ;;
   *) usage ;;
 esac
