@@ -1857,7 +1857,8 @@ test_arm_confirms_a_slow_post_claim_startup() {
 # A live foreign .wake-queue.lock holder makes the child's bounded startup
 # recovery read refuse inside FM_WATCHER_STARTUP_LOCK_BOUND; the child ends
 # with the typed line, the arm relays it verbatim, and the same clean exit
-# still publishes a drainable downtime.
+# still publishes a drainable downtime. A predecessor's fresh beacon must not
+# confirm the child while it is still blocked before its first poll.
 test_arm_relays_a_startup_lock_held_by_live_pid() {
   local dir state fakebin armout holder status i
   dir=$(make_case arm-startup-lock-held)
@@ -1880,6 +1881,7 @@ test_arm_relays_a_startup_lock_held_by_live_pid() {
     kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
     fail "the fixture could not take the wake-queue lock"
   fi
+  touch "$state/.last-watcher-beat"
   status=0
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
     FM_WATCHER_STARTUP_LOCK_BOUND=2 \
@@ -1888,6 +1890,9 @@ test_arm_relays_a_startup_lock_held_by_live_pid() {
   : > "$dir/lock-release"
   wait "$holder" 2>/dev/null || true
   [ "$status" -ne 0 ] || fail "arm exited zero while the child's startup lock was held"
+  if grep -qF 'watcher: started' "$armout"; then
+    fail "an inherited beacon confirmed a child that never polled: $(cat "$armout")"
+  fi
   grep -F "watcher: FAILED - startup lock $state/.wake-queue.lock held by live pid" "$armout" \
     || fail "arm did not relay the typed startup-lock line: $(cat "$armout")"
   [ ! -e "$state/.watch.lock" ] \

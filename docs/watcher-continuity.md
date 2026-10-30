@@ -427,6 +427,7 @@ A published numeric pid, live or dead, grants no extension to the original wait 
 ### Startup interruption window
 
 The watcher installs its EXIT cleanup trap immediately after claiming the singleton lock, before any recovery-marker or queue lock is touched, and publishes its home-bound lock identity (`fm-home`, `watcher-path`, `pid-identity`) right after.
+The claim also removes the predecessor's `state/.last-watcher-beat` before that identity exists, so a home-bound identity never pairs with an inherited beacon: health, and with it the arm's confirmation, requires the new watcher's own first poll.
 Everything past that point - marker transitions, queue reads, delivery records - runs inside the trap's coverage, so an interrupted startup can only ever abandon locks recorded against the watcher's own pid, which the cleanup releases outright before it attempts the same bounded downtime publication an ordinary exit performs.
 The only window a stop still cuts outside cleanup coverage is the singleton claim itself: a watcher killed mid-claim leaves its claim dirs and any steal mutex as ordinary dead evidence the next acquirer reaps.
 The arm treats that published identity as the startup safe point: it forwards a signal or its deadline TERM only once the child's identity matches (or the confirmation deadline itself expires), never mid-claim.
