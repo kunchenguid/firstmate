@@ -465,6 +465,27 @@ ok - kimi 2.4.0: a short pane collapses the prompt below the complete dialog, an
 ok - kimi 2.4.0: folder-prompt predicates agree with the installed Kimi on every recorded wording
 ```
 
+## Kimi brief delivery
+
+Verified on 2026-10-29 on Linux with tmux 3.6 against Kimi Code CLI 2.4.0, launched with a disposable home and its updater off.
+An immediate Enter after the brief pointer is typed leaves that pointer in the composer.
+One Enter after a 0.25s pause clears the composer.
+With no login, Kimi answers that submit locally with `Error: LLM not set, send "/login" to login` and leaves `context: 0%`, so the run spends no model tokens.
+`tests/fm-kimi-harness.test.sh` pins the delivery decision: a cleared box plus the `❯` user line confirms even at `context: 0%`, nonzero context confirms a cleared box with no echo, and an echo or a nonzero percentage does not confirm while the pointer is still in the box.
+The opt-in live guard refreshes the installed-binary half:
+
+```sh
+FM_KIMI_BRIEF_DELIVERY_LIVE=1 bin/fm-test-run.sh tests/fm-kimi-brief-delivery-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - kimi 2.4.0: an immediate Enter leaves the brief pointer typed in the composer
+# kimi 2.4.0: one Enter after 0.25s cleared the composer; Error: LLM not set, send "/login" to login;context: 0%;
+ok - kimi 2.4.0: one Enter after the paste-burst window submits the brief pointer
+```
+
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.
