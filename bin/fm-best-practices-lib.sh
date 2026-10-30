@@ -176,9 +176,11 @@ fm_bp_block_map() {  # <manifest>
 
 # Print one "<repo>: <reason>" line per defect and fail when there is any. A
 # manifest is refused for any facet or position outside the eleven, any flow
-# that moves start or report or places a step before start or after report,
-# any replace or pair at start or report, any launch.env other than the two
-# firstmate-written exports, and any routing entry that disagrees with it.
+# that moves start or report, places a step before start or after report, puts
+# deliver before verify, or names a firstmate position, any replace or pair at
+# brief.done, launch.env, start, deliver, or report, any launch.env other than
+# the two firstmate-written exports, and any routing entry that disagrees with
+# it.
 fm_bp_manifest_check() {  # <owner/repo>
   local repo=$1 manifest dir verified blocks routing named errs ref f id seen=' ' block_errs=''
   manifest=$(fm_bp_manifest "$repo")
@@ -216,6 +218,13 @@ fm_bp_manifest_check() {  # <owner/repo>
     | ([$ins[] | select(.side == "worker") | .id]) as $wins
     | ([$ins[] | .id]) as $insids
     | ([$blocks[][]]) as $allblocks
+    | ({
+        "brief.done": "the generated Definition of done stays firstmate'"'"'s",
+        "launch.env": "an adapter adds only the two exports firstmate writes",
+        start: "the isolation check stays first",
+        deliver: "the delivery steps stay firstmate'"'"'s",
+        report: "the done report stays last"
+      }) as $XO
     | [
       (if $m.schema != $schema then "schema must be \($schema)" else empty end),
       (if $m.repository != $repo then "repository must be \($repo), the adapter directory it lives in" else empty end),
@@ -246,7 +255,7 @@ fm_bp_manifest_check() {  # <owner/repo>
            (if (["extend", "replace", "pair"] | index($e.action)) == null then "facet \($f) action must be extend, replace, or pair" else empty end),
            (if $e.action == "pair" and (["firstmate-first", "pack-first"] | index($e.order)) == null then "facet \($f) pair needs order firstmate-first or pack-first" else empty end),
            (if $e.action != "pair" and ($e | has("order")) then "facet \($f) order applies only to pair" else empty end),
-           (if ($f == "start" or $f == "report") and $e.action != "extend" then "facet \($f) cannot be replaced or paired: the isolation check stays first and the done report stays last" else empty end),
+           (if ($XO | has($f)) and $e.action != "extend" then "facet \($f) cannot be replaced or paired: \($XO[$f])" else empty end),
            (if $f == "launch.env" then
               (if $e.action != "extend" or ($e | has("reference")) or ($e | has("kinds")) then "launch.env only extends, with the two exports firstmate writes; an adapter adds no switches" else empty end)
             elif s($e.reference) | not then "facet \($f) needs a reference"
@@ -279,7 +288,10 @@ fm_bp_manifest_check() {  # <owner/repo>
          (($wflow | split(" ")) + $wins) as $need
          | (if ($m.flow | sort) != ($need | sort) then "flow must list start, work, verify, deliver, report, and each worker insert exactly once" else empty end),
            (if $m.flow[0] != "start" then "flow must keep start first; nothing runs before the isolation check" else empty end),
-           (if $m.flow[-1] != "report" then "flow must keep report last; nothing runs after the done report" else empty end)
+           (if $m.flow[-1] != "report" then "flow must keep report last; nothing runs after the done report" else empty end),
+           (($m.flow | index("verify")) as $v | ($m.flow | index("deliver")) as $d
+            | if $v != null and $d != null and $d < $v then "flow must keep verify before deliver; nothing is delivered unverified" else empty end),
+           ($m.flow[] | select(. as $p | $FP | index($p) != null) | "flow must not move \(.), a firstmate position; a flow orders worker steps only")
        end),
       (if ($m | has("routing")) and ($m.routing | type) != "array" then "routing must be an array" else empty end),
       ((($m.routing // []) | if type == "array" then . else [] end) | map(.id) | group_by(.) | map(select(length > 1) | .[0]) | .[] | "routing row \(.) is declared twice"),

@@ -50,6 +50,8 @@ At each facet its manifest names, an adapter does one of three things:
 - replace: the adapter's practice stands in for firstmate's at that facet;
 - pair: both run whole, `firstmate-first` or `pack-first`; on the worker side the pack's half is a skill the runtime loads from the enabled pack, named and never copied, and on the firstmate side it is the adapter's reference.
 
+`brief.done`, `launch.env`, `start`, `deliver`, and `report` accept extend only.
+
 It can also insert a step the pack has and firstmate does not, and reorder the worker flow, which are one mechanism: the manifest's `flow` lists the worker positions plus its inserted ones in the order the brief tells the worker to run them, and the brief states that whole order whenever it differs from firstmate's own.
 A firstmate-side insert is a reference loaded before or after a firstmate-side position, because those positions are triggers and nothing runs between them.
 A facet or position the adapter does not name is unchanged, which is also what every project without the token gets, and a home or project cannot change what an adapter does.
@@ -66,7 +68,7 @@ No adapter can replace, pair with, insert around, or reorder anything that would
 - The isolation check staying first and the done report staying last.
 
 None of those lives at a facet or a position: they live in script refusals and the supervisor contract's hard rules, and an adapter's output is only brief text and router references.
-The router loads references at the eleven positions only, and `bin/fm-best-practices.sh manifest-check` refuses a manifest that names any other facet or position, a `flow` that moves `start` from first or `report` from last, a replace or pair at either, or a `launch.env` that adds anything, so nothing an adapter writes is read by the teardown, merge, role, project add or remove, away, Relay, or process-event paths.
+The router loads references at the eleven positions only, and `bin/fm-best-practices.sh manifest-check` refuses a manifest that names any other facet or position, a `flow` that moves `start` from first or `report` from last, puts `deliver` before `verify`, or names a firstmate position, a replace or pair at any of those five, or a `launch.env` that adds anything, so nothing an adapter writes is read by the teardown, merge, role, project add or remove, away, Relay, or process-event paths.
 On the worker side the practice section is the brief's last section and ranks itself below every section above it, so no step it adds can outrank rule 1 or rule 2; on the firstmate side a reference is instruction text ranked below `AGENTS.md`'s hard rules.
 No facet sits at the merge decision: `handoff.review` comes before it and `landing.post-merge` after.
 

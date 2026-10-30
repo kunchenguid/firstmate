@@ -161,7 +161,8 @@
 # A home may carry standing worker instructions without editing this tracked
 # script: when config/brief-include.md exists under the active home, ship and
 # scout scaffolds append its text verbatim as their last section, "# Home brief
-# additions", which defers to every other section of the brief. It goes last
+# additions", which defers to every other section of the brief except a pack's
+# practice section, which ranks below it. It goes last
 # because the machine-read `# Task` heading resolves to its first match, so
 # appended text can never shadow it; a later scout promotion appends its ship
 # contract below it, which that position-free deference already covers. An
@@ -468,10 +469,12 @@ fi
 # Append the include as the last section of a ship or scout scaffold, then
 # the pack's practice section after it, when the project registers a pack.
 append_brief_include() {
+  local outranks='every other section of this brief'
+  [ "$BEST_PRACTICES" = none ] || outranks="$outranks except the Best practices section"
   if [ -n "$BRIEF_INCLUDE_BODY" ]; then
     printf '\n%s\n%s\n%s\n' \
       '# Home brief additions' \
-      "These are this home's standing additions; every other section of this brief takes precedence over anything here that conflicts." \
+      "These are this home's standing additions; $outranks takes precedence over anything here that conflicts." \
       "$BRIEF_INCLUDE_BODY" >> "$BRIEF"
   fi
   [ "$BEST_PRACTICES" != none ] || return 0

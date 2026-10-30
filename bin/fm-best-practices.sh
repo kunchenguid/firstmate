@@ -20,11 +20,13 @@
 #                 per line, from the router skill's routing object.
 # manifest-check  check one adapter, or every carried adapter, against the
 #                 eleven flow positions: refuses any facet, position, or
-#                 routing row outside them, a flow that moves start or report
-#                 or places a step before start or after report, a replace or
-#                 pair at start or report, a launch.env other than the two
-#                 exports firstmate writes, a supported version that is not a
-#                 tag, and a routing object that disagrees with the manifest.
+#                 routing row outside them, a flow that moves start or report,
+#                 places a step before start or after report, puts deliver
+#                 before verify, or names a firstmate position, a replace or
+#                 pair at brief.done, launch.env, start, deliver, or report, a
+#                 launch.env other than the two exports firstmate writes, a
+#                 supported version that is not a tag, and a routing object that
+#                 disagrees with the manifest.
 #                 Prints one line per defect; exit 1 when any.
 # read            what the harness's own registry or skills directory says about
 #                 the pack for that project, as one JSON object: installed,

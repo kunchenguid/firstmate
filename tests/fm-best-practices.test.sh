@@ -197,8 +197,16 @@ test_manifest_check_holds_the_off_limits_boundary() {
   manifest_refusal start-moved '.flow = ["reproduce", "start", "work", "verify", "deliver", "report"]' "flow must keep start first"
   manifest_refusal after-report '.flow = ["start", "work", "verify", "deliver", "report", "reproduce"]' "flow must keep report last"
   manifest_refusal stage-dropped '.flow = ["start", "reproduce", "work", "deliver", "report"]' "exactly once"
-  manifest_refusal replace-start '.facets.start = {action: "replace", reference: "work.md", kinds: ["ship"]}' "facet start cannot be replaced or paired"
-  manifest_refusal pair-report '.facets.report = {action: "pair", order: "pack-first", reference: "work.md", kinds: ["ship"]}' "facet report cannot be replaced or paired"
+  local facet
+  for facet in brief.done launch.env start deliver report; do
+    manifest_refusal "replace-$facet" ".facets[\"$facet\"] = {action: \"replace\", reference: \"work.md\", kinds: [\"ship\"]}" "facet $facet cannot be replaced or paired"
+    manifest_refusal "pair-$facet" ".facets[\"$facet\"] = {action: \"pair\", order: \"pack-first\", reference: \"work.md\", kinds: [\"ship\"]}" "facet $facet cannot be replaced or paired"
+  done
+  manifest_refusal deliver-before-verify '.flow = ["start", "reproduce", "work", "deliver", "verify", "report"]' "flow must keep verify before deliver"
+  local position
+  for position in intake.question brief.practice brief.done launch.env handoff.review landing.post-merge cleanup.record; do
+    manifest_refusal "flow-moves-$position" ".flow = [\"start\", \"reproduce\", \"work\", \"verify\", \"$position\", \"deliver\", \"report\"]" "flow must not move $position"
+  done
   manifest_refusal switches '.facets["launch.env"] = {action: "replace"}' "an adapter adds no switches"
   manifest_refusal commit-pin '.versions = [{tag: "aeac41d4"}]' "the supported list carries tags only"
   manifest_refusal row-outside '.routing += [{id: "deploy", facet: "deploy", type: "noul", instructions: "x", fallback: true, selects: ["floor"]}]' "routing row deploy facet deploy is outside"
@@ -207,12 +215,12 @@ test_manifest_check_holds_the_off_limits_boundary() {
   manifest_refusal unearned-proof '.harnesses.cursor.read = null | .harnesses.cursor.proof = {status: "proven", date: "2026-10-29", evidence: "none"}' "harness cursor is marked proven without a read"
   manifest_refusal bad-scope '.harnesses.cursor.proof.unproven_scopes = ["global"]' "harness cursor unproven_scopes must list user or project"
   manifest_refusal bad-switch '.harnesses.gemini.switch = {user_settings: "~/.gemini/settings.json"}' "harness gemini switch needs"
-  manifest_refusal routing-drift '.facets["brief.done"].action = "replace"' "routing object disagrees"
+  manifest_refusal routing-drift '.facets.work.action = "replace"' "routing object disagrees"
   manifest_refusal no-fingerprints 'del(.fingerprints)' "fingerprints are missing"
   manifest_refusal fingerprint-scope '.fingerprints.skills |= .[1:]' "fingerprints.skills must be exactly the pack skills the adapter's references name"
   manifest_refusal fingerprint-tags '.versions += [{tag: "0.6.15"}]' "fingerprints.tags must hold exactly the supported tags"
   manifest_refusal fingerprint-hash '.fingerprints.tags["0.6.14"]["interview-me"] = "not-a-hash"' "must hash every fingerprinted skill as 64 lowercase hex characters"
-  pass "manifest-check: refuses anything outside the eleven positions, a moved start or report, a replace at either, launch switches, untagged versions, unread proofs, routing drift, and fingerprints that do not cover exactly the named skills and supported tags"
+  pass "manifest-check: refuses anything outside the eleven positions, a moved start or report, a replace or pair at any of the five extend-only facets, deliver before verify, a moved firstmate position, launch switches, untagged versions, unread proofs, routing drift, and fingerprints that do not cover exactly the named skills and supported tags"
 }
 
 test_claude_read_follows_the_registry_marketplace_and_settings() {
@@ -507,6 +515,8 @@ test_brief_composes_the_practice_section_after_the_include() {
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'If `FM_BEST_PRACTICES_VERSION` reads `missing`' "$b" "the practice section lacks the firstmate-owned missing line"
   assert_grep 'Every section above, the home brief additions included, takes precedence' "$b" "the practice section does not rank itself below the brief"
+  assert_grep "These are this home's standing additions; every other section of this brief except the Best practices section takes precedence over anything here that conflicts." "$b" "the home additions do not outrank the practice section"
+  assert_no_grep 'every other section of this brief takes precedence' "$b" "the home additions still yield to the practice section that yields to them"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep '## Step `reproduce` (inserted before `work`)' "$b" "the inserted reproduce step is missing"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
@@ -525,6 +535,7 @@ test_brief_composes_the_practice_section_after_the_include() {
   assert_no_grep '`deliver`' "$b" "a scout brief names a deliver step it does not have"
   FM_HOME="$home" "$BRIEF" s4 demo --mode direct-PR >/dev/null
   FM_HOME="$home" "$BRIEF" s5 demo --mode direct-PR --best-practices none >/dev/null
+  assert_grep "These are this home's standing additions; every other section of this brief takes precedence over anything here that conflicts." "$home/data/s4/brief.md" "a brief with no practice section changed its home additions sentence"
   plain=$(sed 's/s4/ID/g' "$home/data/s4/brief.md")
   [ "$plain" = "$(sed 's/s5/ID/g' "$home/data/s5/brief.md")" ] || fail "--best-practices none changed the brief"
   assert_no_grep "best-practices=" "$home/data/s4/brief.md" "a brief without a pack carries a pack token"
