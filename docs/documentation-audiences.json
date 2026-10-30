@@ -36,6 +36,7 @@
     "docs/t3code-backend.md",
     "docs/tern-backend.md",
     "docs/hc-backend.md",
+    "docs/herdr-core-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -113,6 +114,10 @@
     },
     {
       "source": "docs/hc-backend.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
+      "source": "docs/herdr-core-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
     {
@@ -355,6 +360,10 @@
     },
     {
       "path": "docs/hc-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/herdr-core-backend.md",
       "audience": "operator-current"
     },
     {

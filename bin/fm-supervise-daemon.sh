@@ -210,7 +210,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. rex goes
 # through the same dispatcher primitives as herdr (bin/backends/rex.sh). zellij,
-# orca, cmux, paseo, and tern are real backends elsewhere in firstmate
+# orca, cmux, paseo, tern, and herdr-core are real backends elsewhere in firstmate
 # (bin/fm-backend.sh) but this daemon has no verified composer/busy primitives
 # wired up for them yet - see docs/herdr-backend.md and AGENTS.md section 4's
 # harness-verification discipline. Selecting one refuses loudly at startup
@@ -849,7 +849,7 @@ _utf8_prefix() {  # <text> <max-bytes> <out-var>
 # The injected digest is bounded so it always fits one transport argument:
 # tmux refuses an oversized `send-keys -l` command, and Linux refuses to exec
 # any single argument above 131,071 bytes (MAX_ARG_STRLEN), which is how the
-# herdr, zellij, orca, cmux, and tern adapters pass text. Each item is cut to
+# herdr, zellij, orca, cmux, tern, and herdr-core adapters pass text. Each item is cut to
 # ESCALATE_ITEM_BYTES at a UTF-8 boundary with an omitted-bytes marker, the
 # joined items stop at ESCALATE_DIGEST_BYTES with a "+K more event(s)" tail,
 # and a bounded digest names a full-text file under ESCALATE_FULL_DIR that
