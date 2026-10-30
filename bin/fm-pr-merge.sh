@@ -900,7 +900,7 @@ bitbucket_verify_mergeable() {
   local state='' live_head='' task_count='' build_status=''
 
   if ! json=$(twg bb pull-requests get "$PR_NUMBER" -w "$PR_BB_WORKSPACE" -r "$PR_BB_REPO" \
-      --statuses -o json 2>/dev/null) \
+      --statuses -o json --output-summary none 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the Bitbucket pull request state before merging" >&2
     return 1
@@ -1025,7 +1025,7 @@ forgejo_default_merge_style() {
 bitbucket_confirm_merged() {
   local json state
   if ! json=$(twg bb pull-requests get "$PR_NUMBER" -w "$PR_BB_WORKSPACE" -r "$PR_BB_REPO" \
-      -o json 2>/dev/null) || [ -z "$json" ]; then
+      -o json --output-summary none 2>/dev/null) || [ -z "$json" ]; then
     printf 'actionable: Bitbucket accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
       "$URL" >&2
     return 2

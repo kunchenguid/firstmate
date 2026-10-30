@@ -143,7 +143,7 @@ case "$provider" in
     # never holds or manages a Bitbucket API token itself. Only an exact
     # "MERGED" state wakes, so a changed format or an unreadable pull request
     # stays silent instead of reporting a merge.
-    json=$(twg bb pull-requests get "$number" -w "$workspace" -r "$repo" -o json 2>/dev/null) || exit 0
+    json=$(twg bb pull-requests get "$number" -w "$workspace" -r "$repo" -o json --output-summary none 2>/dev/null) || exit 0
     [ -n "$json" ] || exit 0
     state=$(printf '%s' "$json" | jq -r '
       if type == "object" and (.state | type) == "string" then .state else error("invalid pull request state") end

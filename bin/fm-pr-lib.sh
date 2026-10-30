@@ -1292,7 +1292,7 @@ fm_pr_bitbucket_read_record() {  # <workspace> <repo> <number>
   command -v twg >/dev/null 2>&1 || return 1
   command -v jq >/dev/null 2>&1 || return 1
 
-  if ! json=$(twg bb pull-requests get "$number" -w "$workspace" -r "$repo" -o json 2>/dev/null) \
+  if ! json=$(twg bb pull-requests get "$number" -w "$workspace" -r "$repo" -o json --output-summary none 2>/dev/null) \
     || [ -z "$json" ]; then
     return 1
   fi

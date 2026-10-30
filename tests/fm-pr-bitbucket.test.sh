@@ -373,7 +373,49 @@ test_bitbucket_merge_confirms_and_binds_extra_flags() {
   pass "a Bitbucket merge confirms the landed state, forwards extra flags, and refuses unwaived protected flags"
 }
 
+test_bitbucket_json_calls_disable_summary() {
+  local dir state url line count
+  dir=$(make_case bitbucket-output-summary)
+  state="$dir/home/state"
+  url=https://bitbucket.org/ws/repo/pull-requests/9
+  write_task_meta "$dir"
+
+  # twg wraps a large -o json payload in a YAML envelope by default, which jq
+  # cannot parse, so every call that reads JSON must pass --output-summary none.
+  # Drive each reader: the watcher poll, the merge pre-check and read-back, and
+  # the shared record read.
+  write_poll_meta "$state" task-poll "$url"
+  fm_pr_poll_prepare "$state" task-poll bitbucket "$url" bitbucket.org ws/repo 9 "$POLL" \
+    || fail "could not prepare a Bitbucket poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Bitbucket poll"
+  FM_TEST_TWG_LOG="$dir/twg.log" PATH="$dir/fakebin:$BASE_PATH" \
+    bash "$state/task-poll.check.sh" >/dev/null
+  [ "$(grep -c 'bb pull-requests get' "$dir/twg.log")" -eq 1 ] \
+    || fail "the Bitbucket poll did not make exactly one twg read"
+
+  FM_TEST_TWG_STATE_AFTER_MERGE=MERGED run_merge_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "Bitbucket merge failed while checking the twg read flags"
+  (
+    FM_TEST_TWG_LOG="$dir/twg.log" PATH="$dir/fakebin:$BASE_PATH"
+    export FM_TEST_TWG_LOG PATH
+    fm_pr_bitbucket_read_record ws repo 9
+  ) || fail "the shared Bitbucket record read failed"
+
+  count=0
+  while IFS= read -r line; do
+    count=$((count + 1))
+    case "$line" in
+      *"-o json --output-summary none"*) ;;
+      *) fail "a twg JSON read did not pass --output-summary none: $line" ;;
+    esac
+  done < <(grep 'bb pull-requests get' "$dir/twg.log")
+  [ "$count" -ge 4 ] || fail "expected the poll, the merge pre-check, the merge read-back, and the record read to each call twg, saw $count"
+
+  pass "every Bitbucket twg JSON read passes --output-summary none"
+}
+
 test_bitbucket_url_parsing
 test_bitbucket_merge_watch
 test_bitbucket_verify_mergeable_refusals
 test_bitbucket_merge_confirms_and_binds_extra_flags
+test_bitbucket_json_calls_disable_summary
