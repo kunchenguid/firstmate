@@ -94,7 +94,7 @@ When the captain wants this same token-saving supervision while staying present 
 afk changes how the captain is informed and what happens at a captain-owned decision point, **not who approves what**.
 "Away" never means "approves more" or "approves less."
 A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy; anything requiring the captain still waits for the captain's explicit word.
-While the away-posture record exists, a pull request green at its live head may merge under away authority only when the captain's words name it or a set that contains it; any other green pull request holds for the return, and a later away turn never widens the reading an earlier turn applied to the same words.
+While the away-posture record exists, a pull request green at its live head may merge under away authority only when the captain's words name it or a set that contains it; any other green pull request holds for the return, and being green or open while the record exists does not put a pull request in that set.
 A GitHub merge while away also needs this account's live permission to merge in that repository, and `fm-pr-merge.sh` refuses without calling merge when it cannot prove that.
 Away authority never releases a captain hold, and it expires when the away record is archived.
 `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` remain attended-only and are refused while the away record exists.
