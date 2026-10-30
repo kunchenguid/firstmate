@@ -2112,6 +2112,45 @@ test_generationless_predecessor_stays_counted() {
   pass "generationless predecessors remain counted beside reserved and terminal replacements"
 }
 
+test_policy_requires_one_object() {
+  local home="$TMP_ROOT/single-policy" remote="$TMP_ROOT/single-policy-remote" out rc policy suffix digest
+  make_home "$home"
+  make_remote_secondmate "$remote" single-policy-remote
+  mkdir -p "$remote/state/fleet-seats"
+  new_holder
+  pools "$home" 1
+  cp "$home/config/fleet-seats" "$home/valid-policy"
+  for suffix in pooled empty; do
+    cat "$home/valid-policy" > "$home/config/fleet-seats"
+    if [ "$suffix" = pooled ]; then
+      cat "$home/valid-policy" >> "$home/config/fleet-seats"
+    else
+      printf '{"pools":[]}\n' >> "$home/config/fleet-seats"
+    fi
+    policy=$home/config/fleet-seats
+    rc=0
+    out=$(reserve "$home" "worker-$suffix" pool-model-a 2>&1) || rc=$?
+    expect_code 5 "$rc" "root accepted a $suffix policy stream: $out"
+    assert_absent "$home/state/fleet-seats/holders" "invalid policy created holders"
+    cp "$policy" "$remote/state/fleet-seats/policy.json"
+    rc=0
+    out=$(FM_FLEET_SEATS_TEST_REMOTE_WAIT=1 reserve "$remote" "worker-$suffix" pool-model-a 2>&1) || rc=$?
+    expect_code 5 "$rc" "remote accepted a $suffix policy stream: $out"
+    compgen -G "$remote/state/fleet-seats/requests/*.req" >/dev/null && fail "invalid policy created requests"
+    digest=$(jq -cS . "$policy" | cksum | tr -s ' ' '-' | cut -d- -f1-2)
+    rc=0
+    out=$(seats "$remote" serve --digest "$digest" --epoch single.1 --allowance shared=1 < "$policy" 2>&1) || rc=$?
+    expect_code 5 "$rc" "serve accepted a $suffix policy stream: $out"
+    assert_absent "$remote/state/fleet-seats/served.json" "invalid policy published a certificate"
+  done
+  cp "$home/valid-policy" "$home/config/fleet-seats"
+  reserve "$home" first pool-model-a >/dev/null || fail "single policy refused"
+  rc=0
+  out=$(reserve "$home" second pool-model-a 2>&1) || rc=$?
+  expect_code 4 "$rc" "single policy allowed overbooking: $out"
+  pass "policies require one object at root admission, remote admission, and serve"
+}
+
 test_reservation_uses_one_policy_snapshot() {
   local home="$TMP_ROOT/policy-snapshot" fakebin real_jq out rc mode
   make_home "$home"
@@ -2166,6 +2205,7 @@ SH
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
+      test_policy_requires_one_object) "$focused_test" ;;
       test_reservation_uses_one_policy_snapshot) "$focused_test" ;;
       test_remote_descendants_prevent_incomplete_certificates|test_generationless_predecessor_stays_counted|test_remote_without_pools_confirms_unpooled_models|test_managed_records_and_legacy_import|test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
@@ -2175,6 +2215,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 test_no_pool_configured_is_off
+test_policy_requires_one_object
 test_reservation_uses_one_policy_snapshot
 test_pool_names_do_not_escape_the_seat_directory
 test_legacy_unresolved_models_count_in_every_pool

@@ -201,7 +201,7 @@ host_pools_enabled() {
   if [ -e "$delivered" ] || [ -L "$delivered" ]; then
     [ -f "$delivered" ] && [ ! -L "$delivered" ] \
       && { cmp -s "$delivered" <(printf '{"pools":[]}\n') \
-        || jq -e 'type == "object" and .pools == []' "$delivered" >/dev/null 2>&1; } && return 1
+        || jq -se 'length == 1 and (.[0] | type == "object" and .pools == [])' "$delivered" >/dev/null 2>&1; } && return 1
     return 0
   fi
   [ -e "$TARGET_HOME/config/fleet-seats" ] || [ -L "$TARGET_HOME/config/fleet-seats" ]
