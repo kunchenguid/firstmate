@@ -868,6 +868,7 @@ $ claude -p --settings '{"autoCompactWindow":100000,"skillOverrides":{"docx":"us
 
 With `{"skillOverrides":{"anthropic-skills:pdf":"user-invocable-only"}}`, the prompt `/anthropic-skills:pdf` still loaded the skill and the model answered `LOADED`.
 With the value `off`, the same prompt printed `Skill "anthropic-skills:pdf" is disabled via skillOverrides. Remove the override from your settings to run it.`
+With `{"skillOverrides":{"mattpocock-skills:grilling":"off"}}`, and with the keys `grilling`, `mattpocock-skills@mattpocock:grilling`, and `plugin:mattpocock-skills:grilling`, `/context` still listed `| mattpocock-skills:grilling | Plugin (mattpocock-skills) | ~60 |`.
 The bundled settings schema describes the four `skillOverrides` values and the per-model `autoCompactWindow`, whose accepted range is 100000 to 1000000 or `auto`.
 `tests/fm-spawn-dispatch-profile.test.sh` pins that the file's members reach crewmate and secondmate launches and that malformed files refuse before any launch.
 

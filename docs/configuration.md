@@ -1449,7 +1449,8 @@ For example, this file compacts Claude Opus workers at 100k tokens, hides the PD
 
 The `--settings` value outranks the `user`, project, and local settings files, so its `modelSettings.<model>.autoCompactWindow` replaces a per-model window in the captain's `~/.claude/settings.json`.
 A top-level `autoCompactWindow` in the file also wins, because Claude Code drops lower-precedence per-model windows once a higher-precedence file sets the top-level value, and it then applies to every model.
-`skillOverrides` keys match a skill's listed name, including its plugin qualifier such as `anthropic-skills:pdf`; a qualified key avoids hitting a same-named skill from another source.
+`skillOverrides` keys match a skill's listed name, including a qualifier such as `anthropic-skills:pdf`; a qualified key avoids hitting a same-named skill from another source.
+Skills from installed plugins, such as `mattpocock-skills:grilling`, did not respond to any override value in the verified version.
 Its values are `name-only` (listed without description), `user-invocable-only` (hidden from the model, `/name` still runs), and `off` (hidden from both).
 [Runtime-backend verification](verification/runtime-backends.md#claude-session-settings) records the observed behavior.
 
