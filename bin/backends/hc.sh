@@ -180,7 +180,8 @@ fm_backend_hc_container_ensure() {
   local session raw version
   session=$(fm_backend_hc_session)
   fm_backend_hc_atom_valid "$session" || { echo "error: refusing hc session name '$session'" >&2; return 1; }
-  raw=$(env -u HC_SOCKET hc --version 2>/dev/null | head -1) || raw=
+  raw=$(env -u HC_SOCKET hc --version 2>/dev/null) || raw=
+  raw=$(printf '%s\n' "$raw" | head -1)
   version=${raw##* }
   fm_backend_hc_version_at_least "$version" "$FM_BACKEND_HC_MIN_VERSION" || {
     echo "error: hc '${raw:-unknown}' is older than $FM_BACKEND_HC_MIN_VERSION, the oldest herdr-core this backend was verified on, or its version is unreadable; update it with 'hc update'" >&2

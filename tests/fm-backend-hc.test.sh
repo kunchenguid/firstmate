@@ -14,8 +14,9 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-hc-tests)
 # The stub answers `get` from <dir>/<address>.json (exit from <address>.exit,
 # 3 = not_found when no file exists), `ls` from <dir>/ls.json, `run` with
 # <dir>/run.json, and removes <address>.json on `rm` unless <dir>/rm-sticks
-# exists. `--version` prints FAKE_HC_VERSION (default `hc 0.1.14`). Every call
-# is logged with its HC_SESSION and HC_SOCKET.
+# exists. `--version` prints FAKE_HC_VERSION (default `hc 0.1.14`) and exits
+# FAKE_HC_VERSION_EXIT (default 0). Every call is logged with its HC_SESSION
+# and HC_SOCKET.
 make_hc_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"
   mkdir -p "$fb"
@@ -29,7 +30,7 @@ D="${FAKE_HC_DIR:?}"
   printf '\n'
 } >> "$D/log"
 cmd=${1:-}
-[ "$cmd" != --version ] || { printf '%s\n' "${FAKE_HC_VERSION-hc 0.1.14}"; exit 0; }
+[ "$cmd" != --version ] || { printf '%s\n' "${FAKE_HC_VERSION-hc 0.1.14}"; exit "${FAKE_HC_VERSION_EXIT:-0}"; }
 last=""
 for a in "$@"; do last=$a; done
 case "$cmd" in
@@ -274,6 +275,10 @@ test_container_ensure_refuses_an_hc_below_the_version_floor() {
     assert_contains "$out" "0.1.13" "the refusal for '$v' must name the floor"
     assert_not_contains "$(cat "$D/log")" $'\x1fserver' "version '$v' must be refused before the core is touched"
   done
+  : > "$D/log"
+  out=$(FAKE_HC_VERSION_EXIT=1 hc_shell 'fm_backend_hc_container_ensure' 2>&1) && fail "container_ensure must refuse a failed version probe"
+  assert_contains "$out" "0.1.13" "the refusal for a failed probe must name the floor"
+  assert_not_contains "$(cat "$D/log")" $'\x1fserver' "a failed version probe must be refused before the core is touched"
   for v in "hc 0.1.13" "hc 0.1.15-rc.1" "hc 0.2.0" "hc 1.0"; do
     FAKE_HC_VERSION=$v hc_shell 'fm_backend_hc_container_ensure' >/dev/null || fail "container_ensure must accept version '$v'"
   done
