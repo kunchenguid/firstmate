@@ -240,7 +240,9 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   new adapters. A raw command gets the launch brief appended as its last argument
+#   unless it already names __BRIEF__ or __BRIEFDOORBELL__; a compound one (an
+#   unquoted ;, |, & or newline) launches unchanged with a warning instead. For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -2905,6 +2907,32 @@ launch_template() {
   esac
 }
 
+# raw_launch_is_compound <command>: succeeds when <command> holds a shell
+# control operator (;, |, &, && or a newline) outside quotes. Redirections such
+# as 2>&1 and &> are not operators.
+raw_launch_is_compound() {
+  local s=$1 i c q='' n=${#1}
+  for ((i = 0; i < n; i++)); do
+    c=${s:i:1}
+    case "$q" in
+    \') [ "$c" = "'" ] && q=''
+      continue ;;
+    \") case "$c" in \\) i=$((i + 1)) ;; \") q='' ;; esac
+      continue ;;
+    esac
+    case "$c" in
+    \\) i=$((i + 1)) ;;
+    \' | \") q=$c ;;
+    ';' | '|' | $'\n') return 0 ;;
+    '&')
+      case "${s:0:i}" in *'>' | *'<') continue ;; esac
+      [ "${s:i+1:1}" = '>' ] || return 0
+      ;;
+    esac
+  done
+  return 1
+}
+
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
   RAW_LAUNCH=1
@@ -2920,21 +2948,26 @@ case "$ARG3" in
   # A named adapter template embeds the launch-brief arg itself; a raw command
   # has no such placeholder and would start the agent at an empty prompt.
   # Append it after the caller's own argv. Kimi and rovo reject a positional
-  # prompt and get their brief pointer after their readiness gate, and a command
-  # that already names __BRIEF__ is left alone.
+  # prompt and get their brief pointer after their readiness gate, claude takes
+  # the record-backed doorbell its named template uses, and a command that
+  # already names __BRIEF__ or __BRIEFDOORBELL__ is left alone.
   case "$HARNESS" in
   kimi | rovo) : ;;
   *)
     # shellcheck disable=SC2016 # literal text, expanded by the launched shell
     case "$LAUNCH" in
-    *__BRIEF__*) : ;;
-    *\;* | *\|* | *'&&'* | *' & '* | *' &' | *$'\n'*)
-      # Appending after a compound command would hand the brief to whatever
-      # step comes last (or leave a bare quoted word), not to the agent.
-      echo "error: raw launch command is compound (it contains ;, |, &&, & or a newline), so the launch brief cannot be appended to the agent's argv; put __BRIEF__ where the agent takes its prompt, for example: my-agent --flag \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"; cleanup" >&2
-      exit 1
+    *__BRIEF__* | *__BRIEFDOORBELL__*) : ;;
+    *)
+      if raw_launch_is_compound "$LAUNCH"; then
+        # Appending after a compound command would hand the brief to whatever
+        # step comes last, not to the agent, so it launches unchanged.
+        echo "warning: raw launch command is compound (it contains an unquoted ;, |, &, && or newline), so the launch brief was not appended; put __BRIEF__ where the agent takes its prompt, for example: my-agent --flag \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"; cleanup" >&2
+      elif [ "$HARNESS" = claude ]; then
+        LAUNCH="$LAUNCH __BRIEFDOORBELL__"
+      else
+        LAUNCH=$LAUNCH' "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
       ;;
-    *) LAUNCH=$LAUNCH' "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     esac
     ;;
   esac

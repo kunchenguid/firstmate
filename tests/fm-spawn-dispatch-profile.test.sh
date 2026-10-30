@@ -510,7 +510,7 @@ test_launch_preserves_inherited_git_config() {
   rec=$(make_spawn_case "$id" codex "$id")
   read_case_record "$rec"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness 'echo WORKER-RAN >&2; git config --get-all credential.helper; git config --get core.hooksPath; : __BRIEF__')
+    "$id" "$PROJ_DIR" --harness 'echo WORKER-RAN >&2; git config --get-all credential.helper; git config --get core.hooksPath')
   status=$?
   expect_code 0 "$status" "Git configuration probe should spawn: $out"
   launch=$(cat "$LAUNCH_LOG")
@@ -636,25 +636,77 @@ test_raw_launch_named_like_rovo_still_gets_the_brief() {
   pass "a raw launch whose command only starts with rovo still gets the launch brief"
 }
 
-# Appending the brief after a compound raw command would give it to the last
-# step (or leave a bare quoted word to run), so the spawn refuses and points at
-# __BRIEF__ instead.
-test_compound_raw_launch_without_brief_placeholder_is_refused() {
-  local rec id out status raw
-  id=raw-compound-z15
-  rec=$(make_spawn_case raw-compound claude "$id")
+test_raw_claude_launch_gets_the_brief_doorbell() {
+  local rec id out status launch doorbell
+  id=raw-claude-doorbell-z15
+  rec=$(make_spawn_case raw-claude-doorbell claude "$id")
   read_case_record "$rec"
 
-  for raw in "custom-agent --flag; cleanup" "custom-agent --flag;" "custom-agent --flag && cleanup" "custom-agent --flag | tee out"; do
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude --model x")
+  status=$?
+  expect_code 0 "$status" "raw claude launch should spawn: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "encode launch-brief" "raw claude launch got the typed envelope Claude strips"
+  doorbell=$(claude_launch_brief_arg "$launch")
+  [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
+    || fail "raw claude launch did not end with a launch-brief doorbell: $launch"
+  pass "a raw claude launch gets the record-backed launch-brief doorbell"
+}
+
+# Appending the brief after a compound raw command would give it to the last
+# step, so the command launches unchanged with a warning instead.
+test_compound_raw_launch_without_brief_placeholder_launches_unchanged() {
+  local rec id out status raw launch n=0
+  for raw in "custom-agent --flag; cleanup" "custom-agent --flag && cleanup" "custom-agent --flag | tee out" "custom-agent --flag &"; do
+    n=$((n + 1))
+    id=raw-compound-$n-z15
+    rec=$(make_spawn_case "raw-compound-$n" claude "$id")
+    read_case_record "$rec"
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$PROJ_DIR" "$raw")
+      "$id" "$PROJ_DIR" "$raw" 2>&1)
     status=$?
-    expect_code 1 "$status" "compound raw launch should be refused: $raw"
-    assert_contains "$out" "raw launch command is compound" "refusal did not explain the compound command: $raw"
-    assert_contains "$out" "__BRIEF__" "refusal did not point at __BRIEF__: $raw"
-    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused compound raw launch still published state/$id.meta: $raw"
+    expect_code 0 "$status" "compound raw launch should still spawn: $raw"
+    assert_contains "$out" "launch brief was not appended" "compound raw launch gave no warning: $raw"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "$raw" "compound raw launch command was not emitted unchanged: $raw"
+    assert_not_contains "$launch" "launch-brief" "compound raw launch got the brief appended: $raw"
   done
-  pass "a compound raw launch without __BRIEF__ is refused with guidance"
+  pass "a compound raw launch without __BRIEF__ launches unchanged with a warning"
+}
+
+test_quoted_operator_in_raw_launch_still_gets_the_brief() {
+  local rec id out status launch
+  id=raw-quoted-op-z15
+  rec=$(make_spawn_case raw-quoted-op claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "custom-agent -c 'notify=[a; b | c]' 2>&1" 2>&1)
+  status=$?
+  expect_code 0 "$status" "raw launch with a quoted operator should spawn: $out"
+  assert_not_contains "$out" "launch brief was not appended" "a quoted operator was treated as compound"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "custom-agent -c 'notify=[a; b | c]' 2>&1 \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\"" \
+    "raw launch with a quoted operator did not get the brief appended"
+  pass "a quoted operator or redirection in a raw launch still gets the brief appended"
+}
+
+test_compound_raw_launch_places_brief_at_placeholder() {
+  local rec id out status launch
+  id=raw-compound-placeholder-z15
+  rec=$(make_spawn_case raw-compound-placeholder claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" 'custom-agent --flag "$(__OPINPUT__ encode launch-brief < __BRIEF__)"; cleanup' 2>&1)
+  status=$?
+  expect_code 0 "$status" "compound raw launch with __BRIEF__ should spawn: $out"
+  assert_not_contains "$out" "launch brief was not appended" "a compound command naming __BRIEF__ was warned about"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "custom-agent --flag \"\$('$ROOT/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\"; cleanup" \
+    "compound raw launch did not place the brief at its __BRIEF__ placeholder"
+  pass "a compound raw launch places the brief where it names __BRIEF__, with nothing appended"
 }
 
 test_chained_raw_launch_strips_ai_trailer_in_every_step() {
@@ -664,7 +716,7 @@ test_chained_raw_launch_strips_ai_trailer_in_every_step() {
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "cd . && git commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: chained raw launch' && : __BRIEF__")
+    "$id" "$PROJ_DIR" "cd . && git commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: chained raw launch'")
   status=$?
   expect_code 0 "$status" "chained raw launch should spawn: $out"
   launch=$(cat "$LAUNCH_LOG")
@@ -2785,7 +2837,10 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_rovo_launch_gets_no_positional_brief
 test_raw_launch_named_like_rovo_still_gets_the_brief
-test_compound_raw_launch_without_brief_placeholder_is_refused
+test_raw_claude_launch_gets_the_brief_doorbell
+test_compound_raw_launch_without_brief_placeholder_launches_unchanged
+test_quoted_operator_in_raw_launch_still_gets_the_brief
+test_compound_raw_launch_places_brief_at_placeholder
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
