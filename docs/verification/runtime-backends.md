@@ -580,12 +580,14 @@ jq '{hasCompletedOnboarding, theme}' "$HOME/.claude.json"
 ```
 
 `theme` is `null` on this fully onboarded account, so it is not a reliable completion signal; `hasCompletedOnboarding` is.
-The check gates readiness only on a host this home will actually launch Claude on: one that pins a Claude account through `config/claude-account`, or whose configured harness is `claude` — the default line or any `mate <id>:` override in `config/secondmate-harness`, then `config/crew-harness`.
-When `claude` is merely installed but this home pins no Claude account and runs a different or unknown harness, incomplete onboarding is reported as a non-blocking `skip`, so a host running another harness stays as ready as it is on `main`.
+The check gates readiness only on a host this launch will actually start Claude on: one that pins a Claude account through `config/claude-account`, or one the parent passes `--harness claude` for.
+It no longer reads the remote home's `config/secondmate-harness` or `config/crew-harness`: the parent selects the harness and passes it to the launch, and a freshly provisioned remote home's `config/` is empty.
+`bin/fm-remote-readiness-lib.sh` forwards that harness to the doctor on every readiness run (`bin/fm-spawn.sh` and the secondmate liveness check pass it; a seed preflight has no harness yet and passes none).
+When `claude` is merely installed but no Claude account is pinned and the launch selects a different harness — or no harness is passed, as in a manual or seed run — incomplete onboarding is reported as a non-blocking `skip`, and the spawn-time readiness check, which passes the harness, still catches a Claude launch.
 With no pin the check reads the default store, `$HOME/.claude.json`: the doctor runs under the entrypoint's `env -i` with no `CLAUDE_CONFIG_DIR`, which matches an unpinned launch from a default environment.
 `tests/fm-remote-doctor.test.sh` pins the verdict against controlled account fixtures: a completed record is ready, and a false flag or a missing `.claude.json` is a human gap that `--fix` never answers and never creates.
 It also pins the selected-account cases: with a `config/claude-account` pin, an onboarded selected account is ready even when the default is not, an un-onboarded selected account is a human gap naming that account even when the default is onboarded, an unresolvable pin is a human gap, and the check writes to no config.
-It pins the gating rule too: a host with no Claude pin running a non-Claude or unknown harness is a non-blocking `skip` even with incomplete onboarding, and an un-onboarded pinned-ordinary account's operator step is `env -u CLAUDE_CONFIG_DIR claude` rather than a `CLAUDE_CONFIG_DIR=<root>` form.
+It pins the gating rule too: with no Claude pin, a passed `--harness claude` gates the host (even when the remote home's `crew-harness` names another harness) while a non-claude or omitted harness is a non-blocking `skip` even with incomplete onboarding, and an un-onboarded pinned-ordinary account's operator step is `env -u CLAUDE_CONFIG_DIR claude` rather than a `CLAUDE_CONFIG_DIR=<root>` form.
 
 ## Pi seeded-secondmate project trust
 

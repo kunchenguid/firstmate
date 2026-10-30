@@ -1389,7 +1389,7 @@ spawn_remote_secondmate() {
   # through a launch. This is also the readiness gate every liveness relaunch
   # passes through, because recovery respawns through this same route.
   rc=0
-  fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || rc=$?
+  fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" "$harness" || rc=$?
   if [ "$rc" -ne 0 ]; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true

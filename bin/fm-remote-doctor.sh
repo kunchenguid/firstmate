@@ -2,7 +2,7 @@
 # Check, and optionally repair, one remote account's second-mate readiness.
 #
 # Usage:
-#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix]
+#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--harness <name>] [--fix]
 #
 # Run it through fm-on.sh so the fixed entrypoint invokes this readiness owner
 # over its plain SSH bootstrap. The command reports the same filesystem-composed
@@ -53,6 +53,14 @@
 # onboarding, writes an auto-login password, changes FileVault, stores an
 # account password, or replaces a non-Firstmate wrapper; those remain reported
 # gaps.
+#
+# --harness names the harness the parent launch selected for this host. The
+# Claude first-run onboarding check gates only a host this launch runs Claude
+# on: one that pins a Claude account, or one this argument names as claude. A
+# non-claude --harness, or an omitted one (a manual or seed run with no harness
+# yet), gates that check on the account pin alone. The parent passes --harness on
+# every spawn-time and liveness readiness run, so a Claude launch is caught there
+# even when a bare run would skip it.
 set -eu
 
 # Resolve this script's directory with builtins only: a host missing a required
@@ -87,17 +95,24 @@ ENTRYPOINT_LINK="${HOME:-}/.local/bin/fm-remote-entrypoint.sh"
 usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 MODE=check
-case "${1:-}" in
-  '') ;;
+HARNESS=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
   --fix) MODE=fix; shift ;;
   --worker-tool-probe)
     [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
     MODE='worker-tool-probe'
     shift
     ;;
+  --harness)
+    shift
+    [ "$#" -gt 0 ] || usage
+    HARNESS=$1
+    shift
+    ;;
   *) usage ;;
-esac
-[ "$#" -eq 0 ] || usage
+  esac
+done
 
 PLATFORM=$(fm_remote_job_platform)
 UID_NUM=$(id -u 2>/dev/null) || UID_NUM=
@@ -701,51 +716,6 @@ check_herdr_server() {
     "rerun this command with --fix to start it"
 }
 
-# True only when this home's own configuration names claude as the harness it
-# launches: config/secondmate-harness's default line or any "mate <id>:" override
-# (fm-harness.sh's canonical parser honors both, and a per-mate override launches
-# claude for that secondmate just as the default does), then config/crew-harness.
-# Read the home's config directly rather than resolving a deferred "default" or
-# own-harness fallback, because the doctor runs under the entrypoint's env -i
-# with no way to detect a running firstmate; an absent, "default", or otherwise
-# unresolved harness is therefore treated as not-claude, so onboarding stays a
-# non-blocking note for it. fm-harness.sh's parser is not reused directly: it is
-# not source-safe (it reads $FM_HOME/config at load under set -u and runs a
-# command dispatch that falls to a process-tree walk), and its subcommands only
-# resolve the default or one named mate, with no "does any line name claude"
-# query, which is the whole question here.
-home_harness_is_claude() {
-  local config token
-  [ -n "${FM_HOME:-}" ] || return 1
-  config="$FM_HOME/config"
-  if [ -f "$config/secondmate-harness" ]; then
-    # Print "claude" when the default line (first token) or any "mate <id>:"
-    # override (first token after the colon) names claude; mirrors the override
-    # grammar in fm-harness.sh's secondmate_parse.
-    token=$(awk '
-      { sub(/^[[:space:]]+/, "") }
-      /^#/ || /^$/ { next }
-      /^mate[[:space:]]+[^:[:space:]]+[[:space:]]*:/ {
-        rest = $0
-        sub(/^mate[[:space:]]+[^:[:space:]]+[[:space:]]*:[[:space:]]*/, "", rest)
-        split(rest, a, /[[:space:]]+/)
-        if (a[1] == "claude") { print "claude"; exit }
-        next
-      }
-      !seen_default {
-        seen_default = 1
-        if ($1 == "claude") { print "claude"; exit }
-      }
-    ' "$config/secondmate-harness" 2>/dev/null || true)
-    [ "$token" = claude ] && return 0
-  fi
-  if [ -f "$config/crew-harness" ]; then
-    token=$(tr -d '[:space:]' < "$config/crew-harness" 2>/dev/null || true)
-    [ "$token" = claude ] && return 0
-  fi
-  return 1
-}
-
 check_claude_onboarding() {
   local resolved config completed selection declared root pin_account pinned_ordinary pinned account_err reason
   resolved=$(command -v claude 2>/dev/null || true)
@@ -795,13 +765,20 @@ check_claude_onboarding() {
       return 0
     fi
   fi
-  # Gate readiness only on a host this home will actually launch Claude on: one
-  # that pins a Claude account, or whose configured harness is claude. When
-  # claude is merely installed but this home pins no Claude account and runs a
-  # different (or unknown) harness, its first-run onboarding is a non-blocking
-  # note, so a host that is ready on main stays ready.
-  if [ -z "$pinned" ] && ! home_harness_is_claude; then
-    record claude-onboarding "skip: claude is installed, but this home pins no Claude account and its configured harness is not claude, so its first-run onboarding does not gate this host"
+  # Gate readiness only on a host this launch will actually start Claude on: one
+  # that pins a Claude account, or one whose parent-selected harness (passed as
+  # --harness) is claude. The remote home's own config is never consulted here,
+  # because the parent selects the harness and passes it to the launch; a freshly
+  # provisioned remote home's config is empty. When --harness names another
+  # harness, or no harness was passed (a manual or seed run), this check gates on
+  # the account pin alone, and the spawn-time readiness run, which always passes
+  # --harness, still catches a Claude launch.
+  if [ -z "$pinned" ] && [ "$HARNESS" != claude ]; then
+    if [ -n "$HARNESS" ]; then
+      record claude-onboarding "skip: claude is installed, but this launch selects the $HARNESS harness and this home pins no Claude account, so Claude's first-run onboarding does not gate this host"
+    else
+      record claude-onboarding "skip: claude is installed, but no launch harness was passed to this run and this home pins no Claude account, so Claude's first-run onboarding is not gated here; the spawn-time readiness check passes the harness and still catches a Claude launch"
+    fi
     return 0
   fi
   if [ -n "$root" ]; then
