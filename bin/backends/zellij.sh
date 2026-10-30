@@ -214,12 +214,11 @@ fm_backend_zellij_cli() {  # <session> <action-subcommand-and-args...>
 }
 
 # fm_backend_zellij_session_exists: passive, READ-ONLY liveness check - never
-# starts or creates a session (unlike herdr's target_ready, which DOES
-# auto-start its server: a herdr server restart is non-destructive and
-# recovers persisted state, but zellij's `kill-session` is destructive and
+# starts or creates a session. Zellij's `kill-session` is destructive, so
 # recreating an unrelated target session under the same name would silently
-# orphan whatever the caller actually meant to reach). Every op below calls
-# this first and fails rather than guessing.
+# orphan whatever the caller actually meant to reach. Every op below calls
+# this first and fails rather than guessing. Herdr's different readiness and
+# recovery semantics are owned by docs/herdr-backend.md.
 fm_backend_zellij_session_exists() {  # <session>
   zellij list-sessions --short --no-formatting 2>/dev/null | grep -qxF "$1"
 }

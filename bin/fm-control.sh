@@ -43,9 +43,11 @@
 #              proof (fm_control_endpoint_absence_verdict) before anything is
 #              claimed about it, because `missing` also covers an endpoint that
 #              is merely unreachable from this seat. Herdr proves absence by
-#              reading the session the record names; REX proves it because its
+#              reading the session the record names and binding the pane to the
+#              task; REX proves it because its
 #              never-reused ids answer a structured not-found from the server
-#              the record names.
+#              the record names. docs/agent-control.md "Reclaiming a task whose
+#              endpoint is gone" owns the absence proof, outcomes, and refusals.
 #              Proven gone reports `endpoint-gone` rather than
 #              `already-stopped`, because the endpoint this verb normally
 #              preserves did not survive; a pane that turns out to be there and
@@ -59,20 +61,11 @@
 #              have no session stop (bin/fm-control-lib.sh
 #              fm_control_backend_exit_supported); interrupt ends its turn.
 #   relaunch   Transactionally replace the running agent with a new one, in the
-#              SAME worktree - and the same endpoint whenever that endpoint
-#              still exists - on the same or a newly chosen
-#              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. When the recorded endpoint is instead proven gone -
-#              a Herdr pane or workspace destroyed in churn, or a Rex block or
-#              session gone with its server - the launch owner re-creates one in
-#              that worktree, in the herdr session the record names (Rex: the
-#              recorded session while it survives, otherwise the ordinary Rex
-#              placement), and the task's record rebinds to it; that is how a task
-#              whose terminal was destroyed is reclaimed by the home that owns
-#              it, rather than being stranded with a parked approval nobody can
-#              answer. Reclaim is HERDR- and REX-ONLY for the reason `exit` gives above:
-#              a tmux `missing` cannot be proven absent from a task record, so
-#              it refuses.
+#              SAME worktree - and the same endpoint whenever it remains
+#              adoptable - on the same or a newly chosen harness/model/effort.
+#              Switching harness is one ordinary use of this verb.
+#              The same recovery policy in docs/agent-control.md owns when
+#              the launch owner must rebind to a fresh endpoint instead.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
@@ -401,7 +394,7 @@ fi
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  fm_backend_agent_state "$BACKEND" "$T" "$LABEL"
 }
 
 busy_verdict() {
@@ -713,24 +706,18 @@ do_exit() {
       # `missing` on its own is not a finding about the endpoint: it conflates
       # "destroyed" with "unreachable from this seat". Route it through the
       # control plane's one absence proof - the same one the relaunch gate uses
-      # - and report what that proof actually established, never more.
-      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T" "$META")
+      # - and report what that proof actually established, never more
+      # (docs/agent-control.md "Reclaiming a task whose endpoint is gone").
+      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T" "$META" "$LABEL")
       case "${absence%%$'\t'*}" in
         gone)
-          # Proven gone, so the agent that lived in it went with it: exit's
-          # postcondition already holds and there is nothing to send. Its own
-          # outcome rather than `already-stopped`, because the endpoint this
-          # verb normally preserves did not survive. The worktree and every
-          # uncommitted change are untouched, and `relaunch` re-creates the
-          # endpoint from here.
+          # The task's endpoint is absent, so never send to its old address.
+          # Preserve the worktree and report the distinct endpoint-gone outcome.
           printf 'endpoint-gone'
           return 0
           ;;
         dead)
-          # The endpoint was only unreachable and is there after all, holding
-          # no agent - a herdr pane whose session server was merely stopped is
-          # the common case. Nothing is gone, so this is the ordinary
-          # already-stopped outcome.
+          # The recheck found an eligible agent-free endpoint, not absence.
           printf 'already-stopped'
           return 0
           ;;

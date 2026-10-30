@@ -1109,7 +1109,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   case "$backend" in
     herdr|rex|tern)
       if command -v fm_backend_busy_state >/dev/null 2>&1; then
-        native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+        native=$(fm_backend_busy_state "$backend" "$target" "fm-$id" 2>/dev/null || true)
         if [ "$native" = busy ]; then
           printf 'busy %s-native' "$backend"
           return 0

@@ -222,7 +222,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target="$window"
-  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+  agent_state=$(fm_backend_agent_state "$backend" "$target" "fm-$id" 2>/dev/null) || agent_state=unreadable
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;
     *)
@@ -328,7 +328,7 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
           [ -n "$home" ] || home=$(fm_meta_get "$meta" worktree)
           ( unset FM_ROOT_OVERRIDE; FM_HOME="$home" FM_ROOT="$home" STATE="$home/state" fm_backend_kill "$backend" "$target" ) 2>/dev/null || true
         else
-          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+          fm_backend_kill "$backend" "$target" "" "fm-$id" 2>/dev/null || true
         fi
       fi
     elif [ -n "$target" ] && ! fm_backend_kill "$backend" "$target" 2>/dev/null; then

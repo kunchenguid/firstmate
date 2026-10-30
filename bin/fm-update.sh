@@ -126,7 +126,7 @@ secondmate_agent_may_be_alive() {  # <id>
       fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null) || state=unreadable
   elif fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1; then
     state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" \
-      "$FM_BACKEND_VALIDATED_TARGET" 2>/dev/null) || state=unreadable
+      "$FM_BACKEND_VALIDATED_TARGET" "fm-$id" 2>/dev/null) || state=unreadable
   fi
   case "$state" in
     dead|missing) return 1 ;;
