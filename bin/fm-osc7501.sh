@@ -26,28 +26,18 @@
 # When all of that holds, arm daemonizes `watch`, which polls firstmate's own
 # durable signals for the task and emits records to /dev/tty:
 #
-#   state/<id>.status current line (bin/fm-classify-lib.sh owns the fold -
-#   an open needs-decision or blocked wins over routine events):
+#   an open keyed needs-decision or blocked in state/<id>.status
+#   (bin/fm-classify-lib.sh owns the fold):
 #     needs-decision/held -> blocked kind=question
 #     blocked             -> blocked kind=permission (kind=auth when the note
 #                            names a credential)
-#     failed              -> error
-#     done                -> done ("PR ready" when the note has a URL)
-#     paused              -> working, msg "Waiting: <note>"
 #   otherwise the task's activity as fm_busy_classify reads it
 #   (bin/fm-busy-lib.sh owns every source: the busy-state record, or
-#   Cursor's transcript / Muse's session log):
-#     busy -> working, idle -> idle, unknown -> hold the last record
-#   unhandled <id>.inbox/*.msg with idle or unknown activity reads as
-#     working "Steering received"
-#   a working: line supplies the working message, and reads as working while
-#     the activity is unknown
-#   a failed/done/paused declaration yields only to a follow-up: once any
-#   steer (unhandled or in handled/) was enqueued after it, the declaration is
-#   retired and activity and inbox map as above. Busy-state writes never
-#   retire one - a mid-turn rewrite looks the same as a new turn - and
-#   ordering uses nanosecond file times so a steer in the declaration's own
-#   second still counts; an open decision or blocker always wins
+#   Cursor's transcript / Muse's session log): busy -> working
+#   otherwise the latest status line, when it is terminal:
+#     failed              -> error
+#     done                -> done ("PR ready" when the note has a URL)
+#   otherwise idle activity -> idle, and unknown activity holds the last record
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
@@ -222,25 +212,6 @@ FM_OSC7501_QUERY_MATCH=$(printf '\033]7501')
 
 # --- native reporting ---------------------------------------------------------
 
-# osc_mtime_ns <file> -> mtime in integer nanoseconds, portable.
-OSC_DARWIN=0
-[ "$(uname -s 2>/dev/null)" = Darwin ] && OSC_DARWIN=1
-osc_mtime_ns() {
-  local t s f
-  if [ "$OSC_DARWIN" = 1 ]; then
-    t=$(/usr/bin/stat -f %Fm "$1" 2>/dev/null) || return 1
-  else
-    t=$(stat -c '%Y %y' "$1" 2>/dev/null) || return 1
-    t=$(printf '%s' "$t" | awk '{n = split($3, a, "."); printf "%s.%s", $1, (n > 1 ? a[2] : "")}')
-  fi
-  s=${t%%.*}
-  f="${t#"$s"}"
-  f="${f#.}000000000"
-  f=${f:0:9}
-  case "$s$f" in '' | *[!0-9]*) return 1 ;; esac
-  printf '%s%s' "$s" "$f"
-}
-
 # osc_probe_version <bin> -> first x.y.z in `<bin> --version`, bounded by
 # FM_OSC7501_PROBE_SECS and run at every launch.
 osc_probe_version() { # <bin>
@@ -302,8 +273,6 @@ osc_native() {
 # --- signal -> state ----------------------------------------------------------
 
 LIBS_LOADED=0
-OSC_DECL_LINE=
-OSC_DECL_AT=0
 osc_load_libs() {
   [ "$LIBS_LOADED" = 1 ] && return 0
   # shellcheck source=bin/fm-classify-lib.sh
@@ -313,36 +282,20 @@ osc_load_libs() {
   LIBS_LOADED=1
 }
 
-# osc_inbox_since <dir> <ns>: 0 when a steer message in <dir> was written after
-# <ns> (0 = any message).
-osc_inbox_since() {
-  local msg mt
-  for msg in "$1"/*.msg; do
-    [ -e "$msg" ] || continue
-    mt=$(osc_mtime_ns "$msg") || continue
-    [ "${mt:-0}" -gt "$2" ] 2>/dev/null && return 0
-  done
-  return 1
-}
-
 # osc_plan sets W_STATE, W_KIND, W_MSG; returns 1 when nothing should be
-# emitted (no signal yet, or the activity is unknown). A declaration's time,
-# in nanoseconds, is fixed the first poll that sees its line (OSC_DECL_LINE /
-# OSC_DECL_AT): no later than the status file's mtime then, nor than the end
-# of its own stamped second, so later unrelated appends never move it.
+# emitted (no signal yet, or the activity is unknown). An empty harness means
+# no live agent, so activity is not read.
 osc_plan() { # <task> <kind> <state> <harness>
-  local task=$1 kind=$2 state_dir=$3 line verb note held act bs since sf wmsg=''
+  local task=$1 kind=$2 state_dir=$3 file line verb note held act=
+  file="$state_dir/$task.status"
   W_STATE=
   W_KIND=
   W_MSG=
   osc_load_libs || return 1
-  act=$(fm_busy_classify '' '' "$4" "$task" "$state_dir" 2>/dev/null) || act=
-  bs=${act%% *}
-  line=$(status_current_line "$state_dir/$task.status" "$kind" 2>/dev/null)
-  verb=$(status_line_verb "$line" 2>/dev/null) || verb=
-  note=$(status_line_note "$line" 2>/dev/null) || note=
-  note=$(printf '%s' "$note" | tr '\t\r\n' '   ')
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  line=$(status_open_decisions "$file" "$kind" 2>/dev/null | tail -n 1)
+  verb=$(printf '%s' "$line" | cut -f2)
+  note=$(printf '%s' "$line" | cut -f3- | tr '\t\r\n' '   ')
   case "$verb" in
     needs-decision | "$held")
       W_STATE=blocked
@@ -357,9 +310,21 @@ osc_plan() { # <task> <kind> <state> <harness>
       W_MSG="Blocked: $note"
       return 0
       ;;
+  esac
+  [ -z "$4" ] || act=$(fm_busy_classify '' '' "$4" "$task" "$state_dir" 2>/dev/null) || act=
+  if [ "${act%% *}" = busy ]; then
+    W_STATE=working
+    return 0
+  fi
+  line=$(last_status_line "$file" 2>/dev/null)
+  verb=$(status_line_verb "$line" 2>/dev/null) || verb=
+  note=$(status_line_note "$line" 2>/dev/null) || note=
+  note=$(printf '%s' "$note" | tr '\t\r\n' '   ')
+  case "$verb" in
     failed)
       W_STATE=error
       W_MSG="Failed: $note"
+      return 0
       ;;
     done)
       W_STATE='done'
@@ -367,49 +332,20 @@ osc_plan() { # <task> <kind> <state> <harness>
         *https://*) W_MSG="PR ready: $note" ;;
         *) W_MSG="Done: $note" ;;
       esac
-      ;;
-    paused)
-      W_STATE=working
-      W_MSG="Waiting: $note"
-      ;;
-    working) wmsg=$note ;;
-  esac
-  if [ -n "$W_STATE" ]; then
-    if [ "$line" != "$OSC_DECL_LINE" ]; then
-      since=$(status_line_at_epoch "$line" 2>/dev/null) || return 0
-      since=$((since * 1000000000 + 999999999))
-      if sf=$(osc_mtime_ns "$state_dir/$task.status") && [ "$sf" -lt "$since" ]; then since=$sf; fi
-      OSC_DECL_LINE=$line
-      OSC_DECL_AT=$since
-    fi
-    if ! osc_inbox_since "$state_dir/$task.inbox" "$OSC_DECL_AT" &&
-      ! osc_inbox_since "$state_dir/$task.inbox/handled" "$OSC_DECL_AT"; then
       return 0
-    fi
-    W_STATE=
-    W_MSG=
-  fi
-  if [ "$bs" = busy ]; then
-    W_STATE=working
-    W_MSG=$wmsg
-  elif osc_inbox_since "$state_dir/$task.inbox" 0; then
-    W_STATE=working
-    W_MSG="Steering received"
-  elif [ "$bs" = idle ]; then
-    W_STATE=idle
-  elif [ "$verb" = working ]; then
-    W_STATE=working
-    W_MSG=$wmsg
-  fi
-  [ -n "$W_STATE" ]
+      ;;
+  esac
+  [ "${act%% *}" = idle ] || return 1
+  W_STATE=idle
 }
 
 # --- watcher ------------------------------------------------------------------
 
-# final record before exit: keep a result worth finding (done/error) and park
-# everything else at idle, never clearing records another program owns.
+# final record before exit: the agent is gone, so its activity no longer
+# counts; keep a result worth finding (done/error) and park everything else at
+# idle, never clearing records another program owns.
 osc_final() {
-  if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" "$WATCH_HARNESS" && { [ "$W_STATE" = 'done' ] || [ "$W_STATE" = error ]; }; then
+  if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" '' && { [ "$W_STATE" = 'done' ] || [ "$W_STATE" = error ]; }; then
     printf '%s' "$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")" >&3 2>/dev/null
   else
     printf '%s' "$(osc_seq idle '' '' '' "$WATCH_TITLE" '')" >&3 2>/dev/null
