@@ -2923,7 +2923,7 @@ case "$ARG3" in
   # prompt and get their brief pointer after their readiness gate, and a command
   # that already names __BRIEF__ is left alone.
   case "$HARNESS" in
-  kimi* | rovo*) : ;;
+  kimi | rovo) : ;;
   *)
     # shellcheck disable=SC2016 # literal text, expanded by the launched shell
     case "$LAUNCH" in
