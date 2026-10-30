@@ -1188,6 +1188,40 @@ test_polytoken_spawn_arms_the_busy_contract() {
   pass "fm-spawn: the polytoken busy contract arms and advances through the generated writer"
 }
 
+# Spawning over a task whose merge poll is armed carries the record's pr= block
+# forward, and the poll authenticates only while that block ends the record, so
+# the session binding written after launch must land ahead of it.
+test_polytoken_session_binding_keeps_an_armed_merge_poll_verifiable() {
+  local id rec out rc statedir url head arm valid
+  id="pt-armed-poll-z8-$$"
+  rec=$(make_polytoken_spawn_case armedpoll "$id")
+  read_polytoken_spawn_record "$rec"
+  statedir="$HOME_DIR/state"
+  url=https://github.com/example/repo/pull/8
+  head=0123456789abcdef0123456789abcdef01234568
+  printf 'kind=ship\nmode=no-mistakes\npr=%s\npr_head=%s\n' "$url" "$head" > "$statedir/$id.meta"
+  # shellcheck disable=SC2016 # $1..$4 expand inside the probe's own shell.
+  arm='. "$1/bin/fm-pr-lib.sh"; fm_pr_url_parse "$3" || exit 1
+    fm_pr_poll_prepare "$2" "$4" "$FM_PR_PROVIDER" "$3" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+      "$1/bin/fm-pr-poll.sh" && fm_pr_poll_publish_prepared'
+  # shellcheck disable=SC2016 # $1..$3 expand inside the probe's own shell.
+  valid='. "$1/bin/fm-pr-lib.sh"; fm_pr_poll_artifacts_valid "$2" "$3" "$1/bin/fm-pr-poll.sh"'
+  bash -c "$arm" _ "$ROOT" "$statedir" "$url" "$id" || fail "could not arm the merge poll fixture"
+  bash -c "$valid" _ "$ROOT" "$statedir" "$id" || fail "the armed merge poll fixture did not authenticate"
+
+  out=$(run_polytoken_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model zai/glm-5.3-flash --effort low)
+  rc=$?
+  expect_code 0 "$rc" "a polytoken spawn over an armed task should succeed (output: $out)"
+  assert_grep 'polytoken_session=0czfake-echo' "$statedir/$id.meta" \
+    "setup error: the spawn bound no session, so the ordering is untested"
+  [ "$(tail -n 2 "$statedir/$id.meta")" = "pr=$url"$'\n'"pr_head=$head" ] \
+    || fail "the bound record does not end with its pr= block: $(cat "$statedir/$id.meta")"
+  bash -c "$valid" _ "$ROOT" "$statedir" "$id" \
+    || fail "the session binding disarmed the task's merge poll: $(cat "$statedir/$id.meta")"
+  pass "fm-spawn: the polytoken session binding lands ahead of the pr= block, so an armed merge poll still authenticates"
+}
+
 # ---------------------------------------------------------------------------
 
 test_polytoken_ancestry_detects_the_native_command_name
@@ -1220,3 +1254,4 @@ test_polytoken_whitespace_state_dir_refuses
 test_polytoken_readiness_failure_fails_loudly_and_cleans_up
 test_polytoken_post_launch_failure_drops_its_slot_claim
 test_polytoken_spawn_arms_the_busy_contract
+test_polytoken_session_binding_keeps_an_armed_merge_poll_verifiable
