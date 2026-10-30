@@ -645,7 +645,7 @@ fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
 # it is gone. Only the capped-session release decision uses this, so ordinary
 # teardown keeps fm_backend_zellij_kill's best-effort contract unchanged for
 # every other task. A failed close is proved absent by the session's pane
-# and tab inventories; a successful close is its own proof.
+# and tab inventories, regardless of the close command's exit status.
 fm_backend_zellij_kill_confirmed() {  # <target> [tab_id] [expected_label]
   fm_backend_zellij_parse_target "$1" || return 1
   local tab_id fallback_tab_id=${2:-} expected_label=${3:-} sessions
@@ -666,13 +666,11 @@ fm_backend_zellij_kill_confirmed() {  # <target> [tab_id] [expected_label]
       ;;
   esac
   if [ -n "$tab_id" ]; then
-    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || fm_backend_zellij_target_absent "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" "$fallback_tab_id" "$expected_label"
+    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || true
   elif [ -z "$expected_label" ]; then
-    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-pane --pane-id "$FM_BACKEND_ZELLIJ_PANE" >/dev/null 2>&1 || fm_backend_zellij_target_absent "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" "$fallback_tab_id" "$expected_label"
-  else
-    fm_backend_zellij_target_absent "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" "$fallback_tab_id" "$expected_label"
-    return $?
+    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-pane --pane-id "$FM_BACKEND_ZELLIJ_PANE" >/dev/null 2>&1 || true
   fi
+  fm_backend_zellij_target_absent "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" "$fallback_tab_id" "$expected_label"
 }
 
 # fm_backend_zellij_list_live: recovery/orphan discovery. Lists every tab in

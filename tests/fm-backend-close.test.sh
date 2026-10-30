@@ -118,13 +118,16 @@ pass "cmux proves absence across every window and refuses incomplete inventories
   check_close zellij firstmate:7 1 3 fm-task
   check_close zellij firstmate:7 1
   zellij_close_status=0
+  check_close zellij firstmate:7 1 3 fm-task
+  test_panes='[]' test_tabs='[]'
   check_close zellij firstmate:7 0 3 fm-task
   fm_backend_zellij_tab_for_pane() { return 0; }
   zellij_close_status=1
-  check_close zellij firstmate:7 1
+  check_close zellij firstmate:7 0
   zellij_close_status=0
   check_close zellij firstmate:7 0
   label_status=1
+  test_panes='[{"id":7}]' test_tabs='[{"tab_id":3,"name":"fm-task"}]'
   check_close zellij firstmate:7 1 3 fm-task
   test_panes='[]' test_tabs='[]'
   check_close zellij firstmate:7 0 3 fm-task
