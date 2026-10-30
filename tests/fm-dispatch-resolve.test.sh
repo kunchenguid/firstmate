@@ -111,7 +111,10 @@ cat > "$FAKEBIN/curl" <<'SH'
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
 if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] ||
-  [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
+  [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ] ||
+  [ -n "${OPENAI_API_KEY+x}" ] || [ -n "${OPENAI_API_KEY_PRIVATE+x}" ] ||
+  [ -n "${FM_DISPATCH_API_KEY+x}" ] || [ -n "${DISPATCH_API_KEY_PRIVATE+x}" ] ||
+  [ -n "${KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -140,7 +143,10 @@ cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
 if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] ||
-  [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
+  [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ] ||
+  [ -n "${OPENAI_API_KEY+x}" ] || [ -n "${OPENAI_API_KEY_PRIVATE+x}" ] ||
+  [ -n "${FM_DISPATCH_API_KEY+x}" ] || [ -n "${DISPATCH_API_KEY_PRIVATE+x}" ] ||
+  [ -n "${KEY_PRIVATE+x}" ]; then
   printf 'quota-axi:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -430,6 +436,189 @@ FM_DISPATCH_PROVIDER=unknown OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF
 expect_code 2 "$code" "unknown provider is a configuration error"
 assert_contains "$err" 'unknown FM_DISPATCH_PROVIDER' "unknown provider is actionable"
 pass "OpenRouter ambiguous, malformed, HTTP, and missing-model paths are handled"
+
+# --- off stays off: no provider and no typesafe key, whatever else is set ----
+reset_log
+FM_DISPATCH_BASE_URL=http://127.0.0.1:8080 FM_DISPATCH_API_KEY=unused OPENAI_API_KEY=unused \
+  OPENROUTER_API_KEY=unused run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "config-absent off exits 0"
+assert_equals '' "$out" "config-absent off prints nothing on stdout"
+assert_equals "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $HOME_DIR/.env)" "$err" \
+  "config-absent off is the original single stderr line, byte for byte"
+assert_absent "$LOG/argv" "config-absent off makes no network call"
+assert_absent "$LOG/quota-axi.calls" "config-absent off reads no quota"
+pass "with no provider set, other providers' settings leave the original off line unchanged"
+
+# --- systemone: any System One-compatible host at a base URL ----------------
+SO_KEY='test-systemone-key-never-in-child-env-or-argv'
+SO_RESPONSE="$TMP_ROOT/systemone-response.json"
+write_response "$SO_RESPONSE" rule_4 0.9
+reset_log
+FM_DISPATCH_PROVIDER=systemone FM_DISPATCH_MODEL=clef-flash FM_DISPATCH_BASE_URL=http://127.0.0.1:8080/ \
+  FAKE_CURL_RESPONSE=$SO_RESPONSE run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "systemone clear exits 0"
+assert_contains "$out" '  status: clear' "systemone clear status"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "systemone uses the shared quota argmax"
+assert_contains "$(cat "$LOG/argv")" 'http://127.0.0.1:8080/v1/systemone' "systemone posts to <base>/v1/systemone with a trailing slash trimmed"
+assert_contains "$(cat "$LOG/argv")" $'--max-time\n10' "systemone timeout"
+assert_not_contains "$(cat "$LOG/argv")" '@/dev/fd/3' "systemone without a key sends no Authorization header"
+assert_equals 'fd3 unreadable' "$(cat "$LOG/header")" "systemone without a key opens no header descriptor"
+assert_equals "$(jq -Sc 'del(.model)' "$TMP_ROOT/typesafe-body.json")" "$(jq -Sc 'del(.model)' "$LOG/body")" "systemone sends the unchanged System One request"
+assert_equals 'clef-flash' "$(jq -r .model "$LOG/body")" "systemone model is explicit"
+reset_log
+FM_DISPATCH_PROVIDER=systemone FM_DISPATCH_MODEL=clef-flash FM_DISPATCH_BASE_URL=https://so.example.test \
+  FM_DISPATCH_API_KEY=$SO_KEY FAKE_CURL_RESPONSE=$SO_RESPONSE run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: clear' "systemone with a key is clear"
+assert_contains "$(cat "$LOG/argv")" 'https://so.example.test/v1/systemone' "systemone https base URL"
+assert_not_contains "$(cat "$LOG/argv")" "$SO_KEY" "systemone key never appears in curl argv"
+assert_equals "Authorization: Bearer $SO_KEY" "$(cat "$LOG/header")" "systemone key reaches curl only through fd 3"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "systemone key is absent from child environments"
+printf '%s\n' 'FM_DISPATCH_PROVIDER=systemone' 'FM_DISPATCH_MODEL=clef' 'FM_DISPATCH_BASE_URL=http://10.0.0.5:8080' \
+  "FM_DISPATCH_API_KEY=$SO_KEY" > "$HOME_DIR/.env"
+reset_log
+FAKE_CURL_RESPONSE=$SO_RESPONSE run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "systemone provider, model, base URL, and key work from .env"
+assert_contains "$(cat "$LOG/argv")" 'http://10.0.0.5:8080/v1/systemone' ".env base URL is used"
+assert_equals "Authorization: Bearer $SO_KEY" "$(cat "$LOG/header")" ".env systemone key uses fd 3"
+rm -f "$HOME_DIR/.env"
+pass "systemone posts the unchanged request to its base URL with an optional fd-3 key"
+
+reset_log
+FM_DISPATCH_PROVIDER=systemone FM_DISPATCH_BASE_URL=http://127.0.0.1:8080 run code out err "$BRIEF"
+expect_code 2 "$code" "systemone missing model is a configuration error"
+assert_contains "$err" 'FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=systemone' "systemone missing model is actionable"
+FM_DISPATCH_PROVIDER=systemone FM_DISPATCH_MODEL=clef run code out err "$BRIEF"
+expect_code 2 "$code" "systemone missing base URL is a configuration error"
+assert_contains "$err" 'FM_DISPATCH_BASE_URL required when FM_DISPATCH_PROVIDER=systemone' "systemone missing base URL is actionable"
+FM_DISPATCH_PROVIDER=systemone FM_DISPATCH_MODEL=clef FM_DISPATCH_BASE_URL=127.0.0.1:8080 run code out err "$BRIEF"
+expect_code 2 "$code" "systemone base URL without a scheme is a configuration error"
+assert_contains "$err" 'FM_DISPATCH_BASE_URL must start with http:// or https://' "systemone bad base URL is actionable"
+assert_absent "$LOG/argv" "systemone configuration errors make no network call"
+reset_log
+printf '%s\n' '10.0.0.5' > "$HOME_DIR/config/dispatch-never-send"
+FM_DISPATCH_PROVIDER=systemone FM_DISPATCH_MODEL=clef FM_DISPATCH_BASE_URL=http://10.0.0.5:8080 \
+  FAKE_CURL_RESPONSE=$SO_RESPONSE run code out err "$BRIEF"
+assert_equals '' "$out" "a never-send base URL withholds the request"
+assert_contains "$err" 'nothing sent)' "a never-send base URL reports withholding"
+assert_absent "$LOG/argv" "a never-send base URL makes no network call"
+rm -f "$HOME_DIR/config/dispatch-never-send"
+reset_log
+printf '%s\n' '{"answers":{"rule":{"choice":"rule_4","confidence":0.9}}}' > "$SO_RESPONSE"
+FM_DISPATCH_PROVIDER=systemone FM_DISPATCH_MODEL=clef FM_DISPATCH_BASE_URL=http://127.0.0.1:8080 \
+  FAKE_CURL_RESPONSE=$SO_RESPONSE run code out err "$BRIEF"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "systemone partial response is rejected"
+reset_log
+FM_DISPATCH_PROVIDER=systemone FM_DISPATCH_MODEL=clef FM_DISPATCH_BASE_URL=http://127.0.0.1:8080 \
+  FAKE_CURL_FAIL=1 run code out err "$BRIEF"
+expect_code 0 "$code" "systemone transport failure exits 0"
+assert_contains "$out" '  status: error' "systemone transport failure returns to normal intake"
+assert_contains "$out" '  reason: http 000 after' "systemone transport failure reads as http 000"
+assert_not_contains "$out" '  profile:' "systemone transport failure never emits a profile"
+assert_absent "$LOG/quota-axi.calls" "systemone transport failure reads no quota"
+pass "systemone configuration errors, never-send base URL, partial response, and transport failure are handled"
+
+# --- openai: Decisions API, mapped to and from the System One shape ----------
+OA_KEY='test-openai-key-never-in-child-env-or-argv'
+OA_RESPONSE="$TMP_ROOT/openai-response.json"
+write_openai_response() {  # <choice> <confidence> [<rule_4 probability>]
+  cat > "$OA_RESPONSE" <<JSON
+{ "answers": [ { "type": "choice", "name": "rule", "choice": "$1", "confidence": $2,
+    "probabilities": [ { "value": "rule_1", "probability": 0.01 }, { "value": "rule_2", "probability": 0.01 },
+      { "value": "rule_3", "probability": 0.01 }, { "value": "rule_4", "probability": ${3:-0.96} },
+      { "value": "default", "probability": 0.01 } ] } ],
+  "usage": { "input_tokens": 700, "output_tokens": 5 } }
+JSON
+}
+write_openai_response rule_4 0.9
+reset_log
+OPENAI_API_KEY=$OA_KEY run code out err "$BRIEF"
+assert_contains "$err" 'TYPESAFE_API_KEY absent' "an OpenAI key alone does not select the provider"
+assert_absent "$LOG/argv" "an OpenAI key alone sends nothing"
+reset_log
+FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna run code out err "$BRIEF"
+expect_code 0 "$code" "openai without a key exits 0"
+assert_equals '' "$out" "openai without a key prints nothing on stdout"
+assert_equals "dispatch-resolve: off (OPENAI_API_KEY absent from the environment and $HOME_DIR/.env)" "$err" "openai without a key is one off line"
+assert_absent "$LOG/argv" "openai without a key makes no network call"
+reset_log
+FM_DISPATCH_PROVIDER=openai OPENAI_API_KEY=$OA_KEY run code out err "$BRIEF"
+expect_code 2 "$code" "openai missing model is a configuration error"
+assert_contains "$err" 'FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=openai' "openai missing model is actionable"
+assert_absent "$LOG/argv" "openai missing model makes no network call"
+reset_log
+FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna OPENAI_API_KEY=$OA_KEY \
+  FAKE_CURL_RESPONSE=$OA_RESPONSE run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "openai clear exits 0"
+assert_contains "$out" '  status: clear' "openai clear status"
+assert_contains "$out" '  model: gpt-6-luna   latency_ms:' "openai answer without a model reports the configured model"
+assert_contains "$out" 'tokens: 700/5' "openai usage is shown"
+assert_contains "$out" '  probabilities: rule_1=0.01 rule_2=0.01 rule_3=0.01 rule_4=0.96 default=0.01' "openai probabilities map back to every option"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "openai uses the shared quota argmax"
+assert_contains "$(cat "$LOG/argv")" 'https://api.openai.com/v1/decisions' "openai endpoint"
+assert_contains "$(cat "$LOG/argv")" $'--max-time\n10' "openai timeout"
+assert_not_contains "$(cat "$LOG/argv")" "$OA_KEY" "openai key never appears in curl argv"
+assert_equals "Authorization: Bearer $OA_KEY" "$(cat "$LOG/header")" "openai key reaches curl only through fd 3"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "openai key is absent from child environments"
+body=$(cat "$LOG/body")
+assert_equals 'gpt-6-luna' "$(jq -r .model <<<"$body")" "openai model is explicit"
+assert_equals "$(jq -c .state "$TMP_ROOT/typesafe-body.json")" "$(jq -c '.input | fromjson' <<<"$body")" "openai input carries the same state as JSON text"
+assert_equals '1 choice rule' "$(jq -r '"\(.questions | length) \(.questions[0].type) \(.questions[0].name)"' <<<"$body")" "openai asks one named choice question"
+assert_equals "$(jq -r .questions.rule.instructions "$TMP_ROOT/typesafe-body.json")" "$(jq -r '.questions[0].instructions' <<<"$body")" "openai keeps the question instructions"
+assert_equals "$(jq -Sc '.questions.rule.criteria' "$TMP_ROOT/typesafe-body.json")" \
+  "$(jq -Sc '.questions[0].choices | map({key: .value, value: .description}) | from_entries' <<<"$body")" "openai choices are every rule plus the none option"
+assert_equals 'input,model,questions' "$(jq -r 'keys | join(",")' <<<"$body")" "openai body carries nothing else"
+assert_not_contains "$body" 'SECRET-WHY-TEXT' "openai never sends rule why text"
+assert_not_contains "$body" 'spendPriority' "openai never sends quota"
+pass "openai maps the Choice request to the Decisions API and its answer back, key on fd 3 only"
+
+reset_log
+printf '%s\n' 'off-by-one in the pager' > "$HOME_DIR/config/dispatch-never-send"
+FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna OPENAI_API_KEY=$OA_KEY \
+  FAKE_CURL_RESPONSE=$OA_RESPONSE run code out err "$BRIEF"
+assert_equals '' "$out" "a never-send match inside the serialized openai input withholds the request"
+assert_contains "$err" 'nothing sent)' "openai never-send reports withholding"
+assert_absent "$LOG/argv" "openai never-send makes no network call"
+printf '%s\n' 'gpt-6-luna' > "$HOME_DIR/config/dispatch-never-send"
+FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna OPENAI_API_KEY=$OA_KEY \
+  FAKE_CURL_RESPONSE=$OA_RESPONSE run code out err "$BRIEF"
+assert_contains "$err" 'nothing sent)' "a never-send model name withholds the openai request"
+assert_absent "$LOG/argv" "a never-send model name makes no network call"
+rm -f "$HOME_DIR/config/dispatch-never-send"
+pass "the never-send check runs on the final openai request body"
+
+openai_rejects() {  # <response-json> <label>
+  printf '%s\n' "$1" > "$OA_RESPONSE"
+  reset_log
+  FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna OPENAI_API_KEY=$OA_KEY \
+    FAKE_CURL_RESPONSE=$OA_RESPONSE run code out err "$BRIEF"
+  expect_code 0 "$code" "$2 exits 0"
+  assert_contains "$out" '  reason: response is not a rule Choice answer' "$2 is rejected"
+  assert_not_contains "$out" '  profile:' "$2 never emits a profile"
+  assert_absent "$LOG/quota-axi.calls" "$2 reads no quota"
+}
+openai_rejects '{"answers":[{"type":"refusal","name":"rule"}]}' "an openai refusal"
+openai_rejects '{"answers":{"rule":{"choice":"rule_4"}}}' "an openai answers object"
+openai_rejects '{"answers":[]}' "an openai response without the rule answer"
+openai_rejects 'not json' "a non-JSON openai response"
+openai_rejects '{"answers":[{"type":"choice","name":"rule","choice":"rule_4","confidence":0.9,"probabilities":[{"value":"rule_4","probability":0.5},{"value":"rule_4","probability":0.5}]}]}' "duplicate openai option values"
+openai_rejects '{"answers":[{"type":"choice","name":"rule","choice":"rule_4","confidence":0.9,"probabilities":[{"value":"rule_4","probability":0.99},{"value":"default","probability":0.01}]}]}' "openai probabilities missing options"
+openai_rejects '{"answers":[{"type":"choice","name":"rule","choice":"rule_4","probabilities":[{"value":"rule_1","probability":0.01},{"value":"rule_2","probability":0.01},{"value":"rule_3","probability":0.01},{"value":"rule_4","probability":0.96},{"value":"default","probability":0.01}]}]}' "an openai answer without confidence"
+reset_log
+write_openai_response rule_4 0.5
+FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna OPENAI_API_KEY=$OA_KEY \
+  FAKE_CURL_RESPONSE=$OA_RESPONSE run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "openai low confidence is ambiguous"
+reset_log
+FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna OPENAI_API_KEY=$OA_KEY \
+  FAKE_CURL_RESPONSE=$OA_RESPONSE FAKE_CURL_HTTP=401 run code out err "$BRIEF"
+assert_contains "$out" '  reason: http 401 after' "openai HTTP error is reported"
+assert_not_contains "$out$err" "$OA_KEY" "openai HTTP error never includes the key"
+reset_log
+FM_DISPATCH_PROVIDER=openai FM_DISPATCH_MODEL=gpt-6-luna OPENAI_API_KEY=$OA_KEY FAKE_CURL_FAIL=1 run code out err "$BRIEF"
+expect_code 0 "$code" "openai transport failure exits 0"
+assert_contains "$out" '  status: error' "openai transport failure returns to normal intake"
+assert_not_contains "$out" '  profile:' "openai transport failure never emits a profile"
+pass "openai malformed, partial, refused, ambiguous, HTTP, and transport paths return to normal intake"
 
 # --- never-send list: a match or a bad list withholds the request -------------
 NEVER_SEND="$HOME_DIR/config/dispatch-never-send"
@@ -1151,6 +1340,8 @@ assert_contains "$err" 'not JSON' "non-JSON rules is named"
 for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"select":"mystery"}]}|unknown select: mystery' \
+  '{"shared_quota":"yes","rules":[{"when":"x","use":{"harness":"claude"}}]}|shared_quota must be true or false when present' \
+  '{"shared_quota":1,"rules":[{"when":"x","use":{"harness":"claude"}}]}|shared_quota must be true or false when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":"high"}]}|min_confidence must be a number from 0 through 1 when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":1.5}]}|min_confidence must be a number from 0 through 1 when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
@@ -1189,5 +1380,89 @@ run code out err --help
 expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
+
+# --- shared-quota opt-out: no quota call, declared-order pick ----------------
+cp "$BASE_RULES" "$RULES"
+jq '.shared_quota = true' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shared-quota clear exits 0"
+assert_contains "$out" '  status: clear' "shared-quota clear status"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "shared-quota picks the first declared profile, not the argmax winner"
+assert_not_contains "$out" 'spendPriority=' "shared-quota prints no quota evidence"
+assert_not_contains "$out" '  remaining=' "shared-quota prints no remaining percentages"
+assert_not_contains "$out" '  runway=' "shared-quota prints no runway gates"
+assert_contains "$out" 'quota ranking off: home declares a single shared quota' "every candidate line states quota ranking is off"
+assert_absent "$LOG/quota-axi.calls" "shared-quota never reads quota-axi"
+[ "$(printf '%s\n' "$out" | grep -c 'quota ranking off')" -ge 3 ] || fail "shared-quota states the opt-out on every candidate line"
+pass "shared-quota opt-out: no quota snapshot, deterministic declared-order pick, opt-out stated on every candidate"
+
+# --- shared-quota: an unmet rule-level floor is bypassed too -----------------
+# rule_1 declares floor model:fable >= 20% but the fixture has 15% there, so the
+# quota-ranked path would fall through to default; the opt-out keeps the rule.
+jq '.shared_quota = true' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_1 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shared-quota unmet rule floor exits 0"
+assert_contains "$out" '  status: clear' "shared-quota unmet rule floor status"
+assert_contains "$out" '  note: rule matched' "shared-quota skips the unmet rule floor instead of falling through to default"
+assert_not_contains "$out" 'fall through to default' "shared-quota unmet rule floor never falls through to default"
+assert_contains "$out" "  profile: --harness 'claude' --model 'fable' --effort 'xhigh'" "shared-quota unmet rule floor picks the rule's own declared profile"
+assert_contains "$out" 'quota ranking off: home declares a single shared quota' "unmet rule floor candidate states quota ranking is off"
+assert_absent "$LOG/quota-axi.calls" "shared-quota unmet rule floor never reads quota-axi"
+pass "shared-quota bypasses an unmet rule-level floor: the rule's own profile wins with no quota call"
+
+# --- shared-quota: an unmet profile-level floor is bypassed too ---------------
+# The codex profile declares floor all_models >= 50% but the fixture has 31%, so
+# the quota-ranked path marks it not eligible; the opt-out resolves the declared
+# order anyway. The use array is reversed so the floored profile is first.
+jq '.shared_quota = true | .rules[1].use |= reverse' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_2 0.99
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shared-quota unmet profile floor exits 0"
+assert_contains "$out" '  status: clear' "shared-quota unmet profile floor status"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "shared-quota unmet profile floor picks the floored profile first in declared order"
+assert_not_contains "$out" 'not eligible' "shared-quota unmet profile floor marks no candidate ineligible"
+assert_contains "$out" 'quota ranking off: home declares a single shared quota' "unmet profile floor candidates state quota ranking is off"
+assert_absent "$LOG/quota-axi.calls" "shared-quota unmet profile floor never reads quota-axi"
+pass "shared-quota bypasses an unmet profile-level floor: the first declared profile wins with no quota call"
+
+# --- shared-quota: preferred_provider still narrows the pool ------------------
+# The matched rule declares claude first, then two codex-family profiles; the
+# home prefers codex, so the first declared codex profile wins.
+jq '.shared_quota = true | .preferred_provider = "codex" | .rules[3].use = [
+  {harness:"claude",model:"sonnet",effort:"high"},
+  {harness:"pi",model:"openai-codex/gpt-5.6-sol",provider:"codex"},
+  {harness:"codex",model:"gpt-5.6-sol"}]' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shared-quota preferred_provider exits 0"
+assert_contains "$out" '  status: clear' "shared-quota preferred_provider status"
+assert_contains "$out" '  preferred_provider: codex: prefer eligible family candidates' "shared-quota still applies the family preference"
+assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "shared-quota preferred_provider picks the first declared preferred-family profile"
+assert_absent "$LOG/quota-axi.calls" "shared-quota preferred_provider never reads quota-axi"
+[ "$(printf '%s\n' "$out" | grep -c '^  candidate: ')" -eq 3 ] || fail "shared-quota preferred_provider lists every candidate"
+[ "$(printf '%s\n' "$out" | grep '^  candidate: ' | grep -c 'quota ranking off: home declares a single shared quota')" -eq 3 ] ||
+  fail "shared-quota preferred_provider states the opt-out on every candidate line"
+pass "shared-quota keeps preferred_provider narrowing: the preferred family wins in declared order with no quota call"
+
+# restore the shared response fixture for the false-path test below
+write_response "$RESPONSE" rule_4 0.9
+
+# --- shared_quota false: byte-for-byte the quota-ranked path ------------------
+jq '.shared_quota = false' "$BASE_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shared_quota false exits 0"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "shared_quota false keeps the spendPriority argmax"
+assert_not_contains "$out" 'quota ranking off' "shared_quota false prints no opt-out wording"
+[ -f "$LOG/quota-axi.calls" ] || fail "shared_quota false still reads quota-axi"
+assert_contains "$out" 'spendPriority=' "shared_quota false prints quota evidence"
+pass "shared_quota false keeps the unchanged quota-ranked behavior"
+cp "$BASE_RULES" "$RULES"
 
 printf '# all fm-dispatch-resolve tests passed\n'

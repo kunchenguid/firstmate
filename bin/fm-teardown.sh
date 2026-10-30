@@ -69,8 +69,11 @@
 # teardown refuses rather than risk discarding unlanded work.
 # A merge-tree option or execution error reports the content-landed proof as
 # unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
-# Uncommitted changes are never landed; dirty refusals distinguish untracked-only
-# leftovers from tracked edits and list at most ten non-exempt untracked paths.
+# Uncommitted changes are never landed. Before return, the dirty check explicitly
+# requests all untracked files, even when status.showUntrackedFiles hides them.
+# Dirty refusals distinguish untracked-only leftovers from tracked edits and list
+# at most ten non-exempt untracked paths. tests/fm-teardown.test.sh covers hidden
+# untracked work and the clean return control.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -1578,6 +1581,9 @@ remove_kimi_turnend_auth() {
 
 retire_busy_state() {
   local state_dir=$1 id=$2 gen=${3:-}
+  # A remote secondmate's host-local route record lives inside the home that
+  # teardown has already removed, taking its busy records with it.
+  [ -d "$state_dir" ] || return 0
   if [ -n "$gen" ]; then
     "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --gen "$gen"
   elif [ -f "$state_dir/$id.busy-gen" ]; then
@@ -2109,7 +2115,7 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  if ! dirty_raw=$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi

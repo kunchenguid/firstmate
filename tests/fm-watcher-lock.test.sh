@@ -627,6 +627,75 @@ test_lock_resumes_own_interrupted_steal_reap() {
   pass "a steal reap interrupted in this process is resumed from its own tombstone"
 }
 
+# Interrupt the real cleanup at its unlink, after it publishes its tombstone.
+test_lock_tombstone_tracks_reaper_start_time() (
+  local dir state lockdir owner reaper tomb i rc holder_start unrelated_start unrelated
+  sleep "$FM_TEST_STUB_MAX_BLOCK_SECONDS" &
+  unrelated=$!
+  trap 'kill "$unrelated" 2>/dev/null || true; wait "$unrelated" 2>/dev/null || true' EXIT
+  # macOS start times have one-second precision.
+  sleep 2
+  dir=$(make_case lock-reaper-pid-reuse)
+  state="$dir/state"
+  lockdir="$state/.contend.lock.steal"
+  owner="$lockdir.owner.fixture"
+  mkdir "$owner"
+  printf '%s\n' "$(dead_pid)" > "$owner/pid"
+  ln -s "$owner" "$lockdir"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$2
+    ready=$3
+    release=$4
+    rm() {
+      if [ "${!#}" = "$lock" ]; then
+        : > "$ready"
+        while [ ! -e "$release" ] && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null \
+          && [ "$SECONDS" -lt "$FM_TEST_STUB_MAX_BLOCK_SECONDS" ]; do
+          sleep 0.05
+        done
+      fi
+      command rm "$@"
+    }
+    fm_lock_reap_dead_link "$lock"
+  ' _ "$LIB" "$lockdir" "$dir/reaper.ready" "$dir/release" &
+  reaper=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$dir/reaper.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$dir/reaper.ready" ] \
+    || { kill "$reaper" 2>/dev/null || true; fail "reaper did not publish its election tombstone"; }
+  holder_start=$(start_time_of "$reaper")
+  unrelated_start=$(start_time_of "$unrelated")
+  [ -n "$holder_start" ] && [ -n "$unrelated_start" ] && [ "$holder_start" != "$unrelated_start" ] \
+    || { kill "$reaper" 2>/dev/null || true; fail "reaper and unrelated process must have distinct starts"; }
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_reap_dead_link "$2"' _ "$LIB" "$lockdir" || rc=$?
+  if [ "$rc" -eq 0 ] || [ ! -L "$lockdir" ]; then
+    : > "$dir/release"
+    wait "$reaper" 2>/dev/null || true
+    fail "contender cleared a genuinely live reaper's tombstone"
+  fi
+  kill -KILL "$reaper" 2>/dev/null || true
+  wait "$reaper" 2>/dev/null || true
+  tomb=
+  for tomb in "$owner".reaped.*; do [ ! -d "$tomb" ] || break; done
+  [ -d "$tomb" ] || fail "interrupted reaper left no tombstone"
+  # Model PID reuse by substituting a known unrelated live process, preserving
+  # whatever start-time identity the production election actually published.
+  mv -- "$tomb" "$owner.reaped.$unrelated${tomb#"$owner.reaped.$reaper"}"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_reap_dead_link "$2"' _ "$LIB" "$lockdir" \
+    || fail "recycled reaper pid kept an abandoned tombstone alive"
+  [ ! -L "$lockdir" ] || fail "recycled-pid cleanup left the stale link"
+  for tomb in "$owner".reaped.*; do
+    [ ! -d "$tomb" ] || fail "recycled-pid cleanup left a tombstone"
+  done
+  is_live_non_zombie "$unrelated" || fail "cleanup disturbed the unrelated live process"
+  pass "tombstone cleanup respects a live reaper and recovers a recycled reaper pid"
+)
+
 test_lock_steal_reap_cannot_remove_successor() {
   # Two reapers verify the same dead steal owner. The competitor runs to
   # completion exactly when the first one is about to remove the link; at most
@@ -687,50 +756,76 @@ SH
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
-  local dir state lockdir dead marker gate hold i pids pid waiter winner wins
+  local dir state lockdir dead marker gate hold attempts i pids pid waiter winner wins ready
   dir=$(make_case lock-stale-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
   gate="$dir/first-winner"
   hold="$dir/winner-release"
+  attempts="$dir/attempts"
   dead=$(dead_pid)
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
   : > "$marker"
-  mkfifo "$gate" "$hold"
+  mkdir "$attempts"
   # try_acquire is nonblocking: all one-shot candidates may lose to a transient
   # steal mutex. A waiting contender guarantees eventual acquisition, and the
-  # FIFO keeps the winner alive until every other contender has finished.
+  # release marker keeps winners alive until every contender has tried. Publish
+  # completed records through regular files. An interrupted FIFO open can leave
+  # its peer blocked forever, before the assertion can even run.
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_acquire_wait "$2" || exit 1
-    printf "%s\n" "${BASHPID:-$$}" >> "$3"
-    printf "%s\n" "${BASHPID:-$$}" > "$4"
-    IFS= read -r _ < "$5"
-  ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
+    self=${BASHPID:-$$}
+    printf "%s\n" "$self" >> "$3"
+    printf "%s\n" "$self" > "$6/winner.$self"
+    ln "$6/winner.$self" "$4" 2>/dev/null || true
+    while [ ! -e "$5" ]; do sleep 0.05; done
+  ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" "$attempts" &
   waiter=$!
   pids=
   i=1
   while [ "$i" -le 39 ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
+      self=${BASHPID:-$$}
       if fm_lock_try_acquire "$2"; then
-        printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        printf "%s\n" "${BASHPID:-$$}" > "$4"
-        IFS= read -r _ < "$5"
+        printf "%s\n" "$self" >> "$3"
+        printf "%s\n" "$self" > "$6/winner.$self"
+        ln "$6/winner.$self" "$4" 2>/dev/null || true
+        : > "$6/$self"
+        while [ ! -e "$5" ]; do sleep 0.05; done
+      else
+        : > "$6/$self"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
+    ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" "$attempts" &
     pids="$pids $!"
     i=$((i + 1))
   done
-  IFS= read -r winner < "$gate"
-  [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
-  for pid in $pids; do
-    [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true
+  i=0
+  ready=0
+  while [ "$i" -lt 400 ]; do
+    ready=1
+    [ -s "$gate" ] || ready=0
+    for pid in $pids; do
+      [ -e "$attempts/$pid" ] || ready=0
+    done
+    [ "$ready" -eq 1 ] && break
+    sleep 0.1
+    i=$((i + 1))
   done
+  if [ "$ready" -ne 1 ]; then
+    : > "$hold"
+    fail "stale-lock contenders did not publish their completed attempts"
+  fi
+  winner=$(cat "$gate")
+  [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
-  printf 'release\n' > "$hold"
+  : > "$hold"
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
   wait "$winner" 2>/dev/null || true
   [ "$wins" -eq 1 ] || fail "expected exactly one stale-lock stealer, got $wins"
   pass "concurrent stale-lock steal yields exactly one winner"
@@ -1898,6 +1993,7 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_lock_tombstone_tracks_reaper_start_time || exit 1
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant

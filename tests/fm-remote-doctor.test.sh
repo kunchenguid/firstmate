@@ -779,6 +779,15 @@ assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the started server was n
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || fail "the linux path invoked launchctl"
 pass "a non-darwin host skips launch agents and starts its herdr server directly"
 
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE_BIN/omp"
+chmod +x "$CASE_BIN/omp"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a host whose only harness is omp was not ready after --fix"
+assert_contains "$DOCTOR_OUT" 'required harness=omp:' "omp did not satisfy the at-least-one-harness requirement"
+pass "omp alone satisfies the remote harness requirement"
+
 # --- --fix may add only owned wrappers for version-manager tools -------------
 
 new_case Linux with-herdr no-gui

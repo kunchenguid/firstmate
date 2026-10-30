@@ -323,7 +323,7 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 | Requirement | Tools |
 | --- | --- |
 | Always required | `git`, `jq`, `herdr`, compatible `tasks-axi`, and `treehouse` |
-| At least one of | `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi` |
+| At least one of | `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `omp` |
 | Additionally required on macOS | `lsof`, so the doctor and guard can prove which process owns the session socket |
 
 ## Provision a route
@@ -524,6 +524,7 @@ A process-event source takes these steps:
 - It mirrors content-bearing lines into the primary status channel.
 - It does not carry blank separators.
 
+A failed remote delta read or non-schema remote output is discarded before capture, so it emits no result, leaves the cursor unchanged, and keeps the source registered for retry and liveness recovery.
 The listener holds its claim across an empty wait and across a delta it re-arms, so a line appended during either is collected without waiting for the next supervision cycle.
 The [`fm-remote-delta-read.sh` header](../bin/fm-remote-delta-read.sh) owns snapshot sampling and its line-visibility and wait-window latency contract.
 It stops when that registration is retired, the registered command changes, or the home's owner lease lapses.
@@ -721,6 +722,7 @@ bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+bin/fm-test-run.sh tests/fm-remote-secondmate-omp.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 ```
 

@@ -1203,8 +1203,8 @@ muse also needs a worker-reachable credential before spawning, and the portable 
 gemini is likewise refused for secondmates because it has no primary supervision protocol; [its adapter reference](../.agents/skills/harness-adapters/references/harness/gemini.md) owns the credential precondition, canonical-launch wiring, and raw-launch limitations.
 rovo is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no turn-end hook and no primary supervision protocol; [`docs/verification/rovo.md`](verification/rovo.md) owns that evidence, including the OAuth token's silent background refresh from a stored refresh token and both tmux and herdr pane liveness (herdr placement is verified live, with a Herdr-side agent-detection gap left open for recovery classification).
 
-agy is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no hook surface and no primary supervision protocol; [`docs/verification/agy.md`](verification/agy.md) owns that evidence, including the spawn-time worktree trust pre-registration through `bin/fm-agy-trust.sh` and Herdr's native agy pane recognition.
-kiro (Kiro CLI, V2 engine only) is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason; it is claude-shaped, so its per-task turn-end and busy hooks live in a firstmate-owned agent config the spawn writes under `state/<id>.kiro-home` and reaches by relocating `KIRO_HOME` (never the worktree's own `.kiro/`), with the `--trust-all-tools` modal suppressed by a seeded `chat.disableTrustAllConfirmation` setting; [`docs/verification/kiro.md`](verification/kiro.md) owns that evidence, and the v3/KAS engine is out of scope and unsupported on Amazon Linux 2.
+An agy secondmate or primary runs the tracked project-scope `.agents/hooks.json` in its own home, and `bin/fm-spawn.sh` pre-registers a secondmate home in agy's workspace trust store through `bin/fm-agy-trust.sh`; [`docs/supervision-protocols/agy.md`](supervision-protocols/agy.md) owns its supervision protocol and [`docs/verification/agy.md`](verification/agy.md) owns the evidence.
+kiro (Kiro CLI, V2 engine only) is likewise verified for crewmate and scout launches ONLY, refused for a secondmate because it has no primary supervision protocol; it is claude-shaped, so its per-task turn-end and busy hooks live in a firstmate-owned agent config the spawn writes under `state/<id>.kiro-home` and reaches by relocating `KIRO_HOME` (never the worktree's own `.kiro/`), with the `--trust-all-tools` modal suppressed by a seeded `chat.disableTrustAllConfirmation` setting; [`docs/verification/kiro.md`](verification/kiro.md) owns that evidence, and the v3/KAS engine is out of scope and unsupported on Amazon Linux 2.
 A kiro hook command must be one unquoted token, so a kiro spawn refuses before launch when that per-task home path contains whitespace or a shell-special character (such as a quote or `$`) and asks for an `FM_HOME` or `FM_STATE_OVERRIDE` free of them.
 
 devin is verified for crewmate and scout launches only; a secondmate is refused because Devin has no verified primary supervision protocol.
@@ -1724,6 +1724,7 @@ This section is the single owner of the canonical schema and its per-field seman
 ```json
 {
   "preferred_provider": "<optional quota-axi provider family to spend first>",
+  "shared_quota": false,
   "rules": [
     {
       "when": "<natural-language condition describing a kind of task>",
@@ -1752,6 +1753,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | Profile `harness` | Required in every profile. |
 | Profile `model` and `effort`; rule `why` | Optional. |
 | Top-level `preferred_provider` | Optional provider-family preference, applied after eligibility checks under `quota-array-dispatch`. |
+| Top-level `shared_quota` | Optional; see "Shared-quota opt-out" below. |
 
 **Preferred provider**
 
@@ -1761,6 +1763,15 @@ Both bootstrap and the enabled resolver reject malformed values, including null,
 Bootstrap validates this field even without a resolver key because the agent-owned intake also honors it.
 An absent field preserves the existing routing behavior.
 The [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#rank-by-spendpriority) owns family preference, uncertainty, and fallback after the existing gates.
+
+**Shared-quota opt-out**
+
+An optional top-level `"shared_quota": true` declares this home draws every provider's usage from one single shared budget, such as one workplace AI spend line, so per-provider quota rows do not describe what is left.
+With it set, typed dispatch resolution makes no `quota-axi` call, applies no quota floor or runway gate, ranks nothing by `spendPriority`, and resolves the matched rule's `use` profiles in declared order; every candidate line still prints, stating quota ranking is off by home declaration.
+`preferred_provider` is a separate home preference, not a quota signal, so it still applies: `preferred_provider` still narrows the pool; declared order then picks within it.
+Firstmate's own `quota-array-dispatch` intake honors the same declaration.
+Without the setting, or with `"shared_quota": false`, behavior is unchanged.
+The declared value must be a boolean; anything else is an actionable configuration error reported like any other malformed rule.
 
 **Fields applied only by typed resolution**
 
@@ -1830,13 +1841,14 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 ## Typed dispatch resolution (.env FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL)
 
-`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief through typesafe.ai or OpenRouter, so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
-`FM_DISPATCH_PROVIDER` selects `typesafe` or `openrouter`, and `FM_DISPATCH_MODEL` selects the model.
+`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief through typesafe.ai, OpenRouter, any System One-compatible host, or OpenAI, so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
+`FM_DISPATCH_PROVIDER` selects `typesafe`, `openrouter`, `systemone`, or `openai`, and `FM_DISPATCH_MODEL` selects the model.
 Each setting comes from the calling environment or the home's gitignored `.env` through `bin/fm-env-lib.sh`; a non-empty environment value wins.
-OpenRouter requires both `FM_DISPATCH_PROVIDER=openrouter` and a non-empty `FM_DISPATCH_MODEL`; an omitted model is an actionable configuration error, and the presence of an OpenRouter key never selects the provider by itself.
+OpenRouter, `systemone`, and OpenAI each require their explicit `FM_DISPATCH_PROVIDER` value and a non-empty `FM_DISPATCH_MODEL`; an omitted model is an actionable configuration error, and the presence of a provider's key never selects that provider by itself.
+`systemone` also requires `FM_DISPATCH_BASE_URL`, an `http://` or `https://` base such as a local llama.cpp server or a hosted System One-compatible service, and posts to `<base>/v1/systemone`; a missing or scheme-less base URL is an actionable configuration error.
 With no provider setting, the original typesafe.ai behavior is unchanged: `jev-latest` is used when `TYPESAFE_API_KEY` is available, `FM_DISPATCH_MODEL` is ignored, and the resolver is off otherwise.
 Explicit `FM_DISPATCH_PROVIDER=typesafe` also uses `jev-latest` when no model is set.
-The selected provider's key must be non-empty in the environment or `.env`, with the environment taking precedence.
+The selected provider's key must be non-empty in the environment or `.env`, with the environment taking precedence; `systemone` is the exception, where an absent `FM_DISPATCH_API_KEY` means the request carries no `Authorization` header.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared top-level, rule, and profile fields it applies.
@@ -1854,7 +1866,9 @@ Firstmate invokes the resolve path directly after writing the brief, without a p
 **What the model receives**
 
 When on and at least one rule exists, the tool sends the project name and the brief's task-specific text as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, approvals, or confidence floors.
-OpenRouter's Decisions API accepts the same Choice request shape and returns the same typed answer, including confidence and a probability per option; both providers use the same response validation and post-model gates.
+OpenRouter's Decisions API and a `systemone` host accept the same Choice request shape and return the same typed answer, including confidence and a probability per option.
+For OpenAI's Decisions API the resolver rewrites that request into OpenAI's shape - the state as JSON text `input` and one `choice` question named `rule` whose `choices` are the same options - and maps the answer's per-option probability array back; a refusal, a missing or duplicated rule answer, or duplicated option values is rejected as malformed.
+Every provider then uses the same response validation and post-model gates.
 The task-specific text is the brief's `## Captain's intent` and `## Firstmate spec` sections under `# Task` that `bin/fm-brief.sh` scaffolds, read by the same parser that feeds `fm-spawn.sh` validation and the no-mistakes `--intent` contract; a brief with neither section is sent whole.
 
 When the sections are sent from a scout brief, the line `Brief kind: scout (report only)` comes first, taken from the scaffold's scout contract line; ship briefs and briefs sent whole get no kind line.
@@ -1876,7 +1890,7 @@ Every entry is trimmed of surrounding whitespace, and any run of whitespace, in 
 Example Client Ltd
 ```
 
-Before the request is sent, every string in it is checked, including the selected model, the project name, the task text, each rule's `when`, and the fixed question text.
+Before the request is sent, the endpoint URL and every string in the final provider-specific request body are checked, including strings inside JSON text such as OpenAI's `input`: the selected model, the project name, the task text, each rule's `when`, and the fixed question text.
 A match stops the request: the resolver behaves exactly as when it is off, printing one `dispatch-resolve: off (...; nothing sent)` line on stderr and nothing on stdout, making no network or quota call, and exiting 0, so firstmate dispatches through its existing intake.
 A list that is present but not a readable regular file also stops the request the same way rather than sending unchecked text.
 That one diagnostic names the list line number at most and never prints the listed value or the matching text.
@@ -1894,6 +1908,7 @@ After the answer, code applies all remaining checks and ranking:
 - Every applicable account-wide and model/product row from one `quota-axi --json` snapshot.
 - The optional `preferred_provider` restriction under the [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#rank-by-spendpriority).
 - The numeric `spendPriority` argmax within that candidate pool, using each candidate's limiting row.
+- With the home's `shared_quota: true` declaration ("Crew dispatch profiles"), the quota snapshot, floors, runway gates, and `spendPriority` argmax are skipped entirely; resolution is the matched rule's declared profile order (`preferred_provider` still narrows the pool; declared order then picks within it).
 
 The resolver prints its preferred-family decision while retaining evidence for every candidate.
 If preferred candidates remain eligible but none is rankable, it escalates instead of selecting another family.
@@ -1934,7 +1949,7 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 Every result above exits 0.
 
 - Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-- Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, a missing `jq`, an unknown provider, or an OpenRouter provider without a model, each reported and never selected around.
+- Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, a missing `jq`, an unknown provider, a non-typesafe provider without a model, or `systemone` without a valid base URL, each reported and never selected around.
 - Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 
 **Firstmate retains the dispatch decision**
@@ -1948,10 +1963,11 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 **Key handling and provider settings**
 
-- The resolver copies either environment-provided key into a non-exported private variable and unsets both `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` before launching child processes; bootstrap also protects the typesafe key.
-- The resolver sends only the selected key to `curl` as a header read from a file descriptor, never on argv, and never prints, logs, or writes either key.
-- The typesafe.ai endpoint is `https://api.typesafe.ai/v1/systemone`, and the OpenRouter endpoint is `https://openrouter.ai/api/alpha/decisions`.
-- The default confidence floor remains 0.6; request timeouts are 5 seconds for typesafe.ai and 10 seconds for OpenRouter.
+- The resolver copies every environment-provided key into a non-exported private variable and unsets `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and `FM_DISPATCH_API_KEY` before launching child processes; bootstrap also protects the typesafe key.
+- The resolver sends only the selected key to `curl` as a header read from a file descriptor, never on argv, and never prints, logs, or writes any key.
+- The typesafe.ai endpoint is `https://api.typesafe.ai/v1/systemone`, the OpenRouter endpoint is `https://openrouter.ai/api/alpha/decisions`, the OpenAI endpoint is `https://api.openai.com/v1/decisions`, and the `systemone` endpoint is `<FM_DISPATCH_BASE_URL>/v1/systemone`.
+- The default confidence floor remains 0.6; request timeouts are 5 seconds for typesafe.ai and 10 seconds for OpenRouter, `systemone`, and OpenAI.
+- A CPU-only local `systemone` host may not answer within its 10-second timeout; that is an ordinary `error` outcome, and firstmate keeps its existing intake.
 
 The recommended OpenRouter model is `typesafe/jev-1.13` because it is built for fast typed choices and supplies native per-option probabilities without generated text.
 The dated model catalog observation is recorded in [dispatch verification](verification/dispatch-resolve.md#the-api-the-tool-depends-on).
@@ -1960,6 +1976,14 @@ The resolver never chooses this model automatically; use these settings in the c
 ```dotenv
 FM_DISPATCH_PROVIDER=openrouter
 FM_DISPATCH_MODEL=typesafe/jev-1.13
+```
+
+A `systemone` or OpenAI setup names its model the same way; the resolver never picks one for them:
+
+```dotenv
+FM_DISPATCH_PROVIDER=systemone
+FM_DISPATCH_MODEL=<model the host serves>
+FM_DISPATCH_BASE_URL=http://127.0.0.1:8080
 ```
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
@@ -2085,6 +2109,16 @@ A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via 
 
 A project whose reviews are created by a review tool that uploads its own snapshot of the worker's commits is registered `[direct-PR forge=external]`; it is never detected, ships `direct-PR` only, carries no yolo, and needs the [external review tool](#external-review-tool-configexternal-reviewmd-configexternal-review-url-configexternal-review-backup) configuration below.
 [`docs/external-review-forge.md`](external-review-forge.md) is the design.
+
+## PR text selection (data/projects.md pr= token)
+
+A project with no `pr=` token keeps today's behavior: the no-mistakes pipeline's `pr` step writes the pull request title and body and refreshes them on every validated push.
+A project whose outside maintainer reviews and merges, and whose hand-written PR text the pipeline would overwrite, is registered `[no-mistakes pr=manual]`.
+`pr=manual` is the one accepted value, off by default, read like `forge=`: `bin/fm-project-mode.sh --pr <name>` reads it back, and its header owns the grammar and refusals.
+It applies to a `no-mistakes` ship on a project with no `forge=` binding only, so the registry refuses it on `direct-PR`, which already leaves the PR text to the worker, on `local-only`, which opens no PR, and beside a forge.
+Firstmate passes it to `bin/fm-brief.sh --pr manual` at intake the same way it passes `--forge`, `bin/fm-spawn.sh` refuses a brief whose `pr=` disagrees with the registry, and `bin/fm-promote.sh` reads it from the registry.
+The generated brief then has the worker pass `--skip pr,ci` on every `no-mistakes axi run`, write the PR title and body itself, open or update the PR with `gh-axi`, and wait for the PR's checks; `bin/fm-dod-lib.sh` owns that text.
+The token is the thin registry form of no-mistakes' own keep-text option, [kunchenguid/no-mistakes#1648](https://github.com/kunchenguid/no-mistakes/issues/1648), and is meant to map onto it once that exists.
 
 ## GitHub Enterprise hosts (config/github-hosts)
 
@@ -3170,10 +3204,13 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-FM_DISPATCH_PROVIDER=   # typesafe or openrouter; absent preserves the original typesafe key gate ("Typed dispatch resolution")
-FM_DISPATCH_MODEL=      # explicit model for the selected provider; required for openrouter
+FM_DISPATCH_PROVIDER=   # typesafe, openrouter, systemone, or openai; absent preserves the original typesafe key gate ("Typed dispatch resolution")
+FM_DISPATCH_MODEL=      # explicit model for the selected provider; required for openrouter, systemone, and openai
+FM_DISPATCH_BASE_URL=   # http(s) base of a System One-compatible host; required for systemone
+FM_DISPATCH_API_KEY=    # optional systemone key; absent sends no Authorization header
 TYPESAFE_API_KEY=       # typesafe dispatch key, from the environment or .env
 OPENROUTER_API_KEY=     # OpenRouter dispatch key, from the environment or .env
+OPENAI_API_KEY=         # OpenAI dispatch key, from the environment or .env
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
