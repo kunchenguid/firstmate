@@ -418,7 +418,13 @@ t_activity_after_done_and_idle_inbox() {
   wait_cap 'state=done' "$d/cap" 60 || fail "steer: done not reported"
   printf 'state=busy ts=%s\n' "$now" >"$d/state/t12.busy-state"
   wait_cap 'state=working' "$d/cap" 60 || fail "steer: a busy turn after done still reads done"
+  : >"$d/cap"
+  printf 'state=idle ts=%s\n' "$((now + 1))" >"$d/state/t12.busy-state"
+  wait_cap 'state=idle' "$d/cap" 60 || fail "steer: the finished follow-up turn did not read idle"
   kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  local states
+  states=$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')
+  assert_equals "state=idle " "$states" "a retired done never reappears, live or as the final record"
   : >"$d/cap"
   rm -f "$d/state/t12.status"
   printf 'state=idle ts=%s\n' "$now" >"$d/state/t12.busy-state"
@@ -462,6 +468,25 @@ t_interrupted_query_restores_mode() {
   pass "query safety: an interrupted probe restores the terminal mode"
 }
 
+# An hc terminal opened from inside a herdr session inherits HERDR_* markers;
+# its own HC_TERMINAL_ID still makes it a known-aware reporter.
+t_hc_terminal_with_inherited_herdr_markers() {
+  local d=$TMP_ROOT/hcinherit
+  mkhome "$d"
+  start_term "$d" silent
+  clean_env env HC_TERMINAL_ID=t-2 HERDR_ENV=1 HERDR_PANE_ID=p-1 \
+    FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+    --task t14 --harness codex --backend hc --kind ship \
+    --state "$d/state" --config "$d/config"
+  local wpid
+  wpid=$(watcher_pid "$d/state") || fail "hc inside herdr: no watcher armed"
+  assert_equals "" "$(cat "$d/cap" 2>/dev/null)" "hc inside herdr: no capability probe"
+  kill "$wpid" 2>/dev/null
+  wait_gone "$wpid" || true
+  stop_term
+  pass "known-aware: an hc terminal reports despite inherited HERDR markers"
+}
+
 fm_test_run \
   t_query_unaware_terminal_silent \
   t_query_answered_arms_watcher \
@@ -476,4 +501,5 @@ fm_test_run \
   t_disarm_after_agent_exit_parks_idle \
   t_rearm_retires_previous_reporter \
   t_activity_after_done_and_idle_inbox \
-  t_interrupted_query_restores_mode
+  t_interrupted_query_restores_mode \
+  t_hc_terminal_with_inherited_herdr_markers
