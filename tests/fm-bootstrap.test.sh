@@ -605,33 +605,40 @@ ROWS
 }
 
 test_stale_no_mistakes_daemon() {
-  local label status binary_mtime mode case_dir fakebin out expect n daemon_pid
-  sleep 300 &
-  daemon_pid=$!
+  local label status order mode case_dir fakebin out expect n daemon_pid
   n=0
-  expect="STALE_DAEMON: no-mistakes daemon (pid $daemon_pid) started before the installed no-mistakes was replaced; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
-  while IFS='^' read -r label status binary_mtime mode; do
+  while IFS='^' read -r label status order mode; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     case_dir="$TMP_ROOT/nm-daemon-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     fakebin=$(make_fake_toolchain "$case_dir")
-    touch -d "$binary_mtime" "$fakebin/no-mistakes"
+    if [ "$order" = binary_first ]; then
+      touch -d @1 "$fakebin/no-mistakes"
+      sleep 3
+    fi
+    sleep 300 &
+    daemon_pid=$!
+    if [ "$order" = daemon_first ]; then
+      sleep 3
+      touch -d @1 "$fakebin/no-mistakes"
+    fi
+    expect="STALE_DAEMON: no-mistakes daemon (pid $daemon_pid) started before the installed no-mistakes was replaced; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NM_DAEMON_STATUS="${status//PID/$daemon_pid}" "$ROOT/bin/fm-bootstrap.sh")
+    kill "$daemon_pid" 2>/dev/null
     case "$mode" in
-      silent) [ -z "$out" ] || { kill "$daemon_pid"; fail "$label: expected silence, got: $out"; } ;;
-      stale) [ "$out" = "$expect" ] || { kill "$daemon_pid"; fail "$label: expected '$expect', got: $out"; } ;;
+      silent) [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      stale) [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
     esac
   done <<'ROWS'
-binary older than the daemon start matches^daemon running (pid PID)^1 hour ago^silent
-binary replaced after the daemon start mismatches^daemon running (pid PID)^1 hour from now^stale
-no daemon running stays silent^daemon not running^1 hour from now^silent
-unreadable daemon pid stays silent^daemon running (pid 99999999)^1 hour from now^silent
-unparseable daemon status stays silent^something else entirely^1 hour from now^silent
+binary installed before the daemon start stays silent despite epoch mtime^daemon running (pid PID)^binary_first^silent
+binary installed after the daemon start reports despite epoch mtime^daemon running (pid PID)^daemon_first^stale
+no daemon running stays silent^daemon not running^daemon_first^silent
+unreadable daemon pid stays silent^daemon running (pid 99999999)^daemon_first^silent
+unparseable daemon status stays silent^something else entirely^daemon_first^silent
 ROWS
-  kill "$daemon_pid" 2>/dev/null
   pass "bootstrap reports a no-mistakes daemon older than the installed binary"
 }
 

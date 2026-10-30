@@ -1531,7 +1531,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
 fi
 
 # A daemon outlives a binary upgrade, so compare its start time with the
-# installed binary's modification time; both are readable on macOS and Linux.
+# installed binary's inode change time (Nix pins mtime to 1); both are readable on macOS and Linux.
 etime_seconds() {
   local etime=$1 days=0 a b c h=0 m s
   case "$etime" in *-*) days=${etime%%-*}; etime=${etime#*-} ;; esac
@@ -1548,7 +1548,7 @@ detect_stale_no_mistakes_daemon() {
   etime=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
   [ -n "$etime" ] || return 0
   age=$(etime_seconds "$etime" 2>/dev/null) || return 0
-  mtime=$(stat -L -c %Y "$bin" 2>/dev/null || stat -L -f %m "$bin" 2>/dev/null) || return 0
+  mtime=$(stat -L -c %Z "$bin" 2>/dev/null || stat -L -f %c "$bin" 2>/dev/null) || return 0
   [ -n "$mtime" ] || return 0
   if [ $(( $(date +%s) - age )) -lt "$mtime" ]; then
     echo "STALE_DAEMON: no-mistakes daemon (pid $pid) started before the installed no-mistakes was replaced; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
