@@ -375,6 +375,26 @@ test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
   pass "host: an attended close whose task turns main-only before its turn still reaches main unchanged"
 }
 
+# A hand-back that cannot publish downtime fails on its own output, however
+# early the close arrives: no output at all is how a host that died reads, and
+# the Stop hook retries that into a second park that nothing ever closes.
+test_at_turn_downtime_write_failure_is_never_silent() {
+  local home
+  home=$(make_home attended-turns-main-only-write-fails attended)
+  turn_main_only_at_second_offer "$home"
+  fail_downtime_write_at_second_offer "$home"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "write failure: the host never started a watcher cycle"
+  append_status "$home" 'step one'
+  wait_until_deadline 60 host_exited "$home" || fail "write failure: the host did not exit: $(cat "$home/state/.supervision-host.log")"
+  assert_re 'pass-through[[:space:]]+downtime-unrestored' "$home/state/.supervision-host.log" "fixture: downtime publication did not fail"
+  expect_code 1 "$(cat "$home/host.rc")" "a failed hand-back must exit nonzero"
+  assert_re '^supervision-host hand-back failed: ' "$home/host.out" "the failed hand-back must name itself on stdout"
+  assert_no_re '^(supervision-host:|signal:|stale:|check:|heartbeat($|:))' "$home/host.out" "the failed hand-back must not emit a wake on stdout"
+  stop_home_processes "$home"
+  pass "host: a failed at-turn downtime write names itself and is never read as a host that died"
+}
+
 
 # Grok and OpenCode have no mirror writer, because they cannot record a
 # session's first captain prompt, and neither Codex nor omp has a proven one,
@@ -930,6 +950,7 @@ fm_test_run \
   test_attended_close_with_unidentified_main_session_passes_to_main \
   test_close_accepted_away_that_turns_attended_passes_to_main \
   test_attended_close_that_turns_main_only_before_its_turn_passes_to_main \
+  test_at_turn_downtime_write_failure_is_never_silent \
   test_primary_without_a_verified_mirror_runs_away_only \
   test_attended_wake_carries_the_dialog_mirror \
   test_dialog_bearing_files_are_owner_only \

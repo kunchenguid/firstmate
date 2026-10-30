@@ -281,7 +281,7 @@ start_host() {  # <home> [park options...]
         [ -f "$seed" ] || continue
         FM_ROOT_OVERRIDE="$MIRROR_ROOT" "$MIRROR_ROOT/bin/fm-host-mirror.sh" hook claude < "$seed"
       done
-      "$0" park "$@" > "$FM_HOME/host.out" 2>&1
+      "$0" park "$@" > "$FM_HOME/host.out" 2> "$FM_HOME/host.err"
       printf "%s\n" "$?" > "$FM_HOME/host.rc"
     ' "$HOST" "$@" 2>> "$home/claude.err" &
 }
@@ -334,6 +334,12 @@ dump_host_handback_diagnostics() {  # <home> [wait-name]
   printf '--- host.out ---\n' >&2
   if [ -n "$home" ] && [ -f "$home/host.out" ]; then
     cat "$home/host.out" >&2
+  else
+    printf '(missing)\n' >&2
+  fi
+  printf '%s\n' '--- host.err ---' >&2
+  if [ -n "$home" ] && [ -f "$home/host.err" ]; then
+    cat "$home/host.err" >&2
   else
     printf '(missing)\n' >&2
   fi
@@ -459,6 +465,21 @@ esac
 exec "$real_node" "\$@"
 SH
   chmod +x "$1/fakebin/node"
+}
+
+# Fails the downtime publication of the hand-back after the second offer.
+fail_downtime_write_at_second_offer() {  # <home>
+  local real_mktemp
+  real_mktemp=$(command -v mktemp)
+  cat > "$1/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/state/.watcher-down.tmp.'*)
+    [ "\$(cat "\$FM_HOME/offer-count" 2>/dev/null)" != 2 ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$1/fakebin/mktemp"
 }
 
 

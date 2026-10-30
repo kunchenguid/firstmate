@@ -367,19 +367,10 @@ test_successor_left_at_the_turn_survives_the_hook_process_group_teardown() {
 # If the at-turn hand-back cannot publish downtime, the healthy successor
 # cannot turn that undelivered close into a silent Stop-hook success.
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails() {
-  local home real_mktemp
+  local home
   home=$(make_primary_home hook-turns-main-only-write-fails)
   turn_main_only_at_second_offer "$home"
-  real_mktemp=$(command -v mktemp)
-  cat > "$home/fakebin/mktemp" <<SH
-#!/usr/bin/env bash
-case "\$*" in
-  *'/state/.watcher-down.tmp.'*)
-    [ "\$(cat "\$FM_HOME/offer-count" 2>/dev/null)" != 2 ] || exit 1 ;;
-esac
-exec "$real_mktemp" "\$@"
-SH
-  chmod +x "$home/fakebin/mktemp"
+  fail_downtime_write_at_second_offer "$home"
   start_hook_session "$home"
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "hook write failure: no watcher started"
