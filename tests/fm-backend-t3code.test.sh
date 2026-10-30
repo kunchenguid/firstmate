@@ -27,33 +27,19 @@ export PATH="$FAKEBIN:$PATH"
 t3_fake_start "$TMP_ROOT/server"
 WATCH_PID=
 PROVIDER_PID=
-# fm-spawn.sh creates each task's /tmp/fm-<id> outside TMP_ROOT, so every id a
-# case spawns is recorded (t3_task_id) and its directory removed on exit.
-T3_TASK_IDS="$TMP_ROOT/task-ids"
 cleanup() {
-  local pid id
+  local pid
   for pid in "$WATCH_PID" "$PROVIDER_PID"; do
     [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   done
-  if [ -f "$T3_TASK_IDS" ]; then
-    while IFS= read -r id; do
-      [ -z "$id" ] || rm -rf "/tmp/fm-$id"
-    done < "$T3_TASK_IDS"
-  fi
   t3_fake_stop
   fm_test_cleanup
 }
 trap cleanup EXIT
-t3_task_id() {  # <id>
-  printf '%s\n' "$1" >> "$T3_TASK_IDS"
-}
-# Concurrent runs of this suite share /tmp, so every case id carries this
-# run's tag; the EXIT cleanup then removes only directories this run created.
 T3_RUN=$(printf '%05x%04x' "$(( $$ % 1048576 ))" "$RANDOM")
-t3_uid() {  # <base> -> <base><run-tag>, recorded for cleanup
-  t3_task_id "$1$T3_RUN"
+t3_uid() {  # <base> -> <base><run-tag>
   printf '%s' "$1$T3_RUN"
 }
 # A claude spawn writes workspace trust into the launching user's own store
@@ -1284,7 +1270,6 @@ test_spawn_codex_preserves_tracked_codex_config() {
   local proj wt data state id out rc fb neutral original
   t3_require_tomllib test_spawn_codex_preserves_tracked_codex_config || return 0
   id=$(t3_uid t3codextrk2)
-  t3_task_id "$id"
   t3_case spawn-codex-tracked-compatible
   proj="$CASE_DIR/spawn-project"; wt="$CASE_DIR/spawn-wt"; data="$CASE_DIR/data"; state="$CASE_DIR/state"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1403,7 +1388,6 @@ test_spawn_claude_refuses_tracked_claude_local_md() {
 test_spawn_claude_refuses_worktree_symlink() {
   local proj wt data state id out rc fb target exclude
   id=$(t3_uid t3claudelink)
-  t3_task_id "$id"
   t3_case spawn-claude-symlink
   proj="$CASE_DIR/spawn-project"; wt="$CASE_DIR/spawn-wt"; data="$CASE_DIR/data"; state="$CASE_DIR/state"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1504,7 +1488,6 @@ test_codex_cleanup_without_journal_needs_no_python() {
 test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   local proj wt data state id out fb thread
   id=$(t3_uid t3spawnz1)
-  t3_task_id "$id"
   t3_case spawn
   proj="$CASE_DIR/spawn-project"
   wt="$CASE_DIR/spawn-wt"
@@ -1549,7 +1532,7 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   local settings="$wt/.claude/settings.local.json"
   [ "$(t3_json_field "$settings" 'Object.keys(d.hooks).sort().join(" ")')" = "SessionEnd Stop StopFailure UserPromptSubmit" ] \
     || fail "the env merge must keep the busy hooks, got hooks '$(t3_json_field "$settings" 'Object.keys(d.hooks || {})')'"
-  [ "$(t3_json_field "$settings" 'd.env.GOTMPDIR')" = "/tmp/fm-$id/gotmp" ] || fail "settings env must carry GOTMPDIR, got '$(t3_json_field "$settings" 'd.env')'"
+  [ "$(t3_json_field "$settings" 'd.env.GOTMPDIR')" = "$(cd "$CASE_DIR/state" && pwd -P)/$id.tasktmp/gotmp" ] || fail "settings env must carry GOTMPDIR, got '$(t3_json_field "$settings" 'd.env')'"
   [ "$(t3_json_field "$settings" 'd.env.FM_TASK_ID')" = "$id" ] || fail "a ship worker's settings env must carry FM_TASK_ID"
   [ "$(t3_json_field "$settings" 'd.env.FM_TASK_INBOX')" = "$state/$id.inbox" ] || fail "a ship worker's settings env must carry its steering inbox"
   [ "$(t3_json_field "$settings" 'd.env.GIT_CONFIG_VALUE_0')" = "$state/$id.git-hooks" ] || fail "T3 workers must select the installed Git hook"
@@ -1575,7 +1558,6 @@ test_spawn_codex_scout_writes_toml_env_with_traceparent() {
   local proj wt data state id out fb toml tp
   t3_require_tomllib test_spawn_codex_scout_writes_toml_env_with_traceparent || return 0
   id=$(t3_uid t3codexz1)
-  t3_task_id "$id"
   t3_case spawn-codex
   proj="$CASE_DIR/spawn-project"; wt="$CASE_DIR/spawn-wt"; data="$CASE_DIR/data"; state="$CASE_DIR/state"
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -1595,7 +1577,7 @@ test_spawn_codex_scout_writes_toml_env_with_traceparent() {
   expect_code 0 $? "a codex scout on t3code should spawn against the fake T3 server"$'\n'"$out"
   toml="$wt/.codex/config.toml"
   assert_present "$toml" "a codex worker gets .codex/config.toml in its worktree"
-  [ "$(t3_toml_env "$toml" GOTMPDIR)" = "/tmp/fm-$id/gotmp" ] || fail "config.toml must set GOTMPDIR, got '$(cat "$toml")'"
+  [ "$(t3_toml_env "$toml" GOTMPDIR)" = "$(cd "$CASE_DIR/state" && pwd -P)/$id.tasktmp/gotmp" ] || fail "config.toml must set GOTMPDIR, got '$(cat "$toml")'"
   [ "$(t3_toml_env "$toml" FM_TASK_ID)" = "$id" ] || fail "a scout's config.toml must set FM_TASK_ID"
   [ "$(t3_toml_env "$toml" FM_TASK_INBOX)" = "$state/$id.inbox" ] || fail "a scout's config.toml must set FM_TASK_INBOX"
   [ "$(t3_toml_env "$toml" GIT_CONFIG_VALUE_0)" = "$state/$id.git-hooks" ] || fail "a scout's config.toml must select the installed Git hook"
@@ -1621,7 +1603,6 @@ test_spawn_codex_warns_unless_codex_trusts_the_project() {
   t3_require_tomllib test_spawn_codex_warns_unless_codex_trusts_the_project || return 0
   for trust in absent project; do
     id=$(t3_uid "t3trust$trust")
-    t3_task_id "$id"
     t3_case "spawn-codex-trust-$trust"
     proj="$CASE_DIR/spawn-project"; wt="$CASE_DIR/spawn-wt"; data="$CASE_DIR/data"; state="$CASE_DIR/state"
     codex_home="$CASE_DIR/codex-home"
@@ -1666,7 +1647,6 @@ test_spawn_codex_warns_unless_codex_trusts_the_project() {
 # config dir, so the bearer is read from there.
 make_t3_secondmate_home() {  # <home> <id>
   local home=$1 id=$2
-  t3_task_id "$id"
   mkdir -p "$home/bin" "$home/data"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
@@ -1757,7 +1737,7 @@ test_spawn_secondmate_runs_thread_in_home_with_env() {
   [ "$(t3_json_field "$settings" 'd.permissions.allow[0]')" = 'Bash(ls:*)' ] || fail "the home's own settings must survive the T3 environment install"
   [ "$(t3_json_field "$settings" 'd.env.LAVISH_AXI_HOST')" = undefined ] || fail "a key an earlier spawn wrote and this one does not must not linger"
   [ "$(t3_json_field "$settings" 'Object.keys(d.env).length')" = 19 ] || fail "the env block should hold the home's entry, the 17 Firstmate keys, and their list, got $(t3_json_field "$settings" 'Object.keys(d.env)')"
-  [ "$(t3_json_field "$settings" 'd.env.GOTMPDIR')" = "/tmp/fm-$id/gotmp" ] || fail "settings env must carry GOTMPDIR"
+  [ "$(t3_json_field "$settings" 'd.env.GOTMPDIR')" = "$(cd "$CASE_DIR/home/state" && pwd -P)/$id.tasktmp/gotmp" ] || fail "settings env must carry GOTMPDIR"
   read_settings() { t3_json_field "$settings" "d.env[\"$1\"]"; }
   assert_t3_secondmate_env read_settings "claude secondmate settings env" "$home" "$thread" autoarm "$id"
   t3_excluded "$home" .claude/settings.local.json || fail "the settings file must be git-excluded in the home"
@@ -1782,7 +1762,7 @@ test_spawn_codex_secondmate_writes_toml_env() {
   thread=$(bash -c '. "$1"; fm_meta_get "$2" t3_thread_id' _ "$ROOT/bin/fm-backend.sh" "$CASE_DIR/home/state/$id.meta")
   toml="$home/.codex/config.toml"
   assert_present "$toml" "a codex secondmate home gets .codex/config.toml"
-  [ "$(t3_toml_env "$toml" GOTMPDIR)" = "/tmp/fm-$id/gotmp" ] || fail "config.toml must set GOTMPDIR, got '$(cat "$toml")'"
+  [ "$(t3_toml_env "$toml" GOTMPDIR)" = "$(cd "$CASE_DIR/home/state" && pwd -P)/$id.tasktmp/gotmp" ] || fail "config.toml must set GOTMPDIR, got '$(cat "$toml")'"
   read_toml() { t3_toml_env "$toml" "$1"; }
   assert_t3_secondmate_env read_toml "codex secondmate config.toml" "$home" "$thread" persistent "$id"
   t3_excluded "$home" .codex/config.toml || fail "config.toml must be git-excluded in the home"
@@ -1818,7 +1798,6 @@ test_spawn_refuses_t3code_when_token_rejected() {
 # worktree the fake treehouse leases for it, in the current case.
 t3_worker_setup() {
   local id=$1
-  t3_task_id "$id"
   WORKER_PROJ="$CASE_DIR/spawn-project"; WORKER_WT="$CASE_DIR/spawn-wt"
   fm_git_worktree "$WORKER_PROJ" "$WORKER_WT" "fm/$id"
   mkdir -p "$CASE_DIR/data/$id" "$CASE_DIR/state" "$CASE_DIR/home/state"

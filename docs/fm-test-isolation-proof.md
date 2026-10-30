@@ -81,7 +81,9 @@ This record owns concurrent isolation evidence for the portable parallel candida
 ## 2026-10-23: T3 Code suites added
 
 `tests/fm-backend-t3code.test.sh` and `tests/fm-t3-mcp.test.sh` joined the candidate set.
-The backend suite spawns real tasks, and `fm-spawn.sh` creates each task's `/tmp/fm-<id>` outside the suite's temporary root, so every case id carries a per-run suffix and the suite's exit cleanup removes only the directories that run created; the helper suite keeps its files under its own root and its fake server binds an ephemeral loopback port.
+The backend suite spawns tasks in private fixture homes and retains per-run case-id suffixes.
+Its task-temp isolation follows the [`bin/fm-spawn.sh` header](../bin/fm-spawn.sh) contract; [`tests/fm-kimi-harness.test.sh`](../tests/fm-kimi-harness.test.sh) pins home separation and teardown isolation.
+The helper suite keeps its files under its own root and its fake server binds an ephemeral loopback port.
 
 - Command: `bin/fm-test-isolation-proof.sh --jobs 4 --json <path>` (run `fm-isolation-1792736369527-49823`, 2026-10-23T06:19:29Z to 06:49:34Z, macOS arm64 with stock Bash 3.2 and no tmux)
 - Result: `FM_ISOLATION_SUMMARY total=26 failed=2 concurrency=4 duration_ms=1804656`

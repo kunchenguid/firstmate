@@ -871,7 +871,7 @@ SH
   [ ! -e "$world/fm-$id.id" ] \
     || fail "the refused launch left its window open, still leasing $(cat "$world/fm-$id.path")"
   [ ! -e "$claim1" ] && [ ! -e "$claim2" ] || fail "the refused launch left a slot claim behind"
-  [ ! -e "/tmp/fm-$id" ] || fail "the refused launch left its task temp root behind"
+  [ ! -e "$HOME_DIR/state/$id.tasktmp" ] || fail "the refused launch left its task temp root behind"
 
   out=$(run_spawn "$id" --harness codex --mode no-mistakes --yolo off)
   status=$?
@@ -944,10 +944,10 @@ SH
   [ -e "$CASE_DIR/holder.ready" ] || fail "the stand-in retry never took the per-id spawn lock"$'\n'"$out"
   assert_contains "$out" "another spawn of $id holds its spawn lock" \
     "the abort did not report skipping its per-id cleanup"$'\n'"$out"
-  [ -d "/tmp/fm-$id" ] || fail "the abort removed the task temp root while another spawn held the per-id lock"
+  [ -d "$HOME_DIR/state/$id.tasktmp" ] || fail "the abort removed the task temp root while another spawn held the per-id lock"
   [ ! -e "$world/fm-$id.id" ] || fail "the contended abort left its window open"
   [ ! -e "$slot_root/1/.fm-slot-owner" ] || fail "the contended abort left its slot claim behind"
-  rm -rf "/tmp/fm-$id"
+  rm -rf "$HOME_DIR/state/$id.tasktmp"
   pass "a refused polytoken launch leaves its per-id paths alone while another spawn holds the per-id lock"
 }
 
