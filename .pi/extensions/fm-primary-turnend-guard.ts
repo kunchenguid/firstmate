@@ -482,6 +482,10 @@ async function claimSessionstartMessage(
   return sessionstartMessage(generation, result);
 }
 
+// stdout is deliberately ignored: with a live foreign session-lock owner the
+// guard prints a read-only ownership diagnostic there and exits 0, and surfacing
+// it would mean a message into this session's transcript that can schedule a turn
+// for a session that must not arm or repair anything.
 function runGuard(): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
     const invocation = firstmateShellInvocation(`${root}/bin/fm-turnend-guard.sh`, ["--pi"]);
