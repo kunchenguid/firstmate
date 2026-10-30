@@ -491,6 +491,19 @@ invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null 2>&1
 [ -s "$CASE/control-calls" ] || fail "prefixed pi model did not match its scope"
 ok "a prefixed pi model matches a bare model scope"
 
+# A pi profile with no provider is refused at bind.
+begin pi-no-provider
+write_rules true
+write_meta
+jq '.rules[0].use[0] = {harness:"pi", model:"anthropic/claude-sonnet-5", effort:"high"}' \
+  "$CASE/config/crew-dispatch.json" > "$CASE/config/next.json"
+mv "$CASE/config/next.json" "$CASE/config/crew-dispatch.json"
+invoke bind "$ID" --rule 0 >/dev/null 2>&1
+rc=$?
+[ "$rc" -ne 0 ] || fail "bind accepted a pi profile with no provider"
+grep -q '^dispatch_array=' "$CASE/state/$ID.meta" && fail "refused bind recorded an array" || true
+ok "a pi profile with no provider is refused"
+
 # An open decision from another key keeps the worker parked even after a later paused line.
 begin open-decision-parks
 write_rules true
