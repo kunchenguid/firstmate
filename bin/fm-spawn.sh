@@ -7333,7 +7333,9 @@ fi
 # proven or answered support, and stands down for harnesses that report
 # natively (claude >= 2.1.295, pi >= 1.1.0 - probed against the resolved
 # binary where one is pinned), so an unaware terminal only ever sees the one
-# capability probe and no extra process stays behind.
+# capability probe and no extra process stays behind. The `disarm` after the
+# agent command retires the reporter when the agent exits, because the pane
+# shell that sourced the launch outlives it.
 OSC7501_AGENT_BIN=
 case "$HARNESS" in
   claude) OSC7501_AGENT_BIN=claude ;;
@@ -7341,7 +7343,7 @@ case "$HARNESS" in
 esac
 OSC7501_ARM_ARGS=
 [ -z "$OSC7501_AGENT_BIN" ] || OSC7501_ARM_ARGS=" --agent-bin $(shell_quote "$OSC7501_AGENT_BIN")"
-LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") arm --task $(shell_quote "$ID") --harness $(shell_quote "$HARNESS") --backend $(shell_quote "$BACKEND") --kind $(shell_quote "$KIND") --state $(shell_quote "$STATE_REAL") --config $(shell_quote "$CONFIG")$OSC7501_ARM_ARGS >/dev/null 2>/dev/null || true; $LAUNCH"
+LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") arm --task $(shell_quote "$ID") --harness $(shell_quote "$HARNESS") --backend $(shell_quote "$BACKEND") --kind $(shell_quote "$KIND") --state $(shell_quote "$STATE_REAL") --config $(shell_quote "$CONFIG")$OSC7501_ARM_ARGS >/dev/null 2>/dev/null || true; $LAUNCH; $(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") disarm --state $(shell_quote "$STATE_REAL") >/dev/null 2>/dev/null || true"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
