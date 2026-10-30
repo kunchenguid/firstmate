@@ -14,6 +14,9 @@ unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
 STRIP="$ROOT/bin/fm-git-strip-ai-trailers.sh"
 TMP_ROOT=$(fm_test_tmproot fm-git-strip-ai-trailers)
 
@@ -474,7 +477,7 @@ test_cortex_attribution_does_not_reach_the_commit_object() {
 }
 
 test_reentrant_hook_cycle_exits_at_first_reentry() {
-  local repo hooks stubbin depthlog bound maxdepth body outer
+  local repo hooks stubbin depthlog maxdepth body outer
   repo="$TMP_ROOT/reentry"
   make_repo "$repo"
   hooks="$TMP_ROOT/hooks-reentry"
@@ -517,11 +520,7 @@ SH
   chmod 700 "$repo/.git/hooks/post-commit"
   printf 'note\n' >>"$repo/README.md"
   git -C "$repo" add README.md
-  if command -v timeout >/dev/null 2>&1; then bound="timeout 60";
-  elif command -v gtimeout >/dev/null 2>&1; then bound="gtimeout 60";
-  else fail "neither timeout nor gtimeout is installed to bound the recursion check"; fi
-  # shellcheck disable=SC2086 # bound is a chosen command name plus its seconds
-  with_hooks_env "$hooks" $bound git -C "$repo" commit -q \
+  with_hooks_env "$hooks" fm_run_timed 60 git -C "$repo" commit -q \
     --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: reentrant cycle' ||
     fail "commit through a re-entered wrapper hung or failed"
   [ -f "$depthlog" ] || fail "the repository post-commit hook never ran, so the chain is broken"
@@ -541,7 +540,7 @@ SH
 }
 
 test_wrapper_copy_inside_repository_hookspath_completes() {
-  local repo hooks copyland body bound
+  local repo hooks copyland body
   repo="$TMP_ROOT/self-copy"
   make_repo "$repo"
   hooks="$TMP_ROOT/hooks-self-copy"
@@ -561,16 +560,44 @@ test_wrapper_copy_inside_repository_hookspath_completes() {
   git -C "$repo" config core.hooksPath "$copyland"
   printf 'note\n' >>"$repo/README.md"
   git -C "$repo" add README.md
-  if command -v timeout >/dev/null 2>&1; then bound="timeout 60";
-  elif command -v gtimeout >/dev/null 2>&1; then bound="gtimeout 60";
-  else fail "neither timeout nor gtimeout is installed to bound the recursion check"; fi
-  # shellcheck disable=SC2086 # bound is a chosen command name plus its seconds
-  $bound git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: self-contained wrapper' ||
+  fm_run_timed 60 git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: self-contained wrapper' ||
     fail "commit through a wrapper copy inside the repository hooks hung or failed"
   body=$(git -C "$repo" log -1 --format=%B)
   assert_not_contains "$body" "cursoragent@cursor.com" "Cursor trailer survived a commit through the copied wrapper"
   assert_contains "$body" "fix: self-contained wrapper" "subject was rewritten"
   pass "a wrapper copy inside the repository hooks completes instead of re-entering itself"
+}
+
+# The guarded pre-push wrapper deliberately carries no re-entrancy sentinel (a
+# skipped guard would fail open), so the -ef self-copy check in its chain is the
+# only thing stopping a copy of it from exec-ing itself forever.
+test_push_guard_wrapper_copy_inside_repository_hookspath_completes() {
+  local repo hooks guard bare mirror copyland out rc
+  repo="$TMP_ROOT/push-guard-self-copy"
+  make_repo "$repo"
+  bare="$TMP_ROOT/push-guard-self-copy-origin.git"
+  mirror="$TMP_ROOT/push-guard-self-copy-mirror.git"
+  git init -q --bare "$bare"
+  git init -q --bare "$mirror"
+  git -C "$repo" remote add origin "file://$bare"
+  git -C "$repo" remote add mirror "file://$mirror"
+  guard="$TMP_ROOT/push-guard-self-copy-file"
+  "$ROOT/bin/fm-git-push-guard.sh" write "$guard" "$repo" fm/t1 fm/ || fail "guard write failed"
+  hooks="$TMP_ROOT/hooks-push-guard-self-copy"
+  "$STRIP" install --push-guard "$guard" "$hooks" "$repo" || fail "install --push-guard should succeed"
+  # Beads copies the pane's hooks into the repository and points core.hooksPath
+  # there, so the chain lookup of the copy names its own directory.
+  copyland="$repo/.beads-hooks"
+  mkdir -p "$copyland"
+  cp "$hooks/pre-push" "$copyland/pre-push"
+  chmod 700 "$copyland/pre-push"
+  git -C "$repo" config core.hooksPath "$copyland"
+  rc=0
+  out=$(fm_run_timed 60 git -C "$repo" push mirror HEAD:refs/heads/side 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a push through a pre-push wrapper copy inside the repository hooks hung or failed (rc=$rc): $out"
+  git -C "$mirror" rev-parse --verify -q refs/heads/side >/dev/null \
+    || fail "the push through the copied guarded wrapper never landed"
+  pass "a guarded pre-push wrapper copy inside the repository hooks completes instead of re-entering itself"
 }
 
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
@@ -658,6 +685,7 @@ test_env_file_canonicalizes_hooks_dir
 test_cortex_attribution_does_not_reach_the_commit_object
 test_reentrant_hook_cycle_exits_at_first_reentry
 test_wrapper_copy_inside_repository_hookspath_completes
+test_push_guard_wrapper_copy_inside_repository_hookspath_completes
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 test_no_strip_keeps_the_message_and_still_chains
 test_push_guard_install_runs_the_guard_before_chaining
