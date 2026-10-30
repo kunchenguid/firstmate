@@ -17,17 +17,26 @@ SCRIPT=$ROOT/bin/fm-osc7501.sh
 DRIVER=$TMP_ROOT/fake-term.py
 Q=$'\033]7501;?\033\\'
 
-# fake-term.py <cap-file> <slave-name-file> <answer|silent> - a terminal
-# emulator on a pty: writes the slave path, appends every output byte to the
-# capture file, and in "answer" mode replies to the OSC 7501 capability query
-# like a 7501-aware terminal would. Runs until killed.
+# fake-term.py <cap-file> <slave-name-file> <answer|silent> [cmd...] - a
+# terminal emulator on a pty: writes the slave path, appends every output byte
+# to the capture file, and in "answer" mode replies to the OSC 7501 capability
+# query like a 7501-aware terminal would. A trailing command runs as the
+# pane's shell: its own session with the pty as controlling terminal, so its
+# /dev/tty is this terminal. Runs until killed.
 cat >"$DRIVER" <<'PY'
-import os, pty, select, sys, time
+import fcntl, os, pty, select, sys, termios, time
 
 cap_path, slave_path, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 master, slave = pty.openpty()
 with open(slave_path, "w") as f:
     f.write(os.ttyname(slave))
+if len(sys.argv) > 4 and os.fork() == 0:
+    os.close(master)
+    os.setsid()
+    fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+    for fd in (0, 1, 2):
+        os.dup2(slave, fd)
+    os.execvp(sys.argv[4], sys.argv[4:])
 cap = open(cap_path, "ab", buffering=0)
 seen = 0
 query = b"\x1b]7501;?\x1b\\"
@@ -54,10 +63,11 @@ PY
 
 # start_term <dir> <answer|silent> -> sets TERM_SLAVE + TERM_CAP, leaves the
 # emulator running. TERM_PID kills it; run from a test's subshell scope.
-start_term() { # <dir> <mode>
-  local dir=$1
+start_term() { # <dir> <mode> [cmd...]
+  local dir=$1 mode=$2
+  shift 2
   : >"$dir/cap"
-  python3 "$DRIVER" "$dir/cap" "$dir/slave" "$2" &
+  python3 "$DRIVER" "$dir/cap" "$dir/slave" "$mode" "$@" &
   TERM_PID=$!
   local i=0
   while [ ! -s "$dir/slave" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
@@ -68,11 +78,12 @@ stop_term() { kill "$TERM_PID" 2>/dev/null; wait "$TERM_PID" 2>/dev/null || true
 
 # Strip every env var that could make the pane look known-aware or
 # known-unaware, so the tests below control detection explicitly.
+CLEAN_UNSET=(-u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SESSION
+  -u HC_SOCKET -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION
+  -u HERDR_SOCKET_PATH -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID
+  -u REX_BLOCK -u REX_SESSION -u TERM_PROGRAM)
 clean_env() { # <cmd...>
-  env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SESSION \
-    -u HC_SOCKET -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
-    -u HERDR_SOCKET_PATH -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
-    -u REX_BLOCK -u REX_SESSION -u TERM_PROGRAM "$@"
+  env "${CLEAN_UNSET[@]}" "$@"
 }
 
 mkhome() { # <dir>: a minimal config/state pair
@@ -293,6 +304,164 @@ t_known_aware_skips_query() {
   pass "known-aware: HC_TERMINAL_ID arms with no capability probe"
 }
 
+# --- watcher lifecycle -------------------------------------------------------
+
+watcher_pid() { # <state-dir> -> the one recorded watcher pid
+  local f
+  for f in "$1"/.osc7501watch-*; do
+    [ -f "$f" ] || continue
+    read -r pid _ <"$f" && printf '%s' "$pid"
+    return 0
+  done
+  return 1
+}
+
+wait_gone() { # <pid>
+  local i=0
+  while kill -0 "$1" 2>/dev/null && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i + 1)); done
+  ! kill -0 "$1" 2>/dev/null
+}
+
+# Two panes of one home, each arming through its own real controlling
+# terminal (/dev/tty, no stand-in): the second launch must not retire the
+# first pane's reporter, and each terminal reports its own task.
+t_concurrent_panes_keep_their_reporters() {
+  local d=$TMP_ROOT/twopanes a b pane
+  mkhome "$d"
+  printf 'state=busy\n' >"$d/state/ta.busy-state"
+  printf 'state=busy\n' >"$d/state/tb.busy-state"
+  for pane in a b; do
+    mkdir -p "$d/$pane"
+    # shellcheck disable=SC2016
+    start_term "$d/$pane" silent env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID="$pane" FM_OSC7501_INTERVAL=1 \
+      bash -c 'echo $$ >"$5"; bash "$1" arm --task "$4" --harness codex --backend tmux --kind ship --state "$2" --config "$3"; exec sleep 300' \
+      _ "$SCRIPT" "$d/state" "$d/config" "t$pane" "$d/$pane/shell"
+    eval "$pane=\$TERM_PID"
+    wait_cap "$(printf 'fm-t%s' "$pane" | base64 | tr -d '\n')" "$d/$pane/cap" 60 || fail "pane $pane: no record for t$pane"
+  done
+  local pids pid
+  pids=$(cat "$d/state"/.osc7501watch-* 2>/dev/null | awk '{print $1}')
+  assert_equals 2 "$(printf '%s\n' "$pids" | grep -c .)" "one reporter per controlling terminal"
+  for pid in $pids; do kill -0 "$pid" 2>/dev/null || fail "a pane's reporter was retired by the other pane's launch"; done
+  for pid in $pids; do kill "$pid" 2>/dev/null; done
+  kill "$(cat "$d/a/shell")" "$(cat "$d/b/shell")" 2>/dev/null || true
+  TERM_PID=$a stop_term
+  TERM_PID=$b stop_term
+  pass "concurrent panes: each controlling terminal keeps its own reporter"
+}
+
+# The pane shell outlives the agent: the launch's disarm after the agent
+# returns must retire the reporter and park the record, not leave working.
+t_disarm_after_agent_exit_parks_idle() {
+  local d=$TMP_ROOT/disarm
+  mkhome "$d"
+  start_term "$d" answer
+  printf 'state=busy\n' >"$d/state/t10.busy-state"
+  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
+    --task t10 --harness codex --backend tmux --kind ship \
+    --state "$d/state" --config "$d/config"
+  local wpid
+  wpid=$(watcher_pid "$d/state") || fail "disarm: no watcher armed"
+  wait_cap 'state=working' "$d/cap" 60 || fail "disarm: no working record"
+  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" disarm --state "$d/state"
+  wait_gone "$wpid" || fail "disarm left the reporter running"
+  local tail
+  tail=$(tail -c 4000 "$d/cap" | grep -o 'state=[a-z]*' | tail -1)
+  assert_equals "state=idle" "$tail" "disarm parks the record at idle"
+  [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] || fail "disarm left the pidfile behind"
+  stop_term
+  pass "lifecycle: disarm after the agent exits retires the reporter"
+}
+
+# A relaunch on the same pane retires the old reporter before any gate: a
+# same-task relaunch rebinds a fresh reporter, and a natively reporting agent
+# gets the pane with no firstmate writer left.
+t_rearm_retires_previous_reporter() {
+  local d=$TMP_ROOT/rearm
+  mkhome "$d"; mkfake "$d" claude 'claude 2.1.295'
+  start_term "$d" answer
+  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x bash "$SCRIPT" arm \
+    --task t11 --harness codex --backend tmux --kind ship \
+    --state "$d/state" --config "$d/config"
+  local first second
+  first=$(watcher_pid "$d/state") || fail "rearm: no first watcher"
+  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x bash "$SCRIPT" arm \
+    --task t11 --harness codex --backend tmux --kind ship \
+    --state "$d/state" --config "$d/config"
+  second=$(watcher_pid "$d/state") || fail "rearm: same-task relaunch armed no watcher"
+  [ "$first" != "$second" ] || fail "rearm: same-task relaunch kept the old reporter"
+  wait_gone "$first" || fail "rearm: old reporter still running after same-task relaunch"
+  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x PATH="$d/bin:$PATH" \
+    bash "$SCRIPT" arm --task t11 --harness claude --backend tmux --kind ship \
+    --state "$d/state" --config "$d/config" --agent-bin claude
+  wait_gone "$second" || fail "rearm: native relaunch left the firstmate reporter running"
+  [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] || fail "rearm: native relaunch armed a watcher"
+  stop_term
+  pass "lifecycle: relaunch retires the previous reporter before native/off gates"
+}
+
+# A done declaration yields to a steer that came after it: a newer busy turn
+# reads as working, and a pending message beside an idle record as steering.
+t_activity_after_done_and_idle_inbox() {
+  local d=$TMP_ROOT/steer now
+  mkhome "$d"
+  start_term "$d" answer
+  sleep 300 &
+  local holder=$!
+  now=$(date +%s)
+  printf 'state=idle ts=%s\n' "$((now - 20))" >"$d/state/t12.busy-state"
+  printf 'done [at=%s]: PR https://example.test/pr/2\n' "$((now - 10))" >"$d/state/t12.status"
+  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t12 --kind ship --state "$d/state" --harness codex \
+    --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=done' "$d/cap" 60 || fail "steer: done not reported"
+  printf 'state=busy ts=%s\n' "$now" >"$d/state/t12.busy-state"
+  wait_cap 'state=working' "$d/cap" 60 || fail "steer: a busy turn after done still reads done"
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  : >"$d/cap"
+  rm -f "$d/state/t12.status"
+  printf 'state=idle ts=%s\n' "$now" >"$d/state/t12.busy-state"
+  mkdir -p "$d/state/t12.inbox"
+  printf 'steer\n' >"$d/state/t12.inbox/1.msg"
+  clean_env env FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t12 --kind ship --state "$d/state" --harness codex \
+    --parent "$holder" &
+  wpid=$!
+  wait_cap "msg=$(printf 'Steering received' | base64 | tr -d '\n')" "$d/cap" 60 \
+    || fail "steer: a pending message beside an idle record did not read as steering"
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  stop_term
+  pass "mapping: later activity overrides done; idle + inbox reads as steering"
+}
+
+tty_input_mode() { # <tty> -> canonical-input and echo flags as stty names them
+  stty -a <"$1" | tr -s ' \t;' '\n' | grep -Ex -- '-?(icanon|echo)' | sort
+}
+
+# A launch interrupted while the capability query holds the terminal raw
+# must leave the pane's canonical input and echo as it found them.
+t_interrupted_query_restores_mode() {
+  local d=$TMP_ROOT/intr before after apid
+  mkhome "$d"
+  start_term "$d" silent
+  before=$(tty_input_mode "$TERM_SLAVE")
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_QUERY_DS=20 bash "$SCRIPT" arm \
+    --task t13 --harness codex --backend tmux --kind ship \
+    --state "$d/state" --config "$d/config" &
+  apid=$!
+  wait_cap "$Q" "$d/cap" 60 || fail "interrupt: query never sent"
+  kill -TERM "$apid"
+  wait "$apid" 2>/dev/null || true
+  after=$(tty_input_mode "$TERM_SLAVE")
+  assert_equals "$(printf 'echo\nicanon')" "$before" "pane starts canonical with echo"
+  assert_equals "$before" "$after" "interrupted query restores canonical input and echo"
+  [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] || fail "interrupt: an interrupted arm spawned a watcher"
+  stop_term
+  pass "query safety: an interrupted probe restores the terminal mode"
+}
+
 fm_test_run \
   t_query_unaware_terminal_silent \
   t_query_answered_arms_watcher \
@@ -302,4 +471,9 @@ fm_test_run \
   t_old_claude_uses_generic \
   t_reply_drained_for_next_program \
   t_config_off_disables \
-  t_known_aware_skips_query
+  t_known_aware_skips_query \
+  t_concurrent_panes_keep_their_reporters \
+  t_disarm_after_agent_exit_parks_idle \
+  t_rearm_retires_previous_reporter \
+  t_activity_after_done_and_idle_inbox \
+  t_interrupted_query_restores_mode
