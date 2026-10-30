@@ -371,14 +371,14 @@ ok - fm_backend_orca_kill: a close its missing CLI never attempted reports the f
 ```
 
 An endpoint that is already legitimately gone returns 0 silently on every arm covered by this entry, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited.
-The refusal is reached only through a close that could not do its job, and each arm reports only what it can prove:
+Ordinary close return contracts differ by backend:
 
 | Backend | already gone | a close that failed |
 | --- | --- | --- |
 | tmux | 0, silent | 1, resolved by re-reading the window's exact recorded identity; a read that itself could not run refuses rather than passing for absence |
-| orca | Requires a successful CLI close response | Nonzero on a failed command or an error JSON response |
-| zellij | 0 when successful session or pane/tab inventories prove absence | Nonzero when a failed close or unresolved identity cannot be confirmed absent |
-| cmux | 0 when successful inventories across every window prove absence | Every close requires confirming inventories; failed reads and surviving workspaces return nonzero |
+| orca | 0 when the CLI is available | 0 after an attempted close, including a failed command or error JSON response; nonzero when the CLI prerequisite check fails |
+| zellij | 0, silent | Best effort: close-command failures are ignored, and an unresolved tab identity can skip the close without refusing |
+| cmux | 0, silent | Best effort: close-command failures are ignored, and failed target validation skips the close without refusing |
 | tern | 0, silent | 1 when its inventory re-read cannot run, the block moved to another session, its tab no longer carries the task's scoped title, or it is still listed after the close; portable fixtures only (`tests/fm-backend-tern.test.sh`), contract in [tern-backend.md](../tern-backend.md) |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
