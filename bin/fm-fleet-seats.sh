@@ -292,6 +292,11 @@ validate_pools() {
 
 pool_count() { jq -r '.pools | length' "$1"; }
 
+snapshot_policy() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -r "$1" ] \
+    && cp "$1" "$2" && validate_pools "$2"
+}
+
 # pool_for_model <file> <model>: print "<name>\t<capacity>" for the pool naming it.
 pool_for_model() {
   jq -r --arg m "$2" '.pools[] | select(.models | index($m)) | "\(.name)\t\(.capacity)"' "$1"
@@ -1828,16 +1833,15 @@ EOF_ALLOW
   fi
 
   # reserve in a remote home
+  RESERVE_POLICY=$TMPD/reserve-policy
+  snapshot_policy "$POLICY" "$RESERVE_POLICY" || unavailable "$POLICY is malformed or unreadable"
+  require_explicit_model "$RESERVE_POLICY"
   if [ "$POLICY" != "$DELIVERED" ]; then
-    validate_pools "$CONFIG/fleet-seats" || unavailable "$CONFIG/fleet-seats is malformed"
-    require_explicit_model "$CONFIG/fleet-seats"
-    [ -n "$(pool_for_model "$CONFIG/fleet-seats" "$MODEL")" ] || exit 0
+    [ -n "$(pool_for_model "$RESERVE_POLICY" "$MODEL")" ] || exit 0
     unavailable "the fleet root has not delivered a seat policy to this home"
   fi
-  validate_pools "$POLICY" || unavailable "$POLICY is malformed"
-  require_explicit_model "$POLICY"
-  DIGEST=$(policy_digest "$POLICY")
-  POOL_LINE=$(pool_for_model "$POLICY" "$MODEL")
+  DIGEST=$(policy_digest "$RESERVE_POLICY")
+  POOL_LINE=$(pool_for_model "$RESERVE_POLICY" "$MODEL")
   fm_pid_alive "$HOLDER" || unavailable "holder pid $HOLDER is not a running process"
   if [ -n "$POOL_LINE" ]; then
     POOL=${POOL_LINE%%$'\t'*}
@@ -1943,8 +1947,7 @@ if [ "$CMD" = serve-remotes ]; then
     fi
     lock_or_refuse "$LOCK"
     if [ -e "$ROOT_CONFIG/fleet-seats" ] || [ -L "$ROOT_CONFIG/fleet-seats" ]; then
-      validate_pools "$ROOT_CONFIG/fleet-seats" || unavailable "$ROOT_CONFIG/fleet-seats is malformed"
-      cp "$ROOT_CONFIG/fleet-seats" "$TMPD/policy" || unavailable "cannot read the current seat policy"
+      snapshot_policy "$ROOT_CONFIG/fleet-seats" "$TMPD/policy" || unavailable "$ROOT_CONFIG/fleet-seats is malformed or unreadable"
     else
       printf '{"pools":[]}\n' > "$TMPD/policy"
     fi
@@ -2047,7 +2050,9 @@ if [ "$CMD" = serve-remotes ]; then
 fi
 
 # reserve at the root or a local home
-validate_pools "$POOLS" || unavailable "$POOLS is malformed (see docs/configuration.md \"Fleet seat pools\")"
+DECLARATION=$POOLS
+POOLS=$TMPD/reserve-policy
+snapshot_policy "$DECLARATION" "$POOLS" || unavailable "$DECLARATION is malformed or unreadable (see docs/configuration.md \"Fleet seat pools\")"
 require_explicit_model "$POOLS"
 POOL_LINE=$(pool_for_model "$POOLS" "$MODEL")
 DIGEST=$(policy_digest "$POOLS")
@@ -2056,7 +2061,7 @@ fm_pid_alive "$HOLDER" || unavailable "holder pid $HOLDER is not a running proce
 [ "$KIND" != secondmate ] || lifecycle_join "$HOLDER_STATE" "$TASK"
 mkdir -p "$LEDGER/holders" 2>/dev/null || unavailable "cannot create $LEDGER/holders"
 lock_or_refuse "$LOCK"
-[ -e "$POOLS" ] && validate_pools "$POOLS" && [ "$(policy_digest "$POOLS")" = "$DIGEST" ] \
+[ -e "$DECLARATION" ] && validate_pools "$DECLARATION" && [ "$(policy_digest "$DECLARATION")" = "$DIGEST" ] \
   || unavailable "the fleet seat policy changed before the reservation was decided"
 import_legacy_v1 || unavailable "${LEDGER_ERROR:-the legacy seat records cannot be imported}"
 load_or_refuse
