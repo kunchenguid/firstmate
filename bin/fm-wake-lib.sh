@@ -2021,6 +2021,25 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# Relaunch re-enters a task's recorded slot, so it must still be the task's: a
+# claim naming another task means the pool handed the slot on after this task's
+# worker exited, and a claim that cannot be read proves nothing. Prints the
+# refusal and returns 1 for both. An absent claim passes, as at teardown.
+fm_treehouse_slot_owner_relaunch_check() {  # <worktree> <task-id>
+  local worktree=$1 id=$2
+  fm_treehouse_slot_owner_state "$worktree" "$id"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine|absent) return 0 ;;
+    other)
+      echo "task $id's recorded worktree $worktree was reassigned to task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}, which claimed that pool slot after this record was written; refusing to relaunch $id into another task's copy. Reconcile which record is stale (bin/fm-crew-state.sh $id) before relaunching"
+      ;;
+    *)
+      echo "task $id's recorded worktree $worktree carries a slot-owner claim that cannot be read, so the slot cannot be proved to still be $id's; refusing to relaunch. Inspect or repair the claim file beside that worktree (task= and home= lines) first"
+      ;;
+  esac
+  return 1
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
