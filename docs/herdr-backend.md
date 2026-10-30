@@ -138,7 +138,8 @@ A claimed parent identity that cannot be resolved exactly stops the spawn before
 That covers:
 
 - A missing or unusable socket identity.
-- A closed or unreadable launcher pane, or one with no tab or workspace. The refusal calls the pane id stale and names `HERDR_PANE_ID`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID` as the variables to refresh in the shell.
+- A launcher pane that cannot be read. The refusal says it could not be read.
+- A launcher pane that no longer exists, or one with no tab or workspace. The refusal calls the pane id stale and names `HERDR_PANE_ID`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID` as the variables to refresh in the shell.
 - A pane and tab that disagree about their workspace.
 - A workspace missing from the session.
 - A pane belonging to another named session or Herdr server.

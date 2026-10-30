@@ -1129,8 +1129,7 @@ test_launcher_identity_refuses_an_unreadable_pane() {
   status=$?
   expect_code 1 "$status" "a launcher pane that no longer reads must refuse, not fall back to a label search"
   assert_contains "$out" "w7:p3" "the stale-pane refusal did not name the pane it could not resolve"
-  assert_contains "$out" "stale" "the unreadable-pane refusal did not say the pane id is stale"
-  assert_contains "$out" "HERDR_PANE_ID, HERDR_TAB_ID and HERDR_WORKSPACE_ID" "the unreadable-pane refusal did not name the variables to refresh"
+  assert_contains "$out" "could not be read" "the unreadable-pane refusal did not say the pane could not be read"
   pass "fm_backend_herdr_launcher_identity: refuses when the launcher's own pane no longer resolves"
 }
 
