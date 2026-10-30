@@ -4202,7 +4202,7 @@ real_path_or_raw() { # <path>
 # and a binding naming another parent (or no readable local binding at all)
 # means only that parent can tell whether the home is retired.
 spawn_clear_stale_secondmate_marker() {  # <worktree> <source> <inspect-target>
-  local wt=$1 source=$2 inspect_target=$3 marker parent id bound_home this_home
+  local wt=$1 source=$2 inspect_target=$3 marker parent id bound_home this_home reg reg_entry grep_rc
   # A secondmate spawn launches INTO a home whose marker is the point, so this
   # hygiene is for task worktrees only.
   [ "$KIND" != secondmate ] || return 0
@@ -4214,8 +4214,29 @@ spawn_clear_stale_secondmate_marker() {  # <worktree> <source> <inspect-target>
     IFS= read -r id < "$marker" 2>/dev/null || id=
     id=${id//[[:space:]]/}
   fi
-  if [ -n "$id" ] && secondmate_registry_field "$DATA/secondmates.md" "$id" home >/dev/null 2>&1; then
-    echo "error: $source handed back '$wt', which is the home of secondmate '$id', still registered in $DATA/secondmates.md; refusing to launch a task into a live secondmate home. Retire secondmate '$id' first. Inspect target $inspect_target" >&2
+  case "$id" in *[!A-Za-z0-9._-]*) id= ;; esac
+  # Only a registry that reads cleanly and has no line for the id proves the
+  # secondmate was retired; an unreadable or unsafe registry, or a malformed or
+  # duplicated entry, proves nothing and must not cost a live home its identity.
+  reg="$DATA/secondmates.md"
+  reg_entry=error
+  if [ -n "$id" ]; then
+    if [ ! -e "$reg" ] && [ ! -L "$reg" ]; then
+      reg_entry=missing
+    elif secondmate_registry_field "$reg" "$id" home >/dev/null 2>&1; then
+      reg_entry=registered
+    elif [ -f "$reg" ] && [ ! -L "$reg" ]; then
+      grep_rc=0
+      grep -Eq -- "^- ${id//./[.]}( |\$)" "$reg" 2>/dev/null || grep_rc=$?
+      [ "$grep_rc" -ne 1 ] || reg_entry=missing
+    fi
+  fi
+  if [ "$reg_entry" = registered ]; then
+    echo "error: $source handed back '$wt', which is the home of secondmate '$id', still registered in $reg; refusing to launch a task into a live secondmate home. Retire secondmate '$id' first. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  if [ -n "$id" ] && [ "$reg_entry" = error ]; then
+    echo "error: $source handed back '$wt', which carries the secondmate-home marker of '$id', but $reg cannot be read to confirm '$id' was retired (unreadable, unsafe, or a malformed or duplicated entry); refusing to launch a task into it and keeping its identity. Repair $reg, then retry. Inspect target $inspect_target" >&2
     exit 1
   fi
   bound_home=

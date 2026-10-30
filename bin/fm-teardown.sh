@@ -2817,7 +2817,7 @@ validate_firstmate_home_for_removal() {
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
   # A retirement interrupted while it held the identity files aside would leave
   # this retry looking at an unmarked directory; put them back first.
-  recover_firstmate_home_identity "$abs_home_path" "$label" || return 1
+  recover_firstmate_home_identity "$abs_home_path" "$label" "$expected_id" || return 1
   if [ ! -f "$abs_home_path/$SUB_HOME_MARKER" ]; then
     echo "REFUSED: unsafe $label removal target $home is not a seeded secondmate home" >&2
     return 1
@@ -3073,12 +3073,28 @@ restore_firstmate_home_identity() {  # <abs-home> <label> <backup>
 }
 
 # Put back identity files an earlier, interrupted retirement staged aside. A
-# backup that exists for this home means its lease was never confirmed returned,
-# because a confirmed return deletes the backup.
-recover_firstmate_home_identity() {  # <abs-home> <label>
-  local home=$1 label=$2 backup
+# surviving backup does not prove the lease is still held: a teardown killed
+# after `treehouse return` succeeded but before it deleted the backup leaves one
+# behind a slot the pool may already have handed to a task. That task's spawn
+# claimed the slot (bin/fm-wake-lib.sh slot-owner claim), so a claim naming
+# anyone else, or one that cannot be read, refuses: restoring would stamp the
+# task's worktree as this secondmate's home and the retry would return it.
+recover_firstmate_home_identity() {  # <abs-home> <label> <secondmate-id>
+  local home=$1 label=$2 id=${3:-} backup marker
   backup=$(firstmate_home_identity_backup_path "$home")
   [ -e "$backup" ] || [ -L "$backup" ] || return 0
+  fm_treehouse_slot_owner_state "$home" "$id"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    other)
+      echo "REFUSED: $label $home was already returned by an interrupted retirement and the pool has since handed the slot to task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}; its home identity was not restored and the slot was not returned. The leftover backup at $backup is no longer needed once that is confirmed." >&2
+      return 1
+      ;;
+    unsafe)
+      marker=$(fm_treehouse_slot_owner_marker "$home" 2>/dev/null) || marker="beside $home"
+      echo "REFUSED: $label $home has a recoverable home-identity backup at $backup, but its slot-owner claim cannot be read, so the slot cannot be proved to still be this secondmate's; nothing was restored or returned. Inspect or repair the claim file at $marker, then re-run teardown." >&2
+      return 1
+      ;;
+  esac
   restore_firstmate_home_identity "$home" "$label" "$backup" || return 1
   echo "teardown: restored the interrupted retirement's home-identity files for $label $home" >&2
 }

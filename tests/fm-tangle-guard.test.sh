@@ -301,6 +301,47 @@ test_spawn_clears_stale_secondmate_marker() {
   pass "fm-spawn: clears a secondmate marker this home retired, refuses every other leftover by cause"
 }
 
+# Only a registry that reads cleanly with no entry for the id proves the
+# secondmate was retired. An unsafe registry, or a malformed or duplicated entry
+# for the id, proves nothing, so a same-parent binding must not be enough to
+# strip a possibly live home of its identity.
+test_spawn_refuses_stale_marker_on_registry_error() {
+  local proj fakebin case home wt out status real
+  proj=$(make_repo "$TMP_ROOT/spawn-regerr-proj")
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-regerr-fake")
+  for case in malformed duplicate symlink; do
+    home="$TMP_ROOT/spawn-regerr-$case-home"
+    wt="$TMP_ROOT/spawn-regerr-$case-wt"
+    mkdir -p "$home/data"
+    git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+    printf 'regmate\n' > "$wt/.fm-secondmate-home"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
+      > "$wt/.fm-secondmate-parent"
+    case "$case" in
+      malformed)
+        printf -- '- regmate - fixture without its structured suffix\n' > "$home/data/secondmates.md"
+        ;;
+      duplicate)
+        printf -- '- regmate - fixture (home: %s; scope: fixture; projects: ; added 2026-08-05)\n' \
+          "$wt" "$wt" > "$home/data/secondmates.md"
+        ;;
+      symlink)
+        real="$TMP_ROOT/spawn-regerr-real-registry.md"
+        : > "$real"
+        ln -s "$real" "$home/data/secondmates.md"
+        ;;
+    esac
+    out=$(run_spawn "$home" "regerr-$case-kk1" "$proj" "$wt" "$fakebin"); status=$?
+    expect_code 1 "$status" "spawn must refuse a marker whose registry entry cannot be confirmed missing ($case)"
+    assert_contains "$out" "cannot be read to confirm 'regmate' was retired" \
+      "registry-error refusal must say retirement cannot be confirmed ($case)"
+    assert_present "$wt/.fm-secondmate-home" "registry error ($case) cost the home its marker"
+    assert_present "$wt/.fm-secondmate-parent" "registry error ($case) cost the home its binding"
+    assert_absent "$home/state/regerr-$case-kk1.meta" "aborted spawn must not record meta ($case)"
+  done
+  pass "fm-spawn: refuses a stale-looking marker when the registry cannot confirm its retirement"
+}
+
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
 
 # The prevention guard also depends on fm-spawn building robust tmux commands
@@ -404,4 +445,5 @@ test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_clears_stale_secondmate_marker
+test_spawn_refuses_stale_marker_on_registry_error
 test_spawn_tmux_window_construction

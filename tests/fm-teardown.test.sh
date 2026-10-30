@@ -3700,11 +3700,12 @@ SH
 # itself, so the staged identity must be recoverable by the retry: the retry has
 # to find the home still a seeded secondmate home, return its lease, and leave
 # the slot without an identity.
-test_interrupted_return_identity_recovered_by_retry() {
-  local case_dir home rc pid i
-  case_dir=$(make_case retire-identity-interrupt)
-  write_meta "$case_dir" local-only secondmate
-  home=$(configure_pooled_secondmate_home "$case_dir")
+# Kill a pooled secondmate teardown while its `treehouse return` is running.
+# The teardown is exec'd in the background shell so the pid killed and waited on
+# is fm-teardown.sh itself, and it is reaped before its fake treehouse dies - a
+# surviving teardown would otherwise run its own failure cleanup under the retry.
+interrupt_pooled_return() {  # <case-dir> <home>
+  local case_dir=$1 home=$2 pid i
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 echo \$\$ > "$case_dir/treehouse.pid"
@@ -3713,18 +3714,35 @@ exec sleep 300
 SH
   chmod +x "$case_dir/fakebin/treehouse"
 
-  run_teardown_pooled "$case_dir" --force > "$case_dir/stdout1" 2> "$case_dir/stderr1" &
+  (
+    FM_HOME='' \
+    FM_ROOT_OVERRIDE="$case_dir/project" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+      exec "$TEARDOWN" task-x1 --force
+  ) > "$case_dir/stdout1" 2> "$case_dir/stderr1" &
   pid=$!
   for i in $(seq 1 100); do
     [ -e "$case_dir/treehouse.reached" ] && break
     sleep 0.1
   done
   [ -e "$case_dir/treehouse.reached" ] \
-    || { kill -KILL "$pid" 2>/dev/null; fail "retire-identity-interrupt: teardown never reached the lease return: $(cat "$case_dir/stderr1")"; }
+    || { kill -KILL "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fail "retire-identity-interrupt: teardown never reached the lease return: $(cat "$case_dir/stderr1")"; }
   assert_absent "$home/.fm-secondmate-home" \
     "retire-identity-interrupt: the identity marker was still in place while the lease was being returned"
-  kill -KILL "$pid" "$(cat "$case_dir/treehouse.pid")" 2>/dev/null || true
+  kill -KILL "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  kill -KILL "$(cat "$case_dir/treehouse.pid")" 2>/dev/null || true
+}
+
+test_interrupted_return_identity_recovered_by_retry() {
+  local case_dir home rc
+  case_dir=$(make_case retire-identity-interrupt)
+  write_meta "$case_dir" local-only secondmate
+  home=$(configure_pooled_secondmate_home "$case_dir")
+  interrupt_pooled_return "$case_dir" "$home"
 
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -3751,6 +3769,41 @@ SH
   [ -z "$(find "$case_dir" -maxdepth 1 -name '.fm-identity-restore.*' -print)" ] \
     || fail "retire-identity-interrupt: a completed retirement left its identity stash behind"
   pass "a retirement interrupted during the lease return is recovered and completed by the retry"
+}
+
+# The interrupted return may have completed before the kill, and the pool may
+# then have handed the slot to a task, whose spawn claimed it. The surviving
+# identity backup does not prove the lease is still this secondmate's, so the
+# retry must refuse rather than stamp the task's worktree as a secondmate home
+# and return it.
+test_interrupted_return_retry_refuses_reassigned_slot() {
+  local case_dir home rc
+  case_dir=$(make_case retire-identity-reassigned)
+  write_meta "$case_dir" local-only secondmate
+  home=$(configure_pooled_secondmate_home "$case_dir")
+  interrupt_pooled_return "$case_dir" "$home"
+  printf 'task=crew-zz9\nhome=%s\n' "$case_dir/other-home" > "$case_dir/.fm-slot-owner"
+
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do dir=$arg; done
+echo returned >> "$dir/../treehouse-returned"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown_pooled "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" || rc=$?
+  [ "$rc" -ne 0 ] || fail "retire-identity-reassigned: the retry reported success on a slot another task holds"
+  assert_contains "$(cat "$case_dir/stderr2")" "handed the slot to task crew-zz9" \
+    "retire-identity-reassigned: the refusal did not name the task now holding the slot"
+  assert_absent "$home/.fm-secondmate-home" \
+    "retire-identity-reassigned: the retry stamped the reassigned slot with the retired identity marker"
+  assert_absent "$home/.fm-secondmate-parent" \
+    "retire-identity-reassigned: the retry stamped the reassigned slot with the retired parent binding"
+  assert_absent "$case_dir/treehouse-returned" \
+    "retire-identity-reassigned: the retry returned a slot another task holds"
+  pass "a retry of an interrupted retirement refuses a slot the pool handed to another task"
 }
 
 configure_secondmate_with_tmux_children() {  # <case-dir>
@@ -6150,6 +6203,7 @@ test_herdr_teardown_presentation_lock_namespace_is_per_account
 test_secondmate_retirement_clears_pooled_home_identity
 test_failed_return_restores_pooled_home_identity
 test_interrupted_return_identity_recovered_by_retry
+test_interrupted_return_retry_refuses_reassigned_slot
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
