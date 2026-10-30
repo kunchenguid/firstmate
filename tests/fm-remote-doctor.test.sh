@@ -791,7 +791,7 @@ mv "$CASE_BIN/tasks-axi" "$MANAGER_BIN/tasks-axi"
 doctor
 expect_code 1 "$DOCTOR_RC" "a version-manager-only required tool was reported ready"
 assert_contains "$DOCTOR_OUT" 'required tasks-axi=MISSING' "the missing managed tool was not reported"
-assert_contains "$DOCTOR_OUT" 'tools in an unselected nvm version or outside the discovered asdf or mise paths need an absolute wrapper' \
+assert_contains "$DOCTOR_OUT" 'tools in a non-default fnm or nvm version or outside the discovered asdf or mise paths need an absolute wrapper' \
   "the missing-tool diagnostic contradicted filesystem version-manager discovery"
 doctor --fix
 expect_code 0 "$DOCTOR_RC" "--fix did not create a wrapper for the discoverable managed tool"

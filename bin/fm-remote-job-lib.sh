@@ -73,11 +73,12 @@
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
 # PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. The PATH
 # is intentionally filesystem-discovered rather than login-shell-derived:
-# ~/.local/bin; nvm, asdf, and mise shims/install bins; Nix; Homebrew; and the
-# system tail. No shell startup files are evaluated. Each discovered set is
-# appended in the shell's own sorted pathname-expansion order, so which install
-# of a multi-version tool wins is fixed by this composition rather than by the
-# order the filesystem happens to return.
+# ~/.local/bin; the fnm default alias bin; Linux Homebrew; nvm, asdf, and mise
+# shims/install bins; Nix; Homebrew; and the system tail. No shell startup files
+# are evaluated. Each discovered set is appended in the shell's
+# own sorted pathname-expansion order, so which install of a multi-version tool
+# wins is fixed by this composition rather than by the order the filesystem
+# happens to return.
 #
 # On macOS the worker is Firstmate's Aqua LaunchAgent
 # dev.firstmate.remote-job at ~/Library/LaunchAgents/dev.firstmate.remote-job.plist
@@ -197,6 +198,20 @@ fm_remote_job_append_dirs() { # <expanded glob matches>
   done
 }
 
+# fnm's default data directory in fnm's own lookup order: the XDG default
+# ~/.local/share/fnm, else the legacy ~/.fnm, else the legacy macOS
+# ~/Library/Application Support/fnm, each under the account home and only when
+# it already exists.
+fm_remote_job_fnm_dir() { # <account-home>
+  local account_home=$1 candidate
+  for candidate in "$account_home/.local/share/fnm" "$account_home/.fnm" "$account_home/Library/Application Support/fnm"; do
+    [ -d "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
 fm_remote_job_nvm_default_selector() { # <account-home>
   local account_home=$1 alias_root selector alias_file next depth=0 suffix
   alias_root="$account_home/.nvm/alias"
@@ -271,9 +286,12 @@ fm_remote_job_nvm_selected_bin() { # <account-home>
 }
 
 fm_remote_job_compose_operator_path() { # <account-home>
-  local account_home=$1 account_user nvm_bin
+  local account_home=$1 account_user fnm_dir nvm_bin
   FM_REMOTE_JOB_OPERATOR_PATH=
   fm_remote_job_path_append_if_dir "$account_home/.local/bin"
+  fnm_dir=$(fm_remote_job_fnm_dir "$account_home" 2>/dev/null || true)
+  [ -z "$fnm_dir" ] || fm_remote_job_path_append_if_dir "$fnm_dir/aliases/default/bin"
+  fm_remote_job_path_append_if_dir /home/linuxbrew/.linuxbrew/bin
   nvm_bin=$(fm_remote_job_nvm_selected_bin "$account_home" 2>/dev/null || true)
   [ -z "$nvm_bin" ] || fm_remote_job_path_append "$nvm_bin"
   fm_remote_job_path_append_if_dir "$account_home/.asdf/shims"
@@ -323,8 +341,11 @@ fm_remote_job_operator_tool() { # <tool>; resolves only outside the checkout bin
 }
 
 fm_remote_job_manager_tool() { # <account-home> <tool>
-  local account_home=$1 tool=$2 directory candidate
+  local account_home=$1 tool=$2 directory candidate fnm_dir fnm_bins=()
+  fnm_dir=$(fm_remote_job_fnm_dir "$account_home" 2>/dev/null || true)
+  [ -z "$fnm_dir" ] || fnm_bins=("$fnm_dir"/node-versions/*/installation/bin)
   for directory in \
+    ${fnm_bins[@]+"${fnm_bins[@]}"} \
     "$account_home"/.nvm/versions/node/*/bin \
     "$account_home"/.asdf/shims \
     "$account_home"/.asdf/installs/*/*/bin \
