@@ -4292,6 +4292,9 @@ validate_spawn_worktree() { # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real owner
   wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || wt_real=
   if [ -n "$wt_real" ] && owner=$(spawn_worktree_sibling_owner "$wt_real"); then
+    # The live sibling owns this worktree and its terminal, so the abort trap
+    # must not close or remove either (Orca removes with --force).
+    ORCA_ABORT_CLEANUP=0
     echo "error: $source yielded $owner (resolved '$WT'); refusing to launch into a worktree held by a live sibling task. Inspect target $inspect_target" >&2
     exit 1
   fi

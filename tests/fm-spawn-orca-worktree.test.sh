@@ -62,7 +62,13 @@ case "$1 $2" in
     done
     wt="$DIR/orca-worktrees/$name"
     mkdir -p "$DIR/orca-worktrees"
-    git -C "$DIR/project" worktree add --quiet -b "orca-$name" "$wt" >&2 || exit 1
+    # FM_TEST_ORCA_RETURN_PATH makes Orca hand back a worktree that already
+    # exists (the shape of a checkout still held by another task).
+    if [ -n "${FM_TEST_ORCA_RETURN_PATH:-}" ]; then
+      wt=$FM_TEST_ORCA_RETURN_PATH
+    else
+      git -C "$DIR/project" worktree add --quiet -b "orca-$name" "$wt" >&2 || exit 1
+    fi
     printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' "$name" "$wt"
     exit 0
     ;;
@@ -72,6 +78,10 @@ case "$1 $2" in
     ;;
   "terminal close")
     touch "$DIR/terminal-closed"
+    exit 0
+    ;;
+  "worktree rm")
+    touch "$DIR/worktree-removed"
     exit 0
     ;;
   "terminal send")
@@ -144,6 +154,60 @@ exit 0
 SH
   chmod +x "$fb/orca"
   printf '%s\n' "$fb"
+}
+
+# Orca can hand back a worktree that a live sibling task still holds. The
+# refusal must leave that sibling's worktree and terminal alone: the abort trap
+# would otherwise remove it (Orca removes with --force) and close its terminal.
+test_orca_live_sibling_worktree_refusal_keeps_the_sibling_checkout() {
+  local case_dir home id=orca-sibling-a3 fb out status sibling_wt
+  case_dir="$TMP_ROOT/live-sibling"
+  home="$case_dir/home"
+  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects"
+  touch "$home/state/.last-watcher-beat"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  fm_git_init_commit "$case_dir/project"
+  sibling_wt="$case_dir/sibling-wt"
+  git -C "$case_dir/project" worktree add --quiet -b sibling-branch "$sibling_wt"
+  fm_write_meta "$home/state/other-task.meta" \
+    "window=firstmate:fm-other-task" \
+    "worktree=$sibling_wt" \
+    "kind=ship" "harness=codex" "mode=no-mistakes" "yolo=off"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise an Orca worktree that a live sibling still holds.
+
+## Firstmate spec
+Confirm the refusal leaves the sibling's worktree in place.
+EOF
+  fb=$(make_orca_fakebin "$case_dir")
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"#{pane_current_command}"*) printf 'claude\n' ;;
+  *) case "${1:-}" in
+       display-message) printf 'firstmate\n' ;;
+       list-windows) printf 'fm-other-task\n' ;;
+     esac ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TEST_ORCA_DIR="$case_dir" \
+    FM_TEST_ORCA_RETURN_PATH="$sibling_wt" PATH="$fb:$PATH" \
+    "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off --backend orca 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an Orca spawn into a live sibling's worktree succeeded: $out"
+  assert_contains "$out" "task other-task" "the refusal did not name the owning task"
+  [ ! -e "$case_dir/worktree-removed" ] || fail "the refusal removed the live sibling's Orca worktree"
+  [ ! -e "$case_dir/terminal-closed" ] || fail "the refusal closed the live sibling's Orca terminal"
+  [ -d "$sibling_wt" ] || fail "the live sibling's worktree is gone"
+  pass "an Orca spawn refused for a live sibling's worktree leaves that worktree and terminal in place"
 }
 
 test_orca_fresh_spawn_enters_the_worktree_it_created() {
@@ -878,6 +942,7 @@ test_orca_interrupted_spawn_before_send_removes_launch_file
 test_orca_launch_file_delete_failure_keeps_terminal
 test_orca_pane_wins_launch_file_race_at_deadline
 test_orca_snapshot_keeps_raw_bytes_tmux_reports
+test_orca_live_sibling_worktree_refusal_keeps_the_sibling_checkout
 test_orca_fresh_spawn_enters_the_worktree_it_created
 test_orca_relaunch_is_refused_before_the_worktree_carveout_could_run
 
