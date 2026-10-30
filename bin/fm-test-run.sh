@@ -250,7 +250,7 @@ descendants_of() {
 
 # A pid names the same process only while its start time is unchanged.
 process_start_identity() {
-  ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'
+  LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'
 }
 
 # Registration lives in a directory only the caller can write: a pre-created
