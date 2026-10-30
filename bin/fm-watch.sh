@@ -4090,19 +4090,15 @@ EOF
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
-          # A merged lane is cleaned up here through bin/fm-teardown.sh's own
-          # gates unless config/no-auto-land opts out (a parked lane always
-          # is), also when bin/fm-pr-merge.sh already recorded the merge; its
-          # one-line outcome joins the merge outcome in the same wake.
-          land_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
-            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible 2>/dev/null) || true
-          if [ -n "$land_out" ]; then
-            fm_wake_append check "land-$id" "check: $id merged $url - $land_out" || exit 1
-          fi
+          # A merged lane eligible for merge-time cleanup, also one
+          # bin/fm-pr-merge.sh already recorded, is torn down by a detached
+          # bin/fm-park.sh land that only starts here, so this iteration never
+          # waits on a teardown; the tick reports its outcome.
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --detach >/dev/null 2>&1 || true
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
-            [ -n "$land_out" ] || continue
-            reason="check: $id merged $url - $land_out"
+            continue
           fi
           wake "$reason"
         fi
@@ -4119,8 +4115,9 @@ EOF
       touch "$STATE/.last-check"
       wake "$reason"
     fi
-    # Parked-on-review lanes, close detection, and opt-in automatic parking
-    # (bin/fm-park.sh owns all three and bounds the whole tick).
+    # Parked-on-review lanes, close detection, opt-in automatic parking, and
+    # the outcomes of detached park, relaunch, and cleanup actions
+    # (bin/fm-park.sh owns all of them and bounds the whole tick).
     park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
     if [ -n "$park_out" ]; then

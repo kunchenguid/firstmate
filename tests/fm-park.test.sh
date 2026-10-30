@@ -550,9 +550,28 @@ park_world() {  # <world>
   rm -f "$1/gh.count" "$1/control.log"
 }
 
+# Waits for a detached lane action to publish its outcome for the next tick.
+wait_report() {  # <world> <label>
+  for _ in $(seq 1 200); do
+    ! compgen -G "$1/state/.review-park-report-*" >/dev/null || return 0
+    sleep 0.1
+  done
+  fail "$2: no detached action reported within 20s"
+}
+
+# One tick that starts a lane action, then the next tick, which reports its
+# outcome; prints that report.
+tick_and_report() {  # <world> <label>
+  local out
+  out=$(run_park "$1" tick 2>&1) || fail "$2: tick failed: $out"
+  [ -z "$out" ] || fail "$2: the starting tick printed: $out"
+  wait_report "$1" "$2"
+  run_park "$1" tick 2>&1 || fail "$2: the reporting tick failed"
+}
+
 expect_relaunch() {  # <world> <label> <trigger-substring>
   local world=$1 label=$2 want=$3 out
-  out=$(run_park "$world" tick 2>&1) || fail "$label: tick failed: $out"
+  out=$(tick_and_report "$world" "$label")
   case "$out" in "relaunched lane: PR "*"$want"*) ;; *) fail "$label: tick output: $out" ;; esac
   head -1 "$world/control.log" | grep -q "^lane relaunch --note-file " || fail "$label: no relaunch call: $(cat "$world/control.log")"
   grep -qF "$want" "$world/control.log" || fail "$label: the relaunch note does not carry the trigger"
@@ -622,18 +641,27 @@ test_behind_base_does_not_relaunch() {
   pass "a parked branch that merely fell behind its base stays parked"
 }
 
-test_tick_starts_no_action_that_outlasts_its_budget() {
-  local w out
-  w=$(make_world tick-budget "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+# A relaunch that takes longer than the whole tick budget still completes: the
+# tick only starts it, and nothing bounded by the tick can kill it.
+test_slow_relaunch_is_never_cut_short_by_the_tick() {
+  local w out start took
+  w=$(make_world tick-slow-relaunch "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
-  printf 'sleep 2\n' > "$w/gh.1.sh"
-  out=$(FM_PARK_TICK_SECS=3 run_park "$w" tick 2>&1)
-  [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "budget: a relaunch started past the tick budget: $out"
-  [ -e "$w/state/lane.review-park" ] || fail "budget: the park record was lost"
-  ! grep -q '^resume_error=' "$w/state/lane.review-park" || fail "budget: the park record notes a failed relaunch"
-  rm -f "$w/gh.1.sh" "$w/gh.count"
-  expect_relaunch "$w" budget-next "checks are failing"
-  pass "a tick never starts a lane action its remaining budget cannot hold, and the next tick takes it"
+  printf '#!/usr/bin/env bash\nsleep 6\nprintf "%%s\\n" "$*" >> "%s/control.log"\n' "$w" > "$w/fakebin/fm-control.sh"
+  start=$(date +%s)
+  out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
+  took=$(( $(date +%s) - start ))
+  [ -z "$out" ] || fail "slow-relaunch: the starting tick printed: $out"
+  [ ! -e "$w/control.log" ] && [ "$took" -lt 6 ] || fail "slow-relaunch: the tick waited ${took}s for the relaunch"
+  # A tick while the relaunch runs leaves the busy lane alone.
+  out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "slow-relaunch: a tick during the relaunch printed: $out"
+  wait_report "$w" slow-relaunch
+  out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
+  case "$out" in "relaunched lane: PR $GH_URL - checks are failing"*) ;; *) fail "slow-relaunch: report: $out" ;; esac
+  [ "$(grep -c ' relaunch ' "$w/control.log")" = 1 ] || fail "slow-relaunch: relaunch calls: $(cat "$w/control.log")"
+  [ ! -e "$w/state/lane.review-park" ] || fail "slow-relaunch: the record of a relaunched lane was kept: $(cat "$w/state/lane.review-park")"
+  pass "a relaunch slower than the whole tick budget completes once, is never killed, and is reported by the next tick"
 }
 
 test_tick_resumes_where_the_last_one_ran_out_of_time() {
@@ -642,13 +670,20 @@ test_tick_resumes_where_the_last_one_ran_out_of_time() {
   cp "$w/state/lane.meta" "$w/state/lane2.meta"
   cp "$w/state/lane.review-park" "$w/state/lane2.review-park"
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
-  # The first lane's read outlasts the whole tick.
+  # The first lane's read outlasts the whole tick; in the next tick the second
+  # lane visited is the slow one, so only the lane that tick starts at relaunches.
   printf 'sleep 4\n' > "$w/gh.1.sh"
+  printf 'sleep 4\n' > "$w/gh.3.sh"
   out=$(FM_PARK_TICK_SECS=2 run_park "$w" tick 2>&1)
   [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "rotate: the slow tick acted: $out"
-  out=$(run_park "$w" tick 2>&1)
-  head -1 "$w/control.log" | grep -q "^lane2 relaunch --note-file " \
+  FM_PARK_TICK_SECS=2 run_park "$w" tick >/dev/null 2>&1
+  wait_report "$w" rotate
+  [ "$(grep ' relaunch ' "$w/control.log" | cut -d' ' -f1)" = lane2 ] \
     || fail "rotate: the next tick did not start at the lane the last one never reached: $(grep ' relaunch ' "$w/control.log")"
+  [ -e "$w/state/lane.review-park" ] || fail "rotate: the lane read last was relaunched"
+  out=$(run_park "$w" tick 2>&1)
+  case "$out" in "relaunched lane2: "*) ;; *) fail "rotate: the next tick did not report lane2: $out" ;; esac
+  wait_report "$w" rotate-rest
   [ ! -e "$w/state/lane.review-park" ] && [ ! -e "$w/state/lane2.review-park" ] \
     || fail "rotate: a complete tick did not visit every lane: $out"
   pass "a tick that runs out of time resumes at the next unvisited lane, so a slow early lane cannot starve later ones"
@@ -673,7 +708,7 @@ test_failed_relaunch_keeps_record_and_stops_retrying() {
   w=$(make_world relaunch-fail "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
   gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
   : > "$w/control.fail"
-  out=$(run_park "$w" tick 2>&1)
+  out=$(tick_and_report "$w" relaunch-fail)
   case "$out" in "relaunch-failed lane: PR $GH_URL (checks are failing"*) ;; *) fail "relaunch-fail: tick output $out" ;; esac
   grep -q '^resume_error=' "$w/state/lane.review-park" || fail "relaunch-fail: record does not note the failure"
   rm -f "$w/control.log"
@@ -716,7 +751,7 @@ test_tick_parks_clean_idle_lanes_only_when_opted_in() {
   out=$(run_park "$w" tick 2>&1)
   [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "auto-park: parked an unclean lane: $out"
   gl_fixture "$w"
-  out=$(run_park "$w" tick 2>&1)
+  out=$(tick_and_report "$w" auto-park)
   case "$out" in "parked lane: PR $GL_URL clean at "*) ;; *) fail "auto-park: tick output $out" ;; esac
   [ -e "$w/state/lane.review-park" ] || fail "auto-park: no record"
   pass "tick parks nothing without opt-in, reads nothing when opted out of cleanup too, never parks an unclean lane, and parks a clean idle one under config/park-on-review"
@@ -730,7 +765,7 @@ test_land_cleans_up_by_default_unless_opted_out() {
   [ -z "$out" ] && [ ! -e "$w/teardown.log" ] || fail "land: acted on an unparked lane under config/no-auto-land: $out"
   rm -f "$w/config/no-auto-land"
   out=$(run_park "$w" land lane --if-eligible 2>&1)
-  [ "$out" = "cleaned up: lane torn down and its working copy returned" ] || fail "land: $out"
+  [ "$out" = "cleaned up lane: PR $GH_URL merged; lane torn down and its working copy returned" ] || fail "land: $out"
   [ "$(cat "$w/teardown.log")" = lane ] || fail "land: teardown was not called exactly once without --force: $(cat "$w/teardown.log")"
 
   w=$(make_world land-parked "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
@@ -738,8 +773,50 @@ test_land_cleans_up_by_default_unless_opted_out() {
   : > "$w/teardown.refuse"
   rc=0; out=$(run_park "$w" land lane --if-eligible 2>&1) || rc=$?
   [ "$rc" = 1 ] || fail "land-refused: exit $rc"
-  [ "$out" = "automatic cleanup refused: REFUSED: worktree has work not on any remote and not landed." ] || fail "land-refused: $out"
+  [ "$out" = "cleanup-refused lane: PR $GH_URL merged; automatic cleanup refused: REFUSED: worktree has work not on any remote and not landed." ] || fail "land-refused: $out"
   pass "merge-time cleanup tears down every lane by default and a parked lane even under config/no-auto-land, through teardown's own gates, and surfaces a refusal"
+}
+
+# The merge poll's land only starts a detached teardown: it returns at once
+# however slow the teardown is, and the next tick reports the outcome, even in
+# a home that opted out of everything the tick otherwise watches.
+test_detached_land_returns_at_once_and_the_tick_reports_it() {
+  local w out start took
+  w=$(make_world land-detached "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  : > "$w/config/no-auto-land"
+  printf '#!/usr/bin/env bash\nsleep 6\nprintf "%%s\\n" "$*" >> "%s/teardown.log"\nrm -f "%s/state/lane.review-park" "%s/state/lane.meta"\n' "$w" "$w" "$w" > "$w/fakebin/fm-teardown.sh"
+  start=$(date +%s)
+  out=$(run_park "$w" land lane --if-eligible --detach 2>&1)
+  took=$(( $(date +%s) - start ))
+  [ "$out" = "automatic cleanup started" ] || fail "land-detached: $out"
+  [ "$took" -lt 6 ] || fail "land-detached: the caller waited ${took}s for the teardown"
+  [ ! -e "$w/teardown.log" ] || fail "land-detached: the teardown finished before the caller returned"
+  wait_report "$w" land-detached
+  [ "$(cat "$w/teardown.log")" = lane ] || fail "land-detached: teardown calls: $(cat "$w/teardown.log")"
+  out=$(run_park "$w" tick 2>&1)
+  [ "$out" = "cleaned up lane: PR $GH_URL merged; lane torn down and its working copy returned" ] || fail "land-detached: report: $out"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-detached: reported twice: $out"
+  pass "a detached merge-time cleanup returns at once, runs its slow teardown to completion, and the next tick reports it once"
+}
+
+# A merge-time cleanup that lands while a relaunch of the same lane is under
+# way waits for it instead of tearing the lane down mid-relaunch.
+test_land_waits_for_an_action_under_way() {
+  local w out
+  w=$(make_world land-waits "$GH_URL"); gh_fixture "$w/gh.1.json"; park_world "$w"
+  gh_fixture "$w/gh.1.json" 'rollup="FAILURE"'
+  printf '#!/usr/bin/env bash\nsleep 3\nprintf "%%s\\n" "$*" >> "%s/order.log"\n' "$w" > "$w/fakebin/fm-control.sh"
+  printf '#!/usr/bin/env bash\nprintf "teardown\\n" >> "%s/order.log"\n' "$w" > "$w/fakebin/fm-teardown.sh"
+  out=$(run_park "$w" tick 2>&1)
+  [ -z "$out" ] || fail "land-waits: the starting tick printed: $out"
+  for _ in $(seq 1 50); do [ -d "$w/state/.review-park-lane.lock" ] && break; sleep 0.1; done
+  [ -d "$w/state/.review-park-lane.lock" ] || fail "land-waits: the relaunch never took the lane lock"
+  out=$(run_park "$w" land lane 2>&1)
+  case "$out" in "cleaned up lane: "*) ;; *) fail "land-waits: $out" ;; esac
+  [ "$(cut -d' ' -f1-2 "$w/order.log" | paste -sd, -)" = "lane relaunch,teardown" ] \
+    || fail "land-waits: the teardown did not wait for the relaunch: $(cat "$w/order.log")"
+  pass "a merge-time cleanup waits for a relaunch of the same lane that is under way"
 }
 
 fm_test_run \
@@ -757,10 +834,12 @@ fm_test_run \
   test_repark_reuses_its_own_lease_and_refuses_a_foreign_one \
   test_each_relaunch_trigger_relaunches_a_fresh_worker \
   test_behind_base_does_not_relaunch \
-  test_tick_starts_no_action_that_outlasts_its_budget \
+  test_slow_relaunch_is_never_cut_short_by_the_tick \
   test_tick_resumes_where_the_last_one_ran_out_of_time \
   test_quiet_parked_lane_and_approval_do_not_relaunch \
   test_failed_relaunch_keeps_record_and_stops_retrying \
   test_closed_pr_is_reported_once \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
-  test_land_cleans_up_by_default_unless_opted_out
+  test_land_cleans_up_by_default_unless_opted_out \
+  test_detached_land_returns_at_once_and_the_tick_reports_it \
+  test_land_waits_for_an_action_under_way

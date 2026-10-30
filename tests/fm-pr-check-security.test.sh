@@ -2522,19 +2522,16 @@ test_merged_poll_reregistration_after_notification_is_absorbed() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "second watcher cycle failed: $(cat "$dir/watch-2.err")"
-  # The lane still holds a task record whose teardown refuses (it names no
-  # project), so the re-armed poll surfaces that refusal again: a merged lane
-  # whose cleanup is refused still needs a decision.
   case "$(cat "$dir/watch-2.out")" in
-    "check: task-a merged https://github.com/o/r/pull/1 - automatic cleanup refused: "*) ;;
-    *) fail "the re-armed poll did not surface the refused cleanup: $(cat "$dir/watch-2.out")" ;;
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "the re-registered duplicate did not fall through to the next check: $(cat "$dir/watch-2.out")" ;;
   esac
   ! grep -F 'task-a.check.sh: merged' "$dir/watch-2.out" >/dev/null \
     || fail "a repeat identical merged poll opened a main-blocking row: $(cat "$dir/watch-2.out")"
   ! grep "$(printf '\tcheck\ttask-a.check.sh\t')" "$state/.wake-queue" >/dev/null 2>&1 \
     || fail "the absorbed duplicate merge notice was queued as a main-blocking row"
   assert_poll_absent "$state" task-a
-  pass "a repeat identical merged poll for an already-notified task does not repeat the merge notice, and surfaces its refused cleanup"
+  pass "a repeat identical merged poll for an already-notified task is absorbed, never queued as a main-blocking row"
 }
 
 # The captain merging a PR himself on the forge is the same outcome as a merge
@@ -2600,10 +2597,11 @@ test_merged_poll_retries_a_failed_upward_report() {
 }
 
 # A merge this home performed through bin/fm-pr-merge.sh is recorded before the
-# poll sees it; the poll absorbs the duplicate notification but still drives the
-# lane's merge-time cleanup and reports its outcome.
+# poll sees it; the poll absorbs the duplicate notification but still starts the
+# lane's merge-time cleanup, detached so even a slow teardown never holds the
+# watcher iteration, and the next park tick reports its outcome.
 test_self_merged_lane_is_still_cleaned_up_by_the_poll() {
-  local dir state url rc
+  local dir state url rc start took
   url=https://github.com/o/r/pull/1
   dir=$(make_case self-merge-cleanup)
   state="$dir/home/state"
@@ -2614,7 +2612,7 @@ test_self_merged_lane_is_still_cleaned_up_by_the_poll() {
     || fail "self-merge-cleanup: merge entrypoint failed: $(cat "$dir/merge.err")"
   [ -f "$state/task-a.pr-poll-merge-notified" ] \
     || fail "self-merge-cleanup: the merge entrypoint did not record the outcome first"
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/teardown.log"\n' "$dir" > "$dir/teardown-stub"
+  printf '#!/usr/bin/env bash\nsleep 8\nprintf "%%s\\n" "$*" >> "%s/teardown.log"\n' "$dir" > "$dir/teardown-stub"
   chmod +x "$dir/teardown-stub"
   retire_contributions_observer "$dir"
   add_stop_custom_check "$dir"
@@ -2626,16 +2624,25 @@ test_self_merged_lane_is_still_cleaned_up_by_the_poll() {
   ack_watcher_cycle "$state" || fail "self-merge-cleanup: recovery acknowledgement failed"
   rm -f "$state/.last-check"
   set +e
+  start=$(date +%s)
   FM_PARK_TEARDOWN_BIN="$dir/teardown-stub" FM_TEST_GH_STATE=MERGED \
     run_watcher_bounded "$dir/home" "$dir/fakebin" >"$dir/watch.out" 2>"$dir/watch.err"
   rc=$?
+  took=$(( $(date +%s) - start ))
   set -e
   [ "$rc" -eq 0 ] || fail "self-merge-cleanup: watcher failed: $(cat "$dir/watch.err")"
+  [ ! -e "$dir/teardown.log" ] && [ "$took" -lt 8 ] \
+    || fail "self-merge-cleanup: the watcher iteration waited ${took}s for the teardown"
+  assert_grep 'stop-cycle' "$dir/watch.out" \
+    "self-merge-cleanup: the absorbed duplicate did not fall through to the next check"
+  assert_poll_absent "$state" task-a
+  for _ in $(seq 1 200); do compgen -G "$state/.review-park-report-*" >/dev/null && break; sleep 0.1; done
   [ "$(cat "$dir/teardown.log" 2>/dev/null)" = task-a ] \
     || fail "self-merge-cleanup: the poll did not clean up the self-merged lane: $(cat "$dir/teardown.log" 2>/dev/null)"
-  assert_grep "check: task-a merged $url - cleaned up" "$dir/watch.out" \
+  FM_HOME="$dir/home" "$ROOT/bin/fm-park.sh" tick >"$dir/tick.out" 2>&1 \
+    || fail "self-merge-cleanup: the reporting tick failed: $(cat "$dir/tick.out")"
+  assert_grep "cleaned up task-a: PR $url merged" "$dir/tick.out" \
     "self-merge-cleanup: the cleanup outcome did not reach the captain"
-  assert_poll_absent "$state" task-a
   pass "a lane merged through bin/fm-pr-merge.sh is still cleaned up when its poll sees the merge"
 }
 

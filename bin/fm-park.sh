@@ -7,9 +7,10 @@
 #   fm-park.sh gate <task-id> [--expect-head <sha>]
 #   fm-park.sh park <task-id>
 #   fm-park.sh resume <task-id> --trigger <text>
-#   fm-park.sh land <task-id> [--if-eligible]
+#   fm-park.sh land <task-id> [--if-eligible] [--detach]
 #   fm-park.sh tick
 #   fm-park.sh list
+#   fm-park.sh run <task-id> park|resume|land [<args>...]   (internal)
 #
 # gate is read-only: one fresh forge read of the task's recorded pr= (GitHub
 # through one gh GraphQL read, GitLab through glab api for the merge request and
@@ -74,16 +75,23 @@
 # removes the park record; failure keeps it with resume_error=, which crew state
 # reports as blocked and which stops tick retrying until resume runs by hand.
 #
-# land runs bin/fm-teardown.sh <task-id> (never --force), so every teardown
-# gate still applies, and prints one outcome line. With --if-eligible it does
-# nothing when config/no-auto-land exists and the task is not parked.
-# bin/fm-watch.sh calls it for every merged lane from its merged-poll path after
-# the merge outcome is recorded, also when bin/fm-pr-merge.sh recorded it first.
+# land waits for any other park action on the lane to finish, runs
+# bin/fm-teardown.sh <task-id> (never --force), so every teardown gate still
+# applies, and prints one outcome line naming the lane and its PR. With
+# --if-eligible it does nothing unless the lane is eligible for merge-time
+# cleanup (land_eligible below: parked, or config/no-auto-land absent). With
+# --detach it starts the land as a detached action (below), prints "automatic
+# cleanup started", and returns at once. bin/fm-watch.sh runs
+# land --if-eligible --detach for every merged lane from its merged-poll path
+# after the merge outcome is recorded, also when bin/fm-pr-merge.sh recorded it
+# first, which makes the watcher the one owner of a merged lane's teardown.
 #
 # tick is what bin/fm-watch.sh runs every check interval. With
 # config/no-auto-land, no config/park-on-review, and no park record it exits
 # after those file tests. Otherwise, holding state/.review-park-tick.lock (a
 # held lock exits silently):
+#   - the outcome lines detached actions published since the last tick are
+#     printed and removed;
 #   - each parked lane gets one forge read; a trigger relaunches it, a merge is
 #     left to the merge poll, and a close without merge is reported once;
 #   - unless config/no-auto-land exists without config/park-on-review, each
@@ -96,16 +104,26 @@
 # comment (inline review-thread replies included), review or note created or
 # edited after the park (an approval with
 # no body is not a comment). A branch merely behind its base is not a trigger. It prints
-# one line per action taken, which the watcher turns into one wake; a quiet
-# tick prints nothing.
-# Forge reads are bounded by FM_PARK_READ_SECS (default 15) and actions by
-# FM_PARK_ACTION_SECS (default 300). A whole tick, actions included, ends within
-# FM_PARK_TICK_SECS (default 180), well under the watcher's stale grace: every
-# timed step is cut to what the tick has left, an action from tick is bounded by
-# two thirds of that budget, and one starts (and a park stops its agent) only
-# while its full bound still fits. A tick that runs out of time saves the lane it
-# did not reach (state/.review-park-tick-next, -unparked for other lanes) and
-# the next tick starts there.
+# one line per outcome and close, which the watcher turns into one wake; a
+# quiet tick prints nothing.
+#
+# A lane action started by tick (park, resume) or by the merge poll (land) runs
+# detached, as fm-park.sh run, in its own process group with stdio closed, so it
+# outlives the watcher iteration that started it and no tick or watcher budget
+# can cut it short. It takes the lane's lock itself (state/.review-park-<id>.lock,
+# held by every park, resume and land), so a lane runs one action at a time and
+# tick skips a lane whose lock is held. Its stdout outcome line, if any, is
+# published as state/.review-park-report-<id>-<epoch>-<pid> (a park refusal
+# prints none), and the next tick reports it.
+# Forge reads are bounded by FM_PARK_READ_SECS (default 15). Each lifecycle
+# call an action makes (bin/fm-control.sh exit or relaunch, bin/fm-teardown.sh)
+# is bounded by FM_PARK_ACTION_SECS (default 900), a hang backstop well above
+# the bounded waits those owners keep themselves. A whole tick holds only reads
+# and action starts and ends within FM_PARK_TICK_SECS (default 180), well under
+# the watcher's stale grace: every read is cut to what the tick has left. A tick
+# that runs out of time saves the lane it did not reach
+# (state/.review-park-tick-next, -unparked for other lanes) and the next tick
+# starts there.
 #
 # list prints each parked lane: id, PR, parked head, and when it parked.
 #
@@ -121,7 +139,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-export FM_HOME FM_STATE_OVERRIDE="$STATE"
+export FM_HOME FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -142,7 +160,7 @@ TEARDOWN_BIN="${FM_PARK_TEARDOWN_BIN:-$SCRIPT_DIR/fm-teardown.sh}"
 CREW_STATE_BIN="${FM_PARK_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 QUIET_SECS=${FM_PARK_QUIET_SECS:-900}
 READ_SECS=${FM_PARK_READ_SECS:-15}
-ACTION_SECS=${FM_PARK_ACTION_SECS:-300}
+ACTION_SECS=${FM_PARK_ACTION_SECS:-900}
 TICK_SECS=${FM_PARK_TICK_SECS:-180}
 for v in "$QUIET_SECS" "$READ_SECS" "$ACTION_SECS" "$TICK_SECS"; do
   case "$v" in ''|*[!0-9]*) printf 'fm-park: timing overrides must be whole seconds\n' >&2; exit 2 ;; esac
@@ -181,14 +199,33 @@ step_secs() {  # <secs>
   [ "$left" -gt 0 ] || return 1
   if [ "$left" -lt "$1" ]; then printf '%s\n' "$left"; else printf '%s\n' "$1"; fi
 }
-# Succeeds while a whole lane action still fits in the tick.
-action_fits() { [ "$(step_secs "$ACTION_SECS" || true)" = "$ACTION_SECS" ]; }
+lane_lock() { printf '%s/.review-park-%s.lock' "$STATE" "$1"; }
 
-# One lane action run from tick, in a subshell so its refusal cannot end the
-# tick; the subshell releases only the locks it took itself.
-lane_action() {  # <command> <args...>
-  action_fits || return 0
-  ( LOCKS_HELD=; trap release_locks EXIT; "$@" ) || true
+# Succeeds while another park action holds the lane.
+lane_busy() {  # <id>
+  local lock
+  lock=$(lane_lock "$1")
+  fm_lock_try_acquire "$lock" || return 0
+  fm_lock_release "$lock" || true
+  return 1
+}
+
+# Starts fm-park.sh run <id> <verb> <args...> detached: its own process group
+# (so a bound on the caller's group cannot reach it), nohup, and stdio closed
+# (so it holds no pipe of the watcher open), in a subshell that returns at once.
+action_start() {  # <id> <verb> <args...>
+  ( set -m 2>/dev/null || true
+    nohup "$SCRIPT_DIR/fm-park.sh" run "$@" </dev/null >/dev/null 2>&1 & )
+}
+
+# Publishes one outcome line for the next tick to report.
+report_write() {  # <id> <line>
+  local tmp
+  tmp=$(mktemp "$STATE/.review-park.XXXXXX") || return 1
+  if ! { printf '%s\n' "$2" > "$tmp" && mv -f -- "$tmp" "$STATE/.review-park-report-$1-$(date +%s)-$$"; }; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 agent_idle() {  # <id>
@@ -520,7 +557,7 @@ slot_lease() {  # <id>
 cmd_park() {
   local id=${1-} why result head local_head pr lease parked_at out rc=0 line
   task_id_ok "$id" || die "usage: fm-park.sh park <task-id>" 2
-  lock_try "$STATE/.review-park-$id.lock" || die "another park action holds $id"
+  lock_try "$(lane_lock "$id")" || die "another park action holds $id"
   why=$(park_preflight "$id") || die "refusing to park $id: $why"
   result=$(gate_eval "$id" "") || die "refusing to park $id: its PR could not be read from the forge"
   if ! gate_print "$result" > "$PARK_TMP/gate" ; then
@@ -540,9 +577,6 @@ cmd_park() {
   fi
   if ! why=$(agent_quiet "$id"); then
     die "refusing to park $id: $why"
-  fi
-  if ! action_fits; then
-    die "refusing to park $id: the tick ran out of time before the stop"
   fi
   # Written before the stop and marked pending, so a park that dies after the
   # stop still leaves the lane watched; the next tick settles a pending record.
@@ -570,7 +604,7 @@ cmd_resume() {
   trigger=$2
   rec=$(record_path "$id")
   [ -f "$rec" ] || die "$id is not parked"
-  lock_try "$STATE/.review-park-$id.lock" || die "another park action holds $id"
+  lock_try "$(lane_lock "$id")" || die "another park action holds $id"
   pr=$(record_get "$id" pr)
   head=$(record_get "$id" head)
   note="$PARK_TMP/note"
@@ -595,23 +629,61 @@ cmd_resume() {
 
 # --- land ------------------------------------------------------------------
 
+# The one merge-time cleanup eligibility rule: a parked lane always (no agent is
+# left to clean it up), any other lane unless config/no-auto-land opts out.
+land_eligible() {  # <id>
+  [ -e "$(record_path "$1")" ] || [ ! -e "$CONFIG/no-auto-land" ]
+}
+
 cmd_land() {
-  local id=${1-} out rc=0 why
-  task_id_ok "$id" || die "usage: fm-park.sh land <task-id> [--if-eligible]" 2
-  if [ "${2-}" = --if-eligible ] && [ ! -e "$(record_path "$id")" ] && [ -e "$CONFIG/no-auto-land" ]; then
+  local id=${1-} eligible=0 detach=0 pr out rc=0 why
+  task_id_ok "$id" || die "usage: fm-park.sh land <task-id> [--if-eligible] [--detach]" 2
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --if-eligible) eligible=1 ;;
+      --detach) detach=1 ;;
+      *) die "usage: fm-park.sh land <task-id> [--if-eligible] [--detach]" 2 ;;
+    esac
+    shift
+  done
+  [ "$eligible" = 0 ] || land_eligible "$id" || return 0
+  [ -f "$STATE/$id.meta" ] || return 0
+  if [ "$detach" = 1 ]; then
+    action_start "$id" land
+    printf 'automatic cleanup started\n'
     return 0
   fi
+  pr=$(fm_meta_get "$STATE/$id.meta" pr)
+  # A park or relaunch under way finishes first; each is bounded by the same
+  # backstop, so this wait is too.
+  if ! fm_lock_acquire_wait_max "$(lane_lock "$id")" "$ACTION_SECS"; then
+    printf 'cleanup-refused %s: PR %s merged; another park action still holds the lane\n' "$id" "$pr"
+    return 1
+  fi
+  LOCKS_HELD="$LOCKS_HELD $(lane_lock "$id")"
   [ -f "$STATE/$id.meta" ] || return 0
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$TEARDOWN_BIN" "$id" 2>&1) || rc=$?
   case "$rc" in
-    0) printf 'cleaned up: lane torn down and its working copy returned\n' ;;
-    4) printf 'cleaned up, but its returned pool slot was lost (see teardown output)\n' ;;
+    0) printf 'cleaned up %s: PR %s merged; lane torn down and its working copy returned\n' "$id" "$pr" ;;
+    4) printf 'cleaned up %s: PR %s merged; lane torn down, but its returned pool slot was lost (see teardown output)\n' "$id" "$pr" ;;
     *)
       why=$(printf '%s\n' "$out" | grep -m1 -E 'REFUSED|^error|refus' || printf '%s\n' "$out" | tail -1)
-      printf 'automatic cleanup refused: %s\n' "$why"
+      printf 'cleanup-refused %s: PR %s merged; automatic cleanup refused: %s\n' "$id" "$pr" "$why"
       return 1
       ;;
   esac
+}
+
+# --- detached action -------------------------------------------------------
+
+cmd_run() {
+  local id=${1-} verb=${2-} out
+  task_id_ok "$id" || die "usage: fm-park.sh run <task-id> park|resume|land [<args>...]" 2
+  case "$verb" in park|resume|land) ;; *) die "usage: fm-park.sh run <task-id> park|resume|land [<args>...]" 2 ;; esac
+  shift 2
+  out=$( LOCKS_HELD=; trap release_locks EXIT; "cmd_$verb" "$id" "$@" 2>/dev/null ) || true
+  [ -z "$out" ] || report_write "$id" "$out"
 }
 
 # --- tick ------------------------------------------------------------------
@@ -625,6 +697,7 @@ closed_once() {  # <id> <pr>
 
 watch_parked() {  # <id>
   local id=$1 pr head parked snap result state triggers
+  ! lane_busy "$id" || return 0
   if [ -n "$(record_get "$id" pending)" ]; then
     ( LOCKS_HELD=; trap release_locks EXIT; settle_pending "$id" ) || true
     [ -e "$(record_path "$id")" ] || return 0
@@ -643,7 +716,7 @@ watch_parked() {  # <id>
   esac
   triggers=$(printf '%s' "$result" | jq -r '.triggers | join("; ")')
   [ -n "$triggers" ] || return 0
-  lane_action cmd_resume "$id" --trigger "$triggers"
+  action_start "$id" resume --trigger "$triggers"
 }
 
 watch_unparked() {  # <id>
@@ -653,6 +726,7 @@ watch_unparked() {  # <id>
   pr=$(fm_meta_get "$meta" pr)
   [ -n "$pr" ] && [ -f "$STATE/$id.check.sh" ] || return 0
   [ ! -e "$(record_path "$id")" ] || return 0
+  ! lane_busy "$id" || return 0
   agent_idle "$id" || return 0
   snap=$(snapshot "$pr") || return 0
   state=$(printf '%s' "$snap" | jq -r .state)
@@ -661,7 +735,7 @@ watch_unparked() {  # <id>
   result=$(printf '%s' "$snap" | jq -c --argjson now "$(date +%s)" --argjson quiet "$QUIET_SECS" \
     --arg expect "" --argjson bots "$(review_bots_json)" "$GATE_PROGRAM") || return 0
   [ "$(printf '%s' "$result" | jq -r .clean)" = true ] || return 0
-  lane_action cmd_park "$id" 2>/dev/null
+  action_start "$id" park
 }
 
 # A pending record is a park that did not confirm its stop. Once its agent is
@@ -670,7 +744,7 @@ watch_unparked() {  # <id>
 # that outlasts its bound) it stays pending.
 settle_pending() {  # <id>
   local id=$1 meta secs alive
-  lock_try "$STATE/.review-park-$id.lock" || return 0
+  lock_try "$(lane_lock "$id")" || return 0
   [ -n "$(record_get "$id" pending)" ] || return 0
   meta="$STATE/$id.meta"
   secs=$(step_secs "$READ_SECS") || return 0
@@ -709,12 +783,16 @@ visit_lanes() {  # <cursor> <visit> <id>...
 cmd_tick() {
   local rec id meta any=0
   local -a parked=() unparked=()
-  for rec in "$STATE"/*.review-park; do [ -e "$rec" ] && any=1 && break; done
+  for rec in "$STATE"/*.review-park "$STATE"/.review-park-report-*; do [ -e "$rec" ] && any=1 && break; done
   [ "$any" = 1 ] || [ -e "$CONFIG/park-on-review" ] || [ ! -e "$CONFIG/no-auto-land" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   lock_try "$STATE/.review-park-tick.lock" || return 0
   DEADLINE=$(( $(date +%s) + TICK_SECS ))
-  [ "$ACTION_SECS" -le $(( TICK_SECS * 2 / 3 )) ] || ACTION_SECS=$(( TICK_SECS * 2 / 3 ))
+  for rec in "$STATE"/.review-park-report-*; do
+    [ -f "$rec" ] || continue
+    cat -- "$rec"
+    rm -f -- "$rec"
+  done
   for rec in "$STATE"/*.review-park; do
     [ -e "$rec" ] || continue
     id=$(basename "$rec" .review-park)
@@ -752,5 +830,6 @@ case "${1:-}" in
   land) shift; cmd_land "$@" ;;
   tick) cmd_tick ;;
   list) cmd_list ;;
+  run) shift; cmd_run "$@" ;;
   *) usage >&2; exit 2 ;;
 esac

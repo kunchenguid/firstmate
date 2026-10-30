@@ -810,7 +810,9 @@ A branch that merely fell behind its base does not relaunch a parked lane.
 The park record is written as pending before the agent is stopped and marked parked once the stop is confirmed, so a park that dies midway is still watched and relaunched on feedback, reads as parking rather than stopped, and is settled on the next check: promoted to parked once its agent is confirmed dead, or dropped while the agent still runs.
 Without the flag, `bin/fm-park.sh park <task-id>` still parks one lane on request.
 
-By default every ship lane is cleaned up automatically when its merge poll sees the PR or merge request merged, including squash and merge-train merges: the lane is torn down through `bin/fm-teardown.sh` (never forced, so unlanded or uncommitted work still refuses) and its local copy returned, and the outcome joins the merge notification.
+By default every ship lane is cleaned up automatically when its merge poll sees the PR or merge request merged, including squash and merge-train merges and merges made through `bin/fm-pr-merge.sh`: the lane is torn down through `bin/fm-teardown.sh` (never forced, so unlanded or uncommitted work still refuses) and its local copy returned.
+The cleanup outcome or teardown refusal follows the merge notification as its own notification.
+Parking, relaunching, and cleanup run detached from the watcher, one at a time per lane, so a slow agent stop, relaunch, or teardown never delays supervision and is never cut short by the watcher's time budget.
 A PR or merge request closed without merging is reported once.
 The optional local, gitignored `config/no-auto-land` presence flag opts out of both for lanes that are not parked; a parked lane is always cleaned up, because no agent is left to do it.
 GitHub pull requests and GitLab merge requests are supported.

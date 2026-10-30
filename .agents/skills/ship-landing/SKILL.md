@@ -21,10 +21,11 @@ A captain instruction to merge is explicit authority; `yolo` is the only standin
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
-A lane parked on review (`bin/fm-park.sh`; [`docs/configuration.md`](../../../docs/configuration.md#park-on-review-configpark-on-review-configno-auto-land) owns the opt-ins) has no agent: it relaunches itself on review activity and is cleaned up automatically when its merge poll sees the merge, so its merge notification already carries the cleanup outcome or the teardown refusal to investigate.
-`bin/fm-park.sh park <id>` parks one clean lane on request and `bin/fm-park.sh resume <id> --trigger <text>` relaunches one by hand.
+The watcher, not firstmate, tears down a merged lane whose merge poll is armed, including a PR merged through `bin/fm-pr-merge.sh`, unless `config/no-auto-land` opts out a lane that is not parked ([`docs/configuration.md`](../../../docs/configuration.md#park-on-review-configpark-on-review-configno-auto-land) owns the opt-ins).
+Never tear such a lane down yourself: wait for its cleanup outcome notification, and act only on a reported teardown refusal.
+A lane parked on review (`bin/fm-park.sh`) has no agent and relaunches itself on review activity; `bin/fm-park.sh park <id>` parks one clean lane on request and `bin/fm-park.sh resume <id> --trigger <text>` relaunches one by hand.
 
-Tear down a ship task only after landing is confirmed.
+Tear down any other ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
