@@ -1721,6 +1721,7 @@ This section is the single owner of the canonical schema and its per-field seman
 ```json
 {
   "preferred_provider": "<optional quota-axi provider family to spend first>",
+  "shared_quota": false,
   "rules": [
     {
       "when": "<natural-language condition describing a kind of task>",
@@ -1749,6 +1750,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | Profile `harness` | Required in every profile. |
 | Profile `model` and `effort`; rule `why` | Optional. |
 | Top-level `preferred_provider` | Optional provider-family preference, applied after eligibility checks under `quota-array-dispatch`. |
+| Top-level `shared_quota` | Optional; see "Shared-quota opt-out" below. |
 
 **Preferred provider**
 
@@ -1758,6 +1760,15 @@ Both bootstrap and the enabled resolver reject malformed values, including null,
 Bootstrap validates this field even without a resolver key because the agent-owned intake also honors it.
 An absent field preserves the existing routing behavior.
 The [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#rank-by-spendpriority) owns family preference, uncertainty, and fallback after the existing gates.
+
+**Shared-quota opt-out**
+
+An optional top-level `"shared_quota": true` declares this home draws every provider's usage from one single shared budget, such as one workplace AI spend line, so per-provider quota rows do not describe what is left.
+With it set, typed dispatch resolution makes no `quota-axi` call, applies no quota floor or runway gate, ranks nothing by `spendPriority`, and resolves the matched rule's `use` profiles in declared order; every candidate line still prints, stating quota ranking is off by home declaration.
+`preferred_provider` is a separate home preference, not a quota signal, so it still applies: `preferred_provider` still narrows the pool; declared order then picks within it.
+Firstmate's own `quota-array-dispatch` intake honors the same declaration.
+Without the setting, or with `"shared_quota": false`, behavior is unchanged.
+The declared value must be a boolean; anything else is an actionable configuration error reported like any other malformed rule.
 
 **Fields applied only by typed resolution**
 
@@ -1896,6 +1907,7 @@ After the answer, code applies all remaining checks and ranking:
 - Every applicable account-wide and model/product row from one `quota-axi --json` snapshot.
 - The optional `preferred_provider` restriction under the [profile-array procedure](../.agents/skills/quota-array-dispatch/SKILL.md#rank-by-spendpriority).
 - The numeric `spendPriority` argmax within that candidate pool, using each candidate's limiting row.
+- With the home's `shared_quota: true` declaration ("Crew dispatch profiles"), the quota snapshot, floors, runway gates, and `spendPriority` argmax are skipped entirely; resolution is the matched rule's declared profile order (`preferred_provider` still narrows the pool; declared order then picks within it).
 
 The resolver prints its preferred-family decision while retaining evidence for every candidate.
 If preferred candidates remain eligible but none is rankable, it escalates instead of selecting another family.

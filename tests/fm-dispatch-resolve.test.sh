@@ -1715,6 +1715,8 @@ assert_contains "$err" 'not JSON' "non-JSON rules is named"
 for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"select":"mystery"}]}|unknown select: mystery' \
+  '{"shared_quota":"yes","rules":[{"when":"x","use":{"harness":"claude"}}]}|shared_quota must be true or false when present' \
+  '{"shared_quota":1,"rules":[{"when":"x","use":{"harness":"claude"}}]}|shared_quota must be true or false when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":"high"}]}|min_confidence must be a number from 0 through 1 when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":1.5}]}|min_confidence must be a number from 0 through 1 when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
@@ -1753,5 +1755,89 @@ run code out err --help
 expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
+
+# --- shared-quota opt-out: no quota call, declared-order pick ----------------
+cp "$BASE_RULES" "$RULES"
+jq '.shared_quota = true' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shared-quota clear exits 0"
+assert_contains "$out" '  status: clear' "shared-quota clear status"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "shared-quota picks the first declared profile, not the argmax winner"
+assert_not_contains "$out" 'spendPriority=' "shared-quota prints no quota evidence"
+assert_not_contains "$out" '  remaining=' "shared-quota prints no remaining percentages"
+assert_not_contains "$out" '  runway=' "shared-quota prints no runway gates"
+assert_contains "$out" 'quota ranking off: home declares a single shared quota' "every candidate line states quota ranking is off"
+assert_absent "$LOG/quota-axi.calls" "shared-quota never reads quota-axi"
+[ "$(printf '%s\n' "$out" | grep -c 'quota ranking off')" -ge 3 ] || fail "shared-quota states the opt-out on every candidate line"
+pass "shared-quota opt-out: no quota snapshot, deterministic declared-order pick, opt-out stated on every candidate"
+
+# --- shared-quota: an unmet rule-level floor is bypassed too -----------------
+# rule_1 declares floor model:fable >= 20% but the fixture has 15% there, so the
+# quota-ranked path would fall through to default; the opt-out keeps the rule.
+jq '.shared_quota = true' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_1 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shared-quota unmet rule floor exits 0"
+assert_contains "$out" '  status: clear' "shared-quota unmet rule floor status"
+assert_contains "$out" '  note: rule matched' "shared-quota skips the unmet rule floor instead of falling through to default"
+assert_not_contains "$out" 'fall through to default' "shared-quota unmet rule floor never falls through to default"
+assert_contains "$out" "  profile: --harness 'claude' --model 'fable' --effort 'xhigh'" "shared-quota unmet rule floor picks the rule's own declared profile"
+assert_contains "$out" 'quota ranking off: home declares a single shared quota' "unmet rule floor candidate states quota ranking is off"
+assert_absent "$LOG/quota-axi.calls" "shared-quota unmet rule floor never reads quota-axi"
+pass "shared-quota bypasses an unmet rule-level floor: the rule's own profile wins with no quota call"
+
+# --- shared-quota: an unmet profile-level floor is bypassed too ---------------
+# The codex profile declares floor all_models >= 50% but the fixture has 31%, so
+# the quota-ranked path marks it not eligible; the opt-out resolves the declared
+# order anyway. The use array is reversed so the floored profile is first.
+jq '.shared_quota = true | .rules[1].use |= reverse' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_2 0.99
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shared-quota unmet profile floor exits 0"
+assert_contains "$out" '  status: clear' "shared-quota unmet profile floor status"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "shared-quota unmet profile floor picks the floored profile first in declared order"
+assert_not_contains "$out" 'not eligible' "shared-quota unmet profile floor marks no candidate ineligible"
+assert_contains "$out" 'quota ranking off: home declares a single shared quota' "unmet profile floor candidates state quota ranking is off"
+assert_absent "$LOG/quota-axi.calls" "shared-quota unmet profile floor never reads quota-axi"
+pass "shared-quota bypasses an unmet profile-level floor: the first declared profile wins with no quota call"
+
+# --- shared-quota: preferred_provider still narrows the pool ------------------
+# The matched rule declares claude first, then two codex-family profiles; the
+# home prefers codex, so the first declared codex profile wins.
+jq '.shared_quota = true | .preferred_provider = "codex" | .rules[3].use = [
+  {harness:"claude",model:"sonnet",effort:"high"},
+  {harness:"pi",model:"openai-codex/gpt-5.6-sol",provider:"codex"},
+  {harness:"codex",model:"gpt-5.6-sol"}]' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shared-quota preferred_provider exits 0"
+assert_contains "$out" '  status: clear' "shared-quota preferred_provider status"
+assert_contains "$out" '  preferred_provider: codex: prefer eligible family candidates' "shared-quota still applies the family preference"
+assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "shared-quota preferred_provider picks the first declared preferred-family profile"
+assert_absent "$LOG/quota-axi.calls" "shared-quota preferred_provider never reads quota-axi"
+[ "$(printf '%s\n' "$out" | grep -c '^  candidate: ')" -eq 3 ] || fail "shared-quota preferred_provider lists every candidate"
+[ "$(printf '%s\n' "$out" | grep '^  candidate: ' | grep -c 'quota ranking off: home declares a single shared quota')" -eq 3 ] ||
+  fail "shared-quota preferred_provider states the opt-out on every candidate line"
+pass "shared-quota keeps preferred_provider narrowing: the preferred family wins in declared order with no quota call"
+
+# restore the shared response fixture for the false-path test below
+write_response "$RESPONSE" rule_4 0.9
+
+# --- shared_quota false: byte-for-byte the quota-ranked path ------------------
+jq '.shared_quota = false' "$BASE_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shared_quota false exits 0"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "shared_quota false keeps the spendPriority argmax"
+assert_not_contains "$out" 'quota ranking off' "shared_quota false prints no opt-out wording"
+[ -f "$LOG/quota-axi.calls" ] || fail "shared_quota false still reads quota-axi"
+assert_contains "$out" 'spendPriority=' "shared_quota false prints quota evidence"
+pass "shared_quota false keeps the unchanged quota-ranked behavior"
+cp "$BASE_RULES" "$RULES"
 
 printf '# all fm-dispatch-resolve tests passed\n'

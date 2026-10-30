@@ -1410,6 +1410,9 @@ unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness
 cursor model profile is accepted^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high"}}]}^empty^
 unsupported cursor effort is flagged^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor:high
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
+top-level shared_quota true is accepted^{"shared_quota":true,"rules":[{"when":"big feature","use":{"harness":"claude"}}]}^empty^
+top-level shared_quota false is accepted^{"shared_quota":false,"rules":[{"when":"big feature","use":{"harness":"claude"}}]}^empty^
+non-boolean shared_quota is flagged^{"shared_quota":"yes","rules":[{"when":"big feature","use":{"harness":"claude"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - shared_quota must be true or false when present
 array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
 one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^
 default array is accepted^{"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5"},{"harness":"grok"}]}^empty^

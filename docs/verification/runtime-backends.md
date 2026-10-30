@@ -3297,6 +3297,28 @@ Error: Invalid OMP profile "BAD". Profile names must match ^[a-z0-9][a-z0-9._-]{
 `bin/fm-omp-profile-lib.sh` enforces the same name rule before launch, and `tests/fm-omp-harness.test.sh` pins the flag position, the profile-scoped catalog check, and the unpinned launch through a fake omp.
 Repeat these commands after an omp upgrade to refresh this record.
 
+### Remote second mate on Linux
+
+Verified on 2026-10-28 against omp 18.13.3 (a Bun-compiled binary installed through mise) on Linux x86_64 with Herdr 0.9.1, driven from a macOS primary through a scratch home on both sides.
+The agent process reads `comm=omp` with its executable inside the mise install tree, so the anchored name identifies it on Linux as on macOS and no launcher-specific identity rule is needed:
+
+```text
+$ bin/fm-spawn.sh <id> --secondmate          # config/secondmate-harness: omp anthropic/claude-opus-5-5 high
+spawned <id> harness=omp kind=secondmate mode=secondmate yolo=off window=remote:<id> worktree=<remote-home> remote=<host> backend=herdr
+$ bin/fm-on.sh <id> fm-remote-secondmate-control.sh state <id>
+alive
+$ bin/fm-remote-secondmate-relaunch.sh <id> omp anthropic/claude-opus-5-5 high
+relaunched <id> harness=omp from=omp model=anthropic/claude-opus-5-5 effort=high backend=herdr endpoint=fm-remote:w1:p2 worktree=<remote-home>
+# on the host, the relaunched agent process
+comm=omp FM_OMP_HARNESS=omp HERDR_SESSION=fm-remote
+$ bin/fm-teardown.sh <id>
+teardown <id> complete (remote <host>:<remote-home>)
+```
+
+Two `bin/fm-send.sh fm-<id>` steers, one before and one after the relaunch, were moved to `handled/` by the agent and answered with correlated lines in the remote `state/parent-replies.status`; the second answer reported `bin/fm-harness.sh` resolving `omp` from the agent's own tool shell and the session lock held by the omp process.
+Retirement removes the remote home, and with it the route state that holds the busy records omp arms, so the host-local teardown skips retiring those records once that state directory is gone.
+`tests/fm-remote-secondmate-omp.test.sh` is the portable regression for the remote gates and retirement; repeat the commands above after an omp or Herdr upgrade to refresh this record.
+
 ## Busy inbox escalation
 
 Verified at `2026-10-03T19:20:07Z` on commit `23b0232908a5adc7fbf7339ef48c34a091a7a799` with Claude Code `2.1.288 (Claude Code)` on Herdr `0.9.1`, protocol `22`, in a named isolated lab session through `bin/fm-herdr-lab.sh`.
