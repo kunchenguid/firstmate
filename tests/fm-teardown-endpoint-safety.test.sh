@@ -1192,6 +1192,33 @@ SH
   chmod +x "$dir/fakebin/tmux"
 }
 
+LOCK_HOLDER_PID=
+start_lock_holder() {  # <lock-path>
+  local lock=$1 i=0
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 30
+  ) &
+  LOCK_HOLDER_PID=$!
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || {
+    kill "$LOCK_HOLDER_PID" 2>/dev/null || true
+    wait "$LOCK_HOLDER_PID" 2>/dev/null || true
+    fail "could not stage held lock $lock"
+  }
+}
+
+stop_lock_holder() {
+  kill "$LOCK_HOLDER_PID" 2>/dev/null || true
+  wait "$LOCK_HOLDER_PID" 2>/dev/null || true
+  LOCK_HOLDER_PID=
+}
+
 assert_claimed_owner_tore_down_past_stale_record() {  # <case> <stale-id> <owner-id> <label>
   local dir=$1 stale=$2 owner=$3 label=$4
   assert_absent "$dir/home/state/$owner.meta" "$label: the owner's record was not removed"
@@ -1219,6 +1246,28 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   set -e
   [ "$rc" -eq 0 ] || fail "teardown of the claimed owner refused over a stale record: $(cat "$dir/stderr")"
   assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine"
+
+  dir=$(make_case two-records-claim-mine-control-locked)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  start_lock_holder "$dir/home/state/.control-$stale.lock"
+  assert_refused_without_mutation "$dir" "$owner" "mine with stale record lifecycle lock held"
+  stop_lock_holder
+  : > "$dir/stderr"
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "owner teardown did not recover after the stale lifecycle action finished: $(cat "$dir/stderr")"
+  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine after lifecycle contention"
+
+  dir=$(make_case two-records-claim-mine-meta-locked)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  start_lock_holder "$dir/home/state/.meta-$stale.lock"
+  assert_refused_without_mutation "$dir" "$owner" "mine with stale record metadata lock held"
+  stop_lock_holder
+  : > "$dir/stderr"
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "owner teardown did not recover after the stale metadata update finished: $(cat "$dir/stderr")"
+  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine after metadata contention"
 
   # The same teardown without --force, the path that keeps the unlanded-work
   # check, also gets past the scan.
