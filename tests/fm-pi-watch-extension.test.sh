@@ -3890,13 +3890,14 @@ EOF
 # Delivery settlement is independent of restoration: hold either Pi's follow-up
 # or an accepted branch turn, then close the successor. The extension must
 # replace it without waiting for that delivery and report an exhausted restore
-# to main even while the earlier branch is still held.
-test_pi_successor_close_during_delivery_keeps_continuity() {  # <actionable|failure|refused> <branch|main>
-  local mode=$1 delivery=$2 replacement=${3:-no} repo home plugin log trigger out status
-  repo="$TMP_ROOT/pi-mid-delivery-$mode-$delivery-$replacement-root"
-  home="$TMP_ROOT/pi-mid-delivery-$mode-$delivery-$replacement-home"
-  log="$TMP_ROOT/pi-mid-delivery-$mode-$delivery-$replacement.log"
-  trigger="$TMP_ROOT/pi-mid-delivery-$mode-$delivery-$replacement.trigger"
+# to main even while the earlier branch is still held. If Pi rejects that
+# alarm, the earlier branch settling must not clear it unreported.
+test_pi_successor_close_during_delivery_keeps_continuity() {  # <actionable|failure|refused> <branch|main> [replace] [reject-alarm]
+  local mode=$1 delivery=$2 replacement=${3:-no} reject_alarm=${4:-no} repo home plugin log trigger out status
+  repo="$TMP_ROOT/pi-mid-delivery-$mode-$delivery-$replacement-$reject_alarm-root"
+  home="$TMP_ROOT/pi-mid-delivery-$mode-$delivery-$replacement-$reject_alarm-home"
+  log="$TMP_ROOT/pi-mid-delivery-$mode-$delivery-$replacement-$reject_alarm.log"
+  trigger="$TMP_ROOT/pi-mid-delivery-$mode-$delivery-$replacement-$reject_alarm.trigger"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
@@ -3929,7 +3930,7 @@ fi
 while [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_TRIGGER_FILE="$trigger" FM_CLOSE_MODE="$mode" FM_DELIVERY_MODE="$delivery" FM_REPLACE_DURING_DELIVERY="$replacement" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_TRIGGER_FILE="$trigger" FM_CLOSE_MODE="$mode" FM_DELIVERY_MODE="$delivery" FM_REPLACE_DURING_DELIVERY="$replacement" FM_REJECT_ALARM="$reject_alarm" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -3942,6 +3943,8 @@ let tool = null;
 const offers = [];
 const prompts = [];
 const handlers = new Map();
+const alarmText = "could not restore watcher continuity after 2 retries";
+let alarmRejected = false;
 const pi = {
   on(event, handler) { handlers.set(event, handler); },
   registerCommand() {},
@@ -3949,6 +3952,10 @@ const pi = {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
   sendUserMessage: async (message) => {
+    if (process.env.FM_REJECT_ALARM === "yes" && !alarmRejected && message.includes(alarmText)) {
+      alarmRejected = true;
+      throw new Error("Pi rejected the follow-up");
+    }
     prompts.push(message);
     if (process.env.FM_DELIVERY_MODE === "main" && prompts.length === 1) await deliverySettlement;
   },
@@ -3993,11 +4000,10 @@ if (process.env.FM_REPLACE_DURING_DELIVERY === "yes") {
 } else {
   writeFileSync(process.env.FM_TRIGGER_FILE, "close\n");
 }
-if (process.env.FM_CLOSE_MODE === "refused") {
-  await waitFor(() => prompts.some((message) => message.includes("could not restore watcher continuity after 2 retries")), "typed failure before the held delivery settles");
-  if (prompts.filter((message) => message.includes("could not restore watcher continuity after 2 retries")).length !== 1) {
-    throw new Error(`restoration failure was not delivered exactly once: ${prompts}`);
-  }
+if (process.env.FM_REJECT_ALARM === "yes") {
+  await waitFor(() => alarmRejected, "rejected typed failure before the held delivery settles");
+} else if (process.env.FM_CLOSE_MODE === "refused") {
+  await waitFor(() => prompts.some((message) => message.includes(alarmText)), "typed failure before the held delivery settles");
 } else {
   await waitFor(() => rows().length === 3 && liveArms().length === 1, "live replacement while delivery is held");
   const predecessor = rows()[1].match(/^arm=([0-9]+)/)[1];
@@ -4011,6 +4017,9 @@ if (process.env.FM_CLOSE_MODE === "actionable") {
 }
 await new Promise((resolve) => setTimeout(resolve, 200));
 if (rows().length !== countBeforeSettlement) throw new Error(`settlement launched extra cycles: ${rows()}`);
+if (process.env.FM_CLOSE_MODE === "refused" && prompts.filter((message) => message.includes(alarmText)).length !== 1) {
+  throw new Error(`restoration failure was not delivered exactly once: ${prompts}`);
+}
 if (process.env.FM_DELIVERY_MODE === "branch" && process.env.FM_CLOSE_MODE !== "refused" && prompts.length !== 0) {
   throw new Error(`branch handling unexpectedly reached main: ${prompts}`);
 }
@@ -4018,9 +4027,9 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi $mode successor close must restore continuity during held $delivery delivery (replacement=$replacement): $out"
+  expect_code 0 "$status" "Pi $mode successor close must restore continuity during held $delivery delivery (replacement=$replacement, reject-alarm=$reject_alarm): $out"
   [ -z "$out" ] || fail "Pi mid-delivery continuity test printed output: $out"
-  pass "Pi $mode successor close restores continuity or reports failure during held $delivery delivery (replacement=$replacement)"
+  pass "Pi $mode successor close restores continuity or reports failure during held $delivery delivery (replacement=$replacement, reject-alarm=$reject_alarm)"
 }
 
 test_pi_late_retiring_actionable_reaches_replacement() {
@@ -5864,6 +5873,7 @@ test_pi_successor_close_during_delivery_keeps_continuity actionable main
 test_pi_successor_close_during_delivery_keeps_continuity failure branch
 test_pi_successor_close_during_delivery_keeps_continuity refused branch
 test_pi_successor_close_during_delivery_keeps_continuity refused branch yes
+test_pi_successor_close_during_delivery_keeps_continuity refused branch yes yes
 test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_tokens_are_process_unique
 test_pi_replacement_persistence_failure_keeps_predecessor_until_successor
