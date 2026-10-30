@@ -33,6 +33,11 @@
 #   fm-test-run.sh --stop=<run-id>
 #   A run stopped by TERM or INT prints FM_TEST_ABORTED signal=<n> run=<id> and
 #   exits 128+n, so callers can tell an aborted run from a failed one.
+#   Runs register in a private per-user directory (mode 700, owned by the
+#   caller; any other directory is refused) keyed by pid plus process start
+#   time, so a reused pid is never signalled. Bash defers a trap until its
+#   foreground child exits, so a TERM sent straight to the runner takes effect
+#   only after the script now running ends; --stop signals the descendants too.
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run. Each
@@ -233,7 +238,7 @@ usage() {
   ' "$0" >&2
 }
 
-PID_DIR="${TMPDIR:-/tmp}/fm-test-run-pids"
+PID_DIR="${TMPDIR:-/tmp}/fm-test-run-pids-$(id -u)"
 
 descendants_of() {
   local c
@@ -243,17 +248,44 @@ descendants_of() {
   done
 }
 
+# A pid names the same process only while its start time is unchanged.
+process_start_identity() {
+  ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'
+}
+
+# Registration lives in a directory only the caller can write: a pre-created
+# directory, a symlink, or another owner's directory could plant records that
+# make --stop signal an unrelated process.
+pid_dir_is_private() {
+  [ -d "$PID_DIR" ] && [ ! -L "$PID_DIR" ] && [ -O "$PID_DIR" ] \
+    && [ -z "$(find "$PID_DIR" -maxdepth 0 ! -perm 700 2>/dev/null)" ]
+}
+
 # Lists live runs (no argument) or stops exactly one run and its descendants.
 stop_runs() {
-  local want=${1:-} f id pid live=0 victims
+  local want=${1:-} f id line pid start live=0 victims
+  if [ ! -e "$PID_DIR" ] && [ ! -L "$PID_DIR" ]; then
+    [ -n "$want" ] || { printf 'fm-test-run: no live runs\n' >&2; return 0; }
+    printf 'fm-test-run: no live run %s\n' "$want" >&2
+    return 1
+  fi
+  if ! pid_dir_is_private; then
+    printf 'fm-test-run: refusing run registry %s: it must be a real directory owned by you with mode 700\n' "$PID_DIR" >&2
+    return 1
+  fi
   for f in "$PID_DIR"/*.pid; do
     [ -f "$f" ] || continue
     id=$(basename "$f" .pid)
-    pid=$(cat "$f" 2>/dev/null)
+    line=$(cat "$f" 2>/dev/null)
+    pid=${line%% *}
+    start=${line#* }
     case $(ps -o command= -p "$pid" 2>/dev/null) in
-      *fm-test-run*) ;;
+      *fm-test-run.sh*) ;;
       *) pid= ;;
     esac
+    if [ -n "$pid" ] && { [ -z "$start" ] || [ "$(process_start_identity "$pid")" != "$start" ]; }; then
+      pid=
+    fi
     if [ -z "$pid" ]; then
       rm -f "$f"
       continue
@@ -2567,9 +2599,7 @@ cleanup_run() {
 }
 
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
-mkdir -p "$PID_DIR"
 PID_FILE="$PID_DIR/$RUN_ID.pid"
-printf '%s\n' "$$" >"$PID_FILE"
 
 # Invoked indirectly by the TERM/INT trap below.
 # shellcheck disable=SC2329
@@ -2583,9 +2613,15 @@ abort_run() {
   exit $((128 + sig))
 }
 
+# The traps are live before the record is published, so a --stop that finds the
+# record always reaches a runner that can clean up after itself.
 trap cleanup_run EXIT
 trap 'abort_run 15' TERM
 trap 'abort_run 2' INT
+(umask 077 && mkdir -p "$PID_DIR") 2>/dev/null
+pid_dir_is_private \
+  || die "refusing run registry $PID_DIR: it must be a real directory owned by you with mode 700"
+printf '%s %s\n' "$$" "$(process_start_identity "$$")" >"$PID_FILE"
 TOTAL=0
 FAILED=0
 SKIPPED_GATE=0

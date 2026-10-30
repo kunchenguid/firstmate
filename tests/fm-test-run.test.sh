@@ -1517,45 +1517,73 @@ test_concurrent_runs_are_ordered_longest_first() {
 }
 
 test_stop_is_scoped_to_one_run() {
-  local tmp repo runner sleeper a_out b_out a_id a_pid b_id b_pid w
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-stop.XXXXXX")
+  local tmp repo runner sleeper a_out b_out a_id a_pid b_id b_pid a_fix b_fix a_rc w pid_dir
+  # Registered before any background launch so a failure below still reaps the
+  # fixture root and every process naming it.
+  tmp=$(fm_test_tmproot fm-test-run-stop) || fail "could not create the stop fixture root"
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
   sleeper=tests/fm-sleep-fixture.test.sh
+  pid_dir="$tmp/fm-test-run-pids-$(id -u)"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
-  printf '#!/usr/bin/env bash\necho "ok - sleeping"\nsleep 600\n' >"$repo/$sleeper"
+  # The fixture records its own pid so the test waits for it to be running, and
+  # sleeps in the foreground the way a long suite script does.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$$" >"$TMPDIR/fixture-$FM_STOP_MARK.pid"\necho "ok - sleeping"\nsleep 60\n' >"$repo/$sleeper"
   chmod +x "$runner" "$repo/$sleeper"
   a_out="$tmp/a.out"
   b_out="$tmp/b.out"
-  TMPDIR="$tmp" "$runner" "$sleeper" >"$a_out" 2>&1 &
+  a_fix="$tmp/fixture-a.pid"
+  b_fix="$tmp/fixture-b.pid"
+  FM_STOP_MARK=a TMPDIR="$tmp" "$runner" "$sleeper" >"$a_out" 2>&1 &
   a_pid=$!
-  TMPDIR="$tmp" "$runner" "$sleeper" >"$b_out" 2>&1 &
+  FM_STOP_MARK=b TMPDIR="$tmp" "$runner" "$sleeper" >"$b_out" 2>&1 &
   b_pid=$!
   w=0
-  while [ "$(find "$tmp/fm-test-run-pids" -name '*.pid' 2>/dev/null | wc -l | tr -d ' ')" -lt 2 ] && [ "$w" -lt 100 ]; do
+  while { [ ! -s "$a_fix" ] || [ ! -s "$b_fix" ]; } && [ "$w" -lt 100 ]; do
     sleep 0.1
     w=$((w + 1))
   done
+  [ -s "$a_fix" ] && [ -s "$b_fix" ] || fail "the fixture scripts never started"
+  [ -z "$(find "$pid_dir" -maxdepth 0 ! -perm 700)" ] || fail "the run registry must be mode 700"
   a_id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$a_pid" '$2 == p {print $1}')
   b_id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$b_pid" '$2 == p {print $1}')
   [ -n "$a_id" ] && [ -n "$b_id" ] || fail "--stop did not list both live runs"
   TMPDIR="$tmp" "$runner" --stop "$a_id" >/dev/null || fail "--stop <run> failed"
+  a_rc=0
+  wait "$a_pid" || a_rc=$?
+  [ "$a_rc" -eq 143 ] || fail "a stopped run must exit 143, got $a_rc: $(cat "$a_out")"
+  grep -q "FM_TEST_ABORTED signal=15 run=$a_id" "$a_out" \
+    || fail "stopped run did not report FM_TEST_ABORTED: $(cat "$a_out")"
   w=0
-  while ! grep -q FM_TEST_ABORTED "$a_out" "$b_out" 2>/dev/null && [ "$w" -lt 100 ]; do
+  while kill -0 "$(cat "$a_fix")" 2>/dev/null && [ "$w" -lt 50 ]; do
     sleep 0.1
     w=$((w + 1))
   done
-  grep -q "FM_TEST_ABORTED signal=15 run=$a_id" "$a_out" \
-    || fail "stopped run did not report FM_TEST_ABORTED: $(cat "$a_out")"
+  ! kill -0 "$(cat "$a_fix")" 2>/dev/null || fail "the stopped run's script is still running"
+  [ ! -e "$pid_dir/$a_id.pid" ] || fail "the stopped run left its registry record behind"
   ! grep -q FM_TEST_ABORTED "$b_out" || fail "sibling run aborted: $(cat "$b_out")"
   kill -0 "$b_pid" 2>/dev/null || fail "sibling run died"
+  kill -0 "$(cat "$b_fix")" 2>/dev/null || fail "sibling run's script died"
   TMPDIR="$tmp" "$runner" --stop "$b_id" >/dev/null 2>&1 || true
-  wait
-  rm -rf "$tmp"
-  pass "--stop kills one run, emits FM_TEST_ABORTED, spares siblings"
+  wait "$b_pid" 2>/dev/null || true
+  pass "--stop kills one run, emits FM_TEST_ABORTED with exit 143, spares siblings"
+}
+
+# A registry directory the caller does not exclusively own is refused, never
+# trusted: a planted record could otherwise aim --stop at an unrelated process.
+test_stop_refuses_an_unprivate_registry() {
+  local tmp runner out rc
+  tmp=$(fm_test_tmproot fm-test-run-stop-dir) || fail "could not create the fixture root"
+  runner="$ROOT/bin/fm-test-run.sh"
+  mkdir -m 755 "$tmp/fm-test-run-pids-$(id -u)"
+  rc=0
+  out=$(TMPDIR="$tmp" "$runner" --stop 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--stop must refuse a registry directory that is not mode 700"
+  case "$out" in *"refusing run registry"*) ;; *) fail "the refusal must name the registry: $out" ;; esac
+  pass "--stop refuses a run registry that is not private to the caller"
 }
 
 # --max-wall-ms is checked after the run, so it cannot end a run that never
@@ -1975,6 +2003,7 @@ test_changed_shared_fixture_selects_its_readers
 test_changed_t3_sources_select_their_readers
 test_concurrent_runs_are_ordered_longest_first
 test_stop_is_scoped_to_one_run
+test_stop_refuses_an_unprivate_registry
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom
 test_max_wall_ms_is_a_result_not_advice
