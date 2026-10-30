@@ -327,9 +327,13 @@
 #   the same isolation test screens every read: a pane still showing the project
 #   or the repository primary while `treehouse get` prepares the slot is waited
 #   out as a transient rather than adopted and then refused, so a home that is
-#   itself a linked worktree of the project repository still launches. A pane
-#   that never reaches an isolated worktree refuses at the end of that wait,
-#   naming the last path seen and why it was rejected.
+#   itself a linked worktree of the project repository still launches. Spawn
+#   accepts a settled path only after this invocation of `treehouse get` confirms
+#   it allocated that same worktree. A failed allocation is reported immediately
+#   with Treehouse's diagnostic; pool exhaustion also points to `treehouse status`
+#   and `max_trees`. A pane that never reaches the confirmed isolated worktree
+#   refuses at the end of the wait, naming the last path seen and why it was
+#   rejected.
 #   That placement is proven only at launch. Every ship or scout therefore
 #   receives `FM_TASK_ID=<task-id>` before launch, on the same backend-specific
 #   environment channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
