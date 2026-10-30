@@ -165,8 +165,9 @@
 # before cleanup. Its current working directory is only incidental process
 # state: the same worker remains the owner after changing directory, so cwd can
 # never veto teardown of that exact recorded endpoint.
-# The scan and destructive return hold a project-identity lock in the local root
-# Firstmate home's state directory, as resolved by bin/fm-wake-lib.sh's
+# The scan and destructive return hold each conflicting record's lifecycle and
+# metadata locks, plus a project-identity lock in the local root Firstmate
+# home's state directory, as resolved by bin/fm-wake-lib.sh's
 # fm_firstmate_root_home; a home seeded from another machine is its own local
 # root, since a lock on this filesystem cannot be held or observed across that
 # boundary. Fresh Treehouse spawns for that project in
@@ -598,6 +599,7 @@ SM_LIVENESS_LOCK=
 META_LOCK=
 META_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
+SLOT_RECORD_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
@@ -608,6 +610,10 @@ teardown_release_locks() {
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi
+  for ((i=${#SLOT_RECORD_LOCK_PATHS[@]} - 1; i >= 0; i--)); do
+    fm_lock_release "${SLOT_RECORD_LOCK_PATHS[$i]}" || true
+  done
+  SLOT_RECORD_LOCK_PATHS=()
   for ((i=${#DESCENDANT_LOCK_PATHS[@]} - 1; i >= 0; i--)); do
     fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true
   done
@@ -2595,9 +2601,48 @@ other_record_endpoint_proven_gone() {  # <meta-file> <task-id>
   return 1
 }
 
+teardown_record_lock_held() {  # <lock-path>
+  local lock=$1 held
+  [ "$CONTROL_LOCK_HELD" != 1 ] || [ "$lock" != "$CONTROL_LOCK" ] || return 0
+  [ "$META_LOCK_HELD" != 1 ] || [ "$lock" != "$META_LOCK" ] || return 0
+  for held in "${DESCENDANT_LOCK_PATHS[@]+"${DESCENDANT_LOCK_PATHS[@]}"}" \
+              "${SLOT_RECORD_LOCK_PATHS[@]+"${SLOT_RECORD_LOCK_PATHS[@]}"}"; do
+    [ "$lock" != "$held" ] || return 0
+  done
+  return 1
+}
+
+hold_conflicting_slot_record_locks() {  # <meta-file> <task-id>
+  local other=$1 other_id=$2 control_lock meta_lock control_held=0 meta_held=0
+  control_lock="${other%/*}/.control-$other_id.lock"
+  meta_lock=$(fm_meta_lock_path "$other") || {
+    echo "REFUSED: task $other_id has an invalid metadata lock path; nothing was changed" >&2
+    return 1
+  }
+  teardown_record_lock_held "$control_lock" && control_held=1
+  teardown_record_lock_held "$meta_lock" && meta_held=1
+  if [ "$control_held" != "$meta_held" ]; then
+    echo "REFUSED: task $other_id's lifecycle and metadata locks are not held together; nothing was changed" >&2
+    return 1
+  fi
+  if [ "$control_held" = 0 ]; then
+    if ! fm_lock_try_acquire "$control_lock"; then
+      echo "REFUSED: task $other_id has a lifecycle action in flight; nothing was changed" >&2
+      return 1
+    fi
+    SLOT_RECORD_LOCK_PATHS+=("$control_lock")
+    if ! fm_lock_try_acquire "$meta_lock"; then
+      echo "REFUSED: task $other_id has a metadata update in flight; nothing was changed" >&2
+      return 1
+    fi
+    SLOT_RECORD_LOCK_PATHS+=("$meta_lock")
+  fi
+  [ -f "$other" ] && [ ! -L "$other" ] || return 2
+}
+
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot claimed=0
+  local slot state_dir other other_id field other_path other_slot lock_rc claimed=0
   slot=$(canonical_existing_dir "$worktree") || return 0
   # A slot whose owner claim names another task was reassigned, so this record's
   # teardown is records-only and touches nothing under it; another record naming
@@ -2631,6 +2676,16 @@ require_exclusive_worktree_slot_record() {
       for field in worktree home; do
         other_path=$(fm_meta_get "$other" "$field")
         [ -n "$other_path" ] || continue
+        other_slot=$(canonical_existing_dir "$other_path") || continue
+        [ "$other_slot" = "$slot" ] || continue
+        lock_rc=0
+        hold_conflicting_slot_record_locks "$other" "$other_id" || lock_rc=$?
+        case "$lock_rc" in
+          0) ;;
+          2) continue ;;
+          *) return 1 ;;
+        esac
+        other_path=$(fm_meta_get "$other" "$field")
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
         if [ "$claimed" = 1 ] && other_record_endpoint_proven_gone "$other" "$other_id"; then
