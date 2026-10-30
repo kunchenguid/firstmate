@@ -212,6 +212,24 @@ test_never_announced_recovery_is_announced_once() {
   err="$home/err.txt"
   printf 'pending:downtime:unreported.1.aaa\n' > "$home/state/.watcher-down"
 
+  # With nothing queued and no decision open, the recovery is announced quietly.
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    "$CHECKPOINT" --seconds 1 >"$out" 2>"$err" || status=$?
+
+  expect_code 124 "$status" "quiet pending recovery checkpoint exit"
+  assert_not_contains "$(cat "$out")" "check: rearm-resurface" \
+    "a never-announced recovery with nothing queued woke main"
+  [ "$(cat "$home/state/.watcher-down")" = 'announced:downtime:unreported.1.aaa' ] \
+    || fail "quiet recovery did not record its announced generation"
+
+  home=$(make_home pending-recovery-queued)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  printf 'pending:downtime:unreported.1.aaa\n' > "$home/state/.watcher-down"
+  append_wake "$home/state" check buried 'check: unacknowledged durable wake' \
+    || fail "could not append the unacknowledged durable wake"
+
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
     "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
@@ -221,7 +239,7 @@ test_never_announced_recovery_is_announced_once() {
     || fail "never-announced recovery did not surface exactly once: $(cat "$out")"
   [ "$(cat "$home/state/.watcher-down")" = 'announced:downtime:unreported.1.aaa' ] \
     || fail "never-announced recovery did not retain its announced generation"
-  pass "a never-announced recovery still surfaces once from a foreground checkpoint"
+  pass "a never-announced recovery surfaces once from a foreground checkpoint only when a wake is queued"
 }
 
 test_queue_append_during_checkpoint_still_resurfaces() {

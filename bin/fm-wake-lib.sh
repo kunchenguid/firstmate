@@ -843,6 +843,7 @@ fm_lock_recheck_stale_owner() {
 
 FM_RECOVERY_MARKER_TOKEN=
 FM_RECOVERY_MARKER_ACTION='none'
+FM_RECOVERY_MARKER_DOUBTFUL=0
 FM_RECOVERY_MARKER_WRITTEN_TOKEN=
 FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
 FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
@@ -901,13 +902,15 @@ _fm_recovery_marker_write_locked() {
 # Apply the downtime republication states owned by docs/watcher-continuity.md
 # while preserving an outstanding generation-bound acknowledgement. A handback
 # source republishes the current episode as already announced: the close it
-# hands to main is that episode's delivery.
+# hands to main is that episode's delivery. A stale-lock source publishes like a
+# watcher close and also records <marker>.stale-lock, which the next arm check
+# consumes and reports as a doubtful restart.
 _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} bound=${3:-} source=${4:-watcher}
   local lock saved_token generation='' status=pending previous_append_token='' guard=${5:-}
   if [ "$#" -ge 5 ]; then shift 5; else set --; fi
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
-  case "$source" in watcher|append|handback) ;; *) return 1 ;; esac
+  case "$source" in watcher|append|handback|stale-lock) ;; *) return 1 ;; esac
   if [ "$source" = append ]; then
     FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
     FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
@@ -927,6 +930,14 @@ _fm_recovery_marker_publish() {
   if [ -n "$guard" ] && ! "$guard" "$@"; then
     fm_lock_release "$lock"
     return 3
+  fi
+  # mkdir neither follows nor replaces an existing path, and any existing entry
+  # already records the doubt.
+  if [ "$source" = stale-lock ] \
+    && [ ! -e "${marker}.stale-lock" ] && [ ! -L "${marker}.stale-lock" ] \
+    && ! mkdir -- "${marker}.stale-lock" 2>/dev/null; then
+    fm_lock_release "$lock"
+    return 1
   fi
   if [ "$kind" = downtime ]; then
     # Read inline rather than in a command substitution: this runs inside the
@@ -1131,11 +1142,16 @@ fm_recovery_lock_wait() {  # <lockdir> <bound-seconds>
   fm_lock_acquire_wait "$1"
 }
 
+# FM_RECOVERY_MARKER_DOUBTFUL reports a restart whose predecessor may have
+# stopped between seeing an event and queuing it: a recorded stale-lock
+# clearance, consumed here, or an unreadable marker quarantined here.
 _fm_recovery_marker_arm_check() {
-  local marker=$1 bound=${2:-} lock line quarantine
+  local marker=$1 bound=${2:-} lock line quarantine doubt
   FM_RECOVERY_MARKER_ACTION='none'
   FM_RECOVERY_MARKER_QUEUED=0
+  FM_RECOVERY_MARKER_DOUBTFUL=0
   lock="${marker}.lock"
+  doubt="${marker}.stale-lock"
   fm_recovery_lock_wait "$FM_WAKE_QUEUE_LOCK" "$bound" || return 1
   if ! fm_recovery_lock_wait "$lock" "$bound"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -1143,6 +1159,15 @@ _fm_recovery_marker_arm_check() {
   fi
   # shellcheck disable=SC2034 # Output read by callers after this function returns.
   [ ! -s "$FM_WAKE_QUEUE" ] || FM_RECOVERY_MARKER_QUEUED=1
+  if [ -e "$doubt" ] || [ -L "$doubt" ]; then
+    if ! rm -f -- "$doubt" 2>/dev/null && ! rmdir -- "$doubt" 2>/dev/null; then
+      fm_lock_release "$lock"
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 1
+    fi
+    # shellcheck disable=SC2034 # Output read by callers after this function returns.
+    FM_RECOVERY_MARKER_DOUBTFUL=1
+  fi
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     if [ -s "$FM_WAKE_QUEUE" ]; then
       if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
@@ -1171,6 +1196,8 @@ _fm_recovery_marker_arm_check() {
       return 1
     fi
     FM_RECOVERY_MARKER_ACTION='recover'
+    # shellcheck disable=SC2034 # Output read by callers after this function returns.
+    FM_RECOVERY_MARKER_DOUBTFUL=1
     fm_lock_release "$lock"
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
@@ -1336,7 +1363,7 @@ fm_recovery_transition() {
       ;;
     clear-stale-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" stale-lock || return 1
       fm_lock_remove_path "$target"
       ;;
     *) return 2 ;;
@@ -1529,7 +1556,7 @@ fm_lock_try_acquire() {
   fi
 
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
-    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound"; then
+    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound" stale-lock; then
     fm_lock_release "$steal"
     if [ -n "$marker_publish_bound" ]; then
       # The marker lock refused inside the caller's bound: surface it as the

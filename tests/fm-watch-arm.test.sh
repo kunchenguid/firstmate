@@ -807,10 +807,84 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" || fail "restart did not surface recovery after clearing a reused-pid lock"
   grep -F 'check: rearm-resurface' "$armout" >/dev/null \
     || fail "restart cleared reused-pid lock evidence without a recovery wake: $(cat "$armout")"
+  [ ! -e "$state/.watcher-down.stale-lock" ] || fail "restart left its stale-lock flag behind"
   is_live_non_zombie "$unrelated" || fail "restart signaled the unrelated process whose pid was reused"
   kill "$unrelated" 2>/dev/null || true
   wait "$unrelated" 2>/dev/null || true
   pass "watch-arm: restart publishes recovery before clearing a reused-pid watcher lock"
+}
+
+# A restart after a previous watcher stopped wakes main only with something to
+# show: a queued row, an open decision, or a doubtful stop. Each case varies one
+# of those from a clean close; quiet is the case with none of them.
+test_restart_wakes_only_with_news() {  # <quiet|queued|decision|dead-lock|stale-lock-flag>
+  local variant=$1 dir home state fakebin armout first_arm watcher_pid
+  dir=$(make_case "restart-news-$variant")
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/first-arm.out"
+  first_arm=$ARM_PID
+  is_live_non_zombie "$first_arm" || fail "$variant: fixture watcher did not stay live"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  if [ "$variant" = dead-lock ]; then
+    kill -KILL "$watcher_pid" 2>/dev/null || fail "$variant: could not abruptly stop the fixture watcher"
+  else
+    kill -TERM "$watcher_pid" 2>/dev/null || fail "$variant: could not stop the fixture watcher"
+  fi
+  wait "$first_arm" 2>/dev/null || true
+  case "$variant" in
+    dead-lock)
+      [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher_pid" ] \
+        || fail "$variant: the killed watcher did not leave its lock behind"
+      ;;
+    *)
+      case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+        pending:downtime:*) ;;
+        *) fail "$variant: clean close did not publish pending downtime" ;;
+      esac
+      ;;
+  esac
+  [ ! -e "$state/.watcher-down.stale-lock" ] || fail "$variant: a clean stop recorded a stale-lock flag"
+  case "$variant" in
+    queued) append_wake "$state" check startup-network 'check: startup-network' ;;
+    decision)
+      printf 'needs-decision [key=pick]: choose a layout\n' > "$state/demo.status"
+      prime_status_seen "$state" "$state/demo.status" || fail "$variant: could not mark the status seen"
+      ;;
+    stale-lock-flag) mkdir "$state/.watcher-down.stale-lock" ;;
+  esac
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  if [ "$variant" = quiet ]; then
+    is_live_non_zombie "$ARM_PID" || fail "$variant: restart with nothing to show did not stay live: $(cat "$armout")"
+    ! grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+      || fail "$variant: restart with nothing to show woke main"
+    case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+      announced:downtime:*) ;;
+      *) fail "$variant: quiet restart did not mark the episode announced" ;;
+    esac
+    # The next real wake carries the episode's acknowledgement.
+    append_wake "$state" check startup-network 'check: startup-network' \
+      || fail "$variant: later wake could not be queued"
+    wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" || fail "$variant: later wake did not reach main"
+    ack_wakes "$state" || fail "$variant: the later wake's drain did not acknowledge the episode"
+    case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+      acked:*) ;;
+      *) fail "$variant: the quiet episode was not retired by the later drain" ;;
+    esac
+    pass "watch-arm: a restart with nothing to show stays quiet and the next wake retires it"
+    return
+  fi
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" || fail "$variant: restart did not wake main"
+  grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || fail "$variant: restart did not deliver the recovery wake: $(cat "$armout")"
+  [ ! -e "$state/.watcher-down.stale-lock" ] || fail "$variant: the stale-lock flag was not consumed"
+  ack_wakes "$state" || fail "$variant: recovery handling acknowledgement failed"
+  pass "watch-arm: a restart after $variant still wakes main"
 }
 
 test_markerless_legacy_queue_is_recovered_on_arm() {
@@ -880,11 +954,15 @@ SH
   printf 'pending:downtime:idle-lavish.1.fixture\n' > "$state/.watcher-down"
 
   FM_ROOT_OVERRIDE="$ROOT" start_rearm_arm "$home" "$state" "$fakebin" "$first_out"
-  wait_for_exit "$ARM_PID" 80 || fail "the first recovery arm did not surface"
-  grep -F 'check: rearm-resurface' "$first_out" >/dev/null \
-    || fail "the pending recovery generation did not get its first announcement"
+  is_live_non_zombie "$ARM_PID" || fail "the first arm woke main with nothing to show: $(cat "$first_out")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    announced:downtime:*) ;;
+    *) fail "the pending recovery generation was not marked announced" ;;
+  esac
   [ ! -s "$state/.wake-queue" ] \
     || fail "the idle Lavish source produced a wake before any result"
+  kill -TERM "$(cat "$state/.watch.lock/pid")" 2>/dev/null || fail "could not stop the first watcher"
+  wait "$ARM_PID" 2>/dev/null || true
 
   FM_ROOT_OVERRIDE="$ROOT" start_rearm_arm "$home" "$state" "$fakebin" "$idle_out"
   i=0
@@ -924,11 +1002,15 @@ test_append_wakes_live_announced_watcher() {
   printf 'pending:downtime:append-after-empty.fixture\n' > "$state/.watcher-down"
 
   start_rearm_arm "$home" "$state" "$fakebin" "$first_out"
-  wait_for_exit "$ARM_PID" 80 || fail "the initial empty recovery did not surface"
-  grep -F 'check: rearm-resurface' "$first_out" >/dev/null \
-    || fail "the initial empty recovery was not announced"
+  is_live_non_zombie "$ARM_PID" || fail "the initial empty recovery woke main: $(cat "$first_out")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    announced:downtime:*) ;;
+    *) fail "the initial empty recovery was not marked announced" ;;
+  esac
   [ ! -s "$state/.wake-queue" ] \
     || fail "the empty recovery unexpectedly queued durable work"
+  kill -TERM "$(cat "$state/.watch.lock/pid")" 2>/dev/null || fail "could not stop the first watcher"
+  wait "$ARM_PID" 2>/dev/null || true
 
   start_rearm_arm "$home" "$state" "$fakebin" "$idle_out"
   is_live_non_zombie "$ARM_PID" \
@@ -1396,7 +1478,7 @@ test_take_over_confirms_a_watcher_stopped_inside_its_event_wait() {
 # watcher's secondmate tick write so it exits through cleanup before TERM lands.
 # The ledger and recovery wake are public output contracts, not source probes.
 test_take_over_preserves_downtime_from_watcher_self_exit() {
-  local dir home state fakebin owner watcher armout acknowledged real_rm real_touch status i
+  local dir home state fakebin owner watcher armout acknowledged real_rm real_touch status i downtime
   dir=$(make_case take-over-self-exit)
   home="$dir/home"
   mkdir -p "$home"
@@ -1442,7 +1524,8 @@ test_take_over_preserves_downtime_from_watcher_self_exit() {
   [ ! -s "$state/.wake-queue" ] || fail "self-exit unexpectedly queued a wake"
   ! grep -q "^$watcher	" "$state/.watch-deliveries.log" 2>/dev/null \
     || fail "self-exit unexpectedly delivered a wake"
-  case "$(cat "$state/.watcher-down")" in pending:downtime:*) ;; *) fail "self-exit did not publish downtime" ;; esac
+  downtime=$(cat "$state/.watcher-down")
+  case "$downtime" in pending:downtime:*) ;; *) fail "self-exit did not publish downtime" ;; esac
   rm -f "$dir/fail-tick"
   touch "$dir/release"
   i=0
@@ -1453,11 +1536,16 @@ test_take_over_preserves_downtime_from_watcher_self_exit() {
     i=$((i + 1))
   done
   [ "$(cat "$state/.watcher-down")" != "$acknowledged" ] || fail "takeover restored the old acknowledgement"
-  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
-  status=$?
-  expect_code 0 "$status" "fresh takeover must surface recovery cleanly"
-  assert_contains "$(cat "$armout")" 'check: rearm-resurface' "self-exit downtime must surface as recovery"
-  pass "watch-arm: takeover preserves self-exit downtime and surfaces a recovery wake"
+  # A clean self-exit with nothing queued is a quiet restart: its downtime stays
+  # an open episode, marked announced, for the next real wake to retire.
+  is_live_non_zombie "$ARM_PID" || fail "fresh takeover woke main with nothing to show: $(cat "$armout")"
+  ! grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || fail "fresh takeover woke main with nothing to show"
+  [ "$(cat "$state/.watcher-down")" = "announced:downtime:${downtime##*:}" ] \
+    || fail "takeover did not keep the self-exit downtime as an announced episode: $(cat "$state/.watcher-down")"
+  kill -TERM "$(cat "$state/.watch.lock/pid")" 2>/dev/null || fail "could not stop the takeover watcher"
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: takeover preserves self-exit downtime as an announced episode without waking main"
 }
 
 test_downtime_marker_does_not_follow_symlink() {
@@ -1984,6 +2072,11 @@ test_interrupted_handling_is_redrained_on_rearm
 test_malformed_marker_is_quarantined_once
 test_recovery_consumption_serializes_queue_publication
 test_restart_preserves_recovery_across_reused_pid_lock
+test_restart_wakes_only_with_news quiet
+test_restart_wakes_only_with_news queued
+test_restart_wakes_only_with_news decision
+test_restart_wakes_only_with_news dead-lock
+test_restart_wakes_only_with_news stale-lock-flag
 test_markerless_legacy_queue_is_recovered_on_arm
 test_idle_lavish_source_stays_quiet_until_result
 test_append_wakes_live_announced_watcher
