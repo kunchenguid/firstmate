@@ -1991,10 +1991,66 @@ SH
   pass "alive and dead observations require the same creation server before and after the read"
 }
 
+test_empty_delivered_policy_and_bounded_startup() {
+  local home="$TMP_ROOT/empty-delivery" policy out rc fb started elapsed mode
+  make_remote_secondmate "$home" remote-empty
+  mkdir -p "$home/state/fleet-seats"
+  new_holder
+  for policy in '{"pools":[]}' '{ "pools": [] }' '{
+  "pools": []
+}'; do
+    printf '%b\n' "$policy" > "$home/state/fleet-seats/policy.json"
+    out=$(FM_FLEET_SEATS_TEST_REMOTE_WAIT=1 reserve "$home" worker pool-model-a) || fail "empty policy refused: $out"
+    assert_equals '' "$out" "empty policy reserved a seat"
+    assert_absent "$home/state/fleet-seats/requests" "empty policy contacted its parent"
+  done
+  printf '{"pools":null}\n' > "$home/state/fleet-seats/policy.json"
+  rc=0
+  out=$(FM_FLEET_SEATS_TEST_REMOTE_WAIT=1 reserve "$home" worker pool-model-a 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "invalid policy disabled admission: $out"
+  fb=$(fm_fakebin "$home")
+  cat > "$fb/rex" <<'REX'
+#!/usr/bin/env bash
+case "$*" in
+  *whoami*) printf '{"endpoint":"unix:/startup"}' ;;
+  *)
+    case "$STARTUP_MODE" in
+      slow) echo "$$" > "$STARTUP_PID"; sleep 30 ;;
+      dead) sleep 1; printf '{"last_exit":0}' ;;
+      alive) printf '{"foreground":{"pid":1,"name":"pi","path":"/bin/pi","argv0":"pi"}}' ;;
+    esac
+    ;;
+esac
+REX
+  chmod +x "$fb/rex"
+  for mode in slow dead alive; do
+    started=$SECONDS
+    rc=0
+    out=$(PATH="$fb:$PATH" STARTUP_MODE="$mode" STARTUP_PID="$home/probe.pid" FM_HOME="$home" \
+      FM_CONTROL_LAUNCH_WAIT=2 FM_CONTROL_POLL=0.1 bash -c '
+        . "$1/bin/fm-control-lib.sh"
+        fm_control_wait_for_startup rex 00000001-0000-7000-8000-000000000001:00000002-0000-7000-8000-000000000002 "" unix:/startup
+      ' _ "$ROOT") || rc=$?
+    elapsed=$((SECONDS - started))
+    [ "$elapsed" -le 4 ] || fail "$mode startup exceeded its wall-clock budget: $elapsed"
+    if [ "$mode" = alive ]; then
+      expect_code 0 "$rc" "live startup failed: $out"
+      assert_equals alive "$out" "live startup was not confirmed"
+    else
+      [ "$rc" -ne 0 ] || fail "$mode startup was confirmed"
+    fi
+    if [ "$mode" = slow ]; then
+      assert_present "$home/probe.pid" "slow probe never ran"
+      ! kill -0 "$(cat "$home/probe.pid")" 2>/dev/null || fail "timed-out probe survived"
+    fi
+  done
+  pass "empty delivered policies opt out and startup probes share the wait budget"
+}
+
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -2058,3 +2114,5 @@ test_rex_absence_uses_matching_metadata
 test_metadata_free_rex_routes_prove_destruction
 
 test_live_and_dead_routes_require_creation_server
+
+test_empty_delivered_policy_and_bounded_startup
