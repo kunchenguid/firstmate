@@ -388,7 +388,7 @@ fm_pr_bitbucket_head() {  # <workspace/repo> <number>
     printf '%s\n' "$head"
     return 0
   fi
-  [[ "$head" =~ ^[0-9a-f]{12,39}$ ]] || return 1
+  [[ "$head" =~ ^[0-9a-f]{12}$ ]] || return 1
   source=$(printf '%s' "$record" | jq -er '.source.repository.full_name') || return 1
   # Reuse the canonical URL owner for the source repository's path validation.
   ( fm_pr_url_parse "https://bitbucket.org/$source/pull-requests/1" ) || return 1
@@ -411,7 +411,7 @@ fm_pr_bitbucket_poll() {  # <workspace/repo> <number>
     *) return 0 ;;
   esac
   head=$(printf '%s' "$record" | jq -er '.source.commit.hash') || return 0
-  [[ "$head" =~ ^[0-9a-f]{12,64}$ ]] || return 0
+  fm_pr_bitbucket_head_valid "$head" || return 0
   checks=$(fm_pr_bitbucket_cli pr checks "$number" --workspace "${path%%/*}" --repo "${path#*/}" --json 2>/dev/null) || return 0
   result=$(printf '%s' "$checks" | jq -er --arg path "$path" --arg number "$number" --arg head "$head" '
     select(type == "object" and .workspace + "/" + .repo == $path
@@ -431,6 +431,12 @@ fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+}
+
+fm_pr_bitbucket_head_valid() {
+  local head=${1-}
+  local LC_ALL=C
+  [[ "$head" =~ ^[0-9a-f]{12}$ ]] || fm_pr_head_valid "$head"
 }
 
 # Resolve the PR number for a task copy's branch via gh-axi, run inside that
@@ -1017,8 +1023,13 @@ fm_pr_poll_snapshot_matches() {
 # interruption between the two may replay it (the merge outcome's same
 # at-least-once boundary). Returns 2 for an already notified observation.
 fm_pr_poll_notify_checks() {  # <state> <id> <template> <result> <reason>
-  local state=$1 id=$2 template=$3 result=$4 reason=$5 marker device key tmp
-  [[ "$result" =~ ^checks\ (passed|failed)\ at\ [0-9a-f]{12,64}$ ]] || return 1
+  local state=$1 id=$2 template=$3 result=$4 reason=$5 marker device key tmp head
+  head=${result##* at }
+  case "$result" in
+    "checks passed at $head"|"checks failed at $head") ;;
+    *) return 1 ;;
+  esac
+  fm_pr_bitbucket_head_valid "$head" || return 1
   fm_pr_poll_snapshot_matches "$state" "$id" "$template" || return 1
   marker="$state/$id.pr-checks-notified"
   device=$(fm_pr_file_device "$state") || return 1

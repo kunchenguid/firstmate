@@ -2387,6 +2387,13 @@ test_bitbucket_read_and_arm() {
   write_task_meta "$dir" task-c
   run_check_entry "$dir" task-c "$BB_URL" >/dev/null 2> "$dir/arm.err" || fail "optional head failure refused arming"
   ! grep -q '^pr_head=' "$state/task-c.meta" || fail "unrelated expanded head was recorded"
+  write_bitbucket_pr "$dir" OPEN aaaaaaaaaaaaa
+  write_task_meta "$dir" task-malformed
+  : > "$dir/bkt.log"
+  run_check_entry "$dir" task-malformed "$BB_URL" >/dev/null 2> "$dir/arm.err" \
+    || fail "malformed optional head refused arming"
+  ! grep -q '^pr_head=' "$state/task-malformed.meta" || fail "malformed head was recorded"
+  ! grep -q 'api /repositories/' "$dir/bkt.log" || fail "malformed head was submitted for expansion"
 
   write_bitbucket_pr "$dir" OPEN "$BB_HEAD"
   for value in INPROGRESS UNKNOWN ''; do
@@ -2402,6 +2409,14 @@ test_bitbucket_read_and_arm() {
       *) fail "Bitbucket terminal state $value was wrong: $out" ;;
     esac
   done
+  write_bitbucket_pr "$dir" OPEN aaaaaaaaaaaa
+  write_bitbucket_checks "$dir" aaaaaaaaaaaa SUCCESSFUL
+  [ "$(run_bitbucket_poll "$dir")" = 'checks passed at aaaaaaaaaaaa' ] \
+    || fail "valid abbreviated Bitbucket head did not emit"
+  write_bitbucket_pr "$dir" OPEN aaaaaaaaaaaaa
+  write_bitbucket_checks "$dir" aaaaaaaaaaaaa SUCCESSFUL
+  [ -z "$(run_bitbucket_poll "$dir")" ] || fail "malformed intermediate-length head emitted"
+  write_bitbucket_pr "$dir" OPEN "$BB_HEAD"
   write_bitbucket_checks "$dir" "$BB_HEAD" FAILED INPROGRESS
   [ -z "$(run_bitbucket_poll "$dir")" ] || fail "partially running checks emitted"
   write_bitbucket_checks "$dir" "$BB_NEXT" SUCCESSFUL
@@ -2471,6 +2486,14 @@ test_bitbucket_notifications_and_trust() {
   state="$dir/home/state"
   write_poll_meta "$state" task-a "$BB_URL"
   seed_canonical_poll "$dir" task-a "$BB_URL"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "could not capture Bitbucket poll snapshot"
+  if fm_pr_poll_notify_checks "$state" task-a "$POLL" \
+      'checks passed at aaaaaaaaaaaaa' 'malformed observation'; then
+    fail "malformed intermediate-length observation was accepted"
+  fi
+  [ ! -e "$state/task-a.pr-checks-notified" ] \
+    || fail "malformed intermediate-length observation was recorded"
   add_stop_custom_check "$dir"
   bitbucket_watch_cycle "$dir"
   assert_grep "checks passed at $BB_HEAD" "$dir/watch.out" "terminal checks did not wake"
