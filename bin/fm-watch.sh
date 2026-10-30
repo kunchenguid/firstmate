@@ -2532,8 +2532,8 @@ pause_state_class() {  # <window> <task>
     fi
   fi
   # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. Reaching here already proves the only two admissible cases: an
-  # ordinary crew whose agent the gate above confirmed dead, whose live pane runtime
+  # could not name. Reaching here already proves the only admissible cases: an
+  # ordinary crew whose agent the gate above confirmed dead or whose live pane runtime
   # state is unreadable, or a secondmate, whose endpoint liveness is deliberately never
   # read and so cannot supply that confirmation. Without the mate case a mate's
   # status-declared `captain-held` transfer - which has no current-state mapping
