@@ -72,7 +72,10 @@
 #              it, rather than being stranded with a parked approval nobody can
 #              answer. Reclaim is HERDR- and REX-ONLY for the reason `exit` gives above:
 #              a tmux `missing` cannot be proven absent from a task record, so
-#              it refuses.
+#              it refuses. A record that teardown marked retired refuses before
+#              the old agent is stopped; bin/fm-spawn.sh then enforces the
+#              recorded pool slot's owner claim under its project lock before
+#              adoption (docs/architecture.md owns that slot boundary).
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness

@@ -93,7 +93,12 @@
 #   to have survived refuses too. The worktree is reused untouched either way; a
 #   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
-#   (`--secondmate`, driven by the session-start liveness sweep).
+#   (`--secondmate`, driven by the session-start liveness sweep). Every spawn or
+#   relaunch refuses a same-id record carrying teardown's retirement marker.
+#   Before a relaunch adopts a Treehouse pool worktree, it holds the project lock
+#   and accepts only this task's owner claim or the legacy absent-claim case;
+#   another task's claim or an unreadable claim refuses (docs/architecture.md
+#   owns the slot-retirement and ownership boundary).
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
