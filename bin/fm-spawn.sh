@@ -2430,6 +2430,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
   }
+  # Relaunch is the recorded-worktree adoption owner, including fm-control.
+  # An absent claim remains compatible with records predating slot claims.
+  fm_treehouse_slot_owner_state "$RELAUNCH_WT" "$ID"
+  if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ]; then
+    echo "error: task $ID's recorded worktree is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID; refusing to adopt another task's slot" >&2
+    exit 1
+  fi
   if [ "$KIND" = secondmate ]; then
     FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)
     [ -n "$FIRSTMATE_HOME" ] || FIRSTMATE_HOME=$RELAUNCH_WT

@@ -2307,6 +2307,22 @@ test_spawn_relaunch_refuses_contradicting_flags() {
   pass "fm-spawn --relaunch: every identity axis comes from the record, and a contradicting flag refuses"
 }
 
+test_spawn_relaunch_checks_slot_claim() {
+  local dir out rc
+  dir=$(new_case slotclaim rl-slotclaim)
+  add_ship_task "$dir" rl-slotclaim claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'task=new-owner\nhome=%s\n' "$dir/home" > "$dir/.fm-slot-owner"
+  out=$(run_spawn "$dir" rl-slotclaim --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunch must not adopt another task's slot"
+  assert_contains "$out" "claimed by task new-owner" "refusal names the current owner"
+  [ ! -s "$dir/fake/keys" ] || fail "refused adoption must not send terminal input"
+  rm "$dir/.fm-slot-owner"
+  out=$(run_spawn "$dir" rl-slotclaim --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "legacy absent claims must still allow relaunch: $out"
+  pass "recorded-worktree adoption refuses another owner and preserves legacy absence"
+}
+
 test_spawn_relaunch_refuses_an_unrecorded_task() {
   local dir out rc
   dir=$(new_case norecord rl17)
@@ -3037,6 +3053,7 @@ test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
+test_spawn_relaunch_checks_slot_claim
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_tmux_refuses_a_window_missing_from_its_session
