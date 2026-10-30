@@ -254,6 +254,8 @@ Removing a leased home releases its durable treehouse lease via `treehouse retur
 Because that return restores tracked content without touching gitignored files, teardown first clears the home's own gitignored identity - the `.fm-secondmate-home` marker and the `.fm-secondmate-parent` binding - so the freed slot cannot hand a retired secondmate's identity to the next task that leases it.
 A plain-clone home with no pool slot is simply removed.
 If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease, restoring the identity files it had cleared because a preserved home is still a home.
+Those files are staged in a backup named after the home, so a retry after an interrupted retirement restores them before validating the home.
+A task spawn that leases a slot still carrying a leftover marker clears it only when its binding names this home and its id is no longer registered here; otherwise the spawn refuses ([`bin/fm-spawn.sh`](../../../bin/fm-spawn.sh)'s `spawn_clear_stale_secondmate_marker` owns the cases).
 Before either return or direct removal, teardown asks the target home's process-event runner to retire its registrations and physically owned machine-wide claims through the safe generation-bound path.
 It refuses retirement while that cleanup is uncertain or unavailable, preserving the home and retirement records for a later retry.
 Raw deletion is unsupported because a blocking process-event child can outlive its home.
