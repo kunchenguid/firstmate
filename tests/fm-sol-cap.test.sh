@@ -731,14 +731,22 @@ test_pending_publication_failure_is_reported() (
 )
 
 test_a_busy_boundary_supersede_keeps_another_claims_row() {
-  local case_dir out holder replacement admission i
+  local case_dir out holder holder_pid replacement admission i
   case_dir=$(make_case pending-supersede-other task-c task-d)
   write_sol_row "$case_dir/home" task-c "$(fresh_start)" -1
   fm_write_meta "$case_dir/home/state/task-c.meta" "model=gpt-6.1-sol" "kind=ship"
   printf 'max=2\nmodels=gpt-6-sol\n' > "$case_dir/home/config/sol-cap"
   (
+    FM_HOME=$case_dir/home
+    . "$ROOT/bin/fm-wake-lib.sh"
+    # Stock macOS Bash 3.2 has no BASHPID, so a holder that read it under `set -u`
+    # would die before touching `held` and fail the case on a supported shell.
+    # fm_current_pid owns that probe, and unsetting the variable here keeps this
+    # case exercising the Bash 3.2 path on every host, not only on macOS.
+    unset BASHPID
+    fm_current_pid holder_pid || exit 1
     mkdir "$case_dir/home/state/.sol-cap.lock" || exit 1
-    printf '%s\n' "$BASHPID" > "$case_dir/home/state/.sol-cap.lock/pid"
+    printf '%s\n' "$holder_pid" > "$case_dir/home/state/.sol-cap.lock/pid"
     touch "$case_dir/held"
     for ((i=0; i<400; i++)); do
       [ ! -e "$case_dir/release" ] || break
@@ -752,6 +760,10 @@ test_a_busy_boundary_supersede_keeps_another_claims_row() {
     sleep 0.05
   done
   assert_present "$case_dir/held" "the live process did not hold the boundary"
+  holder_pid=$(cat "$case_dir/home/state/.sol-cap.lock/pid" 2>/dev/null || true)
+  if [ -z "$holder_pid" ] || [ "$holder_pid" = "$$" ] || ! kill -0 "$holder_pid" 2>/dev/null; then
+    fail "the boundary names '$holder_pid' rather than the live process holding it"
+  fi
   lib_refuse_claim "$case_dir" task-c gpt-6.1-sol > "$case_dir/replacement.out" &
   replacement=$!
   for ((i=0; i<200; i++)); do
