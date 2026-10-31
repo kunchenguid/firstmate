@@ -5040,6 +5040,69 @@ EOF
   pass "an erroring lsof scan refuses teardown and preserves the task"
 }
 
+test_lsof_scan_timeout_refuses_before_removal() {
+  local case_dir rc
+  case_dir=$(make_case lsof-scan-timeout-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  # A scan that hangs (e.g. an unreadable root-only docker overlay that stalls
+  # lsof's stat() walk) must hit the fm_run_timed bound and refuse, never run
+  # unbounded and never fall through to destructive cleanup with no proof.
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+sleep 300
+SH
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_TEARDOWN_LSOF_TIMEOUT=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "lsof-scan-timeout-refusal: teardown should refuse"
+  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (lsof failed)" "$case_dir/stderr" \
+    "lsof-scan-timeout-refusal: teardown did not explain the lsof refusal"
+  assert_present "$case_dir/wt" "lsof-scan-timeout-refusal: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "lsof-scan-timeout-refusal: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" "lsof-scan-timeout-refusal: teardown returned the worktree"
+  pass "a hanging lsof scan times out and refuses teardown rather than silently continuing"
+}
+
+test_lsof_scan_padded_zero_override_is_still_bounded() {
+  local case_dir rc
+  case_dir=$(make_case lsof-padded-zero-bound)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  # A padded-zero override must normalise to the default bound, never reach
+  # fm_run_timed as a zero bound (timeout 0 / alarm 0 both disable the
+  # deadline, which is the very hang this change prevents). A hanging scan
+  # therefore still times out and refuses instead of running unbounded.
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+sleep 300
+SH
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf 'return\n' >> "$case_dir/treehouse.log"
+EOF
+  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_TEARDOWN_LSOF_TIMEOUT=00 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "lsof-padded-zero-bound: teardown should refuse (bounded scan)"
+  assert_grep "REFUSED: cannot determine leaked processes under $case_dir/wt for task-x1 (lsof failed)" "$case_dir/stderr" \
+    "lsof-padded-zero-bound: teardown did not explain the lsof refusal"
+  assert_present "$case_dir/wt" "lsof-padded-zero-bound: teardown removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "lsof-padded-zero-bound: teardown removed task metadata"
+  assert_absent "$case_dir/treehouse.log" "lsof-padded-zero-bound: teardown returned the worktree"
+  pass "a padded-zero lsof scan timeout override still normalises to the default bound"
+}
+
 test_reused_pid_identity_is_not_force_killed() {
   local case_dir rc pid
   case_dir=$(make_case reused-pid-identity)
@@ -6084,6 +6147,8 @@ test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
+test_lsof_scan_timeout_refuses_before_removal
+test_lsof_scan_padded_zero_override_is_still_bounded
 test_reused_pid_identity_is_not_force_killed
 test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
