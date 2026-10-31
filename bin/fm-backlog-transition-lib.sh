@@ -55,6 +55,16 @@
 # closes a row that reads as an open captain call. An answer that closes the row
 # first applies any supported retained artifact from the validated record, then
 # replay simply retires the record.
+# `branch_cleanup_pending=1` preserves the marker and matching metadata during
+# replay until teardown satisfies its branch-cleanup postcondition and republishes
+# the ready marker; bin/fm-teardown.sh's header owns that postcondition.
+# The generation check still retires a stale marker for another incarnation.
+# Marker retirement also removes the branch retry identity only when its
+# spawn generation matches the marker, preserving a replacement's identity.
+# A `mode=cleanup` record retires only an already-cleaned task's metadata and
+# retry identity, including in manual and no-backlog homes. It never reads or
+# changes a backlog row. Bootstrap limits exempt homes to this recovery mode.
+# tests/fm-teardown.test.sh covers interrupted completion and task ID reuse.
 
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -69,7 +79,7 @@ FM_BACKLOG_ROW_ERROR=
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_ROW_HOLD_KIND=
 # Set by fm_backlog_close_marker_replay: closed | closed_incomplete | retained |
-# retained_incomplete | answered | stale | noop.
+# retained_incomplete | answered | cleaned | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
 
@@ -853,7 +863,7 @@ fm_backlog_close_transition() {
   shift 5
   [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
   fm_backlog_done "$data" "$id" "$@" || return 1
-  fm_backlog_record_remove "$marker" "pending-close record" "$state"
+  fm_backlog_close_marker_remove "$marker" "$state"
 }
 
 # The captain-held twin of the close transition: same record, same ordering,
@@ -863,7 +873,7 @@ fm_backlog_retain_transition() {
   shift 5
   [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
   fm_backlog_retain "$data" "$id" "$@" || return 1
-  fm_backlog_record_remove "$marker" "pending-close record" "$state"
+  fm_backlog_close_marker_remove "$marker" "$state"
 }
 
 fm_backlog_atomic_transition() {
@@ -886,15 +896,17 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
 
 fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <expected-id> <state-dir>
   local marker=$1 authorized_data data_resolved expected_id=$3 state=$4
-  local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 mode=close line raw_bytes arg_value
+  local id='' data='' marker_spawn_gen='' cleanup_incomplete=0 branch_cleanup_pending=0 mode=close line raw_bytes arg_value
   local url_tail url_authority url_path url_host url_port host_rest host_label host_valid
   local percent_tail percent_valid
   local id_count=0 data_count=0 spawn_gen_count=0 cleanup_incomplete_count=0 mode_count=0
+  local branch_cleanup_pending_count=0
   local args=()
   FM_BACKLOG_CLOSE_VALIDATED_ID=
   FM_BACKLOG_CLOSE_VALIDATED_DATA=
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=0
+  FM_BACKLOG_CLOSE_VALIDATED_BRANCH_CLEANUP_PENDING=0
   FM_BACKLOG_CLOSE_VALIDATED_MODE=close
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=()
   fm_backlog_record_present "$marker" "pending-close record" "$state" || return 1
@@ -912,6 +924,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
       data=*) data=${line#data=}; data_count=$((data_count + 1)) ;;
       spawn_gen=*) marker_spawn_gen=${line#spawn_gen=}; spawn_gen_count=$((spawn_gen_count + 1)) ;;
       cleanup_incomplete=*) cleanup_incomplete=${line#cleanup_incomplete=}; cleanup_incomplete_count=$((cleanup_incomplete_count + 1)) ;;
+      branch_cleanup_pending=*) branch_cleanup_pending=${line#branch_cleanup_pending=}; branch_cleanup_pending_count=$((branch_cleanup_pending_count + 1)) ;;
       mode=*) mode=${line#mode=}; mode_count=$((mode_count + 1)) ;;
       arg=*) args+=("${line#arg=}") ;;
       *) FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"; return 1 ;;
@@ -922,7 +935,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     return 1
   fi
   case "$mode" in
-    close|retain) ;;
+    close|retain|cleanup) ;;
     *)
       FM_BACKLOG_TRANSITION_ERROR="invalid transition mode in pending-close record $marker"
       return 1
@@ -956,6 +969,14 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
       FM_BACKLOG_TRANSITION_ERROR="invalid cleanup state in pending-close record $marker"
       return 1
       ;;
+  esac
+  if [ "$branch_cleanup_pending_count" -gt 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="unreadable pending-close record $marker"
+    return 1
+  fi
+  case "$branch_cleanup_pending" in
+    0|1) ;;
+    *) FM_BACKLOG_TRANSITION_ERROR="invalid branch cleanup state in $marker"; return 1 ;;
   esac
   case "$data" in
     /*) ;;
@@ -1052,16 +1073,17 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
   FM_BACKLOG_CLOSE_VALIDATED_DATA=$data_resolved
   FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN=$marker_spawn_gen
   FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE=$cleanup_incomplete
+  FM_BACKLOG_CLOSE_VALIDATED_BRANCH_CLEANUP_PENDING=$branch_cleanup_pending
   FM_BACKLOG_CLOSE_VALIDATED_MODE=$mode
   FM_BACKLOG_CLOSE_VALIDATED_ARGS=("${args[@]+"${args[@]}"}")
 }
 
 # A leading `--retain` flag records the captain-held transition (`mode=retain`)
-# instead of a close; the remaining flags are the same completion links either
-# transition records.
-fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <cleanup-incomplete: 0|1> [--retain] [flag...]
+# instead of a close. `--cleanup-only` records metadata/identity retirement
+# without a backlog transition, including manual or absent backlogs.
+fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen> <state-dir> <cleanup-incomplete: 0|1> [--retain|--cleanup-only] [--branch-cleanup-pending] [flag...]
   local tmp=$1 id=$2 data spawn_gen=$4 state=$5 cleanup_incomplete=$6 arg previous_arg=''
-  local mode=close serialized_args=()
+  local mode=close branch_cleanup_pending=0 serialized_args=()
   data=$(fm_backlog_data_absolute "$3") || {
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $3"
     return 1
@@ -1076,10 +1098,21 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     *) FM_BACKLOG_TRANSITION_ERROR="invalid pending-close cleanup state"; return 1 ;;
   esac
   shift 6
-  if [ "${1:-}" = --retain ]; then
-    mode=retain
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --retain)
+        [ "$mode" = close ] || { FM_BACKLOG_TRANSITION_ERROR="duplicate retention flag"; return 1; }
+        mode=retain ;;
+      --cleanup-only)
+        [ "$mode" = close ] || { FM_BACKLOG_TRANSITION_ERROR="duplicate cleanup mode"; return 1; }
+        mode=cleanup ;;
+      --branch-cleanup-pending)
+        [ "$branch_cleanup_pending" = 0 ] || { FM_BACKLOG_TRANSITION_ERROR="duplicate branch cleanup flag"; return 1; }
+        branch_cleanup_pending=1 ;;
+      *) break ;;
+    esac
     shift
-  fi
+  done
   for arg in "$@"; do
     if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
       serialized_args+=("local%20main")
@@ -1093,6 +1126,7 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
     printf 'data=%s\n' "$data"
     printf 'spawn_gen=%s\n' "$spawn_gen"
     printf 'cleanup_incomplete=%s\n' "$cleanup_incomplete"
+    [ "$branch_cleanup_pending" = 0 ] || printf 'branch_cleanup_pending=1\n'
     [ "$mode" = close ] || printf 'mode=%s\n' "$mode"
     for arg in "${serialized_args[@]+"${serialized_args[@]}"}"; do
       printf 'arg=%s\n' "$arg"
@@ -1123,8 +1157,30 @@ fm_backlog_close_marker_mark_cleanup_incomplete() {  # <state-dir> <marker-path>
     || { rm -f "$tmp"; return 1; }
 }
 
-fm_backlog_close_marker_remove() {  # <marker-path> <state-dir>
-  fm_backlog_atomic_transition remove "$1" "pending-close record" "$2"
+fm_backlog_teardown_branch_retire() {
+  local state=$1 id=$2 spawn_gen=$3 identity
+  case "$id" in
+    ''|.*|*[!A-Za-z0-9._-]*)
+      FM_BACKLOG_TRANSITION_ERROR="invalid task identity for branch retirement"
+      return 1 ;;
+  esac
+  identity="$state/$id.teardown-branch"
+  [ -e "$identity" ] || [ -L "$identity" ] || return 0
+  fm_backlog_meta_spawn_gen_optional "$identity" "$state" || return 1
+  [ "$FM_BACKLOG_META_SPAWN_GEN" = "$spawn_gen" ] || return 0
+  fm_backlog_atomic_transition remove "$identity" "task branch identity" "$state"
+}
+
+fm_backlog_close_marker_remove() {
+  local marker=$1 state=$2 id spawn_gen
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    fm_backlog_meta_spawn_gen "$marker" "$state" || return 1
+    spawn_gen=$FM_BACKLOG_META_SPAWN_GEN
+    id=${marker##*/}
+    id=${id%.backlog-close}
+    fm_backlog_teardown_branch_retire "$state" "$id" "$spawn_gen" || return 1
+  fi
+  fm_backlog_atomic_transition remove "$marker" "pending-close record" "$state"
 }
 
 fm_backlog_close_marker_clear() {  # <state-dir> <id>
@@ -1133,15 +1189,21 @@ fm_backlog_close_marker_clear() {  # <state-dir> <id>
   fm_backlog_close_marker_remove "$marker" "$1"
 }
 
-# Replay one recorded close or retention. Returns 0 when the row is closed (or
+# Replay one recorded close, retention, or records-only cleanup. Returns 0 when
+# cleanup finishes without a backlog mutation, or when the row is closed (or
 # retained), the marker is stale, or an answer already closed a retained row,
 # and 1 when marker validation or recovery fails. Validation completes before
 # any meta or backlog mutation.
-fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir>
+fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data-dir> [--cleanup-only]
   local state=$1 marker=$2 marker_name expected_id
-  local id data marker_spawn_gen meta meta_spawn_gen row_state cleanup_incomplete mode
+  local replay_scope=${4:-}
+  local id data marker_spawn_gen meta meta_spawn_gen row_state cleanup_incomplete mode branch_cleanup_pending meta_present=0
   local args=() mode_flags=()
   FM_BACKLOG_CLOSE_REPLAY_RESULT=noop
+  case "$replay_scope" in
+    ''|--cleanup-only) ;;
+    *) FM_BACKLOG_TRANSITION_ERROR="invalid pending-close replay scope $replay_scope"; return 1 ;;
+  esac
   fm_backlog_directory_present "$state" "state directory" || return 1
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   marker_name=${marker##*/}
@@ -1154,14 +1216,24 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   data=$FM_BACKLOG_CLOSE_VALIDATED_DATA
   marker_spawn_gen=$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN
   cleanup_incomplete=$FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE
+  branch_cleanup_pending=$FM_BACKLOG_CLOSE_VALIDATED_BRANCH_CLEANUP_PENDING
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
-  [ "$mode" = close ] || mode_flags=(--retain)
+  # Recheck the scope from the validated record under the caller's locks.
+  # A marker replaced since bootstrap's discovery must not widen its authority.
+  if [ "$replay_scope" = --cleanup-only ] && [ "$mode" != cleanup ]; then
+    return 0
+  fi
+  case "$mode" in
+    retain) mode_flags=(--retain) ;;
+    cleanup) mode_flags=(--cleanup-only) ;;
+  esac
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
+    meta_present=1
     if ! fm_backlog_record_present "$meta" "task record" "$state"; then
       FM_BACKLOG_TRANSITION_ERROR="unsafe interrupted task record at $meta"
       return 1
@@ -1173,12 +1245,25 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
     fi
+  fi
+  if [ "$branch_cleanup_pending" = 1 ]; then
+    FM_BACKLOG_TRANSITION_ERROR="task branch cleanup is unresolved for $id; retry teardown before replaying completion"
+    return 1
+  fi
+  if [ "$meta_present" = 1 ]; then
     fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \
       "$marker_spawn_gen" "${mode_flags[@]+"${mode_flags[@]}"}" "${args[@]+"${args[@]}"}" \
       || return 1
     cleanup_incomplete=1
     fm_backlog_atomic_transition remove "$meta" "the interrupted task record" "$state" \
       || return 1
+  fi
+  if [ "$mode" = cleanup ]; then
+    # This intent owns only records of an already-cleaned incarnation. Never
+    # probe or mutate a backlog row when cleanup was explicitly records-only.
+    fm_backlog_close_marker_remove "$marker" "$state" || return 1
+    FM_BACKLOG_CLOSE_REPLAY_RESULT=cleaned
+    return 0
   fi
   if fm_backlog_row_probe "$data" "$id"; then
     row_state=$FM_BACKLOG_ROW_STATE

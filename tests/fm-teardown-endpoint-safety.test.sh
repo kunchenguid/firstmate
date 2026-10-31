@@ -17,6 +17,8 @@ make_case() {  # <name>
     "$TMP_ROOT/$dir/home/config" "$TMP_ROOT/$dir/fakebin" \
     "$TMP_ROOT/$dir/worktree" "$TMP_ROOT/$dir/project"
   git init -q "$TMP_ROOT/$dir/project"
+  fm_git_init_commit "$TMP_ROOT/$dir/worktree"
+  git -C "$TMP_ROOT/$dir/worktree" checkout -qb fm/endpoint-fixture
   : > "$TMP_ROOT/$dir/worktree/sentinel"
   : > "$TMP_ROOT/$dir/runtime.log"
   cat > "$TMP_ROOT/$dir/fakebin/tmux" <<'SH'
@@ -43,7 +45,7 @@ mark_case_as_treehouse_pool() {  # <case>
   mkdir -p "$dir/pool/1"
   git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
     commit --allow-empty -qm pool-fixture
-  git -C "$dir/project" worktree add -q --detach "$dir/pool/1/project"
+  git -C "$dir/project" worktree add -q -b fm/pool-fixture "$dir/pool/1/project"
   ln -s "pool/1/project" "$dir/worktree"
   printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' \
     "$dir/pool/1/project" > "$dir/pool/treehouse-state.json"
@@ -1228,12 +1230,10 @@ test_failed_endpoint_close_refuses_before_removing_the_record() {
   # thing naming what survived, so it has to outlive the refusal.
   assert_present "$dir/home/state/$id.meta" \
     "teardown deleted the only durable record naming an endpoint it could not close"
-  # That retention is this run's, not a durable one - a task carrying a backlog
-  # transition has the next session's pending-close replay remove the retained
-  # record - so the refusal has to say so instead of sending the operator away
-  # trusting it.
-  assert_grep "not durable across a session start" "$dir/failed.err" \
-    "the refusal promised a retention teardown does not own"
+  # bin/fm-backlog-transition-lib.sh owns replay eligibility and record lifetime.
+  # The refusal must make that condition clear before the operator relies on retention.
+  assert_grep "only if its pending close is eligible for replay; unresolved branch cleanup keeps the record for retry" "$dir/failed.err" \
+    "the refusal did not condition record retirement on replay eligibility"
   isolated_tmux_window_exists "$dir" "$socket" "$session" "fm-$id" \
     || fail "the surviving endpoint disappeared, so this case no longer proves the hazard"
   isolated_tmux_window_exists "$dir" "$socket" "$session" control \

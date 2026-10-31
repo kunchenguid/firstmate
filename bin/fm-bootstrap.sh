@@ -1303,6 +1303,7 @@ crew_dispatch_validate() {
 # backstops for what this cannot see. Never reads or writes another home.
 backlog_record_reconcile() {
   local marker meta control_lock meta_lock id row label has_record=0 gate_status
+  local backlog_applies=1 cleanup_pending=0 replay_flags=()
   # A fresh home with no state directory has no physical task records to pair.
   # Keep bootstrap diagnostics working without creating state just for a no-op.
   [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
@@ -1318,7 +1319,23 @@ backlog_record_reconcile() {
       echo "error: backlog reconciliation cannot access configured data directory $DATA ($FM_BACKLOG_TRANSITION_ERROR)" >&2
       return 2
     fi
-    return 0
+    backlog_applies=0
+  fi
+  # Manual and no-backlog homes still own interrupted records-only cleanup.
+  # Preserve their exemption from every backlog transition and record sweep.
+  if [ "$backlog_applies" = 0 ]; then
+    for marker in "$STATE"/*.backlog-close; do
+      [ -e "$marker" ] || [ -L "$marker" ] || continue
+      label=${marker##*/}
+      label=${label%.backlog-close}
+      if fm_backlog_close_marker_validate "$marker" "$DATA" "$label" "$STATE" \
+         && [ "$FM_BACKLOG_CLOSE_VALIDATED_MODE" = cleanup ]; then
+        cleanup_pending=1
+        break
+      fi
+    done
+    [ "$cleanup_pending" = 1 ] || return 0
+    replay_flags=(--cleanup-only)
   fi
   # Keep the wake/lock library's source-time state-directory creation inside
   # this mutating sweep, so FM_BOOTSTRAP_DETECT_ONLY remains read-only.
@@ -1340,8 +1357,11 @@ backlog_record_reconcile() {
       fm_lock_release "$control_lock"
       continue
     fi
-    if fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA"; then
+    if fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA" "${replay_flags[@]+"${replay_flags[@]}"}"; then
       case "$FM_BACKLOG_CLOSE_REPLAY_RESULT" in
+        cleaned)
+          echo "BOOTSTRAP_INFO: finished the interrupted record cleanup for $label without changing its backlog"
+          ;;
         closed)
           echo "BOOTSTRAP_INFO: closed the backlog item for $label that an interrupted cleanup left open"
           ;;
@@ -1364,6 +1384,7 @@ backlog_record_reconcile() {
     fm_lock_release "$meta_lock"
     fm_lock_release "$control_lock"
   done
+  [ "$backlog_applies" = 1 ] || return 0
 
   # A home that owns no records has nothing to pair, so it never pays for a
   # backlog read. A pending close remains authoritative even when replay failed:

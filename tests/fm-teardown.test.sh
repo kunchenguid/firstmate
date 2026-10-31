@@ -2321,7 +2321,7 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
   pass "--legacy-record teardown rolls its stamp back when the close marker write fails"
 }
 
-# Override fakebin/perl so ONLY the stamp rollback's truncate fails; every other
+# Override fakebin/perl so ONLY the stamp rollback on this metadata fails; every other
 # perl call in the lifecycle still runs the real interpreter, so the abandoned
 # attempt leaves its stamp behind for exactly the reason under test.
 add_failing_truncate_perl() {
@@ -2329,9 +2329,10 @@ add_failing_truncate_perl() {
   real=$(command -v perl)
   cat > "$case_dir/fakebin/perl" <<SH
 #!/usr/bin/env bash
-case "\$*" in
-  *truncate*) exit 1 ;;
-esac
+if [ "\$#" -eq 5 ] && [ "\$1" = -e ] && [ "\$3" = -- ] \
+   && [ "\$4" = "$case_dir/state/task-x1.meta" ]; then
+  exit 1
+fi
 exec "$real" "\$@"
 SH
   chmod +x "$case_dir/fakebin/perl"
@@ -5945,8 +5946,768 @@ test_status_archive_nested_secondmate_children() {
   pass "forced secondmate retirement preserves two descendant levels and refuses linked child directories"
 }
 
+add_review_branch_delete_failure() {
+  cat > "$1/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case_dir=$(cd "$(dirname "$0")/.." && pwd)
+if [ -e "$case_dir/forbid-ref-proof" ] \
+   && [ "$*" = "-C $case_dir/project show-ref --verify --quiet refs/heads/fm/task-x1" ]; then
+  echo 'synthetic ref verification failure' >&2
+  exit 128
+fi
+if [ -e "$case_dir/forbid-slot" ] && [ "${1:-}" = -C ] \
+   && [ "${2:-}" = "$case_dir/pool/1/project" ]; then
+  # Existing pool classification needs only Git identity to locate the claim.
+  # Keep that precondition working, then reject branch/content operations.
+  if [ "${3:-} ${4:-} ${5:-}" = 'rev-parse --path-format=absolute --git-common-dir' ]; then
+    exec "${REAL_GIT_FOR_TEST:?}" "$@"
+  fi
+  printf 'slot read: %s\n' "$*" >> "$case_dir/slot-reads"
+  exit 99
+fi
+case " $* " in
+  *' branch -D '*)
+    if [ ! -e "$case_dir/allow-delete" ]; then
+      echo 'synthetic deletion failure' >&2
+      exit 1
+    fi ;;
+esac
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$1/fakebin/git"
+}
+
+test_task_branch_review_regressions() {
+  local case_dir rc first_rc replay_rc project_head task_head problems=0
+  local ref=refs/heads/fm/task-x1
+
+  # A failed deletion must remain a refusal after the original copy vanishes.
+  case_dir=$(make_case branch-review-missing)
+  write_meta "$case_dir" local-only ship
+  printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+  add_review_branch_delete_failure "$case_dir"
+  first_rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" --force \
+    > "$case_dir/first-out" 2> "$case_dir/first-err" || first_rc=$?
+  [ "$first_rc" -ne 0 ] || fail "missing retry fixture did not reach a deletion refusal"
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" --force \
+    > "$case_dir/retry-out" 2> "$case_dir/retry-err" || rc=$?
+  if [ "$rc" -eq 0 ] || [ ! -f "$case_dir/state/task-x1.meta" ]; then
+    printf 'red F1: missing-copy retry retired unresolved branch cleanup\n' >&2
+    problems=$((problems + 1))
+  fi
+  git -C "$case_dir/project" show-ref --verify --quiet "$ref" \
+    || fail "missing retry fixture lost the retained ref"
+  if [ "$rc" -ne 0 ] && [ -f "$case_dir/state/task-x1.meta" ]; then
+    touch "$case_dir/allow-delete"
+    FM_HOME="$case_dir" run_teardown "$case_dir" --force \
+      > "$case_dir/final-out" 2> "$case_dir/final-err" \
+      || fail "missing-copy retry could not finish after deletion became available"
+    ! git -C "$case_dir/project" show-ref --verify --quiet "$ref" \
+      || fail "missing-copy retry reported success with the task ref retained"
+  fi
+
+  # A reassigned slot belongs to its new holder. Retry via the captured shared
+  # Git directory without querying or modifying the slot itself.
+  case_dir=$(make_case branch-review-reassigned)
+  mkdir -p "$case_dir/pool/1"
+  git -C "$case_dir/project" worktree move "$case_dir/wt" "$case_dir/pool/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' \
+    "$case_dir/pool/1/project" > "$case_dir/pool/treehouse-state.json"
+  write_meta "$case_dir" local-only ship "$case_dir/pool/1/project"
+  printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+  add_review_branch_delete_failure "$case_dir"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" --force \
+    > "$case_dir/first-out" 2> "$case_dir/first-err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "reassigned fixture did not reach a deletion refusal"
+  printf 'task=new-holder\nhome=%s\n' "$case_dir" > "$case_dir/pool/1/.fm-slot-owner"
+  cp "$case_dir/pool/1/.fm-slot-owner" "$case_dir/claim-before"
+  printf 'new holder work\n' > "$case_dir/pool/1/project/sentinel"
+  touch "$case_dir/forbid-slot"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" --force \
+    > "$case_dir/retry-out" 2> "$case_dir/retry-err" || rc=$?
+  if [ "$rc" -eq 0 ] || [ ! -f "$case_dir/state/task-x1.meta" ]; then
+    printf 'red F1: reassigned-copy retry retired unresolved branch cleanup\n' >&2
+    problems=$((problems + 1))
+  else
+    touch "$case_dir/allow-delete"
+    FM_HOME="$case_dir" run_teardown "$case_dir" --force \
+      > "$case_dir/final-out" 2> "$case_dir/final-err" \
+      || fail "reassigned-copy retry could not finish through the captured Git directory"
+    ! git -C "$case_dir/project" show-ref --verify --quiet "$ref" \
+      || fail "reassigned-copy retry retained the task ref after success"
+  fi
+  [ ! -s "$case_dir/slot-reads" ] || fail "reassigned-copy retry queried the new holder's worktree: $(cat "$case_dir/slot-reads")"
+  cmp -s "$case_dir/claim-before" "$case_dir/pool/1/.fm-slot-owner" \
+    || fail "reassigned-copy retry changed the new holder's claim"
+  assert_contains "$(cat "$case_dir/pool/1/project/sentinel")" 'new holder work' \
+    "reassigned-copy retry changed the new holder's work"
+
+  # Exercise startup's public replay entry point with a real automatic backlog.
+  case_dir=$(make_case branch-review-replay)
+  write_meta "$case_dir" local-only ship
+  printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  add_review_branch_delete_failure "$case_dir"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" --force \
+    > "$case_dir/first-out" 2> "$case_dir/first-err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "replay fixture did not reach a deletion refusal"
+  replay_rc=0
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" bash -c '
+    . "$1/bin/fm-tasks-axi-lib.sh"
+    . "$1/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_close_marker_replay "$2/state" "$2/state/task-x1.backlog-close" "$2/data"
+  ' _ "$ROOT" "$case_dir" > "$case_dir/replay-out" 2> "$case_dir/replay-err" || replay_rc=$?
+  if [ "$replay_rc" -eq 0 ] || [ ! -f "$case_dir/state/task-x1.meta" ] \
+     || [ ! -f "$case_dir/state/task-x1.backlog-close" ] \
+     || [ "$(backlog_row_state "$case_dir")" != in_flight ]; then
+    printf 'red F2: startup replay retired unresolved cleanup or its backlog intent\n' >&2
+    problems=$((problems + 1))
+  fi
+  if [ "$replay_rc" -ne 0 ] && [ -f "$case_dir/state/task-x1.meta" ]; then
+    replay_rc=0
+    FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" bash -c '
+      . "$1/bin/fm-tasks-axi-lib.sh"
+      . "$1/bin/fm-backlog-transition-lib.sh"
+      fm_backlog_meta_spawn_gen "$2/state/task-x1.meta" "$2/state" || exit 77
+      fm_backlog_close_marker_write "$2/state" task-x1 "$2/data" "$FM_BACKLOG_META_SPAWN_GEN" \
+        --retain --branch-cleanup-pending || exit 77
+      fm_backlog_close_marker_replay "$2/state" "$2/state/task-x1.backlog-close" "$2/data"
+    ' _ "$ROOT" "$case_dir" > "$case_dir/retain-out" 2> "$case_dir/retain-err" || replay_rc=$?
+    expect_code 1 "$replay_rc" "retention replay must refuse unresolved branch cleanup"
+    assert_present "$case_dir/state/task-x1.meta" "retention replay erased retry metadata"
+    grep -Fxq 'mode=retain' "$case_dir/state/task-x1.backlog-close" \
+      || fail "pending retention intent was lost"
+    sed 's/^spawn_gen=.*/spawn_gen=teardown-replacement/' "$case_dir/state/task-x1.meta" \
+      > "$case_dir/replacement.meta"
+    mv "$case_dir/replacement.meta" "$case_dir/state/task-x1.meta"
+    cp "$case_dir/state/task-x1.meta" "$case_dir/new-meta-before"
+    FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" bash -c '
+      . "$1/bin/fm-tasks-axi-lib.sh"
+      . "$1/bin/fm-backlog-transition-lib.sh"
+      fm_backlog_close_marker_replay "$2/state" "$2/state/task-x1.backlog-close" "$2/data"
+    ' _ "$ROOT" "$case_dir" > "$case_dir/stale-out" 2> "$case_dir/stale-err" \
+      || fail "pending branch cleanup weakened stale-generation recovery"
+    cmp -s "$case_dir/new-meta-before" "$case_dir/state/task-x1.meta" \
+      || fail "stale completion changed the replacement incarnation"
+    assert_absent "$case_dir/state/task-x1.backlog-close" "stale completion marker was not retired"
+    [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+      || fail "stale completion changed the replacement backlog row"
+  fi
+
+  # Separate Git namespaces may carry the same branch name. A fresh lock
+  # forces cleanup through the existing return retry before final deletion.
+  case_dir=$(make_case branch-review-standalone)
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  git clone -q "$case_dir/origin.git" "$case_dir/wt"
+  git -C "$case_dir/wt" checkout -q -b fm/task-x1
+  write_meta "$case_dir" local-only ship
+  printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" 'standalone task work'
+  project_head=$(git -C "$case_dir/project" rev-parse "$ref")
+  task_head=$(git -C "$case_dir/wt" rev-parse "$ref")
+  git -C "$case_dir/wt" update-ref refs/no-mistakes/recover/standalone "$task_head"
+  add_transient_lock_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  : > "$(git_index_lock_path "$case_dir/wt")"
+  : > "$case_dir/treehouse-attempts"
+  rc=0
+  FM_HOME="$case_dir" TREEHOUSE_ATTEMPT_FILE="$case_dir/treehouse-attempts" \
+  FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 run_teardown "$case_dir" --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  if [ "$rc" -ne 0 ] \
+     || [ "$(git -C "$case_dir/project" rev-parse "$ref" 2>/dev/null || true)" != "$project_head" ] \
+     || git -C "$case_dir/wt" show-ref --verify --quiet "$ref"; then
+    printf 'red F3: standalone cleanup used the project repository instead of the task repository\n' >&2
+    problems=$((problems + 1))
+  fi
+  [ "$(git -C "$case_dir/wt" rev-parse refs/no-mistakes/recover/standalone)" = "$task_head" ] \
+    || fail "standalone cleanup erased a recovery ref"
+  [ "$problems" -eq 0 ] || fail "$problems branch cleanup review regressions remain"
+  pass "missing-copy retries, startup replay, and standalone Git namespaces preserve task-ref cleanup guarantees"
+}
+
+# Exercise the real teardown entry point with real refs and fake pool commands.
+# No running backend or shared worktree pool is touched.
+test_task_branch_cleanup_outcomes() {
+  local backend=tmux scenario case_dir rc head ref=refs/heads/fm/task-x1
+    for scenario in removed detach-fails delete-fails detached delete-noop legacy-retry; do
+      case_dir=$(make_case "branch-$backend-$scenario")
+      write_meta "$case_dir" local-only ship
+      if [ "$scenario" != legacy-retry ]; then
+        printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+      fi
+      head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      git -C "$case_dir/wt" update-ref refs/no-mistakes/recover/test "$head"
+      git -C "$case_dir/wt" update-ref refs/remotes/no-mistakes/fm/task-x1 "$head"
+      if [ "$scenario" = detached ]; then
+        git -C "$case_dir/wt" checkout --detach -q
+      fi
+      cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_BRANCH_CASE:?}/backend.log"
+SH
+      cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' checkout --detach '*)
+    if [ "${FM_BRANCH_FAILURE:-}" = detach-fails ]; then
+      echo 'synthetic detach failure' >&2
+      exit 1
+    fi ;;
+  *' branch -D '*)
+    case "${FM_BRANCH_FAILURE:-}" in
+      delete-fails|legacy-retry) echo 'synthetic deletion failure' >&2; exit 1 ;;
+      delete-noop) exit 0 ;;
+    esac ;;
+esac
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+      chmod +x "$case_dir/fakebin/git" "$case_dir/fakebin/treehouse"
+      set +e
+      FM_BRANCH_CASE="$case_dir" FM_BRANCH_FAILURE="$scenario" \
+        run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+      rc=$?
+      set -e
+      case "$scenario" in
+        removed|detached)
+          expect_code 0 "$rc" "branch-$backend-$scenario: teardown should succeed: $(cat "$case_dir/stderr")"
+          ! git -C "$case_dir/project" show-ref --verify --quiet "$ref" \
+            || fail "branch-$backend-$scenario: task ref survived completion"
+          assert_absent "$case_dir/state/task-x1.meta" "completed cleanup kept metadata"
+          ;;
+        *)
+          [ "$rc" -ne 0 ] || fail "branch-$backend-$scenario: teardown hid a retained ref"
+          git -C "$case_dir/project" show-ref --verify --quiet "$ref" \
+            || fail "branch-$backend-$scenario: failure lost the task ref"
+          assert_contains "$(cat "$case_dir/stderr")" "$ref" "failure must name the retained ref"
+          ! grep -q 'teardown task-x1 complete' "$case_dir/stdout" \
+            || fail "branch-$backend-$scenario: failure reported complete"
+          assert_present "$case_dir/state/task-x1.meta" "failure must preserve retry metadata"
+          grep -q '^return ' "$case_dir/backend.log" \
+            || fail "branch-$backend-$scenario: ref verification pre-empted the return retry path"
+          if [ "$scenario" = legacy-retry ]; then
+            FM_BRANCH_CASE="$case_dir" FM_BRANCH_FAILURE='' \
+              run_teardown "$case_dir" --force > "$case_dir/retry-out" 2> "$case_dir/retry-err" \
+              || fail "branch-$backend-$scenario: detached retry failed"
+            ! git -C "$case_dir/project" show-ref --verify --quiet "$ref" \
+              || fail "branch-$backend-$scenario: retry forgot the ref after detaching"
+            assert_absent "$case_dir/state/task-x1.teardown-branch" "completed retry kept its legacy branch identity"
+          fi
+          ;;
+      esac
+      [ "$(git -C "$case_dir/project" rev-parse refs/no-mistakes/recover/test)" = "$head" ] \
+        || fail "branch-$backend-$scenario: cleanup erased a recovery ref"
+      [ "$(git -C "$case_dir/project" rev-parse refs/remotes/no-mistakes/fm/task-x1)" = "$head" ] \
+        || fail "branch-$backend-$scenario: cleanup erased a staging ref"
+    done
+  pass "task branch cleanup proves absence or refuses with the retained ref and retry records on the ordinary path"
+}
+
+test_task_branch_identity_replay() {
+  local case_dir mode scenario rc head expected_state real_rm real_tasks ref
+  real_rm=$(command -v rm)
+  real_tasks=$(command -v tasks-axi)
+  for mode in close retain; do
+    for scenario in meta-present meta-removed stale-old stale-replacement; do
+      case_dir=$(make_case "branch-identity-$mode-$scenario")
+      write_meta "$case_dir" local-only ship
+      printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+      seed_backlog_in_flight "$case_dir"
+      expected_state='done'
+      if [ "$mode" = retain ]; then
+        tasks-axi hold task-x1 --kind captain --reason 'fixture decision' \
+          --file "$case_dir/data/backlog.md" >/dev/null
+        expected_state=queued
+      fi
+      head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      git -C "$case_dir/project" update-ref refs/no-mistakes/recover/identity "$head"
+      git -C "$case_dir/project" update-ref refs/remotes/no-mistakes/identity "$head"
+      cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_BRANCH_IDENTITY_INTERRUPT:-}" = meta ]; then
+  for arg in "$@"; do
+    [ "$arg" != "$FM_HOME/state/task-x1.meta" ] || exit 1
+  done
+fi
+exec "${REAL_RM_FOR_BRANCH_TEST:?}" "$@"
+SH
+      cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  done|reopen)
+    if [ "${FM_BRANCH_IDENTITY_INTERRUPT:-}" = backlog ]; then
+      echo 'synthetic completion interruption' >&2
+      exit 1
+    fi ;;
+esac
+exec "${REAL_TASKS_FOR_BRANCH_TEST:?}" "$@"
+SH
+      chmod +x "$case_dir/fakebin/rm" "$case_dir/fakebin/tasks-axi"
+      rc=0
+      FM_HOME="$case_dir" REAL_RM_FOR_BRANCH_TEST="$real_rm" \
+      REAL_TASKS_FOR_BRANCH_TEST="$real_tasks" \
+      FM_BRANCH_IDENTITY_INTERRUPT=$([ "$scenario" = meta-removed ] && echo backlog || echo meta) \
+        run_teardown "$case_dir" --force > "$case_dir/first-out" 2> "$case_dir/first-err" || rc=$?
+      expect_code 1 "$rc" "identity fixture must interrupt completion"
+      assert_present "$case_dir/state/task-x1.teardown-branch" "interruption lost the retry identity"
+      assert_present "$case_dir/state/task-x1.backlog-close" "interruption lost completion intent"
+      if [ "$scenario" = meta-removed ]; then
+        assert_absent "$case_dir/state/task-x1.meta" "fixture did not reach backlog mutation after metadata removal"
+      else
+        assert_present "$case_dir/state/task-x1.meta" "fixture did not stop before metadata removal"
+      fi
+      ! git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+        || fail "identity fixture interrupted before branch cleanup"
+      case "$scenario" in
+        stale-*)
+          cp "$case_dir/state/task-x1.backlog-close" "$case_dir/old-marker"
+          write_meta "$case_dir" local-only ship
+          sed 's/^spawn_gen=.*/spawn_gen=identity-replacement/' "$case_dir/state/task-x1.meta" \
+            > "$case_dir/replacement.meta"
+          mv "$case_dir/replacement.meta" "$case_dir/state/task-x1.meta"
+          printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+          git -C "$case_dir/wt" checkout -q -b fm/task-x1
+          if [ "$scenario" = stale-replacement ]; then
+            mv "$case_dir/state/task-x1.teardown-branch" "$case_dir/old-identity"
+            add_review_branch_delete_failure "$case_dir"
+            rc=0
+            FM_HOME="$case_dir" REAL_RM_FOR_BRANCH_TEST="$real_rm" \
+            REAL_TASKS_FOR_BRANCH_TEST="$real_tasks" \
+              run_teardown "$case_dir" --force > "$case_dir/replacement-out" 2> "$case_dir/replacement-err" || rc=$?
+            expect_code 1 "$rc" "replacement fixture must retain its task branch"
+            cp "$case_dir/state/task-x1.teardown-branch" "$case_dir/replacement-identity"
+            cp "$case_dir/old-marker" "$case_dir/state/task-x1.backlog-close"
+          fi
+          cp "$case_dir/state/task-x1.meta" "$case_dir/replacement-before"
+          ;;
+      esac
+      FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" bash -c '
+        . "$1/bin/fm-tasks-axi-lib.sh"
+        . "$1/bin/fm-backlog-transition-lib.sh"
+        fm_backlog_close_marker_replay "$2/state" "$2/state/task-x1.backlog-close" "$2/data"
+      ' _ "$ROOT" "$case_dir" > "$case_dir/replay-out" 2> "$case_dir/replay-err" \
+        || fail "identity replay failed: $(cat "$case_dir/replay-err")"
+      assert_absent "$case_dir/state/task-x1.backlog-close" "replay retained completion intent"
+      case "$scenario" in
+        stale-*)
+          cmp -s "$case_dir/replacement-before" "$case_dir/state/task-x1.meta" \
+            || fail "stale replay changed replacement metadata"
+          git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+            || fail "stale replay removed the replacement branch"
+          [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+            || fail "stale replay changed the replacement backlog row"
+          ;;
+        *)
+          assert_absent "$case_dir/state/task-x1.meta" "replay retained completed metadata"
+          [ "$(backlog_row_state "$case_dir")" = "$expected_state" ] \
+            || fail "replay did not finish the $mode transition"
+          ;;
+      esac
+      if [ "$scenario" = stale-replacement ]; then
+        cmp -s "$case_dir/replacement-identity" "$case_dir/state/task-x1.teardown-branch" \
+          || fail "stale replay changed replacement branch identity"
+        touch "$case_dir/allow-delete"
+      else
+        assert_absent "$case_dir/state/task-x1.teardown-branch" "replay stranded the retired branch identity"
+      fi
+      case "$scenario" in
+        meta-*)
+          if [ "$mode" = retain ]; then
+            tasks-axi unhold task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+          fi
+          tasks-axi reopen task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+          tasks-axi start task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+          write_meta "$case_dir" local-only ship
+          sed 's/^spawn_gen=.*/spawn_gen=identity-reused/' "$case_dir/state/task-x1.meta" \
+            > "$case_dir/reused.meta"
+          mv "$case_dir/reused.meta" "$case_dir/state/task-x1.meta"
+          printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+          git -C "$case_dir/wt" checkout -q -b fm/task-x1
+          ;;
+      esac
+      FM_HOME="$case_dir" REAL_RM_FOR_BRANCH_TEST="$real_rm" \
+      REAL_TASKS_FOR_BRANCH_TEST="$real_tasks" \
+        run_teardown "$case_dir" --force > "$case_dir/reuse-out" 2> "$case_dir/reuse-err" \
+        || fail "reused task ID could not finish: $(cat "$case_dir/reuse-err")"
+      assert_absent "$case_dir/state/task-x1.teardown-branch" "completed replacement retained its identity"
+      for ref in refs/no-mistakes/recover/identity refs/remotes/no-mistakes/identity; do
+        [ "$(git -C "$case_dir/project" rev-parse "$ref")" = "$head" ] \
+          || fail "identity retirement changed $ref"
+      done
+    done
+  done
+  pass "completion replay retires only its incarnation's branch identity and permits task ID reuse"
+}
+
+test_task_branch_stable_identity_and_manual_recovery() {
+  local case_dir gen rc mode interruption problems=0 real_rm marker
+  real_rm=$(command -v rm)
+  case_dir=$(make_case branch-control-exit-retry)
+  write_meta "$case_dir" local-only ship
+  printf 'branch=fm/task-x1\nharness=codex\n' >> "$case_dir/state/task-x1.meta"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$case_dir/state" task-x1 --state idle --source fm-spawn --event seed)
+  printf 'busy_gen=%s\n' "$gen" >> "$case_dir/state/task-x1.meta"
+  add_review_branch_delete_failure "$case_dir"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" --force \
+    > "$case_dir/first-out" 2> "$case_dir/first-err" || rc=$?
+  expect_code 1 "$rc" "control-exit fixture must retain the branch"
+  assert_present "$case_dir/state/task-x1.teardown-branch" "fixture never captured retry identity"
+  grep -v '^busy_gen=' "$case_dir/state/task-x1.meta" > "$case_dir/expected-meta"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message)
+    case "$*" in
+      *pane_current_command*)
+        if [ -e "$FM_BRANCH_CONTROL_CASE/stopped" ]; then printf 'zsh\n'; else printf 'codex\n'; fi ;;
+      *pane_current_path*) printf '%s/wt\n' "$FM_BRANCH_CONTROL_CASE" ;;
+      *cursor_y*) printf '1\n' ;;
+      *) printf 'fakepane\n' ;;
+    esac ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+  list-windows) printf 'fm-task-x1\n' ;;
+  send-keys)
+    for arg in "$@"; do
+      [ "$arg" != /quit ] || : > "$FM_BRANCH_CONTROL_CASE/stopped"
+    done ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_BRANCH_CONTROL_CASE="$case_dir" \
+  FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+  FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.1 \
+    "$ROOT/bin/fm-control.sh" task-x1 exit > "$case_dir/control-out" 2> "$case_dir/control-err" \
+    || fail "fake Codex exit failed: $(cat "$case_dir/control-err")"
+  cmp -s "$case_dir/expected-meta" "$case_dir/state/task-x1.meta" \
+    || fail "control exit changed fields other than busy_gen"
+  touch "$case_dir/allow-delete"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" --force \
+    > "$case_dir/retry-out" 2> "$case_dir/retry-err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'red P1: a busy_gen-only control exit blocked the same task cleanup: %s\n' "$(cat "$case_dir/retry-err")" >&2
+    problems=$((problems + 1))
+  fi
+
+  for mode in manual absent; do
+    for interruption in before-meta metadata identity; do
+      case_dir=$(make_case "branch-local-completion-$mode-$interruption")
+      write_meta "$case_dir" local-only ship
+      printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+      if [ "$interruption" = before-meta ]; then
+        # Older backlog-exempt records still need recoverable completion.
+        sed '/^spawn_gen=/d' "$case_dir/state/task-x1.meta" > "$case_dir/legacy-meta"
+        mv "$case_dir/legacy-meta" "$case_dir/state/task-x1.meta"
+      fi
+      if [ "$mode" = manual ]; then
+        seed_backlog_in_flight "$case_dir"
+        printf 'manual\n' > "$case_dir/config/backlog-backend"
+      fi
+      cat > "$case_dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "${FM_LOCAL_COMPLETION_INTERRUPT:-}" = before-meta ] && [ "$arg" = "$FM_HOME/state/task-x1.meta" ]; then
+    echo 'synthetic interruption before metadata removal' >&2
+    exit 1
+  fi
+  if [ "${FM_LOCAL_COMPLETION_INTERRUPT:-}" = metadata ] && [ "$arg" = "$FM_HOME/state/task-x1.meta" ]; then
+    "${REAL_RM_FOR_LOCAL_COMPLETION:?}" "$@" || exit $?
+    echo 'synthetic interruption after metadata removal' >&2
+    exit 1
+  fi
+  if [ "${FM_LOCAL_COMPLETION_INTERRUPT:-}" = identity ] && [ "$arg" = "$FM_HOME/state/task-x1.teardown-branch" ]; then
+    echo 'synthetic identity retirement failure' >&2
+    exit 1
+  fi
+done
+exec "${REAL_RM_FOR_LOCAL_COMPLETION:?}" "$@"
+SH
+      chmod +x "$case_dir/fakebin/rm"
+      rc=0
+      FM_HOME="$case_dir" REAL_RM_FOR_LOCAL_COMPLETION="$real_rm" \
+      FM_LOCAL_COMPLETION_INTERRUPT="$interruption" run_teardown "$case_dir" --force \
+        > "$case_dir/first-out" 2> "$case_dir/first-err" || rc=$?
+      expect_code 1 "$rc" "$mode/$interruption fixture must interrupt completion"
+      if [ "$interruption" = before-meta ]; then
+        assert_present "$case_dir/state/task-x1.meta" "fixture passed its metadata interruption"
+      else
+        assert_absent "$case_dir/state/task-x1.meta" "fixture did not reach metadata retirement"
+      fi
+      assert_present "$case_dir/state/task-x1.teardown-branch" "interruption erased the pending identity"
+      marker="$case_dir/state/task-x1.backlog-close"
+      if [ ! -f "$marker" ]; then
+        printf 'red P1: %s/%s completion left no recoverable pending marker\n' "$mode" "$interruption" >&2
+        problems=$((problems + 1))
+      fi
+      if [ "$interruption" != identity ]; then
+        FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+        FM_CONFIG_OVERRIDE="$case_dir/config" FM_BOOTSTRAP_NETWORK=skip \
+        REAL_RM_FOR_LOCAL_COMPLETION="$real_rm" PATH="$case_dir/fakebin:$PATH" \
+          "$ROOT/bin/fm-bootstrap.sh" > "$case_dir/replay-out" 2> "$case_dir/replay-err" \
+          || fail "local completion bootstrap failed: $(cat "$case_dir/replay-err")"
+        if [ -e "$marker" ] || [ -e "$case_dir/state/task-x1.teardown-branch" ] \
+           || [ -e "$case_dir/state/task-x1.meta" ]; then
+          printf 'red P1: bootstrap did not recover %s/%s record cleanup\n' "$mode" "$interruption" >&2
+          problems=$((problems + 1))
+          [ "$interruption" != before-meta ] || continue
+        fi
+      fi
+      # Reuse before recovery must leave the replacement metadata and branch
+      # untouched while replay retires only the completed older incarnation.
+      write_meta "$case_dir" local-only ship
+      sed 's/^spawn_gen=.*/spawn_gen=manual-replacement/' "$case_dir/state/task-x1.meta" > "$case_dir/new-meta"
+      mv "$case_dir/new-meta" "$case_dir/state/task-x1.meta"
+      printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+      cp "$case_dir/state/task-x1.meta" "$case_dir/replacement-before"
+      git -C "$case_dir/wt" checkout -q -b fm/task-x1
+      if [ "$interruption" = identity ] && [ -f "$marker" ]; then
+        FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+        FM_CONFIG_OVERRIDE="$case_dir/config" FM_BOOTSTRAP_NETWORK=skip \
+        REAL_RM_FOR_LOCAL_COMPLETION="$real_rm" PATH="$case_dir/fakebin:$PATH" \
+          "$ROOT/bin/fm-bootstrap.sh" > "$case_dir/replay-out" 2> "$case_dir/replay-err" \
+          || fail "local completion bootstrap failed: $(cat "$case_dir/replay-err")"
+        cmp -s "$case_dir/replacement-before" "$case_dir/state/task-x1.meta" \
+          || fail "local completion replay changed replacement metadata"
+        git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+          || fail "local completion replay removed the replacement branch"
+      fi
+      rc=0
+      FM_HOME="$case_dir" REAL_RM_FOR_LOCAL_COMPLETION="$real_rm" \
+        run_teardown "$case_dir" --force > "$case_dir/reuse-out" 2> "$case_dir/reuse-err" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        printf 'red P1: %s/%s completion blocked the reused task ID: %s\n' "$mode" "$interruption" "$(cat "$case_dir/reuse-err")" >&2
+        problems=$((problems + 1))
+      fi
+      if [ "$mode" = manual ]; then
+        [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail "manual cleanup mutated its backlog row"
+      fi
+    done
+  done
+  [ "$problems" -eq 0 ] || fail "$problems stable-identity/local-completion regressions remain"
+  pass "control exit preserves retry identity and manual/no-backlog completion recovers before task ID reuse"
+}
+
+test_task_branch_failed_launch_and_retained_finish() {
+  local case_dir scenario mode wt rc head problems=0 args=()
+  local ref=refs/heads/fm/task-x1
+  for scenario in absent-on-other present-on-other missing-copy reassigned-copy \
+    missing-copy-absent reassigned-copy-absent missing-copy-error reassigned-copy-error; do
+    for mode in normal force; do
+      case_dir=$(make_case "branch-finish-$scenario-$mode")
+      wt="$case_dir/wt"
+      head=$(git -C "$case_dir/project" rev-parse HEAD)
+      git -C "$case_dir/project" update-ref refs/no-mistakes/recover/finish "$head"
+      git -C "$case_dir/project" update-ref refs/remotes/no-mistakes/finish "$head"
+      case "$scenario" in
+        *-absent)
+          git -C "$wt" checkout --detach -q
+          git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
+          ;;
+      esac
+      case "$scenario" in
+        absent-on-other|present-on-other)
+          git -C "$wt" checkout -q -b startup
+          [ "$scenario" != absent-on-other ] || git -C "$wt" branch -D fm/task-x1 >/dev/null
+          ;;
+        missing-copy*)
+          git -C "$case_dir/project" worktree remove --force "$wt"
+          ;;
+        reassigned-copy*)
+          mkdir -p "$case_dir/pool/1"
+          git -C "$case_dir/project" worktree move "$wt" "$case_dir/pool/1/project"
+          wt="$case_dir/pool/1/project"
+          printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$wt" > "$case_dir/pool/treehouse-state.json"
+          printf 'task=new-holder\nhome=%s\n' "$case_dir" > "$case_dir/pool/1/.fm-slot-owner"
+          cp "$case_dir/pool/1/.fm-slot-owner" "$case_dir/claim-before"
+          printf 'new holder bytes\n' > "$wt/sentinel"
+          add_review_branch_delete_failure "$case_dir"
+          touch "$case_dir/forbid-slot" "$case_dir/allow-delete"
+          ;;
+      esac
+      write_meta "$case_dir" local-only ship "$wt"
+      printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+      case "$scenario" in
+        *-absent|*-error)
+          seed_backlog_in_flight "$case_dir"
+          ;;
+      esac
+      case "$scenario" in
+        *-error)
+          add_review_branch_delete_failure "$case_dir"
+          touch "$case_dir/forbid-ref-proof" "$case_dir/allow-delete"
+          ;;
+      esac
+      cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/tmux-calls"
+exit 0
+SH
+      cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/pool-calls"
+exit 0
+SH
+      chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+      args=()
+      [ "$mode" != force ] || args=(--force)
+      rc=0
+      FM_HOME="$case_dir" run_teardown "$case_dir" "${args[@]+"${args[@]}"}" \
+        > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+      case "$scenario" in
+        *-absent|*-error)
+          expect_code 1 "$rc" "unproved retained ref must refuse cleanup: $scenario/$mode"
+          assert_present "$case_dir/state/task-x1.meta" "unproved retained ref lost retry metadata"
+          assert_present "$case_dir/state/task-x1.backlog-close" "unproved retained ref lost completion intent"
+          assert_contains "$(cat "$case_dir/err")" "$ref" "refusal omitted the unproved ref"
+          cp "$case_dir/state/task-x1.meta" "$case_dir/meta-before-replay"
+          FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+          FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+          FM_CONFIG_OVERRIDE="$case_dir/config" FM_BOOTSTRAP_NETWORK=skip \
+          PATH="$case_dir/fakebin:$PATH" "$ROOT/bin/fm-bootstrap.sh" \
+            > "$case_dir/replay-out" 2> "$case_dir/replay-err" \
+            || fail "unproved retained ref bootstrap failed: $(cat "$case_dir/replay-err")"
+          cmp -s "$case_dir/meta-before-replay" "$case_dir/state/task-x1.meta" \
+            || fail "startup replay retired unproved retained-ref metadata"
+          assert_present "$case_dir/state/task-x1.backlog-close" "startup replay lost unresolved completion intent"
+          [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail "unproved retained ref closed its backlog row"
+          ;;
+        *)
+          if [ "$rc" -ne 0 ]; then
+            printf 'red finish: %s/%s stranded cleanup: %s\n' "$scenario" "$mode" "$(cat "$case_dir/err")" >&2
+            problems=$((problems + 1))
+            continue
+          fi
+          assert_absent "$case_dir/state/task-x1.meta" "finished cleanup retained task metadata"
+          assert_absent "$case_dir/state/task-x1.teardown-branch" "finished cleanup stranded retry identity"
+          assert_absent "$case_dir/state/task-x1.backlog-close" "finished cleanup stranded completion intent"
+          assert_grep 'kill-window' "$case_dir/tmux-calls" "finished cleanup never closed its endpoint"
+          ;;
+      esac
+      case "$scenario" in
+        absent-on-other|present-on-other)
+          ! git -C "$case_dir/project" show-ref --verify --quiet "$ref" || fail "finished cleanup retained its checkable task branch"
+          [ "$(git -C "$wt" symbolic-ref --short HEAD)" = startup ] || fail "cleanup detached an unrelated branch"
+          [ "$(git -C "$case_dir/project" rev-parse refs/heads/startup)" = "$head" ] || fail "cleanup altered the unrelated branch"
+          assert_grep 'return' "$case_dir/pool-calls" "finished launch cleanup never returned its copy"
+          ;;
+        *-absent)
+          ! git -C "$case_dir/project" show-ref --verify --quiet "$ref" || fail "unproved absent ref was created"
+          ;;
+        *)
+          [ "$(git -C "$case_dir/project" rev-parse "$ref")" = "$head" ] || fail "cleanup guessed the task's unavailable Git namespace"
+          case "$scenario" in
+            *-error) ;;
+            *)
+              assert_contains "$(cat "$case_dir/out")" "retained ref $ref" "finished cleanup hid its retained ref"
+              assert_contains "$(cat "$case_dir/out")" 'finished' "retained-ref cleanup omitted its finish outcome"
+              ;;
+          esac
+          ;;
+      esac
+      case "$scenario" in
+        reassigned-copy*)
+          [ ! -s "$case_dir/slot-reads" ] || fail "cleanup inspected the new holder's worktree"
+          cmp -s "$case_dir/claim-before" "$case_dir/pool/1/.fm-slot-owner" || fail "cleanup changed the new holder's claim"
+          assert_contains "$(cat "$wt/sentinel")" 'new holder bytes' "cleanup altered the new holder's copy"
+          ;;
+      esac
+      [ "$(git -C "$case_dir/project" rev-parse refs/no-mistakes/recover/finish)" = "$head" ] || fail "cleanup erased a recovery ref"
+      [ "$(git -C "$case_dir/project" rev-parse refs/remotes/no-mistakes/finish)" = "$head" ] || fail "cleanup erased a staging ref"
+    done
+  done
+  [ "$problems" -eq 0 ] || fail "$problems failed-launch or unavailable-identity cleanup dead ends remain"
+  pass "failed launches check recorded refs and unavailable namespaces finish only with proved retained refs"
+}
+
+test_recorded_task_branch_work_is_checked_before_cleanup() {
+  local case_dir mode checkout outcome baseline task_head rc args=()
+  for mode in local-only no-mistakes; do
+    for checkout in other-branch detached; do
+      for outcome in unfinished pushed force; do
+        case_dir=$(make_case "recorded-work-$mode-$checkout-$outcome")
+        baseline=$(git -C "$case_dir/wt" rev-parse HEAD)
+        printf 'unfinished recorded task work\n' > "$case_dir/wt/task-work.txt"
+        git -C "$case_dir/wt" add task-work.txt
+        git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m 'task work'
+        task_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+        [ "$outcome" != pushed ] || add_fork_with_pushed_branch "$case_dir"
+        if [ "$checkout" = other-branch ]; then
+          git -C "$case_dir/wt" checkout -q -b startup "$baseline"
+        else
+          git -C "$case_dir/wt" checkout --detach -q "$baseline"
+        fi
+        write_meta "$case_dir" "$mode" ship
+        printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+        cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/backend-calls"
+exit 0
+SH
+        cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/pool-calls"
+exit 0
+SH
+        chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+        args=()
+        [ "$outcome" != force ] || args=(--force)
+        rc=0
+        FM_HOME="$case_dir" run_teardown "$case_dir" "${args[@]+"${args[@]}"}" \
+          > "$case_dir/out" 2> "$case_dir/err" || rc=$?
+        if [ "$outcome" = unfinished ]; then
+          expect_code 1 "$rc" "unfinished recorded branch must refuse: $mode/$checkout"
+          [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$task_head" ] \
+            || fail 'cleanup discarded the unfinished recorded task ref'
+          assert_present "$case_dir/state/task-x1.meta" 'refusal lost retry metadata'
+          assert_contains "$(cat "$case_dir/err")" 'refs/heads/fm/task-x1' 'refusal omitted the retained task ref'
+          [ ! -s "$case_dir/backend-calls" ] || fail 'refusal closed the task endpoint'
+          [ ! -s "$case_dir/pool-calls" ] || fail 'refusal returned the task copy'
+        else
+          expect_code 0 "$rc" "permitted recorded branch cleanup failed: $mode/$checkout/$outcome"
+          ! git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+            || fail 'permitted cleanup retained the recorded task branch'
+          assert_absent "$case_dir/state/task-x1.meta" 'permitted cleanup retained metadata'
+        fi
+        [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$baseline" ] || fail 'cleanup changed the unrelated HEAD'
+        if [ "$checkout" = other-branch ]; then
+          [ "$(git -C "$case_dir/wt" symbolic-ref --short HEAD)" = startup ] || fail 'cleanup detached the unrelated branch'
+        else
+          ! git -C "$case_dir/wt" symbolic-ref --quiet HEAD || fail 'cleanup attached the unrelated detached HEAD'
+        fi
+      done
+    done
+  done
+  pass 'recorded task work is protected independently of HEAD, while pushed work and explicit force remain eligible'
+}
+
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
+test_recorded_task_branch_work_is_checked_before_cleanup
+test_task_branch_failed_launch_and_retained_finish
+test_task_branch_stable_identity_and_manual_recovery
+test_task_branch_identity_replay
+test_task_branch_review_regressions
+test_task_branch_cleanup_outcomes
 test_status_archive_opt_in
 test_record_export_config_absent_never_reads_the_exporter
 test_record_export_unopted_symlinked_config_does_not_block_teardown

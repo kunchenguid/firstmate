@@ -1680,7 +1680,7 @@ SH
   touch "$dir/home/state/.last-watcher-beat"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-    || fail "teardown could not finish a valid crash-left retirement receipt"
+    || fail "teardown could not finish a valid crash-left retirement receipt: $(cat "$dir/teardown.err")"
   assert_poll_absent "$dir/home/state" task-a
   [ ! -e "$dir/home/state/task-a.meta" ] || fail "receipt-aware teardown left task metadata"
 

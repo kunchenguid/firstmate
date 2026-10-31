@@ -635,7 +635,9 @@ run_spawn() {  # <case-dir> <args...>
 
 run_ship_spawn() {  # <case-dir> <id>
   local case_dir=$1 id=$2
-  run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off
+  run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off || return $?
+  # The fake agent does not create the task branch from its brief.
+  git -C "$case_dir/wt" checkout -q -B "fm/$id"
 }
 
 # Teardown against a recorded worktree that no longer exists: the landed-work and
@@ -1848,6 +1850,8 @@ test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
 
   out=$(run_teardown "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "interrupted destructive cleanup reported success"
+  assert_present "$case_dir/teardown-interrupted" \
+    "fixture refused before reaching the destructive-cleanup interruption"
   assert_present "$marker" \
     "destructive cleanup began before recording its authoritative close"
   assert_present "$home/state/$id.meta" \
@@ -1856,13 +1860,21 @@ test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
     || fail "interrupted cleanup changed the backlog before recovery"
 
   out=$(run_bootstrap "$case_dir")
+  assert_contains "$out" "task branch cleanup is unresolved" \
+    "restart did not explain why completion requires a teardown retry"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "restart completed cleanup before verifying the task branch: $out"
+  assert_present "$marker" "restart lost the unresolved close marker"
+  assert_present "$home/state/$id.meta" "restart lost the task record needed for retry"
+  assert_present "$home/state/$id.teardown-branch" "restart lost the task's Git identity"
+
+  out=$(run_teardown "$case_dir" "$id") || fail "cleanup retry failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
-    || fail "restart left interrupted cleanup In flight: $out"
-  assert_absent "$marker" "restart retained the recovered close marker"
-  assert_absent "$home/state/$id.meta" "restart retained the interrupted task record"
-  assert_contains "$out" "endpoint or local copy may remain" \
-    "restart silently hid potentially incomplete physical cleanup"
-  pass "restart recovers closes recorded before destructive cleanup"
+    || fail "cleanup retry left the item In flight: $out"
+  assert_absent "$marker" "cleanup retry retained the recovered close marker"
+  assert_absent "$home/state/$id.meta" "cleanup retry retained the task record"
+  assert_absent "$home/state/$id.teardown-branch" "cleanup retry retained the task's Git identity"
+  pass "restart preserves an unresolved branch cleanup until teardown retries it"
 }
 
 test_completion_refuses_a_close_target_symlinked_to_a_directory() {
