@@ -2815,6 +2815,9 @@ validate_firstmate_home_for_removal() {
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
+  # A retirement interrupted while it held the identity files aside would leave
+  # this retry looking at an unmarked directory; put them back first.
+  recover_firstmate_home_identity "$abs_home_path" "$label" "$expected_id" || return 1
   if [ ! -f "$abs_home_path/$SUB_HOME_MARKER" ]; then
     echo "REFUSED: unsafe $label removal target $home is not a seeded secondmate home" >&2
     return 1
@@ -2876,7 +2879,7 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup identity_backup
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -2905,11 +2908,17 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
-      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+    identity_backup=$(stash_firstmate_home_identity "$abs_home_path" "$label") || {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
+      echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+      restore_firstmate_home_identity "$abs_home_path" "$label" "$identity_backup" || true
+      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+      return 1
+    }
+    [ -z "$identity_backup" ] || rm -rf -- "$identity_backup"
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -2999,6 +3008,108 @@ restore_firstmate_home_process_events() {
     return "$TEARDOWN_PROCEVENT_RESTORE_FAILED"
   fi
   rm -rf -- "$backup"
+}
+
+# `treehouse return` restores a pool slot's tracked content but leaves gitignored
+# files in place, and the two files that make a directory a secondmate home -
+# the .fm-secondmate-home identity marker and the .fm-secondmate-parent binding
+# written beside it - are both gitignored. A retired home therefore used to hand
+# its identity to whatever crewmate task next leased that slot, and
+# bin/fm-primary-scope-lib.sh force-includes any marked root as a primary home,
+# so every primary-only guard fired inside an ordinary task worktree. Retirement
+# is the one moment that knows the home has stopped being a home, so clear the
+# identity here.
+#
+# Stash rather than delete outright: a failed or interrupted return preserves the
+# home, and a preserved home must keep its identity. The stash directory is named
+# after the home, not a random mktemp name, so a retry after a killed teardown
+# finds it again: validate_firstmate_home_for_removal restores it before it
+# decides whether the home is still a seeded secondmate home.
+FM_HOME_IDENTITY_FILES=".fm-secondmate-home .fm-secondmate-parent"
+
+firstmate_home_identity_backup_path() {  # <abs-home>
+  local home=$1 key
+  key=$(printf '%s' "$home" | cksum | awk '{print $1}')
+  printf '%s/.fm-identity-restore.%s.%s\n' "${home%/*}" "${home##*/}" "$key"
+}
+
+stash_firstmate_home_identity() {  # <abs-home> <label>
+  local home=$1 label=$2 backup="" name path
+  for name in $FM_HOME_IDENTITY_FILES; do
+    path="$home/$name"
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    if [ -z "$backup" ]; then
+      backup=$(firstmate_home_identity_backup_path "$home")
+      if [ -e "$backup" ] || [ -L "$backup" ] || ! (umask 077; mkdir -- "$backup"); then
+        echo "REFUSED: cannot stage recoverable home-identity files for $label $home at $backup" >&2
+        return 1
+      fi
+    fi
+    if ! mv -- "$path" "$backup/$name"; then
+      restore_firstmate_home_identity "$home" "$label" "$backup" || true
+      echo "REFUSED: cannot clear the home-identity file $path for $label $home" >&2
+      return 1
+    fi
+  done
+  printf '%s\n' "$backup"
+}
+
+restore_firstmate_home_identity() {  # <abs-home> <label> <backup>
+  local home=$1 label=$2 backup=$3 name path
+  [ -n "$backup" ] || return 0
+  [ -d "$backup" ] && [ ! -L "$backup" ] || {
+    echo "error: home-identity restoration failed for $label $home; recovery backup is unavailable at $backup" >&2
+    return 1
+  }
+  for name in $FM_HOME_IDENTITY_FILES; do
+    path="$backup/$name"
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    if [ -e "$home/$name" ] || [ -L "$home/$name" ] || ! mv -- "$path" "$home/$name"; then
+      echo "error: home-identity restoration failed for $label $home; recover $name from $backup" >&2
+      return 1
+    fi
+  done
+  rm -rf -- "$backup"
+}
+
+# Put back identity files an earlier, interrupted retirement staged aside. A
+# surviving backup does not prove the lease is still held: a teardown killed
+# after `treehouse return` succeeded but before it deleted the backup leaves one
+# behind a slot the pool may already have handed to someone else. The durable
+# lease bin/fm-home-seed.sh took under the secondmate id is the one record of who
+# holds the slot, so restore only while that lease is still this secondmate's;
+# a lease held by anyone else (or by nobody), or one that cannot be read,
+# refuses and keeps the backup. Restoring otherwise would stamp the new holder's
+# worktree as this secondmate's home and the retry would return it.
+firstmate_home_lease_holder() {  # <abs-home>
+  local home=$1 out rows path holder
+  command -v jq >/dev/null 2>&1 || return 1
+  out=$( (cd "$FM_ROOT" && treehouse status --json) 2>/dev/null) || return 1
+  rows=$(printf '%s' "$out" | jq -er '.[] | [.path, (.lease_holder // "")] | @tsv' 2>/dev/null) || return 1
+  while IFS=$'\t' read -r path holder; do
+    [ -n "$path" ] && [ "$(cd "$path" 2>/dev/null && pwd -P)" = "$home" ] || continue
+    printf '%s\n' "$holder"
+    return 0
+  done <<EOF
+$rows
+EOF
+  return 1
+}
+
+recover_firstmate_home_identity() {  # <abs-home> <label> <secondmate-id>
+  local home=$1 label=$2 id=${3:-} backup holder
+  backup=$(firstmate_home_identity_backup_path "$home")
+  [ -e "$backup" ] || [ -L "$backup" ] || return 0
+  if ! holder=$(firstmate_home_lease_holder "$home"); then
+    echo "REFUSED: $label $home has a recoverable home-identity backup at $backup, but its treehouse lease cannot be read (treehouse status --json from $FM_ROOT), so the slot cannot be proved to still be this secondmate's; nothing was restored or returned. Re-run teardown once the lease can be read." >&2
+    return 1
+  fi
+  if [ -z "$id" ] || [ "$holder" != "$id" ]; then
+    echo "REFUSED: $label $home was already returned by an interrupted retirement; its treehouse lease is now ${holder:+held by }${holder:-not held}, not by secondmate ${id:-unknown}, so its home identity was not restored and the slot was not returned. The leftover backup at $backup is no longer needed once that is confirmed." >&2
+    return 1
+  fi
+  restore_firstmate_home_identity "$home" "$label" "$backup" || return 1
+  echo "teardown: restored the interrupted retirement's home-identity files for $label $home" >&2
 }
 
 cleanup_firstmate_home_process_events() {

@@ -920,6 +920,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-kimi-trust-lib.sh
@@ -4306,6 +4308,84 @@ real_path_or_raw() { # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 
+# Reject or clear a secondmate-home identity marker left behind in a leased task
+# worktree. Pool slots are reused: bin/fm-home-seed.sh seeds a secondmate home
+# into the same kind of slot a crewmate task later leases, and a `treehouse
+# return` restores tracked content without removing gitignored files, so a slot
+# that once held a secondmate home comes back still carrying its
+# .fm-secondmate-home marker. bin/fm-primary-scope-lib.sh force-includes any
+# marked root as a primary home, so that leftover marker makes every
+# primary-only guard - the subagent pre-tool check, the turn-end guard, the
+# session-start nudge, and the Claude Stop auto-arm - fire inside an ordinary
+# task worktree.
+#
+# Decide by identity, never by shape. A genuine secondmate home is a linked
+# worktree too (docs/turnend-guard.md), so "linked worktree" cannot distinguish
+# a stale marker from a live home. The leftover is cleared only when this home
+# can prove it owned and retired it: the durable .fm-secondmate-parent binding a
+# seed writes beside the marker names this home as the parent, and the marker's
+# id is no longer registered here. Every other case is refused with its cause:
+# an id still registered here is the pool handing out a LIVE secondmate's home,
+# and a binding naming another parent (or no readable local binding at all)
+# means only that parent can tell whether the home is retired.
+spawn_clear_stale_secondmate_marker() {  # <worktree> <source> <inspect-target>
+  local wt=$1 source=$2 inspect_target=$3 marker parent id bound_home this_home reg reg_entry grep_rc
+  # A secondmate spawn launches INTO a home whose marker is the point, so this
+  # hygiene is for task worktrees only.
+  [ "$KIND" != secondmate ] || return 0
+  marker="$wt/$SUB_HOME_MARKER"
+  parent="$wt/.fm-secondmate-parent"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  id=
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    IFS= read -r id < "$marker" 2>/dev/null || id=
+    id=${id//[[:space:]]/}
+  fi
+  case "$id" in *[!A-Za-z0-9._-]*) id= ;; esac
+  # Only a registry that reads cleanly and has no line for the id proves the
+  # secondmate was retired; an unreadable or unsafe registry, or a malformed or
+  # duplicated entry, proves nothing and must not cost a live home its identity.
+  reg="$DATA/secondmates.md"
+  reg_entry=error
+  if [ -n "$id" ]; then
+    if [ ! -e "$reg" ] && [ ! -L "$reg" ]; then
+      reg_entry=missing
+    elif secondmate_registry_field "$reg" "$id" home >/dev/null 2>&1; then
+      reg_entry=registered
+    elif [ -f "$reg" ] && [ ! -L "$reg" ]; then
+      grep_rc=0
+      grep -Eq -- "^- ${id//./[.]}( |\$)" "$reg" 2>/dev/null || grep_rc=$?
+      [ "$grep_rc" -ne 1 ] || reg_entry=missing
+    fi
+  fi
+  if [ "$reg_entry" = registered ]; then
+    echo "error: $source handed back '$wt', which is the home of secondmate '$id', still registered in $reg; refusing to launch a task into a live secondmate home. Retire secondmate '$id' first. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  if [ -n "$id" ] && [ "$reg_entry" = error ]; then
+    echo "error: $source handed back '$wt', which carries the secondmate-home marker of '$id', but $reg cannot be read to confirm '$id' was retired (unreadable, unsafe, or a malformed or duplicated entry); refusing to launch a task into it and keeping its identity. Repair $reg, then retry. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  bound_home=
+  if fm_secondmate_parent_record_parse "$parent" && [ "$FM_SECONDMATE_PARENT_ROUTE" = local ]; then
+    bound_home=$(cd "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || bound_home=$FM_SECONDMATE_PARENT_HOME
+  fi
+  if [ -z "$id" ] || [ -z "$bound_home" ]; then
+    echo "error: $source handed back '$wt', which carries the secondmate-home marker of '${id:-unreadable}' without a readable id and local parent binding (.fm-secondmate-parent), so this home cannot confirm it retired that secondmate; refusing to launch a task into it. Clean the slot from the parent home that provisioned it. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  this_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || this_home=$FM_HOME
+  if [ "$bound_home" != "$this_home" ]; then
+    echo "error: $source handed back '$wt', which carries the identity of secondmate '$id' bound to parent home '$bound_home', not this home '$this_home'; refusing to launch a task into it. Retire or clean that secondmate from '$bound_home'. Inspect target $inspect_target" >&2
+    exit 1
+  fi
+  rm -f -- "$marker" "$parent" || {
+    echo "error: could not clear the stale secondmate identity ('$marker', '$parent'); refusing to launch because every primary-home guard would misfire in this task worktree. Inspect target $inspect_target" >&2
+    exit 1
+  }
+  echo "notice: cleared a stale secondmate-home marker ('$id') retired from this home, left in leased worktree $wt" >&2
+}
+
 # True when <path> is an isolated worktree of the spawning project: a real
 # directory that is its own worktree root, is not the spawning project itself,
 # and does not share the project repository's common git dir. SPAWN_WT_TOP is
@@ -4394,6 +4474,7 @@ validate_spawn_worktree() { # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  spawn_clear_stale_secondmate_marker "$WT" "$source" "$inspect_target"
 }
 
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
