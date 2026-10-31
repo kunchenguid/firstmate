@@ -1565,6 +1565,133 @@ test_arm_refuses_a_disposable_validation_checkout() {
   pass "watch-arm: a disposable validation checkout refuses to arm"
 }
 
+# Arm a fresh watcher whose own startup first runs <startup-snippet>, standing
+# in for a host so loaded that the forked watcher needs longer than the arm's
+# one-second confirmation window to take its lock and beat. BASH_ENV injects the
+# snippet, gated on the watcher's script name so the arm and every other bash
+# process start normally. Extra VAR=value assignments reach the arm unchanged.
+start_slowed_arm() {  # <dir> <startup-snippet> [VAR=value...]
+  local dir=$1 snippet=$2
+  shift 2
+  # shellcheck disable=SC2016 # $0 is expanded by the watcher, not here.
+  printf 'case "$0" in */fm-watch.sh) %s ;; esac\n' "$snippet" > "$dir/watcher-start.sh"
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=1 BASH_ENV="$dir/watcher-start.sh" "$@" "$WATCH_ARM" > "$dir/arm.out" 2>&1 &
+  ARM_PID=$!
+}
+
+# A heavily loaded host can keep a freshly forked watcher from beating within
+# the confirmation window while it is still working through startup. The arm
+# used to TERM that live child at the deadline and report confirmation-timeout,
+# so every retry repeated the same cold start and supervision stayed down. A
+# start that keeps consuming CPU must instead be confirmed once it beats.
+test_arm_confirms_a_slow_watcher_start_that_keeps_progressing() {
+  local dir i status
+  dir=$(make_case slow-progressing-start)
+  mkdir -p "$dir/home/data"
+  # shellcheck disable=SC2016 # The watcher's own shell expands the snippet.
+  start_slowed_arm "$dir" 'end=$((SECONDS + 4)); while [ "$SECONDS" -lt "$end" ]; do :; done'
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -q '^watcher: ' "$dir/arm.out" 2>/dev/null && break
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q '^watcher: started pid=' "$dir/arm.out" \
+    || fail "arm gave up on a slow watcher start that kept progressing: $(cat "$dir/arm.out")"
+  ! grep -q 'reason=confirmation-timeout' "$dir/state/.watch-cycle-exits.log" 2>/dev/null \
+    || fail "arm ledgered a confirmation timeout for a start it went on to confirm"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/state" "$WATCH_ARM" --stop >/dev/null 2>&1
+  wait_for_exit "$ARM_PID" 100
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm did not close after its confirmed watcher stopped"
+  pass "watch-arm: a slow watcher start that keeps progressing is confirmed, not killed at the window"
+}
+
+# The extension is earned by progress, so a start that stops consuming CPU
+# still fails at the window rather than holding the arm while it waits.
+test_arm_fails_a_watcher_start_that_stops_progressing() {
+  local dir status
+  dir=$(make_case stalled-start)
+  mkdir -p "$dir/home/data"
+  start_slowed_arm "$dir" 'exec sleep 30'
+  wait_for_exit "$ARM_PID" 150
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm kept waiting on a watcher start with no progress: $(cat "$dir/arm.out")"
+  [ "$status" -ne 0 ] || fail "arm reported success for a stalled watcher start: $(cat "$dir/arm.out")"
+  grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$dir/arm.out" \
+    || fail "arm did not report the typed confirmation failure: $(cat "$dir/arm.out")"
+  grep -q 'reason=confirmation-timeout' "$dir/state/.watch-cycle-exits.log" \
+    || fail "the stalled start was not ledgered as a confirmation timeout"
+  pass "watch-arm: a watcher start that stops progressing still fails at the confirmation window"
+}
+
+# Owners stop an arm that misses their own readiness budget and allow it only a
+# short bound to exit (Pi/OpenCode 1s, then the supervision host's KILL that
+# would orphan the watcher). An extended window must not lengthen that exit, so
+# a signal past the first window stops the slow watcher at once.
+test_arm_exits_promptly_when_stopped_during_an_extended_window() {
+  local dir status watcher_pid
+  dir=$(make_case signalled-extended-start)
+  mkdir -p "$dir/home/data"
+  start_slowed_arm "$dir" 'while :; do :; done' FM_ARM_CONFIRM_TIMEOUT=5
+  # Past the first six-second window, early in the second.
+  sleep 8
+  is_live_non_zombie "$ARM_PID" \
+    || fail "arm ended before its extended window: $(cat "$dir/arm.out")"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 25
+  status=$?
+  [ "$status" -ne 124 ] || fail "a stopped arm kept waiting on its slow watcher's extended window"
+  watcher_pid=$(tr '\t' '\n' < "$dir/state/.watch-cycle-exits.log" | sed -n 's/^watcher_pid=//p' | tail -1)
+  [ -n "$watcher_pid" ] || fail "the interrupted cycle was not ledgered"
+  ! is_live_non_zombie "$watcher_pid" || fail "a stopped arm left its watcher pid $watcher_pid running"
+  pass "watch-arm: an arm stopped during an extended window exits at once and stops its watcher"
+}
+
+# Progress never extends the wait past the liveness grace: a start that spins
+# without ever beating is reported once FM_GUARD_GRACE has elapsed.
+test_arm_bounds_a_progressing_watcher_start_by_the_grace() {
+  local dir status
+  dir=$(make_case spinning-start)
+  mkdir -p "$dir/home/data"
+  start_slowed_arm "$dir" 'while :; do :; done' FM_GUARD_GRACE=4
+  wait_for_exit "$ARM_PID" 150
+  status=$?
+  [ "$status" -ne 124 ] || fail "arm followed a spinning watcher start past the grace: $(cat "$dir/arm.out")"
+  grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$dir/arm.out" \
+    || fail "arm did not report the typed confirmation failure: $(cat "$dir/arm.out")"
+  grep -q 'reason=confirmation-timeout' "$dir/state/.watch-cycle-exits.log" \
+    || fail "the spinning start was not ledgered as a confirmation timeout"
+  pass "watch-arm: progress never extends a watcher start's confirmation past the grace"
+}
+
+# A grace shorter than the confirmation window keeps the full first window but
+# grants no extension: a start that spins past that window and would beat once
+# it finishes is reported at the first window, never cut short at the grace.
+test_arm_keeps_the_first_window_but_grants_no_extension_past_a_shorter_grace() {
+  local dir status started elapsed
+  dir=$(make_case spinning-start-short-grace)
+  mkdir -p "$dir/home/data"
+  started=$SECONDS
+  # shellcheck disable=SC2016 # The watcher's own shell expands the snippet.
+  start_slowed_arm "$dir" 'end=$((SECONDS + 9)); while [ "$SECONDS" -lt "$end" ]; do :; done' \
+    FM_ARM_CONFIRM_TIMEOUT=4 FM_GUARD_GRACE=1
+  wait_for_exit "$ARM_PID" 300
+  status=$?
+  elapsed=$((SECONDS - started))
+  [ "$status" -ne 124 ] || fail "arm never ended on a spinning watcher start: $(cat "$dir/arm.out")"
+  [ "$elapsed" -ge 4 ] \
+    || fail "arm gave up after ${elapsed}s, before its 5s first window ended: $(cat "$dir/arm.out")"
+  grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$dir/arm.out" \
+    || fail "arm extended past a 1s grace and confirmed the slow start: $(cat "$dir/arm.out")"
+  grep -q 'reason=confirmation-timeout' "$dir/state/.watch-cycle-exits.log" \
+    || fail "the spinning start was not ledgered as a confirmation timeout"
+  pass "watch-arm: a grace shorter than the window keeps the first window and grants no extension"
+}
+
 # Start a real watcher through the real arm for a temporary home and set
 # WATCH_PID from the arm's started line. Both stdout and stderr land in <arm-out>
 # so the watcher's own exit reason, which it logs to stderr, is readable there.
@@ -1969,6 +2096,11 @@ test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
 test_arm_refuses_a_disposable_validation_checkout
+test_arm_confirms_a_slow_watcher_start_that_keeps_progressing
+test_arm_fails_a_watcher_start_that_stops_progressing
+test_arm_exits_promptly_when_stopped_during_an_extended_window
+test_arm_bounds_a_progressing_watcher_start_by_the_grace
+test_arm_keeps_the_first_window_but_grants_no_extension_past_a_shorter_grace
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
 test_attached_arm_exits_when_its_root_is_removed

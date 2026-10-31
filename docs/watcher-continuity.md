@@ -169,7 +169,7 @@ Claude's Stop hook also starts one handling successor before notification.
 After an actionable foreground close, including an attached peer cycle that ended, the hook:
 
 1. Launches `bin/fm-watch-arm.sh` with the closed arm's pid as `FM_WATCH_PREDECESSOR_ARM_PID`.
-2. Waits for that arm's one status line.
+2. Waits for that arm's one status line, until the arm exits or the larger of the hook's guard grace and the arm's full first confirmation window, plus a few seconds, elapses, because the arm never shortens its first window and extends further windows for a watcher still making progress up to that grace.
 3. Only then exits 2 with the wake.
 
 A child of the hook cannot outlive its exit-2 rewake.
@@ -469,6 +469,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - An external append beside a handling successor's inherited rows that surfaces both before and after the prior handling turn acknowledges its rows, including after a lost or malformed sequence counter and when the new row repeats an acknowledged inherited row byte for byte.
 - A watcher close inside the handling window that must leave the printed acknowledgement valid.
 - A re-arm whose recovery cycle is slowed after confirmation and must still surface rather than read as a watcher that stayed live.
+- A slow watcher start still consuming CPU that keeps earning confirmation windows up to the grace, while a stalled start, a start past the grace, or a grace shorter than the first window ends with a `confirmation-timeout` failure.
 - The self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 - The already-acknowledged confirmation no-op for a matching generation, with its mismatched-generation, dead-pid, and lock-mismatch rejections preserved.
 - The manual-restart generation churn that makes a confirmation for the churned generation report a mismatch, which an arm check without a reopen leaves in place.
@@ -515,7 +516,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - One-notice failure episodes.
 - Exit-2 translation.
 - The handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake.
-- An unconfirmed successor reported in the banner without withholding the wake.
+- An unconfirmed successor reported in the banner without withholding the wake, a successor confirming past `FM_ARM_CONFIRM_TIMEOUT` or inside a first window longer than the grace still confirmed, and a silent successor bounded by the grace.
 - Host-timeout HUP/TERM/INT translation into the same durable failure handoff.
 
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim.

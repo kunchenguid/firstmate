@@ -501,13 +501,22 @@ run_arm() {  # <output file, or empty for none>
 # successor receives the closed arm's pid as FM_WATCH_PREDECESSOR_ARM_PID; it
 # must outlive this hook's exit, so it is detached three ways: nohup, stdio
 # away from the hook's pipes, and its own process group. Its one status line
-# is awaited within the arm's own confirmation budget plus slack. Sets
-# SUCCESSOR_FAILURE to the banner line for an unconfirmed successor.
+# is awaited until the successor exits or the larger of GRACE and the arm's
+# full first window (FM_ARM_CONFIRM_TIMEOUT plus one) elapses, plus startup
+# slack: the arm never shortens its first window, and keeps extending further
+# windows for a watcher still making progress up to the FM_GUARD_GRACE passed
+# to it. Sets SUCCESSOR_FAILURE to the banner line for an unconfirmed successor.
 SUCCESSOR_FAILURE=
 start_handling_successor() {  # <closed-arm-pid>
-  local out pid deadline budget line monitor_was_on=0
-  budget=${FM_ARM_CONFIRM_TIMEOUT:-30}
-  case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
+  local out pid deadline budget window line monitor_was_on=0
+  budget=$GRACE
+  case "$budget" in ''|*[!0-9]*) budget=300 ;; esac
+  case "${OSTYPE:-}" in
+    msys*|mingw*|cygwin*) window=${FM_ARM_CONFIRM_TIMEOUT:-30} ;;
+    *) window=${FM_ARM_CONFIRM_TIMEOUT:-10} ;;
+  esac
+  case "$window" in ''|*[!0-9]*) window=30 ;; esac
+  [ "$(( window + 1 ))" -le "$budget" ] || budget=$(( window + 1 ))
   if ! out=$(mktemp "$STATE/.claude-autoarm-successor.XXXXXX"); then
     SUCCESSOR_FAILURE='The handling successor did not confirm a live watcher (its output file could not be created); this handling turn runs uncovered until the next turn end re-arms.'
     return 1
@@ -518,13 +527,19 @@ start_handling_successor() {  # <closed-arm-pid>
     nohup "$SCRIPT_DIR/fm-watch-arm.sh" >"$out" 2>&1 </dev/null &
   pid=$!
   [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
-  deadline=$(( $(date +%s) + budget + 2 ))
+  deadline=$(( $(date +%s) + budget + 5 ))
   while :; do
     if grep -Eq '^watcher: (started|attached) pid=[0-9]+' "$out" 2>/dev/null; then
       rm -f "$out" 2>/dev/null || true
       return 0
     fi
     grep -q '^watcher: FAILED' "$out" 2>/dev/null && break
+    if ! kill -0 "$pid" 2>/dev/null; then
+      # An arm that confirmed and then exited still leaves its started line.
+      grep -Eq '^watcher: (started|attached) pid=[0-9]+' "$out" 2>/dev/null \
+        && { rm -f "$out" 2>/dev/null || true; return 0; }
+      break
+    fi
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 0.2
   done

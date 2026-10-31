@@ -153,6 +153,8 @@ GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
 # Git Bash/MSYS pays a much higher fork cost while the watcher completes its
 # required pre-lock migration, so its bounded default covers that cold start.
+# A child still consuming CPU when a window ends is slow, not wedged, so it is
+# granted further windows up to GRACE after its start (owned_child_progressed).
 case "${OSTYPE:-}" in
   msys*|mingw*|cygwin*) ARM_CONFIRM_DEFAULT=30 ;;
   *) ARM_CONFIRM_DEFAULT=10 ;;
@@ -367,7 +369,8 @@ fail_arm_ground_gone() {
   return 1
 }
 
-# Give a successor the same bounded confirmation window used for a fresh child.
+# Give a successor one window as long as a fresh child's first confirmation
+# window, with no progress extensions.
 # Adapter-owned continuations normally win immediately, but the bound avoids a
 # false failure when process-close delivery and lock publication cross briefly.
 wait_for_healthy_successor() {
@@ -704,7 +707,7 @@ handle_arm_signal() {
     # publishing the home-bound lock identity. Do not TERM it in the middle of
     # stale-lock acquisition: that can abandon the steal mutex. Let startup
     # reach that cleanup-ready point (or exit naturally) before forwarding TERM,
-    # but never past the startup confirmation deadline.
+    # but never past the first confirmation window's deadline.
     while fm_pid_alive "$child"; do
       if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$child" "$FM_HOME" \
         || [ "$(date +%s)" -ge "$deadline" ]; then
@@ -729,8 +732,13 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   exit 1
 }
 # date(1) exposes whole seconds. Keep the configured confirmation budget from
-# collapsing when startup begins just before the next second boundary.
-deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+# collapsing when startup begins just before the next second boundary. The
+# first window is always the full budget; GRACE caps only the further windows
+# owned_child_progressed grants, so a shorter grace grants no extension.
+confirm_start=$(date +%s)
+deadline=$(( confirm_start + CONFIRM_TIMEOUT + 1 ))
+window_end=$deadline
+confirm_limit=$(( confirm_start + GRACE ))
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
@@ -739,6 +747,39 @@ fi
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
+
+# Print the CPU time the child has consumed, as an opaque value that changes
+# only while it runs: utime+stime ticks from a Linux-compatible /proc (Linux,
+# Git Bash/MSYS), else ps(1)'s cumulative time. Empty when neither is readable.
+child_cpu_time() {
+  local stat_line
+  local -a stat_fields
+  if [ -r "/proc/$child/stat" ]; then
+    stat_line=$(cat "/proc/$child/stat" 2>/dev/null) || return 0
+    # After the final comm delimiter, indexes 11 and 12 are stat fields 14 and 15.
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    printf '%s+%s\n' "${stat_fields[11]:-}" "${stat_fields[12]:-}"
+  else
+    ps -o time= -p "$child" 2>/dev/null
+  fi
+}
+child_cpu=$(child_cpu_time)
+
+# At the end of a confirmation window, true when the child consumed CPU during
+# it and GRACE has not elapsed since its start; it then opens the next window.
+# A window with no CPU progress, or the grace running out, ends the wait. Only
+# the first window bounds a signal's wait (handle_arm_signal), so an owner that
+# stops this arm past it still sees it exit promptly.
+owned_child_progressed() {
+  local now cpu
+  now=$(date +%s)
+  [ "$now" -lt "$confirm_limit" ] || return 1
+  cpu=$(child_cpu_time)
+  [ -n "$cpu" ] && [ "$cpu" != "$child_cpu" ] || return 1
+  child_cpu=$cpu
+  window_end=$(( now + CONFIRM_TIMEOUT + 1 ))
+  [ "$window_end" -le "$confirm_limit" ] || window_end=$confirm_limit
+}
 
 owned_child_finished() {
   local rc=$1 signal reason_type status
@@ -850,7 +891,9 @@ while :; do
     fail_arm_ground_gone
     exit 1
   fi
-  [ "$(date +%s)" -ge "$deadline" ] && break
+  if [ "$(date +%s)" -ge "$window_end" ]; then
+    owned_child_progressed || break
+  fi
   sleep 0.2
 done
 

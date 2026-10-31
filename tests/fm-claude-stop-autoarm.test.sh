@@ -97,7 +97,8 @@ write_arm_fixture() {
   # successor (FM_WATCH_PREDECESSOR_ARM_PID set) is recorded apart in
   # state/successor-ran so attempt counts stay about the foreground; it confirms
   # a started watcher and exits, parks while state/successor-park exists, or
-  # fails while state/successor-fail exists.
+  # fails while state/successor-fail exists. state/successor-delay holds seconds
+  # to wait before reporting; state/successor-silent parks it without a report.
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
@@ -106,6 +107,8 @@ if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
     printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
     exit 1
   fi
+  while [ -e "$FM_HOME/state/successor-silent" ]; do sleep 0.05; done
+  [ ! -e "$FM_HOME/state/successor-delay" ] || sleep "$(cat "$FM_HOME/state/successor-delay")"
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
   while [ -e "$FM_HOME/state/successor-park" ]; do sleep 0.05; done
   exit 0
@@ -568,6 +571,53 @@ test_unconfirmed_handling_successor_still_rewakes() {
   assert_contains "$out" "watcher: FAILED - no live watcher with a fresh beacon" "the rewake must carry the successor's own failure line"
   [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq 1 ] || fail "the failed successor must not be retried inside the rewake path"
   pass "auto-arm: an unconfirmed handling successor is reported in the rewake instead of blocking it"
+}
+
+# The arm keeps extending its confirmation windows for a watcher still making
+# progress, up to FM_GUARD_GRACE, so the hook must not give up on a successor at
+# FM_ARM_CONFIRM_TIMEOUT.
+test_late_reporting_handling_successor_is_confirmed() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/successor-late")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" attached-delivered
+  printf '5\n' > "$dir/state/successor-delay"
+  out=$(FM_ARM_CONFIRM_TIMEOUT=1 FM_GUARD_GRACE=30 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a late-confirming handling successor must still rewake"
+  assert_contains "$out" "signal: task.status done: fixture peer cycle ended" "rewake must carry the delivered reason"
+  assert_not_contains "$out" "did not confirm" "a successor confirming past FM_ARM_CONFIRM_TIMEOUT but within grace is confirmed"
+  pass "auto-arm: a handling successor confirming past FM_ARM_CONFIRM_TIMEOUT is still confirmed"
+}
+
+# The arm never shortens its first confirmation window, so a grace below it
+# must not cut the hook's successor wait short.
+test_handling_successor_within_first_window_above_grace_is_confirmed() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/successor-first-window")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" attached-delivered
+  printf '7\n' > "$dir/state/successor-delay"
+  out=$(FM_ARM_CONFIRM_TIMEOUT=8 FM_GUARD_GRACE=1 run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a handling successor confirming inside the first window must still rewake"
+  assert_contains "$out" "signal: task.status done: fixture peer cycle ended" "rewake must carry the delivered reason"
+  assert_not_contains "$out" "did not confirm" "a successor confirming inside the first window is confirmed even with a shorter grace"
+  pass "auto-arm: a handling successor confirming inside a first window longer than the grace is confirmed"
+}
+
+test_silent_handling_successor_is_bounded_by_grace() {
+  local dir out status start elapsed
+  dir=$(make_primary_dir "$TMP_ROOT/successor-silent")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" attached-delivered
+  : > "$dir/state/successor-silent"
+  start=$(date +%s)
+  out=$(FM_ARM_CONFIRM_TIMEOUT=1 FM_GUARD_GRACE=2 run_autoarm "$dir" 2>/dev/null); status=$?
+  elapsed=$(( $(date +%s) - start ))
+  rm -f "$dir/state/successor-silent"
+  expect_code 2 "$status" "a silent handling successor must never withhold the delivered wake"
+  assert_contains "$out" "did not confirm a live watcher" "the rewake must say this turn runs uncovered"
+  [ "$elapsed" -lt 20 ] || fail "the successor wait must stay bounded by FM_GUARD_GRACE plus slack, took ${elapsed}s"
+  pass "auto-arm: a silent handling successor is bounded by the grace cap and reported"
 }
 
 test_failed_close_rewakes_with_failure_banner() {
@@ -2011,6 +2061,9 @@ test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_attached_cycle_end_starts_handling_successor
 test_unconfirmed_handling_successor_still_rewakes
+test_late_reporting_handling_successor_is_confirmed
+test_handling_successor_within_first_window_above_grace_is_confirmed
+test_silent_handling_successor_is_bounded_by_grace
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
