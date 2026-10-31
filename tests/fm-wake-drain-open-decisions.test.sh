@@ -103,14 +103,18 @@ test_large_drain_rows_reach_ready_lookup() {
   printf '# backlog\n' > "$dir/home/data/backlog.md"
   make_fake_tasks_axi_ready "$dir/fakebin"
   payload=$(printf '%0200d' 0)
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
   for ((i = 0; i < 700; i++)); do
-    append_wake "$state" heartbeat "large-$i" "$payload" || fail "queueing large heartbeat $i failed"
+    append_wake "$state" signal "large-$i" "$payload" || fail "queueing large row $i failed"
   done
   out="$dir/large.out"
   run_drain_with_backlog "$dir" "$state" "$out" || fail "large heartbeat drain failed"
   grep -F 'ready-task,2026-10-30' "$out" >/dev/null \
     || fail "large heartbeat rows prevented READY WORK output"
-  pass "large drain rows reach the ready-work lookup"
+  awk -F '\t' '$3 == "signal" && $4 ~ /^large-[0-9]+$/ { bytes += length($0) + 1; rows++ }
+    END { if (rows != 700 || bytes <= 131072) exit 1 }' "$out" \
+    || fail "deduped RAW_ROWS did not contain 700 distinct rows exceeding 128 KiB"
+  pass "more than 128 KiB of distinct drain rows reach the ready-work lookup"
 }
 
 test_stalled_backlog_gate_does_not_block_drain() {
