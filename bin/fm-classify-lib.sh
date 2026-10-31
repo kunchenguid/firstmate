@@ -152,8 +152,9 @@ FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 # log while a log whose tail holds no event still gets a full pass.
 FM_CLASSIFY_EVENT_WINDOW_LINES=200
 
-# Return the last recognized status event, ignoring continuation prose and blanks
-# (empty if missing/blank), and with <previous-event-var> the event before it.
+# Return the last recognized status event, ignoring continuation prose, non-state
+# notes, and blanks (empty if no eligible nonblank line), and with
+# <previous-event-var> the prior event.
 # The optional previous event is what this reader returned before the latest one
 # was appended, so a consumer can name the head it is superseding; asking for it
 # always reads the whole file, since a bounded window cannot bound two events.
@@ -236,7 +237,8 @@ status_prefix_unrecognized() {  # <status-line>
 # Print "<previous event>\n<latest event>" for the status lines on stdin, and
 # return 1 when the stream holds no event at all, so a caller reading a bounded
 # window knows to widen it. A stream without events keeps its last nonblank
-# line as the latest, matching the read this replaced.
+# line other than a non-state note as the latest; warnings cannot declare state
+# even through this fallback (docs/configuration.md "Worker tool exclusions").
 # Keep decision-closing events: skipping a resolved line would revive its opener.
 # A bare legacy free-text line counts as an event only when a captain token leads
 # it, so continuation prose that merely mentions one cannot hide a declaration.
@@ -246,6 +248,7 @@ _fm_status_event_scan() {
   local line last='' prev='' fallback='' legacy_re
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
+    status_line_is_nonstate_note "$line" && continue
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
     _fm_status_line_is_event "$line" "$legacy_re" && { prev=$last; last=$line; }
   done
@@ -253,9 +256,16 @@ _fm_status_event_scan() {
   [ -n "$last" ]
 }
 
+status_line_is_nonstate_note() {
+  local verb
+  status_line_verb "$1" verb
+  [ "$verb" = note ] && [[ "${1%%:*}" =~ [[:space:]]\[state=none\]([[:space:]]|$) ]]
+}
+
 # 0 when a nonblank <line> is a recognized status event for the scan above.
 _fm_status_line_is_event() {  # <line> <legacy-captain-re>
   local verb unstamped
+  status_line_is_nonstate_note "$1" && return 1
   case "$1" in *:*) status_line_verb "$1" verb ;; *) verb='' ;; esac
   _fm_status_verb_recognized "$verb" && return 0
   # Unrecognized verb-shaped prefixes (parked:, holding:, bad corr tokens) stay
@@ -363,8 +373,8 @@ status_is_paused_or_captain_held() {  # <status-line>
 # pause. Only a resolved line for the pause's own phase key (the keyed
 # activity fold's key, where a keyless line is its own phase) retracts it, as
 # does any other later event. A captain-held line counts only while it is the
-# latest event. Bounded like last_status_line: only a tail window made wholly of
-# resolved events widens the read to the whole file.
+# latest event. Bounded like last_status_line: a tail window with no
+# non-resolved event widens the wait scan to the whole file.
 status_declared_wait_line() {  # <status-file>
   local f=$1 last verb resolve legacy_re
   last=$(last_status_line "$f")
@@ -1512,6 +1522,12 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
     while (defined(my $line = <$file>)) {
       next unless $line =~ /[^\s]/;
       $line =~ s/[\r\n]+\z//;
+      my ($head) = split /:/, $line, 2;
+      my ($prefix) = split /\[/, $head, 2;
+      my @words = split " ", $prefix;
+      my $first = shift(@words) // "";
+      my $verb = join " ", $first, grep { !/^corr=[0-9a-fA-F]{16}$/ } @words;
+      next if $verb eq "note" && $head =~ /\s\[state=none\](\s|$)/;
       ($latest, $end) = ($line, $start + tell($file));
     }
     exit 1 unless defined $end;

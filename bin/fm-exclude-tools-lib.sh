@@ -5,13 +5,14 @@
 # docs/configuration.md "Worker tool exclusions" owns the file format and
 # operator contract; bin/fm-spawn.sh's header owns launch-flag mechanics.
 # Name verification belongs inside the worker's loaded-tool registry, never
-# in an out-of-band server connection from these launch-time checks.
+# in an out-of-band server connection from these launch-time checks; these
+# checks only validate entry syntax and the mcp__ server-part shape.
 
 # fm_exclude_tools_names <config-dir>: print the comma-joined names, empty when
 # the file is absent or lists nothing. Non-zero with the reason on stderr when
 # the file or an entry is invalid.
 fm_exclude_tools_names() {
-  local config=$1 file line names='' present
+  local config=$1 file line names='' present server
   file=$config/crew-exclude-tools
   present=$(perl -MErrno=ENOENT -e '
     if (lstat $ARGV[0]) { print 1 }
@@ -33,6 +34,19 @@ fm_exclude_tools_names() {
       echo "error: config/crew-exclude-tools has a malformed entry '$line'; expected one tool name per line using only letters, digits, _ . and - (blank lines and # comment lines are allowed)" >&2
       return 1
     fi
+    case "$line" in
+    mcp__*)
+      # Pi registers MCP tools as mcp__<server>__<tool> with every character
+      # outside [A-Za-z0-9_] in the server part replaced by "_", so a "-" or
+      # "." there can never match. Shape only; never connect to a server.
+      server=${line#mcp__}
+      server=${server%%__*}
+      if [ "${server//[-.]/}" != "$server" ]; then
+        echo "error: config/crew-exclude-tools entry '$line' can never match: Pi names MCP tools mcp__<server>__<tool> with every character outside letters, digits, and _ in the server part replaced by _, so write the server part with _ in place of - and . (for example mcp__${server//[-.]/_}__<tool>)" >&2
+        return 1
+      fi
+      ;;
+    esac
     names="${names:+$names,}$line"
   done <"$file" || {
     echo "error: cannot read config/crew-exclude-tools" >&2

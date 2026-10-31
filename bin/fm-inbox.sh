@@ -1039,6 +1039,7 @@ audio_seconds=$secs"
 # ---------------------------------------------------------------- status
 
 cmd_status() {
+  . "$FM_ROOT/bin/fm-classify-lib.sh"
   local pending=0
   [ -d "$INBOX" ] && pending=$(find "$INBOX" -maxdepth 1 -name '*.note' 2>/dev/null | wc -l | tr -d ' ')
 
@@ -1064,7 +1065,7 @@ cmd_status() {
     kind=$(sed -n 's/^kind=//p' "$m" | head -1)
     mode=$(sed -n 's/^mode=//p' "$m" | head -1)
     last=""
-    [ -f "$STATE/$id.status" ] && last=$(tail -1 "$STATE/$id.status" 2>/dev/null | cut -c1-100)
+    [ -f "$STATE/$id.status" ] && last=$(last_status_line "$STATE/$id.status" | cut -c1-100)
     printf '  %-42s %-6s %-10s %s\n' "$id" "${kind:-?}" "${mode:--}" "${last:-(no events yet)}"
   done
   [ "$any" -eq 1 ] || printf '\n(no workers on deck)\n'

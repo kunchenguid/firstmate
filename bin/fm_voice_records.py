@@ -145,9 +145,9 @@ NOTE_VERB = "note"
 # caring whether the verb is one this module recognises.
 _VERB_SHAPE = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
 
-# Enough tail to hold the last line of a status log. These logs are append-only
-# and grow for the life of a task, while every spoken question reads one per
-# worker, so the read is bounded and seeks rather than scanning from the top.
+# Status logs grow for the life of a task, and every spoken question reads one
+# per worker. Seek to a tail window first to keep ordinary reads cheap; widen to
+# the whole log only when that window holds no eligible event.
 STATUS_TAIL_BYTES = 8192
 
 
@@ -308,7 +308,7 @@ def _parse_backlog(path):
 
 
 def _last_event(state_dir, task_id):
-    """Return (verb, line) from the newest status event in the tail, or (None, None).
+    """Return (verb, line) from the newest eligible status event, or (None, None).
 
     bin/fm-classify-lib.sh remains the owner of status-verb normalization.
     A worker may append plain prose after its own status line - a note to
@@ -323,32 +323,50 @@ def _last_event(state_dir, task_id):
     as prose rather than treated as the event. The bracket matters: status
     metadata sits between the verb and the colon, as in "done [token]:
     shipped it" and "needs-decision [key=api-shape]: which shape". When the
-    tail holds no event at all, the last line is reported exactly as before.
+    tail holds no event at all, the whole log is scanned and its last eligible
+    line is the fallback. Non-state notes are never eligible.
 
-    Only the tail of the log is read; see STATUS_TAIL_BYTES.
+    The tail of the log is read first; see STATUS_TAIL_BYTES.
     """
+    def prefix(text):
+        return text.split(":", 1)[0].split("[", 1)[0].strip()
+
+    def select_event(window):
+        lines = []
+        for text in window.decode("utf-8", errors="replace").splitlines():
+            text = text.strip()
+            if not text:
+                continue
+            words = prefix(text).split()
+            if (words and words[0] == NOTE_VERB
+                    and all(re.fullmatch(r"corr=[0-9a-fA-F]{16}", word)
+                            for word in words[1:])
+                    and re.search(r"\s\[state=none\](\s|$)", text.split(":", 1)[0])):
+                continue
+            lines.append(text)
+        event = next((candidate for candidate in reversed(lines)
+                      if ":" in candidate and _VERB_SHAPE.match(prefix(candidate))), None)
+        return event, lines[-1] if lines else None
+
     path = os.path.join(state_dir, task_id + ".status")
     try:
         with open(path, "rb") as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
-            handle.seek(max(0, size - STATUS_TAIL_BYTES))
+            offset = max(0, size - STATUS_TAIL_BYTES)
+            handle.seek(offset)
             window = handle.read()
+            if offset:
+                window = window.partition(b"\n")[2]
+            line, fallback = select_event(window)
+            if line is None and size > STATUS_TAIL_BYTES:
+                handle.seek(0)
+                line, fallback = select_event(handle.read())
     except OSError:
         return None, None
-    lines = [text.strip() for text in
-             window.decode("utf-8", errors="replace").splitlines() if text.strip()]
-    if not lines:
+    line = line or fallback
+    if line is None:
         return None, None
-
-    def prefix(text):
-        return text.split(":", 1)[0].split("[", 1)[0].strip()
-
-    line = lines[-1]
-    for candidate in reversed(lines):
-        if ":" in candidate and _VERB_SHAPE.match(prefix(candidate)):
-            line = candidate
-            break
 
     verb = NOTE_VERB
     if ":" in line:
