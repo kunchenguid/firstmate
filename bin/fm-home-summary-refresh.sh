@@ -240,12 +240,18 @@ home_summary_reap_attempt() {
 # A ledger published after this attempt started means a newer refresh
 # succeeded, so this attempt's miss must not restore the record it cleared.
 home_summary_record_deadline_miss() {
-  local misses tmp ledger_mtime
+  local misses tmp ledger_mtime tries=0
   trap home_summary_cleanup EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  fm_lock_acquire_wait_max "$REFRESH_LOCK" 1 || return 0
+  # SECONDS ticks whole seconds, so count tries to wait a real 1.5 s inside
+  # the parent's 2 s bound.
+  until fm_lock_try_acquire "$REFRESH_LOCK"; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 15 ] || return 0
+    sleep 0.1
+  done
   HOME_SUMMARY_LOCK_HELD=1
   case "$HOME_SUMMARY_ATTEMPT_EPOCH" in
     ''|*[!0-9]*) ;;
