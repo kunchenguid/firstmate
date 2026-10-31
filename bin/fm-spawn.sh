@@ -414,8 +414,9 @@
 #   even on a host that never had it set.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment, including the
-#   FM_TASK_INBOX export every launch carries (the absolute state/<id>.inbox
-#   path the steering doorbell names). Raw commands must
+#   FM_TASK_TMP export (this task's scratch root) and FM_TASK_INBOX export
+#   (the absolute state/<id>.inbox path the steering doorbell names) every
+#   launch carries. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
@@ -2923,15 +2924,15 @@ launch_template() {
   # spawn answers. The leading shell loop clears every foreign ORCA_*/FM_*
   # marker the pane actually carries at launch time (verified live: ORCA_*
   # values from the launching session's environment reach worker tool
-  # subprocesses through the pane), keeping the three launch-owned names
-  # (FM_TASK_ID, FM_TASK_INBOX, FM_ZELLIJ_SESSION) so the doorbell and backend
+  # subprocesses through the pane), keeping the four launch-owned names
+  # (FM_TASK_ID, FM_TASK_INBOX, FM_TASK_TMP, FM_ZELLIJ_SESSION) so the doorbell and backend
   # plumbing keep working; the fixed `env -u` set clears every harness-identity
   # marker, because polytoken publishes none of its own and does not clear
   # inherited ones. There is no `__EFFORTFLAG__`: polytoken encodes reasoning
   # effort inside the model reference as `<model>(<effort>)`, so the effort
   # axis rides `__MODELFLAG__` after mapping to the nearest compatible
   # level in the installed model's selectable set.
-  polytoken) printf '%s' 'for _fmv in $(env | cut -d= -f1 | grep -E '\''^(ORCA_|FM_)'\''); do case $_fmv in FM_TASK_ID|FM_TASK_INBOX|FM_ZELLIJ_SESSION) ;; *) unset $_fmv ;; esac; done; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u AGENT __POLYTOKENBIN__ --config-dir __POLYTOKENCONFIG__ new --sessions-dir __POLYTOKENSESSIONS__ --facet firstmate-worker --facets-dir __POLYTOKENFACETS__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  polytoken) printf '%s' 'for _fmv in $(env | cut -d= -f1 | grep -E '\''^(ORCA_|FM_)'\''); do case $_fmv in FM_TASK_ID|FM_TASK_INBOX|FM_TASK_TMP|FM_ZELLIJ_SESSION) ;; *) unset $_fmv ;; esac; done; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u AGENT __POLYTOKENBIN__ --config-dir __POLYTOKENCONFIG__ new --sessions-dir __POLYTOKENSESSIONS__ --facet firstmate-worker --facets-dir __POLYTOKENFACETS__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Command Code receives the typed launch envelope after -- as its initial
   # message. --yolo bypasses permission prompts, --trust skips the folder-trust
   # prompt of a fresh worktree, and --skip-onboarding skips taste onboarding.
@@ -2995,15 +2996,9 @@ launch_template() {
   # outer wrap below, like every other non-cursor harness. rovo has no
   # turn-end hook (its eventHooks fire at tool granularity only, never
   # turn-end), so no launch placeholder for one exists.
-  # __ROVOCONFIGOVERRIDE__ (not __EFFORTFLAG__) carries rovo's single
-  # --config-override flag: it always grants allowedExternalPaths for this
-  # task's home-side brief dir, steering inbox, and status file - the file
-  # tool confinement that otherwise blocks the standard
-  # instructions/steering/status/report loop (rovo's bash tool has no such
-  # grant and stays confined to the worktree; the worker's own file tools do
-  # respect the grant, confirmed live) - merged with agent.efficiencyLevel
-  # when a supported effort is requested, since a second --config-override
-  # would silently discard the first (confirmed live).
+  # __ROVOCONFIGOVERRIDE__ (not __EFFORTFLAG__) carries the merged launch
+  # grant and effort override; rovo_config_override_flag owns the allowed
+  # paths, file-tool-only scope, and single-value flag constraint.
   rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____ROVOCONFIGOVERRIDE__' ;;
   *) return 1 ;;
   esac
@@ -3704,23 +3699,26 @@ json_escape() {
 # --config-override itself is single-value (a second occurrence silently
 # discards the first, confirmed live), so this is the ONE place that must
 # also fold in agent.efficiencyLevel when a supported effort was requested.
-# Granted paths are real (symlink-resolved) directories/files under this
-# task's home, matching BRIEF_REAL's own resolution: the brief dir (covers
+# Granted paths are real (symlink-resolved) task-scoped directories/files,
+# matching BRIEF_REAL's own resolution: the brief dir (covers
 # brief.md/launch-brief.md/report.md), the steering inbox directory (covers
-# every steer and its handled/ acknowledgement), and the status file itself.
+# every steer and its handled/ acknowledgement), the status file itself, and
+# the task temp root exported as FM_TASK_TMP for scratch files.
 rovo_config_override_flag() {
-  local effort=$1 data_dir=$2 state_dir=$3 id=$4
-  local data_real state_real agent_json paths_json config_json
+  local effort=$1 data_dir=$2 state_dir=$3 id=$4 task_tmp=$5
+  local data_real state_real temp_real agent_json paths_json config_json
   data_real=$(cd "$data_dir" && pwd -P) || return 1
   state_real=$(cd "$state_dir" && pwd -P) || return 1
+  temp_real=$(cd "$task_tmp" && pwd -P) || return 1
   agent_json=
   case "$effort" in
   low | medium | high | max) agent_json="\"agent\":{\"efficiencyLevel\":\"$(json_escape "$effort")\"}," ;;
   esac
-  paths_json=$(printf '"%s","%s","%s"' \
+  paths_json=$(printf '"%s","%s","%s","%s"' \
     "$(json_escape "$data_real/$id")" \
     "$(json_escape "$state_real/$id.inbox")" \
-    "$(json_escape "$state_real/$id.status")")
+    "$(json_escape "$state_real/$id.status")" \
+    "$(json_escape "$temp_real")")
   config_json="{${agent_json}\"toolPermissions\":{\"allowedExternalPaths\":[$paths_json]}}"
   printf -- '--config-override %s ' "$(shell_quote "$config_json")"
 }
@@ -7133,7 +7131,7 @@ else
   LAUNCH=${LAUNCH//__CLAUDEATTRIBUTION__/,'"attribution":{"commit":"","pr":"","sessionUrl":false}'}
 fi
 if [ "$HARNESS" = rovo ]; then
-  ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {
+  ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID" "$TASK_TMP") || {
     echo "error: could not resolve this task's home paths for rovo's allowedExternalPaths grant" >&2
     exit 1
   }
@@ -7348,6 +7346,8 @@ fi
 # "$FM_TASK_INBOX" instead of a path that grows with the home's depth. Like the
 # kill switch below it is an export statement, so it survives a compound raw
 # launch and the launch-env-allowlist `env -i` wrapper.
+# The scratch-root rule likewise needs no access to the private task metadata.
+LAUNCH="export FM_TASK_TMP=$(shell_quote "$TASK_TMP"); $LAUNCH"
 LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 # When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
@@ -7396,7 +7396,7 @@ if [ "$BACKEND" = t3code ]; then
   # (spawn_t3code_env_install). TRACEPARENT is delivered only once its meta
   # record exists, the same delivered-implies-recorded invariant the pane path
   # keeps by unsetting it when the record fails.
-  T3CODE_ENV=("GOTMPDIR=$TASK_TMP/gotmp" COMPACT_ADVISER_DISABLE=1 "FM_TASK_INBOX=$STATE_REAL/$ID.inbox")
+  T3CODE_ENV=("GOTMPDIR=$TASK_TMP/gotmp" COMPACT_ADVISER_DISABLE=1 "FM_TASK_INBOX=$STATE_REAL/$ID.inbox" "FM_TASK_TMP=$TASK_TMP")
   if [ "$GIT_HOOKS_INSTALLED" = 1 ]; then
     T3CODE_ENV+=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath "GIT_CONFIG_VALUE_0=$GIT_HOOKS_DIR")
   fi
