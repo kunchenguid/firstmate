@@ -187,7 +187,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # Shared wake classifier (last_status_line, status_is_captain_relevant,
 # window_to_task, and the status-span reader). The SAME library backs the
 # always-on watcher's triage, so the captain-relevant verb set and the
-# classification predicates have exactly one definition.
+# classification predicates have exactly one definition. The hold-status
+# library then replaces the status readers with ones that honor a captain
+# hold's mirror lines, as the watcher's do.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-hold-status-lib.sh
@@ -241,7 +243,8 @@ INJECT_LAST_VERDICT=
 INJECT_SENT_MSG=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, and the status-span reader) now
-# live in bin/fm-classify-lib.sh, shared with the always-on watcher.
+# live in bin/fm-classify-lib.sh and bin/fm-hold-status-lib.sh, shared with
+# the always-on watcher.
 # Composer-empty detection, submit acknowledgement, and the harness-scoped
 # supervisor-pane busy guard live in bin/fm-tmux-lib.sh.
 # FM_BUSY_REGEX also overrides Grok's isolated task-state fallback.
@@ -371,9 +374,10 @@ _collapse_newlines() {  # <text>
 
 # --- classification helpers (PURE: no side effects, testable) ---------------
 # last_status_line, status_is_captain_relevant, window_to_task, and the
-# status-span reader come from bin/fm-classify-lib.sh (sourced above),
-# the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
-# and dedup state below layer the daemon's escalation-digest concerns on top.
+# status-span reader come from bin/fm-classify-lib.sh and
+# bin/fm-hold-status-lib.sh (sourced above), the single classifier shared with
+# bin/fm-watch.sh. The decision-string wrappers and dedup state below layer the
+# daemon's escalation-digest concerns on top.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
 # form "<action>|<distilled>" where action is "self" or "escalate". The distilled
