@@ -1574,7 +1574,7 @@ treehouse_pool_report() {
     while IFS= read -r slot_record; do
       slot=$(printf '%s\n' "$slot_record" | jq -r '.path // ""')
       created_at=$(printf '%s\n' "$slot_record" | jq -r '.created_at // ""')
-      slot_leased=$(printf '%s\n' "$slot_record" | jq -r '.leased // false')
+      slot_leased=$(printf '%s\n' "$slot_record" | jq -r '(.leased == true) or ((.lease_id // "") != "") or ((.lease_holder // "") != "")')
       slot_owner=$(printf '%s\n' "$slot_record" | jq -r '.owner_pid // ""')
       repo=$(git -C "$slot" rev-parse --show-toplevel 2>/dev/null) || repo=
       common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
