@@ -126,6 +126,7 @@
 # with it unset, a daemon start/refresh uses the record's mode.
 # FM_TEST_HARNESS pins the primary harness this launch path judges, through
 # fm_supervision_host_primary (bin/fm-supervision-engine-lib.sh owns the seam).
+# FM_AFK_LAUNCH_TARGET_PROBE overrides the endpoint probe only with FM_TEST_SEAM=1.
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -787,6 +788,14 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
 # FM_AFK_LAUNCH_CAPTAIN_BACKEND on success.
 FM_AFK_LAUNCH_CAPTAIN_TARGET=""
 FM_AFK_LAUNCH_CAPTAIN_BACKEND=""
+fm_afk_launch_target_exists() {
+  if [ "${FM_TEST_SEAM:-}" = 1 ] && [ -n "${FM_AFK_LAUNCH_TARGET_PROBE:-}" ]; then
+    "$FM_AFK_LAUNCH_TARGET_PROBE" "$1" "$2"
+  else
+    fm_backend_target_exists "$1" "$2"
+  fi
+}
+
 fm_afk_launch_capture_captain() {
   local target backend
   target=$(discover_supervisor_target) || {
@@ -797,6 +806,10 @@ fm_afk_launch_capture_captain() {
     return 1; }
   if ! fm_supervisor_backend_supported "$backend"; then
     fm_afk_launch_log "away supervision does not support supervisor backend '$backend' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); refusing to arm away mode. Run firstmate inside a supported session, or set FM_SUPERVISOR_BACKEND/FM_SUPERVISOR_TARGET explicitly"
+    return 1
+  fi
+  if ! fm_afk_launch_target_exists "$backend" "$target"; then
+    fm_afk_launch_log "supervisor target '$target' does not resolve to a $backend endpoint; refusing to arm away mode. Set FM_SUPERVISOR_TARGET to firstmate's own pane"
     return 1
   fi
   FM_AFK_LAUNCH_CAPTAIN_TARGET=$target

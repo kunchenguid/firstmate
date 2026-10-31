@@ -31,6 +31,8 @@ CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 # the CLAUDECODE=1 marker below and refuse the daemon paths under test.
 unset PI_CODING_AGENT FM_PI_HARNESS CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI
 export CLAUDECODE=1 FM_TEST_HARNESS=claude FM_TEST_SEAM=1
+export FM_AFK_LAUNCH_TARGET_PROBE
+FM_AFK_LAUNCH_TARGET_PROBE=$(command -v true)
 # A Claude home runs the supervision host unless config/supervision-host-off
 # opts it out (docs/configuration.md "Supervision host"), and the host is that home's
 # away session, so the daemon units run on a Claude home that opted out; the
@@ -262,6 +264,24 @@ unit_native_start_refuses_without_a_verifiable_operator_session() {
   else
     fail "native entry: a supported operator session was refused or recorded wrong (rc=$rc): $out"
   fi
+  rm -rf "$st"
+}
+
+unit_native_start_refuses_an_unresolvable_supervisor_target() {
+  local st out rc action
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-missing-target.XXXXXX")
+  enter_posture "$st" || fail "missing target: could not enter fixture posture"
+  for action in start start-native; do
+    out=$(env -u FM_AFK_LAUNCH_TARGET_PROBE FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+      FM_SUPERVISOR_TARGET=no-such-session:0 FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" "$action" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+      && printf '%s' "$out" | grep -F "supervisor target 'no-such-session:0' does not resolve to a tmux endpoint; refusing to arm away mode" >/dev/null; then
+      pass "$action refuses an unresolvable supervisor target before arming"
+    else
+      fail "$action armed with an unresolvable supervisor target (rc=$rc): $out"
+    fi
+  done
   rm -rf "$st"
 }
 
@@ -1781,6 +1801,7 @@ e2e_herdr() {
 # detached session).
 # ---------------------------------------------------------------------------
 e2e_tmux() {
+  local FM_AFK_LAUNCH_TARGET_PROBE=
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (tmux e2e)"; return 0; }
   local cap_session home_tmp cap_pane before during after rec
   cap_session="fm-afk-launch-cap-$$"
@@ -1885,6 +1906,7 @@ unit_test_harness_seam_requires_the_marker
 unit_pi_enter_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_the_record
 unit_native_start_refuses_without_a_verifiable_operator_session
+unit_native_start_refuses_an_unresolvable_supervisor_target
 unit_native_start_refusal_preserves_existing_away_lifecycle
 unit_native_start_refuses_an_orca_operator_session
 unit_failed_daemon_launch_preserves_the_record

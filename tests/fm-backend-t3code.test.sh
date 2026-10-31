@@ -900,6 +900,8 @@ test_native_restart_rearms_undelivered_stale_warning() {
       # #7168); this unit exercises the lifecycle, so it pins the T3 supervisor
       # thread the fake world serves instead of relying on live discovery.
       export FM_SUPERVISOR_TARGET=thread-live FM_SUPERVISOR_BACKEND=t3code
+      export FM_AFK_LAUNCH_TARGET_PROBE
+      FM_AFK_LAUNCH_TARGET_PROBE=$(command -v true)
       export FM_ESCALATE_BATCH_SECS=999999 FM_STALE_ESCALATE_SECS=5 FM_MAX_DEFER_SECS=0
       "$ROOT/bin/fm-afk-launch.sh" enter --words 'supervise pending work' >/dev/null \
         && "$ROOT/bin/fm-afk-launch.sh" start-native || exit 1
