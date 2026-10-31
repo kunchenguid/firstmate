@@ -1490,8 +1490,21 @@ An unqualified model, an undeclared provider, or a raw Pi launch command, which 
 
 ### Launch scope and sign-in checks
 
-When a file is present, supported command-line launches of that runner from this home use it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
+When a file is present, supported command-line launches of that runner from this home use it: ships, scouts, local secondmate agents, and raw Claude launch commands.
 A local secondmate can override this default with its own [per-secondmate account pin](#per-secondmate-account-pins).
+
+Relaunching a ship or scout that recorded an account at launch is the exception, because it replaces the worker on a task that already has an account: such a task stays on the account it was launched on.
+A pinned spawn records that account on the task, and a relaunch whose current pin selects a different account directory refuses, naming the recorded account, the account the pin now selects, and both ways forward: set the file back, or leave the task where it is and start a fresh task on the new account.
+This replaces the earlier behaviour, in which a relaunch followed the home's current file and rewrote the task's recorded account to match, so a pin changed for an unrelated reason silently moved an existing task to another account directory and left the outgoing worker's session state unreachable under the previous root.
+A removed Claude file is measured against firstmate's own `CLAUDE_CONFIG_DIR` when set, otherwise the ordinary account, and the relaunch refuses when that differs from the recorded account directory, saying that no pin selects an account and naming both the recorded account and the account firstmate is currently running with; it offers setting the file to the recorded account or running firstmate with that account to relaunch, or starting a fresh task on the current account.
+An unpinned Pi replacement explicitly selects its recorded root, so neither the caller's nor the destination pane's ambient account can move it.
+A successful relaunch after unpinning keeps the recorded account, so a later pin change is still guarded.
+That kept account gets the same existence and sign-in checks as a pin, before the old agent stops; a Pi launch model without a provider is checked against the recorded `account_provider`.
+A missing or signed-out recorded account refuses the relaunch, naming that account, rather than falling back to the ambient one.
+A pin change therefore reaches new ship and scout work immediately and existing ships and scouts that recorded an account never; the same recorded account, a relaunch onto a harness that reads the other pin file, and a task with no recorded account in a home with no pin each relaunch exactly as before.
+A ship or scout launched while the home had no pin records no account, so the guard has nothing to measure it against: a pin added afterwards reaches that task on its next relaunch, which moves it to the pinned account directory and records that account from then on.
+A secondmate agent is not measured against its recorded account, because its replacement reconciles its own home's durable records at startup instead of continuing the outgoing agent's conversation; its home-wide or [per-secondmate pin](#per-secondmate-account-pins) is re-read on every relaunch as before.
+
 T3 Code selects the account through its provider instance instead, so `backend=t3code` refuses a worker account pin before mutation; [`t3code-backend.md`](t3code-backend.md#active-limits) owns that backend limit.
 A raw Claude launch command refuses if its leading assignments set `CLAUDE_CONFIG_DIR` or a credential that a pinned launch unsets, such as `ANTHROPIC_API_KEY`.
 The assignment would override the pin.
@@ -1508,7 +1521,7 @@ A home that authenticates Claude through environment credentials on purpose shou
 ### Failures, reporting, and inheritance
 
 A malformed file, a root that is not a readable directory, or a signed-out account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
-The spawn prints the pin as `account=` (plus `account_provider=` for Pi) and records the same fields in the task record, so the session-start digest shows which account each worker launched on.
+The spawn prints the pin as `account=` (plus `account_provider=` for Pi) and records the same fields in the task record, so the session-start digest shows which account each worker launched on, and a ship or scout relaunch is measured against that recorded account.
 
 Pins are not inherited into secondmate homes: the secondmate's own workers read that home's `config/claude-account` and `config/pi-account` files independently.
 A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.

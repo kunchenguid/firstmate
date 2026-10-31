@@ -478,15 +478,21 @@
 #   before provisioning; __PIEXCLUDE__ below owns the Pi launch substitution.
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. docs/configuration.md's "Worker account pin" section owns unpinned
-#   account selection. A present file pins every supported launch of
-#   that runner from this home - ship, scout, local secondmate, raw Claude
-#   command, and relaunch - to the declared account root, and the spawn
-#   refuses before any endpoint, worktree, or record exists when the file is
-#   malformed, the root is unusable, or the runner's own check says it is not
-#   signed in. A pinned Claude launch sheds the environment credentials Claude
-#   ranks above the root's login; a pinned Pi launch needs --model
-#   <provider>/<id> for a declared provider and also carries --provider, and a
-#   raw Pi command refuses. The pin is recorded as account= (and Pi's
+#   account selection. A present file pins every supported new launch of
+#   that runner from this home - ship, scout, local secondmate, and raw Claude
+#   command - to the declared account root, and the spawn refuses before any
+#   endpoint, worktree, or record exists when the file is malformed, the root
+#   is unusable, or the runner's own check says it is not signed in. A
+#   --relaunch keeps a ship or scout on the account already recorded for it
+#   instead, and refuses when the pin, or its removal, now selects a different
+#   account directory, because the replacement would start without the outgoing
+#   worker's session state, which stays under the recorded root
+#   (fm_worker_account_relaunch_guard); a secondmate replacement starts from
+#   its own home's records, so its pin is still re-read. A pinned Claude launch
+#   sheds the environment credentials Claude ranks above the root's login; a
+#   pinned Pi launch needs --model <provider>/<id> for a declared provider and
+#   also carries --provider, and a raw Pi command refuses. The pin is recorded
+#   as account= (and Pi's
 #   account_provider=) in the task record and on the spawned line. A local
 #   secondmate first checks config/secondmate-accounts/<id>/<runner>-account
 #   in this launching home, then falls back to its home-wide pin when absent.
@@ -3267,14 +3273,25 @@ if [ "$HARNESS" = kiro ]; then
   fi
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
-# record exists. An absent pin selects nothing and leaves every later launch
-# step exactly as it was. A pinned Claude root is exported here as well, so the
-# trust registration below writes the store the worker will actually read.
+# record exists. An absent pin leaves a fresh launch unchanged; a relaunch can
+# retain its recorded account. The selected Claude root is exported here as well,
+# so trust registration below writes the store the worker will actually read.
 RAW_COMMAND=
 [ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
 WORKER_ACCOUNT_MATE=
 [ "$KIND" != secondmate ] || WORKER_ACCOUNT_MATE=$ID
-WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND" "$WORKER_ACCOUNT_MATE") || exit 1
+# Account selection guards the same resolved pin it checks and launches with.
+WORKER_ACCOUNT_RELAUNCH_ID=
+WORKER_ACCOUNT_RECORDED=
+WORKER_ACCOUNT_RECORDED_PROVIDER=
+if [ "$RELAUNCH" -eq 1 ]; then
+  WORKER_ACCOUNT_RELAUNCH_ID=$ID
+  WORKER_ACCOUNT_RECORDED=$(fm_meta_get "$RELAUNCH_META" account)
+  WORKER_ACCOUNT_RECORDED_PROVIDER=$(fm_meta_get "$RELAUNCH_META" account_provider)
+fi
+WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" \
+  "$RAW_COMMAND" "$WORKER_ACCOUNT_MATE" "$WORKER_ACCOUNT_RELAUNCH_ID" \
+  "$RELAUNCH_PRIOR_HARNESS" "$WORKER_ACCOUNT_RECORDED" "$WORKER_ACCOUNT_RECORDED_PROVIDER") || exit 1
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}

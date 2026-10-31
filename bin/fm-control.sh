@@ -83,8 +83,15 @@
 #              command, so relaunch requires an explicit --harness for it.
 #              A replacement Claude or Pi profile must also pass this home's
 #              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
-#              that no longer resolves or is signed out refuses before the old
-#              agent stops.
+#              that no longer resolves, is signed out, or now selects a
+#              different account directory than the one a ship or scout is
+#              recorded on refuses before the old agent stops. Such a task
+#              stays on the account it was launched on: its session state
+#              lives under that root, so a pin changed since the spawn moves
+#              new tasks, not this one. Only a pinned spawn records an
+#              account; a task launched unpinned records none, so a pin added
+#              later reaches it on relaunch. A secondmate replacement starts
+#              from its own home's records, so its pin is still re-read.
 #              A replacement omp secondmate likewise passes its per-secondmate
 #              omp profile pin (bin/fm-omp-profile-lib.sh) before the old agent
 #              stops.
@@ -1049,13 +1056,19 @@ resolve_relaunch_profile() {
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
   # The launch owner applies this home's worker account pin too, but only after
-  # the old agent has been stopped, so a pin that no longer resolves or is
-  # signed out must refuse here, while nothing has changed yet.
-  local account_model=$TARGET_MODEL account_mate=
+  # the old agent has been stopped, so a pin that no longer resolves, is signed
+  # out, or has moved off a ship or scout's recorded account must refuse here,
+  # while nothing has changed yet. The guard runs first: a pin now naming a
+  # different account is a move the task never asked for, whoever is signed in
+  # there.
+  local account_model=$TARGET_MODEL account_config account_mate=
   [ "$account_model" != default ] || account_model=
   [ "$KIND" != secondmate ] || account_mate=$ID
-  fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
-    "$account_model" "$TARGET_HARNESS" "" "$account_mate" >/dev/null || return 1
+  account_config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  fm_worker_account_select "$TARGET_HARNESS" "$account_config" \
+    "$account_model" "$TARGET_HARNESS" "" "$account_mate" \
+    "$ID" "$PRIOR_HARNESS" "$(fm_meta_get "$META" account)" \
+    "$(fm_meta_get "$META" account_provider)" >/dev/null || return 1
   fm_omp_profile_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_mate" >/dev/null || return 1
   # Likewise polytoken's launch profile and wiring refusals
