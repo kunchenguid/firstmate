@@ -32,6 +32,11 @@ hc stamps `HC_TERMINAL_ID` into every process an hc terminal starts, including a
 ## Task shape and metadata
 
 Each task is one hc terminal running the user's login shell in the project directory, started with `--no-parent --outlive-parent --no-notify` so it is independent of whichever hc terminal Firstmate itself runs in.
+Each terminal also has a deterministic task-derived core name, with a readable prefix and a checksum of the full home-scoped task label.
+Names fit hc's restricted alphabet and length; a name collision makes creation refuse rather than adopting or steering another terminal.
+Names are presentation only: every operation still addresses the recorded terminal address and verifies its ownership labels.
+Relaunch adopts that same terminal, so its name survives.
+Herdr.app adopts `herdr.tab` terminals as unnamed tabs, so the core task name is available on the terminal/agent entry, not the tab; tabs stay numbered and Firstmate never drives the app window.
 The terminal carries these labels:
 
 | Label | Value | Purpose |
@@ -69,6 +74,11 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Agent state | `hc get`, the foreground process and its process group, through the shared classifier |
 | Close | `hc kill`, then `hc rm`, then `hc get` must answer not found |
 
+`bin/fm-control.sh <id> exit` and `relaunch` are supported for ship and scout tasks in a surviving, positively classified local terminal.
+They use the shared [agent control contract](agent-control.md), including its composer, prompt, harness, and transactional refusal rules.
+The process-state read verifies task/home labels before trusting the foreground, and a shell is agent-free only after a complete process-group scan.
+A failed, incomplete, or unattributed process read refuses rather than claiming the agent stopped.
+
 ## Limits
 
 - `hc send` always presses Enter, so hc cannot type without submitting.
@@ -79,9 +89,13 @@ An input, capture, or close that carries the task label refuses a terminal whose
 - hc reports one foreground process per terminal.
   When that process is a launcher, the adapter also reads the rest of its process group from `ps`, which works only for terminals on the local machine.
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.
+- A missing or finished terminal cannot be reclaimed by `relaunch`, nor treated as an idempotent successful `exit`.
+  The record has no core or socket identity, so a not-found reply from a fresh core or another runtime directory cannot prove the original terminal gone.
+- Plain `hc read` carries no styling.
+  An idle-looking hint or typed text can therefore leave the composer `unknown`; `exit` and `relaunch` refuse until the shared classifier positively proves it empty.
 - `--secondmate` spawns are refused.
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
-- Naming a Herdr.app space needs the app window and is not done; whether the labels above display as intended in Herdr.app is not verified.
+- Naming Herdr.app spaces or tabs needs the app window and is not done; no visual verification against the live app window is claimed.
 - hc has no event stream this adapter consumes; supervision polls like tmux.
 
 ## Tests
@@ -92,3 +106,4 @@ An input, capture, or close that carries the task label refuses a terminal whose
 The smoke skips when no resolved Core binary or `jq` is available; provisioning and teardown failures fail the test.
 For CI coverage, see [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend); the workflow requires `jq` and rejects the `hc not found` skip.
 [`bin/fm-hc-ci-cleanup.sh`](../bin/fm-hc-ci-cleanup.sh) owns job-end cleanup mechanics.
+`tests/fm-control-hc-live-e2e.test.sh` is the prompt-spending opt-in guard (`FM_HC_CONTROL_LIVE=1`): real omp exit, idempotence, replacement, retained core name/local work, and refusal of pending input or unprovable absence.

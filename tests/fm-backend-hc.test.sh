@@ -10,6 +10,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-hc-tests)
+CONTROL_ID="hcc$$"
+FM_TEST_CLEANUP_DIRS+=("/tmp/fm-$CONTROL_ID")
 
 # The stub answers `get` from <dir>/<address>.json (exit from <address>.exit,
 # 3 = not_found when no file exists), `ls` from <dir>/ls.json, `run` with
@@ -38,25 +40,69 @@ case "$cmd" in
     printf '{"jsonrpc":"2.0","id":1,"result":{"generation":%s}}\n' "${FAKE_HC_GENERATION:-1}"
     ;;
   ls) cat "$D/ls.json" 2>/dev/null || printf '{"terminals":[]}\n' ;;
-  run) cat "$D/run.json" ;;
+  run) [ ! -e "$D/run-fails" ] || exit 1; cat "$D/run.json" ;;
   get)
     [ -f "$D/$last.exit" ] && exit "$(cat "$D/$last.exit")"
     [ -f "$D/$last.json" ] || { printf '{"error":{"kind":"not_found"}}\n' >&2; exit 3; }
     cat "$D/$last.json"
     ;;
   rm) [ -e "$D/rm-sticks" ] || rm -f "$D/$last.json"; printf '{}\n' ;;
-  read) printf 'screen of %s\n' "$last" ;;
+  read)
+    [ ! -e "$D/read-fails" ] || exit 1
+    if [ -f "$D/screen" ]; then cat "$D/screen"; else printf 'screen of %s\n' "$last"; fi
+    ;;
   send)
     if [ -f "$D/send.exit" ]; then
       printf '{"error":{"kind":"%s"}}\n' "$(cat "$D/send.kind" 2>/dev/null || echo blocked)" >&2
       exit "$(cat "$D/send.exit")"
     fi
+    payload=$last
+    printf '%s\n' "$payload" >> "$D/sent"
+    addr=${3:-}
+    case "$payload" in
+      /quit|/exit)
+        [ ! -e "$D/exit-sticks" ] || { cat "$D/send.json" 2>/dev/null || printf '{"started":true,"wait":{"status":"working"}}\n'; exit 0; }
+        jq '.foreground = {name:"sh",argv:["sh"],pid:1,cwd:.foreground.cwd}' "$D/$addr.json" > "$D/new.json"
+        mv "$D/new.json" "$D/$addr.json"
+        ;;
+      ". '"*"'")
+        [ ! -e "$D/launch-fails" ] || exit 1
+        [ ! -e "$D/launch-sticks" ] || { printf '{}\n'; exit 0; }
+        jq --arg h "$(cat "$D/becomes")" '.foreground.name=$h | .foreground.argv=[$h]' "$D/$addr.json" > "$D/new.json"
+        mv "$D/new.json" "$D/$addr.json"
+        ;;
+    esac
     cat "$D/send.json" 2>/dev/null || printf '{"started":true,"wait":{"status":"working"}}\n'
     ;;
   *) printf '{}\n' ;;
 esac
 SH
   chmod +x "$fb/hc"
+  cat > "$fb/ps" <<'SH'
+#!/usr/bin/env bash
+[ ! -e "$FAKE_HC_DIR/ps-fails" ] || exit 1
+case "$*" in
+  '-o pgid= -p '*)
+    [ ! -e "$FAKE_HC_DIR/ps-pgid-fails" ] || exit 1
+    printf '1\n' ;;
+  '-A -o pid=,pgid=,comm=')
+    [ ! -e "$FAKE_HC_DIR/ps-list-fails" ] || exit 1
+    if [ -e "$FAKE_HC_DIR/ps-list" ]; then cat "$FAKE_HC_DIR/ps-list"; else printf '1 1 sh\n'; fi ;;
+  '-o args= -p '*)
+    [ ! -e "$FAKE_HC_DIR/ps-args-fails-${*: -1}" ] || exit 1
+    if [ -e "$FAKE_HC_DIR/ps-args-${*: -1}" ]; then cat "$FAKE_HC_DIR/ps-args-${*: -1}"; else printf 'sh\n'; fi ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fb/ps"
+  cat > "$fb/omp" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf 'omp/18.14.1\n' ;;
+  models) printf '[]\n' ;;
+esac
+SH
+  chmod +x "$fb/omp"
   printf '%s\n' "$fb"
 }
 
@@ -206,6 +252,7 @@ test_agent_state_reads_a_shell_wrappers_group() {
   local tag out wrapper
   setup_case wrapper
   tag=$(hometag_of)
+  rm "$FB/ps" # This case needs the real process table, not the fixture above.
   # A shell wrapper in its own process group, waiting on a harness child.
   set -m
   bash -c '(exec -a claude sleep 30); :' &
@@ -357,6 +404,212 @@ test_required_tool_check_uses_the_adapter_resolver() {
   pass "hc: the bootstrap tool check resolves hc exactly as the adapter does"
 }
 
+# Control cases exercise the real transaction and launch owner, not a mocked
+# fm-control. Only the terminal provider and its process-table view are fake.
+setup_control_case() {  # <case> [harness]
+  local tag
+  setup_case "$1"
+  mkdir -p "$HOMEDIR/state" "$HOMEDIR/data/$CONTROL_ID" "$D/user-home"
+  fm_git_worktree "$D/project" "$D/work" hc-task
+  printf 'preserve this edit\n' > "$D/work/uncommitted"
+  printf "# Task\n## Captain's intent\nExercise the hc replacement.\n\n## Firstmate spec\nPreserve the local copy.\n" > "$HOMEDIR/data/$CONTROL_ID/brief.md"
+  tag=$(FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$FM_TEST_ROOT bash -c '. "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"; fm_backend_source hc; fm_backend_hometag')
+  write_terminal "$D" t2 live "fm-$CONTROL_ID" "$tag" "${2:-omp}" "${2:-omp}"
+  jq --arg cwd "$D/work" '.foreground.cwd=$cwd | .name="fm-stable-task-name"' "$D/t2.json" > "$D/new.json"
+  mv "$D/new.json" "$D/t2.json"
+  printf '❯\n' > "$D/screen"
+  printf omp > "$D/becomes"
+  cat > "$HOMEDIR/state/$CONTROL_ID.meta" <<EOF
+window=fmtest:t2
+endpoint_task_id=$CONTROL_ID
+worktree=$D/work
+project=$D/project
+harness=${2:-omp}
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=hc-task
+backend=hc
+hc_session=fmtest
+hc_terminal=t2
+spawn_gen=prior
+EOF
+  cp "$HOMEDIR/state/$CONTROL_ID.meta" "$D/meta-before"
+  cp "$HOMEDIR/data/$CONTROL_ID/brief.md" "$D/brief-before"
+}
+
+run_hc_control() {
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HC_TERMINAL_SOCKET \
+    -u HC_TERMINAL_ID -u HC_SCOPE \
+    PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FAKE_HC_DIR="$D" HOME="$D/user-home" \
+    FM_HOME="$HOMEDIR" FM_ROOT_OVERRIDE="$FM_TEST_ROOT" FM_SPAWN_NO_GUARD=1 \
+    FM_CONTROL_POLL=0.05 FM_CONTROL_EXIT_WAIT=0.2 FM_CONTROL_LAUNCH_WAIT=0.2 \
+    HC_SESSION=unrelated HC_SOCKET=/wrong/socket \
+    bash "${HC_CASE_PROGRAM:-$FM_TEST_ROOT/bin/fm-control.sh}" "$CONTROL_ID" "$@" 2>&1
+}
+
+test_control_exit_proves_stop_and_is_idempotent() {
+  local out rc=0
+  setup_control_case control-exit
+  out=$(run_hc_control exit) || rc=$?
+  expect_code 0 "$rc" "$out"
+  assert_equals "$(jq -r '.foreground.name' "$D/t2.json")" sh "the agent ended but its terminal survived"
+  assert_equals "$(cat "$D/sent")" /quit "the verified omp command is submitted exactly once"
+  out=$(run_hc_control exit) || fail "$out"
+  assert_equals "$(cat "$D/sent")" /quit "idempotent exit sends nothing"
+  assert_not_contains "$(cat "$D/log")" HC_SESSION=unrelated "the record wins over the ambient session"
+  assert_not_contains "$(cat "$D/log")" HC_SESSION=default "control must not touch default"
+  pass "hc: exit proves the agent stopped and remains idempotent on its recorded session"
+}
+
+test_control_exit_preserves_all_refusals() {
+  local scenario rc out
+  for scenario in pending dialog read-fails unreadable ambiguous missing finished foreign-task foreign-home unlabeled ps-fails unverified; do
+    setup_control_case "refuse-$scenario"
+    case "$scenario" in
+      pending) printf '❯ draft text\n' > "$D/screen" ;;
+      dialog) printf 'Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm · Esc to cancel\n' > "$D/screen" ;;
+      read-fails) touch "$D/read-fails" ;;
+      unreadable) printf '1\n' > "$D/t2.exit" ;;
+      ambiguous) jq '.foreground.name="node" | .foreground.argv=["node"]' "$D/t2.json" > "$D/new.json"; mv "$D/new.json" "$D/t2.json" ;;
+      missing) rm "$D/t2.json" ;;
+      finished) jq '.state="finished"' "$D/t2.json" > "$D/new.json"; mv "$D/new.json" "$D/t2.json" ;;
+      foreign-task) jq '.labels["firstmate.task"]="fm-stranger" | .foreground.name="sh" | .foreground.argv=["sh"]' "$D/t2.json" > "$D/new.json"; mv "$D/new.json" "$D/t2.json" ;;
+      foreign-home) jq '.labels["firstmate.home"]="stranger" | .foreground.name="sh" | .foreground.argv=["sh"]' "$D/t2.json" > "$D/new.json"; mv "$D/new.json" "$D/t2.json" ;;
+      unlabeled) jq '.labels={}' "$D/t2.json" > "$D/new.json"; mv "$D/new.json" "$D/t2.json" ;;
+      ps-fails) touch "$D/ps-fails"; jq '.foreground.name="sh" | .foreground.argv=["sh"]' "$D/t2.json" > "$D/new.json"; mv "$D/new.json" "$D/t2.json" ;;
+      unverified) printf 'harness=unknown\n' >> "$HOMEDIR/state/$CONTROL_ID.meta" ;;
+    esac
+    rc=0
+    out=$(run_hc_control exit) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$scenario must refuse, got $out"
+    [ ! -e "$D/sent" ] || fail "$scenario must not submit lifecycle input"
+    assert_not_contains "$(cat "$D/log" 2>/dev/null)" $'\x1fkeys\x1f' "$scenario must not press keys"
+  done
+  pass "hc: pending input, dialogs, uncertain state, foreign identity and unknown harness all refuse untouched"
+}
+
+test_control_exit_never_claims_an_unconfirmed_stop() {
+  local out rc=0
+  setup_control_case exit-sticks
+  touch "$D/exit-sticks"
+  out=$(run_hc_control exit) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a surviving agent cannot be stopped successfully"
+  assert_contains "$out" exit=unconfirmed "transport is not proof of exit"
+  assert_equals "$(jq -r '.foreground.name' "$D/t2.json")" omp "the fake agent survived"
+  pass "hc: exit delivery without a dead-agent read is an explicit failure"
+}
+
+test_control_relaunch_reuses_identity_work_and_name() {
+  local out rc=0
+  setup_control_case relaunch
+  out=$(run_hc_control relaunch --harness omp --model default --effort high --note 'Resume the preserved edit.') || rc=$?
+  expect_code 0 "$rc" "$out"
+  for line in backend=hc hc_session=fmtest hc_terminal=t2 window=fmtest:t2 effort=high; do
+    assert_contains "$(cat "$HOMEDIR/state/$CONTROL_ID.meta")" "$line" "published record retains $line"
+  done
+  assert_not_contains "$(cat "$HOMEDIR/state/$CONTROL_ID.meta")" spawn_gen=prior "replacement gets its own incarnation"
+  assert_equals "$(jq -r '.name' "$D/t2.json")" fm-stable-task-name "adoption preserves the terminal name"
+  assert_contains "$(cat "$HOMEDIR/data/$CONTROL_ID/brief.md")" 'Resume the preserved edit.' "the replacement receives its note"
+  assert_equals "$(cat "$D/work/uncommitted")" 'preserve this edit' "local work must survive"
+  assert_contains "$(cat "$HOMEDIR/state/$CONTROL_ID.control-relaunch")" phase=complete "the transaction is complete"
+  assert_not_contains "$(cat "$D/log")" $'\x1frun\x1f' "replacement adopts rather than forks the terminal"
+  # Switching from a different adapter retains only the explicitly chosen axes.
+  setup_control_case relaunch-switch claude
+  out=$(run_hc_control relaunch --harness omp --model custom-provider/custom --effort high --note 'Switch adapter.') || fail "$out"
+  for line in harness=omp model=custom-provider/custom effort=high; do
+    assert_contains "$(cat "$HOMEDIR/state/$CONTROL_ID.meta")" "$line" "the chosen replacement profile must be published"
+  done
+  assert_equals "$(jq -r '.foreground.name' "$D/t2.json")" omp "the replacement adapter is running"
+  pass "hc: relaunch republishes a live replacement while retaining task, local work, terminal and name"
+}
+
+test_control_relaunch_failure_boundaries() {
+  local scenario out rc
+  for scenario in no-note pending missing secondmate launch-fails launch-sticks; do
+    setup_control_case "relaunch-$scenario"
+    case "$scenario" in
+      pending) printf '❯ draft\n' > "$D/screen" ;;
+      missing) rm "$D/t2.json" ;;
+      secondmate) printf 'kind=secondmate\nhome=%s\n' "$D/work" >> "$HOMEDIR/state/$CONTROL_ID.meta"; cp "$HOMEDIR/state/$CONTROL_ID.meta" "$D/meta-before" ;;
+      launch-*) touch "$D/$scenario" ;;
+    esac
+    rc=0
+    if [ "$scenario" = no-note ]; then out=$(run_hc_control relaunch) || rc=$?
+    else out=$(run_hc_control relaunch --note 'Keep the edit.') || rc=$?; fi
+    [ "$rc" -ne 0 ] || fail "$scenario relaunch must refuse"
+    case "$scenario" in
+      launch-fails|launch-sticks)
+        assert_contains "$(cat "$HOMEDIR/state/$CONTROL_ID.control-relaunch")" failed:launching "post-stop failure is a named partial state"
+        assert_equals "$(jq -r '.foreground.name' "$D/t2.json")" sh "replacement was not confirmed alive"
+        ;;
+      *)
+        cmp -s "$D/meta-before" "$HOMEDIR/state/$CONTROL_ID.meta" || fail "$scenario changed the prior record"
+        cmp -s "$D/brief-before" "$HOMEDIR/data/$CONTROL_ID/brief.md" || fail "$scenario changed prior instructions"
+        [ ! -e "$D/sent" ] || fail "$scenario touched the old agent"
+        ;;
+    esac
+    assert_equals "$(cat "$D/work/uncommitted")" 'preserve this edit' "$scenario must preserve local work"
+  done
+  pass "hc: relaunch refusals preserve the old agent and post-stop failures retain a named recovery state"
+}
+
+test_process_scan_failures_never_prove_dead() {
+  local scenario out rc
+  for scenario in pgid-fails list-fails empty missing-pid wrong-group args-fails; do
+    setup_control_case "ps-$scenario" sh
+    case "$scenario" in
+      pgid-fails|list-fails) touch "$D/ps-$scenario" ;;
+      empty) : > "$D/ps-list" ;;
+      missing-pid) printf '2 1 sh\n' > "$D/ps-list" ;;
+      wrong-group) printf '1 2 sh\n' > "$D/ps-list" ;;
+      args-fails) touch "$D/ps-args-fails-1" ;;
+    esac
+    rc=0
+    out=$(run_hc_control exit) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$scenario incorrectly proved stopped: $out"
+    rc=0
+    out=$(HC_CASE_PROGRAM="$FM_TEST_ROOT/bin/fm-spawn.sh" run_hc_control --relaunch --harness omp) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$scenario incorrectly allowed a replacement: $out"
+    [ ! -e "$D/sent" ] || fail "$scenario sent input into an unproven endpoint"
+  done
+  # A readable harness still wins over an unreadable shell member.
+  setup_case ps-positive
+  write_terminal "$D" t1 live fm-a1 "$(hometag_of)" sh sh
+  printf '1 1 sh\n2 1 omp\n' > "$D/ps-list"
+  touch "$D/ps-args-fails-1"
+  printf omp > "$D/ps-args-2"
+  out=$(hc_shell 'fm_backend_agent_state hc fmtest:t1 fm-a1')
+  assert_equals "$out" alive "positive harness evidence survives an independent unreadable member"
+  pass "hc: only complete process scans license dead; positive harness evidence remains authoritative"
+}
+
+test_task_names_are_valid_stable_and_collision_safe() {
+  local label name other first log
+  setup_case names
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  first=
+  for label in 'fm-Upper.Case' 'fm-very-long-identical-task-prefix-aaaaaaaa' 'fm-very-long-identical-task-prefix-bbbbbbbb'; do
+    hc_shell "fm_backend_hc_create_task fmtest '$label' /proj" >/dev/null || fail "name create failed"
+    log=$(grep $'\x1frun\x1f' "$D/log" | tail -1)
+    name=$(printf '%s' "$log" | tr '\037' '\n' | grep -A1 '^--name$' | tail -1)
+    [[ "$name" =~ ^[a-z0-9_-]{1,32}$ ]] || fail "invalid hc name: $name"
+    hc_shell "fm_backend_hc_create_task fmtest '$label' /proj" >/dev/null || fail "repeat create failed"
+    other=$(grep $'\x1frun\x1f' "$D/log" | tail -1 | tr '\037' '\n' | grep -A1 '^--name$' | tail -1)
+    assert_equals "$name" "$other" "names must be deterministic"
+    [ -z "$first" ] || [ "$first" != "$name" ] || fail "same-prefix task names collided"
+    first=$name
+  done
+  HOMEDIR="$D/another-home"
+  mkdir -p "$HOMEDIR"
+  hc_shell "fm_backend_hc_create_task fmtest '$label' /proj" >/dev/null || fail "second home create failed"
+  other=$(grep $'\x1frun\x1f' "$D/log" | tail -1 | tr '\037' '\n' | grep -A1 '^--name$' | tail -1)
+  [ "$other" != "$name" ] || fail "same task id in distinct homes must get distinct names"
+  touch "$D/run-fails"
+  expect_refused hc_shell 'fm_backend_hc_create_task fmtest fm-conflict /proj'
+  pass "hc: task-derived names obey core rules, distinguish truncation collisions, and never hide a naming refusal"
+}
+
 fm_test_run \
   test_hc_is_spawn_capable_and_never_autodetected \
   test_required_tool_check_uses_the_adapter_resolver \
@@ -373,4 +626,11 @@ fm_test_run \
   test_endpoint_validation_binds_hc_meta \
   test_container_ensure_gates_binary_version_and_generation \
   test_send_text_submit_confirms_through_send_wait \
-  test_send_delimiters_and_binary_socket_pins
+  test_send_delimiters_and_binary_socket_pins \
+  test_control_exit_proves_stop_and_is_idempotent \
+  test_control_exit_preserves_all_refusals \
+  test_control_exit_never_claims_an_unconfirmed_stop \
+  test_control_relaunch_reuses_identity_work_and_name \
+  test_control_relaunch_failure_boundaries \
+  test_task_names_are_valid_stable_and_collision_safe \
+  test_process_scan_failures_never_prove_dead

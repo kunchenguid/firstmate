@@ -27,14 +27,15 @@
 # Identity: each task terminal carries the labels firstmate.task=<window-label>
 # and firstmate.home=<hometag> (bin/fm-backend-hometag-lib.sh). Operations that
 # receive an expected label refuse a terminal whose labels do not match, so a
-# recorded address can never steer input into another home's terminal. hc
-# names are not used: they allow only 1-32 of [a-z0-9_-], narrower than task ids.
+# recorded address can never steer input into another home's terminal. Display
+# names are not identity; hc restricts them to 1-32 of [a-z0-9_-].
 #
 # Visibility in Herdr.app: the app shows a terminal that carries
 # herdr.space=<id> and herdr.tab=<id> labels, and an unknown id becomes a new
 # space or tab. create_task sets herdr.space=FM_HC_SPACE (default
 # fm-<hometag>) and herdr.tab=<scoped label>, so a home's tasks group in one
-# space with one tab each. Naming the space needs the app window and is not done.
+# space with one tab each. Tabs remain unnamed/numbered; core terminal names
+# label the terminal and agent entry, not the tab. No app window command runs.
 #
 # Measured limits on hc 0.1.13 and 0.1.14 (docs/hc-backend.md "Limits"):
 #   - `hc send` always presses Enter after pasting. There is no paste without
@@ -194,6 +195,18 @@ fm_backend_hc_scoped_label() {  # <window-label>
   printf '%s-%s' "$(fm_backend_hometag)" "$1"
 }
 
+# A readable task prefix plus a checksum of the full home-scoped label fits
+# hc's name limit without merging ids that differ beyond the prefix. A rare
+# checksum/name collision is refused by hc run, never adopted by name.
+fm_backend_hc_task_name() {  # <window-label>
+  local slug checksum
+  slug=$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c 'a-z0-9_-' '-')
+  read -r checksum _ <<EOF
+$(fm_backend_hc_scoped_label "$1" | cksum)
+EOF
+  printf '%s-%08x' "${slug:0:23}" "$checksum"
+}
+
 # fm_backend_hc_get: `hc get --json` of the parsed target. Status 3 is hc's
 # structured not_found; any other failure is an unreadable core.
 fm_backend_hc_get() {  # <target>
@@ -290,7 +303,7 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
     return 1
   fi
   out=$(fm_backend_hc_cli "$session" run --bg --json --no-parent --outlive-parent --no-notify \
-    --cwd "$cwd" \
+    --name "$(fm_backend_hc_task_name "$label")" --cwd "$cwd" \
     --label "firstmate.task=$label" --label "firstmate.home=$home" \
     --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$scoped" 2>&1) \
     || { echo "error: hc run failed for $label: $out" >&2; return 1; }
@@ -451,13 +464,20 @@ fm_backend_hc_kill() {  # <target> [unused] [expected-label]
 # finished terminal is `missing`: an hc terminal whose program ended can never
 # host the agent again, exactly like a closed tmux window. A live terminal is
 # classified from hc's foreground process through the shared classifier.
-fm_backend_hc_agent_state() {  # <target>
-  local json rc fields state name argv0 args pid class
+fm_backend_hc_agent_state() {  # <target> [expected-label]
+  local json rc fields state name argv0 args pid class expected=${2:-'*'}
   fm_backend_hc_parse_target "${1:-}" || { printf 'unreadable'; return 0; }
   json=$(fm_backend_hc_get "$1")
   rc=$?
   if [ "$rc" -eq 3 ]; then printf 'missing'; return 0; fi
   [ "$rc" -eq 0 ] || { printf 'unreadable'; return 0; }
+  # Inspect identity on the SAME snapshot as the process state. In particular,
+  # a foreign shell can never become an idempotent successful exit.
+  printf '%s' "$json" | jq -e --arg home "$(fm_backend_hometag)" --arg expected "$expected" '
+    .labels["firstmate.home"] == $home and
+    (if $expected == "*" then (.labels["firstmate.task"] | type == "string" and length > 0)
+     else .labels["firstmate.task"] == $expected end)' >/dev/null 2>&1 \
+    || { printf 'unreadable'; return 0; }
   fields=$(printf '%s' "$json" | jq -r '[.state // "", .foreground.name // "", .foreground.argv[0] // "",
     ((.foreground.argv // []) | join(" ")), (.foreground.pid // "" | tostring)] | @tsv' 2>/dev/null) || {
     printf 'unreadable'
@@ -479,24 +499,38 @@ EOF
   # of the same foreground process group, which is what tmux reads too. A shell
   # wrapper waiting on the harness is such a launcher, so a shell is only dead
   # once its group holds no harness.
-  fm_backend_hc_group_has_agent "$pid" && { printf 'alive'; return 0; }
+  rc=0
+  fm_backend_hc_group_has_agent "$pid" || rc=$?
+  case "$rc" in
+    0) printf 'alive'; return 0 ;;
+    2) printf 'unreadable'; return 0 ;;
+  esac
   [ "$class" != shell ] || { printf 'dead'; return 0; }
   printf 'ambiguous'
 }
 
-# fm_backend_hc_group_has_agent: whether any other process in <pid>'s process
-# group classifies as a harness. Positive evidence only.
+# Process-group scan: 0 = positive harness evidence, 1 = a complete shell-only
+# group, 2 = incomplete or unattributed. Failed reads must never prove `dead`.
 fm_backend_hc_group_has_agent() {  # <pid>
-  local pid=$1 pgid member mpgid comm args
-  case "$pid" in ''|*[!0123456789]*) return 1 ;; esac
-  pgid=$(LC_ALL=C ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
-  [ -n "$pgid" ] || return 1
+  local pid=$1 pgid member mpgid comm args processes seen=0 uncertain=0 class
+  case "$pid" in ''|*[!0123456789]*) return 2 ;; esac
+  pgid=$(LC_ALL=C ps -o pgid= -p "$pid" 2>/dev/null) || return 2
+  pgid=${pgid//[[:space:]]/}
+  case "$pgid" in ''|*[!0123456789]*) return 2 ;; esac
+  processes=$(LC_ALL=C ps -A -o pid=,pgid=,comm= 2>/dev/null) || return 2
   while read -r member mpgid comm; do
-    [ "$mpgid" = "$pgid" ] && [ "$member" != "$pid" ] || continue
-    args=$(LC_ALL=C ps -o args= -p "$member" 2>/dev/null) || continue
-    [ "$(fm_agent_process_classify "$comm" "${args%% *}" "$args" "$member")" = agent ] && return 0
+    [ "$mpgid" = "$pgid" ] || continue
+    [ "$member" != "$pid" ] || seen=1
+    if ! args=$(LC_ALL=C ps -o args= -p "$member" 2>/dev/null) || [ -z "$args" ]; then
+      uncertain=1
+      continue
+    fi
+    class=$(fm_agent_process_classify "$comm" "${args%% *}" "$args" "$member")
+    [ "$class" != agent ] || return 0
+    [ "$class" = shell ] || uncertain=1
   done <<EOF
-$(LC_ALL=C ps -A -o pid=,pgid=,comm= 2>/dev/null)
+$processes
 EOF
+  [ "$seen" = 1 ] && [ "$uncertain" = 0 ] || return 2
   return 1
 }
