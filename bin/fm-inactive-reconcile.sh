@@ -484,10 +484,11 @@ arm_ready_pr_watch() { # <id> <meta>
   recorded=$(meta_field "$meta" pr)
   incarnation=$(meta_incarnation "$meta")
   if [ "$recorded" = "$url" ] && [ -f "$STATE/$id.check.sh" ] \
-    && [ ! -L "$STATE/$id.check.sh" ]; then
+    && [ ! -L "$STATE/$id.check.sh" ] \
+    && [ -f "$STATE/$id.pr-poll" ] && [ -f "$STATE/$id.pr-poll-registration" ]; then
     return 0
   fi
-  if ! arm_output=$(FM_PR_CHECK_EXPECT_INCARNATION="$incarnation" \
+  if ! arm_output=$(fm_run_timed 3 env FM_PR_CHECK_EXPECT_INCARNATION="$incarnation" \
     FM_PR_CHECK_EXPECT_READY_LINE="$line" \
     "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1); then
     publish_actionable "pr-watch-arm:$id" \
