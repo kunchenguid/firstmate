@@ -424,6 +424,18 @@ A live foreign holder therefore cannot strand a TERM'd watcher in this marker-lo
 The bounded wait allows itself one extra lock-freshness window past the bound when the only remaining blocker is a lock whose holder never published its pid: `fm_lock_mid_acquire_is_fresh` defers to that residue for a whole freshness window before it can be stolen, so a creator killed inside its claim write would otherwise consume the entire bound without ever becoming reclaimable.
 A published numeric pid, live or dead, grants no extension to the original wait bound.
 
+## Local cycle telemetry
+
+`bin/fm-watch-arm.sh` attempts a local telemetry append when its cycle-ending ledger path completes.
+Telemetry is enabled by default; set `FM_TELEMETRY=0` in the arm's environment to disable it (other values, including an empty value, leave it enabled).
+The stream lives at `telemetry.jsonl` in the arm's resolved state directory, including when `FM_STATE_OVERRIDE` selects that directory.
+It rotates before an append would exceed 1 MiB, retaining three older segments named `.1` through `.3`, with `.1` the newest.
+The active file and retained segments receive owner-only read/write permissions before emission; symlink or non-file destinations cause emission to be skipped.
+Records contain only the emission timestamp and cycle classification with fixed schema, event, and source labels; the [emitter header](../bin/fm-telemetry-lib.sh) owns the exact record format.
+No task content, model usage, or external export is included.
+Emission is best-effort: unavailable storage, lock contention, or emitter errors can lose records without changing wake delivery or the arm's exit result.
+`tests/fm-telemetry.test.sh` exercises a real watcher close, disabled and blocked emission, and private bounded retention.
+
 ## Regression coverage
 
 ### Pi and OpenCode watch extension
