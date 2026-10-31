@@ -44,6 +44,10 @@
 # auto-detection. Tern stamps TERM_PROGRAM=tern and TERN_PANE into every block
 # it spawns (a tmux server or Herdr client started inside a block inherits
 # them), so an inherited marker is not a selection; see docs/tern-backend.md.
+# bin/backends/hc.sh adds herdr-core (`hc`, the core under Herdr.app), also
+# EXPERIMENTAL, spawn-capable, session-provider-only, and EXPLICIT-ONLY:
+# hc stamps HC_TERMINAL_ID into every descendant process, so an inherited
+# marker is not a selection; see docs/hc-backend.md.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -52,7 +56,7 @@
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
 # spawn-capable backend, currently herdr, zellij, orca, cmux, paseo, rex, or
-# t3code, or tern, carries an explicit `backend=` line.
+# t3code, tern, or hc, carries an explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
 # backend's supervision surface is conceptually an EVENT SOURCE - it produces
@@ -95,8 +99,10 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # (docs/tern-backend.md); docs/verification/runtime-backends.md records what
 # was exercised against a real Tern.
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex t3code tern"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex t3code tern"
+# hc is EXPERIMENTAL and spawn-capable, session-provider-only like tmux
+# (docs/hc-backend.md).
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -214,6 +220,8 @@ fm_backend_detect() {
   # every descendant process of a Tern block, including a tmux server or Herdr
   # client started inside it, so their presence never proves the captain chose
   # Tern (docs/tern-backend.md "Selection is explicit").
+  # hc is not detected either: HC_TERMINAL_ID reaches every process an hc
+  # terminal starts (docs/hc-backend.md "Selection is explicit").
   return 1
 }
 
@@ -310,7 +318,7 @@ fm_backend_explicit_name() {
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
 # distinct from the primary-marker case.
-# Paseo and tern are never auto-detected, so they only ever come out of this
+# Paseo, tern, and hc are never auto-detected, so they only ever come out of this
 # function from FM_BACKEND or config/backend.
 fm_backend_name() {
   local detected marker
@@ -376,6 +384,7 @@ fm_backend_required_tools() {  # <backend>
     paseo)  printf '%s' 'paseo jq treehouse' ;;
     rex)    printf '%s' 'rex jq treehouse' ;;
     tern)   printf '%s' 'tern jq treehouse' ;;
+    hc)     printf '%s' 'hc jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
     t3code) printf '%s' 'node treehouse' ;;
     *) return 1 ;;
@@ -701,6 +710,21 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       ;;
+    hc)
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: hc endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      recorded_session=$(fm_backend_meta_exact_value "$meta" hc_session) || recorded_session=
+      terminal=$(fm_backend_meta_exact_value "$meta" hc_terminal) || terminal=
+      if [ -z "$recorded_session" ] || [ -z "$terminal" ] \
+        || [ "$window" != "$recorded_session:$terminal" ] \
+        || ! fm_backend_endpoint_atom_valid "$recorded_session" \
+        || ! fm_backend_endpoint_atom_valid "$terminal"; then
+        echo "REFUSED: hc endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      ;;
   esac
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_BACKEND_VALIDATED_BACKEND=$backend
@@ -832,6 +856,9 @@ fm_backend_source() {  # <name>
     tern)
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-timeout-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-cursor-lib.sh
       ;;
+    hc)
+      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-cursor-lib.sh
+      ;;
     *)
       return 1
       ;;
@@ -903,6 +930,13 @@ fm_backend_source() {  # <name>
         # shellcheck source=/dev/null
         . "$adapter" || return 1
         _FM_BACKEND_TERN_SOURCED=1
+      fi
+      ;;
+    hc)
+      if [ -z "${_FM_BACKEND_HC_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$adapter" || return 1
+        _FM_BACKEND_HC_SOURCED=1
       fi
       ;;
   esac
@@ -981,6 +1015,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     rex) fm_backend_rex_capture "$@" ;;
     t3code) fm_backend_t3code_capture "$@" ;;
     tern) fm_backend_tern_capture "$@" ;;
+    hc) fm_backend_hc_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -997,7 +1032,8 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 # (bin/backends/rex.sh's header owns the derivation and its verified basis).
 # tern reads the viewport with `tern capture --surfaces` and no `--scrollback`
 # (trimmed to the block's rows); its own capture opts into history with the flag.
-FM_BACKEND_VISIBLE_CAPTURE="tmux herdr zellij rex tern"
+# hc reads the screen alone with `hc read --lines 0`.
+FM_BACKEND_VISIBLE_CAPTURE="tmux herdr zellij rex tern hc"
 
 # fm_backend_visible_capture_supported: whether <backend> can read the visible
 # viewport WITHOUT scrollback. Callers that must not mistake a scrolled-away
@@ -1035,6 +1071,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     rex) fm_backend_rex_send_key "$@" ;;
     t3code) fm_backend_t3code_send_key "$@" ;;
     tern) fm_backend_tern_send_key "$@" ;;
+    hc) fm_backend_hc_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -1079,6 +1116,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     rex) fm_backend_rex_send_text_submit "$@" || rc=$? ;;
     t3code) fm_backend_t3code_send_text_submit "$@" || rc=$? ;;
     tern) fm_backend_tern_send_text_submit "$@" || rc=$? ;;
+    hc) fm_backend_hc_send_text_submit "$@" || rc=$? ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; rc=1 ;;
   esac
   fm_composer_dialog_sink_release
@@ -1115,6 +1153,7 @@ fm_backend_kill() {  # <backend> <target>
     rex) fm_backend_rex_kill "$@" ;;
     t3code) fm_backend_t3code_kill "$1" ;;
     tern) fm_backend_tern_kill "$@" ;;
+    hc) fm_backend_hc_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -1155,6 +1194,7 @@ fm_backend_busy_state() {  # <backend> <target>
     rex) fm_backend_rex_busy_state "$@" ;;
     t3code) fm_backend_t3code_busy_state "$@" ;;
     tern) fm_backend_tern_busy_state "$@" ;;
+    hc) fm_backend_hc_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1185,6 +1225,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     zellij) fm_backend_zellij_composer_state "$@" ;;
     t3code) fm_backend_t3code_composer_state "$@" ;;
     tern) fm_backend_tern_composer_state "$@" ;;
+    hc) fm_backend_hc_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -1255,6 +1296,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source tern || return 1
       fm_backend_tern_target_ready "$target" "$expected_label"
       ;;
+    hc)
+      fm_backend_source hc || return 1
+      fm_backend_hc_target_ready "$target" "$expected_label"
+      ;;
     *)
       return 1
       ;;
@@ -1289,6 +1334,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # Tern answers through the same process classifier from `tern process`, but
 # bin/fm-control-lib.sh's fm_control_backend_state_verified does not list it, so
 # no control-plane verb treats a Tern verdict as proof that an agent stopped.
+# hc classifies the one foreground process `hc get` reports through the same
+# classifier and is likewise absent from fm_control_backend_state_verified.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
@@ -1298,6 +1345,7 @@ fm_backend_agent_state() {  # <backend> <target>
     rex) fm_backend_rex_agent_state "$target" ;;
     t3code) fm_backend_t3code_agent_state "$target" ;;
     tern) fm_backend_tern_agent_state "$target" ;;
+    hc) fm_backend_hc_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }

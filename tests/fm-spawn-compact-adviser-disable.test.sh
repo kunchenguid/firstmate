@@ -382,6 +382,38 @@ SH
   pass "a compound raw launch-command still starts its agent with the compact-adviser switch on"
 }
 
+test_launch_preserves_literal_home_and_brief_paths() {
+  local name rec id out status seen want brief
+  for name in normal literal; do
+    id="path-$name-a1"
+    rec=$(make_case "path-$name" codex "$id")
+    read_case "$rec"
+    if [ "$name" = literal ]; then
+      mv "$HOME_DIR" "$CASE_DIR/R&D \"double\" 'single' home"
+      HOME_DIR="$CASE_DIR/R&D \"double\" 'single' home"
+    fi
+    out=$(run_case_spawn "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 0 "$status" "$name path spawn should succeed: $out"
+    # Capture the environment and final prompt received by the fake agent.
+    cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/bin/sh
+printf '%s\n' "$FM_TASK_INBOX"
+for arg do :; done
+printf '%s\n' "$arg"
+SH
+    chmod +x "$FAKEBIN_DIR/codex"
+    seen=$(emitted_launch_env "$FAKEBIN_DIR" "$LAUNCH_LOG" "$PANE_LOG") \
+      || fail "$name path: the emitted launch failed to run"
+    brief=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$HOME_DIR/data/$id/launch-brief.md")
+    want="$(cd "$HOME_DIR/state" && pwd -P)/$id.inbox
+$brief"
+    assert_equals "$want" "$seen" "$name path: launch changed the home or brief bytes"
+  done
+  pass "launch preserves literal ampersands, quotes and spaces in home and brief paths"
+}
+
+test_launch_preserves_literal_home_and_brief_paths
 test_ship_allowlist_absent
 test_ship_allowlist_enabled
 test_launch_command_carries_the_switch_without_the_pane_export
