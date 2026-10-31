@@ -1559,7 +1559,7 @@ detect_local_tools() {
 }
 
 treehouse_pool_report() {
-  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool status seen slot repo common lease_at lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30}
+  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool status seen slot repo common lease_at lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} seen_repo seen_pool duplicate
   [ -d "$root" ] && command -v jq >/dev/null 2>&1 && command -v treehouse >/dev/null 2>&1 || return 0
   case "$threshold" in ''|*[!0-9]*) threshold=30 ;; esac
   now=$(date +%s)
@@ -1572,8 +1572,8 @@ treehouse_pool_report() {
     status=$(jq -c '.worktrees // [] | .[]' "$state" 2>/dev/null) || continue
     while IFS='|' read -r slot lease_at slot_owner; do
       repo=$(git -C "$slot" rev-parse --show-toplevel 2>/dev/null) || repo=
-      common=$(git -C "$slot" rev-parse --git-common-dir 2>/dev/null) || common=
-      case "$common" in /*) repo=${common%/.git} ;; esac
+      common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
+      [ -n "$common" ] && repo=${common%/.git}
       owner_live=0
       case "$slot_owner" in ''|*[!0-9]*) ;; *) kill -0 "$slot_owner" 2>/dev/null && owner_live=1 ;; esac
       if [ -e "${slot%/*}/.fm-slot-owner" ] || [ -e "$slot/.fm-slot-owner" ] || [ "$owner_live" -eq 1 ]; then
@@ -1587,7 +1587,14 @@ treehouse_pool_report() {
       fi
       if [ -n "$repo" ]; then
         repo=$(cd -P -- "$repo" 2>/dev/null && pwd -P) || repo=
-        if grep -Fq "$repo|" "$seen"; then
+        duplicate=0
+        while IFS='|' read -r seen_repo seen_pool; do
+          if [ "$seen_repo" = "$repo" ] && [ "$seen_pool" != "$pool" ]; then
+            duplicate=1
+            break
+          fi
+        done < "$seen"
+        if [ "$duplicate" -eq 1 ]; then
           echo "TREEHOUSE_POOL_REPORT: duplicate-clone pool $pool (project $repo)"
           break
         fi

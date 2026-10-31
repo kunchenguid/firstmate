@@ -1555,7 +1555,7 @@ test_treehouse_pool_report_is_read_only_and_classifies_pools() {
   for pool in one two; do
     mkdir -p "$root/$pool/slot"
     cat > "$root/$pool/treehouse-state.json" <<JSON
-{"worktrees":[{"path":"$registered","owner_started_at":"2020-01-01T00:00:00Z"}]}
+{"worktrees":[{"path":"$registered","owner_started_at":"2020-01-01T00:00:00Z"},{"path":"$registered","owner_started_at":"2020-01-01T00:00:00Z"}]}
 JSON
   done
   cat > "$root/orphan/treehouse-state.json" <<JSON
@@ -1573,6 +1573,7 @@ JSON
   assert_contains "$out" "unregistered pool $root/orphan" "pool with no existing project repository was not reported"
   assert_not_contains "$out" "unregistered pool $root/other-home" "another home's existing project clone was falsely reported orphaned"
   assert_contains "$out" "duplicate-clone pool $root/two" "duplicate clone pool was not reported"
+  assert_not_contains "$out" "duplicate-clone pool $root/one" "sibling slots in one pool were reported as duplicate pools"
   assert_contains "$out" "test-leftover pool $root/project-leftover" "test leftover pool was not reported"
   assert_contains "$out" "unowned slot older than 30d: $registered" "old unowned slot was not reported"
   pass "bootstrap reports pool orphans, duplicate clones, old unowned slots, and test pools"
