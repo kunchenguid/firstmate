@@ -1599,7 +1599,7 @@ treehouse_pool_report() {
         age_days=$(( (now - lease_epoch) / 86400 ))
         [ "$age_days" -lt "$threshold" ] || echo "TREEHOUSE_POOL_REPORT: unowned slot older than ${threshold}d: $slot (age ${age_days}d)"
       fi
-    done < <(printf '%s\n' "$status" | jq -r '[.path, (.created_at // ""), (.owner_pid // "")] | join("|")')
+    done < <(printf '%s\n' "$status" | jq -r '[.path, (.owner_started_at // ""), (.owner_pid // "")] | join("|")')
     case "${pool##*/}" in
       project-*|scratch-project-*)
         [ "$pool_has_owner" -eq 1 ] || echo "TREEHOUSE_POOL_REPORT: test-leftover pool $pool"
