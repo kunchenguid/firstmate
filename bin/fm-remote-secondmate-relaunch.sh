@@ -92,9 +92,8 @@ printf '%s\n' "$RELAUNCH_OUT"
 
 # The confirmed identity comes from the route block the host prints after a
 # successful relaunch, never from the human-readable "relaunched ..." summary
-# line: a relaunch onto "default" prints that literal word there, while the
-# endpoint's own record - and this parent's, to match it - store an empty
-# field for "no explicit pin".
+# line: only the endpoint's own record, read back here, says what the mate now
+# runs, and this parent's record is republished to match it.
 [ "$(printf '%s\n' "$RELAUNCH_OUT" | sed -n 's/^schema=//p' | tail -1)" \
   = fm-remote-secondmate-control.v1 ] \
   || die "the host relaunched $ID but reported no route confirmation to record"
