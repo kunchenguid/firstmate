@@ -1571,7 +1571,10 @@ treehouse_pool_report() {
     pool_has_owner=0
     duplicate_reported=0
     status=$(jq -c '.worktrees // [] | .[]' "$state" 2>/dev/null) || continue
-    while IFS='|' read -r slot created_at slot_owner; do
+    while IFS= read -r slot_record; do
+      slot=$(printf '%s\n' "$slot_record" | jq -r '.path // ""')
+      created_at=$(printf '%s\n' "$slot_record" | jq -r '.created_at // ""')
+      slot_owner=$(printf '%s\n' "$slot_record" | jq -r '.owner_pid // ""')
       repo=$(git -C "$slot" rev-parse --show-toplevel 2>/dev/null) || repo=
       common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
       [ -n "$common" ] && repo=${common%/.git}
@@ -1589,7 +1592,9 @@ treehouse_pool_report() {
       if [ -n "$repo" ]; then
         repo=$(cd -P -- "$repo" 2>/dev/null && pwd -P) || repo=
         duplicate=0
-        while IFS='|' read -r seen_repo seen_pool; do
+        while IFS= read -r seen_record; do
+          seen_repo=$(printf '%s\n' "$seen_record" | jq -r '.repo')
+          seen_pool=$(printf '%s\n' "$seen_record" | jq -r '.pool')
           if [ "$seen_repo" = "$repo" ] && [ "$seen_pool" != "$pool" ]; then
             duplicate=1
             break
@@ -1601,7 +1606,7 @@ treehouse_pool_report() {
             duplicate_reported=1
           fi
         fi
-        printf '%s|%s\n' "$repo" "$pool" >> "$seen"
+        jq -cn --arg repo "$repo" --arg pool "$pool" '{repo:$repo,pool:$pool}' >> "$seen"
       fi
       if [ ! -e "${slot%/*}/.fm-slot-owner" ] && [ ! -e "$slot/.fm-slot-owner" ] \
         && [ "$owner_live" -eq 0 ]; then
@@ -1614,7 +1619,7 @@ treehouse_pool_report() {
         age_days=$(( (now - lease_epoch) / 86400 ))
         [ "$age_days" -lt "$threshold" ] || echo "TREEHOUSE_POOL_REPORT: unowned slot older than ${threshold}d: $slot (age ${age_days}d)"
       fi
-    done < <(printf '%s\n' "$status" | jq -r '[.path, (.created_at // ""), (.owner_pid // "")] | join("|")')
+    done < <(printf '%s\n' "$status" | jq -c '.')
     case "${pool##*/}" in
       project-*|scratch-project-*)
         [ "$pool_has_owner" -eq 1 ] || echo "TREEHOUSE_POOL_REPORT: test-leftover pool $pool"
