@@ -7342,6 +7342,22 @@ fi
 # LAUNCH_ENV_PREFIX construction below sets it again at the `env -i` boundary,
 # so under an enabled allowlist the switch is established before the wrapping
 # `/bin/sh` starts rather than only inside the command that shell runs.
+# Arm the worker-side OSC 7501 status reporter (bin/fm-osc7501.sh) inside the
+# launch before the agent command: the arm must run while the pane shell
+# still owns the terminal's input, because the capability query it may send
+# is answered on that input stream and any earlier agent could read the reply
+# as typed text. The reporter header owns eligibility and native-version
+# gates; pass the resolved binary where one is pinned. The `disarm` after
+# the agent command retires the reporter when the agent exits, because the
+# pane shell that sourced the launch outlives it.
+OSC7501_AGENT_BIN=
+case "$HARNESS" in
+  claude) OSC7501_AGENT_BIN=claude ;;
+  pi | pi-signed) OSC7501_AGENT_BIN=${PI_BIN:-pi} ;;
+esac
+OSC7501_ARM_ARGS=
+[ -z "$OSC7501_AGENT_BIN" ] || OSC7501_ARM_ARGS=" --agent-bin $(shell_quote "$OSC7501_AGENT_BIN")"
+LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") arm --task $(shell_quote "$ID") --harness $(shell_quote "$HARNESS") --backend $(shell_quote "$BACKEND") --kind $(shell_quote "$KIND") --state $(shell_quote "$STATE_REAL") --config $(shell_quote "$CONFIG") --target $(shell_quote "$T")$OSC7501_ARM_ARGS >/dev/null 2>/dev/null || true; $LAUNCH; $(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") disarm --state $(shell_quote "$STATE_REAL") >/dev/null 2>/dev/null || true"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
