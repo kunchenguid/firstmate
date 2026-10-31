@@ -121,11 +121,18 @@ fm_tasks_axi_compatible() { return 1; }
 fm_backlog_backend_manual() { return 1; }
 SH
   ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
-  # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
+  # Meta with a nonexistent worktree so the dirty/treehouse blocks skip; its
+  # recorded branch is on a remote, which proves the work pushed.
+  git init -q "$TMP_ROOT/landed-project-$id"
+  git -C "$TMP_ROOT/landed-project-$id" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm fixture
+  git -C "$TMP_ROOT/landed-project-$id" branch "fm/$id"
+  git -C "$TMP_ROOT/landed-project-$id" update-ref "refs/remotes/fork/fm/$id" "refs/heads/fm/$id"
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
 worktree=$TMP_ROOT/nonexistent-worktree-$id
-project=$TMP_ROOT/nonexistent-project-$id
+project=$TMP_ROOT/landed-project-$id
+branch=fm/$id
 harness=claude
 kind=ship
 mode=no-mistakes
@@ -218,11 +225,18 @@ fm_tasks_axi_compatible() { return 1; }
 fm_backlog_backend_manual() { return 1; }
 SH
   ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
-  # No tasktmp= line at all.
+  # No tasktmp= line at all. The recorded branch is on a remote, which proves
+  # the work pushed for a task with no worktree of its own to inspect.
+  git init -q "$TMP_ROOT/landed-proj-$id"
+  git -C "$TMP_ROOT/landed-proj-$id" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm fixture
+  git -C "$TMP_ROOT/landed-proj-$id" branch "fm/$id"
+  git -C "$TMP_ROOT/landed-proj-$id" update-ref "refs/remotes/fork/fm/$id" "refs/heads/fm/$id"
   cat > "$fake/state/$id.meta" <<META
 window=fakeses:fm-$id
 worktree=$TMP_ROOT/nonexistent-wt-$id
-project=$TMP_ROOT/nonexistent-proj-$id
+project=$TMP_ROOT/landed-proj-$id
+branch=fm/$id
 harness=claude
 kind=ship
 mode=no-mistakes
