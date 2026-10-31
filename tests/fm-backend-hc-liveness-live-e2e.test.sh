@@ -52,6 +52,7 @@ cleanup_lab() {
   local rc=$?
   trap - EXIT
   hc_test_safe_teardown "$ROOT" "$HC_TEST_SES" || rc=1
+  fm_test_cleanup
   exit "$rc"
 }
 trap cleanup_lab EXIT

@@ -57,6 +57,23 @@ fm_hclab_root() {
   printf '%s' "${FM_HC_LAB_DIR:-${TMPDIR:-/tmp}/fm-hc-lab-${UID}}"
 }
 
+# Create roots privately, or refuse roots another user could control.
+fm_hclab_private_root() { # <root>
+  local root=$1 mode
+  if [ ! -e "$root" ] && [ ! -L "$root" ]; then
+    mkdir -m 700 "$root" || return 1
+  fi
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(/usr/bin/stat -f '%Lp' "$root") || return 1
+  else
+    mode=$(stat -c '%a' "$root") || return 1
+  fi
+  if [ ! -d "$root" ] || [ -L "$root" ] || [ ! -O "$root" ] || (( (8#$mode & 0022) != 0 )); then
+    fm_hclab_error "unsafe root '$root': must be an operator-owned directory, not group/other-writable"
+    return 1
+  fi
+}
+
 fm_hclab_session_dir() { # <session>
   printf '%s/%s' "$(fm_hclab_root)" "$1"
 }
@@ -139,31 +156,25 @@ else
   fm_hclab_file_meta() { stat -c '%n %i %Y %s' "$1" 2>/dev/null; }
 fi
 
-fm_hclab_fleet_state() { # <root>...
+fm_hclab_fleet_state() ( # <root>...
+  set -o pipefail
   local root files f
   for root in "$@"; do
     [ -d "$root" ] || continue
-    files=$(find "$root" \( -type f -o -type s \) -print 2>/dev/null | LC_ALL=C sort) || continue
+    files=$(find "$root" \( -type f -o -type s \) -print | LC_ALL=C sort) || return 1
     [ -n "$files" ] || continue
     printf '%s\n' "$files" | while IFS= read -r f; do
-      fm_hclab_file_meta "$f"
-    done
+      fm_hclab_file_meta "$f" || return 1
+    done || return 1
   done | LC_ALL=C sort
-}
+)
 
-# fm_hclab_roots_from_file: echo the recorded real-state roots, one per line.
-fm_hclab_roots_from_file() { # <roots-file>
-  local r
-  while IFS= read -r r; do
-    [ -n "$r" ] && printf '%s\n' "$r"
-  done < "$1"
-}
-
-fm_hclab_fleet_state_recorded() { # <roots-file>
-  fm_hclab_roots_from_file "$1" | while IFS= read -r root; do
-    fm_hclab_fleet_state "$root"
+fm_hclab_fleet_state_recorded() ( # <roots-file>
+  set -o pipefail
+  cat "$1" | while IFS= read -r root; do
+    fm_hclab_fleet_state "$root" || return 1
   done | LC_ALL=C sort
-}
+)
 
 fm_hclab_check_tripwire() { # <session>
   local name=$1 tripwire roots_file before after
@@ -177,8 +188,10 @@ fm_hclab_check_tripwire() { # <session>
     fm_hclab_error "missing fleet-state roots record for '$name'; refusing unverified teardown"
     return 1
   }
-  before=$(cat "$tripwire")
-  after=$(fm_hclab_fleet_state_recorded "$roots_file")
+  if ! before=$(cat "$tripwire") || ! after=$(fm_hclab_fleet_state_recorded "$roots_file"); then
+    fm_hclab_error "could not read complete fleet-state snapshot; refusing unverified teardown"
+    return 1
+  fi
   [ "$before" = "$after" ] || {
     fm_hclab_error "FLEET-STATE TRIPWIRE FAILED: real herdr-core state changed during lab work"
     fm_hclab_error "before: $(printf '%s' "$before" | wc -l | tr -d ' ') files; after: $(printf '%s' "$after" | wc -l | tr -d ' ') files"
@@ -193,11 +206,11 @@ fm_hclab_provision() { # <session>
   bin=$(fm_hclab_bin) || return 1
   command -v jq >/dev/null 2>&1 || { fm_hclab_error "jq is required"; return 1; }
   dir=$(fm_hclab_session_dir "$name")
-  [ ! -e "$dir" ] || {
-    fm_hclab_error "session dir already exists for '$name'; refusing to adopt or overwrite it"
+  mkdir -m 700 "$dir" || {
+    fm_hclab_error "could not create session dir for '$name'; refusing to adopt or overwrite it"
     return 1
   }
-  mkdir -p "$dir/env/xdg-state" "$dir/env/xdg-config" "$dir/env/xdg-data" "$(fm_hclab_sock_dir)" || return 1
+  mkdir -p "$dir/env/xdg-state" "$dir/env/xdg-config" "$dir/env/xdg-data" || return 1
   fm_hclab_real_state_roots > "$(fm_hclab_roots_path "$name")" || {
     rm -rf "$dir"
     fm_hclab_error "could not record the fleet-state roots"
@@ -370,6 +383,13 @@ fm_hclab_teardown() { # <session>
 }
 
 cmd=${1:-}
+# All commands that can write or remove lab state share the root checks.
+case "$cmd" in
+  provision|run|stop|teardown)
+    fm_hclab_private_root "$(fm_hclab_root)" || exit 1
+    fm_hclab_private_root "$(fm_hclab_sock_dir)" || exit 1
+    ;;
+esac
 case "$cmd" in
   name)
     label=${2:-}
