@@ -526,7 +526,7 @@
 #                  launches (supplies its own leading space, empty otherwise)
 #     __PIRESUME__ optional relaunch-only `--session <reference>` that keeps a
 #                  Pi replacement on the session the endpoint's runtime already
-#                  reports (relaunch_resume_args below owns it; it supplies its
+#                  reports (relaunch_resume_ref below supplies the reference; it supplies its
 #                  own leading space, and is empty on every fresh spawn and for
 #                  every other harness)
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -3736,17 +3736,6 @@ relaunch_resume_ref() {  # <harness> <backend> <target> -> "<flag>\t<reference>"
   flag=$(fm_control_relaunch_resume_flag "$harness" "$agent") || return 0
   [ -n "$flag" ] && [ -n "$ref" ] || return 0
   printf '%s\t%s' "$flag" "$ref"
-}
-
-# Prints the arguments with the single leading space that appends them to the
-# launch line, so an empty result leaves every other launch byte-identical.
-relaunch_resume_args() {  # <harness> <backend> <target>
-  local spec flag ref
-  spec=$(relaunch_resume_ref "${1-}" "${2-}" "${3-}") || return 0
-  [ -n "$spec" ] || return 0
-  flag=${spec%%$'\t'*}
-  ref=${spec#*$'\t'}
-  printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
 }
 
 model_flag_for_harness() {
