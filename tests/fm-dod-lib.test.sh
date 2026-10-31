@@ -478,7 +478,7 @@ test_worker_role_names_skill_and_fallback_file() {
   role_file="$TMP_ROOT/worker-role.txt"
   path="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
   [ -f "$path" ] || fail "Firstmate skill file is missing at $path"
-  fm_brief_worker_role "$TMP_ROOT/state" upstream-4751 "$ROOT" >"$role_file"
+  fm_brief_worker_role "$TMP_ROOT/state" upstream-4751 "$ROOT" "$TMP_ROOT/data" >"$role_file"
   assert_grep "\`CONTRIBUTING.md\` and \`firstmate-coding-guidelines\` for Firstmate changes" "$role_file" \
     "worker role did not name the skill"
   assert_grep "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`$path\` instead." "$role_file" \
