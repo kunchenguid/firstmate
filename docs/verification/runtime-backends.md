@@ -2710,6 +2710,32 @@ FM_TASK_ID=[lab10] FM_TASK_INBOX=[<lab>/home/state/lab10.inbox] GIT_CONFIG_VALUE
 Codex's own `config/read` on a leased worktree, through `codex app-server` with an isolated `CODEX_HOME`, gives the same split: the project layer is listed either way, but its values apply only when the worktree, or the main checkout it belongs to, is trusted; a trusted parent directory does not count.
 Write order is not the cause: T3 starts a thread's Codex session with `thread/start` at the thread's first turn (`apps/server/src/orchestration-v2/ProviderTurnStartService.ts:656` calling `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts:6571` at tag v0.1.0), after spawn has written the file.
 
+### Tool names in 0.1.3 and later
+
+On 2026-10-27, `tools/list` on `t3 v0.1.4-nightly.20261027.3770` offered `t3_thread_configure` and `t3_pending_request`, but not `t3_thread_configuration` or the three `t3_pending_request_*` tools.
+Stable `v0.1.3` (commit `d2c44031`) has the same tool set.
+On the new server, `t3_thread_configure` called with only `threadId` returns the thread's `modelSelection`, `runtimeMode`, and `interactionMode`, and `t3_pending_request` takes `action` `list`, `read`, or `respond`.
+`t3 v0.1.3-nightly.20261026.3740` lists both `t3_thread_configuration` and `t3_thread_configure`, but there `t3_thread_configure` without `modelSelection` fails with `Missing key ["modelSelection"]`, so the binding read keeps `t3_thread_configuration` whenever it is listed.
+
+The rename handling was verified live on Linux x86_64 (kernel 6.8.0) with codex-cli 0.164.0, node v24.21.0, and treehouse v2.3.0.
+One server was the service-managed `t3 v0.1.3-nightly.20261026.3740`; the other was a loopback lab copy of `t3 v0.1.4-nightly.20261027.3770` with its own base directory and port, stopped afterwards.
+Each run used a scratch Firstmate home with `config/backend` `t3code` and a scratch project with a bare origin.
+The home carried this change plus an unrelated local fix to how the helper reads a model's effort options.
+
+```sh
+bin/fm-t3-mcp.mjs status
+bin/fm-spawn.sh <id> <home>/projects/<repo> --scout --harness codex --model <model> --effort high --backend t3code
+bin/fm-t3-mcp.mjs wait <thread>
+bin/fm-teardown.sh <id>
+```
+
+| Step | `0.1.3-nightly.20261026.3740` | `0.1.4-nightly.20261027.3770` |
+| --- | --- | --- |
+| Capability gate and `status` | earlier tool family for both capabilities | current tool family for both capabilities |
+| Codex scout spawn, including the binding read-back | launched; the Codex session recorded `"effort":"high"` | launched; the Codex session recorded `"effort":"high"` |
+| `wait` until the scout's `done` line and report | `"status":"completed","timedOut":false` | `"status":"completed","timedOut":false` |
+| Teardown | the thread read `archived:true` | the thread read `archived:true` |
+
 ## tern
 
 The compatibility floor documented with this adapter is Tern 0.9.4.
