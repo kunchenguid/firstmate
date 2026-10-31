@@ -2794,6 +2794,7 @@ test_spawn_refuses_launch_settings_t3_cannot_honor codex-approval-mode approve-f
 test_spawn_refuses_launch_settings_t3_cannot_honor codex-permission-mode restricted "config/codex-permission-mode=restricted" codex
 test_spawn_codex_accepts_bypass_approval_mode
 test_spawn_refuses_launch_settings_t3_cannot_honor launch-env-allowlist HOME "config/launch-env-allowlist"
+test_spawn_refuses_launch_settings_t3_cannot_honor crew-exclude-tools mcp__srv__writeTool "backend=t3code cannot apply config/crew-exclude-tools"
 test_spawn_refuses_raw_launch_command
 test_spawn_abort_returns_lease_only_after_archive ok
 test_spawn_abort_returns_lease_only_after_archive fail

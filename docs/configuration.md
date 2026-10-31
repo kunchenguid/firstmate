@@ -1432,6 +1432,8 @@ The contract is runtime-neutral: a runtime must support hiding the listed tool n
 With no file, or a file with no entries, every launch on every runtime is unchanged.
 
 Create the file with one tool name per line, such as `mcp__<server>__<tool>` for an MCP tool.
+On Claude Code an `mcp__<server>` entry also hides every tool that server provides; the server still starts, but none of its tools reach the worker.
+Pi treats every entry as an exact tool name.
 Blank lines and lines beginning with `#` are allowed, and surrounding whitespace on a line is trimmed; a trailing comment on an entry line is not allowed.
 The file is read from this home's own configuration directory on every launch, so a change reaches the next worker or relaunch without a restart.
 It is not in the inherited configuration set, so no other home, including a secondmate home, receives it; create the file in each home that wants it.
@@ -1442,6 +1444,8 @@ It does not apply to a secondmate's own agent, which neither reads nor refuses o
 | Runtime | With a non-empty list |
 | --- | --- |
 | `pi`, `pi-signed` | Hides listed tool names, MCP tools included, on every ship and scout spawn and relaunch. |
+| `claude` | Hides listed built-in and MCP tools, or whole MCP servers, on every ship and scout spawn and relaunch. |
+| `claude` on the `t3code` backend | The launch refuses, because T3 Code starts Claude itself and cannot carry the list. |
 | Every other runtime, and a raw launch command | The launch refuses with an error naming `config/crew-exclude-tools`, because that runtime has no verified way to hide tools. |
 
 A relaunch validates the list and the replacement runtime's support before stopping the running worker, so an exclusion-list refusal preserves the running agent.
@@ -1459,6 +1463,7 @@ The check runs before worker actions so it cannot supersede a terminal status em
 An unmatched entry is reported as **unverified**, not valid: Pi versions that omit excluded tools from the registry cannot distinguish a correct exclusion from a typo, and a server that has not connected cannot verify its tools either.
 Names present in the registry produce no report; unknown or unverified names do not refuse the launch.
 Each relaunch installs a fresh worker extension with the home's current list, so the replacement performs the same check.
+That loaded-tool report is Pi-only: Claude Code accepts a name it does not know without complaint, so on a Claude worker a mistyped entry leaves that tool available and unreported.
 
 [`bin/fm-exclude-tools-lib.sh`](../bin/fm-exclude-tools-lib.sh) implements parsing and pre-launch validation for this contract; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the launch-flag mechanics.
 
