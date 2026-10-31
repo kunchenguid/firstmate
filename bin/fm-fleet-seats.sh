@@ -142,7 +142,11 @@
 # registering home reserves it at the root, dispatches it with a remote route carrying
 # the host operation token, and applies the host's token-scoped disposition
 # with reconcile-remote. Host-side records under state/parent-route are
-# execution receipts, not counted holders (bin/fm-remote-secondmate-control.sh).
+# execution receipts (bin/fm-remote-secondmate-control.sh): a pooled
+# supervisor whose generation a retained reservation proves is
+# parent-accounted, while one no reservation proves is adopted into the serve
+# certificate, so pools can be enabled around a pre-pool or unrecorded
+# supervisor without losing its occupancy.
 #
 # EXPLICIT MODELS. While any pool is configured, every launch needs a verified
 # explicit model. A harness default or raw launch command cannot prove its
@@ -651,13 +655,15 @@ meta_state() {
   echo pooled
 }
 
-# pooled_records <state-dir> <models-file>: "<state>\t<id>" per unmanaged
-# pooled active record. A record whose generation is a predecessor some
-# incarnation names, but which the ledger never held, is still an unmanaged
-# agent and counts by its record. Returns 4 (with CONFLICT
+# pooled_records <state-dir> <models-file> [gens-file]: "<state>\t<id>" per
+# unmanaged pooled active record. When <gens-file> is given, each emitted
+# record's "<id>\t<generation>" is appended to it, identifying the same agent
+# on another accounting surface. A record whose generation is a predecessor
+# some incarnation names, but which the ledger never held, is still an
+# unmanaged agent and counts by its record. Returns 4 (with CONFLICT
 # set) when a record's generation is otherwise unknown to its ledger holder.
 pooled_records() {
-  local home_state=$1 models=$2 meta id verdict gen
+  local home_state=$1 models=$2 gens=${3:-} meta id verdict gen
   [ -r "$home_state" ] && [ -x "$home_state" ] || return 1
   for meta in "$home_state"/*.meta; do
     [ -e "$meta" ] || continue
@@ -677,7 +683,12 @@ pooled_records() {
       fi
     fi
     verdict=$(meta_state "$meta" "$models")
-    case "$verdict" in pooled|unreadable) printf '%s\t%s\n' "$home_state" "$id" ;; esac
+    case "$verdict" in
+      pooled|unreadable)
+        printf '%s\t%s\n' "$home_state" "$id"
+        [ -z "$gens" ] || printf '%s\t%s\n' "$id" "$gen" >> "$gens"
+        ;;
+    esac
   done
 }
 
@@ -777,8 +788,12 @@ root_holders() {
   ledger_scan || return 1
   {
     ledger_pool_holders "$models"
+    # The (task, generation) pairs this home already counts, so an adopted
+    # supervisor a remote certificate lists is not counted a second time.
+    awk -F '\t' '($4 == "reserved" || $4 == "confirmed") { print $2 "\t" $3 }' \
+      "$TMPD/ledger" > "$TMPD/counted-gens" || return 1
     while IFS= read -r home_state; do
-      pooled_records "$home_state" "$models" || { rc=$?; [ "$rc" -ne 4 ] || return 4; return 1; }
+      pooled_records "$home_state" "$models" "$TMPD/counted-gens" || { rc=$?; [ "$rc" -ne 4 ] || return 4; return 1; }
     done < "$TMPD/local-homes"
     primary=$(jq -r '.primary_model // empty' "$POOLS")
     if [ -n "$primary" ] && grep -Fxq -- "$primary" "$models" && primary_counts "$ROOT_STATE"; then
@@ -791,7 +806,12 @@ root_holders() {
         continue
       fi
       jq -r --slurpfile m <(jq -R . "$models" | jq -s .) \
-        "$MODEL_NORMALIZATION"'.holders[] | .model |= seat_model | select(.model == null or (.model as $x | $m[0] | index($x))) | "\(.state_dir)\t\(.task)"' \
+        --slurpfile c <(jq -R . "$TMPD/counted-gens" | jq -s .) \
+        "$MODEL_NORMALIZATION"'.holders[] | .model |= seat_model
+          | select(.model == null or (.model as $x | $m[0] | index($x)))
+          | select((.state_dir | endswith("/parent-route") | not)
+            or ((.task + "\t" + .generation) as $k | ($c[0] | index($k) | not)))
+          | "\(.state_dir)\t\(.task)"' \
         "$CERT_FILE" | while IFS=$'\t' read -r st task; do
           printf 'remote:%s:%s\t%s\n' "$id" "$st" "$task"
         done
@@ -804,6 +824,8 @@ root_holders() {
 }
 
 # remote_home_holders <models-file>: a remote home's own holders for one pool.
+# Adopted host supervisors count here exactly as they will in the certificate
+# this serve is about to publish.
 remote_home_holders() {
   local models=$1 home_state rc
   CONFLICT=
@@ -814,8 +836,36 @@ remote_home_holders() {
     while IFS= read -r home_state; do
       pooled_records "$home_state" "$models" || { rc=$?; [ "$rc" -ne 4 ] || return 4; return 1; }
     done < "$TMPD/local-homes"
+    [ ! -f "$TMPD/adopted-hosts" ] || awk -F '\t' 'NR == FNR { m[$0] = 1; next }
+      $4 == "-" || ($4 in m) { print $1 "\t" $2 }' "$models" "$TMPD/adopted-hosts"
   } > "$TMPD/holders.raw" || return $?
   LC_ALL=C sort -u "$TMPD/holders.raw"
+}
+
+# host_reservation <id> <generation>: print the retained parent reservation
+# proving this host supervisor's accounting, when one exists: the record under
+# the supervisor's actual generation, or one an observing operation bound to
+# that generation through its durable receipt (an `existing` episode binds the
+# operation token it was claimed under to the generation it found running).
+host_reservation() {
+  local id=$1 gen=$2 dir record opfile op
+  dir=$ROOT_STATE/parent-route
+  record="$dir/$id.seat-reservation.$gen"
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    printf '%s\n' "$record"
+    return 0
+  fi
+  for opfile in "$dir/$id.seat-operation."*; do
+    [ -f "$opfile" ] && [ ! -L "$opfile" ] || continue
+    [ "$(record_field "$opfile" actual_generation)" = "$gen" ] || continue
+    op=${opfile##*.seat-operation.}
+    gen_ok "$op" || continue
+    record="$dir/$id.seat-reservation.$op"
+    [ -e "$record" ] || [ -L "$record" ] || continue
+    printf '%s\n' "$record"
+    return 0
+  done
+  return 1
 }
 
 lock_or_refuse() {  # <lock>
@@ -1683,6 +1733,7 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
     : > "$TMPD/adopted-hosts"
     if [ "$(pool_count "$TMPD/delivered")" -gt 0 ]; then
       jq -r '.pools[].models[]' "$TMPD/delivered" > "$TMPD/host-models"
+      ledger_scan || unavailable "${LEDGER_ERROR:-the seat ledger cannot be read}"
       for meta in "$ROOT_STATE/parent-route"/*.meta; do
         [ -e "$meta" ] || [ -L "$meta" ] || continue
         verdict=$(meta_state "$meta" "$TMPD/host-models")
@@ -1691,36 +1742,46 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
         id=${id%.meta}
         gen=$(meta_generation "$meta")
         gen_ok "$gen" || unavailable "host supervisor $id has unaccounted occupancy"
-        reservation="$ROOT_STATE/parent-route/$id.seat-reservation.$gen"
-        # A pre-pool supervisor has no reservation at all: fleet seats did not
-        # exist when it launched, so no certificate could have been written.
-        # Adopt it so the first pooled serve can finish, but count it exactly
-        # once - a task record for the same id already contributes a holder to
-        # the certificate, so adopting that one too would spend two seats on a
-        # single worker and refuse valid work. A reservation that exists but
-        # does not validate is still refused.
-        if [ ! -e "$reservation" ] && [ ! -L "$reservation" ]; then
-          [ "$verdict" = pooled ] || unavailable "host supervisor $id has unaccounted occupancy"
-          adopted=1
+        if reservation=$(host_reservation "$id" "$gen"); then
+          op=${reservation##*.seat-reservation.}
+          if ! private_file_ok "$reservation" \
+            || ! jq -e --arg t "$id" --arg g "$op" --arg h "$ROOT_HOME" --arg m "$(record_field "$meta" model)" '
+              .schema == "fm-fleet-seat-holder.v2" and .task == $t
+              and (.incarnations | length == 1)
+              and any(.incarnations[]; .generation == $g and .kind == "secondmate"
+                and .lifecycle == "reserved" and .launch_phase == "dispatching"
+                and .model == (if $m == "-" or $m == "default" or $m == "" then null else $m end)
+                and .route.placement == "remote"
+                and .route.operation == $g and .route.home == $h)
+            ' "$reservation" >/dev/null 2>&1; then
+            unavailable "host supervisor $id has unaccounted occupancy"
+          fi
+          continue
+        fi
+        # No retained reservation proves parent accounting: a supervisor
+        # launched before this home had seat pools, or one whose launch reply
+        # was lost before the parent recorded it, has none to present. Adopt
+        # it into this certificate so the first pooled serve can finish,
+        # unless the same agent is already counted here under a matching
+        # generation. A reservation that exists but does not validate is
+        # still refused above.
+        if ! awk -F '\t' -v t="$id" -v g="$gen" \
+            '($4 == "reserved" || $4 == "confirmed") && $2 == t && $3 == g { found = 1 } END { exit !found }' \
+            "$TMPD/ledger"; then
+          accounted=0
           while IFS= read -r home_state; do
-            if [ -e "$home_state/$id.meta" ] || [ -L "$home_state/$id.meta" ]; then
-              adopted=0
+            if { [ -e "$home_state/$id.meta" ] || [ -L "$home_state/$id.meta" ]; } \
+              && [ "$(meta_generation "$home_state/$id.meta" 2>/dev/null)" = "$gen" ]; then
+              accounted=1
               break
             fi
           done < "$TMPD/local-homes"
-          if [ "$adopted" -eq 1 ]; then
-            printf '%s\t%s\t%s\t%s\tconfirmed\n' "$ROOT_STATE/parent-route" "$id" "$gen" "$(record_field "$meta" model)" >> "$TMPD/adopted-hosts"
+          if [ "$accounted" -eq 0 ]; then
+            model=$(record_field "$meta" model)
+            case "$model" in ''|default|-) model=- ;; esac
+            printf '%s\t%s\t%s\t%s\tconfirmed\n' \
+              "$ROOT_STATE/parent-route" "$id" "$gen" "$model" >> "$TMPD/adopted-hosts"
           fi
-        elif ! private_file_ok "$reservation" \
-          || ! jq -e --arg t "$id" --arg g "$gen" --arg h "$ROOT_HOME" --arg m "$(record_field "$meta" model)" '
-            .schema == "fm-fleet-seat-holder.v2" and .task == $t
-            and (.incarnations | length == 1)
-            and any(.incarnations[]; .generation == $g and .kind == "secondmate"
-              and .lifecycle == "reserved" and .launch_phase == "dispatching"
-              and .model == $m and .route.placement == "remote"
-              and .route.operation == $g and .route.home == $h)
-          ' "$reservation" >/dev/null 2>&1; then
-          unavailable "host supervisor $id has unaccounted occupancy"
         fi
       done
     fi
