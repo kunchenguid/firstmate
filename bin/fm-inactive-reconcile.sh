@@ -337,7 +337,7 @@ pr_for_task() { # <meta> [preferred-line]
   value=$(meta_field "$meta" pr)
   if [ -n "$preferred" ]; then
     case "$preferred" in
-      done\ *' PR https://'*' checks green')
+      done\ *' PR https://'*' checks green'|done:*'PR https://'*' checks green')
         local ready_url=${preferred#* PR }
         ready_url=${ready_url% checks green}
         case "$ready_url" in *[[:space:]]*|'') ;; *) value=$ready_url ;; esac

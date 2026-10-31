@@ -223,6 +223,38 @@ test_branch_ack_retires_inactive_outcome_receipt() {
   pass "a branch-actor acknowledgement retires the inactive-outcome receipt and later scans stay quiet"
 }
 
+# A stalled first registration is bounded; later children and ledger delivery
+# still happen, and the persisted cursor wraps so the first child is retried.
+test_slow_pr_watch_does_not_starve_ledger_or_later_children() {
+  local url='https://github.com/owner/repo/pull/1'
+  make_world slow-pr-watch; bind_secondmate local
+  write_child "$MATE" a-slow "done: PR $url checks green"
+  write_child "$MATE" b-later 'done: later child finished'
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FORGE_LOG"
+case " $* " in
+  *'pull/1 '*) sleep 5; exit 0 ;;
+  *' --json isDraft '*) printf '{"isDraft":false}\n' ;;
+  *' --json headRefOid '*) printf '{"headRefOid":"%s"}\n' "$FM_TEST_HEAD" ;;
+  *' --json state '*) printf 'OPEN\n' ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/gh"
+  FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+  grep -Fq 'child-outcome-b-later-done' "$MAIN/state/mate.status" \
+    || fail 'slow PR registration prevented later ledger delivery'
+  grep -Fq 'owner/repo/pull/1' "$WORLD/forge.log" \
+    || fail 'slow first registration was not attempted'
+  # One scan clears the exhausted cursor; the following scan starts at a-slow again.
+  FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+  : > "$WORLD/forge.log"
+  FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+  grep -Fq 'owner/repo/pull/1' "$WORLD/forge.log" \
+    || fail 'the cursor left the timed-out child permanently first'
+  pass 'slow PR registration is bounded, does not starve ledger delivery, and is retried after cursor wrap'
+}
+
 # A canonical ready ledger line is enough to record pr= and install the poll
 # sidecar in a main home, without a supervisor-turn caller.
 test_main_home_arms_ready_pr_watch() {
@@ -488,9 +520,9 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   mkdir -p "$MATE/data/scout"
   printf '# findings\n' > "$MATE/data/scout/report.md"
   write_child "$MATE" boom 'failed: build broke'
-  write_child "$MATE" replaced-pr $'working: old PR https://example.test/owner/repo/pull/11\ndone: PR https://example.test/owner/repo/pull/22'
-  awk '$0 !~ /^pr=/' "$MATE/state/replaced-pr.meta" > "$MATE/state/replaced-pr.meta.tmp"
-  mv "$MATE/state/replaced-pr.meta.tmp" "$MATE/state/replaced-pr.meta"
+  write_child "$MATE" replaced-pr $'working: old PR https://example.test/owner/repo/pull/11\ndone: PR https://example.test/owner/repo/pull/22 checks green'
+  sed -i.bak 's|^pr=https://example.test/owner/repo/pull/1$|pr=https://example.test/owner/repo/pull/11|' "$MATE/state/replaced-pr.meta"
+  rm -f "$MATE/state/replaced-pr.meta.bak"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   scout_key=$(reported_outcome_key "$MATE" scout 'done') || fail "scout receipt key missing"
   boom_key=$(reported_outcome_key "$MATE" boom failed) || fail "failed receipt key missing"
@@ -499,7 +531,7 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
     || fail "scout delivery lost its report pointer: $(cat "$MAIN/state/mate.status")"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
     || fail "failed line was not delivered under the failed verb: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 checks green pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
     || fail "ledger fallback did not prefer the terminal ready line PR: $(cat "$MAIN/state/mate.status")"
   printf 'working: retrying\ndone: fixed on retry\n' >> "$MATE/state/boom.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -1118,6 +1150,7 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_slow_pr_watch_does_not_starve_ledger_or_later_children
 test_main_home_arms_ready_pr_watch
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
