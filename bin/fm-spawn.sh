@@ -516,6 +516,10 @@
 #     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
 #                  JSON object for a crewmate or scout, or a quoted path to
 #                  state/<task-id>.claude-settings.json for a secondmate
+#     __CLAUDESESSION__ optional `--session-id <uuid> ` on a claude launch carrying
+#                  a concrete pin, minted collision-checked so the pinned-model
+#                  assertion can read that session's own transcript by address
+#                  (supplies its own trailing space, empty otherwise)
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
@@ -3448,7 +3452,7 @@ muse_credential_present() {
 # records pin-versus-actual in the task status, where supervision and the captain
 # see a downgrade instead of finding it later in a session file.
 #
-# Three rules keep that record honest:
+# Four rules keep that record honest:
 #   - The read binds to a signal the harness itself emits, its own session
 #     record. A harness that emits nothing, or whose session has not stated a
 #     model yet, is recorded as unverified: never as a match, and never by
@@ -3458,12 +3462,18 @@ muse_credential_present() {
 #     produced, not the model the previous session last ran on (measured
 #     2026-10-31 on pi 1.4.0: `--model` supersedes the stored model on resume, so
 #     the inherited records legitimately disagree with a changed pin; docs/
-#     verification/runtime-backends.md "Pinned model on a resumed session").
+#     verification/runtime-backends.md "Pinned model readback after a launch").
 #   - The assertion never decides the launch. By the time a session can state its
 #     model the worker is already running, so a mismatch is reported, not turned
 #     into a launch failure or a blocked:/failed: decision event that could drive
 #     supervision into replacing a live worker. The pin remains what the launch
 #     line carries; this records whether the harness honored it.
+#   - Only a turn that ran is evidence. A request the vendor could not complete
+#     still persists an assistant record naming the model it was asked for (Pi
+#     0.84.4 wrote one with stopReason error, recorded 2026-09-02 in docs/
+#     verification/runtime-backends.md "historical post-construction
+#     provider-error fallback"), so an error or aborted attempt states nothing
+#     about the pin, and an error-only session stays unverified.
 #
 # The probe is bounded so a slow first turn costs the spawn a bounded wait and an
 # unresolved read becomes "unverified" rather than a hang: FM_MODEL_PIN_POLLS
@@ -3483,9 +3493,16 @@ spawn_model_pin_interval() {  # -> seconds between polls
 
 # Compare the pin with the model a session reports. Exact, or a provider-qualified
 # pin against the bare id a record carries, or Claude's short family alias against
-# that family's concrete id. A decorated id stays a DIFFERENT model from a plain
-# one: `claude-opus-5[1m]` against a `claude-opus-5-5` pin is exactly the drift
-# this assertion exists to surface.
+# that family's concrete id.
+# Claude also documents each of its version aliases, and its `-latest` names, as
+# the same model as the dated snapshot that alias resolves to (claude-haiku-4-5 is
+# claude-haiku-4-5-20251001 and so on; the vendor's model-id page owns the pairs),
+# so the two spellings compare equal in either direction - a launch pinned to the
+# alias is not a downgrade when the API reports the snapshot it resolved to.
+# Anything else stays a DIFFERENT model: another version, a suffix that is not
+# that alias's own snapshot date, and a decorated id such as `claude-opus-5[1m]`
+# against a `claude-opus-5-5` pin, which is exactly the drift this assertion
+# exists to surface.
 spawn_model_pin_matches() {  # <harness> <pin> <actual>
   local harness=$1 pin=$2 actual=$3
   [ -n "$pin" ] && [ -n "$actual" ] || return 1
@@ -3575,9 +3592,11 @@ spawn_pi_session_line_count() {  # <file> -> complete lines
   printf '%s' "$lines"
 }
 
-# The last assistant turn at or after <first-line>, as provider/model when the
-# record names a provider and the bare model otherwise. Reading from an offset is
-# what separates the replacement's own turn from the history it inherited.
+# The last COMPLETED assistant turn at or after <first-line>, as provider/model
+# when the record names a provider and the bare model otherwise. Reading from an
+# offset is what separates the replacement's own turn from the history it
+# inherited; requiring a completed-turn stopReason (stop, length, or toolUse) is
+# what keeps a failed attempt out of the evidence (rules above).
 spawn_pi_session_reported_model() {  # <file> [first-line]
   local file=${1-} first=${2:-1} model
   [ -r "$file" ] || return 1
