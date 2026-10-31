@@ -235,7 +235,9 @@ fm_sol_cap_config() {  # <config-dir>
 # fm_sol_cap_model_capped <model>
 # Is <model> one of the models the loaded declaration covers? The declared
 # exact ids match literally; the declared pattern matches the model id. A
-# model the declaration does not name is not capped.
+# model the declaration does not name is not capped, and the unpinned
+# `default` sentinel names no dispatched model, so a broad pattern must never
+# catch it.
 # fm_sol_cap_small_int <value>
 # Zero exit when <value> is a positive integer of at most nine digits, so a
 # numeric comparison against it can never overflow: an out-of-range value

@@ -2076,7 +2076,7 @@ At least one of `models` or `model-pattern` is required, because a declaration t
 A model covered by neither is never capped, never reserved, and never counted.
 Blank lines and `#` comments are ignored; every other line is a `key=value` pair, and an unknown key, a repeated key, a non-integer count, a `ceiling` above `max`, or an unusable pattern is refused by name.
 A capped session is a worker whose dispatched model is one the declaration covers.
-A fresh launch with `--model default` has no explicit model pin; remote endpoint reuse follows the reported-model reconciliation below.
+A fresh launch with `--model default` has no explicit model pin: the sentinel itself is never a covered model, so no phase of the guard treats an unpinned worker as capped, and remote endpoint reuse follows the reported-model reconciliation below.
 `bin/fm-sol-cap-lib.sh` is the single owner of the guard's mechanics and CLI, `bin/fm-spawn.sh` owns the hook point (after the spawn's harness/model axis resolves, before any endpoint, worktree, or record exists), and this section is the single owner of the operator contract.
 
 **What counts and where it lives**
