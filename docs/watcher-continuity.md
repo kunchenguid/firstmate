@@ -151,7 +151,7 @@ That line is retained for replacement handoff, but the adapter never treats that
 
 The successor start and the wake delivery are separate steps on Pi.
 A successor start never waits behind a wake delivery that is still in flight, so a close that arrives while an earlier wake is still being delivered to the supervision branch re-arms immediately instead of leaving the fleet unwatched for the length of that delivery.
-Delivery to the branch stays serialized: one wake is delivered at a time, and the deliveries keep their order.
+Delivery to the branch stays serialized: one wake is delivered at a time, each wake only after its own close's successor start has settled, and the deliveries keep their order.
 The handling handoff is confirmed inside the successor start, while that successor is still the live arm, and the delivery reads the confirmed outcome.
 A successor that a later close already replaced is therefore never confirmed as a failed handoff, and a healthy newer successor is never reported to main as a restoration failure.
 A close that arrives while a successor start or a wake delivery is in flight keeps its bounded retry for the end of that operation, and the operation that held the guard settles it.
@@ -466,7 +466,9 @@ Defaults and overrides, including Claude Stop's outer successor-status wait, are
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
 - Blocks prompt delivery to prove the successor launches first.
-- Verifies single-flight behavior.
+- Holds one branch delivery open to prove successive actionable closes still restore their own successors, and that the queued wakes then arrive in order.
+- Proves a close whose delivery waits behind that held delivery keeps the handoff its own successor confirmed instead of reporting a healthy newer successor to main as a restoration failure.
+- Verifies single-flight behavior for the restoration pump and for delivery separately.
 - Changes the session lock before close to prove ownership is rechecked.
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 - Lets a Pi successor's descendant print readiness after the arm exits to prove restoration retries until a live successor exists before delivery.
