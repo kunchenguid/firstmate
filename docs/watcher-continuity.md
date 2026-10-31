@@ -43,6 +43,9 @@ Each adapter:
 - Applies bounded exponential retry after an unexpected or failed close.
 
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
+The actionable restoration path applies the same live-child check after readiness, so output retained by a dead child's descendant cannot satisfy successor verification.
+Pi also settles an arm child on its process exit event, not only on stdio close, so a child that dies while a descendant still holds its pipes takes the same bounded retry.
+If a complete actionable line arrives while those pipes drain after exit, it replaces the provisional failure retry and takes the ordinary actionable restoration path.
 A failed follow-up never cancels continuity restoration.
 
 ### Pi session replacement
@@ -435,6 +438,9 @@ It then simulates actionable and empty child closes against the actual Pi and Op
 - Verifies single-flight behavior.
 - Changes the session lock before close to prove ownership is rechecked.
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+- Lets a Pi successor's descendant print readiness after the arm exits to prove restoration retries until a live successor exists before delivery.
+- Lets a verified Pi successor exit after delivery while a descendant holds its pipes to prove the exit alone schedules the bounded retry.
+- Delays a Pi arm's actionable line behind a descendant-held pipe until after its exit to prove that line still becomes the wake instead of a retry.
 
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, plus:
 

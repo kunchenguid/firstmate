@@ -1029,16 +1029,22 @@ export default function (pi: ExtensionAPI) {
       appendExtensionLog(
         `restore attempt=${attempt} predecessor=${predecessorArmPid || "none"} start=${replacement.ok ? `ok pid=${successorChild?.pid ?? "none"}` : "failed"}`,
       );
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
+      const ready = Boolean(replacement.ok && successorChild && await waitForReadiness(successorChild));
+      if (ready && successorChild && liveArmChild(owner) === successorChild) {
         return { failure: "", recovery: armRecovery.get(successorChild) };
       }
       if (replacement.ok) {
-        appendExtensionLog(`restore attempt=${attempt} readiness=timeout pid=${successorChild?.pid ?? "none"}`);
-        failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
-        if (!(await retireArm(successorChild))) {
-          return {
-            failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
-          };
+        if (ready) {
+          appendExtensionLog(`restore attempt=${attempt} readiness=dead pid=${successorChild?.pid ?? "none"}`);
+          failure = "watcher: FAILED - Pi extension could not verify a live successor watcher";
+        } else {
+          appendExtensionLog(`restore attempt=${attempt} readiness=timeout pid=${successorChild?.pid ?? "none"}`);
+          failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
+          if (!(await retireArm(successorChild))) {
+            return {
+              failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
+            };
+          }
         }
       } else {
         failure = /(?:read-only|no live session)/.test(replacement.message)
@@ -1147,6 +1153,20 @@ export default function (pi: ExtensionAPI) {
       if (reason && !armPendingActionable.has(armChild)) {
         const pending = createPendingActionable(reason, String(armChild.pid ?? ""));
         armPendingActionable.set(armChild, pending);
+        // `exit` can precede the final stdout/stderr data events. If that exit
+        // provisionally classified a partial buffer as a failure, replace its
+        // scheduled retry with the actionable restoration path once the full
+        // line arrives.
+        if (settled) {
+          enqueuePendingActionable(owner, pending);
+          if (!generationIsLive(owner)) return;
+          if (owner.retryTimer) {
+            clearTimeout(owner.retryTimer);
+            owner.retryTimer = null;
+          }
+          owner.retryFailures = 0;
+          void processPendingActionables(owner);
+        }
       }
     };
     const releaseChild = (): void => {
@@ -1161,7 +1181,7 @@ export default function (pi: ExtensionAPI) {
       stderr += chunk.toString();
       observeEstablishedArm();
     });
-    armChild.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+    const finishArm = (code: number | null, signal: NodeJS.Signals | null): void => {
       if (settled) return;
       settled = true;
       resolveClosed();
@@ -1189,6 +1209,10 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       scheduleRetry(owner, classification.message, predecessor);
+    };
+    armChild.on("close", finishArm);
+    armChild.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      setImmediate(() => finishArm(code, signal));
     });
     armChild.on("error", (error: Error) => {
       if (settled) return;
