@@ -539,6 +539,7 @@ tests/fm-send-strict.test.sh
 tests/fm-spawn-batch.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-t3-mcp.test.sh
+tests/fm-task-job.test.sh
 tests/fm-test-run.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-transition-lib.test.sh
@@ -573,6 +574,7 @@ tests/fm-send-strict.test.sh 4804
 tests/fm-spawn-batch.test.sh 2987
 tests/fm-supervision-instructions.test.sh 809
 tests/fm-t3-mcp.test.sh 57613
+tests/fm-task-job.test.sh 17552
 tests/fm-test-run.test.sh 156781
 tests/fm-tmux-submit-busy.test.sh 2600
 tests/fm-transition-lib.test.sh 101
@@ -604,6 +606,7 @@ tests/fm-crew-state.test.sh
 tests/fm-t3-mcp.test.sh
 tests/fm-arm-pretool-check.test.sh
 tests/fm-herdr-lab.test.sh
+tests/fm-task-job.test.sh
 tests/fm-cd-pretool-check.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-pi-primary-types.test.sh

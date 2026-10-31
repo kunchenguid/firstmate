@@ -1197,7 +1197,7 @@ write_endpoint_close_meta() {  # <case-dir> <id> <window>
 }
 
 test_failed_endpoint_close_refuses_before_removing_the_record() {
-  local dir socket session='close failure' id=strand-task rc
+  local dir socket session='close failure' id=strand-task rc out jobdir runner child
   [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
   dir=$(make_case close-failure)
   socket=dedicated.sock
@@ -1208,6 +1208,12 @@ test_failed_endpoint_close_refuses_before_removing_the_record() {
     || fail "fixture did not create the task window"
 
   write_endpoint_close_meta "$dir" "$id" "$session:fm-$id"
+  printf 'spawn_gen=close-retry-job\n' >> "$dir/home/state/$id.meta"
+  out=$(FM_HOME="$dir/home" FM_TASK_INBOX="$dir/home/state/$id.inbox" \
+    "$ROOT/bin/fm-task-job.sh" start --timeout 120 -- sleep 60) || fail "task job start failed: $out"
+  jobdir="$dir/home/state/$id.inbox/jobs/$(printf '%s\n' "$out" | sed -n 's/^job: //p')"
+  runner=$(sed -n 's/^pid=//p' "$jobdir/runner")
+  child=$(sed -n 's/^pid=//p' "$jobdir/child")
 
   set +e
   env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 \
@@ -1224,6 +1230,17 @@ test_failed_endpoint_close_refuses_before_removing_the_record() {
     "the backend's own close failure was swallowed instead of reported"
   assert_grep "could not be closed" "$dir/failed.err" \
     "teardown did not refuse on the reported close failure"
+  ! kill -0 "$runner" 2>/dev/null || fail "failed endpoint cleanup left its task job runner alive"
+  ! kill -0 "$child" 2>/dev/null || fail "failed endpoint cleanup left its task command alive"
+  assert_grep 'stopped=1' "$jobdir/job" "confirmed cleanup must persist in the existing job record"
+  assert_absent "$jobdir/exit" "cancelled task jobs must not publish a completion"
+  FM_HOME="$dir/home" bash -c '. "$1"; fm_task_job_reconcile "$2" "$3"' \
+    _ "$ROOT/bin/fm-task-job-lib.sh" "$dir/home/state" "$id" > "$dir/reconcile.out" 2>&1 \
+    || fail "reconciling the stopped job failed"
+  assert_no_grep 'unrecoverable' "$dir/reconcile.out" "recovery must skip confirmed cancellations"
+  assert_absent "$jobdir/delivered" "recovery must not deliver a cancelled task job"
+  set -- "$dir/home/state/$id.inbox/"*.msg
+  [ ! -e "$1" ] || fail "recovery queued a cancelled completion"
   # The refusal exists so the endpoint is not STRANDED: the record is the only
   # thing naming what survived, so it has to outlive the refusal.
   assert_present "$dir/home/state/$id.meta" \
@@ -1246,6 +1263,7 @@ test_failed_endpoint_close_refuses_before_removing_the_record() {
     PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
     > "$dir/rerun.out" 2> "$dir/rerun.err" \
     || fail "the rerun after a recovered close still failed: $(cat "$dir/rerun.err")"
+  assert_no_grep 'unrecoverable' "$dir/rerun.err" "the teardown retry must skip the confirmed stopped job"
   assert_absent "$dir/home/state/$id.meta" "the recovered rerun left the task record behind"
   isolated_tmux_window_exists "$dir" "$socket" "$session" "fm-$id" \
     && fail "the recovered rerun did not close the recorded endpoint"

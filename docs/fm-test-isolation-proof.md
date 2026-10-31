@@ -44,6 +44,7 @@ This record owns concurrent isolation evidence for the portable parallel candida
 - `tests/fm-spawn-batch.test.sh`
 - `tests/fm-supervision-instructions.test.sh`
 - `tests/fm-t3-mcp.test.sh`
+- `tests/fm-task-job.test.sh`
 - `tests/fm-test-run.test.sh`
 - `tests/fm-tmux-submit-busy.test.sh`
 - `tests/fm-transition-lib.test.sh`
@@ -89,7 +90,18 @@ The backend suite spawns real tasks, and `fm-spawn.sh` creates each task's `/tmp
 - The two failures are existing members that fail identically on this host without the T3 change: `tests/fm-test-run.test.sh` fails its coverage-guard cases under Bash 3.2 on the base commit too, and `tests/fm-pr-merge.test.sh` fails `forgejo-merges: a well-formed pull request URL should merge` when run alone on the base commit.
 - Separately, two concurrent copies of the backend suite plus the helper suite passed twice, and each suite passed beside `tests/fm-busy-state.test.sh`.
 
-`docs/fm-test-isolation-proof.json` still holds the 2026-08-20 portable-pool artifact; a clean 26-candidate artifact needs a Linux run with Bash 5 and tmux.
+## 2026-10-27: task-job suite added
+
+`tests/fm-task-job.test.sh` joined the candidate set.
+It keeps every fixture under its own temporary root, rings a fake `tmux` on its own `PATH`, runs each watcher against its fixture state directory, and signals only the processes its own task jobs started.
+
+- Command: `bin/fm-test-isolation-proof.sh --jobs 4 --json <path>` (run `fm-isolation-1793100804583-18291`, 2026-10-27T11:33:24Z to 11:49:33Z, macOS arm64, one-minute load average 4.36 at start)
+- Result: `FM_ISOLATION_SUMMARY total=27 failed=2 concurrency=4 duration_ms=968926`
+- `tests/fm-task-job.test.sh` exit 0 (17764 ms).
+- The two failures are existing members that fail identically on this host when run alone, outside this change: `tests/fm-pr-merge.test.sh` fails `forgejo-merges: a well-formed pull request URL should merge`, as recorded for the T3 run above, and `tests/fm-composer-lib.test.sh` fails `multiword named claude idle on herdr`, whose only dependency, `bin/fm-composer-lib.sh`, this change does not touch.
+
+`docs/fm-test-isolation-proof.json` still holds the 2026-08-20 portable-pool artifact.
+A clean artifact for the current portable candidate set needs a Linux run with Bash 5 and tmux.
 
 ## Family concurrency proofs
 
