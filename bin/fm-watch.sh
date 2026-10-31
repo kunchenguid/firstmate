@@ -3466,7 +3466,7 @@ home_summary_backoff_active() {
   esac
   [ "$misses" -ge 1 ] || return 1
   [ "$misses" -gt 4 ] && misses=4
-  delay=$(( HOME_SUMMARY_INTERVAL * (1 << (misses - 1)) ))
+  delay=$(( 10#$HOME_SUMMARY_INTERVAL * (1 << (10#$misses - 1)) ))
   [ "$(age_of "$STATE/.home-summary-refresh.backoff")" -lt "$delay" ]
 }
 

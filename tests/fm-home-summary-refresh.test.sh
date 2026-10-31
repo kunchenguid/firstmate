@@ -320,7 +320,8 @@ pass "live watcher cadence bounds publication staleness without signals"
 # very next poll: a producer that keeps missing would otherwise run back to
 # back. Seed a fresh record of four consecutive misses, which holds refreshes
 # for eight intervals, while the ledger is already due; then age the record
-# past its delay and require the ordinary cadence to resume and clear it.
+# past its delay and require the ordinary cadence to resume and clear it. The
+# zero-padded interval must still read as decimal seconds.
 BACKOFF_HOME="$TMP_ROOT/backoff-home"
 mkdir -p "$BACKOFF_HOME/state" "$BACKOFF_HOME/data" "$BACKOFF_HOME/config" \
   "$BACKOFF_HOME/projects"
@@ -335,7 +336,7 @@ printf '4\n' > "$BACKOFF_HOME/state/.home-summary-refresh.backoff"
 PATH="$FAKEBIN:$PATH" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BACKOFF_HOME" \
   FM_SNAPSHOT_NOW="$NOW_THREE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_THREE" \
-  FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=2 FM_SIGNAL_GRACE=0 \
+  FM_POLL=1 FM_HOME_SUMMARY_INTERVAL=08 FM_SIGNAL_GRACE=0 \
   FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
   "$WATCH" > "$TMP_ROOT/backoff-watch.out" 2> "$TMP_ROOT/backoff-watch.err" &
 WATCH_PID=$!
@@ -533,7 +534,7 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
   || fail "lock timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 4 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
+[ "$elapsed" -lt 7 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
   || fail "repeated lock timeout changed the best-effort caller result"
@@ -563,7 +564,7 @@ PATH="$HANGBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
   "$WRITER" --best-effort \
   || fail "validation timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 4 ] || fail "best-effort refresh waited $elapsed seconds on validation"
+[ "$elapsed" -lt 7 ] || fail "best-effort refresh waited $elapsed seconds on validation"
 grep -F 'refresh exceeded its 1-second deadline' \
   "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "publication validation timeout was not logged"
@@ -595,7 +596,7 @@ for attempt in 1 2; do
   rm -f "$STUBBORN_MARKER"
   PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
     FM_TEST_STUBBORN_MARKER="$STUBBORN_MARKER" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=5 \
     "$WRITER" --best-effort \
     || fail "a killed worker changed the best-effort caller result"
   [ -e "$STUBBORN_MARKER" ] || fail "the stubborn validation stall was never reached"
@@ -610,6 +611,22 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
 [ ! -e "$HOME_DIR/state/.home-summary-refresh.backoff" ] \
   || fail "a successful publication kept the deadline-miss record"
 pass "the parent removes a killed worker's temporary files and counts consecutive deadline misses"
+
+# A refresh that published after a timed-out attempt started is the newer
+# result, so that attempt's miss must not restore the record it cleared.
+rm -f "$STUBBORN_MARKER"
+touch -t 203801010000 "$HOME_DIR/state/home-summary.json"
+PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+  FM_TEST_STUBBORN_MARKER="$STUBBORN_MARKER" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=5 \
+  "$WRITER" --best-effort \
+  || fail "a killed worker changed the best-effort caller result"
+[ -e "$STUBBORN_MARKER" ] || fail "the stubborn validation stall was never reached"
+[ ! -e "$HOME_DIR/state/.home-summary-refresh.backoff" ] \
+  || fail "a timed-out attempt restored the record a newer publication cleared"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the superseded deadline miss"
+pass "a deadline miss older than the published ledger leaves the backoff record clear"
 
 MKBIN="$TMP_ROOT/mkdir-hangbin"
 REAL_MKDIR=$(command -v mkdir)
@@ -631,7 +648,7 @@ PATH="$MKBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKDIR="$REAL_MKDIR" \
   "$WRITER" --best-effort >/dev/null 2>"$TMP_ROOT/stalled-state.err" \
   || fail "state initialization timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 6 ] \
+[ "$elapsed" -lt 8 ] \
   || fail "best-effort refresh waited $elapsed seconds before bounded state initialization"
 pass "best-effort refresh bounds state initialization"
 

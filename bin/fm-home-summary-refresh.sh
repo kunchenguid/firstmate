@@ -28,12 +28,14 @@
 #
 # A worker that misses its deadline is killed mid-attempt, and one that dies
 # otherwise may not have run its own cleanup either, so after any worker
-# failure the parent removes that attempt's temporary files itself. Each worker
-# tags its temporary names with its parent's pid, so a concurrent attempt's
-# files are never touched. A missed deadline is also recorded in
-# state/.home-summary-refresh.backoff: one line holding the count of
-# consecutive deadline misses, with the file's mtime marking the latest one. A
-# successful publication removes the record. The watcher reads it to back off
+# failure the parent removes that attempt's temporary files in a separately
+# bounded child. Each worker tags its temporary names with its parent's pid, so
+# a concurrent attempt's files are never touched. The same child records a
+# missed deadline in state/.home-summary-refresh.backoff: one line holding the
+# count of consecutive deadline misses, with the file's mtime marking the latest
+# one. It updates the record under the refresh lock and skips it when the
+# ledger was published after this attempt started. A successful publication
+# removes the record under the same lock. The watcher reads it to back off
 # its own refresh triggers (bin/fm-watch.sh home_summary_refresh_detached);
 # session start, spawn, and teardown ignore it.
 set -u
@@ -52,6 +54,8 @@ BACKOFF_RECORD="$STATE/.home-summary-refresh.backoff"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
+HOME_SUMMARY_DEADLINE_MISSED=${FM_HOME_SUMMARY_DEADLINE_MISSED:-0}
+HOME_SUMMARY_ATTEMPT_EPOCH=${FM_HOME_SUMMARY_ATTEMPT_EPOCH:-}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
 HOME_SUMMARY_ERROR=
@@ -80,6 +84,7 @@ case "${1:-}" in
     BEST_EFFORT=${FM_HOME_SUMMARY_WORKER_BEST_EFFORT:-0}
     ;;
   --_log-failure) HOME_SUMMARY_MODE=log-failure ;;
+  --_reap) HOME_SUMMARY_MODE=reap ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -228,22 +233,46 @@ home_summary_log_failure() {
 # Parent side of a worker failure: a killed worker's EXIT trap may never have
 # run, so remove the temporary files this attempt tagged.
 home_summary_reap_attempt() {
-  rm -f -- "$STATE/.home-summary.json.$$."* "$STATE/.home-summary-error.$$."* \
-    2>/dev/null || true
+  rm -f -- "$STATE/.home-summary.json.$HOME_SUMMARY_ATTEMPT."* \
+    "$STATE/.home-summary-error.$HOME_SUMMARY_ATTEMPT."* 2>/dev/null || true
 }
 
+# A ledger published after this attempt started means a newer refresh
+# succeeded, so this attempt's miss must not restore the record it cleared.
 home_summary_record_deadline_miss() {
-  local misses tmp
+  local misses tmp ledger_mtime
+  trap home_summary_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  fm_lock_acquire_wait_max "$REFRESH_LOCK" 1 || return 0
+  HOME_SUMMARY_LOCK_HELD=1
+  case "$HOME_SUMMARY_ATTEMPT_EPOCH" in
+    ''|*[!0-9]*) ;;
+    *)
+      ledger_mtime=$(fm_path_mtime "$LEDGER") || ledger_mtime=
+      case "$ledger_mtime" in
+        ''|*[!0-9]*) ;;
+        *) [ "$ledger_mtime" -lt "$HOME_SUMMARY_ATTEMPT_EPOCH" ] || return 0 ;;
+      esac
+      ;;
+  esac
   misses=$(head -n 1 "$BACKOFF_RECORD" 2>/dev/null) || misses=
   case "$misses" in
     ''|*[!0-9]*) misses=0 ;;
   esac
-  [ "$misses" -lt 1000 ] || misses=999
+  [ "$misses" -lt 1000 ] 2>/dev/null || misses=999
   tmp="$BACKOFF_RECORD.tmp.$$"
-  printf '%s\n' "$((misses + 1))" > "$tmp" 2>/dev/null \
+  printf '%s\n' "$((10#$misses + 1))" > "$tmp" 2>/dev/null \
     && mv -f -- "$tmp" "$BACKOFF_RECORD" 2>/dev/null
   rm -f -- "$tmp" 2>/dev/null || true
 }
+
+if [ "$HOME_SUMMARY_MODE" = reap ]; then
+  home_summary_reap_attempt
+  [ "$HOME_SUMMARY_DEADLINE_MISSED" != 1 ] || home_summary_record_deadline_miss
+  exit 0
+fi
 
 if [ "$HOME_SUMMARY_MODE" = log-failure ]; then
   HOME_SUMMARY_ERROR=${FM_HOME_SUMMARY_PARENT_ERROR:-"refresh worker failed"}
@@ -254,6 +283,7 @@ fi
 
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
   attempt_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || attempt_stamp=
+  attempt_epoch=$(date +%s 2>/dev/null) || attempt_epoch=
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
     FM_HOME_SUMMARY_IF_IDLE="$HOME_SUMMARY_IF_IDLE" \
@@ -263,8 +293,13 @@ if [ "$HOME_SUMMARY_MODE" = parent ]; then
   else
     refresh_rc=$?
   fi
-  home_summary_reap_attempt
-  [ "$refresh_rc" -ne 124 ] || home_summary_record_deadline_miss
+  deadline_missed=0
+  [ "$refresh_rc" -ne 124 ] || deadline_missed=1
+  fm_run_timed 2 env \
+    FM_HOME_SUMMARY_ATTEMPT="$$" \
+    FM_HOME_SUMMARY_DEADLINE_MISSED="$deadline_missed" \
+    FM_HOME_SUMMARY_ATTEMPT_EPOCH="$attempt_epoch" \
+    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_reap >/dev/null 2>&1 || true
   if [ "$BEST_EFFORT" -eq 1 ]; then
     if [ "$refresh_rc" -eq 124 ]; then
       parent_error="refresh exceeded its ${HOME_SUMMARY_TIMEOUT}-second deadline"
