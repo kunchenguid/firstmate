@@ -30,7 +30,10 @@ case "$1 ${2:-}" in
     ;;
   'mv --help') echo '[<id>...]' ;;
   'ready '*|ready)
-    if [ "${FM_FAKE_TASKS_AXI_EMPTY:-0}" = 1 ]; then
+    if [ "${FM_FAKE_TASKS_AXI_FAIL_READY:-0}" = 1 ]; then
+      echo 'fake ready failure' >&2
+      exit 1
+    elif [ "${FM_FAKE_TASKS_AXI_EMPTY:-0}" = 1 ]; then
       printf 'ready[0]{id,since}:\nHelp for ready tasks-axi output\n'
     else
       printf 'ready[1]{id,since}:\n  ready-task,2026-10-30\n'
@@ -78,6 +81,21 @@ test_ready_work_only_on_heartbeat() {
   if grep -F 'READY WORK' "$out" >/dev/null; then
     fail "heartbeat with no ready items printed READY WORK"
   fi
+
+  dir=$(make_case ready-work-failed-ready)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/failed-ready.out"
+  FM_FAKE_TASKS_AXI_FAIL_READY=1 run_drain_with_backlog "$dir" "$state" "$out" \
+    || fail "heartbeat drain failed when the ready lookup failed"
+  grep -F 'READY WORK unavailable: fake ready failure' "$out" >/dev/null \
+    || fail "ready lookup failure was not reported: $(cat "$out")"
+  grep -F 'heartbeat' "$out" >/dev/null \
+    || fail "a ready lookup failure prevented heartbeat presentation"
 
   dir=$(make_case ready-work-non-heartbeat)
   state="$dir/state"

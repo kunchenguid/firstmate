@@ -792,7 +792,7 @@ print_status_sections() {
 }
 
 print_ready_work_section() {  # <deduped-raw-rows>
-  local rows=$1 ready gate_status FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
+  local rows=$1 ready gate_status ready_status FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
   case "$FM_TASKS_AXI_TIMEOUT" in ''|*[!0-9]*|0) FM_TASKS_AXI_TIMEOUT=10 ;; esac
   export FM_TASKS_AXI_TIMEOUT
   if fm_backlog_transition_applies "$CONFIG" "$DATA" ship; then
@@ -804,9 +804,14 @@ print_ready_work_section() {  # <deduped-raw-rows>
   fi
   fm_backlog_tasks_axi_addressing "$DATA" || return 0
   if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
-    ready=$(cd "$FM_BACKLOG_AXI_ROOT" && fm_tasks_axi ready --file "$FM_BACKLOG_AXI_FILE" 2>&1) || return 0
+    ready=$(cd "$FM_BACKLOG_AXI_ROOT" && fm_tasks_axi ready --file "$FM_BACKLOG_AXI_FILE" 2>&1)
   else
-    ready=$(cd "$FM_BACKLOG_AXI_ROOT" && fm_tasks_axi ready 2>&1) || return 0
+    ready=$(cd "$FM_BACKLOG_AXI_ROOT" && fm_tasks_axi ready 2>&1)
+  fi
+  ready_status=$?
+  if [ "$ready_status" -ne 0 ]; then
+    printf 'READY WORK unavailable: %s\n' "${ready%%$'\n'*}"
+    return 0
   fi
   printf '%s\n' "$ready" | awk '
     /^ready\[/ { in_ready=1; next }
