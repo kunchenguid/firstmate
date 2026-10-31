@@ -427,6 +427,76 @@ ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
 
+test_worker_briefs_include_post_merge_verification_and_decision_context() {
+  local home id brief base_brief
+  home="$TMP_ROOT/post-merge-rules-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR; do
+    id="brief-post-merge-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode brief scaffold failed"
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "Firstmate performs the merge procedure" "$brief" \
+      "$mode brief must not promise a Firstmate merge procedure"
+    assert_grep "Never merge a PR." "$brief" \
+      "$mode brief must reserve PR merges for the configured authority"
+    assert_no_grep "You may merge" "$brief" \
+      "$mode brief must not authorize worker PR merges"
+    assert_no_grep "Firstmate merges the PR" "$brief" \
+      "$mode brief must not add a Firstmate merge mechanism"
+    assert_no_grep "Firstmate end-to-end tests and recalculates" "$brief" \
+      "$mode brief must not promise a Firstmate post-merge test procedure"
+    assert_no_grep "Firstmate reverts to the state before the merge" "$brief" \
+      "$mode brief must not grant rollback authority in worker instructions"
+    assert_grep "The configured merge authority decides whether to merge the PR" "$brief" \
+      "$mode brief must leave the merge decision to configured authority"
+    assert_grep "You never merge a PR." "$brief" \
+      "$mode brief must state workers never merge"
+    assert_grep "Append \`done [at=<epoch>]: PR {url}" "$brief" \
+      "$mode brief must tell workers to report the ready PR and stop"
+  done
+
+  # A named PR base must be the branch the mandatory checks validate against, so
+  # a release/x PR is tested against release/x rather than the repository default.
+  for mode in no-mistakes direct-PR; do
+    id="brief-base-branch-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" --base-branch release/x >/dev/null 2>&1 \
+      || fail "$mode base-branch brief scaffold failed"
+    base_brief="$home/data/$id/brief.md"
+    assert_no_grep "Firstmate performs the merge procedure" "$base_brief" \
+      "$mode brief must not render the removed Firstmate merge procedure"
+    assert_no_grep "verify in a disposable worktree" "$base_brief" \
+      "$mode brief must not add merge-procedure steps for named bases"
+    assert_no_grep "Firstmate end-to-end tests and recalculates" "$base_brief" \
+      "$mode brief must not promise an out-of-scope merge procedure for named bases"
+    assert_grep "Never merge a PR." "$base_brief" \
+      "$mode brief must retain the worker merge prohibition for named bases"
+    assert_no_grep "You may merge" "$base_brief" \
+      "$mode brief must not authorize workers to merge the named-base PR"
+  done
+
+  for kind in scout secondmate; do
+    id="brief-decision-context-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --scout >/dev/null 2>&1 \
+        || fail "scout brief scaffold failed"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 \
+        || fail "secondmate charter scaffold failed"
+    fi
+    brief="$home/data/$id/brief.md"
+    if [ "$kind" = scout ]; then
+      assert_grep 'background and each option with its consequence' "$brief" \
+        "$kind brief must require decision background and option consequences"
+    else
+      assert_grep 'consequence of each option' "$brief" \
+        "$kind brief must require decision background and option consequences"
+    fi
+    assert_no_grep 'summary of options' "$brief" "$kind brief must not retain the underspecified decision template"
+  done
+  pass "fm-brief.sh: worker merge prohibition and decision context render in all briefs"
+}
+
 test_faster_paths_use_configured_authority_without_stacked_review() {
   local home id brief
   home="$TMP_ROOT/configured-authority-home"
@@ -849,7 +919,7 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost decisions, blockers, failures, ready outcomes, or landed work"
   # Under standing merge authority nothing is ever "ready for review", so the
   # landed merge is the trigger a charter without this line silently omits.
-  assert_grep 'a merge you performed yourself under standing merge authority and one the captain merged on the forge' "$brief" \
+  assert_grep 'a merge Firstmate performed under standing merge authority and one the captain merged on the forge' "$brief" \
     "secondmate charter did not name a landed merge as a reporting trigger"
   assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
     "secondmate charter changed the preserved status vocabulary"
@@ -1699,6 +1769,7 @@ test_forge_external_renders_the_review_rail
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
+test_worker_briefs_include_post_merge_verification_and_decision_context
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
