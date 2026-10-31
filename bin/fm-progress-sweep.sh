@@ -18,8 +18,11 @@
 #   - the status-log folds bin/fm-classify-lib.sh owns (the declared-wait line
 #     and the latest event's verb);
 #   - captain holds, which are backlog holds of kind captain;
-#   - the project-capacity declaration (bin/fm-project-capacity-lib.sh) and the
-#     away-posture spend cap (bin/fm-afk-contract.sh);
+#   - the project-capacity declaration (bin/fm-project-capacity-lib.sh), the
+#     away-posture spend cap (bin/fm-afk-contract.sh), and, only when
+#     config/lane-capacity exists, the lane count and host headroom from
+#     bin/fm-capacity.sh's plain report. That report never reads the
+#     quota-provider perspective, so the sweep makes no network call;
 #   - file modification times of the status log, task record, and steering
 #     inbox, which bound the grace window.
 # It writes nothing.
@@ -52,8 +55,12 @@
 # A Queued row that `tasks-axi ready` lists (unblocked, unheld, no active date
 # gate) is progressing only while capacity is genuinely full:
 #   away-capacity-full     the away-posture spend cap is reached
+#   lane-capacity-full     bin/fm-capacity.sh reports free_lanes=0: the
+#                          config/lane-capacity cap is reached or a host
+#                          headroom constraint holds
 #   project-capacity-full  the project's declared capacity is reached
-# otherwise it is the orphan queued-ready.
+# otherwise it is the orphan queued-ready. A capacity read that fails or
+# cannot be determined never counts as full.
 #
 # Rows owned by secondmate homes are out of scope: only this home's backlog is
 # read, and a row or task record of kind secondmate, or a task record naming a
@@ -167,6 +174,7 @@ listing_rows() {  # <label> <tail-field-count>
       line = substr($0, 3)
       c = split(line, f, ",")
       if (c < 4 + n) next
+      gsub(/"/, "", f[1]); gsub(/"/, "", f[3]); gsub(/"/, "", f[4])
       out = f[1] "\t" f[3] "\t" f[4]
       for (i = c - n + 1; i <= c; i++) { v = f[i]; gsub(/"/, "", v); out = out "\t" v }
       print out
@@ -253,6 +261,13 @@ if [ -f "$STATE/.afk-contract" ] \
   esac
 fi
 
+lane_full=0
+if [ -e "$CONFIG/lane-capacity" ] \
+  && cap_out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_PROJECTS_OVERRIDE="$PROJECTS" "$SCRIPT_DIR/fm-capacity.sh" 2>/dev/null); then
+  case "${cap_out%%$'\n'*}" in "capacity: free_lanes=0 "*) lane_full=1 ;; esac
+fi
+
 # 0 when <repo>'s declared machine capacity is reached. An undeclared,
 # unreadable, or unmatched declaration is not "full": an unreadable one refuses
 # every spawn, which firstmate must hear about rather than have masked here.
@@ -274,6 +289,7 @@ while IFS=$'\t' read -r id kind repo _title; do
   [ -n "$id" ] || continue
   [ "$kind" != secondmate ] || continue
   if [ "$away_full" -eq 1 ]; then emit progressing "$id" away-capacity-full; continue; fi
+  if [ "$lane_full" -eq 1 ]; then emit progressing "$id" lane-capacity-full; continue; fi
   if project_full "$repo"; then emit progressing "$id" project-capacity-full; continue; fi
   emit orphan "$id" queued-ready
 done < <(printf '%s\n' "$ready_out" | listing_rows ready 1)

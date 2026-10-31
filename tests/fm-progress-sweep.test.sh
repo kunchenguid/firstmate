@@ -223,6 +223,71 @@ SH
   pass "sweep: ready public-followup obligations are not read as dispatchable rows"
 }
 
+# tasks-axi's TOON output quotes a value that reads as a number, boolean, or
+# null, so the ids 2048 and true arrive as "2048" and "true". The row's real id
+# names its task record and its wake key.
+test_sweep_unquotes_numeric_and_boolean_ids() {
+  local home out
+  home=$(make_home pred-quoted)
+  add_inflight "$home" 2048 %60 "working [at=$OLD]: long build"
+  axi "$home" add true "A boolean-looking id" --repo demo
+  out=$(run_sweep "$home" FM_FAKE_LIVE_PANES="%60" \
+    "FM_FAKE_CREW_STATE_2048=state: working · source: pane · busy") || fail "sweep failed: $out"
+  assert_equals "progressing working" "$(row_of "$out" 2048)" "a numeric id must find its own task record and working worker"
+  assert_equals "orphan queued-ready" "$(row_of "$out" true)" "a boolean-looking Queued id must be reported by its real id"
+  assert_not_contains "$out" '"' "no emitted id may keep its TOON quotes"
+  pass "sweep: TOON-quoted numeric and boolean ids are read as their real ids"
+}
+
+seed_full_lanes() {  # <home> <lane-capacity-content>
+  local i
+  printf '%s\n' "$2" > "$1/config/lane-capacity"
+  for i in 1 2 3; do
+    add_inflight "$1" "lane$i" "%5$i" "working [at=$OLD]: running"
+  done
+  axi "$1" add next-unit "Next unit" --repo demo
+}
+
+full_lane_env() {
+  printf '%s\n' "FM_FAKE_LIVE_PANES=%51 %52 %53" \
+    "FM_FAKE_CREW_STATE_lane1=state: working · source: pane · busy" \
+    "FM_FAKE_CREW_STATE_lane2=state: working · source: pane · busy" \
+    "FM_FAKE_CREW_STATE_lane3=state: working · source: pane · busy"
+}
+
+test_sweep_full_lane_capacity_is_a_reason() {
+  local home out line envs=()
+  home=$(make_home pred-lanes-full)
+  seed_full_lanes "$home" 3
+  while IFS= read -r line; do envs+=("$line"); done < <(full_lane_env)
+  out=$(run_sweep "$home" "${envs[@]}") || fail "sweep failed: $out"
+  assert_equals "progressing lane-capacity-full" "$(row_of "$out" next-unit)" "a ready row with every configured lane running is held by lane capacity"
+  assert_not_contains "$out" "orphan" "no row in a home at its lane cap may be an orphan"
+  (
+    export PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh"
+    export "${envs[@]}"
+    # shellcheck source=bin/fm-watch.sh
+    . "$WATCH"
+    progress_orphans_enqueue
+    [ "$?" -eq 1 ] || { printf 'heartbeat found an orphan: %s\n' "$PROGRESS_ORPHAN_REASON"; exit 1; }
+  ) || fail "the heartbeat must stay silent for a home at its lane cap"
+  if [ -f "$home/state/.wake-queue" ]; then
+    assert_no_grep "progress-orphan" "$home/state/.wake-queue" "no progress-orphan wake may be queued at the lane cap"
+  fi
+  pass "sweep: a ready row held by a full lane cap is progressing and wakes nobody"
+}
+
+test_sweep_undeterminable_lane_capacity_still_orphans() {
+  local home out line envs=()
+  home=$(make_home pred-lanes-bad)
+  seed_full_lanes "$home" "three lanes"
+  while IFS= read -r line; do envs+=("$line"); done < <(full_lane_env)
+  out=$(run_sweep "$home" "${envs[@]}") || fail "sweep failed: $out"
+  assert_equals "orphan queued-ready" "$(row_of "$out" next-unit)" "an unreadable lane cap must never make an idle ready row look held"
+  pass "sweep: an undeterminable lane capacity still reports the ready row as an orphan"
+}
+
 # --- watcher heartbeat --------------------------------------------------------
 
 # The 31 October events had already been surfaced and handled: every status
@@ -519,6 +584,9 @@ fm_test_run \
   test_sweep_finished_and_unanswered_live_workers \
   test_sweep_queued_and_out_of_scope_rows \
   test_sweep_ignores_ready_public_followups \
+  test_sweep_unquotes_numeric_and_boolean_ids \
+  test_sweep_full_lane_capacity_is_a_reason \
+  test_sweep_undeterminable_lane_capacity_still_orphans \
   test_heartbeat_wakes_on_oct31_orphan \
   test_heartbeat_requeue_skips_unacknowledged_orphan \
   test_heartbeat_absorbs_paused_held_blocked_rows \
