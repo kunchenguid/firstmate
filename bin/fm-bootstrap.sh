@@ -1559,24 +1559,23 @@ detect_local_tools() {
 }
 
 treehouse_pool_report() {
-  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool status seen slot repo common created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} seen_repo seen_pool duplicate duplicate_reported
+  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool records slot repo common created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} duplicate duplicate_reported seen_pair i
+  local -a seen_repos=() seen_pools=()
   [ -d "$root" ] && command -v jq >/dev/null 2>&1 && command -v treehouse >/dev/null 2>&1 || return 0
   case "$threshold" in ''|*[!0-9]*) threshold=30 ;; esac
   now=$(date +%s)
-  seen=$(mktemp "${TMPDIR:-/tmp}/fm-pool-seen.XXXXXX") || return 0
+  records=$(mktemp "${TMPDIR:-/tmp}/fm-pool-records.XXXXXX") || return 0
   for state in "$root"/*/treehouse-state.json; do
     [ -f "$state" ] || continue
     pool_count=$((pool_count + 1))
     pool=${state%/treehouse-state.json}
     pool_has_owner=0
     duplicate_reported=0
-    status=$(jq -c '.worktrees // [] | .[]' "$state" 2>/dev/null) || continue
-    if [ -n "$status" ]; then
-      while IFS= read -r slot_record; do
-      slot=$(printf '%s\n' "$slot_record" | jq -r '.path // ""')
-      created_at=$(printf '%s\n' "$slot_record" | jq -r '.created_at // ""')
-      slot_leased=$(printf '%s\n' "$slot_record" | jq -r '(.leased == true) or ((.lease_id // "") != "") or ((.lease_holder // "") != "")')
-      slot_owner=$(printf '%s\n' "$slot_record" | jq -r '.owner_pid // ""')
+    if ! jq -j '.worktrees[]? | (.path // ""), "\u0000", (.created_at // ""), "\u0000", (((.leased == true) or ((.lease_id // "") != "") or ((.lease_holder // "") != "")) | tostring), "\u0000", (.owner_pid // ""), "\u0000"' "$state" > "$records" 2>/dev/null; then
+      continue
+    fi
+    while IFS= read -r -d '' slot && IFS= read -r -d '' created_at \
+      && IFS= read -r -d '' slot_leased && IFS= read -r -d '' slot_owner; do
       owner_live=0
       case "$slot_owner" in ''|*[!0-9]*) ;; *) kill -0 "$slot_owner" 2>/dev/null && owner_live=1 ;; esac
       if [ -z "$slot" ]; then
@@ -1598,21 +1597,26 @@ treehouse_pool_report() {
       if [ -n "$repo" ]; then
         repo=$(cd -P -- "$repo" 2>/dev/null && pwd -P) || repo=
         duplicate=0
-        while IFS= read -r seen_record; do
-          seen_repo=$(printf '%s\n' "$seen_record" | jq -r '.repo')
-          seen_pool=$(printf '%s\n' "$seen_record" | jq -r '.pool')
-          if [ "$seen_repo" = "$repo" ] && [ "$seen_pool" != "$pool" ]; then
-            duplicate=1
-            break
+        seen_pair=0
+        for ((i = 0; i < ${#seen_repos[@]}; i++)); do
+          if [ "${seen_repos[$i]}" = "$repo" ]; then
+            if [ "${seen_pools[$i]}" = "$pool" ]; then
+              seen_pair=1
+            else
+              duplicate=1
+            fi
           fi
-        done < "$seen"
+        done
         if [ "$duplicate" -eq 1 ]; then
           if [ "$duplicate_reported" -eq 0 ]; then
             echo "TREEHOUSE_POOL_REPORT: duplicate-clone pool $pool (project $repo)"
             duplicate_reported=1
           fi
         fi
-        jq -cn --arg repo "$repo" --arg pool "$pool" '{repo:$repo,pool:$pool}' >> "$seen"
+        if [ "$seen_pair" -eq 0 ]; then
+          seen_repos+=("$repo")
+          seen_pools+=("$pool")
+        fi
       fi
       if [ ! -e "${slot%/*}/.fm-slot-owner" ] && [ ! -e "$slot/.fm-slot-owner" ] \
         && [ "$owner_live" -eq 0 ] && [ "$slot_leased" != true ]; then
@@ -1625,10 +1629,7 @@ treehouse_pool_report() {
         age_days=$(( (now - lease_epoch) / 86400 ))
         [ "$age_days" -lt "$threshold" ] || echo "TREEHOUSE_POOL_REPORT: unowned slot older than ${threshold}d: $slot (age ${age_days}d)"
       fi
-      done <<EOF
-$status
-EOF
-    fi
+    done < "$records"
     case "${pool##*/}" in
       project-*|scratch-project-*)
         [ "$pool_has_owner" -eq 1 ] || echo "TREEHOUSE_POOL_REPORT: test-leftover pool $pool"
@@ -1636,7 +1637,7 @@ EOF
     esac
   done
   [ "$pool_count" -eq 0 ] || echo "TREEHOUSE_POOL_REPORT: scanned $pool_count pools under $root"
-  rm -f "$seen"
+  rm -f "$records"
 }
 
 detect_local_config() {
