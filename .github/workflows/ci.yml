@@ -459,6 +459,20 @@ jobs:
             *) echo "::error::expected stock macOS Bash 3.2.57, got $BASH_VERSION"; exit 1 ;;
           esac
           /bin/bash --version | head -1
+
+          for i in 1 2 3; do
+            coverage_output=$(bin/fm-test-run.sh --check-coverage 2>&1) || {
+              echo "::error::stock macOS Bash 3.2 coverage check failed on iteration $i"
+              printf '%s\n' "$coverage_output"
+              exit 1
+            }
+            printf '%s\n' "$coverage_output" | grep -Fq 'FM_TEST_COVERAGE ok' || {
+              echo "::error::stock macOS Bash 3.2 coverage check omitted its success marker on iteration $i"
+              printf '%s\n' "$coverage_output"
+              exit 1
+            }
+          done
+
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
 
           shell_inventory="$RUNNER_TEMP/fm-shell-inventory"

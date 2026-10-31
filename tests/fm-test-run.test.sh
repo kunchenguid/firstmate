@@ -1103,6 +1103,22 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+test_shebang_check_coverage_stability() {
+  local out i
+  # On macOS bash 3.2, nested subshell command substitutions over process
+  # substitutions inside lane assignment historically corrupted memory and
+  # flakily produced "coverage guard: portable serial shards share scripts".
+  # Running check-coverage repeatedly through its shebang in a command substitution
+  # proves shard dedupe and weight evaluation stay deterministic and crash-free.
+  for i in 1 2 3; do
+    out=$("$RUNNER" --check-coverage 2>&1) || fail "shebang check-coverage failed on iteration $i: $out"
+    assert_contains "$out" "FM_TEST_COVERAGE ok" "iteration $i must report coverage ok"
+    assert_not_contains "$out" "portable serial shards share scripts" "iteration $i must not share scripts across shards"
+    assert_not_contains "$out" "malloc:" "iteration $i must not trigger memory allocator errors"
+  done
+  pass "shebang check-coverage is stable across repeated subshell captures"
+}
+
 # The two parallel lanes are only "duration-balanced" while every member has a
 # measured hint and the packing over those hints stays even. Both halves went
 # unchecked until one lane grew past its CI job cap and was cancelled on every
@@ -1921,6 +1937,7 @@ test_tern_family_selection
 test_list_scheduled_proven_isolated_uses_serial_weights
 test_list_scheduled_non_lane_selections_use_serial_weights
 test_portable_shard_union_and_coverage_guard
+test_shebang_check_coverage_stability
 test_portable_parallel_lanes_stay_duration_balanced
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
