@@ -379,6 +379,7 @@ family_for_basename() {
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|\
     fm-pr-state-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
+    fm-sessionstart-unattended-live-e2e.test.sh|\
     fm-supervision-host-live-e2e.test.sh|fm-supervision-host-attended-live-e2e.test.sh|\
     fm-host-mirror-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
@@ -1610,7 +1611,7 @@ families_for_changed_path() {
       ;;
     bin/fm-session-start.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
-    bin/fm-gate-refuse*|bin/fm-lock*)
+    bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-session-standdown-lib.sh)
       printf '%s\n' session-bootstrap
       ;;
     bin/fm-bootstrap.sh)

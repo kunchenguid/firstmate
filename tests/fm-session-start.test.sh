@@ -881,6 +881,90 @@ EOF
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
 }
 
+# An agent in a headless `claude -p` or FM_NO_LOCK=1 session that runs this
+# script itself, because its hook stood down, must still never take the lock,
+# while an attended or opted-in session does.
+test_direct_invocation_stands_down_without_the_lock() {
+  local rec root home fakebin out err status holder_pid
+  rec=$(new_world direct-standdown)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  err="$TMP_ROOT/direct-standdown.err"
+
+  status=0
+  out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" CLAUDE_PID="$SESSION_START_TEST_HARNESS_PID" \
+    CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>"$err") || status=$?
+  expect_code 0 "$status" "an unattended direct session start must exit 0"
+  [ -z "$out" ] || fail "an unattended direct session start printed a digest: $out"
+  [ "$(wc -l < "$err" | tr -d ' ')" = 1 ] || fail "an unattended stand-down did not print exactly one stderr line: $(cat "$err")"
+  assert_contains "$(cat "$err")" "fm-session-start: stood down" "an unattended stand-down did not say it stood down"
+  assert_absent "$home/state/.lock" "an unattended direct session start took the fleet lock"
+
+  status=0
+  out=$(FM_NO_LOCK=1 FM_SESSIONSTART_ALLOW_UNATTENDED=1 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>"$err") || status=$?
+  expect_code 0 "$status" "an FM_NO_LOCK=1 direct session start must exit 0"
+  [ -z "$out" ] || fail "an FM_NO_LOCK=1 direct session start printed a digest: $out"
+  assert_contains "$(cat "$err")" "fm-session-start: stood down" "an FM_NO_LOCK=1 stand-down did not say it stood down"
+  assert_absent "$home/state/.lock" "an FM_NO_LOCK=1 direct session start took the fleet lock"
+
+  out=$(CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless FM_SESSIONSTART_ALLOW_UNATTENDED=1 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>/dev/null)
+  assert_contains "$out" "lock acquired: harness pid" "an opted-in unattended direct session start did not take the lock"
+  rm -f "$home/state/.lock"
+
+  out=$(CLAUDE_CODE_SESSION_ATTENDED=1 CLAUDE_CODE_SESSION_ID=sid-attended \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>/dev/null)
+  assert_contains "$out" "lock acquired: harness pid" "an attended direct session start did not take the lock"
+  rm -f "$home/state/.lock"
+
+  status=0
+  out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" CLAUDE_PID="$SESSION_START_TEST_HARNESS_PID" \
+    CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless CLAUDE_JOB_DIR="$TMP_ROOT/jobs/parent00" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>"$err") || status=$?
+  expect_code 0 "$status" "a mismatched background job dir direct session start must exit 0"
+  assert_contains "$(cat "$err")" "fm-session-start: stood down" "an inherited background job dir did not stand down"
+  assert_absent "$home/state/.lock" "an inherited background job dir took the fleet lock"
+
+  status=0
+  out=$(FM_NO_LOCK=1 CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless CLAUDE_JOB_DIR="$TMP_ROOT/jobs/sid-head" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>"$err") || status=$?
+  expect_code 0 "$status" "an FM_NO_LOCK=1 background direct session start must exit 0"
+  assert_contains "$(cat "$err")" "fm-session-start: stood down" "an FM_NO_LOCK=1 background session did not stand down"
+  assert_absent "$home/state/.lock" "an FM_NO_LOCK=1 background session took the fleet lock"
+
+  out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" CLAUDE_PID="$SESSION_START_TEST_HARNESS_PID" \
+    CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless CLAUDE_JOB_DIR="$TMP_ROOT/jobs/sid-head" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>/dev/null)
+  assert_contains "$out" "lock acquired: harness pid" "a Claude background-session primary did not take the lock"
+
+  rm -f "$home/state/.lock"
+
+  # A non-Claude harness started from a headless Claude pane inherits that
+  # pane's unattended signal, session id, and CLAUDE_PID; with no live Claude
+  # in its own ancestry it is not that Claude session and still takes the helm.
+  out=$(FM_FAKE_HARNESS=codex FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" CLAUDE_PID="$SESSION_START_TEST_HARNESS_PID" \
+    CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>/dev/null)
+  assert_contains "$out" "lock acquired: harness pid" "a codex session with an inherited unattended Claude signal did not take the lock"
+  rm -f "$home/state/.lock"
+
+  sleep 300 &
+  holder_pid=$!
+  out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" CLAUDE_PID="$holder_pid" \
+    CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>/dev/null)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  assert_contains "$out" "lock acquired: harness pid" "an unattended signal whose CLAUDE_PID is outside the ancestry did not take the lock"
+
+  pass "a direct session start stands down for an unattended Claude, mismatched background, or FM_NO_LOCK=1 session and takes the lock when attended, bound background, opted in, or the unattended signal belongs to no Claude in its ancestry"
+}
+
 test_lock_write_failure_read_only_path() {
   local rec root home fakebin out status
   rec=$(new_world lock-write-failure)
@@ -3096,6 +3180,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_direct_invocation_stands_down_without_the_lock
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
 test_session_lock_concurrent_single_winner
