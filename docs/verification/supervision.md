@@ -851,7 +851,7 @@ The routine backlog and most of the away window's rows were appended to the stor
 | Captain outcome (a finished local-only worker) | `to-main branch-outcome: ... (store rows 3)`; main drained `BRANCH OUTCOMES`, landed the branch, and ran `mark-processed --through 3` |
 | Twelve waiting routine rows, then a fresh captain outcome | main's one drain printed `[seq 16]` first, then the four newest routine rows and `(8 earlier routine outcome(s) not shown; bin/fm-branch-outcome.sh list keeps them)` |
 
-Current return-window batching and preservation of older and oversized ready-work handoffs are covered by `tests/fm-supervision-host.test.sh`; the drain header in `bin/fm-wake-drain.sh` owns presentation bounds.
+Current return-window batching and preservation of older and oversized ready-work handoffs are covered by `tests/fm-supervision-host-drain.test.sh`; the drain header in `bin/fm-wake-drain.sh` owns presentation bounds.
 A Pi primary without `config/supervision-host` ran the same gated-worker session with the changed branch prompt: routine row 1, captain row 2 for the finished work, landing, and `fm_branch_processed` through 2, with no `BRANCH OUTCOMES` line in either conversation.
 
 ```text
