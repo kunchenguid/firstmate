@@ -597,7 +597,7 @@ The compatibility helper `fm_backend_agent_alive` continues to collapse those de
 
 - A rex spawn additionally gates both the `rex` CLI and the running Rex server at API revision 5 or newer and requires `jq` (see [`docs/rex-backend.md`](rex-backend.md) "Setup"), refusing loudly on a missing CLI, an older API revision, or a server that cannot be reached or started.
 - A tern spawn requires `tern` and `jq`, refusing loudly when either is missing (see [`docs/tern-backend.md`](tern-backend.md) "Setup"); bootstrap reports a missing `tern` as `MISSING_MANUAL` with `https://stencil.so/tern`.
-- An hc spawn requires `hc` and `jq` and a core that `hc server status` can reach or start (see [`docs/hc-backend.md`](hc-backend.md) "Setup").
+- For hc spawn prerequisites, binary resolution, and compatibility gates, see [`docs/hc-backend.md`](hc-backend.md#setup).
 
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 

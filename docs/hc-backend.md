@@ -85,6 +85,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 
 `tests/fm-backend-hc.test.sh` pins the adapter against a fake `hc`.
 `tests/fm-backend-hc-liveness-live-e2e.test.sh` is the default-on live guard: it launches every installed harness bare in a private core and requires `alive`.
-`tests/fm-backend-hc-smoke.test.sh` drives the real `hc` inside a `bin/fm-hc-lab.sh` session: a private `fm-hclab-*` core with scratch XDG roots, a pinned socket, a fleet-state tripwire against real core state, and a teardown that sweeps the session's `serve`/`hold` daemons; `tests/hc-test-safety.sh` owns the only sanctioned teardown path.
-It skips when `hc` or `jq` is missing, and the `tests-hc` CI lane installs the pinned build and fails on that skip.
-`bin/fm-hc-ci-cleanup.sh` snapshots and removes job-owned lab sessions at job end.
+`tests/fm-backend-hc-smoke.test.sh` drives the real binary in an isolated lab; [`bin/fm-hc-lab.sh`](../bin/fm-hc-lab.sh) owns the isolation and metadata-tripwire contract, and [`tests/hc-test-safety.sh`](../tests/hc-test-safety.sh) owns guarded test teardown.
+The smoke skips when no resolved Core binary or `jq` is available; provisioning and teardown failures fail the test.
+For CI coverage, see [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend); the workflow requires `jq` and rejects the `hc not found` skip.
+[`bin/fm-hc-ci-cleanup.sh`](../bin/fm-hc-ci-cleanup.sh) owns job-end cleanup mechanics.

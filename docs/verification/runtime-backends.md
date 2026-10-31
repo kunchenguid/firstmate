@@ -3516,7 +3516,7 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 
 ### Adapter lifecycle
 
-`tests/fm-backend-hc-smoke.test.sh` passed inside a `bin/fm-hc-lab.sh` session (hc 0.1.14, 2026-10-30): an `fm-hclab-*` core with scratch XDG roots, a pinned `FM_HC_SOCKET`, and a fleet-state tripwire that verified real core state byte-identical afterward.
+`tests/fm-backend-hc-smoke.test.sh` passed inside a `bin/fm-hc-lab.sh` session (hc 0.1.14, 2026-10-30): an `fm-hclab-*` core with scratch XDG roots, a pinned `FM_HC_SOCKET`, and a fleet-state tripwire that verified the recorded real-core file metadata inventory unchanged afterward.
 Teardown swept the session's `serve`/`hold` daemons by their `HC_SESSION` env token.
 
 ```text
@@ -3575,7 +3575,7 @@ ok - hc liveness: grok grok 1.0.41 (4220f3b224a6) [stable] classifies alive in h
 # unverified on this machine (not installed): kimi
 ```
 
-Teardown swept the session's serve/hold daemons plus the harness processes they held, and the fleet-state tripwire confirmed the real core untouched.
+Teardown swept the session's serve/hold daemons plus the harness processes they held, and the fleet-state tripwire confirmed the recorded real-core file metadata inventory unchanged.
 
 ### Not verified
 
