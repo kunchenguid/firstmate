@@ -270,7 +270,7 @@ test_persist_gates_and_asks_only_for_open_records() {
   assert_not_contains "$out" "restarted: sm1" "a mate that never confirmed must not be restarted"
   assert_contains "$out" "summary: 0 of 1 restarted" "the summary must not claim a reload"
   # The agent is untouched: nothing exited, nothing relaunched.
-  assert_no_grep '^/exit$' "$dir/fake/literal" "the agent was stopped without a confirmed persist"
+  assert_no_regex '^/exit$' "$dir/fake/literal" "the agent was stopped without a confirmed persist"
   assert_absent "$dir/home/state/sm1.control-relaunch" \
     "a restart transaction was opened without a confirmed persist"
   grep -h '^phase=' "$dir/home/state/pending-replies"/* | grep -q '^phase=awaiting_report$' \
@@ -425,7 +425,7 @@ test_refused_restart_falls_back_without_claiming_a_reload() {
   assert_not_contains "$out" "restarted: sm1" "a refused restart must not be reported as restarted"
   [ "$(cat "$dir/fake/command")" = "$before" ] \
     || fail "a refusal before the stop should leave the running agent exactly as it was"
-  assert_no_grep '^/exit$' "$dir/fake/literal" "a pre-stop refusal must not have stopped the agent"
+  assert_no_regex '^/exit$' "$dir/fake/literal" "a pre-stop refusal must not have stopped the agent"
   pass "T5 a refused restart leaves the mate running and reports an unknown outcome"
 }
 
@@ -707,7 +707,7 @@ SH
 
   expect_code 3 "$rc" "an unrelated concurrent answer must not release the persist gate"$'\n'"$out"
   assert_not_contains "$out" "restarted: sm1" "the unrelated answer authorized a restart"
-  assert_no_grep '^/exit$' "$dir/fake/literal" "the unrelated answer stopped the mate"
+  assert_no_regex '^/exit$' "$dir/fake/literal" "the unrelated answer stopped the mate"
   pass "T9 the persist gate retains its explicitly allocated correlation"
 }
 
@@ -927,7 +927,7 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   assert_not_contains "$out" "restarted: sm1" "an unprovable mate must never be reported as reloaded"
   [ "$(cat "$dir/fake/command")" = "$before" ] \
     || fail "the unprovable mate's agent was stopped anyway"
-  assert_no_grep '^/exit$' "$dir/fake/literal" "nothing may be stopped on the nudge path"
+  assert_no_regex '^/exit$' "$dir/fake/literal" "nothing may be stopped on the nudge path"
   pass "T16 an already-current mate with an unprovable runtime keeps the honest nudge path"
 }
 
