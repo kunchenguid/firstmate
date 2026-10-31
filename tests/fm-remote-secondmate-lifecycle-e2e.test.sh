@@ -2058,7 +2058,7 @@ remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/archive-retry.out" 2> "$T
 expect_code 1 "$archive_retry_rc" "unsafe local archive must retain the remote route"
 assert_grep 'unsafe status archive directory' "$TMP_ROOT/archive-retry.err" "retirement did not reach status archival"
 assert_present "$PARENT/state/ios.meta" "failed archival lost the retry metadata"
-assert_grep '^- ios ' "$PARENT/data/secondmates.md" "failed archival lost the retry registry route"
+assert_grep '- ios ' "$PARENT/data/secondmates.md" "failed archival lost the retry registry route"
 rm "$PARENT/data/ios"
 mv "$TMP_ROOT/status-archive.saved" "$PARENT/data/ios"
 archive_retry_rc=0
@@ -2066,7 +2066,7 @@ remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/archive-retry-ok.out" 2> 
   || archive_retry_rc=$?
 expect_code 4 "$archive_retry_rc" "archive repair retry must replay the retained retirement exit"
 assert_absent "$PARENT/state/ios.meta" "successful retirement retry retained metadata"
-assert_no_grep '^- ios ' "$PARENT/data/secondmates.md" "successful retry retained the registry route"
+assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "successful retry retained the registry route"
 pass "remote retirement retains its route through a failed local archive and succeeds on retry"
 
 # Reconcile an already-retired remote home with no parent-side status. Holding
