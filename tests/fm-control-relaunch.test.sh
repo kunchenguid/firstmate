@@ -1861,7 +1861,13 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
     run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
       > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
+  # Wait the same five seconds this file's other backgrounded-relaunch marker
+  # waits allow. Two seconds was the outlier, and it is a race window rather
+  # than a behavioral bound: the relaunch has to start a real process and work
+  # its way to the pre-publication check, which a loaded runner can easily push
+  # past two seconds. A passing case leaves the loop as soon as the marker
+  # lands, so the larger ceiling costs nothing.
+  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 500 ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done

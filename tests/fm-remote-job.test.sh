@@ -68,9 +68,18 @@ if [ -n "${TOP_SECRET:-}" ]; then printf 'secret=leaked\n'; else printf 'secret=
 while IFS= read -r line || [ -n "$line" ]; do printf 'stdin=%s\n' "$line"; done
 exit "${FM_PROBE_EXIT:-0}"
 SH
+# The job under the timeout tests must outlive its deadline by a wide margin so
+# the assertion turns on whether the worker kills it, not on the worker winning a
+# race against the job's own exit. With only a couple of seconds of slack the
+# worker's poll-and-signal loop can lose that race under a contended scheduler
+# (CI load, and macOS process-group signalling), letting the job exit on its own
+# before the kill lands and flaking the "terminated an over-time job" assertion.
+# The worker still kills at the deadline, so the wait returns in ~1s and this
+# long sleep is never actually slept when the timeout works; it only bounds how
+# long a genuinely broken kill would take to surface.
 cat > "$REMOTE_ROOT/bin/fm-timeout-job.sh" <<'SH'
 #!/bin/bash
-sleep 3
+sleep 30
 SH
 cat > "$REMOTE_ROOT/bin/fm-delay-job.sh" <<'SH'
 #!/bin/bash
