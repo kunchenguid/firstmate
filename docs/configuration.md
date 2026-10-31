@@ -2049,7 +2049,7 @@ The ceiling is **off unless the captain declares it**.
 `config/sol-cap` is a local, gitignored file in the dispatching home that names both the ceiling and the models it covers.
 Without that file there is no ceiling, no reservation, and no change to any dispatch: a home that never opted in behaves exactly as it did before this guard existed.
 A malformed file refuses loudly, naming the file and the problem, rather than guessing a ceiling the captain never wrote.
-A declaration the guard cannot read leaves it unable to know its own scope, so the refusal covers every dispatch through the guard, not only a capped model.
+A declaration the guard cannot read leaves it unable to know its own scope, so the refusal covers every dispatch through the guard, not only a capped model, and teardown or forced secondmate cleanup refuses the same way instead of releasing occupancy it cannot classify.
 
 ```sh
 # config/sol-cap

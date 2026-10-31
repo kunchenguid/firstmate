@@ -4089,8 +4089,8 @@ teardown_sol_claim_held() {  # <task-id> <state-dir>
   esac
 }
 
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 teardown_sol_claim_held "$ID" "$STATE" || exit 1
+# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1

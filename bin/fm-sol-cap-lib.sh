@@ -28,6 +28,12 @@
 #
 #   <session-id>	<model>	<start-epoch>	<pid>
 #
+# The pid field is the owning worker's process while it runs, 0 while a
+# delivery is still unconfirmed, and a marker otherwise: -1 a confirmed stop,
+# -2 an adopted claim the launcher cannot yet prove live or stopped, and -3 an
+# incarnation a replacement superseded. Only a live positive pid, a delivery
+# reservation, and an adopted claim count toward the ceiling.
+#
 
 # Registries live in each owning state directory; the claim lock lives in
 # the shared local root home's state directory.
@@ -395,7 +401,7 @@ fm_sol_cap_adopt_workers() (
     fi
     if [ "$lifecycle_held" = 1 ]; then
       # A superseded marker is preserved until lifecycle ownership permits
-      # its resolution: it still counts, and resolving it here would lose
+      # its resolution: it claims no slot, and resolving it here would lose
       # the marker the next adoption needs.
       [ "$pid" = -3 ] && continue
       fm_sol_cap_registry_claim "$file" "$id" "$model" "$now" -2 || return 1
@@ -586,9 +592,10 @@ fm_sol_cap_registry_remove_row() {  # <registry-file> <id>
 # fm_sol_cap_registry_supersede <registry-file> <id>
 # Mark this task id's row as superseded: the row names an incarnation that
 # is being replaced, so it must not be read as this task's current claim. The
-# row keeps its model and start epoch and still counts, so a replacement
-# never hands the same capacity to two sessions before the next adoption
-# resolves the marker. A no-op when the id has no row.
+# row keeps its model and start epoch as evidence of the incarnation it named,
+# and claims no slot, because only a row holding no live occupancy is
+# superseded. The next adoption resolves the marker. A no-op when the id has
+# no row.
 fm_sol_cap_registry_supersede() {  # <registry-file> <id>
   local file=$1 id=$2 tmp rc
   [ -f "$file" ] || return 0
@@ -646,11 +653,10 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     # Any other replacement marks the prior incarnation's row superseded: a
     # row an earlier incarnation left behind names this task's id while
     # describing a session that is being replaced, and adoption skips it, so
-    # a later declaration would leave this worker uncounted. The row still
-    # counts until the next adoption resolves the marker, so a replacement
-    # never hands the same capacity to two sessions. A first dispatch has no
-    # prior incarnation to mark, and a home with no row to mark never waits
-    # on the admission boundary at all.
+    # a later declaration would leave this worker uncounted. A superseded row
+    # claims no slot, so a replacement never hands the same capacity to two
+    # sessions. A first dispatch has no prior incarnation to mark, and a home
+    # with no row to mark never waits on the admission boundary at all.
     # The task id still has a row, so this dispatch reuses an id whose
     # earlier incarnation left evidence behind. That is true whether the
     # earlier incarnation's metadata is still published or a confirmed
@@ -667,8 +673,8 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     fi
     # The invalidation waits only briefly for the admission boundary, and it
     # never aborts this dispatch: a dispatch that reserves no slot must not
-    # be refused by ceiling contention, and the row it marks keeps counting
-    # until the next adoption resolves it.
+    # be refused by ceiling contention, and the next adoption resolves the
+    # marker it writes.
     fm_sol_cap_lock_try_briefly "$lock" || return 0
     if ! fm_sol_cap_registry_supersede "$state/$FM_SOL_REGISTRY_NAME" "$id"; then
       fm_lock_release "$lock" || true
