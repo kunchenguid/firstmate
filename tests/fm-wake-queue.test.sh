@@ -3349,10 +3349,13 @@ test_secondmate_liveness_tick_relaunches_dead_endpoint_once() {
   local dir state pid out ledger
   dir=$(make_secondmate_liveness_case liveness-dead)
   state="$dir/state"
+  printf 'codex gpt-5.6-sol medium\n' > "$dir/config/secondmate-harness"
 
   run_liveness_leg "$dir" dead FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
   wait_for_exit "$pid" 300 || fail "the watcher did not exit on its auto-relaunch wake"
   out="$dir/watch-dead.out"
+  assert_contains "$(cat "$out")" "model pin unverified: pin 'gpt-5.6-sol'" \
+    "the automatic recovery wake must include its replacement's observed model verdict"
   grep -F 'check: secondmate sm1 auto-relaunched after confirmed agent absence on existing endpoint (backend=tmux)' "$out" >/dev/null \
     || fail "a confirmed-dead secondmate was not auto-relaunched: $(cat "$out" "$dir/watch-dead.err")"
   [ "$(grep -c 'check: secondmate sm1 auto-relaunched' "$out")" -eq 1 ] \

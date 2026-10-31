@@ -295,6 +295,7 @@ cmd_launch() {
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     die "remote host-local secondmate launch failed"
   fi
+  printf '%s\n' "$out" | sed -n '/^model pin \(asserted\|mismatch\|unverified\):/p' >&2 || true
   [ -f "$meta" ] || die "remote launch returned without endpoint metadata"
   # remote_endpoint_load's per-backend record checks are the post-spawn
   # verification: herdr session fm-remote plus target, or rex's id trio and a
