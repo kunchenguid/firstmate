@@ -76,7 +76,8 @@
 # arm would, and otherwise this arm owns a fresh cycle as a plain arm does.
 # Recovery restoration follows docs/watcher-continuity.md "Generation reuse";
 # an unconfirmed stop leaves downtime for the fresh cycle's recovery check.
-# Any other watcher, or one that outlives the stop,
+# The stop waits for a slow exit up to the stall bound an attached arm uses.
+# Any other watcher, or one still running at that bound,
 # is attached to exactly as a plain arm attaches.
 #
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
@@ -610,8 +611,9 @@ fi
 # Stop the watcher the named arm owns, by its locked identity, and wait for it
 # to exit (header, --take-over). Returns 3 after printing the reason that cycle
 # delivered before the stop landed, 0 once it stopped without delivering, and
-# 1 when it was not stopped (its handover state was unreadable, or it outlived
-# the stop), which leaves it to the plain attach below.
+# 1 when it was not stopped (its handover state was unreadable, or its beacon
+# reached the stall bound before it exited), which leaves it to the plain
+# attach below.
 take_over_cycle() {  # <watcher-pid> <identity>
   local pid=$1 i owner_signal
   cycle_begin "$pid" attached "$2"
@@ -619,14 +621,17 @@ take_over_cycle() {  # <watcher-pid> <identity>
   if attached_holder_live "$pid"; then
     kill -TERM "$pid" 2>/dev/null || true
   fi
+  # The watcher honors TERM only at its next safe point, which a slow cycle step
+  # can hold past any short fixed bound; giving up early reopened the episode
+  # main had acknowledged. Follow it as attach_and_wait follows a slow holder.
   i=0
-  while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
+  while fm_pid_alive "$pid"; do
+    if [ $((i % 10)) -eq 0 ] && [ "$(fm_path_age "$BEAT")" -ge "$STALL_BOUND" ]; then
+      return 1
+    fi
     sleep 0.1
     i=$((i + 1))
   done
-  if fm_pid_alive "$pid"; then
-    return 1
-  fi
   if cycle_delivered_reason; then
     cycle_log_append unknown unknown taken-over-delivered-wake none
     printf '%s\n' "$DELIVERED_REASON"
