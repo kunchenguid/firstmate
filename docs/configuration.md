@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Claude session settings](#claude-session-settings-configclaude-session-settingsjson), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Claude session settings](#claude-session-settings-configclaude-session-settingsjson), [Claude crew settings](#claude-crew-settings-configclaude-crew-settingsjson), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1458,6 +1458,23 @@ An absent file adds nothing.
 Any other content, an unreadable file, or a missing `jq` refuses every spawn from that home before any endpoint, worktree, or task record exists.
 `bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
 Secondmate homes inherit the file, so their own crewmates carry the same settings.
+
+## Claude crew settings (config/claude-crew-settings.json)
+
+The optional local, gitignored `config/claude-crew-settings.json` adds Claude Code settings to Firstmate-built Claude crewmate and scout launches only, including their control-plane relaunches.
+Secondmate launches and the primary session never carry it, so it suits settings that would break supervision, such as turning off the Firstmate supervisor skills that a worker never loads.
+
+The file follows the [session settings](#claude-session-settings-configclaude-session-settingsjson) rules: one JSON object without `hooks`, `feedbackDrafts`, or `attribution`, read on every spawn and relaunch, and refusing every spawn from that home when it is invalid.
+It is merged after `config/claude-session-settings.json` into the same inline `--settings` object.
+The crew file wins a conflicting key, and object members such as `skillOverrides` and `modelSettings` merge recursively, so the session file's other entries survive beside the crew file's.
+An array value is replaced, not concatenated.
+For example, this file turns off two supervisor skills, lists `firstmate-coding-guidelines` by name only, and caps every listed skill description at 250 characters:
+
+```json
+{"skillListingMaxDescChars":250,"skillOverrides":{"afk":"off","harness-adapters":"off","firstmate-coding-guidelines":"name-only"}}
+```
+
+Firstmate ships no default crew file, and secondmate homes do not inherit it.
 
 ## Codex permission mode (config/codex-permission-mode)
 
