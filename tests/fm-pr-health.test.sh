@@ -614,6 +614,9 @@ test_action_required_and_review_required_are_distinct() {
   set_pr "$home" 40 '.reviewDecision = "REVIEW_REQUIRED" | .checks = []'
   expect_one "$home" 'needs human approval' 'a required review must be distinct'
   expect_silent "$home" 'a required review must not repeat'
+  set_pr "$home" 40 '.reviewDecision = "CHANGES_REQUESTED"'
+  expect_one "$home" 'author must act' 'a requested change must alert the author'
+  expect_silent "$home" 'an unchanged requested change must not repeat'
   pass 'maintainer-gated CI and required review states notify distinctly once'
 }
 

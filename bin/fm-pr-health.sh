@@ -150,6 +150,8 @@ STEP='
       | ($p.maintainer_gated // []) as $gated
       | (($g.reviewDecision == "REVIEW_REQUIRED") or (($r.requested_reviewers // []) | length > 0)) as $needs_approval
       | (($p.needs_approval // []) | index($head) | not) as $approval_new
+      | ($g.reviewDecision == "CHANGES_REQUESTED") as $author_action
+      | (($p.author_action // []) | index($head) | not) as $author_action_new
       | ($r.mergeable == false and ($conflicts | index($head) | not)) as $conflict_new
       | [$ctx[] | select(.maintainer_gated)
           | . as $check | select([$gated[] | select(.head == $head and .name == $check.name)] | length == 0)] as $new_gated
@@ -159,8 +161,11 @@ STEP='
       | {fp:{conflicts:($conflicts + if $conflict_new then [$head] else [] end),
              checks:($checks + [$new_failing[] | {head:$head,name:.}]),
              maintainer_gated:($gated + [$new_gated[] | {head:$head,name:.name}]),
-             needs_approval:($p.needs_approval // [] | if $needs_approval and $approval_new then . + [$head] else . end)},
+             needs_approval:($p.needs_approval // [] | if $needs_approval and $approval_new then . + [$head] else . end),
+             author_action:($p.author_action // [] | if $author_action and $author_action_new then . + [$head] else . end)},
          lines:([
+           (select($author_action and $author_action_new)
+            | "pr-health: \\($url) author must act \\($where) (task \\($owners))"),
            (select($approval_new and $needs_approval)
             | "pr-health: \($url) needs human approval \($where) (task \($owners))"),
            (select($conflict_new)
