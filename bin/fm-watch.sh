@@ -328,6 +328,7 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
+CLAIMED_RUN_DELAY=${FM_CLAIMED_RUN_DELAY:-180}
 # The liveness beacon is touched once per cycle, immediately before the
 # terminal wait below (event_wait_or_sleep) as well as at the top of the next
 # one, so a healthy cycle's beacon can legitimately age up to POLL seconds
@@ -3974,7 +3975,52 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
+  # A worker's routine validation-started line is not itself an actionable wake.
+  # Remember each distinct claim and verify it after a bounded delay on this poll loop.
+  claimed_run_tick() {
+  local f task meta wt branch line size marker seen stamp recorded_branch recorded_size runs
+  case "$CLAIMED_RUN_DELAY" in ''|*[!0-9]*) return 0 ;; esac
+  for f in "$STATE"/*.status; do
+    [ -f "$f" ] || continue
+    task=${f##*/}; task=${task%.status}
+    line=$(tail -n 1 "$f" 2>/dev/null || true)
+    case "$line" in *working*validat*|*working*no-mistakes*) ;; *) continue ;; esac
+    meta="$STATE/$task.meta"
+    wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    [ -d "$wt" ] || continue
+    branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    [ -n "$branch" ] || continue
+    size=$(wc -c < "$f" | tr -d '[:space:]')
+    marker="$STATE/.claimed-run-$task"
+    seen="$STATE/.claimed-run-seen-$task"
+    if [ "$(sed -n '1p' "$seen" 2>/dev/null || true)" = "$branch:$size" ]; then
+      rm -f "$marker"
+      continue
+    fi
+    stamp=$(sed -n '1p' "$marker" 2>/dev/null || true)
+    recorded_branch=$(sed -n '2p' "$marker" 2>/dev/null || true)
+    recorded_size=$(sed -n '3p' "$marker" 2>/dev/null || true)
+    if [ "$recorded_branch" != "$branch" ] || [ "$recorded_size" != "$size" ]; then
+      { date +%s; printf '%s\n%s\n' "$branch" "$size"; } > "$marker"
+      continue
+    fi
+    case "$stamp" in ''|*[!0-9]*) rm -f "$marker"; continue ;; esac
+    [ "$(( $(date +%s) - stamp ))" -ge "$CLAIMED_RUN_DELAY" ] || continue
+    runs=$(no-mistakes runs --limit 100 2>/dev/null) || continue
+    if ! printf '%s\n' "$runs" | awk -v branch="$branch" '$2 == branch { found=1 } END { exit !found }'; then
+      printf '%s\n' "$branch:$size" > "$seen"
+      rm -f "$marker"
+      fm_wake_append check "claimed-run-$task" "check: validation claim has no run for $branch (worker reported validation started)" || return 1
+      wake "check: validation claim has no run for $branch (worker reported validation started)"
+    fi
+    printf '%s\n' "$branch:$size" > "$seen"
+    rm -f "$marker"
+  done
+  }
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
+  claimed_run_tick || { echo 'watcher: claimed-run verification failed' >&2; exit 1; }
+
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
   # after the signal scan would be starved whenever a chatty sibling crewmate
