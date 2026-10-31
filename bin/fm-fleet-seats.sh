@@ -407,7 +407,7 @@ resolve_authority() {
     # published. It never becomes an independent authority with a policy and a
     # ledger of its own, so the root's capacity still governs it.
     ROOT_ORPHAN=1
-    if proven=$(authority_record_read "$root"); then
+    if proven=$(authority_record_read "$home_canon") || proven=$(authority_record_read "$root"); then
       root=$proven
     else
       # No provable root: this home owns no seat authority, so the seat guard
