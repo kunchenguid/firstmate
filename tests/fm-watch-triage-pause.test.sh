@@ -1463,6 +1463,92 @@ test_required_captain_hold_tests_fail_without_tasks_axi() {
   pass "all four required captain-hold tests fail when tasks-axi is unavailable"
 }
 
+# A fake gh that answers the pull-request read fm-pr-state.sh actually runs.
+# FM_TEST_VIEW_MERGEABLE selects GitHub's mergeable value.
+install_pr_state_gh() { # <fakebin>
+  cat > "$1/gh" <<'SH'
+#!/usr/bin/env bash
+set -o pipefail
+head=c2eac54c17a1ddc2633ad51b83e21e5fe888142e
+serve() {
+  case "$*" in
+    "pr view "*" --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision --jq "*)
+      jq -n --arg head "$head" --arg mergeable "${FM_TEST_VIEW_MERGEABLE-MERGEABLE}" \
+        '{state: "OPEN", mergedAt: null, isDraft: false, headRefOid: $head,
+          author: {login: "prauthor", is_bot: false},
+          mergeable: (if $mergeable == "null" then null else $mergeable end),
+          reviewDecision: "APPROVED"}'
+      ;;
+    "pr checks "*" --required --json name,state,bucket --jq "*)
+      printf '%s\n' '[{"name":"lint","state":"SUCCESS","bucket":"pass","workflow":"ci"}]'
+      ;;
+    "pr checks "*" --json name,state,bucket --jq "*)
+      printf '%s\n' '[{"name":"lint","state":"SUCCESS","bucket":"pass","workflow":"ci"}]'
+      ;;
+    *)
+      printf 'unexpected gh call: %s\n' "$*" >&2
+      exit 91
+      ;;
+  esac
+}
+prog=
+prev=
+for arg in "$@"; do
+  [ "$prev" != --jq ] || prog=$arg
+  prev=$arg
+done
+serve "$@" | jq -r "$prog"
+SH
+  chmod +x "$1/gh"
+}
+
+# One aged paused recheck. Prints the watcher stdout path via the caller's
+# variables and leaves the wake text in <out>.
+launch_aged_pause_recheck() { # <name> <mergeable>
+  local name=$1 mergeable=$2 dir state fakebin out capture_file window key sig
+  dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-conflict"
+  printf 'idle, waiting on the maintainer\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\npr=https://github.com/o/r/pull/7\n' "$window" > "$state/conflict.meta"
+  printf 'paused: waiting on the maintainer\n' > "$state/conflict.status"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/conflict.status"
+  sig=$(seen_sig "$state/conflict.status"); printf '%s' "$sig" > "$state/.seen-conflict_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "idle, waiting on the maintainer")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  install_pr_state_gh "$fakebin"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the maintainer'
+  export FM_TEST_VIEW_MERGEABLE=$mergeable
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 150 || { reap "$pid"; fail "$name did not re-surface: $(cat "$out" 2>/dev/null)"; }
+  PAUSE_RECHECK_OUT=$out
+}
+
+test_paused_recheck_names_a_merge_conflict() {
+  local pid
+  command -v jq >/dev/null 2>&1 || fail "jq is required to answer the pull-request read"
+  launch_aged_pause_recheck conflict-dirty CONFLICTING
+  grep -F "awaiting external" "$PAUSE_RECHECK_OUT" >/dev/null \
+    || fail "a conflicting pull request lost the paused recheck: $(cat "$PAUSE_RECHECK_OUT")"
+  grep -F "merge conflict with its base" "$PAUSE_RECHECK_OUT" >/dev/null \
+    || fail "a conflicting pull request did not name the conflict: $(cat "$PAUSE_RECHECK_OUT")"
+  grep -F "possible wedge" "$PAUSE_RECHECK_OUT" >/dev/null \
+    && fail "a conflicting paused recheck was labeled a wedge: $(cat "$PAUSE_RECHECK_OUT")"
+  launch_aged_pause_recheck conflict-clean MERGEABLE
+  grep -F "awaiting external" "$PAUSE_RECHECK_OUT" >/dev/null \
+    || fail "a clean pull request lost the paused recheck: $(cat "$PAUSE_RECHECK_OUT")"
+  grep -F "merge conflict" "$PAUSE_RECHECK_OUT" >/dev/null \
+    && fail "a clean pull request named a merge conflict: $(cat "$PAUSE_RECHECK_OUT")"
+  unset FM_FAKE_CREW_STATE FM_TEST_VIEW_MERGEABLE
+  pass "a paused recheck names a merge conflict only when the pull request conflicts"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -1497,4 +1583,5 @@ fm_test_run \
   test_paused_until_wrong_year_is_bounded_by_the_cadence \
   test_paused_until_that_passed_is_rechecked_before_the_cadence \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
-  test_paused_bg_job_until_timeout_rechecks_after_the_job_ends
+  test_paused_bg_job_until_timeout_rechecks_after_the_job_ends \
+  test_paused_recheck_names_a_merge_conflict
