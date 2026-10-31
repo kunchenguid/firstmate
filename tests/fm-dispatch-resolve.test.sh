@@ -1560,6 +1560,15 @@ assert_contains "$out" '  status: clear' "native Codex headroom resolves despite
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "native Codex reads codex-home"
 assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex headroom is chosen"
 
+jq '(.providers[] | select(.provider == "codex" and .accountKey == "codex-home")).accountKeys = ["codex-home", "work account"]' "$SCHEMA6_NATIVE" > "$TMP_ROOT/schema6-whitespace-alias.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-whitespace-alias.json" run code out err "$BRIEF"
+expect_code 0 "$code" "a whitespace-containing alias exits 0"
+assert_contains "$out" '  status: clear' "a whitespace-containing alias does not invalidate the snapshot"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "an exact accountKey match still supplies quota with a whitespace-containing alias"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "the exact accountKey match is chosen despite a whitespace-containing alias"
+pass "schema 6 accepts whitespace in accountKeys without changing exact matching"
+
 jq '.providers |= reverse' "$SCHEMA6_NATIVE" > "$TMP_ROOT/schema6-reversed.json"
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-reversed.json" run code out err "$BRIEF"
@@ -1571,6 +1580,41 @@ reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-default.json" run code out err "$BRIEF"
 assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex falls back to the default row when codex-home is absent"
 pass "native Codex binds to codex-home before default, independently of Pi accounts and row order"
+
+FOLDED_QUOTA="$TMP_ROOT/schema6-folded.json"
+jq '.providers |= map(select(.provider != "codex" or .accountKey == "codex-home") |
+  if .provider == "codex" then .accountKey = "credential-primary" | .accountKeys = ["credential-primary", "credential-alias"] else . end)' "$SCHEMA6_NATIVE" > "$FOLDED_QUOTA"
+jq '.rules[0].use = [{harness: "pi", model: "credential-alias/gpt-6-astra", provider: "codex"}]' "$LANE_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$FOLDED_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a credential key covered only by accountKeys binds to its producer row"
+assert_contains "$out" "candidate: pi:credential-alias/gpt-6-astra  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8" "the folded account row supplies its quota"
+
+jq '(.providers[] | select(.accountKey == "credential-primary")) as $row |
+  .providers += [($row | .accountKey = "credential-alias" | .accountKeys = ["credential-alias"] |
+    .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 0 | .runway.status = "exhausted_now"))]' "$FOLDED_QUOTA" > "$TMP_ROOT/schema6-folded-exact.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-folded-exact.json" run code out err "$BRIEF"
+assert_contains "$out" "candidate: pi:credential-alias/gpt-6-astra  provider=codex  scope=all_models  remaining=0%" "an exact accountKey match takes precedence over another row's alias"
+
+jq '.providers |= reverse' "$FOLDED_QUOTA" > "$TMP_ROOT/schema6-folded-reversed.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-folded-reversed.json" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "covered-key matching ignores row order"
+
+jq '.providers += [(.providers[] | select(.accountKey == "credential-primary") | .accountKey = "other-credential")]' "$FOLDED_QUOTA" > "$TMP_ROOT/schema6-folded-ambiguous.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-folded-ambiguous.json" run code out err "$BRIEF"
+assert_contains "$out" '  reason: no rankable eligible candidate' "ambiguous covered-key matches remain unmeasured"
+assert_contains "$out" "candidate: pi:credential-alias/gpt-6-astra  provider=codex  -> eligible, unranked: provider codex has no quota row for account credential-alias" "ambiguous matches leave the candidate eligible but unranked"
+
+for malformed_keys in '"credential-alias"' '[""]'; do
+  jq --argjson keys "$malformed_keys" '(.providers[] | select(.accountKey == "credential-primary")).accountKeys = $keys' "$FOLDED_QUOTA" > "$TMP_ROOT/schema6-folded-malformed.json"
+  reset_log
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-folded-malformed.json" run code out err "$BRIEF"
+  assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "accountKeys must be an array of non-empty strings"
+done
+cp "$LANE_RULES" "$RULES"
 
 jq '.schemaVersion = 5 | .providers |= map(select(.accountKey != "openai-codex")) | del(.providers[].accountKey)' "$SCHEMA6" > "$SCHEMA5_PAIR"
 reset_log

@@ -109,7 +109,8 @@ This live snapshot was all `through_reset`, so finite-runway fields were omitted
 There is no `projectionBasis` field; its absence means `cycle_average`.
 `runway` and `selection` are nested under each effective-availability scope, so the same provider/model applicability rules govern headroom, runway, and `spendPriority`.
 Projection confidence is not present on every known runway, so selection must preserve that absence as uncertainty rather than fabricate it.
-The schema compatibility and account-matching contract is owned by [`quota-array-dispatch`](../../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility); this schema-5 evidence does not reinterpret an absent runway, pace, or selection field.
+The [shared quota library](../../bin/fm-quota-axi-lib.sh) owns schema compatibility, and [`quota-array-dispatch`](../../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility) owns account matching.
+This schema-5 evidence does not reinterpret an absent runway, pace, or selection field.
 
 ## Provider-family counterfactual that this producer schema supports
 
