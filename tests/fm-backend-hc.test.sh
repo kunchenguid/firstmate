@@ -121,6 +121,48 @@ test_create_task_is_independent_labeled_and_refuses_duplicates() {
   pass "hc: create_task starts an independent labeled terminal and refuses a duplicate"
 }
 
+# hc 0.1.15 starts a core from a plain `hc get`, so a view refuses every hc call
+# at the one boundary they share: endpoint-state reads say unreadable, the
+# presence check fails, and kill refuses, so nothing closes a live task there.
+test_view_refuses_every_hc_call() {
+  setup_case view
+  local out rc=0 tag state
+  out=$(hc_shell 'FM_VIEW=1 fm_backend_hc_container_ensure' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "container_ensure succeeded inside a view: $out"
+  assert_contains "$out" "firstmate --mode install" "the refusal did not name install mode"
+  assert_contains "$out" "outside this session" "the refusal did not say to launch from outside the session"
+  assert_contains "$out" "instead of the real project" "the refusal did not name the consequence"
+  assert_contains "$out" "an hc server" "the refusal did not read as plain English"
+  assert_not_contains "$out" "is herdr-core installed" "the refusal blamed the hc install"
+  tag=$(hometag_of)
+  write_terminal "$D" t1 live fm-a1 "$tag" claude claude
+
+  rc=0
+  out=$(hc_shell 'FM_VIEW=1 fm_backend_hc_cli fmtest get --json t1' 2>&1) || rc=$?
+  assert_equals 1 "$rc" "a supervision call inside a view must fail plainly, not as hc's not_found"
+  assert_contains "$out" "firstmate --mode install" "a supervision call's refusal did not name install mode"
+  for state in "fm_backend_hc_endpoint_state fmtest:t1 fm-a1" "fm_backend_hc_agent_state fmtest:t1"; do
+    assert_equals unreadable "$(hc_shell "FM_VIEW=1 $state" 2>/dev/null)" "$state must read unreadable inside a view"
+  done
+  assert_equals unknown "$(hc_shell 'FM_VIEW=1 fm_backend_hc_busy_state fmtest:t1' 2>/dev/null)" \
+    "busy_state must read unknown inside a view"
+  expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_target_ready fmtest:t1 fm-a1'
+  expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_capture fmtest:t1 10 fm-a1'
+  expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_send_key fmtest:t1 Enter fm-a1'
+  expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_send_text_line fmtest:t1 hello fm-a1'
+  expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_kill fmtest:t1 "" fm-a1'
+  expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_create_task fmtest fm-a2 /proj'
+  assert_absent "$D/log" "hc was invoked inside a view"
+  assert_present "$D/t1.json" "a refused close removed the terminal"
+
+  out=$(hc_shell 'unset FM_VIEW; fm_backend_hc_container_ensure') || fail "container_ensure refused outside a view: $out"
+  assert_equals "$out" "fmtest" "container_ensure did not print the session outside a view"
+  assert_contains "$(cat "$D/log")" "server"$'\x1f'"status" "hc was not asked for the server status outside a view"
+  assert_equals ready "$(hc_shell 'unset FM_VIEW; fm_backend_hc_endpoint_state fmtest:t1 fm-a1')" \
+    "a supervision call outside a view must still reach hc"
+  pass "hc: a view refuses every hc call before reaching hc; outside a view the calls are unchanged"
+}
+
 test_control_interrupt_delivers_the_harness_keys() {
   local tag out rc=0 id=hcint1
   setup_case interrupt
@@ -263,6 +305,7 @@ test_endpoint_validation_binds_hc_meta() {
 fm_test_run \
   test_hc_is_spawn_capable_and_never_autodetected \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
+  test_view_refuses_every_hc_call \
   test_control_interrupt_delivers_the_harness_keys \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \
   test_invalid_session_never_reaches_hc \

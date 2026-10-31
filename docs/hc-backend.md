@@ -73,6 +73,11 @@ An input, capture, or close that carries the task label refuses a terminal whose
   When that process is a launcher, the adapter also reads the rest of its process group from `ps`, which works only for terminals on the local machine.
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.
 - `--secondmate` spawns are refused.
+- A project-mode session cannot run or supervise hc tasks, because any hc command can start a core and that core would show workers the view instead of the real project (measured on `hc 0.1.15` from a plain `hc get`).
+  Every hc call is refused before it reaches hc, so a recorded hc task cannot be read there.
+  Endpoint-state reads report such a task as unreadable, while the session-start digest and the fleet snapshot report it as dead.
+  Kill and relaunch refuse, so the task is safe; check it from an install-mode session.
+  Install mode is the way to use hc: launch with `firstmate --mode install` from a normal terminal outside the session.
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
 - Naming a Herdr.app space needs the app window and is not done; whether the labels above display as intended in Herdr.app is not verified.
 - hc has no event stream this adapter consumes; supervision polls like tmux.

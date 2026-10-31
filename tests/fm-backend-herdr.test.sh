@@ -1380,6 +1380,23 @@ test_server_ensure_reports_a_replacement_that_never_ends() {
   pass "fm_backend_herdr_server_ensure: a replacement that never ends fails naming its marker instead of starting or using a server"
 }
 
+test_server_ensure_refuses_its_own_start_inside_a_firstmate_view() {
+  local dir out status
+  dir="$TMP_ROOT/server-owned-view"; mkdir -p "$dir/session"
+  out=$(run_owned_server_ensure "$dir" FM_VIEW=1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "server_ensure must refuse to start a server from inside a Firstmate view"
+  [ ! -e "$dir/starts" ] || fail "server_ensure started a server from inside a Firstmate view"
+  assert_contains "$out" "would show workers the view" "the refusal should name the consequence"
+  dir="$TMP_ROOT/server-owned-view-external"; mkdir -p "$dir/session"
+  printf 'systemd user unit herdr-fmtest.service\n' > "$dir/session/firstmate-server-owner"
+  out=$(run_owned_server_ensure "$dir" FM_VIEW=1 FM_HERDR_FLIP_AFTER=2 FM_HERDR_FLIP=up)
+  status=$?
+  expect_code 0 $status "server_ensure should use an externally managed server that comes up while it waits inside a view: $out"
+  [ ! -e "$dir/starts" ] || fail "server_ensure started a server that an external owner manages"
+  pass "fm_backend_herdr_server_ensure: inside a Firstmate view it refuses only its own start, still waiting for an externally managed server"
+}
+
 test_container_ensure_reuses_existing_workspace() {
   local dir log resp fb out
   dir="$TMP_ROOT/container-reuse"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6210,6 +6227,7 @@ test_server_ensure_waits_out_a_server_replacement
 test_server_ensure_holds_callers_off_a_running_server_during_a_replacement
 test_server_ensure_resumes_ownership_after_a_replacement_clears
 test_server_ensure_reports_a_replacement_that_never_ends
+test_server_ensure_refuses_its_own_start_inside_a_firstmate_view
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
