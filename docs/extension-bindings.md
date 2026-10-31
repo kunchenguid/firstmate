@@ -186,7 +186,10 @@ The capability has four operations:
 | `result.terminal` | `source_id`, `sequence`, `content` | `{value:true|false}` | Core conditionally retires only the exact registration generation it owns. |
 | `result.silent` | `source_id`, `sequence`, `content` | `{value:true|false}` | Core records handling only for a positive, valid verdict; every failure publishes the result. |
 
-A long-poll implementation must return `no-result` before its bound timeout when no event arrives; a host timeout is an actionable package failure, not a normal discovery cadence.
+A long-poll implementation must return `no-result` before its bound timeout when no event arrives.
+A host timeout that fires on time while the machine runs normally is an actionable package failure, not a normal discovery cadence.
+When a deadline fires far past its bound because the machine was suspended across it, the host grants one short bounded grace instead of killing a healthy invocation, and the captured error records which bound fired and how far it overran, so a suspension-driven kill is never read as a package failure.
+A genuinely stalled invocation receives no grace and still dies at its bound.
 The shipped example uses a 55-second finite wait inside the default five-minute host bound, so an absent file produces no result and no wake before ordinary reconciliation starts the next wait.
 The package never receives a result-file path.
 A source configuration reference is a bounded non-secret identifier or path reference stored in the private registration and sent in JSON; credential values must stay out of the reference, argv, envelopes, diagnostics, and process-event records.
@@ -214,7 +217,7 @@ An unknown enabled version refuses rather than downgrading.
 
 A missing or changed package never executes.
 A malformed binding, integrity mismatch, failed handshake, crash, nonzero exit, timeout, oversized stream, wrong request id, or invalid response never selects another adapter.
-A source invocation failure becomes a bounded host-produced `firstmate.process-event-extension-error.v1` result and remains unhandled.
+A source invocation failure becomes a bounded host-produced `firstmate.process-event-extension-error.v1` result and remains unhandled; a deadline-driven failure names its `bound`, and a suspension-driven kill additionally carries `overrun_ms`.
 For the same source, a repeated complete host-error envelope reuses an existing unhandled capture only when its host-error sidecar, exact result bytes, adapter, and immutable extension identity all match.
 A matching retry allocates no new result sequence and records no handled acknowledgement.
 Ordinary reconciliation continues to publish the retained evidence and retry polling, so old failure evidence does not block recovery.

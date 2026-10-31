@@ -266,7 +266,20 @@ if ($rc == 70 && !$truncated && $written > 0 && $written <= 1024) {
     $error_bytes .= $buffer;
   }
   my $error = eval { decode_json($error_bytes) };
-  if (ref($error) eq 'HASH' && keys(%$error) == 4
+  # Deadline failures extend the base four keys with bound, and with
+  # overrun_ms only for a suspension-driven kill that received the bounded
+  # grace. Both optional shapes stay byte-stable per failure mode, so retry
+  # envelopes keep reusing one unhandled capture.
+  my $deadline_keys = 0;
+  if (ref($error) eq 'HASH' && keys(%$error) == 5
+      && ($error->{bound} // '') =~ /\A[a-z0-9-]{1,32}\z/) {
+    $deadline_keys = 1;
+  } elsif (ref($error) eq 'HASH' && keys(%$error) == 6
+      && ($error->{bound} // '') =~ /\A[a-z0-9-]{1,32}\z/
+      && !ref($error->{overrun_ms}) && ($error->{overrun_ms} // '') =~ /\A[0-9]{1,9}\z/) {
+    $deadline_keys = 1;
+  }
+  if (ref($error) eq 'HASH' && (keys(%$error) == 4 || $deadline_keys)
       && ($error->{schema} // '') eq 'firstmate.process-event-extension-error.v1'
       && ($error->{extension_id} // '') eq $extension_id
       && ($error->{operation} // '') eq 'source.poll'
