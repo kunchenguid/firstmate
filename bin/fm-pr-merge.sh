@@ -183,10 +183,10 @@
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
 # an away record exists (a quiet-mode record is a present captain, so its
-# merges stay attended: bin/fm-afk-contract.sh mode) any green merge may
+# merges stay attended: bin/fm-afk-contract.sh mode) a green merge may
 # proceed under away authority:
-# the record's presence is the whole mechanical fact, and which merge the
-# captain's away words name is the supervision session's reading
+# the record's presence is the whole mechanical fact, and which pull requests
+# the captain's away words name is the supervision session's reading
 # (bin/fm-branch-prompt.sh "Postures"). While away, a GitHub merge is also
 # refused before the forge call unless this account's live repository
 # permission can merge. An unreadable record refuses rather
