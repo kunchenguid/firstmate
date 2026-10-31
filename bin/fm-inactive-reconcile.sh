@@ -363,8 +363,9 @@ state_line_note() { # <state-line>
 # Enforce the header's same-record pull-request contract. A scout never delivers
 # a PR, so it never carries one, exactly as pr_for_task rules for the
 # ledger-first path. Otherwise a status-log state carries a PR only in a mode's
-# ready-signal shape, the same rule pr_for_task applies, so a PR a worker merely
-# mentioned in prose is never the delivery.
+# ready-signal shape (`PR <url>`, `PR <url> checks green`, or Gerrit's
+# `PR <url> published for review`) naming a review URL bin/fm-pr-lib.sh parses,
+# so a PR a worker merely mentioned in prose is never the delivery.
 terminal_outcome_pr() { # <state-line> <kind>
   local line=$1 kind=${2:-} value
   [ "$kind" != scout ] || return 0
@@ -372,10 +373,14 @@ terminal_outcome_pr() { # <state-line> <kind>
     clean_field "$(state_line_pr "$line")"
     return 0
   fi
-  value=$(printf '%s\n' "$(state_line_note "$line")" \
-    | sed -nE 's|^PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\1|p' \
-    | head -1 || true)
-  clean_field "$value"
+  value=$(state_line_note "$line")
+  case "$value" in 'PR '*) value=${value#PR } ;; *) return 0 ;; esac
+  case "$value" in
+    *' checks green') value=${value% checks green} ;;
+    *' published for review') value=${value% published for review} ;;
+  esac
+  fm_pr_url_parse "$value" || return 0
+  clean_field "$FM_PR_URL"
 }
 
 # Enforce the header's independent captain-facing corroboration contract. A

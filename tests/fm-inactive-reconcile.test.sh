@@ -1106,17 +1106,46 @@ test_terminal_outcome_takes_the_pr_its_run_opened() {
 test_status_log_sourced_outcome_keeps_its_own_pr() {
   local payload
   make_world outcome-pr-log
-  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/7 checks green'
+  write_child "$MAIN" child 'done: PR https://github.com/owner/repo/pull/7 checks green'
   FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
-    FM_FAKE_CREW_DETAIL='PR https://example.test/owner/repo/pull/7 checks green' \
+    FM_FAKE_CREW_DETAIL='PR https://github.com/owner/repo/pull/7 checks green' \
     run_reconcile "$MAIN" --startup
   payload=$(queued_payload "$MAIN" 'inactive-outcome:')
   [ -n "$payload" ] || fail "no terminal outcome was queued"
   case "$payload" in
-    *'pr=https://example.test/owner/repo/pull/7'*) ;;
+    *'pr=https://github.com/owner/repo/pull/7'*) ;;
     *) fail "the terminal outcome dropped the pull request its own record named: $payload" ;;
   esac
   pass "a status-log sourced outcome keeps the pull request that record named"
+}
+
+# Every supported forge's ready report keeps its review link: a GitLab merge
+# request and a Gerrit change reported in their own ready shapes.
+test_status_log_outcome_keeps_gitlab_and_gerrit_reviews() {
+  local payload name url detail
+  for name in gitlab gerrit; do
+    case "$name" in
+      gitlab)
+        url='https://gitlab.example/group/sub/project/-/merge_requests/8'
+        detail="PR $url checks green"
+        ;;
+      gerrit)
+        url='https://gerrit.example/c/group/project/+/4201'
+        detail="PR $url published for review"
+        ;;
+    esac
+    make_world "outcome-pr-log-$name"
+    write_child "$MAIN" child "done: $detail"
+    FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
+      FM_FAKE_CREW_DETAIL="$detail" run_reconcile "$MAIN" --startup
+    payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+    [ -n "$payload" ] || fail "no terminal outcome was queued for $name"
+    case "$payload" in
+      *"pr=$url"*) ;;
+      *) fail "the $name terminal outcome dropped its review link: $payload" ;;
+    esac
+  done
+  pass "a status-log outcome keeps GitLab and Gerrit review links"
 }
 
 # A status-log outcome without its own PR carries none. An earlier working line
@@ -1333,6 +1362,7 @@ test_reconciliation_sets_no_forge_mode_for_state_read
 test_terminal_outcome_never_names_a_pr_the_run_did_not_open
 test_terminal_outcome_takes_the_pr_its_run_opened
 test_status_log_sourced_outcome_keeps_its_own_pr
+test_status_log_outcome_keeps_gitlab_and_gerrit_reviews
 test_status_log_outcome_never_borrows_an_earlier_pr
 test_status_log_outcome_never_borrows_the_fresh_last_line_pr
 test_status_log_outcome_never_claims_a_mentioned_pr
