@@ -1704,8 +1704,9 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
           # The running host has proved this pre-pool supervisor exists. Adopt
           # its exact generation into the certificate instead of requiring a
           # reservation that could only have been made after this first serve.
-          [ "$verdict" = pooled ] && gen_ok "$gen" \
-            || unavailable "host supervisor $id has unaccounted occupancy"
+          if [ "$verdict" != pooled ] || ! gen_ok "$gen"; then
+            unavailable "host supervisor $id has unaccounted occupancy"
+          fi
           printf '%s\t%s\t%s\t%s\tconfirmed\n' "$ROOT_STATE/parent-route" "$id" "$gen" "$(record_field "$meta" model)" >> "$TMPD/adopted-hosts"
         fi
       done
