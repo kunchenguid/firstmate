@@ -9,7 +9,11 @@
 # GitLab, gerrit-axi for Gerrit, and tea for Forgejo, so an upstream checkout
 # needs no extra tooling to follow GitHub or GitLab. The Gerrit and Forgejo
 # branches additionally need jq, which bin/fm-pr-check.sh refuses to arm those
-# watches without.
+# watches without. Bitbucket Cloud has no such CLI, so its branch reads the REST
+# API with curl and jq under the NO_MISTAKES_BITBUCKET_EMAIL and
+# NO_MISTAKES_BITBUCKET_API_TOKEN credential, all of which bin/fm-pr-check.sh
+# refuses to arm a Bitbucket watch without; bin/fm-pr-lib.sh's Bitbucket section
+# owns why the credential only ever reaches curl on stdin.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -74,6 +78,37 @@ case "$provider" in
     esac
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
     state=$(GH_HOST=$host gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    [ "$state" = MERGED ] && printf '%s\n' merged
+    ;;
+  bitbucket)
+    [ "$host" = bitbucket.org ] || exit 0
+    workspace=${path%%/*}
+    repo=${path#*/}
+    [ "${#workspace}" -ge 1 ] && [ "${#workspace}" -le 100 ] || exit 0
+    case "$workspace" in
+      -*|*[!a-z0-9_-]*) exit 0 ;;
+    esac
+    [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || exit 0
+    case "$repo" in
+      .|..|-*|*[!a-z0-9._-]*) exit 0 ;;
+    esac
+    [ "$url" = "https://bitbucket.org/$workspace/$repo/pull-requests/$number" ] || exit 0
+    [ -n "${NO_MISTAKES_BITBUCKET_EMAIL:-}" ] && [ -n "${NO_MISTAKES_BITBUCKET_API_TOKEN:-}" ] || exit 0
+    credential="$NO_MISTAKES_BITBUCKET_EMAIL:$NO_MISTAKES_BITBUCKET_API_TOKEN"
+    credential=${credential//\\/\\\\}
+    credential=${credential//\"/\\\"}
+    # Only a 200 whose record is this exact pull request and says MERGED wakes;
+    # an error body, a redirect, or any other state stays silent.
+    json=$(printf 'user = "%s"\n' "$credential" \
+      | curl -q -sS -K - -H 'Accept: application/json' --connect-timeout 10 --max-time 20 \
+        -w '\n%{http_code}' \
+        "https://api.bitbucket.org/2.0/repositories/$workspace/$repo/pullrequests/$number?fields=id,state" \
+        2>/dev/null) || exit 0
+    [ "${json##*$'\n'}" = 200 ] || exit 0
+    json=${json%$'\n'*}
+    state=$(printf '%s' "$json" | jq -r --argjson number "$number" '
+      if type == "object" and .id == $number and (.state | type) == "string"
+      then .state else error("not the requested pull request") end' 2>/dev/null) || exit 0
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   gitlab)

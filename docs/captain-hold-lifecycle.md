@@ -165,7 +165,7 @@ After cleanup, and still under the task's own lock, teardown does three things:
 
 - It records one `Deliverable of the finished work: ...` line at the end of the task body.
 - It copies a supported pull request or canonical `data/<id>/report.md` into the row's structured artifact fields.
-  A Gerrit change or GitLab merge request URL is not a pull request tasks-axi accepts, so it appears only in the deliverable line.
+  A Gerrit change, GitLab merge request, or Bitbucket Cloud pull request URL is not a pull request tasks-axi accepts, so it appears only in the deliverable line.
 - It runs `tasks-axi reopen`.
 
 The row returns to Queued with its hold intact.
@@ -178,7 +178,7 @@ That record carries the retention intent as a `mode=retain` line.
 An interrupted cleanup therefore replays the retention at the next session start through the same record, validator, and lock as an ordinary close, and never closes the row.
 
 If the captain answers before replay, `answer` validates that record and copies any supported retained pull request or report into the row before closing it.
-A retained Gerrit change or GitLab merge request URL is instead recorded as a `Gerrit change <url>` or `GitLab merge request <url>` note on that close.
+A retained Gerrit change, GitLab merge request, or Bitbucket Cloud pull request URL is instead recorded as a `Gerrit change <url>`, `GitLab merge request <url>`, or `Bitbucket Cloud pull request <url>` note on that close.
 Replay then retires the record.
 
 ### Known retained-delivery gaps

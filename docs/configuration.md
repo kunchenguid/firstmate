@@ -15,6 +15,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
+| Forge credentials for Bitbucket Cloud pull requests | [Bitbucket Cloud pull requests](#bitbucket-cloud-pull-requests-no_mistakes_bitbucket_email--no_mistakes_bitbucket_api_token) |
 
 ## FM_HOME
 
@@ -2059,6 +2060,23 @@ FM_DISPATCH_BASE_URL=http://127.0.0.1:8080
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+## Bitbucket Cloud pull requests (NO_MISTAKES_BITBUCKET_EMAIL / NO_MISTAKES_BITBUCKET_API_TOKEN)
+
+Firstmate records, watches, reads, and merges a Bitbucket Cloud pull request (`https://bitbucket.org/<workspace>/<repository>/pull-requests/<number>`) through the Bitbucket REST API 2.0, with the same credential the no-mistakes pipeline uses to open it, so the fleet has one Bitbucket credential.
+Bitbucket Data Center and Server URLs are not Bitbucket Cloud URLs and are refused.
+
+Set both variables in the environment firstmate runs in, which its watcher inherits:
+
+- `NO_MISTAKES_BITBUCKET_EMAIL` is the Atlassian account email.
+- `NO_MISTAKES_BITBUCKET_API_TOKEN` is an Atlassian API token for that account, used as HTTP Basic auth.
+
+The token needs read access to pull requests, commit statuses, and the repository, and write access to pull requests for a merge.
+A merge also needs repository admin access to read the destination branch's restrictions; an unreadable restriction set refuses the merge.
+[`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header owns the supported merge checks, strategy selection, and remaining unbound-head race that can land unverified commits.
+Firstmate reads the credential from the environment only, never from `.env`, and hands it to `curl` on standard input rather than as an argument, so it never appears in a process listing and is never printed, logged, or recorded.
+`curl` and `jq` are required alongside it.
+Registering a Bitbucket watch, merging a Bitbucket pull request, or reading one with `bin/fm-pr-state.sh` refuses and names whichever of the four is missing, rather than skipping the read.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with its exact install or upgrade command, or with manual instructions.
@@ -2172,7 +2190,8 @@ It uses the same live secondmate discovery and propagation helper as bootstrap; 
 A project with no `forge=` token is served by the GitHub tooling, `gh` and `gh-axi`, exactly as before the token existed, and the token changes nothing for existing entries.
 A remote-backed project on a Forgejo or Gitea server is registered with `forge=forgejo`, one value of the same closed `forge=` binding that Gerrit uses; `bin/fm-project-mode.sh`'s header owns its grammar, values, and refusals, and `bin/fm-project-mode.sh --forge <name>` reads it back.
 Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way it passes `--mode`, and `bin/fm-spawn.sh` refuses a brief whose forge disagrees with the registry; on `forgejo` the generated ship brief names `tea` instead of `gh-axi`.
-The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
+The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, Bitbucket Cloud, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
+Bitbucket Cloud pull requests need no forge token; see [Bitbucket Cloud pull requests](#bitbucket-cloud-pull-requests-no_mistakes_bitbucket_email--no_mistakes_bitbucket_api_token) for their setup and limits.
 
 A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
 A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
@@ -3243,6 +3262,8 @@ FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may 
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_TASK_INBOX_BUSY_MAX=2      # consecutive busy-deferred due polls before a stuck-busy stale wake; 1..999999999, at most 9 decimal digits, otherwise 2; policy: bin/fm-task-inbox-lib.sh
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+NO_MISTAKES_BITBUCKET_EMAIL=       # Bitbucket Cloud credential shared with no-mistakes; see "Bitbucket Cloud pull requests"
+NO_MISTAKES_BITBUCKET_API_TOKEN=   # its Atlassian API token; never printed, logged, or recorded
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
 FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
 FM_MAIL_TIMEOUT=20   # mail-plane IMAP/SMTP socket timeout in seconds; invalid or non-positive values become 20
