@@ -1501,7 +1501,7 @@ fm_lock_acquire_wait() {
 # one freshness window more - still bounded, and any published pid, live or
 # dead, returns at the original bound.
 fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds>
-  local lockdir=$1 seconds=$2 deadline grace_deadline= pid
+  local lockdir=$1 seconds=$2 deadline grace_deadline='' pid
   deadline=$((SECONDS + seconds))
   while ! fm_lock_try_acquire "$lockdir"; do
     if [ "$SECONDS" -ge "$deadline" ]; then
