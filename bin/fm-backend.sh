@@ -1151,7 +1151,7 @@ fm_backend_kill() {  # <backend> <target>
     cmux) fm_backend_cmux_kill "$@" ;;
     paseo) fm_backend_paseo_kill "$@" ;;
     rex) fm_backend_rex_kill "$@" ;;
-    t3code) fm_backend_t3code_kill "$1" ;;
+    t3code) fm_backend_t3code_kill "$1" "${4-${FM_T3CODE_TASK_SERVER:-}}" ;;
     tern) fm_backend_tern_kill "$@" ;;
     hc) fm_backend_hc_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;

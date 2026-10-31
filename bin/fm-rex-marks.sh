@@ -474,14 +474,21 @@ EOF
     # Clearing the mark also removes the progress record beneath it.
     if [ -f "$(cache_path "$task")" ] || [ -f "$(progress_cache_path "$task")" ]; then
       load_backend || return 1
-      fm_backend_rex_mark "$target" clear "" "" "fm-$task" || rc=1
+      if fm_backend_rex_mark "$target" clear "" "" "fm-$task"; then
+        rm -f "$(cache_path "$task")" "$(progress_cache_path "$task")"
+      else
+        rc=1
+      fi
     fi
     if [ -f "$(tint_cache_path "$task")" ]; then
       load_backend || return 1
-      fm_backend_rex_tint "$target" reset "fm-$task" || rc=1
+      if fm_backend_rex_tint "$target" reset "fm-$task"; then
+        rm -f "$(tint_cache_path "$task")"
+      else
+        rc=1
+      fi
     fi
   done
-  rm -f "$(cache_path "$1")" "$(progress_cache_path "$1")" "$(tint_cache_path "$1")"
   return "$rc"
 }
 

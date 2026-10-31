@@ -407,9 +407,14 @@ fm_afk_launch_daemon_cmd() {  # <captain-target> <captain-backend>
 
 fm_afk_launch_record_write() {  # <backend> <target> <extra>
   local pending
+  [ "$1" != rex ] || [ -n "${4:-${FM_AFK_LAUNCH_REX_SERVER:-}}" ] || return 1
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   pending=$(mktemp "$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal.pending.XXXXXX") || return 1
-  printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "$pending" || { rm -f "$pending"; return 1; }
+  if [ "$1" = rex ]; then
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-${FM_AFK_LAUNCH_REX_SERVER:-}}"
+  else
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3"
+  fi > "$pending" || { rm -f "$pending"; return 1; }
   mv "$pending" "$FM_AFK_LAUNCH_RECORD" || { rm -f "$pending"; return 1; }
 }
 
@@ -426,12 +431,12 @@ fm_afk_launch_flag_write() {
 # Returns 1 when no record exists.
 fm_afk_launch_record_read() {
   local extra record
-  FM_AFK_REC_BACKEND=""; FM_AFK_REC_TARGET=""; FM_AFK_REC_EXTRA=""; extra=""
+  FM_AFK_REC_BACKEND=""; FM_AFK_REC_TARGET=""; FM_AFK_REC_EXTRA=""; FM_AFK_REC_SERVER=""; extra=""
   [ -f "$FM_AFK_LAUNCH_RECORD" ] || return 1
   record=$(cat "$FM_AFK_LAUNCH_RECORD" 2>/dev/null) || record=""
-  IFS=$'\t' read -r FM_AFK_REC_BACKEND FM_AFK_REC_TARGET extra \
+  IFS=$'\t' read -r FM_AFK_REC_BACKEND FM_AFK_REC_TARGET extra FM_AFK_REC_SERVER \
     < "$FM_AFK_LAUNCH_RECORD" || true
-  if ! printf '%s\n' "$record" | awk -F '\t' 'NF != 3 { bad=1 } END { exit !(NR == 1 && !bad) }' \
+  if ! printf '%s\n' "$record" | awk -F '\t' 'NF != 3 && !(NF == 4 && $1 == "rex") { bad=1 } END { exit !(NR == 1 && !bad) }' \
     || [ -z "$FM_AFK_REC_BACKEND" ] || [ -z "$FM_AFK_REC_TARGET" ]; then
     fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"
     return 2
@@ -444,6 +449,20 @@ fm_afk_launch_record_read() {
     none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
     *) return 2 ;;
   esac || { fm_afk_launch_log "daemon terminal record is malformed; refusing to act on it"; return 2; }
+  if [ "$FM_AFK_REC_BACKEND" = rex ] && [ -z "$FM_AFK_REC_SERVER" ]; then
+    local legacy_server=${FM_AFK_LEGACY_REX_SERVER:-}
+    if [ -z "$legacy_server" ] || ! fm_backend_source rex \
+      || [ "$(fm_backend_rex_server_endpoint)" != "$legacy_server" ]; then
+      fm_afk_launch_log "legacy Rex terminal record has no creation server; set FM_AFK_LEGACY_REX_SERVER to the verified creation endpoint to recover it"
+      return 2
+    fi
+    FM_AFK_REC_SERVER=$legacy_server
+    fm_afk_launch_record_write rex "$FM_AFK_REC_TARGET" "$FM_AFK_REC_EXTRA" "$FM_AFK_REC_SERVER" || {
+      FM_AFK_REC_SERVER=""
+      fm_afk_launch_log "failed to migrate legacy Rex terminal record; refusing to act on it"
+      return 2
+    }
+  fi
 }
 
 fm_afk_launch_record_validate_if_present() {
@@ -457,11 +476,20 @@ fm_afk_launch_record_validate_if_present() {
 # recorded workspace id (herdr) needs no separate close: closing the pane takes
 # its single-tab dedicated workspace with it. A rex daemon owns a dedicated
 # session, which is killed by its exact recorded id.
+fm_afk_launch_rex_server_matches() {
+  local recorded=${1-${FM_AFK_REC_SERVER:-}}
+  if [ -z "$recorded" ] || [ "$(fm_backend_rex_server_endpoint)" != "$recorded" ]; then
+    fm_afk_launch_log "Rex creation server is missing or differs from the current server; preserving the AFK terminal route"
+    return 1
+  fi
+}
+
 fm_afk_launch_close_terminal() {  # <backend> <target> [extra]
   local backend=$1 target=$2 extra=${3:-}
   case "$backend" in
     rex)
       fm_backend_source rex || return 1
+      fm_afk_launch_rex_server_matches || return 1
       [ "${extra%%:*}" = session ] || return 1
       fm_backend_rex_cli kill "$extra" >/dev/null 2>&1
       ;;
@@ -490,7 +518,8 @@ fm_afk_launch_terminal_absent() {  # <backend> <target>
   case "$backend" in
     rex)
       fm_backend_source rex || return 1
-      [ "$(fm_backend_rex_block_presence "$target")" = missing ]
+      fm_afk_launch_rex_server_matches || return 1
+      [ "$(fm_backend_rex_block_presence "$target")" = missing ] && fm_afk_launch_rex_server_matches
       ;;
     herdr)
       session=${target%%:*}
@@ -532,7 +561,8 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
   case "$backend" in
     rex)
       fm_backend_source rex || return 1
-      fm_backend_rex_target_ready "$target"
+      fm_afk_launch_rex_server_matches || return 1
+      fm_backend_rex_target_ready "$target" && fm_afk_launch_rex_server_matches
       ;;
     herdr)
       session=${target%%:*}
@@ -712,6 +742,8 @@ fm_afk_launch_create_rex() {  # <captain-target> <captain-backend>
   fm_backend_source rex || return 1
   fm_backend_rex_version_check || { fm_afk_launch_log "rex server not ready"; return 1; }
   label=${FM_AFK_LAUNCH_LABEL:-"$FM_AFK_LAUNCH_WS_LABEL-$$-${RANDOM:-0}-$(date '+%s')"}
+  FM_AFK_LAUNCH_REX_SERVER=$(fm_backend_rex_server_endpoint) || return 1
+  FM_AFK_REC_SERVER=$FM_AFK_LAUNCH_REX_SERVER
   out=$(fm_backend_rex_cli new "$label" --cwd "$FM_HOME" --json 2>/dev/null) || {
     fm_afk_launch_log "rex could not create the daemon session '$label'"
     return 1
@@ -724,7 +756,7 @@ fm_afk_launch_create_rex() {  # <captain-target> <captain-backend>
   fi
   target=$(fm_backend_rex_target "$sid" "$bid")
   cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend")
-  if ! fm_afk_launch_record_write rex "$target" "$sid"; then
+  if ! fm_afk_launch_record_write rex "$target" "$sid" "$FM_AFK_LAUNCH_REX_SERVER"; then
     fm_afk_launch_log "failed to persist rex daemon terminal record; closing $sid"
     fm_afk_launch_close_terminal rex "$target" "$sid"
     return 1

@@ -28,6 +28,7 @@ new_home() { # name -> home with the monitor flag on
   cat > "$home/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
+[ "${GH_HOST:-}" = github.com ] || { echo "wrong GitHub host" >&2; exit 1; }
 printf '%s\n' "$*" >> "$FORGE/calls.log"
 model() {
   local n=$1 attempt
@@ -601,6 +602,11 @@ test_all_owned_pr_reads_start_in_one_wave() {
     || fail "every owned PR must start before a slow read completes: $out"
   pass 'all owned PR reads start in one wave without rotating a backlog'
 }
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
 
 failures=0
 for test_name in test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \

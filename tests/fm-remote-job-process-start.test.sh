@@ -60,7 +60,8 @@ wait_gone() { # <pid>
 has_proc() { [ -r "/proc/$$/stat" ]; }
 
 write_fake_proc_stat() { # <proc-root> <pid> <comm> <starttime>
-  mkdir -p "$1/$2"
+  mkdir -p "$1/$2" "$1/sys/kernel/random"
+  printf 'test-boot\n' > "$1/sys/kernel/random/boot_id"
   printf '%s (%s) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 %s 20 21 22\n' "$2" "$3" "$4" > "$1/$2/stat"
 }
 
@@ -69,10 +70,14 @@ test_fake_proc_token_is_stable_and_parses_comm() {
   write_fake_proc_stat "$proc_root" 4242 'watcher ) with (spaces' 987654
   first=$(FM_PROC_ROOT_OVERRIDE="$proc_root" fm_remote_job_process_start 4242) \
     || fail "could not read a fake /proc starttime"
-  [ "$first" = proc-starttime=987654 ] || fail "comm with spaces and parens shifted the field: '$first'"
+  [ "$first" = "boot=test-boot proc-starttime=987654" ] || fail "comm with spaces and parens shifted the field: '$first'"
   second=$(FM_PROC_ROOT_OVERRIDE="$proc_root" fm_remote_job_process_start 4242) \
     || fail "could not re-read the fake /proc starttime"
   [ "$second" = "$first" ] || fail "the token changed without a starttime change"
+  FM_PROC_ROOT_OVERRIDE="$proc_root" fm_remote_job_start_matches proc-starttime=987654 4242 || fail "preceding proc token did not migrate"
+  FM_PROC_ROOT_OVERRIDE="$proc_root" fm_remote_job_start_matches proc-starttime=987655 4242 && fail "mismatched preceding proc token verified"
+  printf 'different-boot\n' > "$proc_root/sys/kernel/random/boot_id"
+  FM_PROC_ROOT_OVERRIDE="$proc_root" fm_remote_job_start_matches "$first" 4242 && fail "a previous boot matched the same pid and start tick"
   case "$first" in *$'\n'*) fail "token is not a single line" ;; esac
   pass "fake /proc starttime is a stable single-line token parsed after the last )"
 }
@@ -105,13 +110,15 @@ test_lstart_fallback_without_proc() {
   local live token expected
   sleep 30 &
   live=$!
+  mkdir -p "$TMP_ROOT/no-proc/sys/kernel/random"
+  printf 'test-boot\n' > "$TMP_ROOT/no-proc/sys/kernel/random/boot_id"
   token=$(FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proc" fm_remote_job_process_start "$live") \
     || { kill "$live" 2>/dev/null || true; fail "fallback read failed"; }
   expected=$(LC_ALL=C ps -p "$live" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
-  case "$token" in proc-starttime=*) fail "fallback returned a proc token without /proc: '$token'" ;; esac
-  [ "$(printf '%s' "$token" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" = "$expected" ] \
+  case "$token" in boot=*proc-starttime=*) fail "fallback returned a proc token without /proc: '$token'" ;; esac
+  [ "$(printf '%s' "${token#* ps-start=}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" = "$expected" ] \
     || fail "fallback '$token' is not ps lstart '$expected'"
   pass "ps lstart is the fallback when /proc is absent"
 }
@@ -131,7 +138,7 @@ test_pre_update_legacy_lstart_still_verifies() {
   if has_proc; then
     proc_token=$(fm_remote_job_process_start "$live") \
       || { kill "$live" 2>/dev/null || true; fail "/proc token read failed"; }
-    case "$proc_token" in proc-starttime=*) ;; *)
+    case "$proc_token" in boot=*proc-starttime=*) ;; *)
       kill "$live" 2>/dev/null || true
       fail "expected proc-starttime token, got '$proc_token'"
       ;;
@@ -171,34 +178,40 @@ test_c_locale_cookie_verifies_under_localized_ps() (
 )
 
 test_pre_update_worker_lock_verifies_then_code_identity_replaces() {
-  local old new legacy_start
+  local old new legacy_start format
   has_proc || { pass "pre-update worker lock upgrade skipped without /proc"; return; }
-  stop_fixture_worker
-  ensure_worker
-  old=$(cat "$LOCK/pid")
-  legacy_start=$(ps -p "$old" -o lstart= 2>/dev/null) \
-    || fail "could not read the live owner's bare lstart"
-  printf '%s\n' "$legacy_start" > "$LOCK/start"
-  fm_remote_job_recorded_owner_alive "$LOCK" \
-    || fail "a pre-update lock start did not verify the live owner"
-  fm_remote_job_worker_owned_alive "$FIXTURE_ROOT" "$ACCOUNT_HOME" \
-    || fail "worker_owned_alive rejected a pre-update lock start"
-  # Stale code identity forces the ordinary replace path once ownership holds.
-  printf 'stale-pre-update-identity\n' > "$STATE_ROOT/worker.identity"
-  ensure_worker
-  new=$(cat "$LOCK/pid")
-  [ "$new" != "$old" ] || fail "code-identity path did not replace the pre-update worker"
-  wait_gone "$old" || fail "the pre-update worker survived its replacement"
-  case "$(cat "$LOCK/start")" in proc-starttime=*) ;; *)
-    fail "replacement did not record a /proc token"
-    ;;
-  esac
-  [ "$(supervisor_count)" = 1 ] || fail "upgrade left $(supervisor_count) supervisors"
-  ensure_worker
-  ensure_worker
-  [ "$(cat "$LOCK/pid")" = "$new" ] || fail "repeated ensure replaced the upgraded worker"
-  [ "$(supervisor_count)" = 1 ] || fail "repeated ensure piled up $(supervisor_count) supervisors"
-  pass "pre-update lock start verifies; code-identity replace yields one supervisor"
+  for format in lstart proc; do
+    stop_fixture_worker
+    ensure_worker
+    old=$(cat "$LOCK/pid")
+    if [ "$format" = proc ]; then
+      legacy_start=$(fm_remote_job_process_start "$old") || fail "could not read live proc token"
+      legacy_start=${legacy_start#* }
+    else
+      legacy_start=$(ps -p "$old" -o lstart= 2>/dev/null) || fail "could not read live lstart"
+    fi
+    printf '%s\n' "$legacy_start" > "$LOCK/start"
+    fm_remote_job_recorded_owner_alive "$LOCK" \
+      || fail "a pre-update lock start did not verify the live owner"
+    fm_remote_job_worker_owned_alive "$FIXTURE_ROOT" "$ACCOUNT_HOME" \
+      || fail "worker_owned_alive rejected a pre-update lock start"
+    # Stale code identity forces the ordinary replace path once ownership holds.
+    printf 'stale-pre-update-identity\n' > "$STATE_ROOT/worker.identity"
+    ensure_worker
+    new=$(cat "$LOCK/pid")
+    [ "$new" != "$old" ] || fail "code-identity path did not replace the pre-update worker"
+    wait_gone "$old" || fail "the pre-update worker survived its replacement"
+    case "$(cat "$LOCK/start")" in boot=*proc-starttime=*) ;; *)
+      fail "replacement did not record a /proc token"
+      ;;
+    esac
+    [ "$(supervisor_count)" = 1 ] || fail "upgrade left $(supervisor_count) supervisors"
+    ensure_worker
+    ensure_worker
+    [ "$(cat "$LOCK/pid")" = "$new" ] || fail "repeated ensure replaced the upgraded worker"
+    [ "$(supervisor_count)" = 1 ] || fail "repeated ensure piled up $(supervisor_count) supervisors"
+  done
+  pass "pre-update lstart and proc locks verify; code-identity replacement yields one supervisor"
 }
 
 # Wait for a fresh worker.ready heartbeat that the current code identity owns.
@@ -235,7 +248,7 @@ test_repeated_ensure_never_piles_supervisors() {
   stop_fixture_worker
   ensure_worker
   pid=$(cat "$LOCK/pid")
-  case "$(cat "$LOCK/start")" in proc-starttime=*) ;; *) fail "worker did not record a /proc token" ;; esac
+  case "$(cat "$LOCK/start")" in boot=*proc-starttime=*) ;; *) fail "worker did not record a /proc token" ;; esac
   i=0
   while [ "$i" -lt 5 ]; do
     i=$((i + 1))
@@ -245,6 +258,11 @@ test_repeated_ensure_never_piles_supervisors() {
   [ "$(cat "$LOCK/pid")" = "$pid" ] || fail "repeated ensure replaced a healthy worker"
   pass "repeated ensure against a healthy worker keeps exactly one supervisor"
 }
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
 
 test_fake_proc_token_is_stable_and_parses_comm
 test_token_changes_with_starttime

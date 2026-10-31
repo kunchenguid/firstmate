@@ -44,6 +44,14 @@ fm_backend_t3code_token_file() {
   printf '%s/t3code-token' "$(fm_backend_t3code_config_dir)"
 }
 
+fm_backend_t3code_server_identity() {
+  node -e 'try { const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!c.origin || !c.environment_id) process.exit(1); process.stdout.write(JSON.stringify([c.origin,c.environment_id])); } catch { process.exit(1); }' "$(fm_backend_t3code_token_file)"
+}
+
+fm_backend_t3code_server_matches() {
+  [ -n "${1:-}" ] && [ "$(fm_backend_t3code_server_identity 2>/dev/null)" = "$1" ]
+}
+
 fm_backend_t3code_tool_check() {
   command -v node >/dev/null 2>&1 || { echo "error: backend=t3code selected but 'node' is not installed" >&2; return 1; }
   command -v treehouse >/dev/null 2>&1 || { echo "error: backend=t3code selected but 'treehouse' is not installed" >&2; return 1; }
@@ -246,6 +254,68 @@ fm_backend_t3code_thread_state() {  # <thread-id>
   fm_backend_t3code_mcp state --thread "$1"
 }
 
+# Legacy task metadata has no recorded server identity. Adopt the selected
+# server only when it returns positive evidence that this thread exists there;
+# a not-found response cannot distinguish a server switch from destruction.
+fm_backend_t3code_adopt_server_for_thread() {  # <thread-id> -> server identity
+  local thread=$1 out exists server
+  server=$(fm_backend_t3code_server_identity) || return 1
+  out=$(fm_backend_t3code_thread_state "$thread") || return 1
+  exists=$(printf '%s' "$out" | fm_backend_t3code_json_get exists) || return 1
+  [ "$exists" = true ] || return 1
+  fm_backend_t3code_server_matches "$server" || return 1
+  printf '%s' "$server"
+}
+
+fm_backend_t3code_server_for_meta() (
+  local meta=$1 expected=${2:-} lock server tmp acquired=0 carrier owner pid current inherited=0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  server=$(fm_meta_get "$meta" t3_server)
+  if [ -n "$server" ]; then
+    fm_backend_t3code_server_matches "$server" || return 1
+    printf '%s' "$server"
+    return 0
+  fi
+  if ! declare -F fm_meta_lock_path >/dev/null; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-wake-lib.sh"
+  fi
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  while IFS= read -r carrier; do
+    [ "${carrier%%|*}" = "$lock" ] || continue
+    owner=${carrier#*|}
+    fm_lock_points_to_owner "$lock" "$owner" || return 1
+    pid=$(cat "$owner/pid") || return 1
+    fm_current_pid current || return 1
+    fm_pid_descends_from "$current" "$pid" || return 1
+    inherited=1
+  done <<< "${FM_T3_META_LOCK_CARRIERS:-}"
+  if [ "$inherited" = 0 ] && ! { [ "${META_LOCK_HELD:-0}" = 1 ] && [ "${META_LOCK:-}" = "$lock" ]; } &&
+    ! { [ "${SPAWN_META_LOCK_HELD:-0}" = 1 ] && [ "${SPAWN_META_LOCK:-}" = "$lock" ]; }; then
+    fm_lock_try_acquire "$lock" || { echo "error: T3 adoption metadata lock is held; retry after its owner finishes" >&2; return 1; }
+    acquired=1
+  fi
+  trap '[ "$acquired" = 0 ] || fm_lock_release "$lock"' EXIT
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  server=$(fm_meta_get "$meta" t3_server)
+  if [ -z "$server" ]; then
+    server=$(fm_backend_t3code_adopt_server_for_thread "$(fm_meta_get "$meta" t3_thread_id)") || return 1
+    [ -z "$expected" ] || [ "$server" = "$expected" ] || return 1
+    tmp=$(umask 077; mktemp "$meta.adopt.XXXXXX") || return 1
+    if awk -v server="$server" '
+      /^pr=/ && !inserted { print "t3_server=" server; inserted=1 }
+      !/^t3_server=/ { print }
+      END { if (!inserted) print "t3_server=" server }
+    ' "$meta" > "$tmp" &&
+      fm_backend_t3code_server_matches "$server" && mv -f "$tmp" "$meta"; then :; else
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+  fm_backend_t3code_server_matches "$server" || return 1
+  printf '%s' "$server"
+)
+
 # fm_backend_t3code_probe: one word naming the thread's row in the status
 # table, from its V2 thread status: blocked (any pending runtime request: a
 # question or a permission approval waits on a human), idle, starting
@@ -379,23 +449,25 @@ fm_backend_t3code_send_key() {  # <thread-id> <key>
 # transcript visible in T3. Idempotent: an archived thread with no active run,
 # or one the verified server no longer has, is already the end state.
 fm_backend_t3code_kill() {  # <thread-id>
-  local thread=$1 out exists
+  local thread=$1 out exists recorded=${2-${FM_T3CODE_TASK_SERVER:-}}
+  fm_backend_t3code_server_matches "$recorded" || { echo "error: T3 creation server does not match the current credential" >&2; return 1; }
   out=$(fm_backend_t3code_thread_state "$thread") || return 1
   exists=$(printf '%s' "$out" | fm_backend_t3code_json_get exists) || return 1
   case "$exists" in
     true) ;;
-    false) return 0 ;;
+    false) fm_backend_t3code_server_matches "$recorded"; return $? ;;
     *) return 1 ;;
   esac
   if [ "$(printf '%s' "$out" | fm_backend_t3code_json_get archived)" = true ] \
     && ! printf '%s' "$out" | fm_backend_t3code_json_get activeRunId >/dev/null; then
-    return 0
+    fm_backend_t3code_server_matches "$recorded"
+    return $?
   fi
   if printf '%s' "$out" | fm_backend_t3code_json_get activeRunId >/dev/null; then
     fm_backend_t3code_native_interrupt "$thread" >/dev/null || return 1
   fi
   out=$(fm_backend_t3code_mcp archive --thread "$thread") || return 1
-  [ "$(printf '%s' "$out" | fm_backend_t3code_json_get closed)" = true ]
+  [ "$(printf '%s' "$out" | fm_backend_t3code_json_get closed)" = true ] && fm_backend_t3code_server_matches "$recorded"
 }
 
 # fm_backend_t3code_home_env_cleanup: remove what a T3 secondmate spawn wrote

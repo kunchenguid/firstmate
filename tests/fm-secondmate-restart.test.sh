@@ -166,6 +166,7 @@ add_local_mate() {
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"
+    echo "spawn_gen=g-initial"
     echo "worktree=$smhome"
     echo "project=$smhome"
     echo "harness=$harness"
@@ -215,6 +216,7 @@ add_repo_backed_mate() {  # <case-dir> <id> [harness] [backend]
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"
+    echo "spawn_gen=g-initial"
     echo "worktree=$smhome"
     echo "project=$smhome"
     echo "harness=$harness"
@@ -441,6 +443,7 @@ setup_remote_case() {  # <case-dir> <id> <ssh-mode>
   {
     echo "window=remote:$id"
     echo "endpoint_task_id=$id"
+    echo "spawn_gen=g-initial"
     echo "worktree=$dir/$id-home"
     echo "project=$dir/$id-home"
     echo "harness=claude"
@@ -453,12 +456,14 @@ setup_remote_case() {  # <case-dir> <id> <ssh-mode>
     echo "remote_host=remote-mac"
     echo "remote_backend=herdr"
     echo "remote_target=fm-remote:2ndmate-$id"
+    echo "remote_spawn_gen=g-initial"
   } > "$dir/home/state/$id.meta"
   printf -- '- %s - remote domain (host: remote-mac; root: /srv/fm; home: /srv/%s; scope: things; projects: p; added 2026-09-03)\n' \
     "$id" "$id" > "$dir/home/data/secondmates.md"
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
+stdin_payload=$(cat)
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
@@ -467,13 +472,31 @@ argv_b64=$4
 decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
 rargs=()
 while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
-stdin_payload=$(cat)
 printf '%s\n' "${rargs[*]}" >> "$FM_FAKE_SSH_LOG"
 case "${FM_FAKE_SSH_MODE:-ok}" in
   unreachable) exit 255 ;;
 esac
 case "${rargs[1]:-}" in
+  route)
+    # The host's route answer is the generation authority when the parent holds
+    # no seat generation of its own, so a host that has moved on answers with
+    # the newer generation from its next route answer on.
+    if [ "${FM_FAKE_CHANGE_GENERATION:-}" = 1 ]; then
+      route_calls=0
+      [ -f "$FM_FAKE_DIR/route-calls" ] && route_calls=$(cat "$FM_FAKE_DIR/route-calls" 2>/dev/null || echo 0)
+      route_calls=$((route_calls + 1))
+      printf '%s\n' "$route_calls" > "$FM_FAKE_DIR/route-calls"
+      if [ "$route_calls" -gt 1 ]; then
+        printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\ntarget=fm-remote:2ndmate-%s\nspawn_gen=g-new\n' "${rargs[2]}"
+        exit 0
+      fi
+    fi
+    printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\ntarget=fm-remote:2ndmate-%s\nspawn_gen=%s\n' "${rargs[2]}" "${FM_FAKE_HOST_GENERATION:-g-initial}"
+    ;;
   send-stdin)
+    if [ "${FM_FAKE_CHANGE_GENERATION:-}" = 1 ]; then
+      perl -pi -e 's/^remote_spawn_gen=.*/remote_spawn_gen=g-new/' "$FM_FAKE_REMOTE_META"
+    fi
     # Model the live remote mate: act on the instruction and report back on the
     # parent channel, carrying the correlation token the request embedded.
     if [ -n "${FM_FAKE_ANSWER_STATUS:-}" ]; then
@@ -492,7 +515,7 @@ case "${rargs[1]:-}" in
     esac
     printf 'relaunched %s harness=%s from=claude model=%s effort=%s backend=herdr endpoint=fm-remote:2ndmate-%s worktree=/srv/fm\n' \
       "${rargs[2]}" "${rargs[3]}" "${rargs[4]}" "${rargs[5]}" "${rargs[2]}"
-    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'schema=fm-remote-secondmate-control.v1\nspawn_gen=g-restarted\n'
     printf 'backend=herdr\n'
     printf 'target=fm-remote:2ndmate-%s\n' "${rargs[2]}"
     printf 'herdr_session=fm-remote\n'
@@ -527,7 +550,7 @@ test_remote_mate_restarts_over_the_transport_hop() {
     "a remote restart should be reported with its host and the parent's pinned runtime"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
   [ -n "$relaunch_line" ] || fail "no relaunch crossed the transport hop"$'\n'"$(cat "$dir/ssh.log")"
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high --expect-generation g-initial" ] \
     || fail "the host-local relaunch did not carry the parent's resolved profile: $relaunch_line"
   # The persist request crossed the SAME hop before the restart did.
   [ "$(grep -n '^fm-remote-secondmate-control.sh send-stdin' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
@@ -552,7 +575,7 @@ test_remote_restart_lands_on_the_per_mate_pin() {
 
   expect_code 0 "$rc" "a mate with its own override should restart onto it"$'\n'"$out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi mate-model max" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi mate-model max --expect-generation g-initial" ] \
     || fail "the mate's own override did not reach the host relaunch: $relaunch_line\n$out"
   pass "T6a a remote mate with a per-mate override restarts onto that override, not the default pin"
 }
@@ -569,7 +592,7 @@ test_remote_restart_uses_the_default_for_an_unpinned_mate() {
 
   expect_code 0 "$rc" "a mate with no override should restart onto the default pin"$'\n'"$out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high --expect-generation g-initial" ] \
     || fail "an unpinned mate did not resolve the default pin: $relaunch_line\n$out"
   pass "T6b a remote mate with no override line still restarts onto the default pin"
 }
@@ -590,7 +613,7 @@ test_remote_restart_with_a_legacy_pin_file_uses_the_first_line() {
 
   expect_code 0 "$rc" "a legacy pin file must not refuse a restart"$'\n'"$out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high --expect-generation g-initial" ] \
     || fail "the restart did not use the first line of the legacy pin: $relaunch_line\n$out"
   pass "T6d a legacy pin file still restarts the mate onto its first line"
 }
@@ -616,6 +639,18 @@ test_remote_restart_refuses_an_unreadable_per_mate_pin() {
 }
 
 # --- T7: an unreachable host is unknown, never a claimed reload --------------
+test_remote_restart_refuses_a_stale_host_binding() {
+  local dir out rc
+  dir=$(new_case stale-host-binding)
+  setup_remote_case "$dir" sm2 ok
+  out=$(FM_FAKE_HOST_GENERATION=g-host-new run_restart "$dir" fm-sm2); rc=$?
+  expect_code 3 "$rc" "stale parent generation at the host: $out"
+  assert_contains "$out" "nudged: sm2" "the newer host incarnation was not nudged"
+  assert_no_grep 'fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" "a stale host binding opened a relaunch"
+  assert_no_grep 'open records written down' "$dir/home/state/sm2.status" "a stale binding requested persistence"
+  pass "remote restart verifies the host incarnation before requesting persistence"
+}
+
 test_unreachable_host_is_reported_unknown() {
   local dir out rc
   dir=$(new_case unreachable)
@@ -672,7 +707,7 @@ test_native_ultra_restart_keeps_local_and_remote_profiles() {
   unset FM_FAKE_ANSWER_STATUS
   expect_code 0 "$rc" "native remote restart failed: $out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi-signed codex-native/gpt-6-astra ultra" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi-signed codex-native/gpt-6-astra ultra --expect-generation g-initial" ] \
     || fail "remote restart dropped native profile: $relaunch_line"
   pass "native Ultra survives local restart and the remote restart transport"
 }
@@ -986,6 +1021,66 @@ w = { tokens: [],
     || fail "nothing but the doorbell may reach the T3 thread, got '$(t3_fake_mutations)'"
   pass "T17 a T3 mate is routed to the re-read message by both passes, never restarted"
 }
+# --- T12: a persistence answer is bound to the generation it was asked of ---
+test_persist_answer_from_an_earlier_generation_nudges() {
+  local dir out rc
+  dir=$(new_case earlier-generation)
+  add_local_mate "$dir" sm1
+  perl -pi -e 's/^spawn_gen=.*/spawn_gen=g1/' "$dir/home/state/sm1.meta"
+  # Automatic recovery replaces the mate after the persist request went out
+  # and before its answer releases the restart.
+  cat > "$dir/fake/on-doorbell" <<SH
+#!/usr/bin/env bash
+perl -pi -e 's/^spawn_gen=.*/spawn_gen=g2/' "$dir/home/state/sm1.meta"
+SH
+  chmod +x "$dir/fake/on-doorbell"
+  arm_answer "$dir" sm1
+  out=$(run_restart "$dir" sm1); rc=$?
+  expect_code 3 "$rc" "a restart whose persistence belonged to an earlier generation"$'\n'"$out"
+  assert_contains "$out" "nudged: sm1:" "the newer incarnation was not nudged"
+  assert_contains "$out" "belonged to generation g1" "the nudge did not name the earlier generation"
+  assert_no_grep '^/exit$' "$dir/fake/literal" "the newer incarnation was stopped on an old acknowledgement"
+
+  dir=$(new_case matching-generation)
+  add_local_mate "$dir" sm1
+  perl -pi -e 's/^spawn_gen=.*/spawn_gen=g1/' "$dir/home/state/sm1.meta"
+  arm_answer "$dir" sm1
+  out=$(run_restart "$dir" sm1); rc=$?
+  expect_code 0 "$rc" "a generation-matching persistence answer"$'\n'"$out"
+  assert_equals 1 "$(grep -c '^/exit$' "$dir/fake/literal")" "a matching answer did not permit exactly one restart"
+  pass "T12 a persistence answer from an earlier generation nudges instead of stopping its successor"
+}
+
+test_missing_generation_nudges_without_persistence() {
+  local dir out rc record
+  dir=$(new_case missing-generation)
+  add_local_mate "$dir" sm1
+  perl -ni -e 'print unless /^spawn_gen=/' "$dir/home/state/sm1.meta"
+  arm_answer "$dir" sm1
+  out=$(run_restart "$dir" sm1); rc=$?
+  expect_code 3 "$rc" "missing generation restart: $out"
+  assert_contains "$out" "launch generation is missing" "missing generation did not explain the nudge"
+  assert_no_grep '^/exit$' "$dir/fake/literal" "missing generation stopped the agent"
+  for record in "$dir/home/state/sm1.inbox"/*.msg; do
+    [ ! -f "$record" ] || assert_not_contains "$(cat "$record")" "Open-record persistence" "missing generation requested persistence before nudging"
+  done
+  pass "a missing generation selects the nudge path before requesting persistence"
+}
+
+test_remote_generation_change_nudges() {
+  local dir out rc
+  dir=$(new_case remote-generation-change)
+  setup_remote_case "$dir" sm2 ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  export FM_FAKE_REMOTE_META="$dir/home/state/sm2.meta"
+  export FM_FAKE_CHANGE_GENERATION=1
+  out=$(run_restart "$dir" sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS FM_FAKE_REMOTE_META FM_FAKE_CHANGE_GENERATION
+  expect_code 3 "$rc" "a remote persistence acknowledgement after recovery: $out"
+  assert_contains "$out" 'belonged to generation g-initial' "remote restart ignored its generation"
+  assert_no_grep 'fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" "an old acknowledgement relaunched the successor"
+  pass "unpooled remote persistence acknowledgements are generation fenced"
+}
 
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
@@ -1012,4 +1107,11 @@ test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
 test_t3_mate_stays_on_the_nudge_path
 
+test_persist_answer_from_an_earlier_generation_nudges
 echo "# all fm-secondmate-restart tests passed"
+
+test_missing_generation_nudges_without_persistence
+
+test_remote_generation_change_nudges
+
+test_remote_restart_refuses_a_stale_host_binding

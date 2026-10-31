@@ -197,7 +197,7 @@ rex_env() {  # <dir> [VAR=value...] <snippet>
   shift
   (
     unset TERM_PROGRAM REX_SESSION REX_BLOCK REX_SERVER
-    export FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" \
+    export FM_REX_TASK_SERVER=unix:///fake/rex.sock FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" \
       STATE="$dir/home/state" FM_REX_FAKE_DEAD_PID="$DEAD_PID" \
       FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex"
     while [ $# -gt 1 ]; do
@@ -790,6 +790,8 @@ test_kill_closes_and_retires_per_home_session() {
   dir=$(new_case kill)
   out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid1 <<<"$out"
   out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp'); read -r _ _ bid2 <<<"$out"
+  if rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid1#block:}' '' '' unix:///other.sock"; then fail "Rex kill accepted a different creation server"; fi
+  assert_equals 2 "$(state_json "$dir" '.sessions[0].windows | length')" "Rex server mismatch changed the endpoint"
   rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid1#block:}'" || fail "kill of a live block must succeed"
   assert_equals 1 "$(state_json "$dir" '.sessions[0].windows | length')" "kill must close only its own tab"
   rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid1#block:}'" || fail "kill of an already-gone block must succeed"
@@ -982,11 +984,6 @@ test_list_live_scopes_to_this_home() {
   pass "fm_backend_rex_list_live: home-scoped blocks only, nothing when unreachable"
 }
 
-if [ -n "${FM_TEST_ONLY:-}" ]; then
-  "$FM_TEST_ONLY"
-  exit 0
-fi
-
 # --- attention marks (opt-in) ---------------------------------------------------
 
 # mark_case: a task tab whose foreground is a harness at pid 4242 under a shell
@@ -1178,6 +1175,33 @@ test_marks_clear_removes_records_and_caches() {
   pass "rex: clearing a task removes its mark, tint, and caches"
 }
 
+test_marks_failed_clear_preserves_retry() {
+  local retry cache
+  for retry in clear sync; do
+    mark_case "marks-retry-$retry"
+    printf 'on\n' >"$MARK_DIR/home/config/rex-status-marks"
+    printf 'subtle\n' >"$MARK_DIR/home/config/rex-tint"
+    printf '%s\n' "window=$MARK_T" "backend=rex" "kind=ship" >"$MARK_DIR/home/state/t1.meta"
+    mark_task_status "blocked [at=1700000000]: stuck"
+    mark_status '[]'
+    marks_run sync || fail "sync failed"
+    printf '42\tValidating\n' >"$MARK_DIR/home/state/.rex-progress-t1"
+    touch "$MARK_DIR/fake/unreachable"
+    if marks_run clear t1; then fail "unreachable clear must fail"; fi
+    for cache in mark progress tint; do
+      [ -s "$MARK_DIR/home/state/.rex-$cache-t1" ] || fail "failed clear lost $cache retry evidence"
+    done
+    rm "$MARK_DIR/fake/unreachable" "$MARK_DIR/home/config/rex-status-marks" "$MARK_DIR/home/config/rex-tint"
+    mark_status '[{"id":"fm","app":"firstmate","state":"blocked","msg":"stuck"},{"id":"fm-progress","app":"firstmate","state":"working","progress":42}]'
+    : >"$MARK_TTY"
+    marks_run "$retry" t1 || fail "retry failed"
+    grep -qF 'state=clear:app=firstmate:id=fm' "$MARK_TTY" || fail "retry must clear displayed mark"
+    grep -qF $'\033]111\033\\' "$MARK_TTY" || fail "retry must reset tint"
+    compgen -G "$MARK_DIR/home/state/.rex-*-t1" >/dev/null && fail "successful retry must drop caches"
+  done
+  pass "rex: failed clear retains all channel evidence for explicit and unconfigured sync retries"
+}
+
 test_nm_run_progress_reads_captured_status() {
   local out caps="$ROOT/tests/captures/no-mistakes-v1.70.1"
   out=$(bash -c '. "$1/bin/fm-nm-run-lib.sh"; fm_nm_run_progress "$(cat "$2")"' _ "$ROOT" "$caps/replacement.toon")
@@ -1188,6 +1212,90 @@ test_nm_run_progress_reads_captured_status() {
     && fail "output with no steps table must fail"
   pass "rex: validation progress reads captured no-mistakes status by column name"
 }
+
+test_retirement_keeps_absent_homes_absent() {
+  local dir out sid bid
+  dir=$(new_case retire-absent-home)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  rm -rf "${dir:?}/home"
+  rex_env "$dir" "fm_backend_rex_kill '${sid#session:}:${bid#block:}'" || fail "closing a deleted home's block failed"
+  assert_absent "$dir/home" "Rex cleanup recreated the deleted home"
+  assert_equals 0 "$(state_json "$dir" '[.sessions[].windows[].blocks[]] | length')" "deleted-home cleanup did not close its block"
+  pass "Rex closes a deleted home's block without recreating its state for optional session retirement"
+}
+
+test_teardown_retries_rex_staged_deletion() {
+  local shape dir mate child out sid wid bid stage evidence gone_home rc attempt real_rm
+  real_rm=$(command -v rm)
+  for shape in top descendant; do
+    dir=$(new_case "rex-staging-$shape")
+    mate="$dir/mate"
+    child="$mate/child"
+    mkdir -p "$mate/state" "$mate/data" "$mate/config" "$dir/home/data" "$dir/home/config" "$dir/failbin"
+    printf 'sm\n' >"$mate/.fm-secondmate-home"
+    printf 'manual\n' >"$dir/home/config/backlog-backend"
+    out=$(rex_env "$dir" "FM_HOME=$mate" "FM_ROOT=$mate" "STATE=$mate/state" \
+      'fm_backend_rex_create_task fm-sm /tmp other-home') || fail "mate create failed"
+    read -r sid wid bid <<<"$out"
+    rex_teardown_meta "$dir/home/state" sm secondmate "$mate" "$sid" "$wid" "$bid"
+    printf 'spawn_gen=g1\n' >>"$dir/home/state/sm.meta"
+    evidence="$dir/home/state/sm.home-removal"
+    gone_home=$mate
+    if [ "$shape" = descendant ]; then
+      mkdir -p "$child/state" "$child/data" "$child/config"
+      printf 'child\n' >"$child/.fm-secondmate-home"
+      printf 'manual\n' >"$mate/config/backlog-backend"
+      out=$(rex_env "$dir" "FM_HOME=$child" "FM_ROOT=$child" "STATE=$child/state" \
+        'fm_backend_rex_create_task fm-child /tmp other-home') || fail "child create failed"
+      read -r sid wid bid <<<"$out"
+      rex_teardown_meta "$mate/state" child secondmate "$child" "$sid" "$wid" "$bid"
+      printf 'spawn_gen=g1\n' >>"$mate/state/child.meta"
+      evidence="$mate/state/child.home-removal"
+      gone_home=$child
+    fi
+    cat >"$dir/failbin/rm" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+case "$last" in
+  *.retiring.*)
+    if [ -e "$FM_TEST_DELETE_FAIL" ]; then
+      "$FM_TEST_REAL_RM" -f "$last/home/.fm-secondmate-home"
+      exit 1
+    fi ;;
+esac
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+    chmod +x "$dir/failbin/rm"
+    touch "$dir/delete-fail"
+    for attempt in first retry; do
+      rc=0
+      out=$(env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+        FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_REX_FAKE_DEAD_PID="$DEAD_PID" FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+        FM_TEST_REAL_RM="$real_rm" FM_TEST_DELETE_FAIL="$dir/delete-fail" PATH="$dir/failbin:$PATH" \
+        "$ROOT/bin/fm-teardown.sh" sm --force 2>&1) || rc=$?
+      if [ "$attempt" = first ]; then
+        [ "$rc" -ne 0 ] || fail "injected deletion failure was ignored"
+        stage=$(sed -n 's/^home_removal_stage=//p' "$evidence")
+        [ -n "$stage" ] && [ -d "$stage/home" ] || fail "failed deletion lost staged data: $out"
+        assert_absent "$gone_home" "fixture did not rename the home"
+        rm "$dir/delete-fail"
+      else
+        expect_code 0 "$rc" "Rex staged retirement retry: $out"
+        assert_absent "$mate" "Rex retry recreated or retained the home"
+        assert_absent "$stage" "Rex retry orphaned staged private data"
+        assert_absent "$evidence" "Rex retry retained finalization evidence"
+      fi
+    done
+  done
+  pass "Rex top-level and descendant retirement resume staged deletion without recreating absent homes"
+}
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
 
 test_bin_prefers_rex_bin_dir
 test_rex_spawn_refuses_unproven_remote_endpoint
@@ -1225,4 +1333,8 @@ test_firstmate_records_never_count_as_worker_state
 test_marks_are_off_by_default
 test_marks_producer_converges_and_notifies_once
 test_marks_clear_removes_records_and_caches
+test_marks_failed_clear_preserves_retry
 test_nm_run_progress_reads_captured_status
+
+test_retirement_keeps_absent_homes_absent
+test_teardown_retries_rex_staged_deletion

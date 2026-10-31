@@ -232,11 +232,11 @@ fm_github_host_allowed() {  # <host>
 # gh and gh-axi address the host in GH_HOST, from the pull request URL, or from
 # the clone's own origin, in that order of specificity. A GitHub Enterprise host
 # is not any tool's default one, so every GitHub call on a pull request path
-# exports it once through here and its children inherit it. github.com keeps the
-# ambient behavior it always had, byte for byte.
+# exports it once through here and its children inherit it. Every call uses the
+# parsed host explicitly.
 fm_pr_github_host_export() {  # <host>
   case ${1-} in
-    ''|github.com) return 0 ;;
+    '') return 1 ;;
   esac
   GH_HOST=$1
   export GH_HOST

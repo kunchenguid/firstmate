@@ -1045,8 +1045,8 @@ test_github_enterprise_hosts() {
   grep -qxF 'pr=https://github.com/my-org/repo/pull/37' "$dir/home/state/task-a.meta" \
     || fail "github.com pr metadata changed"
   [ -s "$dir/gh.log" ] || fail "github.com registration made no forge read"
-  ! grep -qE '^host=.+' "$dir/gh.log" \
-    || fail "github.com registration exported a host it never needed"
+  grep -qxF 'host=github.com' "$dir/gh.log" \
+    || fail "github.com registration did not pin its public host"
   pass "GitHub Enterprise hosts are accepted only when the home names them and their host reaches every forge call"
 }
 
@@ -3759,6 +3759,11 @@ SH
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "released watcher did not strictly authenticate the poll"
   pass "device re-record publication waits without rewriting its registration"
 }
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
 
 test_parser_matrix
 test_github_enterprise_config_resolution

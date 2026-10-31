@@ -57,7 +57,7 @@
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
 # cherry, and merge-tree containment each fail to prove content landed without also
 # accepting unlanded edits to the same paths. Teardown still accepts a merged PR
-# whose head contains the current local work (ancestor or whitespace-exact patch ids),
+# whose head contains the current local work (ancestor or equivalent patch ids),
 # or a clean content-in-default tree match. Anything else refuses.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
@@ -190,7 +190,14 @@
 # is the approved discard path that prevalidates child removal targets, locks each
 # descendant home's task set before enumeration, and holds those locks through
 # child cleanup. Contention refuses the complete forced teardown before child
-# mutation. Local and remote retirement serialize their destructive phase with
+# mutation. Forced tmux child cleanup verifies any generation-bound socket and
+# reads the exact window inventory before and after closing the child. A live,
+# unaddressable, or differently owned child retains its records.
+# The fleet seat owner separately verifies each generation's bound route
+# before releasing it (bin/fm-fleet-seats.sh). Cleanup retains
+# counted seat generations and their recovery routes when an
+# endpoint close fails; --force cannot bypass that accounting refusal.
+# Local and remote retirement serialize their destructive phase with
 # that mate's backlog-handoff lock under the registry lock. Pending handoff wake
 # state is retired with the home, and local removal failure restores that state
 # before preserving the route for retry. After a successful local or remote
@@ -544,8 +551,57 @@ fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-secondmate-liveness-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
+fm_sm_live_require_locks
+
+teardown_release_seat() {
+  local seat_state=$1 seat_home=$2 seat_config=$3 seat_data=$4 seat_id=$5
+  local ledger generations gen meta="$1/$5.meta" carrier lock rc=0
+  local response_args=()
+  [ -z "${TEARDOWN_REMOTE_RETIREMENT:-}" ] || response_args=(--response-file "$TEARDOWN_REMOTE_RETIREMENT")
+  [ -d "$seat_state" ] || return 1
+  lock=$(fm_supervisor_lifecycle_lock_path "$seat_state" "$seat_id") || return 1
+  local FM_SUPERVISOR_LIFECYCLE_CARRIER=${TEARDOWN_LIFECYCLE_CARRIER:-}
+  for carrier in "${DESCENDANT_EPISODE_CARRIERS[@]+"${DESCENDANT_EPISODE_CARRIERS[@]}"}"; do
+    case "$carrier" in "$lock|"*) FM_SUPERVISOR_LIFECYCLE_CARRIER=$carrier ;; esac
+  done
+  export FM_SUPERVISOR_LIFECYCLE_CARRIER
+  if ledger=$(FM_HOME=$seat_home FM_STATE_OVERRIDE=$seat_state FM_CONFIG_OVERRIDE=$seat_config \
+    FM_DATA_OVERRIDE=$seat_data "$SCRIPT_DIR/fm-fleet-seats.sh" show "$seat_id"); then
+    if [ -n "$ledger" ]; then
+      generations=$(printf '%s\n' "$ledger" | jq -r '.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed") | .generation') || return 1
+    else
+      generations=$(fm_meta_get "$meta" fleet_seat_generation)
+      [ -n "$generations" ] || generations=$(fm_meta_get "$meta" spawn_gen)
+    fi
+  else
+    # Old records without a seat generation predate fleet-seat ownership; an
+    # unresolvable authority must not block their ordinary teardown. Managed
+    # generations remain fail-closed because the record provides their key.
+    generations=$(fm_meta_get "$meta" fleet_seat_generation)
+    [ -n "$generations" ] || generations=$(fm_meta_get "$meta" spawn_gen)
+    [ -z "$generations" ] && return 0
+    return 1
+  fi
+  [ -n "$generations" ] || return 0
+  if [ -n "$ledger" ] && [ "${TEARDOWN_ENDPOINT_CLOSE_FAILED:-0}" = 1 ]; then
+    echo "error: $seat_id's endpoint was not closed; preserving its counted generations and recovery route" >&2
+    return 1
+  fi
+  while IFS= read -r gen; do
+    if ! FM_HOME=$seat_home FM_STATE_OVERRIDE=$seat_state FM_CONFIG_OVERRIDE=$seat_config \
+      FM_DATA_OVERRIDE=$seat_data "$SCRIPT_DIR/fm-fleet-seats.sh" release "$seat_id" \
+      --generation "$gen" --reason teardown "${response_args[@]}" >/dev/null; then
+      echo "error: $seat_id's fleet seat generation $gen stays counted; preserving its recovery route and home" >&2
+      rc=1
+      break
+    fi
+  done <<EOF_GENERATIONS
+$generations
+EOF_GENERATIONS
+  return "$rc"
+}
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -593,6 +649,8 @@ SM_LIVENESS_LOCK=
 META_LOCK=
 META_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
+DESCENDANT_EPISODE_CARRIERS=()
+TEARDOWN_LIFECYCLE_CARRIER=
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
@@ -604,7 +662,13 @@ teardown_release_locks() {
     teardown_release_herdr_locks || true
   fi
   for ((i=${#DESCENDANT_LOCK_PATHS[@]} - 1; i >= 0; i--)); do
-    fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true
+    case "${DESCENDANT_LOCK_PATHS[$i]}" in
+      */.secondmate-liveness-*.lock)
+        local episode_id=${DESCENDANT_LOCK_PATHS[$i]##*/.secondmate-liveness-}
+        fm_supervisor_lifecycle_release "${DESCENDANT_LOCK_PATHS[$i]%/*}" "${episode_id%.lock}" || true
+        ;;
+      *) fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true ;;
+    esac
   done
   DESCENDANT_LOCK_PATHS=()
   if [ -n "${HANDOFF_WAKE_RETIRE_LOCK:-}" ]; then
@@ -624,7 +688,7 @@ teardown_release_locks() {
     META_LOCK_HELD=0
   fi
   if [ -n "${SM_LIVENESS_LOCK:-}" ]; then
-    fm_lock_release "$SM_LIVENESS_LOCK" || true
+    fm_supervisor_lifecycle_release "$STATE" "$ID" || true
     SM_LIVENESS_LOCK=
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
@@ -639,6 +703,16 @@ teardown_release_locks() {
   return "$status"
 }
 trap teardown_release_locks EXIT
+# A secondmate's retirement joins its supervisor lifecycle episode first (the
+# fleet order is episode, then control, then metadata), waiting a bounded time
+# for a running liveness recovery or launch to finish rather than interleaving.
+if [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_meta_get "$META" kind 2>/dev/null || true)" = secondmate ]; then
+  fm_supervisor_lifecycle_enter "$STATE" "$ID" 30 || {
+    echo "error: a secondmate liveness check is in progress for $ID (lifecycle episode pid ${FM_LOCK_HELD_PID:-unknown}); nothing was changed - retry teardown" >&2
+    exit 1
+  }
+  SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
+fi
 fm_lock_try_acquire "$CONTROL_LOCK" || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
@@ -648,6 +722,57 @@ CONTROL_LOCK_HELD=1
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
+
+remote_finalization_finish() {
+  local evidence="$STATE/.seat-retirement-$ID.json" tmp rc
+  [ -f "$evidence" ] && [ ! -L "$evidence" ] || return 1
+  if secondmate_registry_line_for_id "$SECONDMATE_REG" "$ID"; then
+    [ "$SECONDMATE_REGISTRY_REMOTE" = 1 ] || return 1
+  else
+    [ -f "$SECONDMATE_REG" ] && ! grep -qE "^- $ID( |$)" "$SECONDMATE_REG" || return 1
+    SECONDMATE_REGISTRY_HOST=$(jq -er '.local_finalization.host | strings | select(length > 0)' "$evidence") || return 1
+    SECONDMATE_REGISTRY_ROOT=$(jq -er '.local_finalization.root | strings | select(startswith("/"))' "$evidence") || return 1
+    SECONDMATE_REGISTRY_HOME=$(jq -er '.home | strings | select(startswith("/"))' "$evidence") || return 1
+  fi
+  jq -e --arg id "$ID" --arg host "$SECONDMATE_REGISTRY_HOST" --arg root "$SECONDMATE_REGISTRY_ROOT" --arg home "$SECONDMATE_REGISTRY_HOME" '
+    .task == $id and .home == $home and .destroyed == true
+    and .local_finalization.host == $host and .local_finalization.root == $root
+    and (.exit_code == 0 or .exit_code == 4)' "$evidence" >/dev/null || return 1
+  if [ "$(jq -r '.local_finalization.ledger_cleaned_up // false' "$evidence")" != true ]; then
+    [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
+    tmp=$(umask 077; mktemp "$STATE/.seat-retirement-$ID.XXXXXX") || return 1
+    if ! (jq '.local_finalization.ledger_cleaned_up = true' "$evidence" > "$tmp" && mv -f -- "$tmp" "$evidence"); then
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+  rc=$(jq -r .exit_code "$evidence") || return 1
+  rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
+    "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
+    "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID" || return 1
+  tmp=$(mktemp "$SECONDMATE_REG.XXXXXX") || return 1
+  if grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp"; then :; else
+    [ "$?" = 1 ] || { rm -f "$tmp"; return 1; }
+  fi
+  mv -f -- "$tmp" "$SECONDMATE_REG" || { rm -f "$tmp"; echo "error: remote registry publication failed; retirement evidence is preserved for retry" >&2; return 1; }
+  rm -f -- "$evidence" || return 1
+  printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$SECONDMATE_REGISTRY_HOST" "$SECONDMATE_REGISTRY_HOME"
+  return "$rc"
+}
+
+if [ ! -e "$META" ] && [ ! -L "$META" ] && [ -f "$STATE/.seat-retirement-$ID.json" ]; then
+  fm_lease_forbid_branch "secondmate retirement (fm-teardown)"
+  fm_supervisor_lifecycle_enter "$STATE" "$ID" 0 || exit 1
+  SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
+  META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+  fm_lock_acquire_wait "$META_LOCK" || exit 1
+  META_LOCK_HELD=1
+  [ ! -e "$META" ] && [ ! -L "$META" ] || exit 1
+  LOCAL_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
+  fm_lock_acquire_wait "$LOCAL_REGISTRY_LOCK" || exit 1
+  remote_finalization_finish
+  exit $?
+fi
 
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -669,13 +794,14 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 # serialize on this lock; retirement holds it to the end so no probe or relaunch
 # can act on the route mid-teardown, and its relaunch ledger and park marker are
 # removed with the route instead of surviving for a reused id.
-if [ "$TEARDOWN_META_KIND" = secondmate ]; then
-  fm_lock_try_acquire "$STATE/.secondmate-liveness-$ID.lock" || {
+if [ "$TEARDOWN_META_KIND" = secondmate ] && [ -z "$SM_LIVENESS_LOCK" ]; then
+  fm_supervisor_lifecycle_enter "$STATE" "$ID" 0 || {
     echo "error: a secondmate liveness check is in progress for $ID; nothing was changed - retry teardown" >&2
     exit 1
   }
   SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
 fi
+TEARDOWN_LIFECYCLE_CARRIER=${FM_SUPERVISOR_LIFECYCLE_CARRIER:-}
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
@@ -1148,7 +1274,9 @@ remote_outbox_cleanup() {
 }
 
 remote_secondmate_teardown() {
-  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp
+  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp release_rc generation target
+  local TEARDOWN_REMOTE_RETIREMENT
+  local -a retire_args
   remote_host=$(fm_meta_get "$META" remote_host)
   [ -n "$remote_host" ] || return 3
   kind=$(fm_meta_get "$META" kind)
@@ -1163,6 +1291,23 @@ remote_secondmate_teardown() {
   route_home=$SECONDMATE_REGISTRY_HOME
   [ "$route_host" = "$remote_host" ] && [ "$route_root" = "$remote_root" ] && [ "$route_home" = "$remote_home" ] \
     || { echo "REFUSED: remote secondmate metadata does not match its registry route" >&2; return 1; }
+  # shellcheck source=bin/fm-remote-generation-lib.sh
+  . "$SCRIPT_DIR/fm-remote-generation-lib.sh"
+  fm_remote_generation_resolve retire || return 1
+  generation=$FM_REMOTE_GENERATION
+  target=$FM_REMOTE_TARGET
+  retire_args=("$ID")
+  [ "$FORCE" != --force ] || retire_args+=(--force)
+  retire_args+=(--expect-generation "$generation")
+  TEARDOWN_REMOTE_RETIREMENT="$STATE/.seat-retirement-$ID.json"
+  if [ -e "$TEARDOWN_REMOTE_RETIREMENT" ] || [ -L "$TEARDOWN_REMOTE_RETIREMENT" ]; then
+    [ -f "$TEARDOWN_REMOTE_RETIREMENT" ] && [ ! -L "$TEARDOWN_REMOTE_RETIREMENT" ] \
+      || { echo "REFUSED: remote retirement evidence is unsafe" >&2; return 1; }
+    jq -e --arg t "$ID" --arg h "$remote_home" --arg g "$generation" --arg target "$target" \
+      '.task == $t and .home == $h and (.generation // "") == $g and .backend == "herdr"
+       and .target == $target and .destroyed == true and (.exit_code == 0 or .exit_code == 4)' \
+      "$TEARDOWN_REMOTE_RETIREMENT" >/dev/null || { echo "REFUSED: remote retirement evidence does not match this generation" >&2; return 1; }
+  fi
   handoff_wake_retire_validate || return 1
   remote_recovery_paths_validate initial || return 1
   if [ "$FORCE" != --force ] && [ "$REMOTE_OUTBOX_PRESENT" -eq 1 ]; then
@@ -1177,10 +1322,11 @@ remote_secondmate_teardown() {
     return 1
   }
   "$FM_ROOT/bin/fm-guard.sh" || true
-  if [ "$FORCE" = --force ]; then
-    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force < /dev/null 2>&1); then rc=0; else rc=$?; fi
+  if [ -f "$TEARDOWN_REMOTE_RETIREMENT" ]; then
+    out=
+    rc=$(jq -r .exit_code "$TEARDOWN_REMOTE_RETIREMENT")
   else
-    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" < /dev/null 2>&1); then rc=0; else rc=$?; fi
+    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "${retire_args[@]}" < /dev/null 2>&1); then rc=0; else rc=$?; fi
   fi
   if [ "$rc" -ne 0 ] && [ "$rc" -ne "$TEARDOWN_LOST_SLOT_EXIT" ]; then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
@@ -1195,6 +1341,18 @@ remote_secondmate_teardown() {
     printf '%s\n' "$out" | grep -E '^(warning: treehouse return left pool slot |  )' >&2 || true
   fi
   teardown_export_records "$STATE" "$ID" || return 1
+  if [ ! -f "$TEARDOWN_REMOTE_RETIREMENT" ]; then
+    tmp=$(umask 077; mktemp "$STATE/.seat-retirement-$ID.XXXXXX") || return 1
+    if ! printf '%s\n' "$out" | sed -n 's/^seat_retirement=//p' | jq -se \
+      --arg t "$ID" --arg h "$remote_home" --arg g "$generation" --arg target "$target" --argjson rc "$rc" \
+      'select(length == 1) | .[0] | select(.task == $t and .home == $h and (.generation // "") == $g
+        and .backend == "herdr" and .target == $target and .destroyed == true) | .exit_code = $rc' > "$tmp"; then
+      rm -f -- "$tmp"
+      echo "error: remote retirement has no matching destruction evidence; preserving the local route" >&2
+      return 1
+    fi
+    mv -f -- "$tmp" "$TEARDOWN_REMOTE_RETIREMENT" || return 1
+  fi
   remote_recovery_paths_validate recheck || {
     echo "error: remote home retired but local recovery paths changed; preserving the local route for retry" >&2
     return 1
@@ -1210,17 +1368,20 @@ remote_secondmate_teardown() {
     || { echo "error: remote pending-reply cleanup failed; preserving the local route for retry" >&2; return 1; }
   handoff_wake_retire \
     || { echo "error: remote receiver wake cleanup failed; preserving the local route for retry" >&2; return 1; }
-  tmp="$SECONDMATE_REG.tmp.$$"
-  grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
-  mv -f -- "$tmp" "$SECONDMATE_REG"
+  release_rc=0
+  teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || release_rc=$?
+  [ "$release_rc" -eq 0 ] || return "$release_rc"
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
   teardown_retire_status "$STATE" "$ID" || return 1
+  tmp=$(umask 077; mktemp "$STATE/.seat-retirement-$ID.XXXXXX") || return 1
+  if ! (jq --arg host "$remote_host" --arg root "$remote_root" '.local_finalization = {host: $host, root: $root, ledger_cleaned_up: true}' "$TEARDOWN_REMOTE_RETIREMENT" > "$tmp" \
+    && mv -f -- "$tmp" "$TEARDOWN_REMOTE_RETIREMENT"); then
+    rm -f "$tmp"
+    return 1
+  fi
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
-  rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
-    "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
-    "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
-  printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
-  return "$rc"
+  remote_finalization_finish
+
 }
 
 remote_secondmate_teardown_locked() {
@@ -1667,8 +1828,6 @@ ensure_commit_object() {
 
 patch_id_for_commit() {
   local commit=$1
-  # Indentation can change semantics. Unsupported --verbatim yields no id,
-  # so callers fall back to the content check or refuse, never ignore whitespace.
   git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
     | git patch-id --verbatim 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
@@ -2089,6 +2248,26 @@ teardown_scrub_scratch_copy() {
   }
 }
 
+teardown_retain_remote_retirement_outcome() {
+  local retirement_tmp retirement_rc
+  [ -n "${FM_REMOTE_RETIRE_PENDING:-}" ] || return 0
+  [ -f "$FM_REMOTE_RETIRE_PENDING" ] && [ ! -L "$FM_REMOTE_RETIRE_PENDING" ] || return 1
+  retirement_tmp=$(umask 077; mktemp "${FM_REMOTE_RETIRE_PENDING}.XXXXXX") || return 1
+  retirement_rc=0
+  [ "$TEARDOWN_POOL_SLOT_LOST" = 0 ] || retirement_rc=$TEARDOWN_LOST_SLOT_EXIT
+  if ! jq -e --arg id "$ID" --arg home "${HOME_PATH:-$WT}" --arg gen "$(meta_value "$META" spawn_gen)" \
+    --arg target "$T" --argjson rc "$retirement_rc" '
+    select(.schema == "fm-remote-retirement-pending.v1" and .task == $id and .home == $home
+      and .generation == $gen and .target == $target and .backend == "herdr"
+      and .phase == "pending" and .destroyed == false
+      and (.exit_code == null or .exit_code == 0 or .exit_code == 4))
+    | .exit_code = (if .exit_code == 4 then 4 else $rc end)' "$FM_REMOTE_RETIRE_PENDING" > "$retirement_tmp" \
+    || ! mv -f -- "$retirement_tmp" "$FM_REMOTE_RETIRE_PENDING"; then
+    rm -f -- "$retirement_tmp"
+    return 1
+  fi
+}
+
 # Callers run this only for a copy that was a Treehouse pool slot before the
 # return; a return removes any other copy, and the pool cannot lose it.
 teardown_note_dirty_return() {
@@ -2105,6 +2284,7 @@ teardown_note_dirty_return() {
   [ "$residue_rc" -eq 0 ] || residue="cannot verify: the copy is missing or not a readable git worktree after return"
   echo "warning: treehouse return left pool slot $slot_label ($wt) dirty or unverified; the pool lost this slot. Remaining paths:" >&2
   printf '%s\n' "$residue" | sed 's/^/  /' >&2
+  teardown_retain_remote_retirement_outcome
 }
 
 validate_worktree_teardown_safety() {
@@ -2875,9 +3055,65 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
   reap_task_worktree_processes "secondmate home" "$1"
 }
 
-remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup
+finish_firstmate_home_removal() {
+  local rc=$1 restore_rc=0
+  trap - EXIT
+  if [ "$removal_committed" = 0 ] && [ -n "$process_event_backup" ]; then
+    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || restore_rc=$?
+  elif [ "$removal_committed" = 1 ] && [ -n "$process_event_backup" ]; then
+    if [ -n "$retired" ]; then
+      process_event_backup="$retired/home/${process_event_backup##*/}"
+    fi
+    rm -rf -- "$process_event_backup" || restore_rc=1
+  fi
+  [ -z "$tmp" ] || rm -f -- "$tmp" || restore_rc=1
+  if [ "$removal_committed" = 0 ] && [ -n "$retired" ]; then
+    rmdir "$retired" 2>/dev/null || true
+  fi
+  [ "$restore_rc" = 0 ] || rc=$restore_rc
+  exit "$rc"
+}
+
+remove_firstmate_home() (  # <home> <label> <task-id> <backend>
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} meta=${5:-$META} abs_home_path process_event_backup backup_root retired recorded tmp generation evidence removal_committed=0
+  process_event_backup=''
+  retired=''
+  tmp=''
+  trap 'finish_firstmate_home_removal "$?"' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
   [ -n "$home" ] || return 0
+  evidence="${meta%.meta}.home-removal"
+  if [ -e "$evidence" ] || [ -L "$evidence" ]; then
+    [ -f "$evidence" ] && [ ! -L "$evidence" ] || return 1
+    recorded=$(meta_value "$evidence" home_removal_stage)
+    [ -n "$recorded" ] || return 1
+  else
+    recorded=''
+  fi
+  generation=$(meta_value "$meta" spawn_gen)
+  if [ -n "$recorded" ]; then
+    [ ! -L "$home" ] || return 1
+    [ "$(meta_value "$evidence" home_removal_source)" = "$home" ] \
+      && [ "$(meta_value "$evidence" home_removal_generation)" = "$generation" ] || return 1
+    abs_home_path=$(secondmate_registry_path_key "$home") || return 1
+    case "$recorded" in
+      "$abs_home_path.retiring."*)
+        case "${recorded#"$abs_home_path.retiring."}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac ;;
+      *) return 1 ;;
+    esac
+    [ ! -L "$recorded" ] || return 1
+    if [ ! -e "$home" ] && [ ! -L "$home" ]; then
+      if [ -e "$recorded" ]; then
+        [ -d "$recorded" ] || return 1
+        validate_removal_target "$recorded" "$label staging" >/dev/null || return 1
+        rm -rf -- "$recorded" || return 1
+      fi
+      rm -f -- "$evidence" || return 1
+      return 0
+    fi
+  fi
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
@@ -2886,14 +3122,43 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
   if [ "$backend" = t3code ]; then
     { fm_backend_source t3code && fm_backend_t3code_home_env_cleanup "$abs_home_path"; } || return 1
   fi
-  process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
+  retired=''
+  if ! firstmate_home_has_treehouse_slot "$abs_home_path"; then
+    case "${FM_REMOTE_RETIRE_STAGE:-}" in
+      "$abs_home_path.retiring."*)
+        retired=$FM_REMOTE_RETIRE_STAGE
+        case "${retired#"$abs_home_path.retiring."}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        if [ -e "$retired" ] || [ -L "$retired" ]; then
+          [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
+          rmdir "$retired" || return 1
+        fi
+        mkdir -m 700 "$retired" || return 1 ;;
+      *)
+        if [ -n "$recorded" ]; then
+          retired=$recorded
+          if [ -e "$retired" ]; then
+            [ -d "$retired" ] && [ ! -L "$retired" ] || return 1
+            rmdir "$retired" || return 1
+          fi
+          mkdir -m 700 "$retired" || return 1
+        else
+          retired=$(mktemp -d "${abs_home_path}.retiring.XXXXXX") || return 1
+          tmp=$(umask 077; mktemp "${evidence}.XXXXXX") || return 1
+          if ! printf 'home_removal_source=%s\nhome_removal_generation=%s\nhome_removal_stage=%s\n' "$home" "$generation" "$retired" >"$tmp" \
+            || ! mv -f -- "$tmp" "$evidence"; then
+            return 1
+          fi
+        fi ;;
+    esac
+  fi
+  backup_root=${abs_home_path%/*}
+  [ -z "$retired" ] || backup_root=$abs_home_path
+  process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label" "$backup_root") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
-    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
   if [ "$backend" = t3code ] \
     && ! t3code_secondmate_home_shutdown_barrier "$abs_home_path" "$expected_id"; then
-    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
   # Read-only strip dirs sit at state/<id>.git-hooks, and a remote secondmate's
@@ -2902,24 +3167,23 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
   if firstmate_home_has_treehouse_slot "$abs_home_path"; then
     command -v treehouse >/dev/null 2>&1 || {
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
-      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
-      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
-    [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+    removal_committed=1
     return 0
   fi
-  if safe_rm_rf "$abs_home_path" "$label"; then
-    [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+  if mv -- "$abs_home_path" "$retired/home"; then
+    removal_committed=1
+    rm -rf -- "$retired" || return 1
+    rm -f -- "$evidence" || return 1
     return 0
   fi
-  restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
   return 1
-}
+)
 
 firstmate_home_has_process_events() {
   local home=$1 path owner claim_root
@@ -2938,12 +3202,12 @@ firstmate_home_has_process_events() {
 }
 
 snapshot_firstmate_home_process_events() {
-  local home=$1 label=$2 backup path
+  local home=$1 label=$2 backup_root=${3:-${1%/*}} backup path
   if ! firstmate_home_has_process_events "$home"; then
     printf '\n'
     return 0
   fi
-  backup=$(umask 077; mktemp -d "${home%/*}/.fm-procevent-restore.XXXXXX") || {
+  backup=$(umask 077; mktemp -d "$backup_root/.fm-procevent-restore.XXXXXX") || {
     echo "REFUSED: cannot stage recoverable process-event state for $label $home" >&2
     return 1
   }
@@ -3052,6 +3316,7 @@ preflight_firstmate_home_process_event_tree() {
 collect_descendant_task_locks() {
   local home=$1 sub_state child_meta child_id child_kind child_wt child_home task_set_lock
   local -a child_ids
+  if [ ! -e "$home" ] && [ ! -L "$home" ]; then return 0; fi
   sub_state="$home/state"
   if [ -L "$sub_state" ]; then
     echo "REFUSED: secondmate home $home has a symbolic-link state path at $sub_state; forced teardown changed nothing" >&2
@@ -3075,6 +3340,16 @@ collect_descendant_task_locks() {
   # without ever having been lifecycle-locked (bin/fm-wake-lib.sh's
   # fm_task_set_lock_path owns why). Taken per home, parent before child, and
   # held until this teardown exits.
+  for child_meta in "$sub_state"/*.meta; do
+    [ -f "$child_meta" ] && [ "$(meta_value "$child_meta" kind)" = secondmate ] || continue
+    child_id=$(basename "$child_meta" .meta)
+    if ! fm_supervisor_lifecycle_acquire "$sub_state" "$child_id" 0; then
+      echo "REFUSED: descendant secondmate $child_id has a lifecycle episode in flight; forced teardown changed nothing" >&2
+      return 1
+    fi
+    DESCENDANT_EPISODE_CARRIERS+=("$FM_SUPERVISOR_LIFECYCLE_CARRIER")
+    DESCENDANT_LOCK_PATHS+=("$(fm_supervisor_lifecycle_lock_path "$sub_state" "$child_id")")
+  done
   task_set_lock=$(fm_task_set_lock_path "$sub_state") || {
     echo "REFUSED: secondmate home $home has an invalid task-set lock path; forced teardown changed nothing" >&2
     return 1
@@ -3101,6 +3376,14 @@ collect_descendant_task_locks() {
     [ -n "$child_kind" ] || child_kind=ship
     child_home=
     if [ "$child_kind" = secondmate ]; then
+      local episode_carrier found_episode=0
+      for episode_carrier in "${DESCENDANT_EPISODE_CARRIERS[@]+"${DESCENDANT_EPISODE_CARRIERS[@]}"}"; do
+        if FM_SUPERVISOR_LIFECYCLE_CARRIER=$episode_carrier fm_supervisor_lifecycle_adopt "$sub_state" "$child_id"; then
+          found_episode=1
+          break
+        fi
+      done
+      [ "$found_episode" -eq 1 ] || { echo "REFUSED: descendant secondmate $child_id changed during episode acquisition" >&2; return 1; }
       child_wt=$(meta_value "$child_meta" worktree)
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3149,6 +3432,11 @@ preflight_descendant_task_locks() {
       return 1
     fi
     DESCENDANT_LOCK_PATHS+=("$meta_lock")
+    local meta_owner
+    meta_owner=$(fm_lock_link_owner "$meta_lock") || return 1
+    FM_T3_META_LOCK_CARRIERS="${FM_T3_META_LOCK_CARRIERS:+$FM_T3_META_LOCK_CARRIERS
+}$meta_lock|$meta_owner"
+    export FM_T3_META_LOCK_CARRIERS
     [ -f "$meta" ] || {
       echo "REFUSED: descendant task $task_id changed while forced teardown acquired its locks; forced teardown changed nothing" >&2
       return 1
@@ -3305,10 +3593,6 @@ teardown_herdr_require_prerequisites() {  # <task-id>
       return 1
     fi
   done
-  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
-    # shellcheck source=/dev/null
-    . "$SCRIPT_DIR/fm-wake-lib.sh"
-  fi
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1 \
     || ! declare -F fm_lock_release >/dev/null 2>&1; then
     echo "error: herdr teardown lock machinery is unavailable for $task_id; nothing was changed - restore the lock support and rerun teardown" >&2
@@ -3387,6 +3671,11 @@ preflight_firstmate_home_herdr_children() {  # <home>
     if [ "$child_backend" = herdr ]; then
       teardown_herdr_preflight_target "$child_target" "$child_id" || return 1
     fi
+    if [ "$child_backend" = rex ]; then
+      [ -n "$(meta_value "$child_meta" rex_server)" ] && [ "$(meta_value "$child_meta" rex_server)" = "$(fm_backend_rex_server_endpoint)" ] || return 1
+    elif [ "$child_backend" = t3code ]; then
+      t3_server_for_meta "$child_meta" >/dev/null || return 1
+    fi
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     if [ "$child_kind" = secondmate ]; then
@@ -3433,6 +3722,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   local subject=$1 backend=$2 target=$3 honors_force=$4
   echo "error: the $backend endpoint $target for $subject could not be closed, so it may still be live." >&2
   if [ "$honors_force" = 1 ] && [ "$FORCE" = "--force" ]; then
+    TEARDOWN_ENDPOINT_CLOSE_FAILED=1
     echo "error: --force authorizes continuing past a close that failed, so this cleanup proceeds toward removing the task's records; reconcile $target yourself, because nothing here can still be relied on to name it." >&2
     return 0
   fi
@@ -3445,7 +3735,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot
+  local home=$1 archive_parent=${2:-$ID} home=$1 archive_parent=${2:-$ID} archive_parent child_backend child_busy_gen child_gen child_home child_id child_inventory_rc child_kind child_ledger child_meta child_orca_worktree_id child_owner_rc child_pool_slot child_proj child_return_rc child_rex_home child_route child_socket child_t child_windows child_wt child_server home sub_state
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3479,10 +3769,53 @@ cleanup_firstmate_home_children() {
           echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
           return 1
         fi
+      elif [ "$child_backend" = tmux ]; then
+        if [ "$FORCE" != "--force" ]; then
+          echo "error: child $child_id requires explicit forced cleanup from its owning tmux server" >&2
+          endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0
+          return 1
+        fi
+        child_ledger=$(FM_HOME=$home FM_STATE_OVERRIDE=$sub_state FM_CONFIG_OVERRIDE=$home/config \
+          FM_DATA_OVERRIDE=$home/data "$SCRIPT_DIR/fm-fleet-seats.sh" show "$child_id") || return 1
+        if [ -n "$child_ledger" ]; then
+          # A pooled child carries a generation-bound seat, so the close is
+          # authorized only on the server that generation's recorded route
+          # names. Without that proof the endpoint may live on another server
+          # and the parent's cleanup must not close a same-named window here.
+          child_socket=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || child_socket=''
+          case "$child_socket" in /*) ;; *) child_socket='' ;; esac
+          child_gen=$(meta_value "$child_meta" fleet_seat_generation)
+          [ -n "$child_gen" ] || child_gen=$(meta_value "$child_meta" spawn_gen)
+          child_route=$(printf '%s\n' "$child_ledger" | jq -c --arg g "$child_gen" '
+            .incarnations | map(select(.generation == $g)) | last | .route') || return 1
+          if [ -z "$child_socket" ] || ! printf '%s\n' "$child_route" | jq -e --arg s "$child_socket" --arg t "$child_t" \
+            '.placement == "local" and .backend == "tmux" and .target == $t and .socket_path == $s' >/dev/null; then
+            echo "error: child $child_id has no verified ownership on this tmux socket; retaining its endpoint and records" >&2
+            return 1
+          fi
+        fi
+        # Read the exact window on this socket before closing it. Blank pane
+        # queries after a successful kill are normal tmux behavior, not proof.
+        fm_backend_source tmux || return 1
+        child_inventory_rc=0
+        child_windows=$(fm_backend_tmux_window_inventory "=${child_t%%:*}") || child_inventory_rc=$?
+        if [ -n "$child_ledger" ]; then
+          # A verified route also permits retry after the previous close won.
+          [ "$child_inventory_rc" -eq 2 ] || { [ "$child_inventory_rc" -eq 0 ] && [ -n "$child_windows" ]; } || return 1
+        fi
+        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "$(meta_value "$child_meta" "${child_backend%code}_server")" \
+          || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
+        child_inventory_rc=0
+        child_windows=$(fm_backend_tmux_window_inventory "=${child_t%%:*}") || child_inventory_rc=$?
+        if [ "$child_inventory_rc" -ne 2 ] && { [ "$child_inventory_rc" -ne 0 ] \
+          || printf '%s\n' "$child_windows" | grep -qxF -- "${child_t#*:}"; }; then
+          echo "error: child $child_id survives as a live or unaddressable endpoint at its recorded tmux target $child_t; close it from its owning home on its owning server, then retry secondmate teardown" >&2
+          return 1
+        fi
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
-        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) \
+        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "$(meta_value "$child_meta" "${child_backend%code}_server")" ) \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       elif [ "$child_backend" = rex ]; then
         child_rex_home=$home
@@ -3491,20 +3824,25 @@ cleanup_firstmate_home_children() {
           [ -n "$child_rex_home" ] || child_rex_home=$child_wt
         fi
         ( unset FM_ROOT_OVERRIDE; FM_HOME="$child_rex_home" FM_ROOT="$child_rex_home" STATE="$child_rex_home/state" \
-          fm_backend_kill "$child_backend" "$child_t" "" "fm-$child_id" ) \
+          fm_backend_kill "$child_backend" "$child_t" "" "fm-$child_id" "$(meta_value "$child_meta" rex_server)" ) \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       else
-        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
+        child_server=$(meta_value "$child_meta" "${child_backend%code}_server")
+        if [ "$child_backend" = t3code ]; then
+          child_server=$(t3_server_for_meta "$child_meta") || return 1
+        fi
+        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "$child_server" \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
     teardown_export_records "$sub_state" "$child_id" || return 1
+    teardown_release_seat "$sub_state" "$home" "$home/config" "$home/data" "$child_id" || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      if [ -n "$child_home" ] && [ -d "$child_home" ]; then
+      if [ -n "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" "$archive_parent/children/$child_id" || return $?
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_backend" || return $?
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" "$child_backend" "$child_meta" || return $?
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -3541,7 +3879,7 @@ cleanup_firstmate_home_children() {
           child_pool_slot=0
           fm_treehouse_pool_slot "$child_proj" "$child_wt" && child_pool_slot=1
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
-            [ "$child_pool_slot" = 0 ] || teardown_note_dirty_return "$child_wt"
+            [ "$child_pool_slot" = 0 ] || teardown_note_dirty_return "$child_wt" || return $?
             fm_treehouse_slot_owner_release "$child_wt" "$child_id"
           else
             child_return_rc=$?
@@ -3585,6 +3923,25 @@ cleanup_firstmate_home_children() {
   done
 }
 
+t3_server_for_meta() {  # <task-meta> -> the verified server identity for this cleanup
+  local recorded
+  recorded=$(fm_meta_get "$1" t3_server)
+  if [ -z "$recorded" ]; then
+    recorded=$(fm_backend_t3code_server_for_meta "$1") || recorded=
+    if [ -n "$recorded" ]; then
+      echo "warning: T3 creation server identity is missing; adopted the selected server after confirming the thread exists" >&2
+    elif [ "$FORCE" = --force ]; then
+      recorded=$(fm_backend_t3code_server_identity) || return 1
+      echo "warning: T3 creation server identity is missing and thread ownership could not be verified; --force authorizes cleanup using the selected server" >&2
+    else
+      echo "error: T3 creation server identity is missing and the thread is not present on the selected server; preserving the task and its worktree" >&2
+      return 1
+    fi
+  fi
+  fm_backend_t3code_server_matches "$recorded" || return 1
+  printf '%s' "$recorded"
+}
+
 remove_secondmate_registry_entry() {
   local id=$1 tmp lock rc=0 acquired=0
   [ -f "$SECONDMATE_REG" ] || return 0
@@ -3599,6 +3956,16 @@ remove_secondmate_registry_entry() {
   [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
   return "$rc"
 }
+
+if [ "$BACKEND" = rex ]; then
+  [ "$(fm_meta_get "$META" rex_server)" = "$(fm_backend_rex_server_endpoint)" ] && [ -n "$(fm_meta_get "$META" rex_server)" ] \
+    || { echo "error: Rex creation server does not match; preserving the task and its worktree" >&2; exit 1; }
+elif [ "$BACKEND" = t3code ]; then
+  T3_SERVER_FOR_CLEANUP=$(t3_server_for_meta "$META") \
+    || { echo "error: T3 creation server does not match; preserving the task and its worktree" >&2; exit 1; }
+  [ -n "$T3_SERVER_FOR_CLEANUP" ] \
+    || { echo "error: T3 server identity is unavailable; preserving the task and its worktree" >&2; exit 1; }
+fi
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
@@ -3853,7 +4220,7 @@ fi
 # T3 project is deliberately left in place: project.delete refuses while the
 # archived thread exists and would take that transcript with it under force.
 if [ "$BACKEND" = t3code ]; then
-  fm_backend_kill t3code "$T" || {
+  fm_backend_kill t3code "$T" "" "fm-$ID" "$T3_SERVER_FOR_CLEANUP" || {
     echo "error: could not stop and archive T3 thread $T for $ID; start T3 Code (or archive the thread there) and re-run teardown" >&2
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
@@ -3877,7 +4244,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     remove_harness_worktree_wiring "$WT"
   fi
   if [ -n "$T_ORCA" ]; then
-    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" rex_server)" \
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -3917,7 +4284,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
-  [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
+  [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT" || exit $?
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
@@ -3987,7 +4354,7 @@ elif [ "$BACKEND" = herdr ]; then
   fi
 elif [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
-    fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
+    fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" "$(meta_value "$META" rex_server)" ) \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
@@ -3996,7 +4363,7 @@ elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$TEARDOWN_WINDOWLE
   if [ "$BACKEND" = rex ] && { [ -e "$STATE/.rex-mark-$ID" ] || [ -e "$STATE/.rex-progress-$ID" ] || [ -e "$STATE/.rex-tint-$ID" ]; }; then
     FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" clear "$ID" >/dev/null 2>&1 || true
   fi
-  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" "$(meta_value "$META" rex_server)" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
@@ -4034,13 +4401,15 @@ if [ "$KIND" != secondmate ]; then
   fi
 fi
 teardown_export_records "$STATE" "$ID" || exit 1
+teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  teardown_retain_remote_retirement_outcome || exit $?
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
     || { echo "error: local pending-reply recovery paths changed; preserving the secondmate home and route" >&2; exit 1; }
-  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND"; then
+  if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" "$BACKEND" "$META"; then
     :
   else
     rc=$?
@@ -4054,7 +4423,6 @@ if [ "$KIND" = secondmate ]; then
     pending_replies_cleanup_for_task "$STATE/pending-replies" "$PENDING_REPLIES_DIR_REAL" \
       || { echo "error: local pending-reply cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
   fi
-  remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
@@ -4097,6 +4465,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
+  "$STATE/$ID.seat-operation."* "$STATE/$ID.seat-reservation."* \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/$ID.claude-settings.json" "$STATE/$ID.devin-config.json" \
   "$STATE/$ID.polytoken-busy.sh" \
@@ -4165,6 +4534,9 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+fi
+if [ "$KIND" = secondmate ]; then
+  remove_secondmate_registry_entry "$ID"
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0

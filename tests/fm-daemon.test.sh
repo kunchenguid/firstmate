@@ -3447,157 +3447,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
-test_afk_start_refuses_when_flag_cannot_be_written
-test_afk_start_ignores_stale_pidfile_without_lock
-test_afk_start_refuses_tern_supervisor_backend
-test_afk_start_reclaims_stale_daemon_lock_reused_pid
-test_daemon_state_root_uses_fm_home
-test_classify_routine_signal_self
-test_classify_terminal_signal_escalates
-test_classify_check_and_unknown_escalate
-test_unknown_wake_ack_suppresses_handled_identity
-test_unknown_wake_ack_failure_still_clears_delivered_digest
-test_stale_transient_self_records_marker
-test_stale_diagnostic_wedge_survives_busy_housekeeping
-test_enriched_wedge_under_declared_wait_uses_pause_cadence
-test_enriched_wedge_under_worker_blocker_follows_its_flag
-test_stale_terminal_escalates
-test_stale_actionable_wait_escalates_and_keeps_pause_cadence
-test_stale_paused_classifies_pause
-test_stale_pause_survives_a_foreign_resolved_line
-test_stale_captain_held_classifies_pause
-test_handle_wake_paused_records_pause_marker
-test_handle_wake_paused_signal_records_pause_marker
-test_handle_wake_terminal_signal_clears_pause_tracking
-test_housekeeping_migrates_watcher_pause_marker
-test_housekeeping_migrates_watcher_unpaused_marker_to_clear
-test_housekeeping_seeds_pause_marker_from_status
-test_housekeeping_persistent_stale_escalates
-test_housekeeping_resumed_stale_cleared
-test_housekeeping_paused_resurfaces_and_resets
-test_housekeeping_captain_held_resurfaces_and_resets
-test_housekeeping_captain_held_silenced_only_by_an_away_record
-test_housekeeping_paused_resumed_cleared
-test_housekeeping_busy_declared_wait_matures_its_window
-test_housekeeping_declared_time_controls_pause_recheck
-test_housekeeping_paused_unpaused_cleared
-test_housekeeping_captain_held_resolved_cleared
-test_housekeeping_stale_marker_transitions_to_pause
-test_housekeeping_captain_held_stale_marker_transitions_to_pause
-test_housekeeping_pause_marker_transitions_to_clear
-test_housekeeping_herdr_persistent_stale_resolves_meta
-test_housekeeping_herdr_idle_busy_record_clears_stale
-test_housekeeping_herdr_resumed_stale_cleared
-test_housekeeping_orca_persistent_stale_resolves_terminal
-test_escalate_batches_into_one_digest
-test_escalate_batch_age_uses_first_append
-test_heartbeat_scan_dedup
-test_handle_wake_routes_self_and_escalate
-test_needs_decision_queued_row_escalates_once_as_the_decision
-test_captain_held_decision_owned_row_is_self_handled
-test_inject_skip_forces_self
-test_is_wake_reason_distinguishes_status_stdout
-test_terminal_stale_escalate_leaves_no_marker
-test_signal_escalate_marks_seen_no_catchall_refire
-test_collapse_newlines_pure
-test_afk_absent_daemon_does_not_inject
-test_busy_guard_defers_when_supervisor_busy
-test_marker_detection
-test_afk_turn_exemption
-test_should_exit_afk_when_afk_inactive
-test_strip_injection_marker
-test_escalate_marker_preserving_primary_types_envelope
-test_record_doorbell_detection
-test_pane_input_pending_detects_partial_input
-test_pane_input_pending_blank_defers_strict
-test_pane_input_pending_requires_proven_empty_prompt
-test_tmux_composer_state_bare_shell_is_unknown
-test_tmux_composer_state_bordered_and_agent_rows_are_empty
-test_tmux_composer_state_requires_matching_box_borders
-test_pane_input_pending_preserves_bright_placeholder_like_draft
-test_classify_signal_dedup_against_scan
-test_classify_signal_skips_turn_end_markers
-test_classify_signal_survives_a_later_routine_append
-test_classification_commits_its_captured_endpoint
-test_stale_masked_event_escalates_at_captured_endpoint
-test_stale_read_failure_surfaces_without_advancing_seen
-test_recreated_status_rejects_captured_identity
-test_unverifiable_identity_surfaces_without_marker
-test_status_read_failure_surfaces_without_advancing_seen
-test_catchall_advances_routine_then_surfaces_append
-test_escalation_buffer_failure_retains_wake_and_position
-test_busy_inbox_escalation_reaches_supervision stuck away
-test_busy_inbox_escalation_reaches_supervision stuck quiet
-test_busy_inbox_escalation_reaches_supervision write away
-test_busy_inbox_escalation_reaches_supervision write quiet
-test_busy_inbox_escalation_reaches_supervision reset away
-test_busy_inbox_escalation_reaches_supervision reset quiet
-test_busy_inbox_dispatch_preserves_other_stale_reasons
-test_catchall_buffer_failure_preserves_position
-test_durable_wake_failure_retains_entire_batch
-test_missing_status_stale_is_acknowledged_without_diagnostic
-test_transient_unreadable_signal_recovers_without_advancing
-test_permission_recovery_reclassifies_catchall_status
-test_permanent_classification_failure_is_reported_and_acknowledged
-test_catchall_scan_surfaces_a_masked_event
-test_classify_stale_dedup_against_signal
-test_afk_nonterminal_working_merged_keeps_wedge_aging
-test_afk_genuine_done_still_terminal_stale
-test_pane_input_pending_bordered_idle_not_pending
-test_pane_input_pending_bordered_with_text_is_pending
-test_submit_ack_confirms_on_bordered_empty_composer
-test_submit_ack_reports_pending_on_persistent_swallow
-test_max_defer_empty_swallow_types_once_and_alarms
-test_max_defer_flushes_empty_idle_pane
-test_max_defer_pending_composer_alarms_without_typing
-test_composer_deferral_names_pending_text_or_unrecognized_shape
-test_normal_flush_clears_stale_wedge_marker
-test_oversized_digest_is_bounded_and_kept_durable
-test_digest_budget_counts_omitted_events
-test_inject_send_failure_logs_stage_stderr_and_bytes
-test_inject_enter_failure_logs_confirmation_stage
-test_bounded_digest_full_text_kept_after_typing
-test_below_max_defer_does_nothing
-test_max_defer_afk_inactive_does_not_flush_or_alarm
-test_wedge_alarm_library_mode_defaults_to_discard
-test_wake_helpers_replace_inherited_notifier_override
-test_wedge_alarm_discard_seam_fires_nothing
-test_wedge_alarm_direct_notifiers_honor_discard_seam
-test_wedge_alarm_osascript_channel_selected
-test_wedge_alarm_herdr_channel_selected
-test_wedge_alarm_rex_channel_selected
-test_wedge_alarm_auto_never_selects_rex
-test_wedge_alarm_command_channel_receives_summary
-test_wedge_alarm_command_failure_hides_configured_command
-test_wedge_alarm_unknown_channel_hides_configured_directive
-test_wedge_alarm_off_disables_active_alert_regardless_of_position
-test_wedge_alarm_auto_darwin_selects_osascript
-test_wedge_alarm_auto_non_darwin_has_no_os_channel
-test_wedge_alarm_config_file_multi_channel
-test_wedge_alarm_failing_channel_degrades_gracefully
-test_wedge_alarm_hung_channel_times_out_and_falls_through
-test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant
-test_wedge_alarm_hung_override_times_out_and_falls_through
-test_wedge_alarm_shutdown_stops_active_notifier_group
-test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
-test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
-test_fm_send_reports_delivered_unconfirmed_submit
-test_fm_send_exits_nonzero_on_initial_send_failure
-test_fm_send_exits_nonzero_on_unproven_submit
-test_discover_supervisor_backend_precedence
-test_discover_supervisor_target_herdr
-test_discover_supervisor_t3code_after_env_tmux_and_herdr
-test_pane_is_busy_t3code_trusts_native_verdict_without_capture
-test_pane_is_busy_herdr_native_busy_state
-test_primary_busy_guard_is_harness_scoped
-test_pane_is_busy_defaults_to_tmux_when_backend_omitted
-test_pane_input_pending_herdr_dispatch
-test_inject_msg_herdr_busy_guard_defers
-test_inject_msg_herdr_composer_guard_defers
-test_inject_msg_herdr_pane_gone_defers
-test_inject_msg_herdr_submits_through_backend_dispatch
-test_inject_msg_defers_on_dead_shell_unknown
-test_inject_msg_defers_on_unrecognized_composer_state
+
 
 # The Claude background-task exit picker names itself on the stale reason.
 # Away mode self-handles the first sight, so the name has to be saved and
@@ -3710,7 +3560,270 @@ test_dialog_name_joins_unseen_status_escalation() {
   pass "a dialog name joins the escalation of an unseen status"
 }
 
+
+test_t3_bounded_digest_snapshot_retention() (
+  local mode dir state item i count
+  local -a snapshots
+  shopt -s nullglob
+  for mode in refused deferred encode freeze; do
+    (
+      dir=$(make_bordered_case "t3-digest-$mode")
+      state="$dir/state"
+      ESCALATE_KEPT_FULL=''
+      FM_SUPERVISOR_BACKEND=t3code
+      FM_DAEMON_PRIMARY_HARNESS=codex
+      item='event: '
+      while [ "${#item}" -lt 6000 ]; do item+='blocked waiting for review ; '; done
+      escalate_add "$state" "$item"
+      inject_msg() {
+        INJECT_SUBMIT_ATTEMPTED=1
+        INJECT_LAST_VERDICT=send-failed
+        if [ "$mode" = deferred ]; then
+          INJECT_SUBMIT_ATTEMPTED=0
+          INJECT_LAST_VERDICT=deferred
+        fi
+        return 1
+      }
+      if [ "$mode" = encode ]; then
+        fm_operational_input_encode() { return 1; }
+      elif [ "$mode" = freeze ]; then
+        mv() {
+          case "${!#}" in *.frozen) return 1 ;; esac
+          command mv "$@"
+        }
+      fi
+      for i in 1 2 3; do
+        if escalate_flush "$state"; then fail "injected $mode unexpectedly delivered"; fi
+        snapshots=("$state/.subsuper-digests/"*)
+        count=${#snapshots[@]}
+        case "$mode" in
+          encode|freeze) [ "$count" = 0 ] || fail "$mode leaked $count snapshots" ;;
+          *)
+            [ "$count" = 1 ] || fail "$mode retry retained $count snapshots"
+            cmp -s "${snapshots[0]}" "$state/.subsuper-escalations" || fail "snapshot changed buffered events"
+            ;;
+        esac
+      done
+      if [ "$mode" = refused ] || [ "$mode" = deferred ]; then
+        inject_msg() { return 0; }
+        escalate_flush "$state" || fail "$mode could not deliver on retry"
+        [ ! -s "$state/.subsuper-escalations" ] || fail "delivered retry retained events"
+        snapshots=("$state/.subsuper-digests/"*)
+        [ "${#snapshots[@]}" = 1 ] || fail "successful retry changed retained snapshot count"
+      fi
+    ) || return 1
+  done
+  pass "T3 bounded retries reuse snapshots and preparation failures remove allocations"
+)
+
+test_t3_digest_preserves_harness_carrier_on_retry() (
+  local harness dir state first request record msg kind
+  for harness in claude codex; do
+    dir=$(make_supercase "t3-carrier-$harness")
+    state="$dir/state"
+    FM_SUPERVISOR_BACKEND=t3code
+    FM_DAEMON_PRIMARY_HARNESS=$harness
+    LOG="$dir/daemon.log"
+    afk_enter "$state"
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { echo empty; }
+    fm_backend_send_text_submit() {
+      printf '%s' "$3" > "$dir/submitted"
+      printf '%s' "$FM_T3CODE_CLIENT_REQUEST_ID" > "$dir/request"
+      echo pending
+    }
+    escalate_add "$state" "event A: done"
+    if escalate_flush "$state"; then fail "unconfirmed digest was cleared"; fi
+    first=$(cat "$dir/submitted")
+    request=$(cat "$dir/request")
+    [ -n "$request" ] || fail "digest has no request identity"
+    if [ "$harness" = claude ]; then
+      fm_operational_doorbell_path "$first" record || fail "Claude received no record carrier"
+      msg=$(cat "$record")
+      fm_operational_input_kind "$msg" kind || fail "record lost its operational kind"
+    else
+      fm_operational_input_kind "$first" kind || fail "Codex lost its typed envelope"
+    fi
+    assert_equals away-supervisor "$kind" "digest changed operational kind"
+    should_exit_afk "$state" "$first" && fail "operational digest ended away mode"
+    escalate_add "$state" "event B: done"
+    if escalate_flush "$state"; then fail "unconfirmed retry was cleared"; fi
+    assert_equals "$first" "$(cat "$dir/submitted")" "retry changed the carrier"
+    assert_equals "$request" "$(cat "$dir/request")" "retry changed request identity"
+    fm_backend_send_text_submit() {
+      printf '%s' "$3" > "$dir/submitted"
+      printf '%s' "$FM_T3CODE_CLIENT_REQUEST_ID" > "$dir/request"
+      echo empty
+    }
+    escalate_flush_frozen "$state" "$state/.subsuper-escalations" || fail "accepted retry failed"
+    assert_equals "$first" "$(cat "$dir/submitted")" "accepted retry changed carrier"
+    assert_equals "$request" "$(cat "$dir/request")" "accepted retry changed identity"
+    assert_contains "$(cat "$state/.subsuper-escalations")" "event B" "retry lost later events"
+  done
+  pass "T3 retries preserve harness-specific carriers and request identities"
+)
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
+
+test_afk_start_refuses_when_flag_cannot_be_written
+test_afk_start_ignores_stale_pidfile_without_lock
+test_afk_start_refuses_tern_supervisor_backend
+test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_daemon_state_root_uses_fm_home
+test_classify_routine_signal_self
+test_classify_terminal_signal_escalates
+test_classify_check_and_unknown_escalate
+test_unknown_wake_ack_suppresses_handled_identity
+test_unknown_wake_ack_failure_still_clears_delivered_digest
+test_stale_transient_self_records_marker
+test_stale_diagnostic_wedge_survives_busy_housekeeping
+test_enriched_wedge_under_declared_wait_uses_pause_cadence
+test_enriched_wedge_under_worker_blocker_follows_its_flag
+test_stale_terminal_escalates
+test_stale_actionable_wait_escalates_and_keeps_pause_cadence
+test_stale_paused_classifies_pause
+test_stale_pause_survives_a_foreign_resolved_line
+test_stale_captain_held_classifies_pause
+test_handle_wake_paused_records_pause_marker
+test_handle_wake_paused_signal_records_pause_marker
+test_handle_wake_terminal_signal_clears_pause_tracking
+test_housekeeping_migrates_watcher_pause_marker
+test_housekeeping_migrates_watcher_unpaused_marker_to_clear
+test_housekeeping_seeds_pause_marker_from_status
+test_housekeeping_persistent_stale_escalates
+test_housekeeping_resumed_stale_cleared
+test_housekeeping_paused_resurfaces_and_resets
+test_housekeeping_captain_held_resurfaces_and_resets
+test_housekeeping_captain_held_silenced_only_by_an_away_record
+test_housekeeping_paused_resumed_cleared
+test_housekeeping_busy_declared_wait_matures_its_window
+test_housekeeping_declared_time_controls_pause_recheck
+test_housekeeping_paused_unpaused_cleared
+test_housekeeping_captain_held_resolved_cleared
+test_housekeeping_stale_marker_transitions_to_pause
+test_housekeeping_captain_held_stale_marker_transitions_to_pause
+test_housekeeping_pause_marker_transitions_to_clear
+test_housekeeping_herdr_persistent_stale_resolves_meta
+test_housekeeping_herdr_idle_busy_record_clears_stale
+test_housekeeping_herdr_resumed_stale_cleared
+test_housekeeping_orca_persistent_stale_resolves_terminal
+test_escalate_batches_into_one_digest
+test_escalate_batch_age_uses_first_append
+test_heartbeat_scan_dedup
+test_handle_wake_routes_self_and_escalate
+test_needs_decision_queued_row_escalates_once_as_the_decision
+test_captain_held_decision_owned_row_is_self_handled
+test_inject_skip_forces_self
+test_is_wake_reason_distinguishes_status_stdout
+test_terminal_stale_escalate_leaves_no_marker
+test_signal_escalate_marks_seen_no_catchall_refire
+test_collapse_newlines_pure
+test_afk_absent_daemon_does_not_inject
+test_busy_guard_defers_when_supervisor_busy
+test_marker_detection
+test_afk_turn_exemption
+test_should_exit_afk_when_afk_inactive
+test_strip_injection_marker
+test_escalate_marker_preserving_primary_types_envelope
+test_record_doorbell_detection
+test_pane_input_pending_detects_partial_input
+test_pane_input_pending_blank_defers_strict
+test_pane_input_pending_requires_proven_empty_prompt
+test_tmux_composer_state_bare_shell_is_unknown
+test_tmux_composer_state_bordered_and_agent_rows_are_empty
+test_tmux_composer_state_requires_matching_box_borders
+test_pane_input_pending_preserves_bright_placeholder_like_draft
+test_classify_signal_dedup_against_scan
+test_classify_signal_skips_turn_end_markers
+test_classify_signal_survives_a_later_routine_append
+test_classification_commits_its_captured_endpoint
+test_stale_masked_event_escalates_at_captured_endpoint
+test_stale_read_failure_surfaces_without_advancing_seen
+test_recreated_status_rejects_captured_identity
+test_unverifiable_identity_surfaces_without_marker
+test_status_read_failure_surfaces_without_advancing_seen
+test_catchall_advances_routine_then_surfaces_append
+test_escalation_buffer_failure_retains_wake_and_position
+test_busy_inbox_dispatch_preserves_other_stale_reasons
+test_catchall_buffer_failure_preserves_position
+test_durable_wake_failure_retains_entire_batch
+test_missing_status_stale_is_acknowledged_without_diagnostic
+test_transient_unreadable_signal_recovers_without_advancing
+test_permission_recovery_reclassifies_catchall_status
+test_permanent_classification_failure_is_reported_and_acknowledged
+test_catchall_scan_surfaces_a_masked_event
+test_classify_stale_dedup_against_signal
+test_afk_nonterminal_working_merged_keeps_wedge_aging
+test_afk_genuine_done_still_terminal_stale
+test_pane_input_pending_bordered_idle_not_pending
+test_pane_input_pending_bordered_with_text_is_pending
+test_submit_ack_confirms_on_bordered_empty_composer
+test_submit_ack_reports_pending_on_persistent_swallow
+test_max_defer_empty_swallow_types_once_and_alarms
+test_max_defer_flushes_empty_idle_pane
+test_max_defer_pending_composer_alarms_without_typing
+test_composer_deferral_names_pending_text_or_unrecognized_shape
+test_normal_flush_clears_stale_wedge_marker
+test_oversized_digest_is_bounded_and_kept_durable
+test_digest_budget_counts_omitted_events
+test_inject_send_failure_logs_stage_stderr_and_bytes
+test_inject_enter_failure_logs_confirmation_stage
+test_bounded_digest_full_text_kept_after_typing
+test_below_max_defer_does_nothing
+test_max_defer_afk_inactive_does_not_flush_or_alarm
+test_wedge_alarm_library_mode_defaults_to_discard
+test_wake_helpers_replace_inherited_notifier_override
+test_wedge_alarm_discard_seam_fires_nothing
+test_wedge_alarm_direct_notifiers_honor_discard_seam
+test_wedge_alarm_osascript_channel_selected
+test_wedge_alarm_herdr_channel_selected
+test_wedge_alarm_rex_channel_selected
+test_wedge_alarm_auto_never_selects_rex
+test_wedge_alarm_command_channel_receives_summary
+test_wedge_alarm_command_failure_hides_configured_command
+test_wedge_alarm_unknown_channel_hides_configured_directive
+test_wedge_alarm_off_disables_active_alert_regardless_of_position
+test_wedge_alarm_auto_darwin_selects_osascript
+test_wedge_alarm_auto_non_darwin_has_no_os_channel
+test_wedge_alarm_config_file_multi_channel
+test_wedge_alarm_failing_channel_degrades_gracefully
+test_wedge_alarm_hung_channel_times_out_and_falls_through
+test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant
+test_wedge_alarm_hung_override_times_out_and_falls_through
+test_wedge_alarm_shutdown_stops_active_notifier_group
+test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
+test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
+test_fm_send_reports_delivered_unconfirmed_submit
+test_fm_send_exits_nonzero_on_initial_send_failure
+test_fm_send_exits_nonzero_on_unproven_submit
+test_discover_supervisor_backend_precedence
+test_discover_supervisor_target_herdr
+test_discover_supervisor_t3code_after_env_tmux_and_herdr
+test_pane_is_busy_t3code_trusts_native_verdict_without_capture
+test_pane_is_busy_herdr_native_busy_state
+test_primary_busy_guard_is_harness_scoped
+test_pane_is_busy_defaults_to_tmux_when_backend_omitted
+test_pane_input_pending_herdr_dispatch
+test_inject_msg_herdr_busy_guard_defers
+test_inject_msg_herdr_composer_guard_defers
+test_inject_msg_herdr_pane_gone_defers
+test_inject_msg_herdr_submits_through_backend_dispatch
+test_inject_msg_defers_on_dead_shell_unknown
+test_inject_msg_defers_on_unrecognized_composer_state
+test_busy_inbox_escalation_reaches_supervision stuck away
+test_busy_inbox_escalation_reaches_supervision stuck quiet
+test_busy_inbox_escalation_reaches_supervision write away
+test_busy_inbox_escalation_reaches_supervision write quiet
+test_busy_inbox_escalation_reaches_supervision reset away
+test_busy_inbox_escalation_reaches_supervision reset quiet
 test_dialog_name_survives_away_self_handle
 test_seen_terminal_dialog_stale_clears_like_a_plain_stale
 test_dialog_name_joins_unseen_status_escalation
 test_dialog_name_after_demand_deep_inspection_still_escalates
+
+test_t3_bounded_digest_snapshot_retention
+test_t3_digest_preserves_harness_carrier_on_retry

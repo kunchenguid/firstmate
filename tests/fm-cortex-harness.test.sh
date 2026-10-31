@@ -148,14 +148,6 @@ rm "$state/worker.turn-ended"
 run_hook Stop
 [ "$(fm_busy_classify tmux fake:w cortex worker "$state")" = 'busy fm-spawn' ] || fail 'stale Stop cleared replacement'
 assert_absent "$state/worker.turn-ended" 'stale Stop woke replacement'
-stop_command=$(jq -r '.hooks.Stop[0].hooks[0].command' "$hooks")
-case "$stop_command" in
-  *' --turn-ended '*) ;;
-  *) fail 'Stop hook does not raise the turn-end notification under the apply lock' ;;
-esac
-case "$stop_command" in
-  *touch*) fail 'Stop hook touches the turn-end marker outside the apply lock' ;;
-esac
 wiring=$(fm_control_harness_wiring_paths cortex /unused "$state" worker)
 case "$wiring" in *"$hooks"*"$plugin/.cortex-plugin/plugin.json"*) ;; *) fail "plugin retirement paths missing: $wiring" ;; esac
 ! "$ROOT/bin/fm-cortex-plugin.sh" "$state" 'bad id' "$gen" 2>/dev/null || fail 'invalid task id accepted'

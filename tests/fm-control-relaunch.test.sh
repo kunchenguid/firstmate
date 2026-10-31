@@ -73,6 +73,14 @@ case "${1:-}" in
       esac
     done
     payload=${1:-}
+    if [ "${FM_FAKE_INTERRUPT_SEND_FAIL:-0}" = 1 ] && { [ "$payload" = C-c ] || [ "$payload" = Escape ]; }; then
+      printf '%s\n' "$payload" >> "$D/keys"
+      exit 1
+    fi
+    if [ "${FM_FAKE_EXIT_SEND_FAIL:-0}" = 1 ] && [ "$literal:$payload" = 1:/exit ]; then
+      printf '/exit\n' >> "$D/literal"
+      exit 1
+    fi
     if [ "$literal" = 1 ]; then
       case "$payload" in
         ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
@@ -107,6 +115,7 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
+        *socket_path*) printf '%s/socket\n' "$D"; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
           if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
@@ -290,6 +299,14 @@ SH
 make_mv_failure_stub() {  # <case-dir>
   cat > "$1/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
+if [ -n "${FM_FAKE_PRESTOP_PHASE:-}" ]; then
+  for path in "$@"; do
+    if [ -f "$path" ] && grep -Fxq "phase=$FM_FAKE_PRESTOP_PHASE" "$path"; then
+      if [ "${FM_FAKE_PRESTOP_INTERRUPT:-0}" = 1 ]; then kill -TERM "$PPID"; exit 143; fi
+      exit 1
+    fi
+  done
+fi
 if [ -n "${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" ]; then
   for path in "$@"; do
     if [ -f "$path" ] && grep -Fqx 'phase=complete' "$path"; then
@@ -1792,12 +1809,14 @@ test_missing_instructions_refuse_before_stopping_anything() {
 }
 
 test_checkpoint_refusal_leaves_the_record_byte_identical() {
-  local dir before after
+  local dir before after out rc
   dir=$(new_case bytes rl12)
   add_ship_task "$dir" rl12 claude
   before=$(cat "$dir/home/state/rl12.meta")
   rm -rf "$dir/wt/.git"
-  run_control "$dir" rl12 relaunch --note "x" >/dev/null 2>&1
+  out=$(run_control "$dir" rl12 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a checkpoint refusal"
+  assert_contains "$out" "relaunch_failure=prelaunch" "checkpoint refusal did not classify the untouched agent"
   after=$(cat "$dir/home/state/rl12.meta")
   [ "$before" = "$after" ] || fail "a refused relaunch must leave the durable record byte-identical"
   pass "fm-control relaunch: a refusal before the agent is stopped leaves the durable record untouched"
@@ -1813,6 +1832,7 @@ test_checkpoint_refuses_uninspectable_head_and_status() {
   out=$(FM_REAL_GIT="$real_git" FM_FAKE_GIT_FAILURE=head \
     run_control "$dir" rl22 relaunch --note "x"); rc=$?
   expect_code 1 "$rc" "an uninspectable HEAD should refuse"
+  assert_contains "$out" "relaunch_failure=prelaunch" "HEAD refusal did not classify prelaunch failure"
   assert_contains "$out" "HEAD cannot be inspected" "the refusal should name the failed HEAD proof"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "HEAD inspection failure must not stop the agent"
 
@@ -1822,6 +1842,7 @@ test_checkpoint_refuses_uninspectable_head_and_status() {
   out=$(FM_REAL_GIT="$real_git" FM_FAKE_GIT_FAILURE=status \
     run_control "$dir" rl23 relaunch --note "x"); rc=$?
   expect_code 1 "$rc" "an uninspectable worktree status should refuse"
+  assert_contains "$out" "relaunch_failure=prelaunch" "status refusal did not classify prelaunch failure"
   assert_contains "$out" "status cannot be inspected" "the refusal should name the failed dirty-state proof"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "status inspection failure must not stop the agent"
   pass "fm-control relaunch: checkpoint inspection failures refuse before stopping"
@@ -1840,6 +1861,7 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
   out=$(run_control "$dir" rl13 relaunch --harness codex --note "carry this forward"); rc=$?
   expect_code 1 "$rc" "a failed launch should fail closed"$'\n'"$out"
   assert_contains "$out" "no agent is running" "the failure should say no agent is running"
+  assert_contains "$out" "relaunch_failure=launch" "the stopped replacement failure lacked its confirmation"
   assert_contains "$out" "$dir/wt" "the failure should say where the work is preserved"
   [ "$(cat "$dir/home/state/rl13.meta")" = "$before" ] \
     || fail "a failed launch must keep the prior durable record"
@@ -1893,6 +1915,7 @@ test_post_publication_launch_failure_keeps_the_new_record() {
   out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
     run_control "$dir" rl24 relaunch --harness codex --note "keep the published record"); rc=$?
   expect_code 1 "$rc" "a post-publication launch failure should fail closed"$'\n'"$out"
+  assert_not_contains "$out" "relaunch_failure=launch" "an uncertain published replacement claimed confirmed failure"
   [ "$(meta_field "$dir" rl24 harness)" = codex ] \
     || fail "a published replacement record must not be rewritten to the prior harness"
   [ -n "$(meta_field "$dir" rl24 control_relaunch_tx)" ] \
@@ -1914,6 +1937,8 @@ test_stop_transport_failure_reconciles_a_dead_agent() {
     || fail "the journal should retain the pre-stop phase on a partial stop"
   [ "$(journal_field "$dir" rl25 rollback)" = prior-record-kept-agent-dead ] \
     || fail "rollback should reconcile the observed dead agent"
+  assert_contains "$out" "relaunch_failure=launch" "a confirmed stopped agent was reported as a prelaunch refusal"
+  assert_not_contains "$out" "relaunch_failure=prelaunch" "a confirmed stopped agent kept its old-seat signal"
   assert_contains "$out" "no agent is running" "the failure should report the reconciled dead state"
   assert_grep "preserve this after stop" "$dir/home/data/rl25/brief.md" \
     "the progress note should survive once the old agent has stopped"
@@ -2183,7 +2208,6 @@ test_concurrent_relaunch_is_refused() {
   pass "fm-control relaunch: two control actions on one task serialize instead of interleaving"
 }
 
-# shellcheck disable=SC2031
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   local dir out rc lock holder i=0
   dir=$(new_case spawnlock rl26)
@@ -2191,6 +2215,7 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   printf 'zsh' > "$dir/fake/command"
   lock="$dir/home/state/.control-rl26.lock"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_try_acquire "$lock" || exit 1
     sleep 30
@@ -2211,13 +2236,13 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   pass "fm-spawn relaunch: direct entry participates in lifecycle serialization"
 }
 
-# shellcheck disable=SC2031
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
   local dir out rc lock holder i=0
   dir=$(new_case promotelock rl29)
   add_ship_task "$dir" rl29 claude
   lock="$dir/home/state/.control-rl29.lock"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_try_acquire "$lock" || exit 1
     sleep 30
@@ -3011,9 +3036,691 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
-test_relaunch_off_opencode_removes_tracked_wiring
-test_exit_and_relaunch_remove_the_dialog_file
-test_exit_removes_the_dialog_file_before_releasing_the_lock
+if [ "$#" -eq 0 ]; then
+  test_relaunch_off_opencode_removes_tracked_wiring
+  test_exit_and_relaunch_remove_the_dialog_file
+  test_exit_removes_the_dialog_file_before_releasing_the_lock
+fi
+# --- fleet seats across the relaunch transaction ----------------------------
+# bin/fm-fleet-seats.sh owns the transitions; these drive them through the
+# real control plane and launch owner.
+
+pool_case() {  # <case-dir> <id>: two one-seat pools and a pooled ship record
+  printf '{"pools":[{"name":"one","capacity":1,"models":["pool-model-a"]},{"name":"two","capacity":1,"models":["pool-model-b"]}]}\n' \
+    > "$1/home/config/fleet-seats"
+  perl -pi -e 's/^model=.*/model=pool-model-a/' "$1/home/state/$2.meta"
+  printf 'spawn_gen=g-old\n' >> "$1/home/state/$2.meta"
+}
+
+case_seats() {  # <case-dir> <args...>
+  local dir=$1; shift
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" "$ROOT/bin/fm-fleet-seats.sh" "$@"
+}
+
+probe_seat() {  # <case-dir> <model>: another holder's reservation, given back
+  local out rc gen
+  gen="probe$(date +%s)$RANDOM$RANDOM"
+  out=$(case_seats "$1" reserve probe --generation "$gen" --harness pi --model "$2" --holder-pid "$$" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || case_seats "$1" release probe --generation "$gen" --reason prelaunch >/dev/null 2>&1
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
+test_pooled_relaunch_reserves_its_destination_before_stopping() {
+  local dir out rc
+  dir=$(new_case pooldest rl50)
+  mkdir -p "$dir/home/config"
+  add_ship_task "$dir" rl50 claude
+  pool_case "$dir" rl50
+  printf 'kind=ship\nmodel=pool-model-b\nharness=pi\n' > "$dir/home/state/busy.meta"
+  out=$(run_control "$dir" rl50 relaunch --model pool-model-b --note "move pools"); rc=$?
+  expect_code 1 "$rc" "a cross-pool relaunch into a full pool"$'\n'"$out"
+  assert_contains "$out" "pool two is full" "the destination seat was not checked first"
+  assert_contains "$out" "relaunch_failure=prelaunch" "the refusal did not classify the untouched agent"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a full destination pool stopped the agent"
+  assert_no_grep "/exit" "$dir/fake/literal" "a full destination pool sent the exit command"
+  [ "$(meta_field "$dir" rl50 model)" = pool-model-a ] || fail "a refused relaunch changed the record"
+  pass "fm-control relaunch: a full destination pool refuses before the old agent is touched"
+}
+
+test_same_pool_relaunch_keeps_one_seat_through_the_handoff() {
+  local dir out rc gen
+  dir=$(new_case poolsame rl51)
+  mkdir -p "$dir/home/config"
+  add_ship_task "$dir" rl51 claude
+  pool_case "$dir" rl51
+  out=$(run_control "$dir" rl51 relaunch --model pool-model-a --note "same pool"); rc=$?
+  expect_code 0 "$rc" "a same-pool relaunch at full capacity"$'\n'"$out"
+  gen=$(meta_field "$dir" rl51 spawn_gen)
+  assert_equals "$dir/fake/socket" "$(case_seats "$dir" show rl51 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .route.socket_path')" "replacement did not record the fixture's owning socket"
+  [ "$(journal_field "$dir" rl51 seat_generation)" = "$gen" ] \
+    || fail "the journal did not record the replacement's seat generation"
+  [ "$(journal_field "$dir" rl51 seat_previous_generation)" = g-old ] \
+    || fail "the journal did not record the replaced generation"
+  [ "$(case_seats "$dir" show rl51 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .launch_phase')" = started ] \
+    || fail "the replacement's seat was not confirmed with its endpoint"
+  out=$(probe_seat "$dir" pool-model-a); rc=$?
+  expect_code 4 "$rc" "another holder after the same-pool relaunch: $out"
+  pass "fm-control relaunch: a same-pool replacement keeps exactly one counted seat"
+}
+
+test_relaunch_rollback_releases_only_an_undelivered_candidate() {
+  local dir out rc real_mv meta gen
+  dir=$(new_case poolrollback rl52)
+  mkdir -p "$dir/home/config"
+  add_ship_task "$dir" rl52 claude
+  pool_case "$dir" rl52
+  meta="$dir/home/state/rl52.meta"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+    run_control "$dir" rl52 relaunch --model pool-model-a --note "rollback"); rc=$?
+  expect_code 1 "$rc" "a failed publication before delivery"$'\n'"$out"
+  gen=$(journal_field "$dir" rl52 seat_generation)
+  [ "$(case_seats "$dir" show rl52 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" = released ] \
+    || fail "a candidate that never reached delivery kept its seat"
+  out=$(probe_seat "$dir" pool-model-a); rc=$?
+  expect_code 4 "$rc" "the stopped task's record still counts until recovery or cleanup: $out"
+
+  dir=$(new_case pooldelivered rl53)
+  mkdir -p "$dir/home/config"
+  add_ship_task "$dir" rl53 claude
+  pool_case "$dir" rl53
+  out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
+    run_control "$dir" rl53 relaunch --model pool-model-a --note "delivered"); rc=$?
+  expect_code 1 "$rc" "a failure after launch delivery"$'\n'"$out"
+  gen=$(journal_field "$dir" rl53 seat_generation)
+  [ "$(case_seats "$dir" show rl53 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" = reserved ] \
+    || fail "a delivered candidate lost its seat on rollback"
+  pass "fm-control relaunch: rollback releases an undelivered candidate and keeps a delivered one counted"
+}
+
+sm_case() {  # <case-dir> <id>: a local secondmate record on a pooled model
+  local dir=$1 id=$2 home="$1/home"
+  mkdir -p "$home/config" "$home/data/$id"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '{"pools":[{"name":"one","capacity":1,"models":["pool-model-a"]}]}\n' > "$home/config/fleet-seats"
+  printf '# secondmate brief\n' > "$home/data/$id/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf '%s\n' "$id" > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=pool-model-a"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+    echo "spawn_gen=g-sm-old"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+}
+
+test_secondmate_relaunch_confirms_its_seat_inside_one_episode() {
+  local dir out rc gen blocker
+  dir=$(new_case smseat sm50)
+  sm_case "$dir" sm50
+  bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" sm50 0 && : > "$3" && exec sleep 600' \
+    _ "$ROOT" "$dir/home/state" "$dir/episode-held" &
+  blocker=$!
+  for _ in $(seq 1 50); do [ -e "$dir/episode-held" ] && break; sleep 0.1; done
+  out=$(run_control "$dir" sm50 relaunch --model pool-model-a); rc=$?
+  kill "$blocker"
+  wait "$blocker" 2>/dev/null
+  expect_code 1 "$rc" "a relaunch during another lifecycle episode"$'\n'"$out"
+  assert_contains "$out" "another lifecycle episode" "the episode refusal was not named"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a relaunch during another episode stopped the agent"
+
+  out=$(run_control "$dir" sm50 relaunch --model pool-model-a --expect-generation g-other); rc=$?
+  expect_code 6 "$rc" "a relaunch whose expected generation is stale"$'\n'"$out"
+  assert_contains "$out" "generation-mismatch" "the stale generation was not named"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a stale expected generation stopped the agent"
+
+  out=$(run_control "$dir" sm50 relaunch --model pool-model-a --expect-generation g-sm-old); rc=$?
+  expect_code 0 "$rc" "a pooled secondmate relaunch"$'\n'"$out"
+  gen=$(meta_field "$dir" sm50 spawn_gen)
+  [ "$(case_seats "$dir" show sm50 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" = confirmed ] \
+    || fail "the started secondmate's seat was not confirmed: $(case_seats "$dir" show sm50)"
+  out=$(probe_seat "$dir" pool-model-a); rc=$?
+  expect_code 4 "$rc" "another holder beside the relaunched supervisor: $out"
+  pass "fm-control relaunch: a secondmate relaunch runs in one episode, honors its expected generation, and confirms its seat"
+}
+
+test_host_relaunch_records_terminal_predecessor() {
+  local dir out rc
+  dir=$(new_case host-receipt sm62)
+  sm_case "$dir" sm62
+  for gen in g-sm-old s.test.new; do
+    printf 'schema=fm-remote-seat-receipt.v1\noperation=%s\nrequested_generation=%s\nphase=started\n' "$gen" "$gen" > "$dir/home/state/sm62.seat-operation.$gen"
+  done
+  out=$(FM_REMOTE_SEAT_OPERATION=s.test.new FM_SPAWN_SEAT_GENERATION=s.test.new run_control "$dir" sm62 relaunch --model pool-model-a); rc=$?
+  expect_code 0 "$rc" "host relaunch with retained predecessor receipt: $out"
+  assert_equals dead-after-start "$(sed -n 's/^phase=//p' "$dir/home/state/sm62.seat-operation.g-sm-old")" "the host forgot its predecessor's terminal outcome"
+  assert_equals s.test.new "$(meta_field "$dir" sm62 spawn_gen)" "host relaunch did not publish the replacement"
+  assert_equals started "$(sed -n 's/^phase=//p' "$dir/home/state/sm62.seat-operation.s.test.new")" "fractional host startup wait did not confirm its receipt"
+  pass "host relaunch persists the predecessor's terminal outcome before endpoint reuse"
+}
+
+test_unpooled_supervisor_spawn_keeps_prior_success_semantics() {
+  local dir out rc
+  dir=$(new_case unpooled-supervisor sm60)
+  sm_case "$dir" sm60
+  printf '{"pools":[{"name":"unrelated","capacity":1,"models":["another-model"]}]}\n' > "$dir/home/config/fleet-seats"
+  printf 'bash' > "$dir/fake/command"
+  printf 'bash' > "$dir/fake/becomes"
+  out=$(FM_CONTROL_LAUNCH_WAIT=0 run_spawn "$dir" sm60 --relaunch --harness claude --model pool-model-a); rc=$?
+  expect_code 0 "$rc" "unpooled supervisor spawn with a shell-only endpoint: $out"
+  [ "$(meta_field "$dir" sm60 spawn_gen)" != g-sm-old ] || fail "unpooled launch did not publish its generation"
+  pass "unpooled local supervisors preserve ordinary spawn success semantics"
+}
+
+replacement_launch_delivered() {  # <case-dir>: either supported launch carrier
+  grep -Eq 'encode launch-brief|Firstmate operational input waiting: read' "$1/fake/literal"
+}
+
+test_unconfirmed_predecessor_prevents_control_launch() {
+  local dir out rc
+  dir=$(new_case launch-carrier-control sm69)
+  sm_case "$dir" sm69
+  out=$(run_control "$dir" sm69 relaunch --model pool-model-a); rc=$?
+  expect_code 0 "$rc" "a successful Claude relaunch must calibrate the delivery detector: $out"
+  replacement_launch_delivered "$dir" || fail "the delivery detector missed a successful Claude launch"
+  assert_equals claude "$(cat "$dir/fake/command")" "the calibration did not start Claude"
+
+  dir=$(new_case unconfirmed-control sm61)
+  sm_case "$dir" sm61
+  printf 'bash' > "$dir/fake/command"
+  # shellcheck disable=SC2016 # Variables expand in the child shell.
+  env PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" FM_HOME="$dir/home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+    "$SEATS" reserve sm61 --generation g-sm-old --kind secondmate --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+    route="$FM_HOME/state/submitted-route"
+    (umask 077 && printf "{\"placement\":\"local\",\"backend\":\"tmux\",\"target\":\"fmses:fm-sm61\",\"home\":null,\"host\":null,\"remote_root\":null,\"spawn_gen\":\"g-sm-old\"}\n" > "$route")
+    "$SEATS" dispatch sm61 --generation g-sm-old --route-file "$route" >/dev/null
+  ' || fail "submitting the predecessor"
+  out=$(run_control "$dir" sm61 relaunch --model pool-model-a); rc=$?
+  expect_code 1 "$rc" "a manual relaunch beside an executable buffered predecessor: $out"
+  assert_contains "$out" "no replacement was launched" "control did not stop at the predecessor-release refusal"
+  assert_equals reserved "$(case_seats "$dir" show sm61 | jq -r '.incarnations[] | select(.generation=="g-sm-old") | .lifecycle')" "control released the buffered predecessor"
+  if replacement_launch_delivered "$dir"; then
+    fail "control delivered a replacement over the buffered predecessor"
+  fi
+  assert_equals bash "$(cat "$dir/fake/command")" "control started a replacement over the buffered predecessor"
+  out=$(run_spawn "$dir" sm61 --relaunch --harness claude --model pool-model-a); rc=$?
+  expect_code 1 "$rc" "standalone relaunch beside an executable buffered predecessor: $out"
+  assert_contains "$out" "no replacement was launched" "standalone spawn ignored predecessor uncertainty"
+  assert_equals reserved "$(case_seats "$dir" show sm61 | jq -r '.incarnations[] | select(.generation=="g-sm-old") | .lifecycle')" "standalone spawn freed the buffered predecessor"
+  if replacement_launch_delivered "$dir"; then
+    fail "standalone spawn delivered over the buffered predecessor"
+  fi
+  assert_equals bash "$(cat "$dir/fake/command")" "standalone spawn started a replacement over the buffered predecessor"
+  pass "manual and standalone relaunches retain an executable buffered predecessor"
+}
+
+test_observed_predecessors_and_opt_out_successors() {
+  local dir kind out rc gen old home route
+  for kind in ship scout secondmate optout; do
+    dir=$(new_case "observed-$kind" rl63)
+    mkdir -p "$dir/home/config"
+    if [ "$kind" = secondmate ]; then
+      sm_case "$dir" rl63
+      old=g-sm-old
+      printf '{"pools":[{"name":"unrelated","capacity":1,"models":["another-model"]}]}\n' > "$dir/home/config/fleet-seats"
+    else
+      add_ship_task "$dir" rl63 claude
+      pool_case "$dir" rl63
+      old=g-old
+      [ "$kind" != scout ] || perl -pi -e 's/^kind=ship/kind=scout/' "$dir/home/state/rl63.meta"
+    fi
+    home="$dir/home"
+    route="$home/state/predecessor-route"
+    # shellcheck disable=SC2016
+    env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+      PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" \
+      FM_HOME="$home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+        "$SEATS" reserve rl63 --generation "$1" --kind "$2" --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+        (umask 077 && printf "{\"placement\":\"local\",\"backend\":\"tmux\",\"target\":\"fmses:fm-rl63\",\"home\":null,\"host\":null,\"remote_root\":null,\"spawn_gen\":\"%s\"}\n" "$1" > "$3")
+        "$SEATS" dispatch rl63 --generation "$1" --route-file "$3" >/dev/null
+      ' _ "$old" "${kind/optout/ship}" "$route" || fail "could not dispatch the predecessor for $kind"
+    assert_equals "$dir/fake/socket" "$(case_seats "$dir" show rl63 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .route.socket_path')" "$kind predecessor dispatch used a socket outside the fixture"
+    assert_equals reserved "$(case_seats "$dir" show rl63 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "the fixture predecessor was already confirmed"
+    if [ "$kind" = optout ]; then
+      cp "$home/config/fleet-seats" "$dir/policy"
+      rm "$home/config/fleet-seats"
+    fi
+    out=$(run_control "$dir" rl63 exit); rc=$?
+    expect_code 0 "$rc" "exit observing $kind predecessor: $out"
+    assert_equals true "$(case_seats "$dir" show rl63 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .startup_confirmed')" "exit lost the observed startup for $kind"
+    out=$(run_control "$dir" rl63 relaunch --model pool-model-a --note "observed predecessor"); rc=$?
+    expect_code 0 "$rc" "observed $kind predecessor: $out"
+    gen=$(meta_field "$dir" rl63 spawn_gen)
+    assert_equals released "$(case_seats "$dir" show rl63 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "the observed predecessor stayed counted"
+    assert_equals confirmed "$(case_seats "$dir" show rl63 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" "the successor did not confirm"
+    [ "$kind" != optout ] || cp "$dir/policy" "$home/config/fleet-seats"
+    out=$(run_control "$dir" rl63 relaunch --model pool-model-a --note "ordinary next relaunch"); rc=$?
+    expect_code 0 "$rc" "next $kind relaunch: $out"
+  done
+  pass "observed worker and unpooled supervisor predecessors confirm before stop, including policy opt-out handoffs"
+}
+
+test_standalone_relaunch_completes_the_predecessor_handoff() {
+  local dir kind old gen model out rc route
+  for kind in ship scout secondmate; do
+    dir=$(new_case "standalone-$kind" rl64)
+    if [ "$kind" = secondmate ]; then
+      sm_case "$dir" rl64
+      old=g-sm-old
+    else
+      add_ship_task "$dir" rl64 claude
+      old=g-old
+      [ "$kind" != scout ] || perl -pi -e 's/^kind=ship/kind=scout/' "$dir/home/state/rl64.meta"
+    fi
+    mkdir -p "$dir/home/config"
+    pool_case "$dir" rl64 || fail "standalone pool fixture"
+    perl -pi -e "s/^spawn_gen=.*/spawn_gen=$old/" "$dir/home/state/rl64.meta"
+    route="$dir/home/state/old-route"
+    # shellcheck disable=SC2016 # Variables expand in the child shell.
+    env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+      PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" FM_HOME="$dir/home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+      "$SEATS" reserve rl64 --generation "$1" --kind "$2" --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+      (umask 077 && printf "{\"placement\":\"local\",\"backend\":\"tmux\",\"target\":\"fmses:fm-rl64\",\"spawn_gen\":\"%s\"}\n" "$1" > "$3")
+      "$SEATS" dispatch rl64 --generation "$1" --route-file "$3" >/dev/null
+    ' _ "$old" "$kind" "$route" || fail "could not dispatch the standalone predecessor"
+    for model in pool-model-b pool-model-a; do
+      out=$(run_control "$dir" rl64 exit); rc=$?
+      expect_code 0 "$rc" "stop before standalone $kind relaunch: $out"
+      out=$(FM_CONTROL_LAUNCH_WAIT=0.1 run_spawn "$dir" rl64 --relaunch --harness claude --model "$model"); rc=$?
+      expect_code 0 "$rc" "standalone $kind handoff: $out"
+      gen=$(meta_field "$dir" rl64 spawn_gen)
+      assert_equals released "$(case_seats "$dir" show rl64 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "standalone spawn stranded its predecessor"
+      assert_equals 1 "$(case_seats "$dir" show rl64 | jq '[.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")] | length')" "standalone spawn left multiple generations counted"
+      if [ "$model" = pool-model-b ]; then
+        out=$(probe_seat "$dir" pool-model-a); rc=$?
+        expect_code 0 "$rc" "the old pool stayed occupied: $out"
+      fi
+      out=$(probe_seat "$dir" "$model"); rc=$?
+      expect_code 4 "$rc" "standalone replacement lost its seat: $out"
+      if [ "$kind" = secondmate ]; then
+        assert_equals true "$(case_seats "$dir" show rl64 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .startup_confirmed')" "fractional startup wait did not confirm the supervisor"
+      fi
+      old=$gen
+    done
+  done
+  pass "standalone worker and supervisor relaunches release exact predecessors before replacement delivery"
+}
+
+test_fractional_supervisor_startup_timeout_retains_the_launch() {
+  local dir out rc gen
+  dir=$(new_case fractional-timeout sm65)
+  sm_case "$dir" sm65
+  printf 'bash' > "$dir/fake/command"
+  printf 'bash' > "$dir/fake/becomes"
+  out=$(FM_CONTROL_LAUNCH_WAIT=0.05 FM_CONTROL_POLL=0.01 run_spawn "$dir" sm65 --relaunch --harness claude --model pool-model-a); rc=$?
+  expect_code 1 "$rc" "fractional startup timeout: $out"
+  assert_contains "$out" "startup was not confirmed" "the fractional wait failed outside startup polling"
+  gen=$(meta_field "$dir" sm65 spawn_gen)
+  assert_equals true "$(case_seats "$dir" show sm65 | jq --arg g "$gen" 'any(.incarnations[]; .generation == $g and .lifecycle == "reserved" and .startup_confirmed == false and .launch_phase == "dispatching" and .route.spawn_gen == $g)')" "timeout lost its dispatched generation or route"
+  out=$(probe_seat "$dir" pool-model-a); rc=$?
+  expect_code 4 "$rc" "a fractional timeout freed its submitted seat: $out"
+  pass "fractional supervisor startup timeouts retain the exact submitted generation and route"
+}
+
+test_legacy_predecessors_remain_counted_without_socket_identity() {
+  local dir kind old st name out rc
+  for kind in ship scout secondmate; do
+    dir=$(new_case "legacy-$kind" rl66)
+    mkdir -p "$dir/home/config"
+    if [ "$kind" = secondmate ]; then
+      sm_case "$dir" rl66
+      old=g-sm-old
+    else
+      add_ship_task "$dir" rl66 claude
+      pool_case "$dir" rl66
+      old=g-old
+      [ "$kind" != scout ] || perl -pi -e 's/^kind=ship/kind=scout/' "$dir/home/state/rl66.meta"
+    fi
+    st=$(cd "$dir/home/state" && pwd -P)
+    name=$(printf '%s\t%s' "$st" rl66 | cksum | tr -s ' ' '-' | cut -d- -f1-2)
+    mkdir -p "$st/fleet-seats/legacy"
+    printf 'state=%s\ntask=rl66\nmodel=pool-model-a\npid=99999999\npid_identity=\n' "$st" > "$st/fleet-seats/legacy/$name.seat"
+    cp "$st/rl66.meta" "$dir/before.meta"
+    out=$(run_control "$dir" rl66 relaunch --harness claude --model pool-model-a --note "resume imported predecessor"); rc=$?
+    expect_code 1 "$rc" "legacy $kind predecessor without socket identity: $out"
+    assert_contains "$out" "could not record rl66's exact predecessor startup" "legacy refusal did not identify unverified startup"
+    cmp -s "$st/rl66.meta" "$dir/before.meta" || fail "legacy refusal changed the endpoint record"
+    assert_equals claude "$(cat "$dir/fake/command")" "legacy refusal stopped the agent"
+    assert_no_grep '/exit' "$dir/fake/literal" "legacy refusal sent the exit command"
+    assert_equals reserved "$(case_seats "$dir" show rl66 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "legacy predecessor lost its counted seat"
+    assert_equals false "$(case_seats "$dir" show rl66 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .startup_confirmed')" "legacy predecessor acquired unsupported startup evidence"
+    out=$(probe_seat "$dir" pool-model-a); rc=$?
+    expect_code 4 "$rc" "legacy refusal returned capacity: $out"
+    assert_absent "$st/fleet-seats/legacy/$name.seat" "legacy record was not imported once"
+  done
+  pass "legacy workers and supervisors remain counted without recorded socket ownership"
+}
+
+test_existing_host_generations_recover_through_observing_operations() {
+  local dir home st verb out rc disp receipt generation
+  . "$ROOT/tests/remote-herdr-fixture.sh"
+  for verb in launch relaunch; do
+    generation="replacement.$RANDOM.$RANDOM"
+    dir=$(new_case "host-existing-$verb" sm67)
+    sm_case "$dir" sm67
+    home="$dir/smhome"
+    st="$home/state/parent-route"
+    mkdir -p "$st" "$home/config" "$dir/user-home"
+    mkdir -p "$home/data/.parent-route/sm67"
+    cp "$dir/home/data/sm67/brief.md" "$home/data/.parent-route/sm67/brief.md"
+    cp "$dir/home/config/fleet-seats" "$home/config/fleet-seats"
+    install_remote_herdr_fixture "$dir/herdr" "$dir/herdr-state" "$dir/herdr-log" "$dir/herdr-fail" "$TMP_ROOT/hr.sock"
+    jq -n --arg h "$home" '{next:3,workspaces:[{workspace_id:"w1",label:"2ndmate-sm67",cwd:$h}],tabs:[{tab_id:"w1:t2",label:"1",workspace_id:"w1",pane_id:"w1:p2",cwd:$h}],typed:{"w1:p2":true},working:{}}' > "$dir/herdr-state"
+    fm_write_meta "$st/sm67.meta" kind=secondmate mode=secondmate harness=claude model=pool-model-a effort=medium \
+      backend=herdr window=fm-remote:w1:p2 endpoint_task_id=sm67 herdr_session=fm-remote \
+      herdr_workspace_id=w1 herdr_tab_id=w1:t2 herdr_pane_id=w1:p2 \
+      "worktree=$home" "project=$home" "home=$home" spawn_gen=actual.old
+    out=$(run_existing_host "$dir" launch sm67 claude pool-model-a medium herdr --operation observing.old); rc=$?
+    expect_code 0 "$rc" "host import of the running generation: $out"
+    disp=$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | tail -1)
+    assert_present "$dir/host-root/state/remote-secondmate-history/sm67.operation.observing.old" "host did not retain operation history in its disposable root"
+    assert_equals 'existing actual.old' "$(printf '%s\n' "$disp" | jq -r '.disposition + " " + .actual_generation')" "host did not persist its existing-generation binding"
+    assert_absent "$st/sm67.seat-operation.actual.old" "import invented a generation-named receipt"
+    receipt="$st/sm67.seat-operation.observing.old"
+    cp "$receipt" "$dir/observing-receipt"
+    jq '.typed={} | .working={}' "$dir/herdr-state" > "$dir/herdr-dead"
+    mv "$dir/herdr-dead" "$dir/herdr-state"
+    rm "$receipt"
+    printf 'schema=fm-remote-seat-receipt.v1\noperation=foreign\nrequested_generation=wrong\nactual_generation=actual.old\nphase=started\n' > "$st/sm67.seat-operation.foreign"
+    out=$(run_existing_host "$dir" launch sm67 claude pool-model-a medium herdr --operation refused.missing); rc=$?
+    expect_code 1 "$rc" "missing or foreign predecessor evidence: $out"
+    assert_contains "$out" 'no confirmed startup or proven endpoint destruction' "host accepted a foreign generation binding"
+    assert_equals actual.old "$(sed -n 's/^spawn_gen=//p' "$st/sm67.meta")" "a refused recovery changed the predecessor"
+    cp "$dir/observing-receipt" "$receipt"
+    if [ "$verb" = launch ]; then
+      out=$(run_existing_host "$dir" disposition sm67 --operation observing.old)
+      disp=$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | tail -1)
+      assert_equals 'dead-after-start actual.old' "$(printf '%s\n' "$disp" | jq -r '.disposition + " " + .actual_generation')" "host could not reconcile its imported generation before recovery"
+      out=$(run_existing_host "$dir" launch sm67 claude pool-model-a medium herdr --operation "$generation" --previous actual.old); rc=$?
+    else
+      out=$(run_existing_host "$dir" relaunch sm67 claude pool-model-a medium --operation "$generation" --previous actual.old); rc=$?
+    fi
+    expect_code 0 "$rc" "host $verb after an imported generation died: $out"
+    assert_equals "$generation" "$(sed -n 's/^spawn_gen=//p' "$st/sm67.meta")" "host recovery did not publish the replacement"
+    assert_equals dead-after-start "$(sed -n 's/^phase=//p' "$receipt")" "host recovery left the observing receipt nonterminal"
+    assert_equals observing.old "$(sed -n 's/^requested_generation=//p' "$receipt")" "terminalization rewrote the request generation"
+    assert_equals actual.old "$(sed -n 's/^actual_generation=//p' "$receipt")" "terminalization lost the actual generation"
+    out=$(run_existing_host "$dir" disposition sm67 --operation observing.old)
+    disp=$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | tail -1)
+    assert_equals 'dead-after-start actual.old' "$(printf '%s\n' "$disp" | jq -r '.disposition + " " + .actual_generation')" "endpoint reuse revived the observing operation"
+    disp=$(run_existing_host "$dir" disposition sm67 --operation "$generation" | sed -n 's/^seat_disposition=//p' | tail -1)
+    assert_equals started "$(printf '%s\n' "$disp" | jq -r .disposition)" "the ordinary replacement did not confirm startup"
+    # Lose or replace the delivered operation's receipt, then retry the exact
+    # relaunch token against a real fixture endpoint. Neither case may stop it.
+    cp "$st/sm67.meta" "$dir/before-damaged-retry.meta"
+    cp "$dir/herdr-log" "$dir/before-damaged-retry.log"
+    receipt="$st/sm67.seat-operation.$generation"
+    if [ "$verb" = launch ]; then
+      rm "$receipt"
+    else
+      perl -pi -e 's/^operation=.*/operation=foreign.operation/' "$receipt"
+      cp "$receipt" "$dir/foreign-receipt"
+    fi
+    out=$(run_existing_host "$dir" relaunch sm67 claude pool-model-a medium --operation "$generation" --previous actual.old); rc=$?
+    expect_code 1 "$rc" "retrying a delivered token after receipt damage: $out"
+    cmp -s "$dir/before-damaged-retry.meta" "$st/sm67.meta" || fail "a damaged receipt retry changed its live generation"
+    cmp -s "$dir/before-damaged-retry.log" "$dir/herdr-log" || fail "a damaged receipt retry touched its live endpoint"
+    if [ "$verb" = launch ]; then
+      assert_absent "$receipt" "a delivered token recreated its lost receipt"
+    else
+      cmp -s "$receipt" "$dir/foreign-receipt" || fail "a delivered token overwrote its foreign receipt"
+    fi
+    disp=$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | tail -1)
+    assert_equals unknown "$(printf '%s\n' "$disp" | jq -r .disposition)" "receipt damage was reported as a settled outcome"
+  done
+  pass "host launch and relaunch recover imported generations and refuse damaged-receipt retries without endpoint effects"
+}
+
+run_existing_host() {
+  local dir=$1 operation='' previous=- arg prior='' record='' link
+  shift
+  mkdir -p "$dir/host-root"
+  for link in bin .agents skills AGENTS.md; do
+    [ -e "$dir/host-root/$link" ] || ln -s "$ROOT/$link" "$dir/host-root/$link"
+  done
+  case "$1" in
+    launch|relaunch)
+      for arg in "$@"; do
+        case "$prior" in --operation) operation=$arg ;; --previous) previous=$arg ;; esac
+        prior=$arg
+      done
+      record=$(jq -cn --arg t "$2" --arg g "$operation" --arg p "$previous" \
+        --arg m "$4" --arg home "$dir/smhome" --arg state "$dir/home/state" '
+        {schema:"fm-fleet-seat-holder.v2", state_dir:$state, task:$t, revision:2,
+         incarnations:[{generation:$g, previous_generation:(if $p == "-" then null else $p end),
+           kind:"secondmate", model:$m, lifecycle:"reserved", launch_phase:"dispatching",
+           route:{placement:"remote", operation:$g, home:$home}}]}')
+      ;;
+  esac
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    PATH="$dir/herdr/bin:$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir/host-root" FM_HOME="$dir/smhome" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 \
+    FM_CONTROL_LAUNCH_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_POLL=0.01 \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" <<< "$record" 2>&1
+}
+
+test_host_prelaunch_refusal_releases_candidate_for_corrected_launch() {
+  local dir out rc receipt
+  . "$ROOT/tests/remote-herdr-fixture.sh"
+  dir=$(new_case host-prelaunch-retry sm69)
+  sm_case "$dir" sm69
+  mkdir -p "$dir/smhome/data/.parent-route/sm69" "$dir/smhome/config"
+  cp "$dir/home/data/sm69/brief.md" "$dir/smhome/data/.parent-route/sm69/brief.md"
+  cp "$dir/home/config/fleet-seats" "$dir/smhome/config/fleet-seats"
+  install_remote_herdr_fixture "$dir/herdr" "$dir/herdr-state" "$dir/herdr-log" "$dir/herdr-fail" "$TMP_ROOT/prelaunch-retry.sock"
+  out=$(run_existing_host "$dir" launch sm69 invalid-harness pool-model-a medium herdr --operation rejected.op); rc=$?
+  expect_code 1 "$rc" "unverified host harness refusal: $out"
+  receipt="$dir/smhome/state/parent-route/sm69.seat-operation.rejected.op"
+  assert_equals prelaunch "$(sed -n 's/^phase=//p' "$receipt")" "definitive harness refusal was not persisted as prelaunch"
+  out=$(run_existing_host "$dir" disposition sm69 --operation rejected.op)
+  assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/.*\"disposition\":\"\([^\"]*\)\".*/\1/p' | tail -1)" \
+    "later disposition did not preserve the prelaunch refusal"
+  printf '%s\n' invalid > "$dir/smhome/config/codex-permission-mode"
+  out=$(run_existing_host "$dir" launch sm69 claude pool-model-a medium herdr --operation rejected.config); rc=$?
+  expect_code 1 "$rc" "host spawn configuration refusal: $out"
+  assert_equals prelaunch "$(sed -n 's/^phase=//p' "$dir/smhome/state/parent-route/sm69.seat-operation.rejected.config")" "spawn preflight refusal was not persisted"
+  out=$(run_existing_host "$dir" disposition sm69 --operation rejected.config)
+  assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "spawn refusal replay became unknown"
+  [ ! -e "$dir/smhome/state/parent-route/sm69.meta" ] || fail "refused spawn published endpoint metadata"
+  printf '%s\n' bypass > "$dir/smhome/config/codex-permission-mode"
+  cat > "$dir/fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  --help) printf '%s\n' 'Cursor Agent CLI' ;;
+  --list-models) printf '%s\n' 'different-model' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/cursor-agent"
+  out=$(run_existing_host "$dir" launch sm69 cursor pool-model-a medium herdr --operation rejected.cursor); rc=$?
+  expect_code 1 "$rc" "later host spawn model refusal: $out"
+  assert_contains "$out" "Cursor model 'pool-model-a' is not available" "fixture did not reach later spawn validation"
+  assert_equals prelaunch "$(sed -n 's/^phase=//p' "$dir/smhome/state/parent-route/sm69.seat-operation.rejected.cursor")" "later spawn refusal was not persisted"
+  out=$(run_existing_host "$dir" disposition sm69 --operation rejected.cursor)
+  assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "later spawn refusal replay became unknown"
+  [ ! -e "$dir/smhome/state/parent-route/sm69.meta" ] || fail "later refused spawn published endpoint metadata"
+  out=$(run_existing_host "$dir" launch sm69 claude pool-model-a medium herdr --operation corrected.op); rc=$?
+  expect_code 0 "$rc" "corrected host launch after prelaunch refusal: $out"
+  assert_equals corrected.op "$(sed -n 's/^spawn_gen=//p' "$dir/smhome/state/parent-route/sm69.meta")" \
+    "corrected launch did not publish its generation"
+  out=$(run_existing_host "$dir" relaunch sm69 claude pool-model-a invalid-effort --operation rejected.effort --previous corrected.op); rc=$?
+  expect_code 1 "$rc" "host effort refusal: $out"
+  assert_equals prelaunch "$(sed -n 's/^phase=//p' "$dir/smhome/state/parent-route/sm69.seat-operation.rejected.effort")" "effort refusal was not persisted"
+  jq '.typed={} | .working={}' "$dir/herdr-state" > "$dir/herdr-dead"
+  mv "$dir/herdr-dead" "$dir/herdr-state"
+  out=$(run_existing_host "$dir" relaunch sm69 claude pool-model-a medium --operation corrected.relaunch --previous corrected.op); rc=$?
+  expect_code 0 "$rc" "corrected host relaunch after effort refusal: $out"
+  assert_equals corrected.relaunch "$(sed -n 's/^spawn_gen=//p' "$dir/smhome/state/parent-route/sm69.meta")" "corrected relaunch did not publish its generation"
+  jq '.typed={} | .working={}' "$dir/herdr-state" > "$dir/herdr-dead"
+  mv "$dir/herdr-dead" "$dir/herdr-state"
+  printf '%s\n' invalid > "$dir/smhome/config/codex-permission-mode"
+  out=$(run_existing_host "$dir" launch sm69 claude pool-model-a medium herdr --operation rejected.recovery --previous corrected.relaunch); rc=$?
+  expect_code 1 "$rc" "dead predecessor recovery spawn refusal: $out"
+  receipt="$dir/smhome/state/parent-route/sm69.seat-operation.rejected.recovery"
+  assert_equals prelaunch "$(sed -n 's/^phase=//p' "$receipt")" "recovery refusal was not persisted"
+  assert_equals true "$(sed -n 's/^old_destroyed=//p' "$receipt")" "recovery lost predecessor destruction evidence"
+  out=$(run_existing_host "$dir" disposition sm69 --operation rejected.recovery)
+  assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "recovery refusal replay became unknown"
+  assert_equals true "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .old_destroyed)" "replay lost predecessor destruction evidence"
+  printf '%s\n' bypass > "$dir/smhome/config/codex-permission-mode"
+  out=$(run_existing_host "$dir" launch sm69 claude pool-model-a medium herdr --operation corrected.recovery --previous corrected.relaunch); rc=$?
+  expect_code 0 "$rc" "corrected recovery launch after prelaunch refusal: $out"
+  assert_equals corrected.recovery "$(sed -n 's/^spawn_gen=//p' "$dir/smhome/state/parent-route/sm69.meta")" "corrected recovery did not publish its generation"
+  pass "a definitive host-side prelaunch refusal releases its candidate and accepts a corrected launch"
+}
+
+test_host_prestop_journal_refusal_persists_prelaunch() {
+  local phase mode dir out rc receipt expected real_mv effect
+  . "$ROOT/tests/remote-herdr-fixture.sh"
+  real_mv=$(command -v mv)
+  for phase in noted stopping; do
+    for mode in refusal interrupted; do
+      dir=$(new_case "prestop-$phase-$mode" sm70)
+      sm_case "$dir" sm70
+      mkdir -p "$dir/smhome/data/.parent-route/sm70" "$dir/smhome/config"
+      cp "$dir/home/data/sm70/brief.md" "$dir/smhome/data/.parent-route/sm70/brief.md"
+      cp "$dir/home/config/fleet-seats" "$dir/smhome/config/fleet-seats"
+      install_remote_herdr_fixture "$dir/herdr" "$dir/herdr-state" "$dir/herdr-log" "$dir/herdr-fail" "$TMP_ROOT/prestop-$phase-$mode.sock"
+      out=$(run_existing_host "$dir" launch sm70 claude pool-model-a medium herdr --operation original); rc=$?
+      expect_code 0 "$rc" "initial host launch: $out"
+      cp "$dir/smhome/state/parent-route/sm70.meta" "$dir/before.meta"
+      cp "$dir/herdr-log" "$dir/before.log"
+      cp "$dir/smhome/data/.parent-route/sm70/brief.md" "$dir/before.brief"
+      make_mv_failure_stub "$dir"
+      expected=prelaunch
+      [ "$mode" != interrupted ] || expected=unknown
+      rc=0
+      out=$(FM_REAL_MV="$real_mv" FM_FAKE_PRESTOP_PHASE="$phase" FM_FAKE_PRESTOP_INTERRUPT="$( [ "$mode" = interrupted ] && echo 1 || echo 0 )" \
+        run_existing_host "$dir" relaunch sm70 claude pool-model-a medium --operation refused --previous original); rc=$?
+      [ "$rc" -ne 0 ] || fail "journal failure succeeded: $phase/$mode"
+      receipt="$dir/smhome/state/parent-route/sm70.seat-operation.refused"
+      if [ "$mode" = refusal ]; then
+        expect_code 1 "$rc" "definitive journal refusal: $out"
+        assert_equals prelaunch "$(sed -n 's/^phase=//p' "$receipt")" "pre-stop rollback did not persist prelaunch"
+      else
+        assert_equals received "$(sed -n 's/^phase=//p' "$receipt")" "interruption was reclassified as a refusal"
+      fi
+      cmp -s "$dir/before.meta" "$dir/smhome/state/parent-route/sm70.meta" || fail "pre-stop failure changed predecessor"
+      out=$(FM_REAL_MV="$real_mv" run_existing_host "$dir" disposition sm70 --operation refused)
+      assert_equals "$expected" "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "journal outcome did not replay ($phase/$mode): $out"
+      tail -n +"$(( $(wc -l < "$dir/before.log") + 1 ))" "$dir/herdr-log" >"$dir/effects.log"
+      for effect in 'pane send' 'pane write' 'workspace close' 'tab close'; do
+        assert_no_grep "$effect" "$dir/effects.log" "pre-stop rollback touched endpoint lifecycle"
+      done
+      cmp -s "$dir/before.brief" "$dir/smhome/data/.parent-route/sm70/brief.md" || fail "pre-stop rollback did not restore instructions"
+      if [ "$mode" = refusal ]; then
+        jq '.typed={} | .working={}' "$dir/herdr-state" >"$dir/dead"
+        mv "$dir/dead" "$dir/herdr-state"
+        out=$(FM_REAL_MV="$real_mv" run_existing_host "$dir" relaunch sm70 claude pool-model-a medium --operation corrected --previous original); rc=$?
+        expect_code 0 "$rc" "corrected relaunch after journal refusal: $out"
+      fi
+    done
+  done
+  pass "pre-stop journal refusals persist prelaunch while interrupted operations stay unknown"
+}
+
+test_verified_do_exit_refusals_persist_only_before_delivery() {
+  local mode dir out rc expected gen receipt home
+  for mode in pending unknown unclassified interrupt send; do
+    dir=$(new_case "exit-refusal-$mode" sm71)
+    sm_case "$dir" sm71
+    home="$dir/home"
+    receipt="$home/state/sm71.seat-operation.candidate"
+    printf 'schema=fm-remote-seat-receipt.v1\noperation=candidate\nverb=relaunch\nrequested_generation=candidate\nprevious_generation=g-sm-old\nphase=received\n' >"$receipt"
+    expected=prelaunch
+    case "$mode" in
+      pending) printf draft >"$dir/fake/composer" ;;
+      unclassified) printf some-unrelated-process >"$dir/fake/command" ;;
+      interrupt)
+        expected=received
+        gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" sm71)
+        printf 'busy_gen=%s\n' "$gen" >>"$home/state/sm71.meta"
+        "$ROOT/bin/fm-busy-event.sh" apply "$home/state" sm71 busy --gen "$gen" --source claude-hook --event user-prompt-submit >/dev/null
+        ;;
+      send) expected=received ;;
+    esac
+    out=$(FM_REMOTE_SEAT_FRESH=1 FM_REMOTE_SEAT_OPERATION=candidate FM_SPAWN_SEAT_GENERATION=candidate \
+      FM_FAKE_COMPOSER_READ_FAIL="$( [ "$mode" = unknown ] && echo 1 )" \
+      FM_FAKE_INTERRUPT_SEND_FAIL="$( [ "$mode" = interrupt ] && echo 1 || echo 0 )" \
+      FM_FAKE_EXIT_SEND_FAIL="$( [ "$mode" = send ] && echo 1 || echo 0 )" \
+      run_control "$dir" sm71 relaunch --harness claude --model pool-model-a); rc=$?
+    expect_code 1 "$rc" "$mode exit refusal: $out"
+    assert_equals "$expected" "$(sed -n 's/^phase=//p' "$receipt")" "$mode classified delivery incorrectly"
+    assert_grep 'spawn_gen=g-sm-old' "$home/state/sm71.meta" "$mode changed predecessor generation"
+    if [ "$expected" = prelaunch ]; then
+      assert_no_grep /exit "$dir/fake/literal" "pre-delivery refusal attempted exit"
+      assert_no_grep C-c "$dir/fake/keys" "pre-delivery refusal attempted interrupt"
+      assert_no_grep Escape "$dir/fake/keys" "pre-delivery refusal attempted interrupt"
+      mkdir -p "$dir/smhome/state/parent-route"
+      cp "$receipt" "$dir/smhome/state/parent-route/sm71.seat-operation.candidate"
+      cp "$home/state/sm71.control-relaunch" "$dir/smhome/state/parent-route/sm71.control-relaunch"
+      out=$(run_existing_host "$dir" disposition sm71 --operation candidate)
+      assert_equals prelaunch "$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | jq -r .disposition)" "$mode journal demoted explicit refusal"
+      : >"$dir/fake/composer"
+      printf claude >"$dir/fake/command"
+      out=$(run_control "$dir" sm71 relaunch --harness claude --model pool-model-a); rc=$?
+      expect_code 0 "$rc" "corrected relaunch after $mode refusal: $out"
+    elif [ "$mode" = interrupt ]; then
+      assert_grep Escape "$dir/fake/keys" "interrupt case did not attempt delivery"
+    else
+      assert_grep /exit "$dir/fake/literal" "send case did not attempt delivery"
+    fi
+  done
+  pass "verified do_exit refusals persist prelaunch before delivery and preserve unknown after interrupt or send attempts"
+}
+
+test_control_terminalizes_all_observing_predecessor_receipts() {
+  local dir out rc op receipt
+  dir=$(new_case host-alias-stop sm68)
+  sm_case "$dir" sm68
+  for op in observing.one observing.two; do
+    printf 'schema=fm-remote-seat-receipt.v1\noperation=%s\nrequested_generation=%s\nactual_generation=g-sm-old\nphase=existing\n' "$op" "$op" > "$dir/home/state/sm68.seat-operation.$op"
+  done
+  printf 'schema=fm-remote-seat-receipt.v1\noperation=replacement.new\nrequested_generation=replacement.new\nphase=received\n' > "$dir/home/state/sm68.seat-operation.replacement.new"
+  printf 'schema=fm-remote-seat-receipt.v1\noperation=foreign\nrequested_generation=foreign\nactual_generation=other-generation\nphase=existing\n' > "$dir/home/state/sm68.seat-operation.foreign"
+  out=$(FM_REMOTE_SEAT_OPERATION=replacement.new FM_SPAWN_SEAT_GENERATION=replacement.new run_control "$dir" sm68 relaunch --model pool-model-a); rc=$?
+  expect_code 0 "$rc" "control stopping a live imported predecessor: $out"
+  for op in observing.one observing.two; do
+    receipt="$dir/home/state/sm68.seat-operation.$op"
+    assert_equals dead-after-start "$(sed -n 's/^phase=//p' "$receipt")" "control stranded an observing predecessor receipt"
+    assert_equals "$op" "$(sed -n 's/^requested_generation=//p' "$receipt")" "control lost an observing operation's requested generation"
+  done
+  assert_equals existing "$(sed -n 's/^phase=//p' "$dir/home/state/sm68.seat-operation.foreign")" "control terminalized another generation's receipt"
+  assert_absent "$dir/home/state/sm68.seat-operation.g-sm-old" "control invented a generation-named receipt"
+  pass "control terminalizes every matching observing receipt and leaves foreign generations alone"
+}
+
+
+if [ "$#" -gt 0 ]; then
+  for focused_test in "$@"; do
+    case "$focused_test" in
+      test_fractional_supervisor_startup_timeout_retains_the_launch|test_unpooled_supervisor_spawn_keeps_prior_success_semantics|test_existing_host_generations_recover_through_observing_operations|test_control_terminalizes_all_observing_predecessor_receipts|test_host_prelaunch_refusal_releases_candidate_for_corrected_launch|test_host_prestop_journal_refusal_persists_prelaunch|test_verified_do_exit_refusals_persist_only_before_delivery|test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
+      *) fail "unknown focused test: $focused_test" ;;
+    esac
+  done
+  exit 0
+fi
+
+test_pooled_relaunch_reserves_its_destination_before_stopping
+test_same_pool_relaunch_keeps_one_seat_through_the_handoff
+test_relaunch_rollback_releases_only_an_undelivered_candidate
+test_secondmate_relaunch_confirms_its_seat_inside_one_episode
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -3100,3 +3807,23 @@ test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
+
+test_unpooled_supervisor_spawn_keeps_prior_success_semantics
+test_unconfirmed_predecessor_prevents_control_launch
+
+test_host_relaunch_records_terminal_predecessor
+
+test_observed_predecessors_and_opt_out_successors
+
+test_standalone_relaunch_completes_the_predecessor_handoff
+
+test_fractional_supervisor_startup_timeout_retains_the_launch
+test_legacy_predecessors_remain_counted_without_socket_identity
+
+test_existing_host_generations_recover_through_observing_operations
+test_host_prelaunch_refusal_releases_candidate_for_corrected_launch
+test_control_terminalizes_all_observing_predecessor_receipts
+
+test_host_prestop_journal_refusal_persists_prelaunch
+
+test_verified_do_exit_refusals_persist_only_before_delivery

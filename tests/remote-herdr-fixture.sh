@@ -83,7 +83,9 @@ case "${1:-} ${2:-}" in
     if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
       printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "$pane"
     else
-      printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane"
+      jq_state --arg p "$pane" '. as $state | .tabs[] | select(.pane_id == $p) | . as $tab
+        | {result:{pane:{pane_id:.pane_id,foreground_cwd:(.cwd //
+            ($state.workspaces[] | select(.workspace_id == $tab.workspace_id) | .cwd))}}}'
     fi
     ;;
   "pane close")

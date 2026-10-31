@@ -461,7 +461,70 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
-fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
+fm_control_endpoint_server_matches() {
+  local backend=$1 meta=${2:-} server=${3:-} recorded=
+  case "$backend" in rex|t3code) ;; *) return 0 ;; esac
+  fm_backend_source "$backend" || return 1
+  if [ -n "$meta" ] && [ -f "$meta" ]; then
+    recorded=$(fm_meta_get "$meta" "${backend%code}_server")
+    if [ "$backend" = t3code ] && [ -z "$recorded" ]; then
+      recorded=$(fm_backend_t3code_server_for_meta "$meta" "$server") || return 1
+    fi
+    [ -z "$server" ] || [ "$server" = "$recorded" ] || { echo "error: metadata and route name different creation servers" >&2; return 1; }
+    [ -n "$server" ] || server=$recorded
+  fi
+  [ -n "$server" ] || { echo "error: endpoint lacks a creation-server identity" >&2; return 1; }
+  case "$backend" in
+    rex) [ "$(fm_backend_rex_server_endpoint)" = "$server" ] ;;
+    t3code) fm_backend_t3code_server_matches "$server" ;;
+  esac || { echo "error: $backend creation server does not match the selected server" >&2; return 1; }
+}
+
+fm_control_endpoint_state() {
+  local state server=${4:-}
+  fm_backend_source "$1" || { printf unreadable; return 0; }
+  case "$1" in
+    rex|t3code) [ -n "$server" ] || server=$(fm_meta_get "${3:-}" "${1%code}_server") ;;
+  esac
+  if [ "$1" = t3code ] && [ -z "$server" ]; then
+    server=$(fm_backend_t3code_server_for_meta "${3:-}") || { printf unreadable; return 0; }
+  fi
+  fm_control_endpoint_server_matches "$1" "${3:-}" "$server" || { printf unreadable; return 0; }
+  state=$(fm_backend_agent_state "$1" "$2") || state=unreadable
+  fm_control_endpoint_server_matches "$1" "${3:-}" "$server" || { printf unreadable; return 0; }
+  printf '%s' "$state"
+}
+
+fm_control_wait_for_startup() {
+  local lib_dir bound
+  lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  bound=$(awk -v t="${FM_CONTROL_LAUNCH_WAIT:-90}" 'BEGIN {
+    if (t !~ /^[0-9]+([.][0-9]+)?$/ || t <= 0) exit 1
+    printf "%d", int(t) + (t > int(t))
+  }') || return 1
+  (
+    # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+    . "$lib_dir/fm-timeout-lib.sh"
+    # Keep expansions for the child shell, not this caller.
+    # shellcheck disable=SC2016
+    fm_run_timed "$bound" bash -c '
+      lib_dir=$1
+      shift
+      . "$lib_dir/fm-backend.sh"
+      . "$lib_dir/fm-control-lib.sh"
+      while :; do
+        state=$(fm_control_endpoint_state "$@") || state=unreadable
+        if [ "$state" = alive ]; then
+          printf alive
+          exit 0
+        fi
+        sleep "${FM_CONTROL_POLL:-0.5}"
+      done
+    ' _ "$lib_dir" "$@"
+  )
+}
+
+fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta] [server-identity]
   local backend=${1-} target=${2-} meta=${3-}
   fm_backend_source "$backend" \
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
@@ -481,7 +544,7 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
       esac
       ;;
     rex)
-      case "$(fm_backend_rex_endpoint_absence_recheck "$target" "$(fm_meta_get "$meta" rex_server)")" in
+      case "$(fm_backend_rex_endpoint_absence_recheck "$target" "${4-$(fm_meta_get "$meta" rex_server)}")" in
         dead) printf 'dead\t' ;;
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;
@@ -489,10 +552,18 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
       esac
       ;;
     t3code)
+      local recorded_server=${4-$(fm_meta_get "$meta" t3_server)}
+      if [ -z "$recorded_server" ]; then
+        recorded_server=$(fm_backend_t3code_server_for_meta "$meta") || { printf 'unproven\tT3 creation server cannot be verified'; return 0; }
+      fi
+      fm_backend_t3code_server_matches "$recorded_server" || { printf 'unproven\tT3 creation server does not match the current credential'; return 0; }
       # A T3 `missing` is the server's own answer (an archived thread or an
       # HTTP 404), never a reachability guess: an unreachable server reads
       # `unreadable` instead. Re-read the thread so the verdict is current.
-      case "$(fm_backend_t3code_agent_state "$target")" in
+      local t3_state
+      t3_state=$(fm_backend_t3code_agent_state "$target")
+      fm_backend_t3code_server_matches "$recorded_server" || { printf 'unproven\tT3 creation server changed while proving absence'; return 0; }
+      case "$t3_state" in
         dead) printf 'dead\t' ;;
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;

@@ -16,6 +16,8 @@ set -u
 # shellcheck source=tests/supervision-host-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/supervision-host-helpers.sh"
 
+. "$ROOT/bin/fm-timeout-lib.sh"
+
 test_park_exit_probe_uses_half_second_child_sleeps() {
   local home host_pid
   home=$(make_home park-cadence attended)
@@ -93,7 +95,7 @@ test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue() {
   kill -TERM "$pid" 2>/dev/null || true
   wait_until 100 bash -c '! kill -0 "$1" 2>/dev/null' _ "$pid" \
     || fail "handled then TERM: the host did not exit within 10s of TERM after a handled wake"
-  FM_HOME="$home" timeout 10 bash -c '. "$1"; fm_wake_append check probe "check: probe"' _ "$ROOT/bin/fm-wake-lib.sh" \
+  FM_HOME="$home" fm_run_timed 10 bash -c '. "$1"; fm_wake_append check probe "check: probe"' _ "$ROOT/bin/fm-wake-lib.sh" \
     || fail "handled then TERM: the stopped host left the wake queue lock held"
   stop_home_processes "$home"
   pass "host: a host stopped right after a handled wake exits and leaves the wake queue usable"
@@ -915,6 +917,11 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
   assert_absent "$home/state/.supervision-host-engine" "a turn that did not handle its wake must not keep its conversation"
   pass "host: an engine turn whose result is incomplete hands its wake to main"
 }
+
+if [ "$#" -gt 0 ]; then
+  fm_test_run "$@"
+  exit
+fi
 
 fm_test_run \
   test_park_exit_probe_uses_half_second_child_sleeps \
