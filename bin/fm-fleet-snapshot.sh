@@ -114,6 +114,10 @@
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,
 # without worker observations or cross-home collection, for the home-local poll.
+# --closures <date>... prints one "<date> <count>" line per date from the dated
+# close labels in data/backlog.md and data/done-archive.md, or "<date> not
+# recorded" for a date before the closure origin: data/closure-origin when
+# present, else the earliest dated close.
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
@@ -234,6 +238,7 @@ usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
        fm-fleet-snapshot.sh --secondmate-home-summary
+       fm-fleet-snapshot.sh --closures <YYYY-MM-DD>...
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
@@ -241,6 +246,11 @@ refreshes only its parent-side remote-summary cache as an observational side eff
 
 --contribution-input emits the canonical local backlog/tasks ownership pair only,
 without worker observations or cross-home collection.
+
+--closures prints "<date> <count>" per date, counting (done|merged|reported <date>)
+labels across data/backlog.md and data/done-archive.md, and "<date> not recorded"
+for a date before the closure origin. The origin is data/closure-origin when
+present, else the earliest dated close; with neither, every date is not recorded.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -291,9 +301,41 @@ case "${1:---json}" in
   --json) ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   --contribution-input) OUTPUT_MODE=contribution-input ;;
+  --closures) OUTPUT_MODE=closures; shift ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
+
+is_iso_date() {  # <value>
+  case "$1" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) return 0 ;; esac
+  return 1
+}
+
+if [ "$OUTPUT_MODE" = closures ]; then
+  [ "$#" -gt 0 ] || { usage >&2; exit 2; }
+  for closure_date in "$@"; do
+    is_iso_date "$closure_date" \
+      || { printf 'fm-fleet-snapshot: --closures date must be YYYY-MM-DD: %s\n' "$closure_date" >&2; exit 2; }
+  done
+  closure_dates=$(cat "$BACKLOG" "$DATA/done-archive.md" 2>/dev/null \
+    | grep -oE '\((done|merged|reported) [0-9]{4}-[0-9]{2}-[0-9]{2}\)' \
+    | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | sort)
+  if [ -e "$DATA/closure-origin" ]; then
+    closure_origin=$(head -n 1 "$DATA/closure-origin")
+    is_iso_date "$closure_origin" \
+      || { printf 'fm-fleet-snapshot: %s must hold one YYYY-MM-DD line\n' "$DATA/closure-origin" >&2; exit 2; }
+  else
+    closure_origin=$(printf '%s\n' "$closure_dates" | head -n 1)
+  fi
+  for closure_date in "$@"; do
+    if [ -z "$closure_origin" ] || [[ "$closure_date" < "$closure_origin" ]]; then
+      printf '%s not recorded\n' "$closure_date"
+    else
+      printf '%s %s\n' "$closure_date" "$(printf '%s\n' "$closure_dates" | grep -cxF -- "$closure_date")"
+    fi
+  done
+  exit 0
+fi
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
