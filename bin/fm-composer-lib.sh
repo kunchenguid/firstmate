@@ -2264,9 +2264,21 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
   # one is present, and it counts only when it is as wide as the widest row of
   # the screen: that is what a rule spanning the whole pane is, and what a rule
   # quoted above a bordered composer is not. Rows below it are the harness's
-  # status bar, which carries no box glyph, so a box glyph under the rule means
-  # the cursor sits below a dialog-shaped fragment of ordinary content.
-  if printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
+  # status bar, which carries no box glyph and no prompt glyph, so either under
+  # the rule means the cursor sits below a dialog-shaped fragment of ordinary
+  # content: the quoted selector was scrolled above a live composer, and the
+  # next Enter would go to that composer rather than to the quoted rows. The
+  # prompt glyphs come from the one declared list, so a bare composer of any
+  # harness is caught below the rule and not only a bordered one.
+  if printf '%s\n' "$screen" | fm_composer_strip_ansi \
+    | LC_ALL=C awk -v glyphs="$FM_COMPOSER_AGENT_PROMPT_GLYPHS" '
+    function starts_with_glyph(s,   j) {
+      sub(/^[ \t]+/, "", s)
+      for (j = 1; j <= glyph_count; j++)
+        if (g[j] != "" && substr(s, 1, length(g[j])) == g[j]) return 1
+      return 0
+    }
+    BEGIN { glyph_count = split(glyphs, g, "\n") }
     { row[NR] = $0
       line = $0
       sub(/[ \t\r]+$/, "", line)
@@ -2286,6 +2298,7 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
       i++
       while (i <= NR) {
         if (row[i] ~ /\342[\224\225][\200-\277]/) exit 1
+        if (starts_with_glyph(row[i])) exit 1
         i++
       }
       exit 0

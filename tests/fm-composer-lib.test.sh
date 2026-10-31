@@ -1946,6 +1946,28 @@ test_pi_selector_ends_at_its_closing_rule_not_at_the_pane() {
     '╰──────────────╯')"); rc=$?
   [ "$rc" -eq 1 ] && [ -z "$out" ] \
     || fail "quoted footer closed by a pane-wide rule must not be a selector, got '$out'"
+  # The same case with a bare composer under the rule, which carries no box
+  # glyph: an ordinary codex `›` row under the rule means the cursor sits in
+  # that composer, so the quoted rows above it are content and the next Enter
+  # must reach the composer rather than be refused as this selector.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→ ✓ alpha-model-one [localfake]' \
+    '    beta-model-two [localfake]' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '────────────────────────────────────────────────────────────────────────' \
+    '› ' \
+    '  gpt-5.5 default · /tmp/project')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] \
+    || fail "quoted footer closed by a pane-wide rule above a bare composer must not be a selector, got '$out'"
+  # A bare composer holding typed text is the same proof: the glyph is the
+  # whole test, so the row's own words are free text.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→   beta-model-two [localfake]' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '────────────────────────────────────────────────────────────────────────' \
+    '› fix the failing test')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] \
+    || fail "a bare composer holding typed text under the rule must not be a selector, got '$out'"
   # Nor is a rule that spans only part of the screen a closing rule.
   out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
     '→   beta-model-two [localfake]' \
