@@ -1489,6 +1489,7 @@ spawn_remote_secondmate() {
     fi
     return "$rc"
   fi
+  printf '%s\n' "$out" | sed -n '/^model pin \(asserted\|mismatch\|unverified\):/p' >&2 || true
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
@@ -3698,6 +3699,10 @@ spawn_assert_model_pin() {
   claude)
     if [ -n "$CLAUDE_SESSION_ID" ]; then
       spawn_assert_claude_model_pin "$CLAUDE_SESSION_CONFIG_DIR" "$CLAUDE_SESSION_ID" "$MODEL"
+    elif [ "$BACKEND" = t3code ]; then
+      spawn_model_pin_note "unverified: pin '$MODEL' could not be addressed for this Claude t3code launch (no session address exists for this path)"
+    elif [ "$RAW_LAUNCH" -eq 1 ]; then
+      spawn_model_pin_note "unverified: pin '$MODEL' could not be addressed for this raw Claude launch (no session address exists for this path)"
     else
       spawn_model_pin_note "unverified: pin '$MODEL' could not be addressed for this Claude launch (no fresh --session-id was available)"
     fi
@@ -7385,7 +7390,7 @@ sq_worktree=$(shell_quote "$WT")
 CLAUDE_SESSION_ID=
 CLAUDE_SESSION_ARGS=
 CLAUDE_SESSION_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-${HOME:-$PWD}/.claude}
-if [ "$HARNESS" = claude ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+if [ "$HARNESS" = claude ] && [ "$BACKEND" != t3code ] && [ "$RAW_LAUNCH" -eq 0 ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
   # A pinned Claude launch takes its own collision-checked session id so the
   # assertion after delivery reads THAT session's transcript instead of guessing
   # which session in the project is recent. Only a launch that carries the

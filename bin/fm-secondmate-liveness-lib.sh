@@ -85,6 +85,10 @@ fm_secondmate_liveness_unlock() {  # <id>
   fm_lock_release "$STATE/.secondmate-liveness-$1.lock" 2>/dev/null || true
 }
 
+fm_sm_live_model_verdicts() {
+  printf '%s\n' "$FM_SM_LIVE_OUT" | sed -n '/^model pin \(asserted\|mismatch\|unverified\):/p' || true
+}
+
 fm_sm_live_first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }

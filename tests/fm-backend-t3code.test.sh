@@ -1869,6 +1869,28 @@ test_spawn_codex_accepts_bypass_approval_mode() {
   pass "fm-spawn.sh --backend t3code codex: config/codex-approval-mode=bypass still launches"
 }
 
+test_t3_claude_pin_has_no_launcher_session_address() {
+  local id out rc fb marker
+  id=$(t3_uid t3claudepin)
+  t3_case spawn-claude-pin-no-address
+  t3_worker_setup "$id"
+  fb=$(make_treehouse_fakebin "$CASE_DIR")
+  marker="$CASE_DIR/uuidgen-called"
+  cat > "$fb/uuidgen" <<SH
+#!/usr/bin/env bash
+printf 'called\n' >> '$marker'
+printf '%s\n' '33333333-3333-4333-8333-333333333333'
+SH
+  chmod +x "$fb/uuidgen"
+  out=$(t3_worker_spawn "$id" claude --model claude-sonnet-5); rc=$?
+  expect_code 0 "$rc" "a pinned T3 Claude launch must remain report-only"$'\n'"$out"
+  assert_absent "$marker" "T3 must not allocate an unused Claude session id"
+  assert_contains "$out" "model pin unverified: pin 'claude-sonnet-5' could not be addressed for this Claude t3code launch (no session address exists for this path)" \
+    "T3 must report its unaddressable pin without polling"
+  [ "$(t3_log_line_of 'r.tool === "t3_thread_send"')" -gt 0 ] || fail "T3 must still receive the launch turn"
+  pass "T3 Claude pin is immediately unverified without allocating a launcher session id"
+}
+
 test_spawn_refuses_raw_launch_command() {
   local id out rc
   id=$(t3_uid t3rawz)
@@ -2794,6 +2816,7 @@ test_spawn_refuses_launch_settings_t3_cannot_honor codex-approval-mode approve-f
 test_spawn_refuses_launch_settings_t3_cannot_honor codex-permission-mode restricted "config/codex-permission-mode=restricted" codex
 test_spawn_codex_accepts_bypass_approval_mode
 test_spawn_refuses_launch_settings_t3_cannot_honor launch-env-allowlist HOME "config/launch-env-allowlist"
+test_t3_claude_pin_has_no_launcher_session_address
 test_spawn_refuses_raw_launch_command
 test_spawn_abort_returns_lease_only_after_archive ok
 test_spawn_abort_returns_lease_only_after_archive fail

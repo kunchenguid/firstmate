@@ -222,6 +222,7 @@ cmd_launch() {
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     die "remote host-local secondmate launch failed"
   fi
+  printf '%s\n' "$out" | sed -n '/^model pin \(asserted\|mismatch\|unverified\):/p' >&2 || true
   [ -f "$meta" ] || die "remote launch returned without endpoint metadata"
   herdr_session=$(fm_meta_get "$meta" herdr_session)
   [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
