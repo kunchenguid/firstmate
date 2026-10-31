@@ -194,6 +194,9 @@ The run wrapper also stands down silently, before any state or lock work, for a 
 - A session marked `FM_NO_LOCK=1`, the generic opt-out for any tool that launches Claude in the home and must not take the fleet lock.
 
 `FM_SESSIONSTART_ALLOW_UNATTENDED=1` opts an unattended Claude session back in, for Firstmate's own live checks that drive a throwaway primary through `claude -p`; it never overrides `FM_NO_LOCK=1`.
+`bin/fm-session-standdown-lib.sh` owns this one predicate, and `bin/fm-session-start.sh` applies it too, so an agent in such a session that runs session start itself, because no digest arrived, still never takes the lock.
+Run directly, it reads the unattended signal from the calling session's own environment, prints one stderr line saying it stood down, and exits 0.
+The run wrapper marks its own downstream call with `FM_SESSION_STANDDOWN_CHECKED=1`, so its payload-bound decision is not re-made from an inherited value.
 The signal evidence lives in [`verification/runtime-backends.md`](verification/runtime-backends.md#claude-unattended-session-signal).
 
 A fresh clone has no gitignored state directory yet.
@@ -422,6 +425,7 @@ It proves the run wrapper creates a missing state directory on a fresh primary a
 It proves a fresh primary whose state directory cannot be created reports that on one stderr line and stands down without a digest.
 It proves an unattended Claude payload and `FM_NO_LOCK=1` stand down without creating state or taking the lock, while attended, inherited-value, and `FM_SESSIONSTART_ALLOW_UNATTENDED=1` opens still take the helm.
 The opt-in live guard `tests/fm-sessionstart-unattended-live-e2e.test.sh` proves the same stand-down and override against a real `claude -p`.
+`tests/fm-session-start.test.sh` proves a direct session start stands down with its stderr line and no lock for an unattended or `FM_NO_LOCK=1` session, while attended and opted-in sessions still take the lock.
 
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including:
 

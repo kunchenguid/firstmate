@@ -45,7 +45,9 @@
 # An unattended Claude session (CLAUDE_CODE_SESSION_ATTENDED=0 bound to the
 # payload's session_id) and an FM_NO_LOCK=1 session stand down before any
 # state or lock work; FM_SESSIONSTART_ALLOW_UNATTENDED=1 opts an unattended
-# Claude session back in. docs/sessionstart-nudge.md owns why.
+# Claude session back in. bin/fm-session-standdown-lib.sh owns that predicate,
+# and FM_SESSION_STANDDOWN_CHECKED=1 tells the downstream fm-session-start.sh
+# this wrapper already applied it. docs/sessionstart-nudge.md owns why.
 # A fresh clone has no gitignored state dir yet; a root that otherwise
 # qualifies as primary gets one created here before the scope check runs, so
 # the first session takes the helm without a manual `mkdir state`.
@@ -65,6 +67,8 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
+# shellcheck source=bin/fm-session-standdown-lib.sh
+. "$SCRIPT_DIR/fm-session-standdown-lib.sh"
 
 SOURCE=
 PI_PREREQUISITE=0
@@ -94,7 +98,6 @@ stand_down() {
 # they do not own. Pi's preflight-only status preserves that intentional silence
 # without mistaking it for a failed eligible attempt that needs the manual nudge.
 fm_is_gate_agent "$FM_ROOT" && stand_down
-[ "${FM_NO_LOCK:-}" = 1 ] && stand_down
 
 # Print the string value of the first key $1 in $PAYLOAD.
 # Splitting on the quote character finds the FIRST such key and its value
@@ -110,6 +113,7 @@ payload_field() {  # <key>
   '
 }
 
+PAYLOAD_SESSION_ID=
 if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   # Claude and Codex both deliver a JSON SessionStart payload on stdin whose
   # `source` field carries startup|resume|clear|compact. Parsed without jq so a
@@ -125,13 +129,11 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  if [ "${CLAUDE_CODE_SESSION_ATTENDED:-}" = 0 ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] &&
-    [ "${FM_SESSIONSTART_ALLOW_UNATTENDED:-}" != 1 ] &&
-    [ "$(payload_field session_id)" = "$CLAUDE_CODE_SESSION_ID" ]; then
-    stand_down
-  fi
+  PAYLOAD_SESSION_ID=$(payload_field session_id)
   SOURCE=$(payload_field source)
 fi
+fm_session_start_stands_down "$PAYLOAD_SESSION_ID" && stand_down
+export FM_SESSION_STANDDOWN_CHECKED=1
 if [ ! -d "$STATE" ] && fm_primary_root_matches "$FM_ROOT"; then
   if ! MKDIR_ERR=$(mkdir -p "$STATE" 2>&1); then
     printf 'fm-sessionstart-run: startup could not create the state directory %s: %s\n' \

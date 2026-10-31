@@ -76,6 +76,13 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 # can find the CLI; a case that verifies detection sets these itself.
 unset REX_SESSION REX_BLOCK
 
+# Clear the session-start stand-down inputs a calling Claude session exports.
+# Run from a headless `claude -p` (CLAUDE_CODE_SESSION_ATTENDED=0) or under
+# FM_NO_LOCK=1, every fixture session start would otherwise stand down
+# (bin/fm-session-standdown-lib.sh); a case that verifies the stand-down sets
+# these itself.
+unset CLAUDE_CODE_SESSION_ATTENDED FM_NO_LOCK FM_SESSIONSTART_ALLOW_UNATTENDED FM_SESSION_STANDDOWN_CHECKED
+
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
 # there (for example a beads backend at its live backlog), so a copy points the
