@@ -179,6 +179,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_DAEMON_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-watch-key-lib.sh
+. "$FM_DAEMON_DIR/fm-watch-key-lib.sh"
 
 # Canonical construction and parsing for every Firstmate operational input.
 # shellcheck source=bin/fm-operational-input.sh
@@ -600,7 +602,7 @@ clear_pause_tracking() {  # <window> <state>
   local win=$1 state=$2 task key watcher_key
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
-  watcher_key=$(_stale_key "$win")
+  watcher_key=$(window_key "$win")
   # This list mirrors the watcher's own per-window markers, cap markers included:
   # releasing a window's wedge timer and escalation count releases them with it,
   # which is what bin/fm-watch.sh's wedge_episode_end does on the routes that
@@ -625,7 +627,7 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   task=$(window_to_task "$win" "$state")
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
-  watcher_key=$(_stale_key "$win")
+  watcher_key=$(window_key "$win")
   if status_is_paused_or_captain_held "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
@@ -642,7 +644,7 @@ migrate_watcher_pause_markers() {  # <state>
     [ -n "$win" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
     key=$(_stale_key "$task")
-    watcher_key=$(_stale_key "$win")
+    watcher_key=$(window_key "$win")
     last=$(status_declared_wait_line "$state/$task.status")
     if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"

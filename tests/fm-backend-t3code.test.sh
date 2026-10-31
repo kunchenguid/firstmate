@@ -16,6 +16,7 @@ unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/t3-fake-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
+. "$ROOT/bin/fm-watch-key-lib.sh"
 
 command -v node >/dev/null 2>&1 || { echo "skip: node absent"; exit 0; }
 
@@ -1105,8 +1106,7 @@ test_t3_stale_watcher() {  # <thread-status> <absorb|surface|dead> [harness] [fr
   local session=$1 expected=$2 harness=${3:-codex} state fb hash out _
   local fresh=${4:-} turn=${5:-} busy_bound=3600 turn_at
   local thread=mcp:6a0e1f2b-3c4d-4a5b-8c6d-0123456789ab key
-  # The watcher's per-window marker key turns `:` into `_` (fm-watch.sh window_key).
-  key=${thread//:/_}
+  key=$(window_key "$thread")
   t3_case "watch-$session-$harness-$fresh-$turn" "$session"
   t3_world "$(t3_thread_json "$thread" "$session" false)"
   # The spawn record below is aged past the bound, so only T3's own run
