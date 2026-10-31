@@ -21,7 +21,13 @@ make_fake_tasks_axi_ready() {
 #!/usr/bin/env bash
 case "$1 ${2:-}" in
   '--version ') echo 'tasks-axi 0.2.6' ;;
-  'update --help') echo '--archive-body' ;;
+  'update --help')
+    if [ "${FM_FAKE_TASKS_AXI_STALL_UPDATE:-0}" = 1 ]; then
+      printf 'update-probe-started\n' >> "$FM_FAKE_TASKS_AXI_LOG"
+      sleep 5
+    fi
+    echo '--archive-body'
+    ;;
   'mv --help') echo '[<id>...]' ;;
   'ready '*|ready)
     if [ "${FM_FAKE_TASKS_AXI_EMPTY:-0}" = 1 ]; then
@@ -86,6 +92,30 @@ test_ready_work_only_on_heartbeat() {
     fail "non-heartbeat drain printed READY WORK"
   fi
   pass "READY WORK is shown with its since date only when a heartbeat is drained"
+}
+
+test_stalled_backlog_gate_does_not_block_drain() {
+  local dir state out probe_log
+  dir=$(make_case ready-work-stalled-gate)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  probe_log="$dir/tasks-axi.log"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/drain.out"
+  FM_TASKS_AXI_TIMEOUT=1 FM_FAKE_TASKS_AXI_STALL_UPDATE=1 \
+    FM_FAKE_TASKS_AXI_LOG="$probe_log" run_drain_with_backlog "$dir" "$state" "$out" \
+    || fail "drain failed after the backlog gate probe stalled"
+  grep -F 'update-probe-started' "$probe_log" >/dev/null \
+    || fail "the backlog gate probe did not reach the intentional stall"
+  grep -F 'heartbeat' "$out" >/dev/null \
+    || fail "the drain did not present the heartbeat after the lookup timed out"
+  if grep -F 'READY WORK' "$out" >/dev/null; then
+    fail "a stalled backlog gate printed READY WORK"
+  fi
+  pass "a stalled backlog gate times out and the drain continues"
 }
 
 test_manual_backlog_suppresses_ready_work() {
@@ -306,6 +336,7 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 
 test_buried_decision_still_surfaces
 test_ready_work_only_on_heartbeat
+test_stalled_backlog_gate_does_not_block_drain
 test_manual_backlog_suppresses_ready_work
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it

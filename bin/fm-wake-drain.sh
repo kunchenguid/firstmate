@@ -819,6 +819,27 @@ print_ready_work_section() {  # <deduped-raw-rows>
   fm_backlog_print_ready_queued_bounded "$ready" "$QUEUED_LIMIT"
 }
 
+print_ready_work_section_bounded() {  # <deduped-raw-rows>
+  local seconds=${FM_TASKS_AXI_TIMEOUT:-10} function_body status
+  case "$seconds" in ''|*[!0-9]*|0) seconds=10 ;; esac
+  function_body=$(declare -f print_ready_work_section) || return 0
+  # shellcheck disable=SC2016 # The child bash expands these values after the timeout starts.
+  if fm_run_timed "$seconds" bash -c '
+    eval "$1"
+    SCRIPT_DIR=$2 CONFIG=$3 DATA=$4 QUEUED_LIMIT=$5 FM_TASKS_AXI_TIMEOUT=$6
+    export SCRIPT_DIR CONFIG DATA QUEUED_LIMIT FM_TASKS_AXI_TIMEOUT
+    . "$SCRIPT_DIR/fm-tasks-axi-lib.sh" || exit
+    . "$SCRIPT_DIR/fm-backlog-transition-lib.sh" || exit
+    print_ready_work_section "$7"
+  ' _ "$function_body" "$SCRIPT_DIR" "$CONFIG" "$DATA" "$QUEUED_LIMIT" "$seconds" "$1"; then
+    return 0
+  else
+    status=$?
+    fm_timed_out "$status" && return 0
+    return "$status"
+  fi
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
@@ -1126,7 +1147,7 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
-print_ready_work_section "$RAW_ROWS"
+print_ready_work_section_bounded "$RAW_ROWS"
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
 assert_watcher_liveness
 exit "$BRANCH_OUTCOMES_RC"
