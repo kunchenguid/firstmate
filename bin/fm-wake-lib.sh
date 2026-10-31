@@ -576,8 +576,9 @@ fm_lock_owner_dir() {
   mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
 }
 
-# The acquiring process's own fm_pid_start_time, probed once per pid: a
-# process's start time never changes, so a long-lived lock user pays it once.
+# fm_lock_record_start <dir> <pid>: write <pid>'s fm_pid_start_time to
+# <dir>/pid-start when it can be probed. The last probed pid's token is cached:
+# a process's start time never changes, so a long-lived lock user pays it once.
 _FM_LOCK_SELF_START_PID=
 _FM_LOCK_SELF_START=
 fm_lock_record_start() {
@@ -1522,6 +1523,9 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   fm_current_pid current || { fm_lock_release "$lockdir"; return 1; }
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$current" ] || { fm_lock_release "$lockdir"; return 1; }
+  # Drop this helper's start time before the pid changes hands and record the
+  # caller's only after, so fm_lock_holder_alive never pairs one holder's pid
+  # with the other's start time.
   rm -f "$ownerdir/pid-start" 2>/dev/null || true
   if ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
     || [ "$(cat "$ownerdir/pid" 2>/dev/null || true)" != "$caller_pid" ]; then
