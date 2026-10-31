@@ -212,8 +212,8 @@ write_live_lists() {  # <tagged 0|1>
   fi
   cat > "$FAKE_DIR/workspaces.json" <<EOF
 {"result":{"workspaces":[
- {"workspace_id":"w1","label":"firstmate","pane_count":3},
- {"workspace_id":"w2","label":"└ web-run · p:$TOKEN_A","pane_count":1,"tokens":$ws_tokens}
+ {"workspace_id":"w1","label":"firstmate","pane_count":3,"tab_count":3},
+ {"workspace_id":"w2","label":"└ web-run · p:$TOKEN_A","pane_count":1,"tab_count":1,"tokens":$ws_tokens}
 ]}}
 EOF
   cat > "$FAKE_DIR/panes.json" <<EOF

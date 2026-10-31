@@ -1721,6 +1721,45 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
 
+### 0.9.x chrome sidebar panes and tab-level removal
+
+Measured on 2026-10-17 on Linux x86_64 against Herdr 0.9.1, client protocol 22, in an isolated named lab session through `bin/fm-herdr-lab.sh`.
+The client reported `"client":{"version":"0.9.1","protocol":22}` and `server.running: true`.
+
+A created workspace answers `workspace create --no-focus` with one tab and one root pane, but once the session has rendered that tab its `pane list` carries a second pane for the same tab:
+
+```text
+{"pane_id":"w1:p2","tab_id":"w1:t1","label":"Sidebar","tokens":{"herdr-sidebar-explorer":"1792255523","herdr-sidebar-git":"1792255523"}}
+```
+
+The sidebar therefore exists only at runtime in `PaneInfo.tokens` and the rendered label; it is not a literal string in the released binary, which is why the adapter identifies it by the `herdr-sidebar-*` token namespace with `label == "Sidebar"` as a second independent signal.
+The same run measured what the two removal primitives do on this release:
+
+```text
+pane close w1:p3  -> tab w1:t2 survives with only its Sidebar pane (tab pane_count 1, terminal pane gone)
+tab close w1:t2   -> the sidebar-only tab is removed entirely
+tab close w1:t1   -> the workspace list empties; workspace get w1 answers workspace_not_found
+```
+
+That is the measured reason projection removal is tab-level: a `pane close` of the terminal pane leaves a sidebar husk behind, while a `tab close` removes the terminal and sidebar panes together and, for the last tab, the disposable workspace itself.
+The workspace and tab `pane_count` fields count the sidebar, so a raw `pane_count == 1` shape gate silently skips every 0.9.x projection; the shared root-pane rule is the version-tolerant replacement.
+`tab create --no-focus` was also observed marking its new tab `focused: true` inside a workspace the client had not switched to, which is why the abort rollback treats its own workspace's active tab as a reachable shape.
+
+The same run pinned the two supporting signals the adapter reads:
+
+```text
+tab get w1:t2 (live)      -> {"result":{"tab":{"tab_id":"w1:t2","workspace_id":"w1","pane_count":2,...}}}
+tab get w1:t2 (closed)    -> {"error":{"code":"tab_not_found","message":"tab w1:t2 not found"}}
+tab get w9:t9 (never)     -> {"error":{"code":"tab_not_found","message":"tab w9:t9 not found"}}
+api snapshot .result.snapshot.panes -> the same PaneInfo objects as pane list, label and tokens included
+```
+
+`tab_not_found` is therefore the confirmed absent-tab code `fm_backend_herdr_tab_presence_state` treats as gone, and an already-closed tab makes the exact tab close idempotent rather than a failed rollback.
+A fresh tab's sidebar pane was listed first with `label == "Sidebar"` and `tokens: null`, and only later carried `herdr-sidebar-*`; the label signal alone therefore has to exclude it, which is why the rule accepts either signal.
+The `api snapshot` pane entries carry the same two signals, so the session-start sweep's candidate rule sees the same shape it does through `pane list`; anything that carries neither signal still fails that rule closed and is never swept.
+
+Re-run this lab probe after every Herdr upgrade that changes the sidebar, `pane close`, `tab close`, `tab get`, or `api snapshot` behavior; `tests/fm-backend-herdr.test.sh` pins the same shape with canned and stateful fakes, and `tests/fm-backend-herdr-presentation-e2e.test.sh` exercises it live.
+
 ### Workspace-removal focus safety
 
 The focus-flash regression ran on 2026-08-05 against both Herdr 0.7.5 protocol 17 and Herdr 0.8.0 protocol 19 on macOS aarch64, with the 0.7.5 run using the pinned upstream release binary first on `PATH`:

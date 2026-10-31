@@ -289,7 +289,7 @@ case "$cmd $sub" in
     printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
     ;;
   "pane list")
-    jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id, workspace_id:.workspace_id}]}}'
     ;;
   "pane close")
     pane=${3:-}
@@ -827,11 +827,56 @@ test_projection_reclaim_rollback_refuses_a_stale_registration() {
   local out
   out=$(bash -c '. "$0/bin/backends/herdr.sh"
     fm_backend_herdr_pane_agent_state() { printf stale-agent; }
-    fm_backend_herdr_projection_close_pane_focus_preserving() { printf "CLOSED %s\n" "$2" >&2; exit 99; }
-    fm_backend_herdr_projection_reclaim_rollback fmtest w1:p9; printf "rc=%s" "$?"' "$ROOT" 2>&1)
-  [ "$out" = "rc=1" ] \
-    || fail "reclaim rollback must refuse (never close) a pane with a stale registration, got '$out'"
-  pass "herdr stale registration: presentation reclaim never closes a stale-registration pane"
+    fm_backend_herdr_projection_close_tab_focus_preserving() { printf "CLOSED %s\n" "$2" >&2; exit 99; }
+    FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+    fm_backend_herdr_projection_reclaim_rollback fmtest w1:t9 w1:p9; printf "rc=%s safe=%s" "$?" "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE"' "$ROOT" 2>&1)
+  [ "$out" = "rc=1 safe=0" ] \
+    || fail "reclaim rollback must refuse (never close) a stale-registration pane and clear the caller's rollback gate, got '$out'"
+  pass "herdr stale registration: presentation reclaim never closes a stale-registration pane and never hands it to the abort cleanup"
+}
+
+test_projection_reclaim_rollback_clears_cleanup_safe_on_agent_state_close_refusal() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_agent_state() { printf no-agent; }
+    fm_backend_herdr_projection_close_tab_focus_preserving() {
+      FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=unknown; return 1; }
+    FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+    fm_backend_herdr_projection_reclaim_rollback fmtest w1:t9 w1:p9; printf "rc=%s safe=%s" "$?" "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE"' "$ROOT" 2>&1)
+  [ "$out" = "rc=1 safe=0" ] \
+    || fail "reclaim rollback must clear the rollback gate on agent-state close refusal, got '$out'"
+  pass "herdr close refusal: presentation reclaim clears the rollback gate on agent-state close refusal"
+}
+
+test_projection_reclaim_rollback_preserves_caller_gate_on_close_failure() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_agent_state() { printf no-agent; }
+    # CLOSE_AGENT_STATE matches required_state (no-agent) but the close fails
+    # for a non-agent reason (e.g. tab close command error).
+    fm_backend_herdr_projection_close_tab_focus_preserving() {
+      FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=no-agent; return 1; }
+    FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+    fm_backend_herdr_projection_reclaim_rollback fmtest w1:t9 w1:p9; printf "rc=%s safe=%s" "$?" "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE"' "$ROOT" 2>&1)
+  [ "$out" = "rc=1 safe=1" ] \
+    || fail "reclaim rollback must preserve the caller gate on close failure (agent state matches), got '$out'"
+  pass "herdr close refusal: presentation reclaim preserves the caller gate when agent state matches but close fails"
+}
+
+test_projection_reclaim_rollback_preserves_caller_gate_when_required_state_empty() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"
+    # When pane_agent_state returns dead, required_state is set to empty,
+    # so close_tab_focus_preserving skips the agent-state recheck entirely
+    # and CLOSE_AGENT_STATE stays empty.
+    fm_backend_herdr_pane_agent_state() { printf dead; }
+    fm_backend_herdr_projection_close_tab_focus_preserving() {
+      FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""; return 1; }
+    FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+    fm_backend_herdr_projection_reclaim_rollback fmtest w1:t9 w1:p9; printf "rc=%s safe=%s" "$?" "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE"' "$ROOT" 2>&1)
+  [ "$out" = "rc=1 safe=1" ] \
+    || fail "reclaim rollback must preserve the caller gate when required_state is empty (dead pane), got '$out'"
+  pass "herdr close refusal: presentation reclaim preserves the caller gate when required_state is empty"
 }
 
 test_busy_state_never_reports_a_shell_only_pane_busy() {
@@ -1398,6 +1443,7 @@ test_create_task_refuses_duplicate_label() {
   local dir log resp fb out status
   dir="$TMP_ROOT/dup-task"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-dup1","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup1 /tmp/proj' "$ROOT" 2>&1 )
@@ -1405,6 +1451,67 @@ test_create_task_refuses_duplicate_label() {
   [ "$status" -ne 0 ] || fail "create_task should refuse an existing tab label (herdr itself does not enforce uniqueness)"
   assert_contains "$out" "already exists" "create_task did not report the duplicate label"
   pass "fm_backend_herdr_create_task: refuses a duplicate tab label (herdr's own tab create has no uniqueness check)"
+}
+
+test_create_task_closes_and_replaces_sidebar_only_husk() {
+  local dir log resp fb out status tab pane
+  dir="$TMP_ROOT/husk-sidebar"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-sidebar-husk","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  # 2: pane list -> only a sidebar chrome pane, no root pane (Herdr 0.9.x sidebar-only husk)
+  printf '{"result":{"panes":[{"pane_id":"w1:s2","tab_id":"w1:t2","label":"Sidebar","tokens":{"herdr-sidebar-explorer":"a","herdr-sidebar-git":"b"}}]}}\n' > "$resp/2.out"
+  # 3: tab create -> the replacement tab
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/3.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-sidebar-husk","workspace_id":"w1"}]}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-sidebar-husk /tmp/proj' "$ROOT" ) \
+    || fail "create_task should close-and-replace a sidebar-only husk (zero root panes) instead of refusing"
+  read -r tab pane <<EOF
+$out
+EOF
+  if [ "$tab" != "w1:t3" ] || [ "$pane" != "w1:p3" ]; then
+    fail "create_task should echo the NEW tab/pane ids, got '$out'"
+  fi
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''fm-sidebar-husk' \
+    "create_task did not create the replacement tab"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the sidebar-only husk's tab"
+  pass "fm_backend_herdr_create_task: closes and replaces a sidebar-only husk (zero root panes) - Herdr 0.9.x"
+}
+
+test_create_task_refuses_when_pane_list_unparseable() {
+  # An unparseable pane-list payload (not valid JSON) must refuse rather than
+  # treat the tab as a sidebar-only husk.
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-unparseable-panes"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-unparseable-husk","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  # 2: pane list -> unparseable payload (jq fails -> treat as unreadable)
+  printf 'not valid json\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-unparseable-husk /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse when the pane list payload is unparseable (fail-safe toward refusal)"
+  assert_contains "$out" "could not read root panes" "create_task did not report the unparseable pane list"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "create_task must not create a replacement tab on an unparseable pane list"
+  pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than treating an unparseable pane list as a sidebar-only husk"
+}
+
+test_create_task_refuses_when_pane_list_is_missing() {
+  # An empty result with no .panes key at all must refuse rather than treat
+  # the tab as a sidebar-only husk.
+  local dir log resp fb out status
+  dir="$TMP_ROOT/husk-missing-panes"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-missing-panes","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  # 2: pane list -> result has no .panes key (incomplete payload)
+  printf '{"result":{}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-missing-panes /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task must refuse when the pane list has no .panes key (fail-safe toward refusal)"
+  assert_contains "$out" "could not read root panes" "create_task did not report the missing pane list"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "create_task must not create a replacement tab on a missing pane list"
+  pass "fm_backend_herdr_create_task: refuses (fail-safe) rather than treating a missing pane list as a sidebar-only husk"
 }
 
 # --- restored-layout husk close-and-replace (herdr session.json restore) -----
@@ -2111,13 +2218,14 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
   printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/4.out"
   printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
-  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
-  # The emptying-close plan's tab list proves the seeded prune is NOT
-  # workspace-emptying (the task tab remains), so the close stays plain.
-  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
-  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/10.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/11.out"
+  # The focus-preserving seeded-tab prune verifies the exact seeded tab still
+  # exists (tab get), then closes it (terminal plus any 0.9.x sidebar pane);
+  # response 7 is the silent `tab close`.
+  printf '{"result":{"tab":{"tab_id":"w9:t1"}}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/8.out"
+  # The converged workspace lists a 0.9.x sidebar pane beside the task's
+  # terminal root pane; pane_for_tab must still resolve the root pane.
+  printf '{"result":{"panes":[{"pane_id":"w9:p3","tab_id":"w9:t2","label":"Sidebar","tokens":{"herdr-sidebar-explorer":"a","herdr-sidebar-git":"b"}},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '
@@ -2142,8 +2250,8 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
     "projection workspace create did not use the corner label, full token, and --no-focus"
   assert_contains "$(cat "$log")" $'tab\x1fcreate\x1f--workspace\x1fw9\x1f--cwd\x1f/tmp/proj\x1f--label\x1ffm-task-p2\x1f--no-focus' \
     "projection task tab did not target the exact new workspace"
-  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p1' \
-    "projection create did not prune the exact seeded root pane"
+  assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw9:t1' \
+    "projection create did not prune the exact seeded default tab"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
     "projection create must never call workspace close"
   pass "herdr presentation create: exact response IDs yield one normal task pane with no workspace-close authority"
@@ -2158,11 +2266,11 @@ test_projection_create_never_closes_a_concurrent_same_label_tab() {
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
   printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/4.out"
   printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
-  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
-  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/10.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/11.out"
+  # The prune verifies the exact seeded tab still exists (tab get), then closes
+  # it; response 7 is the silent `tab close` of the exact seeded default tab.
+  printf '{"result":{"tab":{"tab_id":"w9:t1"}}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/8.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_create_task /tmp/proj label fm-task-p2' "$ROOT" 2>&1)
@@ -2175,6 +2283,345 @@ test_projection_create_never_closes_a_concurrent_same_label_tab() {
   assert_not_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p3' \
     "projection closed a concurrent same-label pane"
   pass "herdr presentation create: concurrent same-label tabs are never prune targets"
+}
+
+test_pane_for_tab_prefers_terminal_over_sidebar() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/pane-for-tab-sidebar"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Herdr 0.9.x lists the chrome sidebar pane before the terminal root pane.
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t1","label":"Sidebar","tokens":{"herdr-sidebar-explorer":"a","herdr-sidebar-git":"b"}},{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_for_tab fmtest w1 w1:t1' "$ROOT") \
+    || fail "pane_for_tab failed to resolve a root pane"
+  [ "$out" = "w1:p1" ] || fail "pane_for_tab returned the sidebar pane instead of the terminal root pane: $out"
+  pass "herdr pane_for_tab: prefers the terminal root pane over a 0.9.x sidebar pane"
+}
+
+test_projection_cleanup_tabs_exact_closes_both_tabs() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/projection-cleanup-tabs"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }
+      fm_backend_herdr_projection_focus_restore() { return 0; }
+      fm_backend_herdr_projection_cleanup_tabs_exact fmtest w9:t2 w9:t1
+    ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "exact tab rollback should succeed: $out"
+  assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw9:t2' "rollback did not close the task tab"
+  assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw9:t1' "rollback did not close the seeded tab"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "rollback should close tabs, never panes"
+  pass "herdr presentation cleanup: exact tab rollback closes both tabs via tab close"
+}
+
+# make_owned_rollback_probe: a stateful Herdr CLI stand-in for the abort
+# rollback. The active focus lives in $FOCUS so a restore really moves it, a
+# live foreground client is always attached, and every focus or close appends
+# one ordered event to $ORDER so a test can prove WHEN focus was restored
+# relative to the close. Arguments select the rollback's owned workspace and
+# prior focus. make_owned_rollback_probe <dir> -> echoes the probe path
+make_owned_rollback_probe() {  # <dir>
+  local dir=$1 probe="$1/probe"
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+set -u
+. "$ROOT/bin/backends/herdr.sh"
+fm_backend_herdr_foreground_client_present() { return 0; }
+fm_backend_herdr_projection_focus_snapshot() {
+  local row
+  row=$(cat "$FOCUS" 2>/dev/null) || return 1
+  [ -n "$row" ] || return 1
+  printf '%s' "$row"
+}
+fm_backend_herdr_cli() {
+  shift
+  case "$1 $2" in
+    "tab get")
+      printf '{"result":{"tab":{"tab_id":"%s","workspace_id":"%s"}}}\n' "$3" "${3%%:*}"
+      ;;
+    "tab focus")
+      printf '%s\t%s\n' "${3%%:*}" "$3" > "$FOCUS"
+      printf 'focus %s\n' "$3" >> "$ORDER"
+      ;;
+    "tab close")
+      printf 'close %s\n' "$3" >> "$ORDER"
+      ;;
+    *) return 1 ;;
+  esac
+}
+fm_backend_herdr_projection_cleanup_tabs_exact fmtest w9:t2 w9:t1 "${1:-}" "${2:-}"
+SH
+  chmod +x "$probe"
+  printf '%s\n' "$probe"
+}
+
+test_projection_abort_rollback_restores_prior_focus_for_owned_active_tab() {
+  local dir probe order focus out status
+  dir="$TMP_ROOT/projection-owned-active-rollback"; mkdir -p "$dir"
+  order="$dir/order"; focus="$dir/focus"; : > "$order"
+  # The seeded tab of the spawn-created workspace is the persisted active tab
+  # and a live client is attached. Herdr 0.9.1 marks a created tab focused
+  # inside a workspace the client has not switched to, so this is the abort
+  # shape a failed create-time focus restore leaves behind.
+  printf 'w9\tw9:t1\n' > "$focus"
+  probe=$(make_owned_rollback_probe "$dir")
+  out=$(ROOT="$ROOT" FOCUS="$focus" ORDER="$order" "$probe" w9 $'w1\tw1:t1' 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "owned rollback of a spawn-created active tab should succeed: $out"
+  [ "$(cat "$order")" = "$(printf 'close %s\nfocus %s\nclose %s' w9:t2 w1:t1 w9:t1)" ] \
+    || fail "the rollback did not restore the pre-spawn focus before closing the owned active tab: $(cat "$order")"
+  [ "$(cat "$focus")" = $'w1\tw1:t1' ] \
+    || fail "the rollback did not leave the captain's prior focus active"
+  pass "herdr presentation abort rollback: an owned active tab is closed only after the prior focus is restored"
+}
+
+test_projection_abort_rollback_keeps_the_guard_outside_its_own_workspace() {
+  local dir probe order focus out status
+  dir="$TMP_ROOT/projection-owned-active-refusal"; mkdir -p "$dir"
+  order="$dir/order"; focus="$dir/focus"
+  probe=$(make_owned_rollback_probe "$dir")
+  : > "$order"; printf 'w9\tw9:t1\n' > "$focus"
+  out=$(ROOT="$ROOT" FOCUS="$focus" ORDER="$order" "$probe" w7 $'w1\tw1:t1' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a tab outside the rollback's own workspace must stay refused"
+  [ "$(cat "$order")" = "close w9:t2" ] \
+    || fail "a foreign-workspace scope still closed or refocused the active tab: $(cat "$order")"
+  [ "$(cat "$focus")" = $'w9\tw9:t1' ] || fail "a foreign-workspace scope moved the captain's focus"
+  : > "$order"; printf 'w9\tw9:t1\n' > "$focus"
+  out=$(ROOT="$ROOT" FOCUS="$focus" ORDER="$order" "$probe" w9 '' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an owned tab with no recorded prior focus must stay refused"
+  [ "$(cat "$order")" = "close w9:t2" ] \
+    || fail "a missing prior focus still closed the owned active tab: $(cat "$order")"
+  assert_contains "$out" "target is the captain's active tab" \
+    "the refused owned rollback did not report the live-viewer boundary"
+  pass "herdr presentation abort rollback: the live-viewer guard stays authoritative outside the owned scope"
+}
+
+# make_projection_create_statefake: a stateful Herdr CLI stand-in that models the
+# measured 0.9.1 removal behavior (a tab close removes the tab, and the emptied
+# workspace with it), so a rollback can be judged by the surviving live state.
+# make_projection_create_statefake <dir> <state-file> -> echoes the fakebin dir
+make_projection_create_statefake() {  # <dir> <state-file>
+  local dir=$1 state=$2 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+STATE='$state'
+save() { local tmp="\$STATE.tmp.\$\$"; cat > "\$tmp" && mv "\$tmp" "\$STATE"; }
+ws=""; label=""
+args=("\$@")
+for ((i=0; i<\${#args[@]}; i++)); do
+  case "\${args[\$i]}" in
+    --workspace) ws=\${args[\$((i+1))]:-} ;;
+    --label) label=\${args[\$((i+1))]:-} ;;
+  esac
+done
+case "\${1:-} \${2:-}" in
+  "workspace create")
+    jq --arg label "\$label" '
+      .workspaces += [{workspace_id:"w1", label:\$label}]
+      | .tabs += [{tab_id:"w1:t1", workspace_id:"w1", pane_id:"w1:p1"}]' "\$STATE" | save
+    printf '%s\n' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}'
+    ;;
+  "workspace list")
+    jq -c '{result:{workspaces:.workspaces}}' "\$STATE"
+    ;;
+  "tab get")
+    tab=\${3:-}
+    if [ "\$(jq -r --arg t "\$tab" '[.tabs[]|select(.tab_id==\$t)]|length' "\$STATE")" = 0 ]; then
+      printf '%s\n' '{"error":{"code":"tab_not_found"}}'
+    else
+      printf '{"result":{"tab":{"tab_id":"%s"}}}\n' "\$tab"
+    fi
+    ;;
+  "tab close")
+    tab=\${3:-}
+    jq --arg t "\$tab" '
+      .tabs |= [.[]|select(.tab_id != \$t)]
+      | . as \$s
+      | .workspaces |= [ .[] | .workspace_id as \$w
+          | select([\$s.tabs[] | select(.workspace_id == \$w)] | length > 0) ]' "\$STATE" | save
+    ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+test_projection_create_focus_restore_failure_keeps_its_rollback_scope() {
+  local dir fb state out status
+  dir="$TMP_ROOT/projection-create-restore-failure"; mkdir -p "$dir/state"
+  state="$dir/live.json"
+  printf '%s\n' '{"workspaces":[],"tabs":[]}' > "$state"
+  fb=$(make_projection_create_statefake "$dir" "$state")
+  # The workspace create succeeds with complete exact IDs and then the
+  # create-time focus restore fails, which is the abort shape the presentation
+  # rollback has to cover.
+  out=$(PATH="$fb:$PATH" STATE_DIR="$dir/state" ID=probe bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_version_check() { return 0; }
+    fm_backend_herdr_server_ensure() { return 0; }
+    fm_backend_herdr_session() { printf fmtest; }
+    fm_backend_herdr_projection_focus_snapshot() { printf "cap-ws\tcap-tab"; }
+    fm_backend_herdr_projection_focus_restore() { [ "${3:-}" != "workspace create" ]; }
+    journal=$(fm_backend_herdr_projection_journal_path "$STATE_DIR" "$ID") || exit 9
+    fm_backend_herdr_projection_journal_create "$STATE_DIR" "$ID" || exit 9
+    token=$(fm_backend_herdr_projection_journal_token "$journal" "$ID") || exit 9
+    label=$(fm_backend_herdr_projection_workspace_label "$ID" "$token")
+    if fm_backend_herdr_projection_create_task /tmp "$label" fm-probe; then
+      printf "create-unexpectedly-succeeded\n"; exit 9
+    fi
+    printf "safe=%s ws=%s tab=%s pane=%s focus=%s\n" \
+      "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-}" \
+      "${FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID:-}" \
+      "${FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID:-}" \
+      "${FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID:-}" \
+      "$(printf "%s" "${FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS:-}" | tr "\t" "/")"
+    fm_backend_herdr_projection_cleanup_tabs_exact \
+      "$FM_BACKEND_HERDR_PROJECTION_SESSION" \
+      "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
+      "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
+      "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
+      "$FM_BACKEND_HERDR_PROJECTION_PRE_CREATE_FOCUS" || printf "rollback-failed\n"
+    if fm_backend_herdr_projection_token_workspace_gone \
+      "$FM_BACKEND_HERDR_PROJECTION_SESSION" "$journal" "$ID"; then
+      printf "token-gone=yes\n"
+    else
+      printf "token-gone=no\n"
+    fi
+  ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the failing create did not reach the rollback probe: $out"
+  assert_contains "$out" "safe=1 ws=w1 tab=w1:t1 pane=w1:p1 focus=cap-ws/cap-tab" \
+    "a failing create-time focus restore did not keep the exact rollback scope: $out"
+  assert_contains "$out" "token-gone=yes" \
+    "the recorded scope did not let the rollback retire the token-bearing workspace: $out"
+  [ "$(jq -r '.workspaces | length' "$state")" = 0 ] \
+    || fail "the abort rollback left an orphan disposable workspace behind: $(jq -c '.workspaces' "$state")"
+  [ "$(jq -r '.tabs | length' "$state")" = 0 ] \
+    || fail "the abort rollback left a seeded or task tab behind: $(jq -c '.tabs' "$state")"
+  pass "herdr presentation create: a failing create-time focus restore still rolls back its exact workspace and seeded tab"
+}
+
+test_projection_reclaim_create_restore_failure_rolls_back_its_replacement() {
+  local dir state home home_real journal token label log out status
+  dir="$TMP_ROOT/projection-reclaim-restore-failure"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$state" "$home"
+  home_real=$(cd "$home" && pwd -P)
+  log="$dir/log"; : > "$log"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" reclaim-r1) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label reclaim-r1 "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/reclaim-r1.herdr-presentation" reclaim-r1 "$2" fmtest \
+      w2 w2:t2 w2:p2 w1 firstmate "$label" fm-reclaim-r1 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create the reclaim restore-failure journal fixture"
+  journal="$state/reclaim-r1.herdr-presentation"
+  label="└ reclaim-r1 · p:$token"
+  out=$(ROOT="$ROOT" JOURNAL="$journal" HOME_A="$home" LOG="$log" CLOSED="$state/closed" \
+    bash -c '
+      . "$ROOT/bin/backends/herdr.sh"
+      fm_backend_herdr_cli() {
+        local session=$1
+        shift
+        printf "%s\n" "$*" >> "$LOG"
+        case "$1 $2" in
+          "tab create")
+            printf "{\"result\":{\"tab\":{\"tab_id\":\"w2:t3\"},\"root_pane\":{\"pane_id\":\"w2:p3\"}}}\n" ;;
+          "tab get")
+            if [ "$3" = w2:t3 ] && [ ! -e "$CLOSED" ]; then
+              printf "{\"result\":{\"tab\":{\"tab_id\":\"w2:t3\",\"workspace_id\":\"w2\"}}}\n"
+            elif [ "$3" = w2:t2 ]; then
+              printf "{\"result\":{\"tab\":{\"tab_id\":\"w2:t2\",\"workspace_id\":\"w2\"}}}\n"
+            else
+              printf "{\"error\":{\"code\":\"tab_not_found\"}}\n"
+            fi
+            ;;
+          "terminal title") printf "{\"result\":{\"reason\":\"cleared\"}}\n" ;;
+          "tab close") : > "$CLOSED" ;;
+          *) return 1 ;;
+        esac
+      }
+      fm_backend_herdr_projection_live_binding_matches() { return 0; }
+      fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+      fm_backend_herdr_projection_focus_restore() { [ "${3:-}" != "husk replacement create" ]; }
+      fm_backend_herdr_pane_agent_state() {
+        case "$2" in
+          w2:p3) [ -e "$CLOSED" ] && printf dead || printf no-agent ;;
+          *) printf no-agent ;;
+        esac
+      }
+      set +e
+      fm_backend_herdr_projection_reclaim_task \
+        fmtest "$JOURNAL" reclaim-r1 "$HOME_A" w2 w2:t2 w2:p2 firstmate fm-reclaim-r1 /tmp/project
+      rc=$?
+      set -e
+      printf "rc=%s safe=%s tab=%s pane=%s\n" "$rc" \
+        "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-}" \
+        "${FM_BACKEND_HERDR_PROJECTION_TAB_ID:-}" \
+        "${FM_BACKEND_HERDR_PROJECTION_PANE_ID:-}"
+    ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the failing reclaim did not reach its rollback probe: $out"
+  assert_contains "$out" "rc=1 safe=1 tab=w2:t3 pane=w2:p3" \
+    "a failing reclaim create-time focus restore did not record its exact rollback scope: $out"
+  assert_contains "$(cat "$log")" "tab close w2:t3" \
+    "a failing reclaim create-time focus restore did not close the exact replacement tab: $(cat "$log")"
+  assert_not_contains "$(cat "$log")" "tab close w2:t2" \
+    "a failing reclaim create-time focus restore closed the recorded husk instead of its replacement"
+  [ "$(sed -n 's/^tab_id=//p' "$journal")" = w2:t2 ] \
+    && [ "$(sed -n 's/^pane_id=//p' "$journal")" = w2:p2 ] \
+    || fail "the rolled-back reclaim rewrote the journal away from its still-recorded husk"
+  pass "herdr presentation reclaim: a failing create-time focus restore closes only its replacement tab"
+}
+
+test_projection_close_is_idempotent_when_the_tab_vanished_mid_close() {
+  local vanished out reads
+  reads="$TMP_ROOT/projection-close-vanish-reads"
+  for vanished in 1 0; do
+    : > "$reads"
+    out=$(VANISHED="$vanished" READS="$reads" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_foreground_client_present() { return 0; }
+      fm_backend_herdr_projection_focus_snapshot() { printf "cap-ws\tcap-tab"; }
+      fm_backend_herdr_cli() {
+        shift
+        case "$1 $2" in
+          "tab get")
+            count=$(( $(cat "$READS" 2>/dev/null || printf 0) + 1 ))
+            printf "%s" "$count" > "$READS"
+            if [ "$VANISHED" = 1 ] && [ "$count" -ge 2 ]; then
+              printf "{\"error\":{\"code\":\"tab_not_found\"}}\n"
+            else
+              printf "{\"result\":{\"tab\":{\"tab_id\":\"%s\"}}}\n" "$3"
+            fi
+            ;;
+          *) return 1 ;;
+        esac
+      }
+      fm_backend_herdr_projection_close_tab_focus_preserving fmtest w9:t1
+      printf "rc=%s" "$?"
+    ' "$ROOT" 2>&1)
+    if [ "$vanished" = 1 ]; then
+      assert_contains "$out" "rc=0" \
+        "a tab that vanished between the presence read and the close must not fail the rollback: $out"
+    else
+      assert_contains "$out" "rc=1" \
+        "a failed close of a tab that is still present must stay a failure: $out"
+    fi
+  done
+  pass "herdr presentation cleanup: a failed tab close succeeds only when a second exact read proves the tab gone"
 }
 
 test_projection_focus_snapshot_requires_exact_workspace_and_tab() {
@@ -3036,29 +3483,21 @@ test_projection_close_failed_removal_rolls_back_the_reposition() {
   pass "herdr presentation cleanup: every unconfirmed removal restores the exact original workspace order and reports failure"
 }
 
-test_kill_emptying_non_focused_uses_pane_death() {
-  local dir log resp fb out status bgpid lock_log lock_held
-  dir="$TMP_ROOT/kill-death"; mkdir -p "$dir/responses"
+test_kill_emptying_non_focused_uses_tab_close() {
+  local dir log resp fb out status lock_log lock_held
+  dir="$TMP_ROOT/kill-tab-close"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; lock_log="$dir/lock.log"; lock_held="$dir/lock-held"
   : > "$log"; : > "$lock_log"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":false}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2","tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/3.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","workspace_id":"w2"}]}}' > "$resp/4.out"
-  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/5.out"
-  cp "$resp/1.out" "$resp/6.out"
-  sleep 300 & bgpid=$!
-  death_process_info_fixture w2:p2 "$bgpid" > "$resp/7.out"
-  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/8.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/9.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/10.out"
-  make_death_lab "$dir" "$bgpid"
+  # response 4 is the silent `tab close`; the focus restore re-reads the still
+  # focused w1 snapshot after the non-focused workspace was emptied.
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_WORKSPACE_MOVER="$dir/mover" \
-    FM_FAKE_MOVER_LOG="$dir/mover.log" FM_FAKE_MOVER_RESPONSE="$dir/no-response" \
-    FM_BACKEND_HERDR_DEATH_CLOSE_POLLS=2 FM_FAKE_LOCK_LOG="$lock_log" \
-    FM_FAKE_LOCK_HELD="$lock_held" \
+    FM_FAKE_LOCK_LOG="$lock_log" FM_FAKE_LOCK_HELD="$lock_held" \
     bash -c '
       . "$0/bin/backends/herdr.sh"
       fm_backend_herdr_target_ready() { fm_backend_herdr_parse_target "$1"; }
@@ -3084,9 +3523,10 @@ test_kill_emptying_non_focused_uses_pane_death() {
   [ "$(cat "$lock_log")" = "$(printf 'acquire\nrelease')" ] \
     || fail "the generic kill did not hold one presentation lock across its complete mutation: $(cat "$lock_log")"
   [ ! -e "$lock_held" ] || fail "the generic kill retained its presentation lock"
-  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "an emptying non-focused kill used the focus-unsafe explicit close"
-  assert_not_contains "$(cat "$log")" $'tab\x1ffocus' "an emptying non-focused kill moved focus"
-  pass "fm_backend_herdr_kill: one session lock covers the focus-safe emptying removal"
+  assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw2:t2' "an emptying non-focused kill did not close the task's tab"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "an emptying non-focused kill used the focus-unsafe explicit pane close"
+  assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' "an emptying non-focused kill ran the obsolete idle-shell proof"
+  pass "fm_backend_herdr_kill: one session lock covers the tab-level emptying removal"
 }
 
 test_kill_focused_workspace_stays_plain_close() {
@@ -3113,11 +3553,11 @@ test_kill_focused_workspace_stays_plain_close() {
     ' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "a focused-workspace kill should stay best-effort: $out"
-  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw2:p2' "a focused-workspace kill did not use the plain close"
+  assert_contains "$(cat "$log")" $'tab\x1fclose\x1fw2:t2' "a focused-workspace kill did not close the task's tab"
   assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' "a focused-workspace kill ran the idle-shell proof"
   kill -0 "$bgpid" 2>/dev/null || fail "a focused-workspace kill signaled the pane's shell"
   kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
-  pass "fm_backend_herdr_kill: killing the focused workspace's tab keeps the legitimate plain close"
+  pass "fm_backend_herdr_kill: killing the focused workspace's tab keeps the legitimate tab close"
 }
 
 test_kill_refuses_when_presentation_lock_is_unavailable() {
@@ -3198,12 +3638,11 @@ test_projection_seeded_prune_refuses_active_tab() {
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9","focused":true},{"tab_id":"w9:t2","label":"fm-task","workspace_id":"w9","focused":false}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}' > "$resp/2.out"
   printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/3.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t1","focused":true}]}}' > "$resp/4.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","focused":true},{"tab_id":"w9:t2","focused":false}]}}' > "$resp/5.out"
-  printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}' > "$resp/6.out"
-  cp "$resp/1.out" "$resp/7.out"
-  cp "$resp/4.out" "$resp/8.out"
-  cp "$resp/5.out" "$resp/9.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w9:t1"}}}' > "$resp/4.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","active_tab_id":"w9:t1","focused":true}]}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","focused":true},{"tab_id":"w9:t2","focused":false}]}}' > "$resp/6.out"
+  cp "$resp/5.out" "$resp/7.out"
+  cp "$resp/6.out" "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_FAKE_HERDR_FOREGROUND_REASON=cleared \
@@ -3212,7 +3651,7 @@ test_projection_seeded_prune_refuses_active_tab() {
   [ "$status" -ne 0 ] || fail "projected seeded pruning must refuse the active tab"
   assert_contains "$out" "target is the captain's active tab" \
     "projected seeded prune did not explain its active-tab refusal"
-  assert_not_contains "$(cat "$log")" $'pane\x1fclose' \
+  assert_not_contains "$(cat "$log")" $'tab\x1fclose' \
     "projected seeded prune closed the captain's active tab"
   pass "herdr presentation focus: projected seeded pruning refuses the active tab"
 }
@@ -3779,22 +4218,18 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p3","tab_id":"w2:t3","workspace_id":"w2"}}}' > "$resp/12.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/13.out"
   printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/14.out"
-  cp "$resp/6.out" "$resp/15.out"
-  cp "$resp/7.out" "$resp/16.out"
-  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2","tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/17.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2"}}}' > "$resp/15.out"
+  cp "$resp/6.out" "$resp/16.out"
+  cp "$resp/7.out" "$resp/17.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/18.out"
   printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/19.out"
-  # The emptying-close plan sees the replacement tab alongside the old husk
-  # tab, so the husk close stays plain.
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-fm-hibit-r1"},{"tab_id":"w2:t3","label":"fm-fm-hibit-r1"}]}}' > "$resp/20.out"
-  : > "$resp/21.out"
-  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/22.out"
-  cp "$resp/6.out" "$resp/23.out"
-  cp "$resp/7.out" "$resp/24.out"
-  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/25.out"
-  cp "$resp/1.out" "$resp/26.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t3","label":"fm-fm-hibit-r1"}]}}' > "$resp/27.out"
-  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/28.out"
+  # response 20 is the silent `tab close` of the old husk tab.
+  cp "$resp/6.out" "$resp/21.out"
+  cp "$resp/7.out" "$resp/22.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/23.out"
+  cp "$resp/1.out" "$resp/24.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t3","label":"fm-fm-hibit-r1"}]}}' > "$resp/25.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/26.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '
@@ -3809,14 +4244,17 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
     || fail "reclaim did not advance the journal to the replacement endpoint"
   calls=$(cat "$log")
   create_line=$(grep -n $'tab\x1fcreate\x1f--workspace\x1fw2' "$log" | cut -d: -f1)
-  close_line=$(grep -n $'pane\x1fclose\x1fw2:p2' "$log" | cut -d: -f1)
+  close_line=$(grep -n $'tab\x1fclose\x1fw2:t2' "$log" | cut -d: -f1)
   [ -n "$create_line" ] && [ -n "$close_line" ] && [ "$create_line" -lt "$close_line" ] \
     || fail "reclaim did not create the exact replacement before closing the old husk"
   agent_line=$(grep -n $'agent\x1fget\x1fw2:p2' "$log" | tail -1 | cut -d: -f1)
   [ -n "$agent_line" ] && [ "$agent_line" -lt "$close_line" ] \
     || fail "reclaim did not recheck the old pane agent state before the close"
-  boundary_mutations=$(sed -n "$((agent_line + 1)),$((close_line - 1))p" "$log" \
-    | grep -Ev $'\x1f(tab\x1flist|pane\x1flist|workspace\x1flist|terminal\x1ftitle\x1fclear)' || true)
+  boundary_mutations=
+  if [ "$((agent_line + 1))" -lt "$close_line" ]; then
+    boundary_mutations=$(sed -n "$((agent_line + 1)),$((close_line - 1))p" "$log" \
+      | grep -Ev $'\x1f(tab\x1flist|pane\x1flist|workspace\x1flist|terminal\x1ftitle\x1fclear)' || true)
+  fi
   [ -z "$boundary_mutations" ] \
     || fail "reclaim mutated between the old pane agent recheck and the close: $boundary_mutations"
   assert_not_contains "$calls" $'workspace\x1fclose' "reclaim introduced workspace-close authority"
@@ -5667,7 +6105,7 @@ EOF
   [ "$tabcount" = 1 ] || fail "the auto-created default tab should be pruned once a real task tab exists, $tabcount tab(s) remain: $(jq -c '.tabs' "$state")"
   jq -r --arg w "$wsid" '[.tabs[]|select(.workspace_id==$w)][0].label' "$state" | grep -qx 'fm-prunetest' \
     || fail "the surviving tab should be the real task tab, not the default: $(jq -c '.tabs' "$state")"
-  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' "create_task did not close the default tab's pane"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close' "create_task did not close the default tab"
   pass "fm_backend_herdr_create_task: prunes exactly the seeded default tab container_ensure identified, once the first real task tab exists"
 }
 
@@ -6182,6 +6620,9 @@ test_agent_descendant_under_a_spaced_install_path_stays_alive
 test_registered_agent_with_an_unreadable_process_view_is_unknown
 test_registered_agent_with_an_empty_foreground_over_a_real_shell_settles_via_descendant_walk
 test_projection_reclaim_rollback_refuses_a_stale_registration
+test_projection_reclaim_rollback_clears_cleanup_safe_on_agent_state_close_refusal
+test_projection_reclaim_rollback_preserves_caller_gate_on_close_failure
+test_projection_reclaim_rollback_preserves_caller_gate_when_required_state_empty
 test_busy_state_never_reports_a_shell_only_pane_busy
 test_cli_caches_the_selected_client_within_a_process
 test_cli_scopes_the_selected_client_to_its_session
@@ -6219,6 +6660,9 @@ test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
+test_create_task_closes_and_replaces_sidebar_only_husk
+test_create_task_refuses_when_pane_list_unparseable
+test_create_task_refuses_when_pane_list_is_missing
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
@@ -6245,6 +6689,13 @@ test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
+test_pane_for_tab_prefers_terminal_over_sidebar
+test_projection_cleanup_tabs_exact_closes_both_tabs
+test_projection_abort_rollback_restores_prior_focus_for_owned_active_tab
+test_projection_abort_rollback_keeps_the_guard_outside_its_own_workspace
+test_projection_create_focus_restore_failure_keeps_its_rollback_scope
+test_projection_reclaim_create_restore_failure_rolls_back_its_replacement
+test_projection_close_is_idempotent_when_the_tab_vanished_mid_close
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab
@@ -6270,7 +6721,7 @@ test_projection_close_death_failure_falls_back_to_plain_close
 test_projection_close_death_still_restores_a_stolen_focus
 test_projection_close_death_never_sigkills_a_reused_pid
 test_projection_close_failed_removal_rolls_back_the_reposition
-test_kill_emptying_non_focused_uses_pane_death
+test_kill_emptying_non_focused_uses_tab_close
 test_kill_focused_workspace_stays_plain_close
 test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_refuses_when_presentation_lock_is_unavailable
