@@ -114,9 +114,9 @@ type SessionGeneration = {
   // replacement began reads it to tell a main-queued wake (replayed) from a
   // branch-handled one (finished).
   unconsumedWakes: Map<string, UnconsumedWake>;
-  // A verified successor's failure close that arrived while the pipeline was
-  // still delivering the wake it was started for; its bounded retry runs once
-  // that delivery settles instead of being skipped by the single-flight guard.
+  // A verified successor's failure close that arrived during restoration;
+  // its bounded retry runs once that restoration settles instead of being
+  // skipped by the single-flight guard.
   deferredClose: { message: string; predecessorArmPid: string } | null;
 };
 
@@ -861,6 +861,65 @@ export default function (pi: ExtensionAPI) {
     owner.cleanupTimer = timer;
   }
 
+  // Delivery can outlive a watcher cycle (notably an accepted branch turn).
+  // Its claim prevents duplicate delivery, but must never occupy the serialized
+  // restoration slot: every later actionable close still needs a successor.
+  async function settleActionableDelivery(
+    owner: SessionGeneration,
+    pending: PendingActionableClose,
+    restoration: { failure: string; recovery?: { generation: string; watcherPid: string } },
+    settleClaim: (settlement: "delivered" | "failed") => void,
+    releaseClaim: () => void,
+    previousClaim?: ActionableDeliveryClaim,
+  ): Promise<void> {
+    try {
+      // A failed restoration must reach main even if an old branch claim
+      // never settles. It stays unreported until Pi accepts it.
+      const alarm = previousClaim && restoration.failure
+        ? sendWake(owner, restoration.failure).catch(() => false)
+        : Promise.resolve(false);
+      // A replacement serializes delivery with the prior generation's claim,
+      // while its watcher restoration remains free to handle later closes.
+      const previousSettlement = previousClaim ? await previousClaim.settlement : "failed";
+      if (!generationIsLive(owner)) {
+        settleClaim(previousSettlement);
+        return;
+      }
+      const unreportedFailure = await alarm ? "" : restoration.failure;
+      const message = unreportedFailure ? `${pending.message}\n\n${unreportedFailure}` : pending.message;
+      // The old branch handled the wake; an unreported alarm still reaches main.
+      const delivered = previousSettlement === "delivered"
+        ? !unreportedFailure || await sendWake(owner, unreportedFailure)
+        : await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration.recovery);
+      if (!delivered) {
+        settleClaim(previousSettlement);
+        return;
+      }
+      const awaitingConsumption = owner.unconsumedWakes.has(pending.token);
+      if (awaitingConsumption && !generationIsLive(owner)) {
+        // A replacement must replay a follow-up accepted by the old session.
+        settleClaim("failed");
+        return;
+      }
+      settleClaim("delivered");
+      if (!awaitingConsumption) {
+        pending.delivered = true;
+        try {
+          finishPendingActionable(owner, pending);
+        } catch (error) {
+          surfaceCleanupFailure(owner, error);
+          schedulePendingCleanup(owner);
+        }
+      }
+    } catch (error) {
+      settleClaim("failed");
+      const detail = error instanceof Error ? error.message : String(error);
+      surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
+    } finally {
+      releaseClaim();
+    }
+  }
+
   async function processPendingActionables(owner: SessionGeneration): Promise<void> {
     if (!generationIsLive(owner) || owner.restoring || owner.pendingActionables.length === 0) return;
     owner.restoring = true;
@@ -878,21 +937,11 @@ export default function (pi: ExtensionAPI) {
         // A record Pi has accepted but not consumed is neither redelivered
         // nor finished here: consumption finishes it, replacement replays it.
         const pending = owner.pendingActionables.find(
-          (item) => !item.delivered && !owner.unconsumedWakes.has(item.token),
+          (item) => !item.delivered && !owner.unconsumedWakes.has(item.token) &&
+            replacementCoordinator.deliveries.get(item.token)?.owner !== owner,
         );
         if (!pending) break;
         const existingClaim = replacementCoordinator.deliveries.get(pending.token);
-        if (existingClaim && existingClaim.owner !== owner) {
-          const settlement = await existingClaim.settlement;
-          if (!generationIsLive(owner)) return;
-          if (settlement === "delivered") {
-            pending.delivered = true;
-            continue;
-          }
-          if (replacementCoordinator.deliveries.get(pending.token) === existingClaim) {
-            replacementCoordinator.deliveries.delete(pending.token);
-          }
-        }
         let settleClaim: (settlement: "delivered" | "failed") => void = () => {};
         const settlement = new Promise<"delivered" | "failed">((resolveSettlement) => {
           settleClaim = resolveSettlement;
@@ -904,46 +953,31 @@ export default function (pi: ExtensionAPI) {
             replacementCoordinator.deliveries.delete(pending.token);
           }
         };
+        const abandonClaim = (): void => {
+          // Forward a prior generation's unresolved delivery through another
+          // replacement, even if this generation retires during restoration.
+          if (existingClaim) {
+            void existingClaim.settlement.then((result) => {
+              settleClaim(result);
+              releaseClaim();
+            });
+          } else {
+            settleClaim("failed");
+            releaseClaim();
+          }
+        };
         try {
           // A new restoration supersedes whatever became of the previous
-          // successor; only a failure during this delivery is retried after it.
+          // successor; only a failure during this restoration is retried after it.
           owner.deferredClose = null;
           const restoration = await restoreAfterActionableClose(owner, pending.predecessorArmPid);
           if (!generationIsLive(owner)) {
-            settleClaim("failed");
-            releaseClaim();
+            abandonClaim();
             return;
           }
-          const message = restoration.failure ? `${pending.message}\n\n${restoration.failure}` : pending.message;
-          const delivered = await deliverActionableWake(owner, message, Boolean(restoration.failure), pending, restoration.recovery);
-          if (!delivered) {
-            settleClaim("failed");
-            releaseClaim();
-            return;
-          }
-          const awaitingConsumption = owner.unconsumedWakes.has(pending.token);
-          if (awaitingConsumption && !generationIsLive(owner)) {
-            // Pi accepted the follow-up, then the session was replaced before
-            // this continuation ran: the shutdown persisted the still-pending
-            // record, so a replacement waiting on this claim must replay it.
-            settleClaim("failed");
-            releaseClaim();
-            return;
-          }
-          settleClaim("delivered");
-          if (!awaitingConsumption) {
-            // The branch handled it, or Pi consumed it before this ran.
-            pending.delivered = true;
-            try {
-              finishPendingActionable(owner, pending);
-            } catch (error) {
-              surfaceCleanupFailure(owner, error);
-            }
-          }
-          releaseClaim();
+          void settleActionableDelivery(owner, pending, restoration, settleClaim, releaseClaim, existingClaim);
         } catch (error) {
-          settleClaim("failed");
-          releaseClaim();
+          abandonClaim();
           throw error;
         }
       }
@@ -959,7 +993,7 @@ export default function (pi: ExtensionAPI) {
         // bounded retries, which hands repair to main through fm_watch_arm_pi
         // (one more silent launch past the bound could hold a hung child that
         // the repair call would then report as "unchanged"), or lost a
-        // verified successor during the delivery, which takes the ordinary
+        // verified successor during restoration, which takes the ordinary
         // bounded, lock-checked retry it would have taken had the pipeline
         // been idle.
         const deferred = owner.deferredClose;
@@ -1179,9 +1213,9 @@ export default function (pi: ExtensionAPI) {
       }
       if (!generationIsLive(owner)) return;
       if (owner.restoring) {
-        // The pipeline is still delivering the wake this successor was
-        // started for. A verified successor that failed on its own keeps its
-        // bounded retry for the end of that delivery; an unready child closing
+        // The pipeline is still restoring continuity. A verified successor
+        // that failed on its own keeps its bounded retry for the end of that
+        // restoration; an unready child closing
         // here was retired by the restoration itself.
         if (verified && !armRetired.has(armChild)) {
           owner.deferredClose = { message: classification.message, predecessorArmPid: predecessor };
