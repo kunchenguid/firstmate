@@ -1851,24 +1851,42 @@ test_dialog_heading_and_footer_must_be_the_recorded_lines() {
   pass "a buried heading or a different last line is not the exit picker"
 }
 
-# The Pi model selector, as it rendered on pi 1.3.0 on 2026-10-20. The
-# rows, the provider hint, the search prompt and the footer are the recorded
-# screen; a real capture, not a reconstruction from the installed source.
+# The Pi model selector, captured from a live pi session (2026-10-31, pi
+# 1.3.0 and 1.4.0 render the same frame) in a 76x44 tmux pane, driven with
+# /model against a local `models.json` provider whose baseUrl is an unreachable
+# port (the `[localfake]` badge) so no provider was called.
+# These are bytes from `tmux capture-pane -p`, from the selector's top rule to
+# the pane's last row: the highlight sits on a model that is not the current
+# one, so the `→` cursor and the `✓` current marker are on different rows, and
+# pi draws its status bar under the dialog's closing rule. The right-aligned
+# model name in the last row is the status bar's own furniture.
 pi_model_picker_screen() {
   printf '%s\n' \
+    '────────────────────────────────────────────────────────────────────────────' \
+    '' \
     'Only showing models from configured providers. Use /login to add providers.' \
     '' \
     '>' \
     '' \
-    '→ ✓ alpha-model-one [localfake]' \
-    '    beta-model-two [localfake]' \
+    '  ✓ alpha-model-one [localfake]' \
+    '→   beta-model-two [localfake]' \
     '    gamma-model-three [localfake]' \
     '' \
-    '  Model Name: alpha-model-one' \
+    '  Model Name: beta-model-two' \
     '' \
     '  Model catalogs refreshed.' \
     '' \
-    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '────────────────────────────────────────────────────────────────────────────' \
+    '/tmp/pilive' \
+    '0.0%/128k (auto)                                             alpha-model-one'
+}
+
+# The same selector captured as the dialog region alone, ending at its closing
+# rule. Both shapes are real: a bounded tail can end at the rule, a viewport
+# capture always carries the status bar under it.
+pi_model_picker_excerpt_screen() {
+  pi_model_picker_screen | sed '$d' | sed '$d'
 }
 
 test_pi_model_selector_is_named_and_blocks_enter() {
@@ -1900,6 +1918,48 @@ test_pi_model_selector_is_named_and_blocks_enter() {
   [ "$rc" -eq 1 ] || fail "the rows without the recorded footer must not match"
   [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
   pass "the Pi model selector is named by its recorded rows and footer"
+}
+
+test_pi_selector_ends_at_its_closing_rule_not_at_the_pane() {
+  local screen out rc tail
+  # The dialog region alone, ending at its closing rule.
+  out=$(fm_composer_blocking_dialog "$(pi_model_picker_excerpt_screen)"); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = 'Pi model selector' ] \
+    || fail "the selector's dialog region alone should match: rc=$rc name='$out'"
+  # What a real pane capture hands the matcher: pi's own status bar follows
+  # the closing rule, so the footer is the dialog's last row, never the
+  # pane's. Reading the footer as the pane's last row made the guard miss
+  # every live selector screen.
+  screen=$(pi_model_picker_screen)
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = 'Pi model selector' ] \
+    || fail "a selector with pi's status bar under its closing rule should match: rc=$rc name='$out'"
+  # The same footer quoted above a bordered composer, closed by a pane-wide
+  # rule, is content: box glyphs under the rule are not a status bar.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→ ✓ alpha-model-one [localfake]' \
+    '    beta-model-two [localfake]' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '────────────────────────────────────────────────────────────────────────' \
+    '╭──────────────╮' \
+    '│ > next steer │' \
+    '╰──────────────╯')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] \
+    || fail "quoted footer closed by a pane-wide rule must not be a selector, got '$out'"
+  # Nor is a rule that spans only part of the screen a closing rule.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→   beta-model-two [localfake]' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '──────' \
+    '  Model catalogs refreshed.')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] \
+    || fail "a short rule under a quoted footer must not be a selector, got '$out'"
+  # A dialog whose closing rule is cut off by a bounded tail still matches.
+  tail=$(pi_model_picker_excerpt_screen | sed '$d')
+  out=$(fm_composer_blocking_dialog "$tail"); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = 'Pi model selector' ] \
+    || fail "a selector tail ending at its footer should match: rc=$rc name='$out'"
+  pass "the Pi selector ends at its closing rule, not at the pane's last row"
 }
 
 fm_test_pi_picker_state() {
@@ -2050,6 +2110,7 @@ test_quoted_exit_picker_text_is_not_a_dialog() {
 test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
 test_pi_model_selector_is_named_and_blocks_enter
+test_pi_selector_ends_at_its_closing_rule_not_at_the_pane
 test_dialog_matcher_is_portable_awk
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog

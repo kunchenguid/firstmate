@@ -1670,37 +1670,59 @@ Refusing an Enter that would confirm a dialog restores an existing safety path, 
 
 ### Pi model selector
 
-Measured 2026-10-20 against pi 1.3.0 in an isolated tmux session on Linux.
+Measured 2026-10-31 against pi 1.3.0 and pi 1.4.0 in an isolated tmux 3.6a session on Linux, with the selector driven live through `bin/fm-send.sh`.
+Both versions render the same frame.
 The Herdr lab was not running, so the Herdr path is covered by the existing fakes.
 Typing `/model` opens a selector whose highlighted row carries a right arrow, while the current model independently carries a check.
-The select, save and cancel footer can be followed by a closing DynamicBorder.
-The recorded capture excerpt is:
+The select, save and cancel footer is followed by the dialog's closing rule, and pi draws its status bar under that rule.
+The recorded frame is the bytes `tmux capture-pane -p` hands the matcher, from the selector's top rule to the pane's last row, with the highlight moved to a model that is not the current one so the `→` cursor and the `✓` current marker sit on different rows:
 
 ```text
+────────────────────────────────────────────────────────────────────────────
+
 Only showing models from configured providers. Use /login to add providers.
 
 >
 
-→ ✓ alpha-model-one [localfake]
-    beta-model-two [localfake]
+  ✓ alpha-model-one [localfake]
+→   beta-model-two [localfake]
     gamma-model-three [localfake]
 
-  Model Name: alpha-model-one
+  Model Name: beta-model-two
 
   Model catalogs refreshed.
 
   Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel
-────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────
+/tmp/pilive
+0.0%/128k (auto)                                             alpha-model-one
 ```
 
-The rows in that capture come from a local `models.json` provider with no reachable endpoint: the selector's own structure is what is measured, and no provider was called.
+The pane was 76 columns wide, so both rules span 76 columns, and the last row is pi's status bar: a left segment, then the right-aligned current model name.
+The rows in that capture come from a local `models.json` provider whose `baseUrl` points at an unreachable port (`127.0.0.1:9`, provider id `localfake`): the selector's own structure is what is measured, and no provider was called.
+That provider is how this screen is reproduced on a host with no authorised login: `PI_CODING_AGENT_DIR` names a throwaway agent directory whose `models.json` declares the provider and its models, and `/model` then lists them.
 A second Enter would confirm the selected model, so the screen is a modal the same way the Claude exit picker is.
-The selector is recognised by a highlighted row marked with an arrow and an optional current-model check, together with the exact `Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel` footer followed only by blank or box-drawing rows.
-A screen that quotes those words above ordinary composer content is not a selector.
+The selector is recognised by a highlighted row marked with an arrow and an optional current-model check, together with the exact `Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel` footer.
+That footer closes the dialog and not the pane: the next non-blank row must be a horizontal rule at least as wide as every other row of the frame, and the rows below that rule are the harness's own status bar, which may carry no box glyph.
+Reading the footer as the pane's last row missed this live screen entirely, because pi always draws its status bar under the closing rule; that reading only ever matched a capture excerpted at the rule.
+A screen that quotes those words above ordinary composer content is not a selector, because a rule that spans only part of the screen is not a closing rule and a box glyph below one is composer content, not a status bar.
 The matcher is per recorded screen rather than a shared "looks like a picker" heuristic: the footers differ per harness, and a footer-only match would reclassify ordinary screens that happen to end in the same words.
 No recorded screen was available for a Codex, Cursor, Grok, Kimi, OpenCode, Gemini, or omp modal picker, so those dialogs are not covered.
 Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
 
+Live trace on that screen, with text submitted at the pane:
+
+```sh
+FM_HOME=/tmp/pilive/fmhome bin/fm-send.sh pi-live:1.1 'live trace probe: this text must not reach the selector'
+```
+
+```text
+error: blocked on a prompt: Pi model selector
+error: text not sent to pi-live:1.1 (tmux send failed; tried meta=/tmp/pilive/fmhome/state/pi-live:1.1.meta; metadata window/terminal lookup; backend=tmux; endpoint=verified)
+```
+
+`bin/fm-send.sh` exits 1, the pane is byte-identical before and after, and the selector is still open with the highlight still on `beta-model-two`: no text was typed into it and no Enter was sent.
+Against the pre-fix matcher the same send typed the probe into the selector's search box and pressed Enter, so the guard was dead on a real screen and only a capture cut at the closing rule ever matched.
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:
