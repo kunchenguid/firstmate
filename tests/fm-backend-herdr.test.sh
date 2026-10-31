@@ -665,6 +665,134 @@ test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable() {
   pass "herdr pane agent session: anything unresumable degrades to a nonzero read with no output"
 }
 
+# --- moving the bound agent session to a fresh replacement ----------------
+#
+# The other half of relaunch session continuity: a harness that relaunches
+# FRESH into a pane whose registration outlived its agent must move Herdr's
+# bound session to the new id it will report, or the pane keeps showing the
+# old session's identity and idle time. Herdr ignores a `startup` report while
+# a session is bound, so the move must be a `clear` report with a sequence on
+# the integrations' nanosecond clock, and it counts only once read back.
+pane_rebind_session_run() {  # <dir> <first-agent-get> <second-agent-get>
+  local dir=$1 resp fb
+  mkdir -p "$dir/responses"; resp="$dir/responses"; : > "$dir/log"
+  printf '%s\n' "$2" > "$resp/1.out"
+  printf '{"result":{}}\n' > "$resp/2.out"
+  printf '%s\n' "$3" > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_rebind_agent_session fmtest w1:p2 claude 11111111-2222-4333-8444-555555555555' "$ROOT"
+}
+
+test_pane_rebind_agent_session_moves_a_bound_session_with_a_newer_clear_report() {
+  local dir status report seq
+  dir=$(mktemp -d "$TMP_ROOT/session-rebind.XXXXXX")
+  status=0
+  pane_rebind_session_run "$dir" \
+    '{"result":{"agent":{"agent":"claude","agent_session":{"agent":"claude","kind":"id","value":"31d009bf-0000-4000-8000-000000000000"}}}}' \
+    '{"result":{"agent":{"agent":"claude","agent_session":{"agent":"claude","kind":"id","value":"11111111-2222-4333-8444-555555555555"}}}}' \
+    || status=$?
+  [ "$status" -eq 0 ] || fail "a bound session that reads back as the new id must succeed, got status $status"
+  report=$(grep $'\x1freport-agent-session\x1f' "$dir/log" | tr '\037' ' ')
+  assert_contains "$report" "pane report-agent-session w1:p2 --source herdr:claude --agent claude --seq " \
+    "the move must be a pane session report from the harness's own integration source"
+  assert_contains "$report" "--agent-session-id 11111111-2222-4333-8444-555555555555 --session-start-source clear --session fmtest" \
+    "the move must name the new id as a clear session start on the exact session"
+  seq=$(printf '%s' "$report" | sed -n 's/.* --seq \([^ ]*\) .*/\1/p')
+  case "$seq" in
+    ''|*[!0-9]*) fail "the report sequence must be a decimal integer, got '$seq'" ;;
+  esac
+  [ "${#seq}" -ge 19 ] || fail "the report sequence must be on the integrations' nanosecond clock, got '$seq'"
+  pass "herdr session rebind: a bound session moves through a newer clear report and is read back"
+}
+
+test_pane_rebind_agent_session_reports_nothing_bound_and_unproven_moves() {
+  local dir status
+  dir=$(mktemp -d "$TMP_ROOT/session-rebind-none.XXXXXX")
+  status=0
+  pane_rebind_session_run "$dir" '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}' '{}' || status=$?
+  [ "$status" -eq 2 ] || fail "a pane with no registration has nothing to move and must return 2, got $status"
+  ! grep -q 'report-agent-session' "$dir/log" || fail "a pane with no bound session must receive no session report"
+
+  dir=$(mktemp -d "$TMP_ROOT/session-rebind-unproven.XXXXXX")
+  status=0
+  pane_rebind_session_run "$dir" \
+    '{"result":{"agent":{"agent":"claude","agent_session":{"agent":"claude","kind":"id","value":"31d009bf-0000-4000-8000-000000000000"}}}}' \
+    '{"result":{"agent":{"agent":"claude","agent_session":{"agent":"claude","kind":"id","value":"31d009bf-0000-4000-8000-000000000000"}}}}' \
+    || status=$?
+  [ "$status" -eq 1 ] || fail "a session that still reads the old id after the report must return 1, got $status"
+  pass "herdr session rebind: nothing bound reports nothing, and an unapplied report is not claimed as moved"
+}
+
+# A relaunch whose recorded pane is gone keeps its own task-named workspace
+# while that exact bound workspace survives: the replacement tab joins it and
+# the journal advances to the new endpoint, while anything that is not that
+# exact surviving binding mutates nothing and lets the caller decide.
+projection_rebind_case() {  # <dir> <journal-version> <workspace-list-json>
+  local dir=$1 version=$2 list=$3 journal
+  mkdir -p "$dir/home" "$dir/state"
+  journal="$dir/state/rb.herdr-presentation"
+  if [ "$version" = 2 ]; then
+    printf 'version=2\ntask_id=rb\nprojection_id=abcdefghijklmnopqrstuv\nhome=%s\nsession=fmtest\nworkspace_id=w2\ntab_id=w2:t1\npane_id=w2:p1\nparent_workspace_id=w1\nparent_label=firstmate\nworkspace_label=└ rb · p:abcdefghijklmnopqrstuv\ntask_label=fm-rb\n' \
+      "$(cd "$dir/home" && pwd -P)" > "$journal"
+  else
+    printf 'version=1\ntask_id=rb\nprojection_id=abcdefghijklmnopqrstuv\n' > "$journal"
+  fi
+  : > "$dir/events"
+  ROOT="$ROOT" EVENTS="$dir/events" LIST="$list" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_projection_focus_restore() { return 0; }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "workspace list") printf "%s\n" "$LIST" ;;
+        "tab create") printf "%s\n" "$*" >> "$EVENTS"; printf "{\"result\":{\"tab\":{\"tab_id\":\"w2:t4\"},\"root_pane\":{\"pane_id\":\"w2:p4\"}}}\n" ;;
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w2:p4\",\"tab_id\":\"w2:t4\",\"workspace_id\":\"w2\"}}}\n" ;;
+        *) printf "unexpected %s\n" "$*" >> "$EVENTS"; return 1 ;;
+      esac
+    }
+    status=0
+    fm_backend_herdr_projection_rebind_task fmtest "$0" rb "$1" w2 w2:t1 w2:p1 fm-rb /wt || status=$?
+    printf "%s %s %s\n" "$status" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+  ' "$journal" "$dir/home"
+}
+
+test_projection_rebind_task_joins_the_surviving_bound_workspace() {
+  local dir out
+  dir="$TMP_ROOT/projection-rebind-survives"
+  out=$(projection_rebind_case "$dir" 2 \
+    '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"└ rb · p:abcdefghijklmnopqrstuv"}]}}')
+  [ "$out" = "0 w2:t4 w2:p4" ] || fail "a surviving bound workspace must take the replacement tab, got '$out'"
+  assert_contains "$(cat "$dir/events")" "tab create --workspace w2 --cwd /wt --label fm-rb --no-focus" \
+    "the replacement tab must be created unfocused in the bound workspace, in the worktree"
+  if ! grep -qx 'tab_id=w2:t4' "$dir/state/rb.herdr-presentation" \
+    || ! grep -qx 'pane_id=w2:p4' "$dir/state/rb.herdr-presentation"; then
+    fail "the journal must advance to the replacement endpoint"
+  fi
+  pass "herdr presentation rebind: a gone pane's surviving bound workspace takes the replacement tab"
+}
+
+test_projection_rebind_task_mutates_nothing_without_an_exact_surviving_binding() {
+  local dir out
+  dir="$TMP_ROOT/projection-rebind-gone"
+  out=$(projection_rebind_case "$dir" 2 '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}')
+  [ "$out" = "2  " ] || fail "a gone bound workspace must return 2 with no endpoint, got '$out'"
+  [ ! -s "$dir/events" ] || fail "a gone bound workspace must create nothing: $(cat "$dir/events")"
+
+  dir="$TMP_ROOT/projection-rebind-renamed"
+  out=$(projection_rebind_case "$dir" 2 \
+    '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"someone else"}]}}')
+  [ "$out" = "2  " ] || fail "a reused or renamed workspace id must return 2, got '$out'"
+  [ ! -s "$dir/events" ] || fail "a reused or renamed workspace id must create nothing: $(cat "$dir/events")"
+
+  dir="$TMP_ROOT/projection-rebind-attempt"
+  out=$(projection_rebind_case "$dir" 1 \
+    '{"result":{"workspaces":[{"workspace_id":"w2","label":"└ rb · p:abcdefghijklmnopqrstuv"}]}}')
+  [ "$out" = "2  " ] || fail "an attempt journal binds no workspace and must return 2, got '$out'"
+  [ ! -s "$dir/events" ] || fail "an attempt journal must create nothing: $(cat "$dir/events")"
+  pass "herdr presentation rebind: anything but the exact surviving binding mutates nothing"
+}
+
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive() {
   local out
   # A registered agent running a foreground tool in its own process group is
@@ -6173,6 +6301,10 @@ test_stale_registration_over_a_shell_only_pane_is_agent_free
 test_stale_registration_ignores_status_and_reads_the_process
 test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
 test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable
+test_pane_rebind_agent_session_moves_a_bound_session_with_a_newer_clear_report
+test_pane_rebind_agent_session_reports_nothing_bound_and_unproven_moves
+test_projection_rebind_task_joins_the_surviving_bound_workspace
+test_projection_rebind_task_mutates_nothing_without_an_exact_surviving_binding
 test_registered_agent_with_a_live_foreground_process_stays_alive
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive
 test_transient_prompt_helper_settles_into_stale_agent

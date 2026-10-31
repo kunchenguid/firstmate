@@ -162,7 +162,7 @@ Rename it manually before expecting new tasks or recovery to use it.
 
 Recovery and list-live still scan the first workspace matching the home label, because they address panes they already recorded rather than choosing where new work goes.
 The one recovery that does place new work is the control plane's reclaim of a destroyed endpoint.
-It mints a replacement tab through this section's ordinary placement rules while pinning the herdr session the task's record names ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
+It pins the herdr session the task's record names and keeps the task in its own projection workspace when presentation spaces are on, using this section's ordinary placement rules only for the flat fallback ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
@@ -882,17 +882,24 @@ Idle secondmates remain exempt from stale-pane escalation.
 A pane has ONE status authority, and for Pi with the integration installed that authority is the lifecycle hooks - Herdr then skips screen detection for the pane, which is the `full_lifecycle_hook_authority` reason `herdr agent explain` prints for it.
 That authority is bound to a session identity, and in the crew shape the registration outliving its process ([above](#restart-and-liveness-behavior)) is that same binding: the record stays, the agent it named is gone.
 
-An agent started FRESH in such a pane reports a new session and Herdr ignores its reports, so the pane stays frozen at whatever the previous agent last reported - a crewmate running its pipeline reads `idle` until its task ends, and nothing from outside repairs it (measured 2026-09-21 on Herdr 0.9.1 against a real Pi; `pane report-agent-session` and `pane report-agent` for `herdr:pi` are accepted without being applied unless the reporter is the registered pane agent, and `pane release-agent` on the stale record changes nothing).
+An agent started FRESH in such a pane reports a new session and Herdr ignores its `startup` report, so the pane stays frozen at whatever the previous agent last reported - a crewmate running its pipeline reads `idle` until its task ends, and the sidebar keeps the old session's idle time (measured 2026-09-21 on Herdr 0.9.1 against a real Pi, and 2026-10-25 against a real Claude; `pane release-agent` on the stale record changes nothing).
+An outside `pane report-agent-session` without `--seq` is accepted and not applied, but one with `--session-start-source clear` and a newer `--seq` does move the binding, which is how a Claude relaunch rebinds below.
 A fresh spawn never meets this: it gets a new pane with nothing bound.
 
 So a **relaunch** preserves the binding instead of fighting it: before the Pi-family launch line is composed, `bin/fm-spawn.sh` reads the pane's recorded session reference through `fm_backend_herdr_pane_agent_session_ref` and passes it back as Pi's own `--session <path-or-id>` (`relaunch_resume_args`; `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_flag` owns which adapters and which registration labels qualify).
 The replacement therefore starts on the exact identity the authority is bound to, and its `working`/`idle`/`blocked` reports land again.
 The reference is the endpoint's own record, never a guess about which session is recent, and only a `pi` label may supply it: a registration belonging to another adapter is ignored, as is an unreadable, missing, or malformed one, in which case the relaunch is the ordinary fresh session it always was.
-A relaunch that changes harness AWAY from Pi is not repaired by this and keeps the pre-existing behavior; only the adapter the authority belongs to can resume its session.
+A relaunch that changes harness AWAY from Pi is not repaired by this; only the adapter the authority belongs to can resume its session.
+
+Claude takes the opposite route, because a Claude relaunch is a fresh session by design.
+When the adopted pane already has a bound session, `bin/fm-spawn.sh` picks a new session id, moves the pane's binding to it with a `clear` report through `fm_backend_herdr_pane_rebind_agent_session`, and starts Claude with `--session-id <that id>` (`relaunch_fresh_session_args`; `fm_control_relaunch_fresh_session_flag` owns which adapters qualify).
+The new Claude then reports the session Herdr already holds, so its status and its idle time are its own.
+A pane with nothing bound needs no rebind and launches unchanged, and a rebind Herdr does not confirm only warns.
+The other adapters have no fresh-session flag and keep their pre-existing behavior.
 
 The session file may not exist any more: Pi creates it at exactly that path, so the identity survives either way.
 The read grants no send, close, or lifecycle authority of its own - it is a read of Herdr's record.
-The portable halves are pinned by `tests/fm-backend-herdr.test.sh` (the read, against a canned CLI) and `tests/fm-control.test.sh` (the per-adapter rule), and `tests/fm-control-herdr-smoke.test.sh` exercises the relaunch path against the real binary; the versioned live measurement, including the reproduction and the resume that lifts it, is [`verification/runtime-backends.md`](verification/runtime-backends.md) "Pane status authority across a relaunch".
+The portable halves are pinned by `tests/fm-backend-herdr.test.sh` (the read and the rebind, against a canned CLI) and `tests/fm-control.test.sh` (the per-adapter rule), and `tests/fm-control-herdr-smoke.test.sh` exercises the relaunch path against the real binary; the versioned live measurement, including the reproduction, the Pi resume, and the Claude rebind, is [`verification/runtime-backends.md`](verification/runtime-backends.md) "Pane status authority across a relaunch".
 
 ## Push events and polling fallback
 

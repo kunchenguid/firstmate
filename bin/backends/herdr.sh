@@ -320,16 +320,17 @@ fm_backend_herdr_presentation_default_supported() {  # <state-dir> [<session>]
   return 1
 }
 
-# fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>]: the one gate
+# fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>] [<session>]: the one gate
 # bin/fm-spawn.sh consults before projecting this home's children into
 # disposable one-task workspaces (docs/herdr-backend.md "Presentation spaces"
 # owns the full contract). An explicit "off" or "on" is obeyed as written; a
 # home that configured nothing is projected only at or above the version floor,
 # and otherwise falls back to the flat layout with one warning. Sets
 # FM_BACKEND_HERDR_PRESENTATION_PREFERENCE for the new-projection boundary to
-# distinguish an unconfigured default from an explicit opt-in.
-fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
-  local config_dir=${1:-} state_dir=${2:-} preference
+# distinguish an unconfigured default from an explicit opt-in. <session> pins
+# the version-floor probe to one herdr session instead of the ambient one.
+fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>] [<session>]
+  local config_dir=${1:-} state_dir=${2:-} session=${3:-} preference
   preference=$(fm_backend_herdr_presentation_preference "$config_dir")
   # bin/fm-spawn.sh reads this out-parameter after sourcing this adapter.
   # shellcheck disable=SC2034
@@ -338,7 +339,7 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
     off) return 1 ;;
     on) return 0 ;;
   esac
-  fm_backend_herdr_presentation_default_supported "$state_dir"
+  fm_backend_herdr_presentation_default_supported "$state_dir" "$session"
 }
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
@@ -2422,6 +2423,38 @@ fm_backend_herdr_pane_agent_session_ref() {  # <session> <pane_id>
   printf '%s\t%s' "$agent" "$value"
 }
 
+# fm_backend_herdr_pane_rebind_agent_session: move a pane's bound agent
+# session to <new-session-id> before a replacement agent that will report that
+# id starts in the pane (docs/herdr-backend.md "Agent status authority and
+# relaunch").
+# Herdr keeps a pane's bound session after its agent exits under a nested
+# shell, and ignores a later `startup` session report while one is bound, so a
+# fresh replacement would leave the pane showing the old session's identity
+# and idle time. Herdr applies a `clear` session report that carries a newer
+# sequence, from outside the pane too, which is the report this sends; the
+# binding is then read back.
+# Return 0 means the pane now names the new session, 2 means no session was
+# bound so there is nothing to move, and 1 means the move could not be proven.
+fm_backend_herdr_pane_rebind_agent_session() {  # <session> <pane_id> <agent> <new-session-id>
+  local session=$1 pane_id=$2 agent=$3 new_id=$4 out bound seq
+  [ -n "$session" ] && [ -n "$pane_id" ] && [ -n "$agent" ] && [ -n "$new_id" ] || return 1
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || return 2
+  bound=$(printf '%s' "$out" | jq -r '.result.agent.agent_session.value // empty' 2>/dev/null)
+  [ -n "$bound" ] || return 2
+  # Herdr orders reports by this sequence; integrations send nanoseconds since
+  # the epoch, so this must be the same clock to count as newer.
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    seq="${EPOCHREALTIME%.*}${EPOCHREALTIME#*.}000"
+  else
+    seq="$(date +%s)000000000"
+  fi
+  fm_backend_herdr_cli "$session" pane report-agent-session "$pane_id" \
+    --source "herdr:$agent" --agent "$agent" --seq "$seq" \
+    --agent-session-id "$new_id" --session-start-source clear >/dev/null 2>&1 || return 1
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || return 1
+  [ "$(printf '%s' "$out" | jq -r '.result.agent.agent_session.value // empty' 2>/dev/null)" = "$new_id" ]
+}
+
 # fm_backend_herdr_tab_is_husk: true (0) only for the two conservative husk
 # states (dead, no-agent) fm_backend_herdr_pane_agent_state can positively
 # confirm; live, stale-agent, and unknown all refuse (1), so an inconclusive
@@ -3000,6 +3033,70 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     "$journal" "$id" "$meta_tab" "$meta_pane" "$new_tab" "$new_pane"; then
     fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     echo "warning: herdr presentation reclaim for $id could not publish its replacement binding; spawning flat" >&2
+    return 2
+  fi
+  FM_BACKEND_HERDR_PROJECTION_TAB_ID=$new_tab
+  FM_BACKEND_HERDR_PROJECTION_PANE_ID=$new_pane
+  return 0
+}
+
+# fm_backend_herdr_projection_rebind_task: re-create a relaunched task's
+# endpoint inside its bound projection workspace when the recorded pane is
+# authoritatively gone but that exact workspace survives, for example because
+# it still holds another tab.
+# The caller holds the session presentation lock and has already proven the
+# recorded pane absent.
+# Return 0 means the replacement tab exists in the bound workspace and the
+# journal names it, 2 means no exact surviving binding with nothing left
+# behind, and 1 means a replacement could not be proven rolled back.
+fm_backend_herdr_projection_rebind_task() {  # <session> <journal> <task-id> <home> <meta-workspace> <meta-tab> <meta-pane> <task-label> <cwd>
+  local session=$1 journal=$2 id=$3 home=$4 meta_workspace=$5 meta_tab=$6 meta_pane=$7
+  local task_label=$8 cwd=$9 canonical_home list focus_before out new_tab new_pane info
+  FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
+  FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 2
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] || return 2
+  canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || return 2
+  if [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$canonical_home" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" != "$meta_workspace" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" != "$meta_tab" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$meta_pane" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" != "$task_label" ]; then
+    return 2
+  fi
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 2
+  printf '%s' "$list" | jq -e --arg workspace "$meta_workspace" \
+    --arg label "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" '
+      [.result.workspaces[]? | select(.workspace_id == $workspace)]
+      | length == 1 and .[0].label == $label
+    ' >/dev/null 2>&1 || return 2
+  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 2
+  if ! out=$(fm_backend_herdr_cli "$session" tab create \
+    --workspace "$meta_workspace" --cwd "$cwd" --label "$task_label" --no-focus 2>/dev/null); then
+    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "endpoint rebind create" || return 1
+    return 2
+  fi
+  new_tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  new_pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  if [ -z "$new_tab" ] || [ -z "$new_pane" ]; then
+    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "endpoint rebind create" || true
+    echo "error: herdr endpoint rebind for $id returned ambiguous replacement ids; refusing a launch into an unknown pane" >&2
+    return 1
+  fi
+  if ! fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "endpoint rebind create"; then
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || true
+    return 1
+  fi
+  info=$(fm_backend_herdr_cli "$session" pane get "$new_pane" 2>/dev/null) || info=
+  if ! printf '%s' "$info" | jq -e --arg pane "$new_pane" --arg tab "$new_tab" --arg workspace "$meta_workspace" '
+    .result.pane.pane_id == $pane
+    and .result.pane.tab_id == $tab
+    and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1 \
+     || ! fm_backend_herdr_projection_journal_replace_endpoint \
+       "$journal" "$id" "$meta_tab" "$meta_pane" "$new_tab" "$new_pane"; then
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || return 1
     return 2
   fi
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=$new_tab
