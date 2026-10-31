@@ -4636,6 +4636,59 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+test_startup_beat_lands_before_blocking_startup_locks() {
+  local dir state fakebin out pid holder i
+  dir=$(make_case startup-beat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  # A live holder on the wake-queue lock blocks the watcher's recovery-marker
+  # startup transitions before the first poll; the startup beat must still land
+  # so a racing arm never refuses a live watcher as a stale-heartbeat holder,
+  # and it must not touch the poll beacon, which would pass for a completed poll.
+  # The holder keeps the lock until the test creates the release marker.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2/.wake-queue.lock" || exit 1
+    : > "$3/holding"
+    i=0
+    while [ "$i" -lt 300 ] && [ ! -e "$3/release" ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    fm_lock_release "$2/.wake-queue.lock" || true
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$dir" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$dir/holding" ]; do
+    kill -0 "$holder" 2>/dev/null || fail 'lock holder died before taking the wake-queue lock'
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/holding" ] || fail 'lock holder did not take the wake-queue lock'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  # The startup beacon must name the watcher while it is still blocked before
+  # its first poll and the lock is still held.
+  i=0
+  while [ "$i" -lt 30 ] && [ "$(cat "$state/.watcher-startup-beat" 2>/dev/null || true)" != "$pid" ]; do
+    kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "watcher exited during blocked startup: $(cat "$out")"; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/release" ] && { reap "$pid"; fail 'lock holder released before the startup beat landed'; }
+  [ "$(cat "$state/.watcher-startup-beat" 2>/dev/null || true)" = "$pid" ] \
+    || { reap "$pid"; fail 'the startup beat did not land while startup was blocked on the wake-queue lock'; }
+  sleep 1.5
+  [ ! -e "$state/.last-watcher-beat" ] || { reap "$pid"; fail 'a watcher blocked before its first poll touched the poll beacon'; }
+  # Once the holder releases, the poll loop takes over, the poll beacon
+  # advances, and the startup beacon is gone.
+  : > "$dir/release"
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "watcher did not poll after the startup lock cleared: $(cat "$out")"; }
+  [ ! -e "$state/.watcher-startup-beat" ] || { reap "$pid"; fail 'the startup beacon outlived the startup transitions'; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "blocked-startup watcher printed a wake: $(cat "$out")"; }
+  reap "$pid"
+  wait "$holder" 2>/dev/null || true
+  pass 'a watcher blocked on a startup lock beats at lock claim and polls once it clears'
+}
+
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
 test_afk_signal_records_heartbeat_endpoint() {
@@ -5018,6 +5071,7 @@ fm_test_run \
   test_heartbeat_backstop_surfaces_a_masked_status \
   test_afk_heartbeat_preserves_idle_accounting \
   test_beacon_stays_fresh_while_absorbing \
+  test_startup_beat_lands_before_blocking_startup_locks \
   test_afk_signal_records_heartbeat_endpoint \
   test_afk_present_reverts_watcher_to_one_shot \
   test_afk_paused_changed_pane_hands_off_plain_stale \

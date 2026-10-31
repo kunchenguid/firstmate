@@ -82,9 +82,15 @@
 # reordering. Terminal URLs settle separately before the forge budget starts
 # and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
-# unmeasured, rather than being mislabeled unavailable. Each distinct supported
-# URL is attempted at most once per poll and its observation applied to every owner.
-# A supported URL's final observation applies
+# unmeasured, rather than being mislabeled unavailable. A URL whose
+# observation fails is retried once while the budget still covers a full
+# observation reserve, so a transient forge failure or a head that moved
+# mid-read costs one extra read rather than a false unavailable wake; only a
+# second consecutive failure records the error. A URL whose error episode is
+# already open is not retried, and a retry the budget refuses keeps the first
+# genuine failure. Each distinct supported URL
+# is otherwise attempted at most once per poll and its observation applied to
+# every owner. A supported URL's final observation applies
 # to every owner without another forge read. When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
 # next URL that still has a full observation reserve; only a genuine forge
@@ -581,7 +587,7 @@ clear_unsupported_errors() {
 }
 
 poll() {
-  local task url old kind error observed why
+  local task url old kind error observed why episode_open
   local -a row
   acquire
   get_input
@@ -620,10 +626,31 @@ poll() {
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
     why='no failing step recorded'
     [ ! -s "$TMP/why" ] || IFS= read -r why < "$TMP/why"
-    # Wake once per failure episode: only when no owner has a prior error.
-    if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
+    # A failure episode is open while any owner still records a prior error.
+    episode_open=0
+    if [ "$observed" -ne 0 ] && ! jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
         .error == null)' "${row[@]:1}" >/dev/null; then
+      episode_open=1
+    fi
+    # One retry while the budget still covers a full observation: a transient
+    # forge failure or a head that moved mid-read costs one extra observation
+    # rather than a false unavailable error and wake. An open episode already
+    # woke, so it is not retried; a retry the budget refuses keeps the first
+    # genuine failure.
+    if [ "$observed" -ne 0 ] && [ "$episode_open" -eq 0 ] \
+      && [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ]; then
+      observed=0
+      observe "$url" || observed=$?
+      if [ "$BUDGET_EXHAUSTED" -ne 0 ]; then
+        observed=1
+      elif [ "$observed" -ne 0 ]; then
+        why='no failing step recorded'
+        [ ! -s "$TMP/why" ] || IFS= read -r why < "$TMP/why"
+      fi
+    fi
+    # Wake once per failure episode: only when no owner has a prior error.
+    if [ "$observed" -ne 0 ] && [ "$episode_open" -eq 0 ]; then
       printf 'contributions: observation unavailable for %s - %s\n' "$url" "$why"
     fi
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac

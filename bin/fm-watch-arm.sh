@@ -22,7 +22,8 @@
 #
 # This script forks the watcher as a tracked child, then VERIFIES the outcome
 # before it settles in. It confirms a watcher process is genuinely alive AND the
-# liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
+# liveness beacon (state/.last-watcher-beat, or its startup beacon per
+# fm_watcher_beat_age) is fresh within FM_GUARD_GRACE (the
 # single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
 # exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
@@ -147,7 +148,6 @@ ARM_SCRIPT="$SCRIPT_DIR/${BASH_SOURCE[0]##*/}"
 ARM_HOME_EXISTED=0
 [ ! -d "$FM_HOME" ] || ARM_HOME_EXISTED=1
 WATCH_LOCK="$STATE/.watch.lock"
-BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
@@ -227,7 +227,7 @@ cycle_log_append() {
   local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after size tmp raw i
   [ "$cycle_active" -eq 1 ] || return 0
   ended_at=$(date +%s)
-  beacon_age=$(fm_path_age "$BEAT")
+  beacon_age=$(fm_watcher_beat_age "$STATE" "$cycle_watcher_pid")
   lock_after=$(lock_snapshot)
 
   i=0
@@ -336,7 +336,7 @@ healthy_watcher() {
 
 report_attached() {
   local age
-  age=$(fm_path_age "$BEAT")
+  age=$(fm_watcher_beat_age "$STATE" "$HEALTHY_PID")
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
@@ -461,7 +461,7 @@ attach_and_wait() {
       continue
     fi
     if attached_holder_live "$attached_pid"; then
-      age=$(fm_path_age "$BEAT")
+      age=$(fm_watcher_beat_age "$STATE" "$attached_pid")
       if [ "$age" -lt "$STALL_BOUND" ]; then
         sleep "$ATTACH_POLL"
         continue

@@ -234,19 +234,35 @@ fm_watcher_lock_matches_pid() {
   FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
+# fm_watcher_beat_age <state> <holder-pid>
+# Age of the poll beacon (state/.last-watcher-beat), or of the startup beacon
+# when that names <holder-pid> and is fresher: a watcher still blocked in its
+# startup recovery transitions has not polled yet and beats
+# state/.watcher-startup-beat instead (bin/fm-watch.sh). Only holder checks
+# that already know the live lock pid read it, so a startup beat never passes
+# for a completed poll and a leftover one never vouches for another watcher.
+fm_watcher_beat_age() {
+  local state=$1 pid=$2 age startup
+  age=$(fm_path_age "$state/.last-watcher-beat")
+  if [ -n "$pid" ] && [ "$(cat "$state/.watcher-startup-beat" 2>/dev/null || true)" = "$pid" ]; then
+    startup=$(fm_path_age "$state/.watcher-startup-beat")
+    [ "$startup" -ge "$age" ] || age=$startup
+  fi
+  printf '%s\n' "$age"
+}
+
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir pid identity age
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
   lockdir="$state/.watch.lock"
-  beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
   identity=$FM_WATCHER_MATCHED_IDENTITY
-  age=$(fm_path_age "$beat")
+  age=$(fm_watcher_beat_age "$state" "$pid")
   [ "$age" -lt "$grace" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
@@ -1035,11 +1051,12 @@ _fm_recovery_marker_ack() {
 }
 
 _fm_recovery_marker_arm_check() {
-  local marker=$1 lock line quarantine
+  local marker=$1 bound=${2:-} beat=${3:-} lock line quarantine deadline=
+  [ -z "$bound" ] || deadline=$((SECONDS + bound))
   FM_RECOVERY_MARKER_ACTION='none'
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  if ! fm_lock_acquire_wait "$lock"; then
+  _fm_recovery_lock_wait "$FM_WAKE_QUEUE_LOCK" "$deadline" "$beat" || return 1
+  if ! _fm_recovery_lock_wait "$lock" "$deadline" "$beat"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
@@ -1112,10 +1129,11 @@ _fm_recovery_marker_arm_check() {
 # the queue read. Handling successors and foreground checkpoints must not call
 # this transition.
 _fm_recovery_marker_reopen_announced() {
-  local marker=$1 lock
+  local marker=$1 bound=${2:-} beat=${3:-} lock deadline=
+  [ -z "$bound" ] || deadline=$((SECONDS + bound))
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  if ! fm_lock_acquire_wait "$lock"; then
+  _fm_recovery_lock_wait "$FM_WAKE_QUEUE_LOCK" "$deadline" "$beat" || return 1
+  if ! _fm_recovery_lock_wait "$lock" "$deadline" "$beat"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
@@ -1190,8 +1208,18 @@ _fm_recovery_marker_handover_restore() {
   return "$status"
 }
 
+# A bounded transition's two lock waits share one deadline (in $SECONDS), so
+# the whole transition ends within its bound rather than once per lock.
+_fm_recovery_lock_wait() {  # <lockdir> [deadline] [beat-file]
+  if [ -n "${2:-}" ]; then
+    fm_lock_acquire_wait_max "$1" "$(( $2 > SECONDS ? $2 - SECONDS : 0 ))" "${3:-}"
+  else
+    fm_lock_acquire_wait "$1"
+  fi
+}
+
 fm_recovery_transition() {
-  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-}
+  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-} beat=${6:-}
   case "$action" in
     handover-restore)
       _fm_recovery_marker_handover_restore "$marker" "$target" "$value"
@@ -1203,10 +1231,10 @@ fm_recovery_transition() {
       _fm_recovery_marker_ack "$marker" "$target"
       ;;
     arm-check)
-      _fm_recovery_marker_arm_check "$marker"
+      _fm_recovery_marker_arm_check "$marker" "$bound" "$beat"
       ;;
     reopen-announced)
-      _fm_recovery_marker_reopen_announced "$marker"
+      _fm_recovery_marker_reopen_announced "$marker" "$bound" "$beat"
       ;;
     handling-settled)
       _fm_recovery_marker_handling_settled "$marker"
@@ -1263,12 +1291,12 @@ fm_recovery_marker_begin_handling() {
   _fm_recovery_marker_begin_handling "$1" "${2:-}"
 }
 
-fm_recovery_marker_arm_check() {
-  fm_recovery_transition "$1" arm-check
+fm_recovery_marker_arm_check() {  # <marker> [max-seconds] [beat-file]
+  fm_recovery_transition "$1" arm-check "" "" "${2:-}" "${3:-}"
 }
 
-fm_recovery_marker_reopen_announced() {
-  fm_recovery_transition "$1" reopen-announced
+fm_recovery_marker_reopen_announced() {  # <marker> [max-seconds] [beat-file]
+  fm_recovery_transition "$1" reopen-announced "" "" "${2:-}" "${3:-}"
 }
 
 fm_recovery_marker_handover_restore() {  # <marker> <snapshot-token> <snapshot-seq>
@@ -1482,12 +1510,27 @@ fm_lock_acquire_wait() {
 # Bounded in-process variant of fm_lock_acquire_wait for the watcher's EXIT
 # cleanup: a live foreign holder must not let one TERM strand the watcher in
 # its trap, so the wait gives up after <seconds> and leaves the ordinary
-# stale-owner evidence for the next acquirer to reclaim.
-fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds>
-  local lockdir=$1 seconds=$2 deadline
+# stale-owner evidence for the next acquirer to reclaim. A lock whose parent
+# directory is gone (a torn-down state directory, fm_lock_parent_gone) can
+# never be taken, so the wait gives up then rather than spinning out the bound.
+# With [beat-file], the waiting process itself beats that file, naming its own
+# pid, at most once a second while the lock stays held, so the beat advances
+# only while this process is actually running its wait.
+fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds> [beat-file]
+  local lockdir=$1 seconds=$2 beat=${3:-} deadline beat_at=-1 self
   deadline=$((SECONDS + seconds))
+  self=${BASHPID:-$$}
   while ! fm_lock_try_acquire "$lockdir"; do
     [ "$SECONDS" -lt "$deadline" ] || return 1
+    ! fm_lock_parent_gone "$lockdir" || return 1
+    if [ -n "$beat" ] && [ "$SECONDS" -ne "$beat_at" ]; then
+      beat_at=$SECONDS
+      if [ "$(cat "$beat" 2>/dev/null || true)" = "$self" ]; then
+        touch "$beat" 2>/dev/null || true
+      elif printf '%s\n' "$self" > "$beat.$self" 2>/dev/null; then
+        mv -f "$beat.$self" "$beat" 2>/dev/null || rm -f "$beat.$self"
+      fi
+    fi
     sleep 0.1
   done
 }
