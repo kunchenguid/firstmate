@@ -2122,7 +2122,9 @@ test_poll_retries_transient_fetch_and_surfaces_real_metadata() {
   homedir_bin="$retry_home/bin"
   mkdir -p "$homedir_bin" "$retry_home/state"
   [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
-  real_py=$(command -v python3)
+  # Resolve the real interpreter, not a version-manager shim: a shim that
+  # re-looks up python3 on the fakebin-first PATH recurses forever (#5846).
+  real_py=$(python3 -c 'import sys; print(sys.executable)')
   harness="$TMP_ROOT/retry-poll-harness.py"
   control="$TMP_ROOT/retry-fetch-count"
   printf '0' > "$control"
@@ -2481,7 +2483,9 @@ test_poll_sanitizes_header_fields() {
   homedir_bin="$HOME_DIR/bin"
   mkdir -p "$homedir_bin"
   [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
-  real_py=$(command -v python3)
+  # Resolve the real interpreter, not a version-manager shim: a shim that
+  # re-looks up python3 on the fakebin-first PATH recurses forever (#5846).
+  real_py=$(python3 -c 'import sys; print(sys.executable)')
   harness="$TMP_ROOT/sanitize-poll-harness.py"
 
   # Drive the real poll_list/clean path through a stubbed IMAP connection so a
