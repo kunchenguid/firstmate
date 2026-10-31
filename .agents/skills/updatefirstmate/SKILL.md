@@ -75,6 +75,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
 
    Read its per-mate lines and its closing `summary:` line as the outcome:
    - `restarted: <id>` - that mate is now genuinely running the current instructions and launch-time settings.
+   - `model pin asserted|mismatch|unverified: <detail>` - when that mate's replacement launch recorded a model verdict, it is forwarded unchanged right after the `restarted:` line; it never changes the restart outcome, but a `mismatch` means the mate is running a different model than its pin ([`bin/fm-spawn.sh`](../../../bin/fm-spawn.sh)'s header owns the wording).
    - `nudged: <id>: <reason>` - the restart was not safe, so the mate got the older re-read message instead and is still running the conversation and launch-time settings it started with.
      Never report one of these as a clean reload.
    - `unreached: <id>: <reason>` - no safe running outcome could be confirmed, including an ambiguous relaunch result.
