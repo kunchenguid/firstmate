@@ -994,17 +994,32 @@ fm_sol_cap_registry_prune() {  # <registry-file>
   return 0
 }
 
-# fm_sol_cap_launch_shell <pane-shell>
+# fm_sol_cap_launch_shell [<reported-shell>]
 # The interpreter a capped local launch hands its command line to. The ceiling
 # gates admission only, so a capped launch must run the bytes it would have run
 # uncapped: uncapped, the pane shell sources the staged launch line, so that
-# same shell is the interpreter here too. <pane-shell> is the pane shell's own
-# report of itself, taken as `$0` when it sources the staged line. A report that
-# names an executable is used as given, a bare name is resolved on PATH, and an
-# unusable report falls back to $SHELL and then /bin/sh, the historical wrapper
-# that still runs every Firstmate-generated launch line.
-fm_sol_cap_launch_shell() {  # <pane-shell>
-  local reported=${1#-} resolved
+# same shell is the interpreter here too.
+#
+# The staged line names no shell expression of its own, because every supported
+# pane shell must parse it unchanged and fish has no `$0`. The fact therefore
+# comes from the process tree: the shell that sourced the staged line is this
+# process's parent, and ps's executable name for it is the shell identity `$0`
+# gave POSIX panes. <reported-shell> is the operator and test seam that supplies
+# that identity directly. A report that names an executable is used as given, a
+# bare name is resolved on PATH, and an unusable report falls back to $SHELL and
+# then /bin/sh, the historical wrapper that still runs every
+# Firstmate-generated launch line.
+fm_sol_cap_launch_shell() {  # [<reported-shell>]
+  local reported resolved
+  if [ "$#" -gt 0 ]; then
+    reported=$1
+  else
+    reported=$(ps -o comm= -p "$PPID" 2>/dev/null) || reported=
+    # Some hosts pad the field around a path that may itself contain spaces.
+    reported=${reported#"${reported%%[![:space:]]*}"}
+    reported=${reported%"${reported##*[![:space:]]}"}
+  fi
+  reported=${reported#-}
   if [ -n "$reported" ]; then
     case "$reported" in
     */*)
@@ -1046,12 +1061,13 @@ fm_sol_cap_launch_shell() {  # <pane-shell>
 #                prints "recorded" or the refusal, exits 0/1.
 #   run <id> <state-dir> <command> [args...]
 #                transfers the reservation to this process, then execs command.
-#   run-launch <id> <state-dir> <pane-shell> <command-line>
+#   run-launch <id> <state-dir> <command-line> [<pane-shell>]
 #                transfers the reservation to this process, then execs the
-#                launch line unchanged under <pane-shell> (fm_sol_cap_launch_shell
-#                above owns how that shell is chosen). A capped launch therefore
-#                parses its command exactly as the uncapped launch it replaces
-#                does, and only admission changes.
+#                launch line unchanged under the pane shell that staged it
+#                (fm_sol_cap_launch_shell above owns how that shell is chosen;
+#                the optional report is the operator and test seam). A capped
+#                launch therefore parses its command exactly as the uncapped
+#                launch it replaces does, and only admission changes.
 
 fm_sol_cap_cli() {
   local mode=$1
@@ -1094,15 +1110,22 @@ fm_sol_cap_cli() {
     ;;
   run-launch)
     local id line shell
-    [ "$#" -eq 5 ] || {
-      echo "usage: fm-sol-cap-lib.sh run-launch <id> <state-dir> <pane-shell> <command-line>" >&2
+    case "$#" in
+    4 | 5) ;;
+    *)
+      echo "usage: fm-sol-cap-lib.sh run-launch <id> <state-dir> <command-line> [<pane-shell>]" >&2
       return 2
-    }
+      ;;
+    esac
     id=$2
-    line=$5
+    line=$4
     # The pane shell sourced the launch line, so it owns the command's syntax;
     # the line is handed back to it unchanged, and only the reservation moves.
-    shell=$(fm_sol_cap_launch_shell "$4") || return 1
+    if [ "$#" -eq 5 ]; then
+      shell=$(fm_sol_cap_launch_shell "$5") || return 1
+    else
+      shell=$(fm_sol_cap_launch_shell) || return 1
+    fi
     fm_sol_cap_promote "$id" "$$" "$3" || return 1
     exec "$shell" -c "$line"
     ;;

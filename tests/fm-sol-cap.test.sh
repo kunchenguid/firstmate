@@ -130,7 +130,10 @@ case "${1:-}" in
           ". '"*"'")
             staged=${arg#". '"}
             staged=${staged%"'"}
-            [ ! -f "$staged" ] || cat "$staged" >> "$FM_FAKE_CALL_LOG.launch"
+            if [ -f "$staged" ]; then
+              cat "$staged" >> "$FM_FAKE_CALL_LOG.launch"
+              printf '%s\n' "$staged" >> "$FM_FAKE_CALL_LOG.launchpath"
+            fi
             ;;
         esac
       fi
@@ -198,19 +201,18 @@ spawn_sol_ship() {  # <case-dir> <id> [model] [pane-path]
 # shellcheck disable=SC2016 # the pane shell expands this text, not this file.
 FM_SOL_TEST_RAW='codex --brief "$(cat <(printf %s pane-syntax))"'
 
-# The stand-ins that raw launch needs: a `paneshell` that names itself as the
-# interpreter and then runs bash, and a `codex` that records the argv it
-# received plus the interpreter that ran it.
+# The stand-ins a raw launch needs: a `paneshell` that is the same bash the
+# uncapped case would run but named like the pane it stands in for, because the
+# handoff reads the sourcing shell's executable name from the process tree now
+# that the staged line carries no report of its own, and a `codex` that records
+# the argv it received plus the interpreter that ran it.
 add_raw_launch_probe() {  # <case-dir>
   local fakebin=$1/fakebin
-  cat > "$fakebin/paneshell" <<'SH'
-#!/usr/bin/env bash
-FM_TEST_PANE_SHELL=paneshell exec bash "$@"
-SH
+  cp "$(command -v bash)" "$fakebin/paneshell"
   cat > "$fakebin/codex" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_FAKE_INVOCATION_LOG.argv"
-printf '%s\n' "${FM_TEST_PANE_SHELL:-none}" >> "$FM_FAKE_INVOCATION_LOG.shell"
+printf '%s\n' "$(basename -- "$(ps -o comm= -p "$PPID" 2>/dev/null)")" >> "$FM_FAKE_INVOCATION_LOG.shell"
 SH
   chmod +x "$fakebin/paneshell" "$fakebin/codex"
 }
@@ -223,19 +225,33 @@ spawn_raw_ship() {  # <case-dir> <id> [raw-command]
       "$id" "$case_dir/project" --harness "$raw" --model gpt-6.1-sol --mode no-mistakes --yolo off
 }
 
-# Run one staged launch line the way its pane would: sourced by a shell that
-# names itself `paneshell`, exactly as that shell reports itself through "$0".
-run_staged_line() {  # <case-dir> <line>
-  local case_dir=$1 line=$2
+# A fish pane's launch command: `(printf ...)` is fish's command substitution,
+# which a POSIX shell rejects, so a launch that reaches the worker at all was
+# parsed by fish.
+# shellcheck disable=SC2016 # the pane shell expands this text, not this file.
+FM_SOL_TEST_FISH_RAW='codex --brief (printf %s fish-pane)'
+
+# Run the staged launch the way its pane would: source the very file the pane
+# received, from the pane-shell stand-in. Sourcing rather than `-c` is what keeps
+# the stand-in in the process tree, which is how the handoff names it.
+run_staged_launch() {  # <case-dir>
+  local case_dir=$1 file
+  file=$(staged_launch_file "$case_dir")
+  [ -n "$file" ] || fail "the spawn for $case_dir staged no launch file"
   (cd "$case_dir/project" &&
     FM_FAKE_INVOCATION_LOG="$case_dir/invocation" \
-      PATH="$case_dir/fakebin:$PATH" bash -c "$line" paneshell) 2>&1
+      PATH="$case_dir/fakebin:$PATH" "$case_dir/fakebin/paneshell" -c ". \"\$1\"" _ "$file") 2>&1
 }
 
 # The staged launch line a spawn handed the pane, i.e. what the pane shell
 # would source. The fake tmux records one per send-keys of a source line.
 staged_launch_line() {  # <case-dir>
   tail -1 "$1/calls.log.launch" 2>/dev/null || true
+}
+
+# The staged launch file itself, as the pane was told to source it.
+staged_launch_file() {  # <case-dir>
+  tail -1 "$1/calls.log.launchpath" 2>/dev/null || true
 }
 
 call_count() { wc -l < "$1/calls.log" | tr -d ' '; }
@@ -307,10 +323,10 @@ test_capped_launch_keeps_the_uncapped_command_invocation() {
     fail "a capped launch staged no admission handoff: $capped_line"
   assert_contains "$capped_line" "$FM_SOL_TEST_RAW" \
     "a capped launch rewrote the raw command instead of handing it through"
-  run_staged_line "$uncapped_case" "$uncapped_line" || rc=$?
+  run_staged_launch "$uncapped_case" || rc=$?
   expect_code 0 "$rc" "the uncapped staged line did not run"
   rc=0
-  run_staged_line "$capped_case" "$capped_line" || rc=$?
+  run_staged_launch "$capped_case" || rc=$?
   expect_code 0 "$rc" "the capped staged line did not run: $(cat "$capped_case/invocation.shell" 2>/dev/null)"
   assert_equals "--brief pane-syntax" "$(cat "$uncapped_case/invocation.argv")" \
     "the uncapped launch did not run the raw command it staged"
@@ -323,6 +339,68 @@ test_capped_launch_keeps_the_uncapped_command_invocation() {
   pass "a capped launch runs the uncapped command unchanged under the pane shell"
 }
 
+# Fish has no $0, so a staged capped launch that named the pane shell with a
+# shell expression would leave the handoff without the pane's identity and fall
+# back to another interpreter. This case sources the very staged file with fish
+# and compares the worker invocation against the uncapped control, so the handoff
+# has to reach the same shell and the same bytes. Without fish the live case
+# cannot run; the emitted handoff is checked for the expressions fish cannot
+# parse and the live case is reported as skipped rather than claimed.
+test_capped_launch_survives_a_fish_pane() {
+  local capped_case uncapped_case out fish_bin line handoff rc=0
+  capped_case=$(make_case launch-fish-capped task-c)
+  uncapped_case=$(make_case launch-fish-uncapped task-c)
+  rm -f "$uncapped_case/home/config/sol-cap"
+  add_raw_launch_probe "$capped_case"
+  add_raw_launch_probe "$uncapped_case"
+  out=$(spawn_raw_ship "$uncapped_case" task-c "$FM_SOL_TEST_FISH_RAW") ||
+    fail "the uncapped fish launch was refused: $out"
+  out=$(spawn_raw_ship "$capped_case" task-c "$FM_SOL_TEST_FISH_RAW") ||
+    fail "the capped fish launch was refused: $out"
+  line=$(staged_launch_line "$capped_case")
+  assert_contains "$line" "$FM_SOL_TEST_FISH_RAW" \
+    "a capped fish launch rewrote the command instead of handing it through"
+  fish_bin=$(command -v fish 2>/dev/null) || fish_bin=
+  if [ -z "$fish_bin" ]; then
+    handoff=${line%%"$FM_SOL_TEST_FISH_RAW"*}
+    # shellcheck disable=SC2016 # these are literal shell tokens fish rejects.
+    case "$handoff" in
+      *'$0'* | *'$('* | *'${'* | *'`'*)
+        fail "the capped launch handoff uses a shell expression fish cannot parse: $handoff" ;;
+    esac
+    echo "skip: fish not found (fish pane launch); only a static handoff check ran"
+    pass "the capped launch handoff carries no syntax fish rejects"
+    return
+  fi
+  out=$(run_staged_launch_in_fish "$uncapped_case" "$fish_bin") || rc=$?
+  expect_code 0 "$rc" "a fish pane could not source the uncapped launch: $out"
+  assert_equals "--brief fish-pane" "$(cat "$uncapped_case/invocation.argv")" \
+    "the uncapped fish launch did not run the command it staged"
+  assert_equals fish "$(cat "$uncapped_case/invocation.shell")" \
+    "the uncapped fish launch did not run under fish"
+  rc=0
+  out=$(run_staged_launch_in_fish "$capped_case" "$fish_bin") || rc=$?
+  expect_code 0 "$rc" "a fish pane could not source the capped launch: $out"
+  assert_equals "$(cat "$uncapped_case/invocation.argv")" "$(cat "$capped_case/invocation.argv")" \
+    "a capped launch changed the command a fish pane runs"
+  assert_equals fish "$(cat "$capped_case/invocation.shell")" \
+    "a capped launch handed the command to an interpreter other than the fish pane"
+  [ "$(registry_row_field "$capped_case" task-c 4)" != 0 ] ||
+    fail "the capped fish launch did not transfer its reservation to the worker's process"
+  pass "a capped launch runs the uncapped command unchanged in a fish pane"
+}
+
+# Source the staged launch file in fish, with the login shell pinned away so a
+# handoff that failed to name fish cannot silently inherit it.
+run_staged_launch_in_fish() {  # <case-dir> <fish>
+  local case_dir=$1 fish_bin=$2 file
+  file=$(staged_launch_file "$case_dir")
+  [ -n "$file" ] || fail "the spawn for $case_dir staged no launch file"
+  (cd "$case_dir/project" &&
+    env -u SHELL FM_FAKE_INVOCATION_LOG="$case_dir/invocation" \
+      PATH="$case_dir/fakebin:$PATH" "$fish_bin" -c "source \$argv[1]" "$file") 2>&1
+}
+
 # The handoff still needs an interpreter when the pane shell cannot be named, so
 # an unusable report falls back to a shell that runs every generated launch line
 # and a POSIX-only one survives it.
@@ -331,7 +409,7 @@ test_run_launch_falls_back_when_the_pane_shell_is_unusable() {
   case_dir=$(make_case launch-fallback task-c)
   write_sol_row "$case_dir/home" task-c "$(fresh_start)"
   out=$(FM_HOME="$case_dir/home" SHELL='' bash "$ROOT/bin/fm-sol-cap-lib.sh" \
-    run-launch task-c "$case_dir/home/state" /nonexistent/pane-shell 'printf %s fallback-ran') || rc=$?
+    run-launch task-c "$case_dir/home/state" 'printf %s fallback-ran' /nonexistent/pane-shell) || rc=$?
   expect_code 0 "$rc" "an unresolvable pane shell refused the launch"
   assert_contains "$out" fallback-ran "an unresolvable pane shell did not fall back to a working shell"
   pass "an unnamed pane shell falls back to a shell that runs the launch line"
@@ -1270,6 +1348,7 @@ test_shared_home_admission
 test_review_regressions
 test_under_cap_sol_spawn_launches_and_claims_its_slot
 test_capped_launch_keeps_the_uncapped_command_invocation
+test_capped_launch_survives_a_fish_pane
 test_run_launch_falls_back_when_the_pane_shell_is_unusable
 test_cap_refuses_the_fifth_and_names_its_sessions
 test_stale_entries_do_not_count
