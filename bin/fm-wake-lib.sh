@@ -586,8 +586,9 @@ fm_lock_owner_dir() {
   mktemp -d "${lock_abs}.owner.${FM_LOCK_OWNER_SCOPE:+$FM_LOCK_OWNER_SCOPE.}XXXXXX" 2>/dev/null
 }
 
-# The acquiring process's own fm_pid_start_time, probed once per pid: a
-# process's start time never changes, so a long-lived lock user pays it once.
+# fm_lock_record_start <dir> <pid>: write <pid>'s fm_pid_start_time to
+# <dir>/pid-start when it can be probed. The last probed pid's token is cached:
+# a process's start time never changes, so a long-lived lock user pays it once.
 _FM_LOCK_SELF_START_PID=
 _FM_LOCK_SELF_START=
 fm_lock_record_start() {
