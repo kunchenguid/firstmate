@@ -1540,7 +1540,7 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
       END { if (found) print found; else exit 1 }
     ' "$statusf") || exit 1
     case "$size" in ''|*[!0-9]*) exit 1 ;; esac
-    printf '%s' "$size" > "$overdue_marker"
+    printf '%s:%s' "$(stat_devino "$statusf")" "$size" > "$overdue_marker"
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
@@ -2667,12 +2667,17 @@ clear_pause_tracking() {  # <window-key>
 # The marker stores the byte offset immediately after the watcher's own blocked
 # line, so later checks read only status events written after that decision.
 pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or absent
-  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" offset actual added line verb key append_rc resume=0
+  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" identity offset actual added line verb key append_rc resume=0
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || { rm -f "$marker"; return 1; }
-  offset=$(cat "$marker" 2>/dev/null || true)
+  identity=$(stat_devino "$statusf") || return 0
+  IFS=: read -r marker_identity offset < "$marker" || { rm -f "$marker"; return 1; }
   actual=$(_fm_status_file_size "$statusf") || return 0
-  case "$offset:$actual" in *[!0-9:]*) return 0 ;; esac
+  case "$offset:$actual" in *[!0-9:]*) rm -f "$marker"; return 1 ;; esac
+  if [ "$identity" != "$marker_identity" ] || [ "$actual" -lt "$offset" ]; then
+    rm -f "$marker"
+    return 1
+  fi
   [ "$actual" -gt "$offset" ] || return 0
   added=$(_fm_status_read_span "$statusf" "$offset" "$((actual - offset))") || return 0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -4405,6 +4410,8 @@ EOF
             _wedge_cap_markers_clear "$key"
             wake "$stale_reason"
           fi
+        elif [ -e "$STATE/.paused-overdue-$task" ]; then
+          printf '%s' "$h" > "$sf"
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's latest status event is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
