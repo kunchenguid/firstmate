@@ -1,0 +1,17 @@
+REAL watcher=63397 lock=63397
+
+CONTENDED recovery auto_rc=0
+firstmate watcher auto-arm could not clear the resolved failure episode - a verified healthy watcher is running, but the episode reset was refused; the attended failure alarm is already committed for this episode, so this suppressed continuation repeats no operator notice and schedules no Stop-owned retry.
+.claude-autoarm-failure-notified present=yes
+.claude-autoarm-failure-alarmed present=yes
+.turnend-claude-blocks present=yes
+lock_holder_exit=0
+
+UNCONTENDED recovery auto_rc=0
+.claude-autoarm-failure-notified present=no
+.claude-autoarm-failure-alarmed present=no
+.turnend-claude-blocks present=no
+epoch=14 owner_pid=67804 outcome=clean updated_at=1793426275
+Sat Oct 31 05:57:55 2026     bash bin/fm-claude-stop-autoarm.sh
+
+RECOVERY DRIVER COMPLETE

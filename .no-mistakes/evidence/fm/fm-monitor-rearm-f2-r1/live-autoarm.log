@@ -1,0 +1,104 @@
+REAL HARNESS ANCESTRY
+23521 89581 /run/current-sys /run/current-system/sw/bin/zsh -c source ~/.claude/shell-snapshots/snapshot-zsh-1793426216175-a87vgb.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \builtin unalias -- 'which'; \builtin unset -f -- 'which'; } >/dev/null 2>&1 || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval ' bash .test-tmp/live-driver.sh' < /dev/null && pwd -P >| /tmp/claude-c3d1-cwd
+lock acquired: harness pid 89581
+lab={run-worktree}/l lock=89581
+
+SCENARIO arm: user config fault exits the real arm before watcher creation
+
+stop=1 auto_rc=2 guard_rc=0 notice=yes alarm=no
+firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after 1 bounded attempts, and no live watcher with a fresh beacon was verified.
+Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.
+epoch=1 owner_pid=24428 outcome=failed updated_at=1793426218
+Sat Oct 31 05:56:57 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=2 auto_rc=2 guard_rc=0 notice=yes alarm=no
+firstmate watcher auto-arm still down - the automatic supervision mechanism remains broken in the recorded failure episode, whose notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-arm
+count=1
+epoch=2
+epoch=2 owner_pid=26405 outcome=failed-suppressed updated_at=1793426220
+Sat Oct 31 05:56:58 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=3 auto_rc=2 guard_rc=0 notice=yes alarm=no
+firstmate watcher auto-arm still down - the automatic supervision mechanism remains broken in the recorded failure episode, whose notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-arm
+count=2
+epoch=3
+epoch=3 owner_pid=28443 outcome=failed-suppressed updated_at=1793426221
+Sat Oct 31 05:57:00 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=4 auto_rc=2 guard_rc=0 notice=yes alarm=no
+firstmate watcher auto-arm still down - the automatic supervision mechanism remains broken in the recorded failure episode, whose notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-arm
+count=3
+epoch=4
+epoch=4 owner_pid=30387 outcome=failed-suppressed updated_at=1793426223
+Sat Oct 31 05:57:01 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=5 auto_rc=2 guard_rc=0 notice=yes alarm=yes
+FIRSTMATE SUPERVISION IS GENUINELY DOWN: 1 task(s) in flight - the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no live watcher or automatic continuation exists, and this session block budget is exhausted.
+Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision; do not launch a manual background arm from this notice.
+session=live-arm
+count=4
+epoch=5
+epoch=5 owner_pid=32178 outcome=failed-suppressed updated_at=1793426225
+Sat Oct 31 05:57:03 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=6 auto_rc=0 guard_rc=0 notice=yes alarm=yes
+firstmate watcher auto-arm suppressed - the attended failure alarm is already committed for this episode, so this suppressed continuation emits no further rewake.
+session=live-arm
+count=5
+epoch=6
+epoch=6 owner_pid=33588 outcome=failed-suppressed updated_at=1793426226
+Sat Oct 31 05:57:05 2026     bash bin/fm-claude-stop-autoarm.sh
+
+SCENARIO signal: user config fault exits the real arm before watcher creation
+
+stop=1 auto_rc=2 guard_rc=0 notice=yes alarm=no
+firstmate watcher auto-arm INTERRUPTED by TERM - the Stop-owned automatic supervision mechanism did not reach a terminal watcher outcome.
+Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.
+epoch=7 owner_pid=34460 outcome=failed updated_at=1793426227
+Sat Oct 31 05:57:06 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=2 auto_rc=2 guard_rc=0 notice=yes alarm=no
+firstmate watcher auto-arm interrupted by TERM - the failure episode notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-signal
+count=1
+epoch=8
+epoch=8 owner_pid=35136 outcome=failed-suppressed updated_at=1793426228
+Sat Oct 31 05:57:07 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=3 auto_rc=2 guard_rc=0 notice=yes alarm=no
+firstmate watcher auto-arm interrupted by TERM - the failure episode notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-signal
+count=2
+epoch=9
+epoch=9 owner_pid=36662 outcome=failed-suppressed updated_at=1793426228
+Sat Oct 31 05:57:08 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=4 auto_rc=2 guard_rc=0 notice=yes alarm=no
+firstmate watcher auto-arm interrupted by TERM - the failure episode notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-signal
+count=3
+epoch=10
+epoch=10 owner_pid=37683 outcome=failed-suppressed updated_at=1793426229
+Sat Oct 31 05:57:08 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=5 auto_rc=2 guard_rc=0 notice=yes alarm=yes
+FIRSTMATE SUPERVISION IS GENUINELY DOWN: 1 task(s) in flight - the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no live watcher or automatic continuation exists, and this session block budget is exhausted.
+Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision; do not launch a manual background arm from this notice.
+session=live-signal
+count=4
+epoch=11
+epoch=11 owner_pid=38906 outcome=failed-suppressed updated_at=1793426230
+Sat Oct 31 05:57:09 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=6 auto_rc=0 guard_rc=0 notice=yes alarm=yes
+firstmate watcher auto-arm interrupted by TERM after the attended alarm - the failure episode is already alarmed, so this suppressed continuation emits no further rewake.
+session=live-signal
+count=5
+epoch=12
+epoch=12 owner_pid=40048 outcome=failed-suppressed updated_at=1793426230
+Sat Oct 31 05:57:10 2026     bash bin/fm-claude-stop-autoarm.sh
+
+LIVE DRIVER COMPLETE

@@ -1,0 +1,24 @@
+
+SCENARIO unpublished lock blocks interrupted real watcher cleanup
+watcher: started pid=5330 (beacon fresh)
+arm=5297 watcher=5330 pid_file_bytes=       5
+synthetic orphan owner={run-worktree}/l/state/.watcher-down.lock.owner.dhbD3F pid_unpublished=yes residue=pid.tmp.aborted
+interrupted arm_exit=129 elapsed_seconds=2
+watcher: started pid=5330 (beacon fresh)
+orphan_dir_remaining=no residue_remaining=no marker=pending:downtime:5330.1793426630.cRhtix
+drain_exit=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 5330.1793426630.cRhtix
+ack_exit=0
+
+SCENARIO published lock blocks interrupted real watcher cleanup
+watcher: started pid=7001 (beacon fresh)
+arm=6951 watcher=7001 pid_file_bytes=       5
+published live holder=7600 lock_pid=7600
+interrupted arm_exit=129 elapsed_seconds=2
+watcher: started pid=7001 (beacon fresh)
+watcher: recovery state could not be persisted; retaining stale lock evidence
+live holder survives=yes watcher_lock_retained=yes
+holder_exit=0
+drain_exit=0
+
+LOCK DRIVER COMPLETE

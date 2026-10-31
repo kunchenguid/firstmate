@@ -1,0 +1,10 @@
+Independent oracle: supplied user intent (budget=3, failure notice once, final alarm once, post-alarm exit 0; positive recovery clears episode; published live holders retain original cleanup bound).
+
+arm: user config fault exits the real arm before watcher creation: notice once; guard steps aside; auto-arm commits exactly one final alarm at budget exhaustion; later exit 0
+signal: user config fault exits the real arm before watcher creation: notice once; guard steps aside; auto-arm commits exactly one final alarm at budget exhaustion; later exit 0
+real host boundary with unresolved pending handling marker; arm startup starved by user config: notice once; guard steps aside; auto-arm commits exactly one final alarm at budget exhaustion; later exit 0
+real host boundary with unresolved announced handling marker; arm startup starved by user config: notice once; guard steps aside; auto-arm commits exactly one final alarm at budget exhaustion; later exit 0
+Real healthy watcher: contended reset retains episode and accurately reports no retry; uncontended reset clears all three episode files
+Real watcher cleanup: orphan unpublished-pid lock reclaimed with pid.tmp residue removed, downtime drain acknowledged; published live holder remains alive and cleanup returns at original bound
+
+Isolation: real Claude Code 2.1.314 on private tmux fm-lab socket; nonzero 140x40 terminal. All inputs and fleet state synthetic in marked worktree-local lab. Hook interfaces invoked under real Claude ancestry with synthetic Stop payloads; no claim of autonomous model-driven asyncRewake delivery. Private tmux server exit=0; recorded harness/watcher/holder PIDs confirmed stopped. Lab, copied focused test launchers, transient scope marker and scratch files removed; tracked source unchanged.

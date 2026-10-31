@@ -1,0 +1,4 @@
+ok - disposable watcher refuses inherited state outside its marked lab
+ok - bounded wait earns one grace window for an unpublished-pid lock, still bounds a live holder
+ok - arm defers TERM until startup watcher can run its lock cleanup
+ok - empty mid-acquire lock keeps a minimum grace

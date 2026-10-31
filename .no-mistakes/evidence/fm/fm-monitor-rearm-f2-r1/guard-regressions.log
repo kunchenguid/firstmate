@@ -1,0 +1,3 @@
+ok - fm-turnend-guard --claude: the exhausted auto-arm commits the attended alarm once, then stays suppressed until recovery
+ok - fm-turnend-guard --claude: a repeatedly lost host hand-back on a pending or announced handling marker reaches the attended alarm
+ok - fm-turnend-guard --claude: a repeatedly interrupted auto-arm reaches the attended alarm

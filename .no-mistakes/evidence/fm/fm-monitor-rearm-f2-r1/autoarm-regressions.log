@@ -1,0 +1,5 @@
+ok - auto-arm: consecutive failures keep Stop-owned retry without repeating notice
+ok - auto-arm: budget contention preserves the episode and forces a reset retry
+ok - auto-arm: post-alarm actionable outcomes cannot continue or reset failure state
+ok - auto-arm: a lost host hand-back notifies once per failure episode
+ok - auto-arm: a lost host hand-back on an announced marker notifies once per failure episode

@@ -1,0 +1,128 @@
+
+SCENARIO real host boundary with unresolved pending handling marker; arm startup starved by user config
+
+stop=1 auto_rc=2 guard_rc=0 notice=yes alarm=no marker=pending:handling:live-incomplete-handback
+firstmate watcher wake - one supervision event needs a handling turn now.
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+firstmate watcher auto-arm FAILED - the supervision host returned an actionable wake, but its rewake could not be committed.
+epoch=15 owner_pid=22504 outcome=failed updated_at=1793426396
+Sat Oct 31 05:59:23 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=2 auto_rc=2 guard_rc=0 notice=yes alarm=no marker=pending:handling:live-incomplete-handback
+firstmate watcher wake - one supervision event needs a handling turn now.
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+firstmate watcher auto-arm hand-back still uncommitted - the supervision host returned an actionable wake, but its rewake could not be committed, and the failure episode notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-pending-handback
+count=1
+epoch=16
+epoch=16 owner_pid=43469 outcome=failed-suppressed updated_at=1793426429
+Sat Oct 31 05:59:56 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=3 auto_rc=2 guard_rc=0 notice=yes alarm=no marker=pending:handling:live-incomplete-handback
+firstmate watcher wake - one supervision event needs a handling turn now.
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+firstmate watcher auto-arm hand-back still uncommitted - the supervision host returned an actionable wake, but its rewake could not be committed, and the failure episode notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-pending-handback
+count=2
+epoch=17
+epoch=17 owner_pid=58098 outcome=failed-suppressed updated_at=1793426432
+Sat Oct 31 06:00:29 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=4 auto_rc=2 guard_rc=0 notice=yes alarm=no marker=pending:handling:live-incomplete-handback
+firstmate watcher wake - one supervision event needs a handling turn now.
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+firstmate watcher auto-arm hand-back still uncommitted - the supervision host returned an actionable wake, but its rewake could not be committed, and the failure episode notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-pending-handback
+count=3
+epoch=18
+epoch=18 owner_pid=60317 outcome=failed-suppressed updated_at=1793426437
+Sat Oct 31 06:00:32 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=5 auto_rc=2 guard_rc=0 notice=yes alarm=yes marker=pending:handling:live-incomplete-handback
+firstmate watcher wake - one supervision event needs a handling turn now.
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+FIRSTMATE SUPERVISION IS GENUINELY DOWN: 1 task(s) in flight - the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no live watcher or automatic continuation exists, and this session block budget is exhausted.
+Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision; do not launch a manual background arm from this notice.
+session=live-pending-handback
+count=4
+epoch=19
+epoch=19 owner_pid=64275 outcome=failed-suppressed updated_at=1793426442
+Sat Oct 31 06:00:37 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=6 auto_rc=0 guard_rc=0 notice=yes alarm=yes marker=pending:handling:live-incomplete-handback
+firstmate watcher auto-arm suppressed - the attended failure alarm is already committed for this episode, so this suppressed continuation emits no further rewake.
+session=live-pending-handback
+count=5
+epoch=20
+epoch=20 owner_pid=69571 outcome=failed-suppressed updated_at=1793426446
+Sat Oct 31 06:00:42 2026     bash bin/fm-claude-stop-autoarm.sh
+
+SCENARIO real host boundary with unresolved announced handling marker; arm startup starved by user config
+
+stop=1 auto_rc=2 guard_rc=0 notice=yes alarm=no marker=announced:handling:live-incomplete-handback
+firstmate watcher wake - one supervision event needs a handling turn now.
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+firstmate watcher auto-arm FAILED - the supervision host returned an actionable wake, but its rewake could not be committed.
+epoch=21 owner_pid=73091 outcome=failed updated_at=1793426451
+Sat Oct 31 06:00:46 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=2 auto_rc=2 guard_rc=0 notice=yes alarm=no marker=announced:handling:live-incomplete-handback
+firstmate watcher wake - one supervision event needs a handling turn now.
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+firstmate watcher auto-arm hand-back still uncommitted - the supervision host returned an actionable wake, but its rewake could not be committed, and the failure episode notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-announced-handback
+count=1
+epoch=22
+epoch=22 owner_pid=78635 outcome=failed-suppressed updated_at=1793426454
+Sat Oct 31 06:00:51 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=3 auto_rc=2 guard_rc=0 notice=yes alarm=no marker=announced:handling:live-incomplete-handback
+firstmate watcher wake - one supervision event needs a handling turn now.
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+firstmate watcher auto-arm hand-back still uncommitted - the supervision host returned an actionable wake, but its rewake could not be committed, and the failure episode notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-announced-handback
+count=2
+epoch=23
+epoch=23 owner_pid=82012 outcome=failed-suppressed updated_at=1793426459
+Sat Oct 31 06:00:54 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=4 auto_rc=2 guard_rc=0 notice=yes alarm=no marker=announced:handling:live-incomplete-handback
+firstmate watcher wake - one supervision event needs a handling turn now.
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+firstmate watcher auto-arm hand-back still uncommitted - the supervision host returned an actionable wake, but its rewake could not be committed, and the failure episode notice was already consumed; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.
+session=live-announced-handback
+count=3
+epoch=24
+epoch=24 owner_pid=87344 outcome=failed-suppressed updated_at=1793426462
+Sat Oct 31 06:00:59 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=5 auto_rc=2 guard_rc=0 notice=yes alarm=yes marker=announced:handling:live-incomplete-handback
+firstmate watcher wake - one supervision event needs a handling turn now.
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.
+FIRSTMATE SUPERVISION IS GENUINELY DOWN: 1 task(s) in flight - the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no live watcher or automatic continuation exists, and this session block budget is exhausted.
+Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision; do not launch a manual background arm from this notice.
+session=live-announced-handback
+count=4
+epoch=25
+epoch=25 owner_pid=92097 outcome=failed-suppressed updated_at=1793426467
+Sat Oct 31 06:01:02 2026     bash bin/fm-claude-stop-autoarm.sh
+
+stop=6 auto_rc=0 guard_rc=0 notice=yes alarm=yes marker=announced:handling:live-incomplete-handback
+firstmate watcher auto-arm suppressed - the attended failure alarm is already committed for this episode, so this suppressed continuation emits no further rewake.
+session=live-announced-handback
+count=5
+epoch=26
+epoch=26 owner_pid=95292 outcome=failed-suppressed updated_at=1793426472
+Sat Oct 31 06:01:07 2026     bash bin/fm-claude-stop-autoarm.sh
+
+HANDBACK DRIVER COMPLETE
