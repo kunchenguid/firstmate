@@ -2437,6 +2437,26 @@ run_drain() {  # <home>
     "$ROOT/bin/fm-wake-drain.sh" 2>/dev/null
 }
 
+# An unbracketed key=<slug> resolution over an open hold is a divergence too.
+test_unbracketed_status_resolution_over_an_open_hold_is_signalled() {
+  local home id out
+  home=$(make_home divergence-unbracketed)
+  id=sample-bare-review
+  tasks_in "$home" add "$id" "Investigate bare routing" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the investigation fixture"
+  write_origin_meta "$home" "$id"
+  run_captain "$home" hold sample-bare-call \
+    --title "Choose route" --reason "captain route choice pending" \
+    --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain call"
+  printf '%s\n' 'blocked [at=1] key=sample-bare-call: north or south' \
+    'resolved [at=3] key=sample-bare-call: answered' > "$home/state/$id.status"
+  out=$(run_captain "$home" diverged) || fail "diverged failed on the unbracketed resolution"
+  printf '%s\n' "$out" | grep -F "sample-bare-call	$id	sample-bare-call" >/dev/null \
+    || fail "the unbracketed-key divergence was not signalled: $out"
+  pass "an unbracketed key=<slug> resolution over an open hold is signalled"
+}
+
 # Reconstructs the 2026-08-06 loss with synthetic names: the answer was posted
 # as a `resolved [key=...]` line and nothing else, so the status fold went quiet
 # while the durable captain-held task stayed open and kept reading as if the
@@ -4976,6 +4996,7 @@ test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
+test_unbracketed_status_resolution_over_an_open_hold_is_signalled
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
 test_teardown_never_closes_a_captain_held_task
