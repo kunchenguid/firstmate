@@ -787,6 +787,32 @@ test_turn_ended_not_working_surfaced() {
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
 
+# One turn's status write and its trailing turn-end hook land inside one signal
+# grace window and surface as ONE wake, so they must queue ONE row: a second row
+# for the same task and wake reason costs the supervisor a presentation line that
+# names nothing the first did not. A turn-end with no status file in its batch is
+# a distinct event and keeps its own row.
+test_status_and_turn_end_batch_queue_one_row() {
+  local dir state fakebin out pid rows
+  dir=$(make_case batch-one-row); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'done: finished the change\n' > "$state/task.status"
+  : > "$state/task.turn-ended"
+  : > "$state/solo.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a batched status write and turn-end"
+  grep -F "signal:" "$out" | grep -F "$state/task.status" | grep -F "$state/task.turn-ended" >/dev/null \
+    || fail "the wake reason no longer names both files of the batch: $(cat "$out")"
+  rows=$(awk -F '\t' '$3 == "signal" && ($4 == "task.status" || $4 == "task.turn-ended") { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$rows" -eq 1 ] || fail "a status write plus its turn-end queued $rows rows instead of one: $(cat "$state/.wake-queue")"
+  awk -F '\t' '$3 == "signal" && $4 == "task.status"' "$state/.wake-queue" | grep -q . \
+    || fail "the coalesced row did not keep the status file's key: $(cat "$state/.wake-queue")"
+  awk -F '\t' '$3 == "signal" && $4 == "solo.turn-ended"' "$state/.wake-queue" | grep -q . \
+    || fail "a turn-end with no status file in its batch lost its own row: $(cat "$state/.wake-queue")"
+  pass "a status write and its same-batch turn-end queue one signal row; a lone turn-end keeps its row"
+}
+
 # --- bare turn-end, unverifiable harness: pane churn is the third proof --------
 # A harness whose semantic busy state has no verified source (codex) can never
 # report working, so the two proofs above are unreachable for it and EVERY worker
@@ -4926,6 +4952,7 @@ fm_test_run \
   test_provably_working_signal_absorbed \
   test_turn_ended_provably_working_absorbed \
   test_turn_ended_not_working_surfaced \
+  test_status_and_turn_end_batch_queue_one_row \
   test_turn_ended_churning_pane_absorbed \
   test_turn_ended_churn_resets_prior_stale_classification \
   test_turn_ended_churn_resets_wedge_state_before_stale_poll \
