@@ -197,7 +197,7 @@ else
       # A session that ran no model (an exhausted limit, a refused request)
       # records <synthetic>. The assertion reads that as no statement, never as a
       # model that ran, so there is nothing here to compare a pin against.
-      printf '# %s recorded <synthetic> for pin %s, so no model ran and the assertion would record unverified\n' \
+      printf '# %s recorded <synthetic> for pin %s, so no model ran and the assertion would emit unverified on stderr\n' \
         "$CLAUDE_WHO" "$CLAUDE_PIN"
       ;;
   esac
@@ -207,7 +207,7 @@ else
       printf '# %s reported %s for pin %s\n' "$CLAUDE_WHO" "$CLAUDE_REPORTED" "$CLAUDE_PIN"
       ;;
     *)
-      fail "$CLAUDE_WHO reported '$CLAUDE_REPORTED' for a launch pinned to $CLAUDE_PIN; the assertion would record a mismatch"
+      fail "$CLAUDE_WHO reported '$CLAUDE_REPORTED' for a launch pinned to $CLAUDE_PIN; the assertion would emit a mismatch on stderr"
       ;;
   esac
   pass "$CLAUDE_WHO: a pinned launch reads back the model its own session id addresses"

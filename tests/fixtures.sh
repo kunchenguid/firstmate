@@ -165,6 +165,9 @@ fake_claude_model_report() {  # <staged-launch-command>
     > "$config_dir/projects/fm-test/$session.jsonl"
   if [ -n "${FM_FAKE_CLAUDE_STATUS_FILE:-}" ] && [ -n "${FM_FAKE_CLAUDE_STATUS_LINE:-}" ]; then
     printf '%s\n' "$FM_FAKE_CLAUDE_STATUS_LINE" >> "$FM_FAKE_CLAUDE_STATUS_FILE"
+    if [ -n "${FM_FAKE_CLAUDE_STATUS_SNAPSHOT:-}" ]; then
+      cp "$FM_FAKE_CLAUDE_STATUS_FILE" "$FM_FAKE_CLAUDE_STATUS_SNAPSHOT"
+    fi
   fi
 }
 case "$*" in
@@ -468,7 +471,7 @@ fm_test_run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
     PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
+    "$ROOT/bin/fm-spawn.sh" "$@" 2>"${FM_TEST_SPAWN_STDERR:-/dev/stdout}"
 }
 
 # --- send-world stubs -------------------------------------------------------

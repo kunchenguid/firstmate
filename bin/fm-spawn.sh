@@ -108,7 +108,7 @@
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
 #   A pinned launch is also asserted after delivery: the started session is asked
-#   which model it runs on, and pin-versus-actual lands in the task status. A
+#   which model it runs on, and pin-versus-actual goes to stderr. A
 #   Claude launch with a concrete pin gets a fresh, collision-checked --session-id
 #   so its transcript is readable by address; a Herdr-bound Pi relaunch is read
 #   from the session identity it resumed. A harness with no readable session model
@@ -3449,8 +3449,8 @@ muse_credential_present() {
 # model policy, or a vendor alias that resolves elsewhere (issue #7735: a
 # relaunch reported `model=<pin>` while its session ran `claude-opus-5[1m]`).
 # So a pinned launch reads back the model the started session itself reports and
-# records pin-versus-actual in the task status, where supervision and the captain
-# see a downgrade instead of finding it later in a session file.
+# emits pin-versus-actual on stderr for supervision and the captain, without
+# writing to the task status file.
 #
 # Four rules keep that record honest:
 #   - The read binds to a signal the harness itself emits, its own session
@@ -3534,44 +3534,11 @@ spawn_model_pin_matches() {  # <harness> <pin> <actual>
   return 1
 }
 
-# The worker's own report outranks model evidence: an open decision, a declared
-# wait, or a terminal outcome IS the task's state, so a later note may not become
-# the line a supervisor reads as that state. Read through the shared classifier so
-# this agrees with every other consumer of the status log.
-spawn_model_pin_state_reported() {  # <status-line>
-  local line=${1-} verb
-  [ -n "$line" ] || return 1
-  status_line_verb "$line" verb
-  case "$verb" in
-  done | failed | blocked | needs-decision | \
-    "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" | \
-    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}")
-    return 0
-    ;;
-  esac
-  return 1
-}
-
-# The single writer for every assertion outcome: one `note:` event, so the record
-# sits in the task's status history without opening a decision event. The note is
-# never written over a state the worker already reported; the file stays
-# byte-identical there - the worker writes to it concurrently, so nothing here
-# rewrites, truncates, or re-appends its lines - and the verdict goes to the
-# operator on stderr instead.
 spawn_model_pin_note() {  # <asserted|mismatch|unverified>: <tail>
-  local verdict=${1%%:*} tail=${1#*:} current
-  current=$(status_current_line "$STATE/$ID.status" "$KIND" 2>/dev/null) || current=
-  if spawn_model_pin_state_reported "$current"; then
-    printf 'warn: model pin %s:%s\n' "$verdict" "$tail" >&2
-    return 0
-  fi
-  printf '%s\n' "$(status_stamp_line "note: model pin $verdict:$tail")" >>"$STATE/$ID.status"
-  [ "$verdict" = mismatch ] || return 0
-  printf 'warn: model pin was not honored%s\n' "$tail" >&2
+  printf 'model pin %s\n' "$1" >&2
+  return 0
 }
 
-# Resolve the outcome into one note. <actual> empty means the session never stated
-# a model, which is unverified rather than a mismatch.
 spawn_model_pin_verdict() {  # <harness> <pin> <actual> <subject>
   local harness=$1 pin=$2 actual=$3 subject=$4
   if [ -z "$actual" ]; then
