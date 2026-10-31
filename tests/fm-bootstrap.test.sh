@@ -1589,6 +1589,7 @@ JSON
   assert_contains "$out" "duplicate-clone pool $root/two" "duplicate clone pool was not reported"
   assert_not_contains "$out" "duplicate-clone pool $root/one" "sibling slots in one pool were reported as duplicate pools"
   assert_contains "$out" "test-leftover pool $root/project-leftover" "test leftover pool was not reported"
+  assert_not_contains "$out" "unregistered pool $root/project-leftover" "empty worktrees array created a synthetic slot"
   assert_contains "$out" "unowned slot older than 30d: $registered" "old created_at Z timestamp was not reported"
   assert_contains "$out" "unowned slot older than 30d: $fractional_repo" "fractional timestamp with offset was not reported"
   assert_not_contains "$out" "unowned slot older than 30d: $missing_date" "missing created_at slot was reported stale"
