@@ -353,7 +353,7 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that 
 A falsely successful close can let teardown remove every durable record naming a still-live endpoint, so each backend's close return must reflect what it can prove.
 Verified on 2026-09-14 with tmux 3.7c by driving `fm_backend_kill` against real tmux endpoints, and the Orca arm by driving `fm_backend_orca_kill` under a search path with no `orca` on it.
 The table below states the current return contract; the 2026-09-14 measurements cover only the tmux and missing-Orca-CLI paths.
-`tests/fm-backend-close.test.sh` exercises the confirmed close for cmux, Zellij, Paseo, and Orca with controlled command responses, and `tests/fm-backend-rex.test.sh` does the same for Rex.
+`tests/fm-backend-close.test.sh` exercises the confirmed close for cmux, Zellij, Paseo, and Orca with controlled command responses and proves the Tern, HC, and T3 Code dispatch preserves each close's arguments and verdict; `tests/fm-backend-rex.test.sh` exercises Rex's confirmed close the same way.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -370,7 +370,7 @@ ok - fm-teardown: an already-exited endpoint, and a server that is already gone,
 ok - fm_backend_orca_kill: a close its missing CLI never attempted reports the failure instead of a success
 ```
 
-An endpoint that is already legitimately gone returns 0 silently on every arm covered by this entry, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited.
+An endpoint that is already legitimately gone returns 0 silently on every arm whose close can run at all, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited, and Orca does the same whenever its CLI is available. An absent Orca binary is the exception: its close cannot run at all, so it refuses even a terminal that is already gone.
 Ordinary close return contracts differ by backend:
 
 | Backend | already gone | a close that failed |
@@ -396,7 +396,7 @@ It is deliberately NOT the ordinary teardown path: a task that holds no capped o
 | --- | --- |
 | tmux | the window's exact recorded identity, as the ordinary close already does |
 | herdr | `fm_backend_herdr_endpoint_confirmed_gone`, the same structured not-found the Herdr record gate uses |
-| zellij | the session's pane and tab inventories; a read that cannot run, or an inventory that still names the pane or tab, is not proof |
+| zellij | the session's terminal pane and tab inventories; a read that cannot run, or an inventory that still names the terminal pane or the recorded tab, is not proof, while a same-numbered plugin pane is a separate ID space and cannot keep the target alive |
 | cmux | the workspace inventory of every window; a failed read, or a surviving workspace or title, is not proof |
 | orca | the close command's own answer: a failed command or an error JSON response is a refused close |
 | paseo | the live terminal inventory; a read that cannot run, or an inventory that still names the terminal, is not proof |
