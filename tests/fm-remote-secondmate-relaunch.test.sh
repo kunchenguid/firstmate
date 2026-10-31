@@ -206,6 +206,23 @@ fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
   || fail "a remote relaunch broke PR poll authentication by writing harness/model/effort after pr="
 pass "a remote relaunch keeps an already-armed PR poll authenticating"
 
+for unpinned_model in - default; do
+  reset_meta
+  printf 'max=1\nmodel-pattern=.*\n' > "$HOME_DIR/config/sol-cap"
+  sed 's|^model=.*|model=default|' "$HOME_DIR/state/ios.meta" > "$TMP/unpinned.meta"
+  mv "$TMP/unpinned.meta" "$HOME_DIR/state/ios.meta"
+  printf 'occupied\tgpt-6.1-sol\t1\t%s\n' "$$" > "$HOME_DIR/state/sol-sessions.tsv"
+  OUT=$(run_relaunch ios codex gpt-6.1-sol default); RC=$?
+  expect_code 1 "$RC" "an explicitly pinned switch must respect the full ceiling"
+  OUT=$(run_relaunch ios codex "$unpinned_model" default); RC=$?
+  expect_code 0 "$RC" "an unpinned switch must bypass the full ceiling: $OUT"
+  assert_grep 'model=default' "$HOME_DIR/state/ios.meta" \
+    "the unpinned switch must publish the confirmed model"
+  assert_equals 1 "$(wc -l < "$HOME_DIR/state/sol-sessions.tsv" | tr -d ' ')" \
+    "an unpinned switch must not create occupancy"
+done
+pass "both unpinned model spellings bypass a full model-pattern ceiling"
+
 echo "ALL TESTS PASSED"
 
 reset_meta

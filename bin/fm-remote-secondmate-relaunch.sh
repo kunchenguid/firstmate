@@ -45,6 +45,7 @@ ID=$1
 HARNESS=$2
 MODEL=$3
 EFFORT=$4
+[ "$MODEL" != - ] || MODEL=default
 case "$ID" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $ID" ;; esac
 
 SPAWN_LOCK="$STATE/.spawn-$ID.lock"
