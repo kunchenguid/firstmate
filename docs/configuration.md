@@ -2089,6 +2089,7 @@ A fresh launch with `--model default` has no explicit model pin: the sentinel it
 - Before delivery, the reservation becomes conservative (pid 0), so an uncertain delivery or later spawn error cannot free a running worker's slot.
 - Local launch commands transfer that reservation to their own process before starting the worker; exiting the worker releases occupancy even while its interactive pane remains open.
 - The ceiling gates admission only: a capped local launch runs the command line it would have run uncapped, parsed by the same pane shell, so an opaque raw launch command keeps the syntax that shell accepts.
+  The launch line runs in a child of the pane, preserving the command line, the pane shell, and the exported environment, while pane-local state that was never exported (shell variables, functions, aliases) is not preserved, because occupancy must belong to the process that runs the worker and be released when that worker exits.
 - Remote or uncertain deliveries keep pid 0 and require reconciliation before their slot can be released; they never expire by age.
 - A retry requesting an explicitly capped model refuses while its existing worker is live or delivery is uncertain; requesting an uncapped or default model alone does not release that occupancy.
 - A successful remote launch reconciles occupancy from the endpoint-reported model under the admission lock, while retaining its per-task spawn lock: an existing live or uncertain capped claim keeps its reconciliation semantics, and a confirmed uncapped route releases stale capped occupancy.
