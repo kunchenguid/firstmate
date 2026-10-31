@@ -11,6 +11,9 @@
 # Claude session id below matches the id recorded beside a live lock. Neither
 # signal ever fails open: no id, no sidecar, an untrusted id, or a different
 # recorded id leaves the ancestry verdict exactly as it was.
+# A second decision is owned here too: fm_session_lock_pid_blocks_reclaim
+# answers whether a recorded owner may be reclaimed, so recovery callers
+# delegate that question instead of re-deriving liveness from the fields.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
@@ -633,9 +636,17 @@ EOF
   return 1
 }
 
-# True if $1 is a live process that looks like a verified harness.
-# A tagged Windows pid uses the Windows process table; numeric pids use the
-# shared identity provider and kill probe to distinguish dead from unreadable.
+# Classify session-lock pid $1, setting FM_SESSION_LOCK_PID_VERDICT to one of:
+#   readable   - the identity was read into FM_PROC_COMM and FM_PROC_ARGS, plus
+#                FM_PROC_PPID for a numeric pid (a tagged pid has no local parent).
+#   dead       - nothing can see the pid, or the Windows table proves it absent.
+#   unknown    - the process exists but this session cannot signal it.
+#   unreadable - it may well be alive but its identity could not be read; also
+#                the value left for a local pid that never gets classified
+#                (empty, non-numeric, or the literal zero).
+# Only "readable" answers an identity question; the other three carry no
+# identity, and the two rules below own what each one means for ownership and
+# for recovery: fm_harness_pid_alive and fm_session_lock_pid_blocks_reclaim.
 fm_session_lock_pid_verdict() {
   local pid=$1 winpid rc=0 comm
   FM_SESSION_LOCK_PID_VERDICT=unreadable
@@ -674,6 +685,10 @@ fm_session_lock_pid_verdict() {
   return 0
 }
 
+# True if $1 is a live process that looks like a verified harness.
+# A tagged Windows pid is answered from the Windows process table, because
+# kill -0 cannot see across that boundary and would report a live harness as
+# dead - which would hand a running session's home to a second one.
 fm_harness_pid_alive() {
   fm_session_lock_pid_verdict "$1"
   [ "$FM_SESSION_LOCK_PID_VERDICT" = readable ] || return 1
@@ -713,6 +728,15 @@ fm_session_pid_identity() {  # <value>
 # rather than guessed at. A dead record, a reused pid whose readable identity is
 # not a verified harness, a malformed or all-zero record, and an owner this
 # session can read but cannot signal are all reclaimable.
+#
+# The all-zero form is refused here rather than in the shared
+# fm_session_pid_valid, because that predicate answers "is this value usable at
+# all" for readers that must keep accepting any numeric record, and because zero
+# is not a process identity: `kill -0 00` signals process group 0, so treating it
+# as an owner wedges the home read-only instead of reclaiming it. This test is
+# string-only on purpose - arithmetic or numeric normalization would let octal
+# interpretation, integer overflow, or an arbitrarily long digit string change a
+# verdict.
 fm_session_lock_pid_blocks_reclaim() {
   fm_session_pid_valid "$1" || return 1
   case "$1" in
