@@ -507,6 +507,63 @@ ROWS
   pass "bootstrap preserves legacy Lavish boards while recommending synchronous reply support"
 }
 
+test_lavish_server_version_notice() {
+  local label version health mode case_dir fakebin out expected n
+  expected='BOOTSTRAP_INFO: lavish-axi 0.1.84 is installed but the running Lavish server is 0.1.85; the next lavish-axi call from either version restarts the server and interrupts live board polls'
+  n=0
+  while IFS='^' read -r label version health mode; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/lavish-server-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    [ "$version" != absent ] || rm -f "$fakebin/lavish-axi"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_LAVISH_AXI_VERSION="$version" FM_FAKE_LAVISH_HEALTH="$health" \
+      "$ROOT/bin/fm-bootstrap.sh") || fail "$label: the notice must not fail bootstrap"
+    case "$mode" in
+      empty) [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      notice) [ "$out" = "$expected" ] || fail "$label: expected '$expected', got: $out" ;;
+      unavailable-only) assert_not_contains "$out" 'running Lavish server' "$label: no notice without an installed lavish-axi" ;;
+    esac
+  done <<'ROWS'
+running server differs from the installed copy^0.1.84^{"ok":true,"app":"lavish-axi","version":"0.1.85","state_id":"x"}^notice
+running server matches the installed copy^0.1.84^{"ok":true,"app":"lavish-axi","version":"0.1.84","state_id":"x"}^empty
+no server is running^0.1.84^^empty
+a non-Lavish listener on the port stays silent^0.1.84^{"ok":true,"app":"other","version":"0.1.85"}^empty
+absent lavish-axi stays silent^absent^{"ok":true,"app":"lavish-axi","version":"0.1.85"}^unavailable-only
+ROWS
+  pass "bootstrap reports a differing running Lavish server version and stays silent otherwise"
+}
+
+test_lavish_server_probe_target() {
+  local case_dir fakebin log out health
+  health='{"ok":true,"app":"lavish-axi","version":"0.1.85"}'
+  case_dir="$TMP_ROOT/lavish-probe-host"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' 100.64.0.5 > "$case_dir/home/config/lavish-axi-host"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  log="$case_dir/curl.log"
+  : > "$log"
+  out=$(env -u LAVISH_AXI_HOST -u LAVISH_AXI_PORT PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_LAVISH_AXI_VERSION=0.1.84 \
+    FM_FAKE_LAVISH_HEALTH="$health" FM_FAKE_LAVISH_HEALTH_LOG="$log" "$ROOT/bin/fm-bootstrap.sh") \
+    || fail "config-host probe: bootstrap failed"
+  assert_contains "$(cat "$log")" 'http://100.64.0.5:4387/health' "probe must use config/lavish-axi-host"
+  assert_contains "$out" 'running Lavish server is 0.1.85' "notice must name the configured server's version"
+
+  : > "$log"
+  out=$(env -u LAVISH_AXI_HOST -u LAVISH_AXI_PORT PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_LAVISH_AXI_VERSION=0.1.84 \
+    FM_FAKE_LAVISH_HEALTH="$health" FM_FAKE_LAVISH_HEALTH_LOG="$log" FM_BOOTSTRAP_NETWORK=skip \
+    "$ROOT/bin/fm-bootstrap.sh") || fail "skip probe: bootstrap failed"
+  [ ! -s "$log" ] || fail "no health probe may run under FM_BOOTSTRAP_NETWORK=skip, got: $(cat "$log")"
+  assert_not_contains "$out" 'running Lavish server' "no notice under skip"
+  pass "Lavish server probe honors config/lavish-axi-host and is skipped in the local phase"
+}
+
 test_tasks_axi_min_version() {
   local label version mode requirement case_dir fakebin base out missing n archive_body multi_id installed requires expect
   missing='MISSING: tasks-axi (install: npm install -g tasks-axi)'
@@ -1542,6 +1599,8 @@ test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
+test_lavish_server_version_notice
+test_lavish_server_probe_target
 test_tasks_axi_min_version
 test_quota_axi_min_version
 test_git_is_required_with_supported_install_instruction
