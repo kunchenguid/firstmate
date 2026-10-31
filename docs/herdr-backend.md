@@ -902,6 +902,8 @@ The Herdr adapter subscribes before reconciling current levels, buffers edges du
 
 The watcher maps the pane back to the task and skips these:
 
+- Leftover endpoints that no surviving task record owns, such as a retired task's window.
+  The edge is only logged, because there is no worker to recover.
 - Secondmate endpoints.
 - Declared `paused:` waits, because the worker's declared wait already accounts for its quiet.
   It is left to the watcher's own bounded pause cadence.

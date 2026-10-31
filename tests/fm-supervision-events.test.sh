@@ -79,6 +79,50 @@ fm_write_meta "$STATE_DIR/tk1.meta" "window=default:wG:pQ" "backend=herdr" "kind
 [ ! -e "$STATE_DIR/.herdr-escalated-default_wG_pQ" ] || fail "a failed durable enqueue must leave the blocked edge eligible for reconnect reconciliation"
 pass "handle_push_transition: enqueue failure cannot commit the Herdr dedupe marker"
 
+# --- handle_push_transition: a leftover endpoint of retired work never stalls -
+
+# Wake-queue rows are epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
+# (fm_wake_append_locked), so a stall is a row whose third column is `stale`.
+stale_rows() {  # <window>
+  awk -F '\t' -v w="$1" '$3 == "stale" && $4 == w' "$STATE_DIR/.wake-queue" 2>/dev/null
+}
+
+# Live-task path: the window a task record names still alarms as a stall.
+reset_state
+fm_write_meta "$STATE_DIR/live.meta" "window=default:wL:pL" "backend=herdr" "kind=ship"
+handle_push_transition herdr default "$(mkrec wL:pL blocked)"
+[ -n "$(stale_rows default:wL:pL)" ] || fail "a blocked edge on a live task's window must raise a stall: $(cat "$STATE_DIR/.wake-queue" 2>/dev/null)"
+[ "$(wc -l < "$WAKE_LOG" | tr -d '[:space:]')" = 1 ] || fail "a live task's stall must wake once, got: $(cat "$WAKE_LOG")"
+pass "handle_push_transition: a blocked edge on a live task's window still raises a stall"
+
+# Retired path: no task record owns the window, so the edge is only logged and
+# committed - no stall, no queued row, no wake - on the first edge and later ones.
+reset_state
+fm_write_meta "$STATE_DIR/live.meta" "window=default:wL:pL" "backend=herdr" "kind=ship"
+handle_push_transition herdr default "$(mkrec wR:pR blocked)"
+[ -z "$(stale_rows default:wR:pR)" ] || fail "an endpoint with no task record must not raise a stall: $(cat "$STATE_DIR/.wake-queue")"
+[ ! -s "$STATE_DIR/.wake-queue" ] || fail "a leftover endpoint must queue nothing: $(cat "$STATE_DIR/.wake-queue")"
+[ ! -s "$WAKE_LOG" ] || fail "a leftover endpoint must not wake the supervisor, got: $(cat "$WAKE_LOG")"
+[ -e "$STATE_DIR/.herdr-escalated-default_wR_pR" ] || fail "the leftover edge must commit its dedupe marker"
+grep -q 'leftover endpoint, no task record): default:wR:pR' "$STATE_DIR/.watch-triage.log" \
+  || fail "the leftover edge should be logged to the triage log: $(cat "$STATE_DIR/.watch-triage.log" 2>/dev/null)"
+rm -f "$STATE_DIR/.herdr-escalated-default_wR_pR"
+handle_push_transition herdr default "$(mkrec wR:pR blocked)"
+[ ! -s "$STATE_DIR/.wake-queue" ] || fail "a later leftover edge must queue nothing: $(cat "$STATE_DIR/.wake-queue")"
+[ ! -s "$WAKE_LOG" ] || fail "a later leftover edge must not wake, got: $(cat "$WAKE_LOG")"
+pass "handle_push_transition: an endpoint with no task record is only logged, never a stall or a wake"
+
+# A task torn down while the wait was open: its endpoint's edge arrives after
+# the record is gone, and the fallback task name alone must not count as one.
+reset_state
+fm_write_meta "$STATE_DIR/other.meta" "window=default:wO:pO" "backend=herdr" "kind=ship"
+handle_push_transition herdr default "$(fm_transition_record fm-other "" "" blocked claude)"
+[ -z "$(stale_rows default:fm-other)" ] || fail "a record for a different window must not make an endpoint look owned: $(cat "$STATE_DIR/.wake-queue")"
+[ ! -s "$WAKE_LOG" ] || fail "the unowned endpoint must not wake, got: $(cat "$WAKE_LOG")"
+grep -q 'leftover endpoint, no task record): default:fm-other' "$STATE_DIR/.watch-triage.log" \
+  || fail "the unowned endpoint must be logged as a leftover: $(cat "$STATE_DIR/.watch-triage.log" 2>/dev/null)"
+pass "handle_push_transition: only a task record whose endpoint matches counts as an owner"
+
 # --- handle_push_transition: absorb (no wake, no enqueue) for a declared pause -
 
 reset_state
