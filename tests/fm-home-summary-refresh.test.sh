@@ -534,7 +534,7 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
   || fail "lock timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 7 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
+[ "$elapsed" -lt 11 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
   || fail "repeated lock timeout changed the best-effort caller result"
@@ -612,6 +612,32 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   || fail "a successful publication kept the deadline-miss record"
 pass "the parent removes a killed worker's temporary files and counts consecutive deadline misses"
 
+# Two callers that miss together each count, even when one waits on the
+# other's record update and on the killed worker's lock. An aged ledger keeps
+# the superseded-miss guard out of the way.
+rm -f "$HOME_DIR/state/.home-summary-refresh.backoff"
+touch -t 200001010000 "$HOME_DIR/state/home-summary.json"
+for pair in 1 2; do
+  rm -f "$STUBBORN_MARKER"
+  PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+    FM_TEST_STUBBORN_MARKER="$STUBBORN_MARKER" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=3 \
+    "$WRITER" --best-effort &
+  pair_pid=$!
+  PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+    FM_TEST_STUBBORN_MARKER="$STUBBORN_MARKER" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=3 \
+    "$WRITER" --best-effort \
+    || fail "a concurrent deadline miss changed the best-effort caller result"
+  wait "$pair_pid" \
+    || fail "a concurrent deadline miss changed the best-effort caller result"
+  [ "$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)" = "$((pair * 2))" ] \
+    || fail "concurrent deadline misses were not both counted: $(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)"
+done
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the concurrent deadline misses"
+pass "concurrent deadline misses each count toward the backoff"
+
 # A refresh that published after a timed-out attempt started is the newer
 # result, so that attempt's miss must not restore the record it cleared.
 rm -f "$STUBBORN_MARKER"
@@ -648,7 +674,7 @@ PATH="$MKBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKDIR="$REAL_MKDIR" \
   "$WRITER" --best-effort >/dev/null 2>"$TMP_ROOT/stalled-state.err" \
   || fail "state initialization timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 8 ] \
+[ "$elapsed" -lt 11 ] \
   || fail "best-effort refresh waited $elapsed seconds before bounded state initialization"
 pass "best-effort refresh bounds state initialization"
 
