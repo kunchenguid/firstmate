@@ -188,6 +188,12 @@ scan_open_blockers() {  # -> tab-separated blocker rows
     id=$(basename "$meta")
     id=${id%.meta}
     status="$STATE/$id.status"
+    # fm-spawn publishes the record before the worker's first append, so an
+    # absent status on a record naming an endpoint is "no status yet". A
+    # windowless leftover, a symlink, or a non-regular file still gates.
+    if [ ! -e "$status" ] && [ ! -L "$status" ] && grep -q '^window=.' "$meta" 2>/dev/null; then
+      continue
+    fi
     if ! status_path_readable "$status"; then
       STATUS_SCAN_ERROR=$status
       return 1

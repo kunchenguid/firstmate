@@ -863,6 +863,40 @@ test_statusless_leftover_record_keeps_catchup_gated_until_cleanup() {
   pass "a status-file-less leftover record gates return; a readable status on that same record is the proven path that passes"
 }
 
+test_just_spawned_record_without_status_lets_catchup_clear() {
+  local dir out
+  dir="$TMP_ROOT/just-spawned"
+  install_runner "$dir"
+  # fm-spawn publishes the record before the worker's first status append, so
+  # a return inside that interval sees a live record with no status file yet.
+  printf 'window=synthetic:fm-fresh\nkind=ship\nspawn_gen=1\n' > "$dir/home/state/fresh.meta"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a just-spawned record without a status file gated return: $out"
+  assert_contains "$out" 'catch-up clear' "a just-spawned record without a status file did not let catch-up clear"
+  assert_not_contains "$out" 'status file unreadable:' "a just-spawned record's absent status was reported unreadable"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "a just-spawned record without a status file left the return gate behind"
+  pass "a live record whose worker has not appended a status line yet lets return catch-up clear"
+}
+
+test_dangling_status_symlink_keeps_catchup_gated() {
+  local dir out rc
+  dir="$TMP_ROOT/dangling-status"
+  install_runner "$dir"
+  printf 'window=synthetic:fm-dangling\nkind=ship\nspawn_gen=1\n' > "$dir/home/state/dangling.meta"
+  ln -s "$dir/missing-status-source" "$dir/home/state/dangling.status"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a dangling status symlink should keep catch-up gated (rc=$rc): $out"
+  assert_contains "$out" "status file unreadable: $dir/home/state/dangling.status; catch-up stays gated" \
+    "the gate did not name the dangling status symlink"
+  pass "a dangling status symlink on a live record still gates return"
+}
+
 test_statusful_leftover_record_lets_catchup_clear() {
   local dir out
   dir="$TMP_ROOT/statusful-leftover"
@@ -1375,6 +1409,8 @@ test_failed_held_listing_keeps_catchup_gated
 test_unreadable_status_file_keeps_catchup_gated
 test_statusless_leftover_record_keeps_catchup_gated_until_cleanup
 test_statusful_leftover_record_lets_catchup_clear
+test_just_spawned_record_without_status_lets_catchup_clear
+test_dangling_status_symlink_keeps_catchup_gated
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
