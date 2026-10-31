@@ -2059,6 +2059,117 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
 }
 
+test_recovery_replays_a_verified_merge_as_a_merge() {
+  local case_dir id out url=https://github.com/example/repo/pull/12
+  id=atomic-heal-verified-b9
+  case_dir=$(make_home heal-pending-verified-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  # The shape a cleanup records when the forge reported the merge: the link is
+  # the recorded close, and the record carries the moment that merge was read.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-verified\npr_merge_verified_at=2026-07-14T00:00:00Z\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a recorded verified merge at $(row_state "$case_dir" "$id"): $out"
+  assert_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "a replayed close did not record the merge the cleanup had verified"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" \
+    | grep -F "links: \"pr:$url\"" >/dev/null \
+    || fail "the replayed verified merge lost its pull-request link"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed verified close left its record behind"
+  pass "session start replays a verified merge as a merge"
+}
+
+test_recovery_replays_a_failed_close_without_duplicating_its_note() {
+  local case_dir id out url=https://github.com/example/repo/pull/11 note body
+  id=atomic-heal-failed-close-b14
+  case_dir=$(make_home heal-failed-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi update "$id" --pr "$url" --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not attach the link the failed close names"
+  note="Delivered, merge not confirmed because it was still open when this finished: $url. The link is a historical record whose merge was not verified in this run"
+  # The shape a failed close leaves: the note is already the row's body, the title
+  # has lost the link, and the pending-close record still owes the close.
+  tasks-axi update "$id" --title "fixture task" --file "$(backlog_of "$case_dir")" >/dev/null
+  tasks-axi update "$id" --body "$note" --file "$(backlog_of "$case_dir")" >/dev/null
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-failed\narg=--note\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$(printf '%s' "$note" | sed 's/ /%20/g')" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a failed close at $(row_state "$case_dir" "$id"): $out"
+  assert_no_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "the replayed failed close claimed a merge"
+  body=$(tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | sed -n 's/^  body: //p' | head -1)
+  [ "$(printf '%s' "$body" | grep -o "$url" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the replayed failed close duplicated or dropped its note: $body"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed failed close left its record behind"
+  pass "session start finishes a failed close without duplicating its note"
+}
+
+test_recovery_replays_a_close_whose_merge_was_never_confirmed() {
+  local case_dir id out url=https://github.com/example/repo/pull/7
+  id=atomic-heal-unconfirmed-b9
+  case_dir=$(make_home heal-pending-unconfirmed-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  # The shape a cleanup records when the forge did not report a merge: the
+  # completion is a plain done, and the pull-request link travels in the note,
+  # percent-encoded so the note's own spaces survive the line format.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-unconfirmed\narg=--note\narg=Delivered,%%20merge%%20not%%20confirmed%%20because%%20it%%20was%%20still%%20open%%20when%%20this%%20finished:%%20%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a recorded unconfirmed close at $(row_state "$case_dir" "$id"): $out"
+  assert_no_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "replaying an unconfirmed close invented a merge"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "body: \"Delivered, merge not confirmed because it was still open when this finished: $url\"" >/dev/null \
+    || fail "the replayed close did not restore the note the cleanup recorded"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed unconfirmed close left its record behind"
+  pass "session start replays an unconfirmed close as a done note, never as a merge"
+}
+
+test_recovery_replays_a_long_unconfirmed_note() {
+  local case_dir id out url note encoded
+  id=atomic-heal-long-unconfirmed-b9
+  case_dir=$(make_home heal-pending-long-unconfirmed-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  # The pending-close note bound must cover a link at the pending-close --pr
+  # validator's 2048-byte limit, or recording an otherwise accepted delivery
+  # would refuse and turn an interrupted cleanup into a stuck task.
+  url="https://$(printf 'a%.0s' {1..200})/$(printf 'b%.0s' {1..1839})"
+  note="Delivered, merge not confirmed because it was still open when this finished: $url. The link is a historical record whose merge was not verified in this run"
+  encoded=${note// /%20}
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-long-unconfirmed\narg=--note\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$encoded" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a long recorded unconfirmed close at $(row_state "$case_dir" "$id"): $out"
+  assert_no_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "replaying a long unconfirmed note invented a merge"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "body: \"$note\"" >/dev/null \
+    || fail "the replayed close did not restore the long note the cleanup recorded"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed long unconfirmed close left its record behind"
+  pass "session start replays a long unconfirmed note without inventing a merge"
+}
+
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note() {
   local case_dir id out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
   id=atomic-heal-gerrit-b9
@@ -2106,16 +2217,50 @@ test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   start_item "$case_dir" "$id"
   tasks-axi "done" "$id" --file "$(backlog_of "$case_dir")" >/dev/null
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
-  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-done\narg=--pr\narg=https://github.com/example/repo/pull/13\n' \
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-done\npr_merge_verified_at=2026-07-14T00:00:00Z\narg=--pr\narg=https://github.com/example/repo/pull/13\n' \
     "$id" "$(home_of "$case_dir")/data" > "$marker"
 
   out=$(run_bootstrap "$case_dir")
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "replaying a completion link changed the closed row: $out"
-  assert_grep 'https://github.com/example/repo/pull/13' "$(backlog_of "$case_dir")" \
-    "recovery discarded the recorded link because the item was already Done"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" \
+    | grep -F 'links: "pr:https://github.com/example/repo/pull/13"' >/dev/null \
+    || fail "recovery discarded a verified completion link because the item was already Done: $out"
+  assert_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "the backfilled verified link did not record the merge"
   assert_absent "$marker" "recovery retained an applied completion-link marker"
-  pass "recovery backfills recorded links onto already Done items"
+  pass "recovery backfills a verified recorded link onto an already Done item"
+}
+
+test_recovery_downgrades_an_unverified_recorded_link_on_a_live_row() {
+  local case_dir id marker out url=https://github.com/example/repo/pull/14
+  id=atomic-heal-live-unverified-b10
+  case_dir=$(make_home heal-live-unverified)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-heal-live"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  # A record staged before the merge check existed: it carries the link and no
+  # verified-merge fact, so the replay may not close the row as a merge.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-live\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$url" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left an unverified recorded close at $(row_state "$case_dir" "$id"): $out"
+  assert_no_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "an unverified recorded link closed the row as a merge"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" \
+    | grep -F 'links: none' >/dev/null \
+    || fail "the unverified recorded link stayed a structured link on the closed row"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F "Historical record: $url" >/dev/null \
+    || fail "the downgraded close did not keep the recorded link in a body note"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | grep -F 'the merge was not verified in this run' >/dev/null \
+    || fail "the downgraded close did not say why the merge is unconfirmed"
+  assert_absent "$marker" "a replayed downgraded close left its record behind"
+  pass "recovery downgrades an unverified recorded link on a live row"
 }
 
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read() {
@@ -2496,6 +2641,32 @@ test_recovery_drops_a_close_for_a_newer_meta_incarnation() {
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "a stale recorded close was left to fire on a later restart"
   pass "session start drops a close recorded for an older meta incarnation"
+}
+
+test_recovery_a_stale_record_never_touches_the_row() {
+  local case_dir id out url=https://github.com/example/repo/pull/21
+  id=atomic-heal-stale-untouched-b13
+  case_dir=$(make_home heal-stale-untouched)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi update "$id" --pr "$url" --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not attach the pull-request link the stale record names"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-two"
+  # A record for an older incarnation that cannot prove its own merge: dropping it
+  # must not rewrite the row it was recorded against.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-one\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$url" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "in_flight" ] \
+    || fail "session start applied a record for an older incarnation: $out"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" \
+    | grep -F "links: \"pr:$url\"" >/dev/null \
+    || fail "dropping a stale record stripped the row's pull-request link"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a stale recorded close was left to fire on a later restart"
+  pass "a stale recorded close never touches the row it names"
 }
 
 test_recovery_rejects_a_legacy_close_without_an_incarnation() {
@@ -3124,8 +3295,13 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_replays_a_verified_merge_as_a_merge
+test_recovery_replays_a_failed_close_without_duplicating_its_note
+test_recovery_replays_a_close_whose_merge_was_never_confirmed
+test_recovery_replays_a_long_unconfirmed_note
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
+test_recovery_downgrades_an_unverified_recorded_link_on_a_live_row
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation
@@ -3142,6 +3318,7 @@ test_failed_close_replay_is_not_started_as_live_work
 test_recovery_rejects_invalid_close_arguments
 test_recovery_rejects_a_symlinked_close_marker
 test_recovery_drops_a_close_for_a_newer_meta_incarnation
+test_recovery_a_stale_record_never_touches_the_row
 test_recovery_rejects_a_legacy_close_without_an_incarnation
 test_bootstrap_rechecks_worker_record_boundary_after_locking
 test_lifecycle_refuses_ancestor_symlinks_outside_home_roots
