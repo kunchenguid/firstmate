@@ -1474,7 +1474,8 @@ For example, this file turns off two supervisor skills, lists `firstmate-coding-
 {"skillListingMaxDescChars":250,"skillOverrides":{"afk":"off","harness-adapters":"off","firstmate-coding-guidelines":"name-only"}}
 ```
 
-Firstmate ships no default crew file, and secondmate homes do not inherit it.
+Firstmate ships no default crew file.
+Secondmate homes inherit the file, so the crewmates and scouts they spawn carry the same settings, while the secondmate launch itself still does not.
 
 ## Codex permission mode (config/codex-permission-mode)
 

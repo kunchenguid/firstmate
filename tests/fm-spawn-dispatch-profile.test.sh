@@ -2304,7 +2304,7 @@ test_claude_crew_settings_merge_into_scout_launch() {
   pass "config/claude-crew-settings.json reaches a claude scout launch, with or without session settings"
 }
 
-test_claude_crew_settings_stay_out_of_secondmate_launch() {
+test_claude_crew_settings_reach_secondmate_home_not_its_launch() {
   local rec id sm out status launch settings
   id=profile-secondmate-crew-settings-z33
   rec=$(make_spawn_case profile-secondmate-crew-settings claude "$id")
@@ -2324,7 +2324,9 @@ test_claude_crew_settings_stay_out_of_secondmate_launch() {
   printf '%s' "$settings" | jq -e '(has("skillListingMaxDescChars") | not) and (has("crewnote") | not)
     and (.skillOverrides | has("afk") | not)' >/dev/null \
     || fail "config/claude-crew-settings.json leaked into a secondmate launch: $settings"
-  pass "config/claude-crew-settings.json stays out of a claude secondmate launch"
+  cmp -s "$HOME_DIR/config/claude-crew-settings.json" "$sm/config/claude-crew-settings.json" \
+    || fail "secondmate home did not inherit config/claude-crew-settings.json"
+  pass "config/claude-crew-settings.json reaches a secondmate home but stays out of its claude launch"
 }
 
 test_claude_crew_settings_invalid_refuses_before_endpoint_or_metadata() {
@@ -3074,7 +3076,7 @@ test_claude_session_settings_reach_secondmate_launch
 test_claude_session_settings_invalid_refuses_before_endpoint_or_metadata
 test_claude_crew_settings_merge_into_crewmate_launch
 test_claude_crew_settings_merge_into_scout_launch
-test_claude_crew_settings_stay_out_of_secondmate_launch
+test_claude_crew_settings_reach_secondmate_home_not_its_launch
 test_claude_crew_settings_invalid_refuses_before_endpoint_or_metadata
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
