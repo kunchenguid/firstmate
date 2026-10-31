@@ -11,7 +11,8 @@
 # Producers:
 #   bin/fm-brief.sh              appended (in every worker's status command,
 #                                right after its unchanged plain append)
-#   bin/fm-spawn.sh              dispatched (fresh spawns only, never relaunch)
+#   bin/fm-spawn.sh              dispatched (fresh spawns only), relaunched
+#                                (a --relaunch replacement agent)
 #   bin/fm-watch.sh              capture, once per poll cycle
 #   bin/fm-pr-check.sh           pr_ready (a PR registered for review, not the
 #                                merge-time re-record from bin/fm-pr-merge.sh)
@@ -21,6 +22,7 @@
 #
 # Usage:
 #   fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model>
+#   fm-fleet-ledger.sh relaunched <task> <harness> <model>
 #   fm-fleet-ledger.sh pr_ready <task> <url>
 #   fm-fleet-ledger.sh merged <task> pr <url>
 #   fm-fleet-ledger.sh merged <task> local
@@ -65,7 +67,7 @@ LOCK="$STATE/.fleet-ledger.lock"
 TEXT_MAX_CHARS=2000
 
 usage() {
-  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture | appended <config> <state>/<task>.status" >&2
+  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | relaunched <task> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture | appended <config> <state>/<task>.status" >&2
   exit 2
 }
 
@@ -76,6 +78,7 @@ task_ok() {
 cmd=${1:-}
 case "$cmd" in
   dispatched) { [ "$#" -eq 6 ] && task_ok "$2"; } || usage ;;
+  relaunched) { [ "$#" -eq 4 ] && task_ok "$2"; } || usage ;;
   pr_ready) { [ "$#" -eq 3 ] && task_ok "$2" && [ -n "$3" ]; } || usage ;;
   merged)
     task_ok "${2:-}" || usage
@@ -211,6 +214,10 @@ case "$cmd" in
     append task.dispatched "$2" \
       '{kind: ($kind | n), project: ($project | n), harness: ($harness | n), model: ($model | n)}' \
       --arg kind "$3" --arg project "$4" --arg harness "$5" --arg model "$6" || rc=1
+    ;;
+  relaunched)
+    append task.relaunched "$2" '{harness: ($harness | n), model: ($model | n)}' \
+      --arg harness "$3" --arg model "$4" || rc=1
     ;;
   pr_ready)
     capture_task "$2" || rc=1

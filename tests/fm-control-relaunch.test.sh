@@ -392,6 +392,20 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_relaunch_records_a_ledger_relaunch_not_a_dispatch() {
+  local dir out rc rows
+  dir=$(new_case ledger rl9)
+  add_ship_task "$dir" rl9 claude
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/config/fleet-ledger"
+  out=$(run_control "$dir" rl9 relaunch --note "stopped mid-refactor"); rc=$?
+  expect_code 0 "$rc" "a relaunch with the ledger on should succeed"$'\n'"$out"
+  rows=$(jq -c 'select(.event | startswith("task.dispatched") or startswith("task.relaunched")) | [.event, .task, .harness]' \
+    "$dir/home/state/fleet-ledger.jsonl")
+  assert_equals '["task.relaunched","rl9","claude"]' "$rows" "ledger dispatch and relaunch records"
+  pass "fm-control relaunch: with the fleet ledger on, a relaunch records task.relaunched and no new dispatch"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -3145,6 +3159,7 @@ test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_records_a_ledger_relaunch_not_a_dispatch
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
