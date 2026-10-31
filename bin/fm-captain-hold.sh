@@ -1222,7 +1222,7 @@ report_retained_artifact_failure() {  # <task-id> <marker-path>
 }
 
 apply_pending_retained_artifact() {  # <task-id>
-  local id=$1 marker label
+  local id=$1 marker note_form
   local -a args=()
   RETAINED_CLOSE_ARGS=()
   marker=$(fm_backlog_close_marker_path "$STATE" "$id") || return 1
@@ -1233,8 +1233,8 @@ apply_pending_retained_artifact() {  # <task-id>
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   case "${args[0]-}" in
     --pr|--report)
-      if [ "${args[0]}" = --pr ] && label=$(fm_backlog_pr_note_label "${args[1]-}"); then
-        RETAINED_CLOSE_ARGS=(--note "$label ${args[1]}")
+      if [ "${args[0]}" = --pr ] && note_form=$(fm_backlog_pr_note_form "${args[1]-}") && [ -n "$note_form" ]; then
+        RETAINED_CLOSE_ARGS=(--note "$note_form")
         return 0
       fi
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0

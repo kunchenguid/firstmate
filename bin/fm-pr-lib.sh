@@ -193,6 +193,29 @@ fm_pr_gerrit_path_valid() {
   done
 }
 
+# A Forgejo/Gitea authority is the same lowercase DNS name as the other
+# self-hosted forges plus an optional port, because a private LAN instance
+# commonly serves on a non-default port. The port is canonical only without a
+# leading zero, so one authority has exactly one spelling. The port check is a
+# case match rather than [[ =~ ]], like every validator this file's parser
+# calls, because a regex match here would clobber BASH_REMATCH before the
+# parser has read the remaining capture groups.
+fm_pr_forgejo_authority_valid() {
+  local authority=${1-} host port
+  local LC_ALL=C
+  host=$authority
+  case "$authority" in
+    *:*)
+      host=${authority%%:*}
+      port=${authority#*:}
+      case "$port" in
+        ''|*[!0-9]*|0*|??????*) return 1 ;;
+      esac
+      ;;
+  esac
+  fm_pr_forge_host_valid "$host"
+}
+
 # Unlike GitLab, a Forgejo/Gitea project has no subgroup nesting: it is always
 # exactly owner/repository, so each segment is validated the same way GitHub's
 # owner and repo are, minus GitHub's specific hyphen-run and length rules.
@@ -246,6 +269,9 @@ fm_pr_github_host_export() {  # <host>
 # provider-tagged identity. Validation is strict and per provider: the GitHub
 # username and repository rules are unchanged, and GitLab, Gerrit, and Forgejo
 # each get their own namespace rules rather than a loosened GitHub rule.
+# GitHub, GitLab, and Gerrit URLs are https-only; a Forgejo/Gitea URL also
+# accepts plain http and an optional port, because a private LAN instance
+# often has no TLS, and its FM_PR_HOST then carries the whole authority.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github and forgejo
 # because bin/fm-pr-merge.sh addresses both by owner/repository. A gitlab or
@@ -317,23 +343,24 @@ fm_pr_url_parse() {
   fi
   # Forgejo/Gitea serve pulls at owner/repo/pulls/<n>: plural "pulls", no "/-/"
   # route separator and no "/+/" change separator, so this shape never collides
-  # with the GitLab or Gerrit patterns above.
-  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
+  # with the GitLab or Gerrit patterns above. The authority may carry a port,
+  # and http is accepted alongside https for a plain-LAN instance without TLS.
+  pattern='^https?://([a-z0-9.-]{1,253}(:[0-9]{1,5})?)/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
-  fm_pr_forge_host_valid "$host" || return 1
-  fm_pr_forgejo_segment_valid "${BASH_REMATCH[2]}" || return 1
+  fm_pr_forgejo_authority_valid "$host" || return 1
   fm_pr_forgejo_segment_valid "${BASH_REMATCH[3]}" || return 1
+  fm_pr_forgejo_segment_valid "${BASH_REMATCH[4]}" || return 1
   FM_PR_PROVIDER=forgejo
   FM_PR_URL=$raw
   FM_PR_HOST=$host
-  FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+  FM_PR_PATH="${BASH_REMATCH[3]}/${BASH_REMATCH[4]}"
   # Consumed by bin/fm-pr-merge.sh, which addresses Forgejo by owner/repository.
   # shellcheck disable=SC2034
-  FM_PR_OWNER=${BASH_REMATCH[2]}
+  FM_PR_OWNER=${BASH_REMATCH[3]}
   # shellcheck disable=SC2034
-  FM_PR_REPO=${BASH_REMATCH[3]}
-  FM_PR_NUMBER=${BASH_REMATCH[4]}
+  FM_PR_REPO=${BASH_REMATCH[4]}
+  FM_PR_NUMBER=${BASH_REMATCH[5]}
 }
 
 fm_pr_head_valid() {
@@ -1145,9 +1172,10 @@ FIELDS
 # than split on quotes per line, because tea's JSON is not guaranteed to put
 # each field on its own line: a login printed as one compact object would hand
 # a line-oriented split the name where it expects the url, and arming would
-# then refuse every host. A login matches when its url's host - scheme,
-# userinfo, port, and path stripped - is exactly <host>. bin/fm-pr-poll.sh keeps
-# its own copy of this filter because the watcher body sources nothing.
+# then refuse every host. A login matches when its url's authority - scheme,
+# userinfo, and path stripped, with any port preserved - is exactly <host>.
+# bin/fm-pr-poll.sh keeps its own copy of this filter because the watcher body
+# sources nothing.
 # shellcheck disable=SC2016 # $h is a jq variable bound by --arg, not a shell one.
 FM_PR_FORGEJO_LOGIN_JQ='
   if type == "array" then
@@ -1157,8 +1185,7 @@ FM_PR_FORGEJO_LOGIN_JQ='
       | select((.url
                 | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
                 | sub("[/?#].*$"; "")
-                | sub("^.*@"; "")
-                | sub(":[0-9]+$"; "")) == $h)
+                | sub("^.*@"; "")) == $h)
       | .name ]
     | if length == 1 then .[0] else error("not exactly one matching login") end
   else
