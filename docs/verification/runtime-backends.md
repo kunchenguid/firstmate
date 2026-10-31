@@ -2681,6 +2681,22 @@ The fake models the T3 protocol facts that hide defects when simplified: cursor 
 `tests/fm-backend-t3code.test.sh` also covers the refusal to replace a T3 secondmate whose thread cannot be proven closed, and `tests/fm-secondmate-liveness.test.sh` pins the unchanged best-effort close on tmux.
 `tests/fm-daemon.test.sh` covers discovery precedence and native busy state.
 
+On 2026-10-27, the operator-owned external away entry passed the portable T3 suite on macOS arm64 with Bash 3.2.57 and Node v26.12.1.
+This exercises the fake T3 protocol, with the primary active during preparation and idle during external delivery, rather than launching a live model session.
+Refresh it with:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-backend-t3code.test.sh
+```
+
+The external-entry cases printed:
+
+```text
+ok - external away: an idle Codex primary receives the digest through its recorded thread, without a model-owned job or operator-pane discovery
+ok - external away: missing preparation, idle or ambiguous discovery, unrelated records, unsupported backends and the supervision host still fail closed
+ok - external away: refresh preserves the live daemon target, starts no duplicate, and pending return still blocks restart
+```
+
 The tracked Codex configuration guard is independent of the transport and passed on 2026-09-15 with `codex-cli 0.154.0` and Python 3.14.7.
 It proves the project model survives, `FM_TASK_ID` reaches `command/exec`, ordinary staging and commits retain the original configuration blob, and teardown restores the original CRLF bytes and Git flag.
 It capability-skips when Codex is absent and fails on absence when explicitly requested:
