@@ -8,7 +8,7 @@ These command-line and terminal facts apply to pane-backed sessions; for T3 Code
 
 | Fact | Value |
 |---|---|
-| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; a secondmate gets no `Stop` busy hook, because its home's tracked Stop guard is its only Stop writer, unless that guard predates `.fm-busy-stop` and the launch keeps the `Stop` idle hook (`../../../docs/turnend-guard.md` owns that); manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
+| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close, and `PermissionRequest` raises a wake without changing busy state (see Permission prompts below); a secondmate gets no `Stop` busy hook, because its home's tracked Stop guard is its only Stop writer, unless that guard predates `.fm-busy-stop` and the launch keeps the `Stop` idle hook (`../../../docs/turnend-guard.md` owns that); manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
 | Exit | `/exit`. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
@@ -71,6 +71,12 @@ A Claude task worker's launch brief and Firstmate steering-inbox messages arrive
 A `--secondmate` launch omits the statement because a secondmate operates under its own supervisor contract instead of a task worker's.
 On the t3code backend, follow the [per-directory worker-channel contract](../../../../../docs/t3code-backend.md#per-directory-harness-environment).
 
+## Permission prompts
+
+Worker `PermissionRequest` hooks report security decisions through the existing status and watcher path; `bin/fm-busy-event.sh` owns request deduplication.
+Never answer a permission prompt with keys; route the decision to firstmate.
+[`../../../../../docs/verification/runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#claude-permission-prompt-wake) records the live event and its refresh command.
+
 ## Skill listing budget
 
 Claude Code lists every skill name but keeps descriptions only within a budget of 1% of the model's context window, and on overflow it drops descriptions from the least-invoked skills first ([skills](https://code.claude.com/docs/en/skills#skill-descriptions-are-cut-short), read 2026-10-19).
@@ -86,7 +92,7 @@ Put either in user settings or the untracked `.claude/settings.local.json`, neve
 ## Primary integration
 
 [`../../../../../docs/verification/supervision.md`](../../../../../docs/verification/supervision.md#turn-end-guard) records the current primary and Stop auto-arm live evidence.
-This differs from the worker hook, which only touches a task marker through `.claude/settings.local.json`.
+Worker hooks update the parent's task state through `.claude/settings.local.json`.
 A Claude secondmate's busy hooks are not that file: `bin/fm-spawn.sh` passes the parent home's `state/<id>.claude-settings.json` through `--settings` and does not edit the mate home's `settings.local.json`.
 
 Primary `.claude/settings.json` registers `../../../bin/fm-turnend-guard.sh --claude` and `../../../bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
