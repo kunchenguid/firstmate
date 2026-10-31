@@ -1340,18 +1340,18 @@ test_paused_until_wrong_year_is_bounded_by_the_cadence() {
 
 test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   local dir state
-  dir=$(paused_until_fixture until-passed "$(( $(date +%s) - 30 ))" 60); state="$dir/state"
-  until_watch "$dir" 999
+  dir=$(paused_until_fixture until-passed "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"
+  until_watch "$dir" 240
   wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a declared wait whose until time passed was not rechecked ahead of the cadence"; }
   grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null || fail "the due recheck did not print a stale wake: $(cat "$dir/watch.out")"
-  grep -F 'declared clearing time has passed' "$dir/watch.out" >/dev/null \
-    || fail "the due recheck did not say the declared time passed: $(cat "$dir/watch.out")"
+  grep -F 'wait overdue - decide or release' "$dir/watch.out" >/dev/null \
+    || fail "the overdue recheck did not request a decision: $(cat "$dir/watch.out")"
   grep -F 'possible wedge' "$dir/watch.out" >/dev/null && fail "a due declared wait was mislabeled a possible wedge"
   # The due recheck fires once per declaration: a second watcher on the same
   # unchanged declaration absorbs it again.
   ack_stopped_cycle "$state" || fail "could not acknowledge the due recheck"
   : > "$dir/watch.out"
-  until_watch "$dir" 999
+  until_watch "$dir" 240
   if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
     reap "$UNTIL_PID"; fail "the due recheck repeated on every poll instead of once per declaration: $(cat "$dir/watch.out")"
   fi
