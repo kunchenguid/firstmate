@@ -1,4 +1,15 @@
 # shellcheck shell=bash
+# fm-ready-queue-lib.sh - the single owner of firstmate's backlog readiness
+# verdict, shared by the watcher's heartbeat triage and the away-mode daemon's
+# classification so the two cannot disagree about whether queued work is ready.
+#
+#   fm_ready_queue_needs_review
+#       Returns 0 when the queue holds ready units OR readiness could not be
+#       determined, and 1 only for a readable backlog that is empty: a markdown
+#       home with no backlog file, or a ready count of zero. Every probe
+#       failure returns 0 deliberately: unreadable readiness must escalate as a
+#       review, never be absorbed as an empty queue. Runs in a subshell so its
+#       sourced globals never reach the caller.
 fm_ready_queue_needs_review() (
   local script_dir data root backend ready count
   script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
