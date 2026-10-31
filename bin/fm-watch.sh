@@ -3453,6 +3453,9 @@ esac
 # below is complete - never inside the claim itself, even past its deadline -
 # so this is also the startup safe point bin/fm-watch-arm.sh waits for.
 WATCHER_PID=${BASHPID:-$$}
+# Scope every staged owner to this watcher, including paths not yet returned
+# by mktemp when a stop arrives. Do not export this to detached workers.
+FM_LOCK_OWNER_SCOPE="$WATCHER_PID.$RANDOM.$RANDOM"
 
 RECONCILE_REQUEST_PID=
 reconcile_requests_pending() {
@@ -3495,7 +3498,7 @@ pr_poll_publish_release() {
 }
 
 watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock
+  local cleanup_status=0 owns_lock=0 transition=release-lock staged lock
   pr_poll_publish_release || cleanup_status=1
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -3521,6 +3524,11 @@ watcher_cleanup() {
   fm_lock_release "${WATCHER_DOWNTIME_MARKER}.lock" || true
   fm_lock_release "${WATCHER_DOWNTIME_MARKER}.lock.steal" || true
   fm_lock_release "$FM_WAKE_QUEUE_LOCK.steal" || true
+  for staged in "$STATE"/.*.owner."$FM_LOCK_OWNER_SCOPE".*; do
+    [ -d "$staged" ] && [ ! -L "$staged" ] || continue
+    lock=${staged%.owner."$FM_LOCK_OWNER_SCOPE".*}
+    fm_lock_discard_staged_owners "$lock" "$FM_LOCK_OWNER_SCOPE" "$WATCHER_PID"
+  done
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
       downtime "$CLEANUP_LOCK_BOUND"; then

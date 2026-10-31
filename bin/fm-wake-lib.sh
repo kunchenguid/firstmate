@@ -574,7 +574,9 @@ fm_lock_abs_path() {
 fm_lock_owner_dir() {
   local lockdir=$1 lock_abs
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
-  mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
+  # An opted-in caller can recover its own staging directories even when a
+  # signal interrupts this command substitution before it returns the path.
+  mktemp -d "${lock_abs}.owner.${FM_LOCK_OWNER_SCOPE:+$FM_LOCK_OWNER_SCOPE.}XXXXXX" 2>/dev/null
 }
 
 # The acquiring process's own fm_pid_start_time, probed once per pid: a
@@ -658,6 +660,19 @@ fm_lock_discard_owner() {
   [ -n "$ownerdir" ] || return 0
   fm_lock_clean_known_files "$ownerdir"
   rmdir "$ownerdir" 2>/dev/null || true
+}
+
+# Discard only this caller's unpublished staging directories. A foreign
+# acquirer uses a different scope; a published owner remains lock evidence.
+fm_lock_discard_staged_owners() {
+  local lockdir=$1 scope=$2 mypid=$3 owner pid
+  for owner in "$lockdir.owner.$scope."*; do
+    [ -d "$owner" ] && [ ! -L "$owner" ] || continue
+    fm_lock_points_to_owner "$lockdir" "$owner" && continue
+    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    [ -z "$pid" ] || [ "$pid" = "$mypid" ] || continue
+    fm_lock_discard_owner "$owner"
+  done
 }
 
 fm_lock_remove_stray_owner_link() {

@@ -1906,13 +1906,48 @@ test_arm_relays_a_startup_lock_held_by_live_pid() {
 # so the child exits through its own cleanup and leaves no dead lock evidence
 # at all: no singleton, no steal mutex, no micro-lock.
 assert_no_startup_lock_evidence() {  # <state> <label>
-  local state=$1 label=$2 lock
+  local state=$1 label=$2 lock owner
   for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal \
     .watcher-down.lock .watcher-down.lock.steal; do
     if [ -e "$state/$lock" ] || [ -L "$state/$lock" ]; then
       fail "$label left $lock behind (pid $(cat "$state/$lock/pid" 2>/dev/null || echo none))"
     fi
+    for owner in "$state/$lock".owner.*; do
+      [ ! -e "$owner" ] && [ ! -L "$owner" ] \
+        || fail "$label left staging owner $owner behind"
+    done
   done
+}
+
+# Clean interruption requires removing unpublished self-owned staging, not a
+# foreign acquirer's directory or the owner behind a still-published lock.
+# This persisted-lock contract rejects both leaked staging and overbroad glob
+# deletion; the expected state follows the clean-interruption ownership rule.
+test_staged_owner_cleanup_preserves_other_acquirers() {
+  local dir state
+  dir=$(make_case staged-owner-cleanup)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1" || exit 1
+    fm_current_pid me || exit 1
+    lock="$2/.wake-queue.lock"
+    scope="$me.fixture"
+    for suffix in empty ours foreign published; do
+      mkdir "$lock.owner.$scope.$suffix" || exit 1
+    done
+    mkdir "$lock.owner.other.empty" || exit 1
+    printf "%s\n" "$me" > "$lock.owner.$scope.ours/pid"
+    printf "%s\n" "$PPID" > "$lock.owner.$scope.foreign/pid"
+    printf "%s\n" "$me" > "$lock.owner.$scope.published/pid"
+    ln -s "$lock.owner.$scope.published" "$lock" || exit 1
+    fm_lock_discard_staged_owners "$lock" "$scope" "$me"
+    [ ! -e "$lock.owner.$scope.empty" ] || exit 2
+    [ ! -e "$lock.owner.$scope.ours" ] || exit 3
+    [ "$(cat "$lock.owner.$scope.foreign/pid")" = "$PPID" ] || exit 4
+    [ -d "$lock.owner.other.empty" ] || exit 5
+    [ "$(cat "$lock/pid")" = "$me" ] || exit 6
+  ' _ "$LIB" "$state" || fail "staged-owner cleanup violated ownership boundaries"
+  pass "staged-owner cleanup removes only unpublished empty or self-owned staging"
 }
 
 test_forced_term_before_the_safe_point_stays_clean() {
@@ -2221,6 +2256,15 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+# Optional function names allow focused regression verification without running
+# unrelated watcher scenarios.
+if [ "$#" -gt 0 ]; then
+  for test_name in "$@"; do
+    case "$test_name" in test_*) "$test_name" || exit 1 ;; *) exit 2 ;; esac
+  done
+  exit 0
+fi
+
 test_lock_tombstone_tracks_reaper_start_time || exit 1
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
@@ -2270,6 +2314,7 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_arm_confirms_a_slow_post_claim_startup
 test_arm_relays_a_startup_lock_held_by_live_pid
+test_staged_owner_cleanup_preserves_other_acquirers
 test_forced_term_before_the_safe_point_stays_clean
 test_unpublishable_identity_exits_through_cleanup
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
