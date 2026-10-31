@@ -2108,7 +2108,7 @@ teardown_note_dirty_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty pi_raw unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -2123,7 +2123,17 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
+  # Git collapses untracked directories, so inspect Pi paths before exempting tasks scratch.
+  if printf '%s\n' "$dirty_raw" | grep -qE '^\?\? \.pi/'; then
+    if ! pi_raw=$(git -C "$WT" status --porcelain --untracked-files=all -- .pi/ 2>/dev/null); then
+      echo "REFUSED: cannot inspect worktree $WT for uncommitted changes under .pi/." >&2
+      return 1
+    fi
+    dirty_raw=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? \.pi/' || true)
+    pi_raw=$(printf '%s\n' "$pi_raw" | grep -E '^\?\? ' || true)
+    dirty_raw=$(printf '%s\n%s\n' "$dirty_raw" "$pi_raw")
+  fi
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.pi/tasks/|\.fm-(grok|kimi)-turnend$)' || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
