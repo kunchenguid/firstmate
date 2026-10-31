@@ -2215,12 +2215,13 @@ The fake-Orca cases execute the real staged launch file under synthetic personal
 
 ### Orca operator-session signal
 
-Observed 2026-10-31 on Orca 1.4.232 (the `orca` CLI reports `1.4.232` from `orca --version`) on the Linux verification host.
+Observed 2026-10-31 on Orca 1.4.232: `orca --version` reports `1.4.232`, `orca status --json` reports `result.runtime.state=ready`, and the packed application of the `orca-ide` build installed on the verification host is the file inspected below.
+The macOS bundle carries the same packed application at `/Applications/Orca.app/Contents/Resources/app.asar`; pick whichever path exists on the machine being checked.
 `ORCA_TERMINAL_HANDLE` is the marker shared supervisor discovery recognizes for an Orca-hosted captain ([operator guide](../orca-backend.md#away-supervision)).
 
 ```sh
 orca --version
-D=/Applications/Orca.app/Contents/Resources; grep -ao 'ORCA_TERMINAL_HANDLE' "$D/app.asar" | wc -l
+D=<orca app>/resources; grep -ao 'ORCA_TERMINAL_HANDLE' "$D/app.asar" | wc -l
 grep -ao '.\{120\}ORCA_TERMINAL_HANDLE.\{200\}' "$D/app.asar"
 ```
 
@@ -2230,7 +2231,7 @@ An inherited value that is not a live terminal of the runtime is replaced, not t
 So the marker names a terminal this Orca runtime owns, and a stale or foreign value cannot redirect discovery to someone else's endpoint.
 A tmux, Herdr, or Rex session started inside an Orca terminal still carries its own innermost markers, which is why discovery checks Orca last.
 
-On that host the two refusal paths were run with only `ORCA_TERMINAL_HANDLE` set (no `TMUX_PANE`, no herdr, Rex, or T3 markers):
+With only `ORCA_TERMINAL_HANDLE` set (no `TMUX_PANE`, no herdr, Rex, or T3 markers), both refusal paths were run:
 
 ```sh
 env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u REX_SESSION -u REX_BLOCK \
@@ -2243,7 +2244,7 @@ error: away-mode daemon does not support supervisor backend 'orca' yet (supporte
 ```
 
 The daemon log recorded `unsupported supervisor backend 'orca' (source=ORCA_TERMINAL_HANDLE)`, and `bin/fm-afk-launch.sh start-native` refused in the same words before writing `state/.afk`.
-Not covered here: no Orca-hosted primary was launched on this host, so the marker was read from the shipped source and then supplied explicitly for the refusal run.
+Not covered here: no Orca-hosted primary was launched, so the marker was read from the shipped source and then supplied explicitly for the refusal run.
 
 ```sh
 tests/fm-daemon.test.sh

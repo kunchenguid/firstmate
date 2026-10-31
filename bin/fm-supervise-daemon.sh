@@ -83,9 +83,11 @@
 #                                   under tmux, "<session>:<pane-id>" from
 #                                   $HERDR_PANE_ID under herdr,
 #                                   "<session-uuid>:<block-uuid>" from
-#                                   $REX_SESSION/$REX_BLOCK under rex, or the
-#                                   home's one live T3 thread - then firstmate:0
-#                                   fallback). Accepts a tmux target, a herdr
+#                                   $REX_SESSION/$REX_BLOCK under rex,
+#                                   the home's one live T3 thread, or the
+#                                   $ORCA_TERMINAL_HANDLE of an Orca terminal -
+#                                   then the firstmate:0 fallback). Accepts a
+#                                   tmux target, a herdr
 #                                   "<session>:<pane-id>", a rex target, or a T3
 #                                   thread id; which one it's read as is decided
 #                                   by FM_SUPERVISOR_BACKEND (below),
@@ -96,7 +98,8 @@
 #                                   selects tmux, $HERDR_ENV=1 selects herdr,
 #                                   TERM_PROGRAM=rex selects rex, then T3
 #                                   discovery behind its explicit-selection gate
-#                                   - falling back to tmux).
+#                                   selects t3code, then $ORCA_TERMINAL_HANDLE
+#                                   selects orca - falling back to tmux).
 #                                   zellij, orca, cmux, paseo, and tern are not yet
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
