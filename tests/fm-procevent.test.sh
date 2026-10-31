@@ -362,9 +362,9 @@ pass "public start never claims an inherited caller process group"
 
 # --- an unhandled result remains eligible for re-announcement on restart ----
 # A result is durable but nothing has ever acknowledged handling it. Every
-# reconcile call - not just the first restart after a crash - must keep
-# re-announcing it, because the only thing that stops re-announcement is an
-# explicit handled acknowledgement, never a prior publication.
+# reconcile call must preserve its queued wake without duplicating it, and
+# retry if that row disappears. Only an explicit handled acknowledgement
+# stops publication after a drain.
 H2="$TMP_ROOT/h2"; new_home "$H2"
 future_status=0
 future_out=$(pe "$H2" handled src-cut 7 2>&1) || future_status=$?
@@ -379,9 +379,70 @@ out=$(pe "$H2" reconcile)
 assert_contains "$out" "published=1" "a durably captured but unhandled result is announced after restart"
 assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "durable adapter identity survives without a registration"
 assert_absent "$H2/state/procevent-inbox/src-cut.7.handled" "recovery alone never marks the recovered result handled"
+before_marker=$(cat "$H2/state/.watcher-down")
+pe "$H2" reconcile > "$TMP_ROOT/duplicate-publisher-1.out" &
+publisher_one=$!
+pe "$H2" reconcile > "$TMP_ROOT/duplicate-publisher-2.out" &
+publisher_two=$!
+wait "$publisher_one" || fail "first duplicate publisher failed"
+wait "$publisher_two" || fail "second duplicate publisher failed"
+[ "$(wc -l < "$H2/state/.wake-queue" | tr -d ' ')" = 1 ] \
+  || fail "concurrent publishers duplicated an already queued result"
+[ "$(cat "$H2/state/.watcher-down")" = "$before_marker" ] \
+  || fail "duplicate publication changed the recovery marker"
+pass "concurrent publication of an identical queued result succeeds without changing the queue or recovery"
+
+# Hold a matching row under the queue lock while publication starts, then
+# remove it before releasing the lock, as an acknowledgement would. A check
+# outside the lock would incorrectly succeed against the soon-to-be-gone row.
+FM_HOME="$H2" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+  trap "fm_lock_release \"$FM_WAKE_QUEUE_LOCK\"" EXIT
+  printf "ready\n" > "$2/queue-held"
+  for ((i=0; i<500; i++)); do
+    if [ -e "$2/remove-row" ]; then
+      : > "$FM_WAKE_QUEUE"
+      exit 0
+    fi
+    kill -0 "$3" 2>/dev/null || exit 1
+    sleep 0.02
+  done
+  exit 1
+' _ "$ROOT" "$TMP_ROOT" "$$" &
+queue_holder=$!
+wait_for "$TMP_ROOT/queue-held" || fail "queue barrier never acquired its lock"
+pe "$H2" reconcile > "$TMP_ROOT/queue-race-publisher.out" &
+queue_publisher=$!
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/src-cut.lock/pid" \
+  || fail "publisher skipped the queue lock for an already queued result"
+kill -0 "$queue_publisher" 2>/dev/null || fail "publisher did not wait for the queue lock"
+: > "$TMP_ROOT/remove-row"
+wait "$queue_holder" || fail "queue barrier could not remove the original row"
+wait "$queue_publisher" || fail "publication failed after concurrent row removal"
+[ "$(wc -l < "$H2/state/.wake-queue" | tr -d ' ')" = 1 ] \
+  || fail "publication failed to retry the result removed under the queue lock"
+pass "publication checks queue presence inside the acknowledgement lock and retries a removed row"
+
+# Identity and payload must BOTH match; generic wake callers still may append
+# identical text for distinct events. Remove only the original row, then seed
+# mismatches through the ordinary append interface before retrying the result.
+FM_HOME="$H2" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+  : > "$FM_WAKE_QUEUE"
+  fm_wake_append_locked check procevent:src-cut:7 "different payload" || exit 1
+  fm_wake_append_locked check another-event "check: procevent lavish src-cut 7" || exit 1
+  fm_wake_append_locked check another-event "check: procevent lavish src-cut 7" || exit 1
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+' _ "$ROOT" || fail "could not seed publication mismatches"
+pe "$H2" reconcile >/dev/null
+[ "$(wc -l < "$H2/state/.wake-queue" | tr -d ' ')" = 4 ] \
+  || fail "publication deduplicated a different identity/payload or generic append deduplicated repeated text"
+pass "only matching result identity and payload suppress publication; generic repeated wakes remain distinct"
 mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-1"
 out=$(pe "$H2" reconcile)
-assert_contains "$out" "published=1" "an unhandled result is re-announced on every reconcile, not only the first"
+assert_contains "$out" "published=1" "an unhandled result is re-announced when its prior queued row is absent"
 assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "the repeat wake preserves its deduplication identity"
 [ "$(count_results "$H2" src-cut)" = 1 ] || fail "repeat re-announcement created a second durable copy"
 mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-2"

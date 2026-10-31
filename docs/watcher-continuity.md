@@ -482,6 +482,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
 - A handling successor that resurfaces a row appended between its predecessor's close and its own startup handoff.
+- Repeated and concurrent `reconcile` re-arms of a captured but unhandled result through the real Pi host, which announce it once and wake the successor only for genuinely new work, with an idle long-poll source as the empty-queue control.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.
