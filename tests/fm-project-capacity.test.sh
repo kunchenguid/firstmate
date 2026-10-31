@@ -340,22 +340,36 @@ test_symlinked_home_counts_each_worker_once() {
 # record, so the record does not hold a place against it. Any other task on the
 # project still sees that record as a holder.
 test_restart_does_not_count_its_own_record() {
-  local case_dir home out rc=0
-  case_dir=$(make_case restart task-c task-d)
-  home="$case_dir/home"
-  declare_capacity "$home" "project 1"
-  fm_write_meta "$home/state/task-c.meta" \
-    "window=firstmate:fm-task-c" \
-    "project=$case_dir/project" \
-    "kind=ship"
-  out=$(spawn_ship "$case_dir" task-c) || rc=$?
-  assert_not_contains "$out" "deferred:" "a restart was deferred by its own record"
-  [ "$rc" -ne "$DEFER_EXIT" ] || fail "a restart exited with the deferral code: $out"
-  rc=0
-  out=$(spawn_ship "$case_dir" task-d "$case_dir/unused") || rc=$?
-  expect_code "$DEFER_EXIT" "$rc" "another task ignored the restarted task's place: $out"
-  assert_contains "$out" "1 already hold a place (task-c)" "another task did not count the restarted task"
-  pass "a restart of a task id does not count that task's own record"
+  local case_dir home out rc scenario kind mode wt
+  for scenario in no-mistakes scout local-only; do
+    kind=ship mode=$scenario
+    [ "$scenario" != scout ] || { kind=scout; mode=; }
+    case_dir=$(make_case "restart-$scenario" task-c task-d)
+    home="$case_dir/home"
+    if [ "$scenario" = local-only ]; then
+      sed 's/mode=no-mistakes/mode=local-only/' "$home/data/task-c/brief.md" > "$home/data/task-c/brief.tmp"
+      mv "$home/data/task-c/brief.tmp" "$home/data/task-c/brief.md"
+    fi
+    declare_capacity "$home" "project 1"
+    fm_write_meta "$home/state/task-c.meta" \
+      "window=firstmate:fm-task-c" \
+      "project=$case_dir/project" \
+      "kind=$kind" "mode=$mode"
+    printf 'done: finished\ncaptain-held: decision transferred\n' > "$home/state/task-c.status"
+    wt=$(new_worktree "$case_dir" task-c)
+    rc=0
+    if [ "$kind" = scout ]; then
+      out=$(run_spawn "$case_dir" "$home" "$wt" task-c "$case_dir/project" --scout) || rc=$?
+    else
+      out=$(run_spawn "$case_dir" "$home" "$wt" task-c "$case_dir/project" --mode "$mode" --yolo off) || rc=$?
+    fi
+    expect_code 0 "$rc" "a completed $scenario restart failed: $out"
+    rc=0
+    out=$(spawn_ship "$case_dir" task-d "$case_dir/unused") || rc=$?
+    expect_code "$DEFER_EXIT" "$rc" "another task ignored the restarted task's place: $out"
+    assert_contains "$out" "1 already hold a place (task-c)" "another task did not count the restarted task"
+  done
+  pass "restarts exclude their own records and reclaim completed workers' places"
 }
 
 test_relaunch_reclaims_a_finished_workers_place() {
