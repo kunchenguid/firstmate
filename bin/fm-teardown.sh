@@ -42,14 +42,18 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
-# squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. A task whose meta records
+# hard-resets/removes the worktree and kills its processes. For a normal ship task,
+# work whose branch is pushed but has no PR recorded or found, or whose recorded PR
+# is confirmed closed without merging, is refused, while a pushed branch with an
+# open PR (including an upstream-contribution PR from a fork) may be cleaned up.
+# Unpushed work has landed only when its PR is merged and GitHub reports a PR head
+# that contains the current local work, or its content is already present in the
+# up-to-date default branch. This recognizes the common squash-merge-then-delete-
+# branch flow, where the branch's own commits live nowhere on a remote yet the
+# change is fully in main. A forge=external task whose HEAD is on its recorded
+# personal backup remote's namespace may be cleaned up while its review is
+# unmerged. Local-only delivery retains its existing boundary where
+# publishing the branch to a remote is sufficient. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
 # its base branch instead of the default branch.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
@@ -1701,38 +1705,58 @@ EOF
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
-# forge for both the PR state and head: a recorded Forgejo URL is read through
-# tea (fm_pr_forgejo_read_record), and everything else through GitHub. Returns
+# forge for both the PR state and head: a recorded Forgejo, GitLab, or Gerrit
+# URL is read through its provider reader in bin/fm-pr-lib.sh, and everything
+# else through GitHub. Returns
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then
 # falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
+  local branch=$1 target provider='' view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
     target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
-    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
-    [ "$FM_PR_RECORD_MERGED" = true ] || return 1
-    head=$FM_PR_RECORD_HEAD
-    fm_pr_head_valid "$head" || return 1
-    resolved_url=$FM_PR_URL
-  else
-    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
-    state=${view%%$'\t'*}
-    remainder=${view#*$'\t'}
-    [ "$state" != "$view" ] || return 1
-    head=${remainder%%$'\t'*}
-    resolved_url=${remainder#*$'\t'}
-    [ "$head" != "$remainder" ] || return 1
-    case "$state" in
-      MERGED|merged) ;;
-      *) return 1 ;;
-    esac
+  if fm_pr_url_parse "$target"; then
+    provider=$FM_PR_PROVIDER
   fi
+  case "$provider" in
+    forgejo)
+      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_HEAD
+      ;;
+    gitlab)
+      fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_HEAD
+      ;;
+    gerrit)
+      fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
+      fm_pr_gerrit_read_revision "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
+      head=$FM_PR_RECORD_REVISION
+      ;;
+    *)
+      view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+      state=${view%%$'\t'*}
+      remainder=${view#*$'\t'}
+      [ "$state" != "$view" ] || return 1
+      head=${remainder%%$'\t'*}
+      resolved_url=${remainder#*$'\t'}
+      [ "$head" != "$remainder" ] || return 1
+      case "$state" in
+        MERGED|merged) ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  case "$provider" in
+    forgejo|gitlab|gerrit)
+      [ "$FM_PR_RECORD_MERGED" = true ] || return 1
+      fm_pr_head_valid "$head" || return 1
+      resolved_url=$FM_PR_URL
+      ;;
+  esac
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
@@ -1794,6 +1818,60 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+# Is the recorded PR positively open? The provider reader must report an open
+# state to allow cleanup of pushed work that is not landed; every other state,
+# including an unreadable or unrecognized record, fails closed.
+pr_is_open() {
+  local target provider
+  [ -n "$PR_URL" ] || return 1
+  target=$PR_URL
+  fm_pr_url_parse "$target" || return 1
+  provider=$FM_PR_PROVIDER
+  case "$provider" in
+    github)
+      fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || return 1
+      ;;
+    gitlab)
+      fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+      ;;
+    gerrit)
+      fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
+      ;;
+    forgejo)
+      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  case "$provider:$FM_PR_RECORD_STATE:$FM_PR_RECORD_MERGED" in
+    github:OPEN:false|github:open:false|gitlab:opened:false|gitlab:open:false|forgejo:open:false|gerrit:NEW:false|gerrit:DRAFT:false)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Is HEAD on the personal backup remote's namespace? A forge=external task
+# with a recorded backup_remote= and backup_prefix= keeps its durable copy
+# there, so that copy is the retention proof while the review is unmerged.
+external_backup_retains_head() {
+  local remote prefix sha repo hit
+  [ "$(fm_meta_get "$META" forge)" = external ] || return 1
+  remote=$(fm_meta_get "$META" backup_remote)
+  prefix=$(fm_meta_get "$META" backup_prefix)
+  [ -n "$remote" ] && [ -n "$prefix" ] || return 1
+  sha=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  for repo in "$WT" "$PROJ"; do
+    [ -n "$repo" ] && [ -d "$repo" ] || continue
+    hit=$(git -C "$repo" for-each-ref --format='%(refname)' --contains="$sha" --count=1 "refs/remotes/$remote/$prefix*" 2>/dev/null) || continue
+    [ -n "$hit" ] && return 0
+  done
+  return 1
 }
 
 # The completion links this teardown already holds locally. A scout's
@@ -2158,21 +2236,21 @@ validate_worktree_teardown_safety() {
     report_worktree_dirt "$dirty"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
-  elif [ -n "$unpushed" ]; then
+  elif [ "$MODE" != local-only ]; then
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
     if [ -z "$branch" ]; then
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
-    if ! work_is_landed "$branch"; then
+    if ! work_is_landed "$branch" && { [ -n "$unpushed" ] || { ! external_backup_retains_head && { [ -z "$PR_URL" ] || ! pr_is_open; }; }; }; then
       if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
         echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
         echo "Restore or upgrade Git and retry the content check." >&2
       else
-        echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+        echo "REFUSED: worktree $WT has work that is not landed." >&2
       fi
-      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      [ -n "$unpushed" ] && printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      echo "Open a PR and land it, merge the work into the default branch, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
