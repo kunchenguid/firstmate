@@ -44,6 +44,9 @@
 #   cortex-hook      Cortex Code per-task plugin hooks (UserPromptSubmit opens;
 #                    Stop, which also fires on an Escape interrupt, and
 #                    SessionEnd close)
+#   kiro-hook        Kiro V2 agent-config hooks (userPromptSubmit opens; stop
+#                    closes) - kiro's ONLY state source; its per-turn stop hook
+#                    also keeps the turn-ended notification touch
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -100,16 +103,25 @@
 # a real busy verdict once any hook has posted, and it defers to whatever
 # harness-specific trust pre-registration already exists (fm-claude-trust.sh,
 # GEMINI_CLI_TRUST_WORKSPACE) to stop the dialog from appearing at all.
-# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY are the ONLY
-# rendered-text busy fallbacks that survive the redesign, because none of their
-# structured lifecycles was credited-live-verified
+# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY are the only
+# harnesses whose rendered text is their SOLE classification, because none of
+# their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
 # hook surface at all, see references/harness/agy.md); each is scoped to
-# its own harness= and can never classify another adapter. The delivery
-# guards in bin/fm-composer-lib.sh match rendered footers for submit
-# acknowledgement and away-mode supervisor injection only; neither is a
-# recorded worker state source.
+# its own harness= and can never classify another adapter.
+# Kiro is different: its kiro-hook record above is its ONLY state source (a
+# live-verified per-turn userPromptSubmit/stop pair, references/harness/kiro.md),
+# and it has no rendered-tail arm here. Its `Kiro is working` footer is matched
+# only by the delivery guards in bin/fm-composer-lib.sh, never as a recorded
+# worker state. The one reachable consumer today is the harness-less union entry
+# in FM_DELIVERY_BUSY_REGEX_DEFAULT, which the tmux submit core reads for submit
+# acknowledgement; FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT is registered per the
+# fleet convention that every verified harness declares its own signature, and
+# has no caller today. So a kiro task with no record classifies unknown
+# missing, and an abnormal turn end (no StopFailure/SessionEnd equivalent
+# exists on kiro V2) leaves the record busy until the next userPromptSubmit
+# re-opens it - docs/verification/kiro.md owns that disclosure.
 #
 # The muse pull source is semantic, not rendered: it folds muse's own durable
 # session event log. It has no writer, no arm, and no gen, because
@@ -204,6 +216,85 @@ fm_busy_gen_path() {  # <state-dir> <id>
   printf '%s/%s.busy-gen' "$1" "$2"
 }
 
+# Optional Pi model-stream contract. The busy writer owns every mutation under
+# its incarnation lock. model-stream is active evidence; model-stream-order
+# retains the latest request and active/closed phase after the marker is cleared.
+#   order: v1 gen=<token> request=<positive uint> phase=<active|closed>
+#   stream / model-progress: v1 gen=<token> request=<uint> rev=<uint> ts=<epoch>
+# Requests strictly increase within a generation. Progress/close must match the
+# open request; closed and older requests cannot reopen or refresh evidence.
+# model-progress is separate from native progress and is read ONLY by opted-in
+# watchers. Missing, malformed, locked, idle, foreign, or stale evidence conveys
+# no model-phase observation, leaving the general busy bound applicable.
+fm_busy_pi_stream_version_supported() {
+  [ "${1:-}" = 1.2.0 ]
+}
+
+fm_busy_stream_seconds() {  # <configured seconds>; off/invalid prints 0
+  local value=${1:-}
+  case "$value" in ''|*[!0-9]*) printf '0'; return ;; esac
+  [ "${#value}" -le 9 ] || { printf '0'; return; }
+  printf '%s' "$((10#$value))"
+}
+
+fm_busy_stream_uint_valid() {
+  case "${1:-}" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 15 ]
+}
+
+fm_busy_stream_order_read() {  # <state-dir> <id>
+  local line version gen request phase extra
+  line=$(cat "$1/$2.model-stream-order" 2>/dev/null) || return 1
+  read -r version gen request phase extra <<< "$line"
+  [ "$version" = v1 ] && [ -z "$extra" ] || return 1
+  gen=${gen#gen=} request=${request#request=} phase=${phase#phase=}
+  fm_busy_token_valid "$gen" && fm_busy_stream_uint_valid "$request" || return 1
+  case "$phase" in active|closed) : ;; *) return 1 ;; esac
+  [ "$line" = "v1 gen=$gen request=$request phase=$phase" ] || return 1
+  printf '%s %s %s' "$gen" "$request" "$phase"
+}
+
+fm_busy_stream_record_read() {  # <record path>
+  local line version gen request rev ts extra
+  line=$(cat "$1" 2>/dev/null) || return 1
+  read -r version gen request rev ts extra <<< "$line"
+  [ "$version" = v1 ] && [ -z "$extra" ] || return 1
+  gen=${gen#gen=} request=${request#request=} rev=${rev#rev=} ts=${ts#ts=}
+  fm_busy_token_valid "$gen" && fm_busy_stream_uint_valid "$request" &&
+    fm_busy_stream_uint_valid "$rev" && fm_busy_stream_uint_valid "$ts" || return 1
+  [ "$line" = "v1 gen=$gen request=$request rev=$rev ts=$ts" ] || return 1
+  printf '%s %s %s %s' "$gen" "$request" "$rev" "$ts"
+}
+
+fm_busy_stream_read() {  # <state-dir> <id> <harness>; gen request rev ts
+  local state=$1 id=$2 harness=$3 snapshot gen request rev ts order current
+  case "$harness" in pi|pi-signed) : ;; *) return 1 ;; esac
+  [ ! -e "$state/$id.busy-state.lock" ] || return 1
+  current=$(fm_busy_current_gen "$state" "$id") || return 1
+  order=$(fm_busy_stream_order_read "$state" "$id") || return 1
+  snapshot=$(fm_busy_stream_record_read "$state/$id.model-stream") || return 1
+  read -r gen request rev ts <<< "$snapshot"
+  [ "$gen" = "$current" ] && [ "$order" = "$gen $request active" ] || return 1
+  case "$(fm_busy_record_read "$state" "$id")" in 'busy pi-ext '*) : ;; *) return 1 ;; esac
+  [ ! -e "$state/$id.busy-state.lock" ] &&
+    [ "$(fm_busy_current_gen "$state" "$id")" = "$current" ] &&
+    [ "$(fm_busy_stream_order_read "$state" "$id")" = "$order" ] &&
+    [ "$(fm_busy_stream_record_read "$state/$id.model-stream")" = "$snapshot" ] || return 1
+  printf '%s' "$snapshot"
+}
+
+fm_busy_model_progress_ts() {  # <state-dir> <id> <harness>
+  local snapshot gen request rev ts current
+  case "$3" in pi|pi-signed) : ;; *) return 1 ;; esac
+  [ ! -e "$1/$2.busy-state.lock" ] || return 1
+  current=$(fm_busy_current_gen "$1" "$2") || return 1
+  snapshot=$(fm_busy_stream_record_read "$1/$2.model-progress") || return 1
+  read -r gen request rev ts <<< "$snapshot"
+  [ "$gen" = "$current" ] && [ ! -e "$1/$2.busy-state.lock" ] &&
+    [ "$(fm_busy_current_gen "$1" "$2")" = "$current" ] || return 1
+  printf '%s' "$ts"
+}
+
 # fm_busy_token_valid: conservative token charset shared by gen, source, and
 # event fields. Anything else is malformed.
 fm_busy_token_valid() {  # <value>
@@ -246,6 +337,7 @@ fm_busy_sources_for_harness() {  # <harness>
     cortex) adapter=cortex-hook ;;
     commandcode) adapter=commandcode-mod ;;
     polytoken) adapter=polytoken-hook ;;
+    kiro) adapter=kiro-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)

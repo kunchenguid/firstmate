@@ -5,8 +5,11 @@
 # dialog and running its turn in agy's own scratch directory.
 #
 # Usage: fm-agy-trust.sh <worktree> <project>
+#        fm-agy-trust.sh --secondmate-home <home> <id>
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
+#   <home>      the seeded secondmate home a --secondmate launch starts in
+#   <id>        the secondmate's task id, matched against <home>/.fm-secondmate-home
 # Prints one line naming what it registered; refuses loudly on anything else.
 #
 # WHY THIS EXISTS. agy 1.2.0 gates a folder it has never seen behind
@@ -39,9 +42,33 @@ unset CDPATH \
   GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_GLOBAL \
   GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
 
-[ "$#" -eq 2 ] || { echo "usage: fm-agy-trust.sh <worktree> <project>" >&2; exit 2; }
-WT_ARG=$1
-PROJ_ARG=$2
+usage() {
+  echo "usage: fm-agy-trust.sh <worktree> <project>" >&2
+  echo "       fm-agy-trust.sh --secondmate-home <home> <id>" >&2
+  exit 2
+}
+
+case "${1:-}" in
+  --secondmate-home)
+    [ "$#" -eq 3 ] || usage
+    MODE=secondmate-home
+    WT_ARG=$2
+    SUB_ID=$3
+    PROJ_ARG=
+    SCOPE_NOUN="secondmate home"
+    ;;
+  '' | -h | --help)
+    usage
+    ;;
+  *)
+    [ "$#" -eq 2 ] || usage
+    MODE=worktree
+    WT_ARG=$1
+    SUB_ID=
+    PROJ_ARG=$2
+    SCOPE_NOUN="worktree"
+    ;;
+esac
 
 refuse() { echo "error: refusing to pre-register agy trust: $1" >&2; exit 1; }
 
@@ -56,33 +83,62 @@ common_dir_of() {
 }
 
 WT_REAL=$(real_dir "$WT_ARG") || true
-[ -n "$WT_REAL" ] || refuse "worktree '$WT_ARG' is not an accessible directory"
+[ -n "$WT_REAL" ] || refuse "$SCOPE_NOUN '$WT_ARG' is not an accessible directory"
 WT_LOGICAL=$(logical_dir "$WT_ARG") || true
 [ -n "$WT_LOGICAL" ] || WT_LOGICAL=$WT_REAL
-PROJ_REAL=$(real_dir "$PROJ_ARG") || true
-[ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
+if [ "$MODE" = worktree ]; then
+  PROJ_REAL=$(real_dir "$PROJ_ARG") || true
+  [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
+fi
 
 [ -n "${HOME:-}" ] || refuse "HOME is not set, so agy's settings store cannot be located"
 HOME_REAL=$(real_dir "$HOME") || true
 [ -n "$HOME_REAL" ] || refuse "HOME '$HOME' is not an accessible directory"
-[ "$WT_REAL" != "$HOME_REAL" ] || refuse "'$WT_REAL' is the home directory, not a task worktree"
+[ "$WT_REAL" != / ] || refuse "'/' is the filesystem root, not a $SCOPE_NOUN"
+[ "$WT_REAL" != "$HOME_REAL" ] || refuse "'$WT_REAL' is the home directory, not a $SCOPE_NOUN"
 
-WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) || true
-[ -n "$WT_TOP" ] || refuse "'$WT_REAL' is not inside a git repository"
-WT_TOP_REAL=$(real_dir "$WT_TOP") || true
-[ "$WT_TOP_REAL" = "$WT_REAL" ] || refuse "'$WT_REAL' is not a worktree root (its root is '${WT_TOP_REAL:-unresolvable}')"
+if [ "$MODE" = worktree ]; then
+  WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) || true
+  [ -n "$WT_TOP" ] || refuse "'$WT_REAL' is not inside a git repository"
+  WT_TOP_REAL=$(real_dir "$WT_TOP") || true
+  [ "$WT_TOP_REAL" = "$WT_REAL" ] || refuse "'$WT_REAL' is not a worktree root (its root is '${WT_TOP_REAL:-unresolvable}')"
 
-WT_GIT_DIR=$(git -C "$WT_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
-[ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has no resolvable git directory"
-WT_GIT_DIR=$(real_dir "$WT_GIT_DIR") || true
-[ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has an unresolvable git directory"
-WT_COMMON=$(common_dir_of "$WT_REAL") || true
-[ -n "$WT_COMMON" ] || refuse "'$WT_REAL' has no resolvable git common directory"
-[ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$WT_REAL' is a primary checkout, not an isolated worktree"
+  WT_GIT_DIR=$(git -C "$WT_REAL" rev-parse --absolute-git-dir 2>/dev/null) || true
+  [ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has no resolvable git directory"
+  WT_GIT_DIR=$(real_dir "$WT_GIT_DIR") || true
+  [ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has an unresolvable git directory"
+  WT_COMMON=$(common_dir_of "$WT_REAL") || true
+  [ -n "$WT_COMMON" ] || refuse "'$WT_REAL' has no resolvable git common directory"
+  [ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$WT_REAL' is a primary checkout, not an isolated worktree"
 
-PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
-[ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
-[ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+  PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
+  [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
+  [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+else
+  [ -n "$SUB_ID" ] || refuse "no secondmate id was supplied, so '$WT_REAL' cannot be matched against its seed marker"
+  SUB_MARKER="$WT_REAL/.fm-secondmate-home"
+  [ ! -L "$SUB_MARKER" ] || refuse "'$SUB_MARKER' is a symlink; a seeded secondmate home carries the marker as a regular file"
+  [ -f "$SUB_MARKER" ] || refuse "'$WT_REAL' carries no .fm-secondmate-home marker, so it is not a seeded secondmate home"
+  [ -O "$SUB_MARKER" ] || refuse "'$SUB_MARKER' is not owned by this user"
+  SUB_MARKER_ID=$(cat "$SUB_MARKER" 2>/dev/null) || true
+  [ "$SUB_MARKER_ID" = "$SUB_ID" ] || refuse "'$WT_REAL' is marked for secondmate '${SUB_MARKER_ID:-unknown}', not '$SUB_ID'"
+  [ -f "$WT_REAL/AGENTS.md" ] || refuse "'$WT_REAL' has no AGENTS.md, so it is not a firstmate home"
+  [ -d "$WT_REAL/bin" ] || refuse "'$WT_REAL' has no bin/, so it is not a firstmate home"
+  for sub_dir_name in data state config projects; do
+    sub_dir="$WT_REAL/$sub_dir_name"
+    if [ -L "$sub_dir" ] && [ ! -e "$sub_dir" ]; then
+      refuse "'$sub_dir' is a broken symlink, so this home's $sub_dir_name directory cannot be shown to stay inside it"
+    fi
+    [ -e "$sub_dir" ] || continue
+    [ -d "$sub_dir" ] || refuse "'$sub_dir' is not a directory, so '$WT_REAL' is not a seeded secondmate home"
+    sub_dir_real=$(real_dir "$sub_dir") || true
+    [ -n "$sub_dir_real" ] || refuse "'$sub_dir' cannot be resolved"
+    case "$sub_dir_real" in
+      "$WT_REAL"/*) ;;
+      *) refuse "'$sub_dir' resolves to '$sub_dir_real', outside the home, so '$WT_REAL' is not a safe secondmate home" ;;
+    esac
+  done
+fi
 
 command -v node >/dev/null 2>&1 || refuse "node is required to record workspace trust and was not found on PATH"
 
