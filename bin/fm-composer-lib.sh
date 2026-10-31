@@ -2269,9 +2269,11 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
   # content: the quoted selector was scrolled above a live composer, and the
   # next Enter would go to that composer rather than to the quoted rows. The
   # prompt glyphs come from the one declared list, so a bare composer of any
-  # harness is caught below the rule and not only a bordered one.
+  # harness is caught below the rule and not only a bordered one. The shell
+  # prompt is deliberately limited to >.
   if printf '%s\n' "$screen" | fm_composer_strip_ansi \
-    | LC_ALL=C awk -v glyphs="$FM_COMPOSER_AGENT_PROMPT_GLYPHS" '
+    | LC_ALL=C awk -v glyphs="$FM_COMPOSER_AGENT_PROMPT_GLYPHS
+>" '
     function starts_with_glyph(s,   j) {
       sub(/^[ \t]+/, "", s)
       for (j = 1; j <= glyph_count; j++)

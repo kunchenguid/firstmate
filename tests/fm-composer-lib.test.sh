@@ -1968,6 +1968,13 @@ test_pi_selector_ends_at_its_closing_rule_not_at_the_pane() {
     '› fix the failing test')"); rc=$?
   [ "$rc" -eq 1 ] && [ -z "$out" ] \
     || fail "a bare composer holding typed text under the rule must not be a selector, got '$out'"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→   beta-model-two [localfake]' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '────────────────────────────────────────────────────────────────────────' \
+    '> next command')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] \
+    || fail "a bare > shell prompt under the rule must not be a selector, got '$out'"
   # Nor is a rule that spans only part of the screen a closing rule.
   out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
     '→   beta-model-two [localfake]' \
