@@ -208,20 +208,9 @@ fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> 
       kind=$(fm_meta_get "$meta" kind)
       [ "$kind" != secondmate ] || continue
       [ -z "$(fm_meta_get "$meta" pr)" ] || continue
-      if [ "$kind" = scout ] || { [ "$kind" = ship ] && [ "$(fm_meta_get "$meta" mode)" = local-only ]; }; then
-        status_file=${meta%.meta}.status
-        finished=0
-        if [ -f "$status_file" ] && [ -r "$status_file" ]; then
-          while IFS= read -r status_line || [ -n "$status_line" ]; do
-            status_line_verb "$status_line" status_verb
-            case "$status_verb" in
-              done) finished=1 ;;
-              working) finished=0 ;;
-            esac
-          done < "$status_file"
-        fi
-        [ "$finished" = 0 ] || continue
-      fi
+      # Resolve the project and its lock before touching any status log: an
+      # unrelated project's task history must not cost a read while this
+      # spawn holds its own project lock.
       project=$(fm_meta_get "$meta" project)
       [ -n "$project" ] || continue
       lock=
@@ -239,6 +228,20 @@ fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> 
         cache_locks+=("$lock")
       fi
       [ -n "$lock" ] && [ "$lock" = "$want" ] || continue
+      if [ "$kind" = scout ] || { [ "$kind" = ship ] && [ "$(fm_meta_get "$meta" mode)" = local-only ]; }; then
+        status_file=${meta%.meta}.status
+        finished=0
+        if [ -f "$status_file" ] && [ -r "$status_file" ]; then
+          while IFS= read -r status_line || [ -n "$status_line" ]; do
+            status_line_verb "$status_line" status_verb
+            case "$status_verb" in
+              done) finished=1 ;;
+              working) finished=0 ;;
+            esac
+          done < "$status_file"
+        fi
+        [ "$finished" = 0 ] || continue
+      fi
       id=$(basename "$meta" .meta)
       label=$id
       [ "$state" = "$first" ] || label="$id in $(dirname "$state")"

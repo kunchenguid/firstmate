@@ -402,7 +402,7 @@ test_finished_worker_frees_a_place() {
     kind=ship
     mode=$scenario
     if [ "$scenario" = scout ]; then kind=scout; mode=no-mistakes; fi
-    sed -i "s/^kind=.*/kind=$kind/; s/^mode=.*/mode=$mode/" "$home/state/live-p.meta"
+    sed -i.bak "s/^kind=.*/kind=$kind/; s/^mode=.*/mode=$mode/" "$home/state/live-p.meta" && rm -f "$home/state/live-p.meta.bak"
     printf 'paused [at=1791700000]: waiting\n' > "$home/state/live-p.status"
     rc=0
     out=$(spawn_ship "$case_dir" task-e "$case_dir/unused") || rc=$?
