@@ -1680,6 +1680,29 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
     registry_homes || unavailable "${REGISTRY_ERROR:-the secondmate registry cannot be read}"
     { [ ! -s "$TMPD/remote-ids" ] || [ "$(pool_count "$TMPD/delivered")" -eq 0 ]; } \
       || unavailable "remote descendants have unaccounted occupancy; this home cannot serve fleet seats"
+    if [ "$(pool_count "$TMPD/delivered")" -gt 0 ]; then
+      jq -r '.pools[].models[]' "$TMPD/delivered" > "$TMPD/host-models"
+      for meta in "$ROOT_STATE/parent-route"/*.meta; do
+        [ -e "$meta" ] || [ -L "$meta" ] || continue
+        verdict=$(meta_state "$meta" "$TMPD/host-models")
+        [ "$verdict" != other ] || continue
+        id=${meta##*/}
+        id=${id%.meta}
+        gen=$(meta_generation "$meta")
+        gen_ok "$gen" || unavailable "host supervisor $id has unaccounted occupancy"
+        reservation="$ROOT_STATE/parent-route/$id.seat-reservation.$gen"
+        private_file_ok "$reservation" \
+          && jq -e --arg t "$id" --arg g "$gen" --arg h "$ROOT_HOME" --arg m "$(record_field "$meta" model)" '
+            .schema == "fm-fleet-seat-holder.v2" and .task == $t
+            and (.incarnations | length == 1)
+            and any(.incarnations[]; .generation == $g and .kind == "secondmate"
+              and .lifecycle == "reserved" and .launch_phase == "dispatching"
+              and .model == $m and .route.placement == "remote"
+              and .route.operation == $g and .route.home == $h)
+          ' "$reservation" >/dev/null 2>&1 \
+          || unavailable "host supervisor $id has unaccounted occupancy"
+      done
+    fi
     SERVED=$LEDGER/served.json
     if [ -e "$SERVED" ] || [ -L "$SERVED" ]; then
       if [ ! -f "$SERVED" ] || [ -L "$SERVED" ] \
