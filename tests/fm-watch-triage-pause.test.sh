@@ -1362,10 +1362,36 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
     reap "$UNTIL_PID"; fail "the due recheck repeated on every poll instead of once per declaration: $(cat "$dir/watch.out")"
   fi
   reap "$UNTIL_PID"
-  printf 'resolved [key=paused-overdue-until]: worker resumed\n' >> "$state/until.status"
+  printf 'working: resumed\n' >> "$state/until.status"
+  # A fresh watcher observes the resumed status and closes the keyed decision.
+  : > "$dir/watch.out"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "resumed worker did not clear the overdue decision"; }
   [ -z "$(status_open_decisions "$state/until.status")" ] \
     || fail "resuming the worker did not close the overdue pause decision"
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
+}
+
+test_undated_pause_overdue_bound() {
+  local dir state
+  dir=$(paused_until_fixture undated-overdue "" 0); state="$dir/state"
+  printf 'paused: waiting for an external dependency\n' > "$state/until.status"
+  touch -m -d "@$(( $(date +%s) - 86390 ))" "$state/until.status"
+  export FM_PAUSE_UNDATED_MAX_SECS=86400
+  until_watch "$dir" 240
+  if ! wait_poll_cycle "$state" "$UNTIL_PID"; then reap "$UNTIL_PID"; fail "undated pause exited before its bound"; fi
+  [ -z "$(status_open_decisions "$state/until.status")" ] || fail "undated pause opened a decision before its bound"
+  reap "$UNTIL_PID"
+  touch -m -d "@$(( $(date +%s) - 86410 ))" "$state/until.status"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "overdue undated pause did not surface"; }
+  grep -Fq 'paused-overdue-until' < <(status_open_decisions "$state/until.status") || fail "overdue undated pause did not open a decision"
+  printf 'working: resumed\n' >> "$state/until.status"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "undated resume did not close decision"; }
+  [ -z "$(status_open_decisions "$state/until.status")" ] || fail "undated resume left decision open"
+  unset FM_PAUSE_UNDATED_MAX_SECS
+  pass "undated pauses stay quiet through the bound and close their overdue decision on resume"
 }
 
 # --- a live worker paused on its own background job --------------------------
@@ -1505,5 +1531,6 @@ fm_test_run \
   test_paused_until_near_future_is_quiet_before_the_cadence \
   test_paused_until_wrong_year_is_bounded_by_the_cadence \
   test_paused_until_that_passed_is_rechecked_before_the_cadence \
+  test_undated_pause_overdue_bound \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
   test_paused_bg_job_until_timeout_rechecks_after_the_job_ends
