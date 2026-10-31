@@ -638,6 +638,58 @@ teardown_release_locks() {
   fm_lease_guard_release || true
   return "$status"
 }
+# Once an EXIT trap is set, stock macOS Bash 3.2 catches SIGSEGV and SIGBUS and
+# returns from the handler, so a fork child that faults before exec (macOS 27
+# does this inside libSystem's atfork child handler) re-faults forever at full
+# CPU while this process waits on it holding every lock. The watchdog runs in a
+# fresh Bash with no EXIT trap. When an unexec'd copy of this process burns
+# FM_TEARDOWN_FORK_SPIN_CPU seconds of CPU, it terminates that copy's ancestors
+# up to this process first, so EXIT cleanup runs and nothing after the stuck
+# fork executes, and only then kills the stuck copy.
+teardown_fork_spin_watchdog() {  # <pid> <cpu-seconds>
+  local top=$1 limit=$2 args actions sig pid
+  trap '' TERM INT HUP
+  cd / || return 0
+  args=$(ps -ww -o args= -p "$top") || return 0
+  [ -n "$args" ] || return 0
+  while kill -0 "$top" 2>/dev/null; do
+    sleep 2
+    actions=$(ps -wwAo pid=,ppid=,time=,args= | awk -v top="$top" -v args="$args" -v limit="$limit" '
+      function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+      function secs(t,   n, p, i, s, d) {
+        d = 0
+        if (index(t, "-")) { d = substr(t, 1, index(t, "-") - 1); t = substr(t, index(t, "-") + 1) }
+        n = split(t, p, ":"); s = 0
+        for (i = 1; i <= n; i++) s = s * 60 + p[i]
+        return d * 86400 + s
+      }
+      BEGIN { args = trim(args) }
+      {
+        pid = $1; parent[pid] = $2; cpu[pid] = secs($3)
+        line = $0; sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+[^ \t]+[ \t]/, "", line)
+        same[pid] = (trim(line) == args)
+      }
+      END {
+        for (pid in same) {
+          if (pid == top || !same[pid] || cpu[pid] < limit) continue
+          chain = ""; p = parent[pid]
+          while (p != "" && p != top && p > 1) { chain = chain " " p; p = parent[p] }
+          if (p != top) continue
+          print "TERM " top; n = split(chain, c, " ")
+          for (i = n; i >= 1; i--) print "TERM " c[i]
+          print "KILL " pid
+        }
+      }') || continue
+    [ -n "$actions" ] || continue
+    while read -r sig pid; do
+      kill -"$sig" "$pid" 2>/dev/null || true
+    done <<EOF
+$actions
+EOF
+  done
+}
+"$BASH" -c "$(declare -f teardown_fork_spin_watchdog)"'; teardown_fork_spin_watchdog "$@"' \
+  fm-teardown-watchdog "$$" "${FM_TEARDOWN_FORK_SPIN_CPU:-60}" </dev/null >/dev/null 2>&1 &
 trap teardown_release_locks EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
