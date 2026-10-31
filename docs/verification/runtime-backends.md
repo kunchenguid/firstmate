@@ -113,6 +113,35 @@ A single-process harness has no descendant that adds a distinct verdict, which i
 The portable regression pins every half without any harness installed: `tests/fm-harness-precedence.test.sh` asserts that this two-process topology decides at comm strength, that the descent probe reaches a strength the top-of-session probe cannot, that a sibling branch answering a foreign harness contributes no verdict, that a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact, and that equal-depth ties choose the comm-strength leaf regardless of process ordering.
 The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, which were not installed, and stopped at the same pre-existing liveness failure for `cursor` 3.18.9, whose resolved binary on that machine is the editor rather than `cursor-agent`; those adapters are unverified by this run.
 
+### Bun-hosted OMP primary identity
+
+Verified on 2026-10-28 on macOS with `omp/18.13.1` and Bun 1.4.2, where `~/.bun/bin/omp` is a `#!/usr/bin/env bun` script rather than a native executable.
+The session-lock and primary-harness walks accept an exact harness script run by Bun, while rejecting option values, later arguments, bare names, and non-harness script basenames.
+The portable regressions exercise real native and Bun-named processes, including lock acquisition and an inherited `CLAUDECODE=1` marker:
+
+```sh
+rtk bash tests/fm-omp-harness.test.sh
+rtk bash tests/fm-session-lock-ancestry.test.sh
+```
+
+Both suites passed.
+The live guard ran against the real Bun-hosted OMP with the same inherited marker:
+
+```sh
+FM_OMP_LIVE_E2E=1 FM_OMP_LIVE_KEEP=1 FM_OMP_LIVE_MODEL='kimi-cn/kimi-k3.1-pro' rtk bash tests/fm-omp-primary-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - omp omp/18.13.1: both tracked .omp/extensions loaded by auto-discovery with no -e and no trust dialog
+ok - omp omp/18.13.1: before_agent_start delivered the digest into model context and the lock names the omp process
+ok - omp omp/18.13.1: fm_watch_arm_omp started a live watcher through the extension
+ok - omp omp/18.13.1: an actionable close spawned a ledger-linked successor and woke main exactly once
+ok - omp omp/18.13.1: session_stop compelled the guard continuation (guard rc=2, then a stop_hook_active stop) and the model reached for fm_watch_arm_omp
+# omp omp/18.13.1 model=kimi-cn/kimi-k3.1-pro: every live omp primary assertion passed
+```
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
@@ -3242,7 +3271,8 @@ The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin
 
 ### Process identity and markers
 
-`ps -o comm=` reports the bare name `omp` for the agent process, from both its `!` bash path and the model's bash tool, so identity is the anchored name; `ompd` and `comp` never match.
+`ps -o comm=` reports the bare name `omp` for the agent process, from both its `!` bash path and the model's bash tool, so identity for this native install is the anchored name; `ompd` and `comp` never match.
+A `#!/usr/bin/env bun` omp install carries the `bun` process name instead; [Bun-hosted OMP primary identity](#bun-hosted-omp-primary-identity) owns that shape.
 omp publishes no harness marker: `PI_CODING_AGENT` is absent from the binary, and the default profile sets neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
 `FM_OMP_HARNESS=omp` is Firstmate's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
 
