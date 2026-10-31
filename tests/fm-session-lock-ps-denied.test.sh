@@ -245,6 +245,52 @@ SH
   pass "refused -p with a live ps -V stays a stop; the denial check is cached once"
 }
 
+test_fallback_diagnostic_is_emitted_once() {
+  # The denied-ps diagnostic is one stderr line per run: a walk over a
+  # dead provider must not print one line per hop. The provider is read
+  # through a command substitution, so a flag it sets dies with that
+  # subshell, and the shell that owns the walk has to spend the guard.
+  # Three failing reads in one shell therefore print one line, and a
+  # readable first pid must not spend the budget for a later failing
+  # one, because a successful read has no cause line to spend.
+  local dir fakebin err lines
+  dir="$TMP_ROOT/diag-once"
+  fakebin=$(fm_fakebin "$dir"); make_denied_ps "$fakebin"
+  err="$dir/failing-reads"
+  PATH="$fakebin:$PATH" bash -c '
+    . "$0"
+    fm_os_proc_triple() {
+      fm_os_proc_diag_once "ps cannot execute and the ps-free identity provider failed for $1; identity reads fail closed"
+      return 1
+    }
+    fm_proc_info 700 || true
+    fm_proc_info 701 || true
+    fm_proc_info 702 || true
+  ' "$LIB" >/dev/null 2>"$err" || fail "the failing-reads fixture shell itself failed"
+  lines=$(grep -c '^fm-session-lock:' "$err" || true)
+  [ "$lines" = 1 ] \
+    || fail "three failing reads printed $lines diagnostics, expected 1: $(cat "$err")"
+  err="$dir/readable-then-failing"
+  PATH="$fakebin:$PATH" bash -c '
+    . "$0"
+    fm_os_proc_triple() {
+      if [ "$1" = 700 ]; then
+        printf "1\tclaude\tclaude --resume\n"
+        return 0
+      fi
+      fm_os_proc_diag_once "ps cannot execute and the ps-free identity provider failed for $1; identity reads fail closed"
+      return 1
+    }
+    fm_proc_info 700 || exit 6
+    fm_proc_info 701 || true
+    fm_proc_info 702 || true
+  ' "$LIB" >/dev/null 2>"$err" || fail "a readable first pid stopped the fixture walk"
+  lines=$(grep -c '^fm-session-lock:' "$err" || true)
+  [ "$lines" = 1 ] \
+    || fail "a readable read spent the diagnostic budget: $lines lines, expected 1"
+  pass "the denied-ps diagnostic prints once per shell, whatever reads follow"
+}
+
 test_ps_success_with_empty_comm_stays_present() {
   # ps exit 0 with no name is a REAL answer about a REAL process: a
   # live process whose comm was emptied is still a live process.
@@ -816,6 +862,7 @@ test_provider_shape_violations_rejected
 test_provider_empty_field_is_a_present_pid
 test_ps_failure_statuses_route_correctly
 test_ps_denial_must_be_confirmed_before_routing
+test_fallback_diagnostic_is_emitted_once
 test_ps_success_with_empty_comm_stays_present
 test_denied_ps_lock_decision_chain
 test_linux_provider_fixture_tree
