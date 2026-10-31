@@ -6472,11 +6472,11 @@ runs[2]{id,branch,status,head,pr}:
   FM_FAKE_RUN_HEAD=$old_head
   FM_FAKE_AXI_STATUS="$(run_running fm/reused-branch | sed 's/01RUN/01OLD/')"
   FM_FAKE_AXI_STATUS_RUN_01OLD="$FM_FAKE_AXI_STATUS"
-  FM_FAKE_AXI_STATUS_RUN_01NEW="$(FM_FAKE_RUN_HEAD=$new_head run_passed fm/reused-branch | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS_RUN_01NEW="$(FM_FAKE_RUN_HEAD=$new_head run_passed_with_pr fm/reused-branch https://github.com/o/r/pull/2 | sed 's/01RUN/01NEW/')"
   # Same-minute timestamps: ledger row order (newest-first) is the tie-break,
   # matching recorded AXI overviews. The bare status naming the older live run
   # must not hide the newer completed result.
-  FM_FAKE_RUNS_LIST="  completed fm/reused-branch ${new_head:0:7} 2026-09-28 12:00
+  FM_FAKE_RUNS_LIST="  completed fm/reused-branch ${new_head:0:7} 2026-09-28 12:00 https://github.com/o/r/pull/2
   running fm/reused-branch ${old_head:0:7} 2026-09-28 12:00"
   out=$(run_crew_state "$d" reused)
   assert_contains "$out" 'state: done' 'the newer completed run remains authoritative'
