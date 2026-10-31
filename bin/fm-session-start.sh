@@ -238,8 +238,8 @@
 #             again, while an equal baseline emits no instruction refresh.
 #
 # STAND-DOWN: an FM_NO_LOCK=1 session, and an unattended Claude session
-# (CLAUDE_CODE_SESSION_ATTENDED=0) unless FM_SESSIONSTART_ALLOW_UNATTENDED=1,
-# prints one stderr line and exits 0 before any state or lock work, so an agent
+# (CLAUDE_CODE_SESSION_ATTENDED=0 in an environment a live Claude ancestor
+# owns) unless FM_SESSIONSTART_ALLOW_UNATTENDED=1, prints one stderr line and exits 0 before any state or lock work, so an agent
 # that runs this script itself still never takes the fleet lock.
 # bin/fm-session-standdown-lib.sh owns that predicate; FM_SESSION_STANDDOWN_CHECKED=1,
 # set only by bin/fm-sessionstart-run.sh after it applied the payload-bound

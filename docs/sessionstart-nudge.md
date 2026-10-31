@@ -196,7 +196,8 @@ The run wrapper also stands down silently, before any state or lock work, for a 
 `FM_SESSIONSTART_ALLOW_UNATTENDED=1` opts an unattended Claude session back in, for Firstmate's own live checks that drive a throwaway primary through `claude -p`; it never overrides `FM_NO_LOCK=1`.
 A Claude background session (`claude --bg`) is also unattended but may be the captain's primary, so it still takes the helm when its `CLAUDE_JOB_DIR` basename equals the first 8 characters of its own `CLAUDE_CODE_SESSION_ID`; a child `claude -p` that inherited a background parent's `CLAUDE_JOB_DIR` does not match and still stands down.
 `bin/fm-session-standdown-lib.sh` owns this one predicate, and `bin/fm-session-start.sh` applies it too, so an agent in such a session that runs session start itself, because no digest arrived, still never takes the lock.
-Run directly, it reads the unattended signal from the calling session's own environment, prints one stderr line saying it stood down, and exits 0.
+Run directly, it has no payload, so the unattended signal counts only when `fm_session_lock_trusted_session_id` in `bin/fm-session-lock-lib.sh` proves `CLAUDE_PID` is a Claude member of the caller's contiguous harness ancestry; another harness that inherited the value, such as a Codex session started from a Claude pane, still takes the helm.
+When it stands down, it prints one stderr line saying so and exits 0.
 The run wrapper marks its own downstream call with `FM_SESSION_STANDDOWN_CHECKED=1`, so its payload-bound decision is not re-made from an inherited value.
 The signal evidence lives in [`verification/runtime-backends.md`](verification/runtime-backends.md#claude-unattended-session-signal).
 

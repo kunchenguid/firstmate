@@ -16,9 +16,17 @@
 # With a session id argument, the hook payload's session_id, the unattended
 # signal counts only when that id equals CLAUDE_CODE_SESSION_ID, so a value
 # inherited into another harness's hook is ignored.
-# Without one, the caller is a command the calling Claude session ran directly,
-# so the signal is read from that session's own environment.
+# Without one, the caller is a command some session ran directly, so the signal
+# counts only when bin/fm-session-lock-lib.sh's fm_session_lock_trusted_session_id
+# proves the environment belongs to a live Claude run in this process's
+# ancestry; a value inherited into another harness is ignored.
 # docs/sessionstart-nudge.md owns why.
+
+_FM_SESSION_STANDDOWN_LIB_DIR=${BASH_SOURCE[0]%/*}
+[ "$_FM_SESSION_STANDDOWN_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_SESSION_STANDDOWN_LIB_DIR=.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "${_FM_SESSION_STANDDOWN_LIB_DIR:-/}/fm-session-lock-lib.sh"
+unset _FM_SESSION_STANDDOWN_LIB_DIR
 
 # Return 0 when this session must stand down from session start.
 fm_session_start_stands_down() {  # [<payload-session-id>]
@@ -28,6 +36,10 @@ fm_session_start_stands_down() {  # [<payload-session-id>]
   local job_dir=${CLAUDE_JOB_DIR:-} session_id=${CLAUDE_CODE_SESSION_ID:-}
   job_dir=${job_dir%/}
   [ -n "$job_dir" ] && [ -n "$session_id" ] && [ "${job_dir##*/}" = "${session_id:0:8}" ] && return 1
-  [ "$#" -eq 0 ] && return 0
+  if [ "$#" -eq 0 ]; then
+    # shellcheck disable=SC2119 # No precomputed ancestry; the helper walks it.
+    fm_session_lock_trusted_session_id >/dev/null
+    return
+  fi
   [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && [ "$1" = "$CLAUDE_CODE_SESSION_ID" ]
 }
