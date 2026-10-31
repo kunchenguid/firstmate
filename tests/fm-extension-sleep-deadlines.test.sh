@@ -308,8 +308,125 @@ JS
   pass "a launch-ready wait interrupted by suspension recovers inside the grace"
 }
 
+# The capture gate must accept every overrun_ms the host can emit (the host
+# validates JS safe integers, at most 16 digits) and reject beyond it, so a
+# long suspension can never silently lose the host-error identity that keeps
+# retries coalescing into one capture.
+overrun_boundary_case() { # <tag> <overrun-ms> <expect-host-error: yes|no> <expected-result-count after two rounds>
+  (
+    set -u
+    local case_root="$TMP_ROOT/overrun-$1" overrun=$2 expect_marker=$3 expect_count=$4
+    local home source claim_root evidence inbox round_result_count
+    local saved_home=${HOME:-} saved_xdg=${XDG_STATE_HOME:-}
+    home="$case_root/home"
+    source="boundary-$1"
+    claim_root="$case_root/claims"
+    mkdir -p "$case_root/user-home" "$case_root/code" "$home" "$claim_root"
+    export HOME="$case_root/user-home" XDG_STATE_HOME="$case_root/xdg"
+    export FM_PROCEVENT_CLAIM_ROOT="$claim_root"
+    export FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=10
+    # Copied tree whose fm-extension.mjs is a shim: a source.poll emits the
+    # exact envelope under test and exits 70, every other host command runs
+    # the real host, so the production capture pipeline validates the bytes.
+    cp -R "$ROOT/bin" "$case_root/code/bin"
+    cat > "$case_root/code/bin/fm-extension.mjs" <<SHIM
+#!/usr/bin/env bash
+case " \$* " in
+  *" process-event "*" source.poll "*)
+    printf '%s\\n' "\${FM_SHIM_EVIDENCE:?FM_SHIM_EVIDENCE is required}"
+    exit 70
+    ;;
+esac
+exec $ROOT/bin/fm-extension.mjs "\$@"
+SHIM
+    chmod 0755 "$case_root/code/bin/fm-extension.mjs"
+    FM_HOME="$home" "$ROOT/bin/fm-extension.mjs" bind "$PACKAGE" --adapter ext-sleep \
+      --trust-same-user-code --timeout-ms "$BOUND_MS" >/dev/null \
+      || fail "cannot bind the overrun-boundary fixture"
+    fm_test_track_procevent_home "$home" "$claim_root"
+    FM_HOME="$home" "$case_root/code/bin/fm-procevent.sh" register-extension ext-sleep "$source" \
+      --config-ref boundary >/dev/null || fail "cannot register $1 fixture"
+    evidence=$(printf '{"schema":"firstmate.process-event-extension-error.v1","extension_id":"org.example.sleep-deadlines","operation":"source.poll","code":"timeout","bound":"invoke","overrun_ms":%s}' "$overrun")
+    inbox="$home/state/procevent-inbox"
+    for round in 1 2; do
+      if [ "$round" -eq 1 ]; then
+        FM_SHIM_EVIDENCE="$evidence" FM_HOME="$home" \
+          "$case_root/code/bin/fm-procevent.sh" start "$source" > "$case_root/start.out" 2>&1 \
+          || fail "$1 start failed: $(cat "$case_root/start.out")"
+      else
+        FM_SHIM_EVIDENCE="$evidence" FM_HOME="$home" \
+          "$case_root/code/bin/fm-procevent.sh" reconcile > "$case_root/reconcile.out" 2>&1 \
+          || fail "$1 reconcile failed: $(cat "$case_root/reconcile.out")"
+        assert_contains "$(cat "$case_root/reconcile.out")" 'started=1' "$1 retry did not launch a recovery poll"
+      fi
+      settle_source "$home" "$claim_root" "$source" \
+        || fail "$1 round $round runner did not settle"
+      round_result_count=$(inbox_count "$inbox" "$source")
+      # A gate-accepted envelope coalesces into the first capture; a rejected
+      # envelope allocates a fresh result each round.
+      if [ "$expect_marker" = yes ]; then
+        [ "$round_result_count" -eq 1 ] \
+          || fail "$1 round $round produced $round_result_count results, expected 1 coalesced capture"
+      else
+        [ "$round_result_count" -eq "$round" ] \
+          || fail "$1 round $round produced $round_result_count results, expected $round"
+      fi
+    done
+    [ "$(inbox_count "$inbox" "$source")" -eq "$expect_count" ] \
+      || fail "$1 did not settle at $expect_count captures"
+    if [ "$expect_marker" = yes ]; then
+      [ "$(host_error_count "$inbox" "$source")" -eq 1 ] \
+        || fail "an overrun at the capture gate cap lost its host-error identity"
+      [ "$expect_count" -eq 1 ] \
+        || fail "an overrun at the capture gate cap must coalesce retries into one capture"
+    else
+      [ "$(host_error_count "$inbox" "$source")" -eq 0 ] \
+        || fail "an overrun beyond the capture gate cap was accepted as host-error identity"
+      [ "$expect_count" -eq 2 ] \
+        || fail "an overrun beyond the capture gate cap should not coalesce retries"
+    fi
+    export HOME="$saved_home"
+    if [ -n "$saved_xdg" ]; then export XDG_STATE_HOME="$saved_xdg"; else unset XDG_STATE_HOME; fi
+    unset FM_PROCEVENT_CLAIM_ROOT FM_PROCEVENT_LAUNCH_FLOOR_SECONDS FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS
+  )
+}
+
+test_overrun_at_the_capture_gate_cap_keeps_host_error_identity() {
+  # 9007199254740991 is Number.MAX_SAFE_INTEGER: the largest value the host
+  # can emit, so the gate must accept it and keep retry dedupe working.
+  overrun_boundary_case cap 9007199254740991 yes 1 || exit 1
+  pass "an overrun at the capture gate cap keeps its host-error identity and retry coalescing"
+}
+
+test_overrun_beyond_the_capture_gate_cap_is_rejected() {
+  # 17 digits cannot come from a host-validated safe integer; the gate must
+  # reject the envelope instead of recording a host-error identity.
+  overrun_boundary_case beyond 10000000000000000 no 2 || exit 1
+  pass "an overrun beyond the capture gate cap is rejected without host-error identity"
+}
+
+settle_source() { # <home> <claim-root> <source>
+  local runner_pid
+  for _ in $(seq 1 600); do
+    runner_pid=$(sed -n '2p' "$2/$3.claim" 2>/dev/null || true)
+    if [ ! -e "$1/state/procevent/$3.runner" ] && [ -z "$runner_pid" ]; then return 0; fi
+    sleep 0.05
+  done
+  return 1
+}
+
+inbox_count() { # <inbox-dir> <source>
+  compgen -G "$1/$2"'.*.result' 2>/dev/null | wc -l | tr -d ' '
+}
+
+host_error_count() { # <inbox-dir> <source>
+  compgen -G "$1/$2"'.*.host-error' 2>/dev/null | wc -l | tr -d ' '
+}
+
 fm_test_run \
   test_genuine_stall_dies_at_bound \
   test_frozen_invocation_resumes_inside_grace \
   test_frozen_invocation_still_dies_at_bound \
-  test_launch_ready_recovers_after_suspension
+  test_launch_ready_recovers_after_suspension \
+  test_overrun_at_the_capture_gate_cap_keeps_host_error_identity \
+  test_overrun_beyond_the_capture_gate_cap_is_rejected

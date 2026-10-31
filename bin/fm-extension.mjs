@@ -1876,8 +1876,9 @@ function errorEvidence(error, extensionId, operation) {
     evidence.bound = bound;
     // overrun_ms marks the suspension-driven kill: it exists only when the
     // deadline fired materially late and a bounded grace was granted, so a
-    // genuine stall keeps byte-stable evidence at its bound.
-    if (error.graceUsed === true && Number.isInteger(error.overrunMs) && error.overrunMs >= 0) {
+    // genuine stall keeps byte-stable evidence at its bound. isSafeInteger
+    // pins emission to the plain-digit range the capture gate accepts.
+    if (error.graceUsed === true && Number.isSafeInteger(error.overrunMs) && error.overrunMs >= 0) {
       evidence.overrun_ms = error.overrunMs;
     }
   }
