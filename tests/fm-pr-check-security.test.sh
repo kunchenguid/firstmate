@@ -277,6 +277,15 @@ case " $* " in
           *) printf '%s\n' '[]' ;;
         esac
         ;;
+      *merge_trains)
+        if [ -n "${FM_TEST_GLAB_TRAINS+x}" ]; then
+          printf '%s\n' "$FM_TEST_GLAB_TRAINS"
+        elif [ "${FM_TEST_GLAB_TRAIN:-}" = gone ]; then
+          printf '%s\n' '[]'
+        else
+          printf '%s\n' '[{"cars":[{"merge_request":{"iid":7}}]}]'
+        fi
+        ;;
       *pipelines/77/jobs*)
         # A child pipeline in another project is served only under that
         # project's own path.
@@ -1547,13 +1556,11 @@ test_arming_baselines_an_already_degraded_change() {
   state="$dir/home/state"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   write_task_meta "$dir" task-a
-  if FM_TEST_GLAB_FAIL=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
-      run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err"; then
-    fail "arming succeeded although its baseline read failed"
-  fi
-  grep -q 'could not read the forge' "$dir/unreadable.err" || fail "arming did not name the unreadable baseline read"
+  FM_TEST_GLAB_FAIL=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/unreadable.err" \
+    || fail "arming failed although the unreadable baseline should be unknown"
   [ ! -e "$state/.control-task-a.lock" ] || fail "an unreadable baseline read left the control lock held"
-  [ ! -e "$state/task-a.check.sh" ] || fail "an unreadable baseline read published a poll"
+  [ -e "$state/task-a.check.sh" ] || fail "an unreadable baseline read did not publish a poll"
   # A readable merge request whose merge-train car read fails for any reason
   # other than a 404 arms as not on a train, so the merged wake is kept.
   for fail_env in FM_TEST_GLAB_API_FAIL FM_TEST_GLAB_TRAIN; do
@@ -2846,8 +2853,8 @@ EOF
     elapsed=$((SECONDS - started))
     case $out in
       'degraded pipeline=941 url=https://gitlab.example/group/subgroup/project/-/pipelines/941') [ -z "$train" ] || fail "GitLab train drop emitted a pipeline line without perl: $out" ;;
-      "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941") [ -n "$train" ] || fail "GitLab failed pipeline emitted a train line without perl: $out" ;;
-      *) fail "GitLab poll lost the known failure without perl (train=$train): $out" ;;
+      '') [ -n "$train" ] || fail "GitLab pipeline failure was lost without perl: $out" ;;
+      *) fail "GitLab poll emitted an unbounded train drop without perl (train=$train): $out" ;;
     esac
     ! grep -q 'api projects/.*/pipelines/' "$dir/glab.log" \
       || fail "GitLab poll made an unbounded detail read without perl (train=$train)"
@@ -2873,9 +2880,11 @@ EOF
   [ "$out" = ontrain ] || fail "GitLab poll did not report a merge request on its train: $out"
   out=$(FM_TEST_GLAB_STDERR_NOTICE=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car run_poll "$dir")
   [ "$out" = ontrain ] || fail "a stderr notice on a good car read spoiled the on-train report: $out"
-  out=$(FM_TEST_GLAB_STDERR_NOTICE=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  out=$(FM_TEST_GLAB_STDERR_NOTICE=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone \
+    FM_TEST_GLAB_TRAINS='[{"cars":[{"merge_request":{"iid":7}}]}]' run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll treated an ambiguous car-endpoint 404 as a train drop: $out"
-  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=canceled FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_DETAIL=need_rebase run_poll "$dir")
+  out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=canceled FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_DETAIL=need_rebase \
+    FM_TEST_GLAB_TRAINS='[{"cars":[{"merge_request":{"iid":7}}]}]' run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll treated an ambiguous car-endpoint 404 as a train drop: $out"
   # A train drop names only the pipeline link, so a merge request never on a
   # train costs no pipeline detail reads on each poll.

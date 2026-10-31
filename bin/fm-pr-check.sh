@@ -249,7 +249,7 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
     if [ "$BASELINE_RC" = 124 ]; then
       echo "error: baseline read of the PR poll timed out" >&2
     elif [ "$BASELINE_RC" = 3 ]; then
-      echo "error: baseline read of the PR poll could not read the forge" >&2
+      BASELINE=
     else
       echo "error: baseline read of the PR poll failed" >&2
     fi

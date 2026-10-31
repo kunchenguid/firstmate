@@ -323,10 +323,28 @@ case "$provider" in
           printf '%s' "$car" | jq -e . >/dev/null 2>&1 || exit 0
           printf '%s' "$car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1 \
             && printf '%s\n' ontrain
-        else
-          # A missing car endpoint response does not prove removal: it can
-          # also mean this endpoint is unavailable or inaccessible.
-          exit 0
+        elif [ "$car_rc" -ne 0 ]; then
+          case $car_err in
+            *'(HTTP 404)'*) ;;
+            *) exit 0 ;;
+          esac
+          trains=$(gitlab_detail_read "projects/$enc/merge_trains" 2>/dev/null) || exit 0
+          present=$(printf '%s' "$trains" | jq -er --argjson iid "$number" '
+            if type == "array" then
+              [ .[].cars[]? | select(.merge_request.iid == $iid) ] | length == 0
+            else
+              error("invalid merge train list")
+            end' 2>/dev/null) || exit 0
+          [ "$present" = true ] || exit 0
+          reread=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null \
+            | jq -r 'if type == "object" and (.state | type) == "string" then .state else error("invalid") end' 2>/dev/null) \
+            || exit 0
+          case $reread in opened|locked) ;; *) exit 0 ;; esac
+          line="degraded train=dropped url=$url"
+          [ -z "$reason" ] || line="$line reason=$reason"
+          [ -z "$pipeline" ] || line="$line pipeline_url=https://$host/$path/-/pipelines/$pipeline"
+          [ "${#line}" -le 2000 ] || exit 0
+          printf '%s\n' "$line"
         fi
         exit 0
         ;;
