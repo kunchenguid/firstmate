@@ -40,6 +40,8 @@
 # that retains other tasks' rows. The next admission applies and clears every
 # pending marker under that boundary before it counts, so a busy boundary
 # cannot leave a live replacement behind a row that claims no slot.
+# Marker staging stays outside the consumed namespace until atomic publication.
+# Storage failures refuse loudly; ordinary lock contention never refuses an uncapped dispatch.
 #
 
 # Registries live in each owning state directory; the claim lock lives in
@@ -643,7 +645,7 @@ fm_sol_cap_registry_supersede() {  # <registry-file> <id>
 fm_sol_cap_supersede_pending() {  # <state-dir> <id> <start> <pid>
   local state=$1 id=$2 start=$3 pid=$4 path tmp
   path=$state/$FM_SOL_PENDING_PREFIX$id
-  tmp=$path.tmp.$$
+  tmp=$state/.sol-cap-supersede.tmp.$id.$$
   if ! printf '%s\t%s\n' "$start" "$pid" > "$tmp" 2>/dev/null; then
     rm -f -- "$tmp"
     return 1
@@ -753,11 +755,18 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     # only rewritten under the boundary; the next admission applies it before
     # it counts, so the prior row cannot hide the live replacement forever.
     if ! fm_sol_cap_lock_try_briefly "$lock"; then
-      fm_sol_cap_supersede_pending "$state" "$id" "$row_start" "$row_pid" || true
+      if ! fm_sol_cap_supersede_pending "$state" "$id" "$row_start" "$row_pid"; then
+        FM_SOL_CAP_REFUSAL="error: Sol ceiling unavailable: cannot record pending supersede for task $id in $state; check state-directory permissions and free space; task was not dispatched rather than launched possibly uncounted"
+        return 1
+      fi
       return 0
     fi
     if ! fm_sol_cap_registry_supersede "$state/$FM_SOL_REGISTRY_NAME" "$id"; then
       fm_lock_release "$lock" || true
+      if ! fm_sol_cap_supersede_pending "$state" "$id" "$row_start" "$row_pid"; then
+        FM_SOL_CAP_REFUSAL="error: Sol ceiling unavailable: cannot record pending supersede for task $id in $state; check state-directory permissions and free space; task was not dispatched rather than launched possibly uncounted"
+        return 1
+      fi
       return 0
     fi
     fm_lock_release "$lock" || true

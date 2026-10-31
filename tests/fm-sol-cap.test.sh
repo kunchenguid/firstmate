@@ -687,21 +687,104 @@ test_a_busy_boundary_replacement_lands_its_pending_supersede() {
   pass "a busy admission boundary keeps the invalidation pending and the next admission supersedes the prior row"
 }
 
+test_pending_publication_is_invisible_until_rename() (
+  local case_dir state
+  case_dir=$(make_case pending-publication task-c)
+  state=$case_dir/home/state
+  FM_HOME=$case_dir/home
+  . "$ROOT/bin/fm-wake-lib.sh"
+  . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+  . "$ROOT/bin/fm-sol-cap-lib.sh"
+  write_sol_row "$FM_HOME" task-c 1 -1
+  mv() {
+    fm_sol_cap_apply_pending_supersedes "$state" || return 1
+    assert_equals "-1" "$(registry_row_field "$case_dir" task-c 4)" "admission consumed an unpublished marker"
+    command mv "$@"
+  }
+  fm_sol_cap_supersede_pending "$state" task-c 1 -1 || fail "admission removed the staged marker"
+  unset -f mv
+  assert_present "$state/.sol-cap-supersede-task-c" "publication lost its marker"
+  fm_sol_cap_apply_pending_supersedes "$state" || fail "the published marker could not be applied"
+  assert_equals "-3" "$(registry_row_field "$case_dir" task-c 4)" "the published marker did not supersede its row"
+  assert_absent "$state/.sol-cap-supersede-task-c" "the applied marker was not cleared"
+  pass "admission cannot consume marker staging before atomic publication"
+)
+
+test_pending_publication_failure_is_reported() (
+  local case_dir
+  case_dir=$(make_case pending-publication-failure task-c)
+  FM_HOME=$case_dir/home
+  . "$ROOT/bin/fm-wake-lib.sh"
+  . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+  . "$ROOT/bin/fm-sol-cap-lib.sh"
+  write_sol_row "$FM_HOME" task-c 1 -1
+  rm "$FM_HOME/config/sol-cap"
+  fm_sol_cap_lock_try_briefly() { return 1; }
+  mv() { return 1; }
+  if fm_sol_cap_refuse_and_claim task-c ship codex gpt-6.1-sol "$FM_HOME/config" "$FM_HOME/state"; then
+    fail "failed marker publication silently allowed an uncounted replacement"
+  fi
+  assert_contains "$FM_SOL_CAP_REFUSAL" "$FM_HOME/state" "publication failure omitted its affected state directory"
+  assert_contains "$FM_SOL_CAP_REFUSAL" "permissions and free space" "publication failure omitted recovery guidance"
+  assert_equals "-1" "$(registry_row_field "$case_dir" task-c 4)" "publication failure rewrote the registry"
+  pass "failed marker publication reports the unavailable count"
+)
+
 test_a_busy_boundary_supersede_keeps_another_claims_row() {
-  local case_dir out
+  local case_dir out holder replacement admission i
   case_dir=$(make_case pending-supersede-other task-c task-d)
   write_sol_row "$case_dir/home" task-c "$(fresh_start)" -1
   fm_write_meta "$case_dir/home/state/task-c.meta" "model=gpt-6.1-sol" "kind=ship"
-  write_sol_row "$case_dir/home" other "$(fresh_start)" 0
-  busy_boundary_replacement "$case_dir"
-  out=$(admit_after_pending "$case_dir" task-d gpt-6.1-sol) ||
-    fail "the next admission failed: $out"
-  assert_equals "$out" "claimed" "the next admission did not claim its own slot"
-  assert_equals "0" "$(registry_row_field "$case_dir" other 4)" \
-    "the pending invalidation dropped another admitted claim's row"
-  assert_equals "gpt-6.1-sol" "$(registry_row_field "$case_dir" other 2)" \
-    "the pending invalidation changed another admitted claim's row"
-  pass "a pending invalidation rewrites only its own task id's row"
+  printf 'max=2\nmodels=gpt-6-sol\n' > "$case_dir/home/config/sol-cap"
+  (
+    mkdir "$case_dir/home/state/.sol-cap.lock" || exit 1
+    printf '%s\n' "$BASHPID" > "$case_dir/home/state/.sol-cap.lock/pid"
+    touch "$case_dir/held"
+    for ((i=0; i<400; i++)); do
+      [ ! -e "$case_dir/release" ] || break
+      sleep 0.05
+    done
+    rm -rf -- "$case_dir/home/state/.sol-cap.lock"
+  ) &
+  holder=$!
+  for ((i=0; i<200; i++)); do
+    [ ! -e "$case_dir/held" ] || break
+    sleep 0.05
+  done
+  assert_present "$case_dir/held" "the live process did not hold the boundary"
+  lib_refuse_claim "$case_dir" task-c gpt-6.1-sol > "$case_dir/replacement.out" &
+  replacement=$!
+  for ((i=0; i<200; i++)); do
+    [ ! -e "$case_dir/home/state/.sol-cap-supersede-task-c" ] || break
+    sleep 0.05
+  done
+  assert_present "$case_dir/home/state/.sol-cap-supersede-task-c" "the replacement did not publish its marker"
+  assert_present "$case_dir/home/state/.sol-cap.lock" "the marker was not published while the boundary was held"
+  wait "$replacement" || fail "the uncapped replacement failed"
+  assert_equals "$(cat "$case_dir/replacement.out")" "not-capped" "contention refused the replacement"
+  assert_equals "-1" "$(registry_row_field "$case_dir" task-c 4)" "the replacement rewrote the locked registry"
+  printf 'max=2\nmodels=gpt-6.1-sol\n' > "$case_dir/home/config/sol-cap"
+  (
+    touch "$case_dir/admission-started"
+    admit_after_pending "$case_dir" task-d gpt-6.1-sol > "$case_dir/admission.out"
+  ) &
+  admission=$!
+  for ((i=0; i<200; i++)); do
+    [ ! -e "$case_dir/admission-started" ] || break
+    sleep 0.05
+  done
+  assert_present "$case_dir/admission-started" "the concurrent admission did not start"
+  [ ! -s "$case_dir/admission.out" ] || fail "admission passed the held boundary"
+  touch "$case_dir/release"
+  wait "$holder" || fail "the boundary holder failed"
+  wait "$admission" || fail "the concurrent admission failed"
+  assert_equals "$(cat "$case_dir/admission.out")" "claimed" "the concurrent admission did not claim"
+  assert_equals "-2" "$(registry_row_field "$case_dir" task-c 4)" "the prior row did not resolve to the replacement"
+  assert_equals "gpt-6.1-sol" "$(registry_row_field "$case_dir" task-d 2)" "the concurrent claim was dropped"
+  assert_absent "$case_dir/home/state/.sol-cap-supersede-task-c" "the published marker was not consumed"
+  out=$(admit_after_pending "$case_dir" task-e gpt-6.1-sol) || true
+  assert_contains "$out" "ceiling reached" "the concurrent sequence exceeded the ceiling"
+  pass "a concurrent admission preserves its claim while applying a pending invalidation"
 }
 
 test_a_busy_boundary_replacement_counts_at_the_ceiling() {
@@ -1471,6 +1554,8 @@ test_an_uncapped_incarnation_resolves_a_superseded_row
 test_an_abandoned_replacement_consumes_no_capacity
 test_a_live_row_is_not_superseded
 test_a_busy_boundary_replacement_lands_its_pending_supersede
+test_pending_publication_is_invisible_until_rename
+test_pending_publication_failure_is_reported
 test_a_busy_boundary_supersede_keeps_another_claims_row
 test_a_busy_boundary_replacement_counts_at_the_ceiling
 test_relaunched_session_id_replaces_its_own_row
