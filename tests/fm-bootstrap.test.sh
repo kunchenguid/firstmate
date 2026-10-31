@@ -1540,7 +1540,7 @@ SH
 }
 
 test_treehouse_pool_report_is_read_only_and_classifies_pools() {
-  local case_dir home root fakebin registered unregistered other_home_clone missing_date fractional_repo leased_repo pool out
+  local case_dir home root fakebin registered unregistered other_home_clone missing_date fractional_repo leased_repo many_repo jq_count_file real_jq jq_calls pool i out
   case_dir="$TMP_ROOT/pool-report"
   home="$case_dir/home"
   root="$case_dir/pools"
@@ -1551,12 +1551,30 @@ test_treehouse_pool_report_is_read_only_and_classifies_pools() {
   other_home_clone="$case_dir/other-home/projects/repo"
   fractional_repo="$home/projects/fractional"
   leased_repo="$home/projects/leased"
-  mkdir -p "$home/projects" "$root/one" "$root/two" "$root/orphan" "$root/other-home" "$root/project-leftover" "$root/empty-path" "$root/timestamp" "$root/leased" "$other_home_clone" "$missing_date" "$fractional_repo" "$leased_repo"
+  many_repo="$home/projects/many"
+  mkdir -p "$home/projects" "$root/one" "$root/two" "$root/orphan" "$root/other-home" "$root/project-leftover" "$root/empty-path" "$root/timestamp" "$root/leased" "$root/many" "$other_home_clone" "$missing_date" "$fractional_repo" "$leased_repo" "$many_repo"
   fakebin=$(make_fake_toolchain "$case_dir")
   git init -q "$registered"
   git init -q "$other_home_clone"
   git init -q "$fractional_repo"
   git init -q "$leased_repo"
+  git init -q "$many_repo"
+  real_jq=$(command -v jq)
+  jq_count_file="$case_dir/jq-count"
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+printf '.\n' >> "$FM_TEST_JQ_COUNT"
+exec "$FM_TEST_REAL_JQ" "$@"
+SH
+  chmod +x "$fakebin/jq"
+  {
+    printf '{"worktrees":['
+    for ((i = 0; i < 64; i++)); do
+      [ "$i" -eq 0 ] || printf ','
+      printf '{"path":"%s"}' "$many_repo"
+    done
+    printf ']}\n'
+  } > "$root/many/treehouse-state.json"
   for pool in one two; do
     mkdir -p "$root/$pool/slot"
     cat > "$root/$pool/treehouse-state.json" <<JSON
@@ -1581,15 +1599,19 @@ JSON
   cat > "$root/leased/treehouse-state.json" <<JSON
 {"worktrees":[{"path":"$leased_repo","created_at":"2020-01-01T00:00:00Z","leased":true,"lease_id":"lease-1","lease_holder":"secondmate-home","leased_at":"2026-10-01T00:00:00Z"}]}
 JSON
-  before=$(find "$root" "$registered" "$other_home_clone" -type f -exec shasum -a 256 {} \; | sort)
-  out=$(PATH="$fakebin:$BASE_PATH" TREEHOUSE_ROOT="$root" FM_POOL_ORPHAN_DAYS=30 \
+  before=$(find "$root" "$registered" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" -type f -exec shasum -a 256 {} \; | sort)
+  : > "$jq_count_file"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_COUNT="$jq_count_file" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" FM_POOL_ORPHAN_DAYS=30 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  after=$(find "$root" "$registered" "$other_home_clone" -type f -exec shasum -a 256 {} \; | sort)
+  jq_calls=$(wc -l < "$jq_count_file")
+  after=$(find "$root" "$registered" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" -type f -exec shasum -a 256 {} \; | sort)
   [ "$before" = "$after" ] || fail "pool report modified pool or repository files"
   assert_contains "$out" "unregistered pool $root/orphan" "pool with no existing project repository was not reported"
   assert_not_contains "$out" "unregistered pool $root/other-home" "another home's existing project clone was falsely reported orphaned"
   assert_contains "$out" "duplicate-clone pool $root/two" "duplicate clone pool was not reported"
+  assert_not_contains "$out" "duplicate-clone pool $root/many" "sibling slots in one pool were reported as duplicate pools"
+  [ "$jq_calls" -le $((64 * 3)) ] || fail "pool scan used $jq_calls jq invocations for 64 slots; expected a linear bound"
   assert_not_contains "$out" "duplicate-clone pool $root/one" "sibling slots in one pool were reported as duplicate pools"
   assert_contains "$out" "test-leftover pool $root/project-leftover" "test leftover pool was not reported"
   assert_not_contains "$out" "unregistered pool $root/project-leftover" "empty worktrees array created a synthetic slot"
