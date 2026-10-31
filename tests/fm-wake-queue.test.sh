@@ -270,6 +270,34 @@ SH
   pass "registered custom check output is queued before cadence suppression"
 }
 
+test_multiline_check_output_wakes_as_one_line() {
+  local dir state fakebin out drain_out check_file
+  dir=$(make_case check-multiline)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  check_file="$state/task.check.sh"
+  cat > "$check_file" <<'SH'
+#!/usr/bin/env bash
+printf 'first event\nsecond event\nthird event\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register multi-line custom check"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not exit for multi-line check output"
+  # Wake consumers keep only lines carrying a wake prefix, so every check line
+  # must ride the one prefixed line, matching the queued row's payload.
+  [ "$(grep -c '' "$out")" -eq 1 ] || fail "multi-line check wake spanned more than one output line"
+  grep -Fx "check: $check_file: first event second event third event" "$out" >/dev/null \
+    || fail "watcher wake line did not carry every check output line"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after multi-line check wake failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F 'first event second event third event' >/dev/null \
+    || fail "multi-line check wake was not queued in full"
+  pass "multi-line check output wakes as one line matching its queued row"
+}
+
 test_atomic_double_drain() {
   local dir state out1 out2 count1 count2 sequence generation leftover
   dir=$(make_case double-drain)
@@ -3765,6 +3793,7 @@ test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
+test_multiline_check_output_wakes_as_one_line
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
