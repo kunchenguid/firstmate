@@ -5812,7 +5812,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     candidate=""
     last_seen=""
     last_reason="the pane reported no path"
-    for _ in $(seq 1 60); do
+    # Observe both ends of the 60 inter-poll sleeps. Sleeping after the final
+    # observation discarded that last interval and left a slot first seen on
+    # read 60 with no opportunity for its required confirming read.
+    for poll in $(seq 0 60); do
+      [ "$poll" -eq 0 ] || sleep 1
       p=$(spawn_current_path "$WT_TARGET" || true)
       [ -z "$p" ] || last_seen="$p"
       if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -5827,7 +5831,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         candidate=""
         [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
-      sleep 1
     done
     if [ -z "$WT" ]; then
       echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
