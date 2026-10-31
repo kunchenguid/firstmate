@@ -192,6 +192,8 @@ The worktree and the task's records are unaffected either way.
 - On t3code, `exit` refuses before anything is sent: a T3 thread has no composer for a typed exit command, and T3's `/mcp` tools offer no session stop.
 - `relaunch` additionally requires a backend that can host a replacement agent - tmux, herdr, and rex.
   t3code is refused before anything is stopped: a T3 thread keeps its conversation, so a new turn or a provider change on it continues the same agent rather than launching a fresh one.
+- `relaunch` refuses any active backlog hold before stopping a ship or scout, including in manual-backlog homes; `tasks-axi`'s `held` result owns dated-hold expiry.
+  A manual-backlog home with a backlog still needs compatible `tasks-axi` to verify holds; unavailable or incompatible tooling, or an unreadable hold state, refuses relaunch.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts; a Rex `unreadable` acts only once the absence proof above settles it.
 - `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.

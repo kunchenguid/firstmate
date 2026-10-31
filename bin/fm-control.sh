@@ -102,7 +102,7 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
-#              An active captain hold refuses before stopping the agent, even
+#              An active backlog hold refuses before stopping the agent, even
 #              with manual backlog editing; tasks-axi owns --until expiry.
 #              An unreadable hold record refuses rather than resuming work.
 #              Records a durable checkpoint and that note, exits the old agent,
@@ -1228,19 +1228,19 @@ do_relaunch() {
   local -a spawn_args
 
   if [ "$KIND" != secondmate ]; then
-    FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" || hold_status=$?
+    FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" --distinguish-absent || hold_status=$?
     case "$hold_status" in
-      0)
-        # An expired deferral remains an open captain call; only its active
-        # dispatch hold prevents recovery from relaunching the worker.
+      0|1)
+        # An existing row may be held for any reason, regardless of whether it
+        # is an open captain call; tasks-axi owns hold expiry.
         fm_backlog_row_probe "$DATA" "$ID" \
-          || die "cannot verify task $ID's captain hold before relaunch ($FM_BACKLOG_ROW_ERROR)"
-        case "$FM_BACKLOG_ROW_HOLD_KIND ${FM_BACKLOG_ROW_STATE#* }" in
-          'captain yes '*) die "task $ID is captain-held; relaunch skipped before stopping the agent" ;;
+          || die "cannot verify task $ID's backlog hold before relaunch ($FM_BACKLOG_ROW_ERROR)"
+        case "${FM_BACKLOG_ROW_STATE#* }" in
+          'yes '*) die "task $ID is ${FM_BACKLOG_ROW_HOLD_KIND:-backlog}-held; relaunch skipped before stopping the agent" ;;
         esac
         ;;
-      1) ;;
-      *) die "cannot verify task $ID's captain hold before relaunch" ;;
+      3) ;;
+      *) die "cannot verify task $ID's backlog hold before relaunch" ;;
     esac
   fi
 

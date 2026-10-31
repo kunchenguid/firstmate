@@ -3141,22 +3141,22 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
-test_relaunch_refuses_an_active_captain_hold_before_stopping() {
-  local dir out rc
+test_relaunch_refuses_an_active_hold_before_stopping() {
+  local dir out rc hold_kind=${1:-captain}
   fm_tasks_axi_compatible || { fail "captain-hold regression requires compatible tasks-axi"; }
-  dir=$(new_case captain-hold rlhold)
+  dir=$(new_case "$hold_kind-hold" rlhold)
   add_ship_task "$dir" rlhold claude
   seed_backlog "$dir" rlhold in_flight
   mkdir -p "$dir/home/config"
   printf 'manual\n' > "$dir/home/config/backlog-backend"
-  tasks-axi hold rlhold --reason 'frozen pending captain approval' --kind captain \
+  tasks-axi hold rlhold --reason 'frozen pending approval' --kind "$hold_kind" \
     --until 2099-11-02 --file "$dir/home/data/backlog.md" >/dev/null
   cp "$dir/home/state/rlhold.meta" "$dir/before.meta"
   cp "$dir/home/data/rlhold/brief.md" "$dir/before-brief.md"
 
   out=$(run_control "$dir" rlhold relaunch --note 'recover after daemon restart'); rc=$?
-  expect_code 1 "$rc" "a captain-held task must refuse relaunch even with manual backlog editing"$'\n'"$out"
-  assert_contains "$out" 'captain-held' "the refusal must explain the hold"
+  expect_code 1 "$rc" "$hold_kind-held work must refuse relaunch even with manual backlog editing"$'\n'"$out"
+  assert_contains "$out" "$hold_kind-held" "the refusal must explain the hold"
   [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] \
     || fail "the held task received lifecycle input"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "the held agent was stopped"
@@ -3165,7 +3165,7 @@ test_relaunch_refuses_an_active_captain_hold_before_stopping() {
   [ ! -e "$dir/home/state/rlhold.control-relaunch" ] || fail "refusal began a relaunch transaction"
   assert_contains "$(tasks-axi show rlhold --file "$dir/home/data/backlog.md")" 'held: yes' \
     "refusal released the hold"
-  pass "fm-control relaunch: an active captain hold refuses before stopping or changing the task"
+  pass "fm-control relaunch: an active $hold_kind hold refuses before stopping or changing the task"
 }
 
 test_relaunch_respects_captain_hold_expiry() {
@@ -3222,7 +3222,8 @@ SH
   pass "fm-control relaunch: unreadable captain hold state refuses before stopping the agent"
 }
 
-test_relaunch_refuses_an_active_captain_hold_before_stopping
+test_relaunch_refuses_an_active_hold_before_stopping external
+test_relaunch_refuses_an_active_hold_before_stopping
 test_relaunch_respects_captain_hold_expiry
 test_relaunch_refuses_when_captain_hold_state_is_unreadable
 test_relaunch_off_opencode_removes_tracked_wiring
