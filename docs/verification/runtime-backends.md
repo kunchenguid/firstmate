@@ -2269,6 +2269,20 @@ tests/fm-backend-cmux-smoke.test.sh
 
 The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, and guarded exact cleanup.
 
+### Workspace description
+
+The backlog-title description was verified on 2026-10-10 with cmux 0.65.0 build 108 and Claude Code 2.1.296 on macOS aarch64.
+Source tags show `new-workspace --description` first in 0.63.2 and parsed by the 0.64.0 CLI.
+Two isolated homes each spawned one real scout with `bin/fm-spawn.sh <id> <project> --scout --harness claude --model haiku --backend cmux`.
+The spawn's post-create title lookup needed a short retry on 0.65.0; that separate race was patched only in the uncommitted test copy.
+
+| Case | `workspace list --all --json` row | Recovery and cleanup |
+| --- | --- | --- |
+| Backlog title `probe: fix the "quoted" cmux sidebar title` | `title` `fm-firstmate-906d934b-test-desc-titled`, `description` the decoded title | `fm_backend_cmux_list_live` returned the endpoint, and `bin/fm-teardown.sh` removed the workspace. |
+| No backlog file, so no title | `title` `fm-firstmate-906d934b-test-desc-untitled`, `description` `null` | Same result. |
+
+The cmux sidebar rendered the titled workspace's description beneath its truncated scoped name.
+
 ### Claude composer confirmation
 
 The borderless Claude composer confirmation was verified on 2026-08-09 with cmux 0.64.22 build 102 and Claude Code 2.1.226 on macOS aarch64.
