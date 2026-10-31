@@ -3065,7 +3065,9 @@ test_malformed_presentation_lock_reports_acquire_failure() {
     || fail "could not seed the malformed-lock wake"
   : > "$state/.status-presentation-lock"
 
-  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 \
+  # Keep the malformed lock within the freshness window during this case.
+  # Even after that window expires, recovery refuses this regular-file lock.
+  FM_STATE_OVERRIDE="$state" FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 FM_LOCK_STALE_AFTER=3600 \
     "$DRAIN" > "$out" 2> "$err" || fail "malformed-lock drain failed"
   grep -F 'wake drain: status presentation lock could not be acquired safely' "$err" >/dev/null \
     || fail "malformed presentation lock did not report an acquire failure"

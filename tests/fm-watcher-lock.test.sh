@@ -1128,6 +1128,58 @@ test_lock_late_claim_loses_after_recreate() {
   pass "late original claimant cannot claim a recreated lock"
 }
 
+test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid() {
+  # A creator killed inside its claim write leaves a linked owner dir with no
+  # pid. Every contender defers to that residue as a fresh mid-acquire lock
+  # for the whole freshness window, so a bounded wait no larger than the
+  # window could never become reclaimable: it would return 1 on its deadline
+  # while the lock sat un-stealable one tick away. The bounded wait earns one
+  # extra freshness window for that unpublished-pid case only; a lock with a
+  # published live holder still fails at the original bound.
+  local dir state lockdir out pid live live_elapsed
+  dir=$(make_case lock-bounded-unpublished-pid)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 30 &
+  live=$!
+  out=$(FM_LOCK_STALE_AFTER=2 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    live=$4
+    owner=$(fm_lock_owner_dir "$2") || exit 20
+    ln -s "$owner" "$2" || exit 21
+    start=$SECONDS
+    if fm_lock_acquire_wait_max "$2" 1; then rc=0; else rc=1; fi
+    printf "rc=%s elapsed=%s pid=%s\n" "$rc" "$((SECONDS - start))" "$(cat "$2/pid" 2>/dev/null || true)"
+    fm_lock_release "$2" || true
+    owner=$(fm_lock_owner_dir "$3") || exit 22
+    printf "%s\n" "$live" > "$owner/pid" || exit 23
+    ln -s "$owner" "$3" || exit 24
+    start=$SECONDS
+    if fm_lock_acquire_wait_max "$3" 1; then rc=0; else rc=1; fi
+    printf "live_rc=%s live_elapsed=%s\n" "$rc" "$((SECONDS - start))"
+  ' _ "$LIB" "$lockdir" "$state/.contend-live.lock" "$live")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "bounded wait did not outlast an unpublished-pid lock: $out" ;;
+  esac
+  pid=${out#*pid=}; pid=${pid%% *}
+  [ -n "$pid" ] || fail "bounded wait left the lock unowned after reclaim: $out"
+  case "$out" in
+    *"live_rc=1"*) ;;
+    *) fail "bounded wait no longer bounds a published live holder: $out" ;;
+  esac
+  live_elapsed=${out##*live_elapsed=}
+  case "$live_elapsed" in
+    ''|*[!0-9]*) fail "missing live-holder elapsed time: $out" ;;
+  esac
+  # Original bound (1s) plus one default freshness window (2s). This leaves
+  # nearly two seconds of scheduling slack but rejects the extra grace wait.
+  [ "$live_elapsed" -lt 3 ] || fail "published live holder earned unpublished-pid grace: $out"
+  pass "bounded wait earns one grace window for an unpublished-pid lock, still bounds a live holder"
+}
+
 test_lock_paused_mid_acquire_claim_fails_during_steal() {
   local dir state lockdir out pid
   dir=$(make_case lock-paused-claim-steal)
@@ -2023,6 +2075,7 @@ test_lock_reclaims_holder_whose_identity_no_longer_recomputes
 test_lock_keeps_live_daemon_holder_with_stale_identity
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
+test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer

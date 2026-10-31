@@ -334,6 +334,9 @@ pass "a captured delta is applied, acknowledged, and re-armed without a handler"
 
 # Now the handler's own retry path, from the state a crash between applying and
 # acknowledging leaves behind: the acknowledgement is gone and re-arming fails.
+# A handled marker precedes the runner's re-listen transition. Quiesce it before
+# mutating its state here and in the unsafe-acknowledgement fixture below.
+stop_reply_listener || fail "the reply listener did not stop before the failed re-arm fixture"
 rm -f "$PARENT/state/procevent-inbox/$SID.1.handled"
 rm -rf "$PARENT/state/procevent"
 : > "$PARENT/state/procevent"
@@ -378,6 +381,7 @@ RESULT_TWO="$PARENT/state/procevent-inbox/$SID.2.result"
 # The runner already applied and acknowledged this capture. Drop that genuine
 # acknowledgement and put an unsafe one in its place, so the handler's refusal
 # to trust a non-regular marker stays under test.
+stop_reply_listener || fail "the reply listener did not stop before the unsafe acknowledgement fixture"
 rm -f "$PARENT/state/procevent-inbox/$SID.2.handled"
 ln -s "$TMP_ROOT/missing-handled-marker" "$PARENT/state/procevent-inbox/$SID.2.handled"
 set +e
