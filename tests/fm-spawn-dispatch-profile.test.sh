@@ -268,7 +268,7 @@ SH
     "a pinned Claude launch must carry the collision-checked session id it asserts"
   assert_not_contains "$launch" "--session-id '$stale_id'" \
     "a pinned Claude launch must never reuse the stale session id"
-  assert_contains "$(cat "$HOME_DIR/state/$id.status")" \
+  assert_contains "$out" \
     "model pin asserted: pin 'claude-opus-5-5' actual 'claude-opus-5-5'" \
     "the model the session reported must be recorded against the pin"
   pass "Claude pin match: collision-checked session id and a recorded assertion"
@@ -288,11 +288,11 @@ test_claude_model_pin_mismatch_is_reported_without_failing_the_spawn() {
   assert_contains "$out" "spawned $id harness=claude" \
     "the spawn still reports the worker it started"
   target="model pin mismatch: pin 'claude-opus-5-5' but pinned Claude session"
-  assert_contains "$(cat "$HOME_DIR/state/$id.status")" "$target" \
-    "the mismatch must be recorded in the task's status"
-  assert_contains "$(cat "$HOME_DIR/state/$id.status")" "reports 'claude-opus-5'" \
+  assert_contains "$out" "$target" \
+    "the mismatch must reach the operator on stderr"
+  assert_contains "$out" "reports 'claude-opus-5'" \
     "the record must name the model the session actually reported"
-  assert_not_contains "$(cat "$HOME_DIR/state/$id.status")" "blocked" \
+  assert_not_contains "$out" "blocked" \
     "the assertion reports; it must not open a blocked decision on a live worker"
   pass "Claude pin mismatch: recorded against the pin, spawn still succeeds"
 }
@@ -309,7 +309,7 @@ test_claude_model_pin_snapshot_verdicts() {
       --model "$pin")
     status=$?
     expect_code 0 "$status" "snapshot verdict must preserve the live spawn"$'\n'"$out"
-    assert_contains "$(cat "$HOME_DIR/state/$id.status")" \
+    assert_contains "$out" \
       "model pin $verdict: pin '$pin'" "unexpected verdict for $pin versus $actual"
   done <<'CASES'
 claude-haiku-4-5 claude-haiku-4-5-20251001 asserted
@@ -319,7 +319,7 @@ claude-opus-5 claude-opus-5-5 mismatch
 claude-opus-5 claude-opus-5[1m] mismatch
 claude-haiku-4-5 claude-haiku-4-5-5 mismatch
 CASES
-  pass "Claude snapshot equivalence and distinct model status verdicts"
+  pass "Claude snapshot equivalence and distinct model stderr verdicts"
 }
 
 test_claude_model_pin_is_unverified_when_the_session_reports_no_model() {
@@ -333,7 +333,7 @@ test_claude_model_pin_is_unverified_when_the_session_reports_no_model() {
     --model claude-opus-5-5)
   status=$?
   expect_code 0 "$status" "a silent session must not fail the spawn"$'\n'"$out"
-  assert_contains "$(cat "$HOME_DIR/state/$id.status")" \
+  assert_contains "$out" \
     "model pin unverified: pin 'claude-opus-5-5'" \
     "a session that states no model must be recorded as unverified, never as a match"
   pass "Claude pin with no reported model: recorded as unverified"
@@ -361,7 +361,7 @@ SH
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--session-id" \
     "an unaddressable pinned launch must not invent a session id"
-  assert_contains "$(cat "$HOME_DIR/state/$id.status")" \
+  assert_contains "$out" \
     "model pin unverified: pin 'claude-opus-5-5'" \
     "a launch with no addressable session must record the pin as unverified"
   pass "Claude pin without uuidgen: launch succeeds and records unverified"
@@ -393,7 +393,7 @@ SH
     "a raw launch must not be given a session id it cannot carry"
   [ ! -s "$uuid_log" ] \
     || fail "a raw launch allocated a Claude session id it never passes to the session"
-  assert_contains "$(cat "$HOME_DIR/state/$id.status")" \
+  assert_contains "$out" \
     "model pin unverified: pin 'claude-opus-5-5'" \
     "a raw launch the pin cannot be read back from must be recorded unverified"
   pass "Raw Claude launch: no session id allocated, pin recorded unverified"
@@ -424,9 +424,35 @@ test_claude_model_pin_note_never_displaces_the_workers_own_state() {
   assert_not_contains "$(cat "$HOME_DIR/state/$id.status")" "model pin" \
     "a reported state must keep the status log byte-identical, with no model note appended"
   assert_contains "$out" \
-    "warn: model pin asserted: pin 'claude-opus-5-5' actual 'claude-opus-5-5'" \
-    "the verdict that could not be recorded must still reach the operator on stderr"
+    "model pin asserted: pin 'claude-opus-5-5' actual 'claude-opus-5-5'" \
+    "the verdict must reach the operator on stderr"
   pass "Claude pin evidence never displaces the worker's own reported state"
+}
+
+test_claude_model_verdict_preserves_status_bytes() {
+  local rec id out status actual verdict snapshot stderr
+  for verdict in asserted mismatch; do
+    id="claude-status-$verdict-z1"
+    rec=$(make_spawn_case "claude-status-$verdict" claude "$id")
+    read_case_record "$rec"
+    snapshot="$CASE_DIR/status-before-verdict"
+    stderr="$CASE_DIR/spawn.stderr"
+    actual=claude-opus-5-5
+    [ "$verdict" = asserted ] || actual=claude-opus-5
+    out=$(FM_FAKE_CLAUDE_MODEL="$actual" \
+      FM_FAKE_CLAUDE_STATUS_FILE="$HOME_DIR/state/$id.status" \
+      FM_FAKE_CLAUDE_STATUS_LINE='working: worker owns this status' \
+      FM_FAKE_CLAUDE_STATUS_SNAPSHOT="$snapshot" FM_TEST_SPAWN_STDERR="$stderr" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model claude-opus-5-5)
+    status=$?
+    expect_code 0 "$status" "a $verdict verdict must preserve a live spawn"$'\n'"$out"
+    cmp -s "$snapshot" "$HOME_DIR/state/$id.status" || fail "model verdict changed task status bytes"
+    assert_contains "$(cat "$stderr")" "model pin $verdict:" "verdict must reach spawn stderr"
+    assert_not_contains "$out" "model pin" "verdict must not go to spawn stdout"
+    [ "$(grep -c '^model pin ' "$stderr")" = 1 ] || fail "expected exactly one model verdict"
+  done
+  pass "matching and mismatching model verdicts preserve task status bytes"
 }
 
 test_claude_spawn_without_a_pin_keeps_its_session_id_and_writes_no_pin_note() {
@@ -2953,6 +2979,7 @@ test_claude_model_pin_is_unverified_when_the_session_reports_no_model
 test_claude_model_pin_is_unverified_when_uuidgen_is_unavailable
 test_raw_claude_launch_does_not_allocate_a_session_id
 test_claude_model_pin_note_never_displaces_the_workers_own_state
+test_claude_model_verdict_preserves_status_bytes
 test_claude_spawn_without_a_pin_keeps_its_session_id_and_writes_no_pin_note
 test_claude_secondmate_launch_brief_publishes_into_its_own_home
 test_claude_spawn_refuses_when_the_brief_record_cannot_publish

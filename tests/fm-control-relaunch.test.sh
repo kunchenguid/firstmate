@@ -2752,8 +2752,8 @@ test_herdr_relaunch_asserts_a_pinned_pi_resume_on_the_turn_it_produced() {
     "the pinned relaunch must keep the Herdr-bound session identity"
   assert_contains "$(cat "$dir/fake/launched-command")" "--model 'anthropic/claude-opus-5-5'" \
     "the pin must stay on the launch line"
-  status=$(cat "$dir/home/state/$id.status")
-  assert_contains "$status" \
+  status=$(cat "$dir/home/state/$id.status" 2>/dev/null)
+  assert_contains "$out" \
     "model pin asserted: pin 'anthropic/claude-opus-5-5' actual 'anthropic/claude-opus-5-5'" \
     "the resumed turn's own model must be recorded against the pin"
   assert_not_contains "$status" "blocked" \
@@ -2780,8 +2780,8 @@ test_herdr_relaunch_reports_a_pinned_pi_resume_turn_that_differs_from_the_pin() 
   expect_code 0 "$rc" "a diverged resumed turn is reported, not turned into a launch failure"$'\n'"$out"
   assert_contains "$(cat "$dir/fake/launched-command")" "--session '$session_file'" \
     "the relaunch is already delivered; it must not be withdrawn after the fact"
-  status=$(cat "$dir/home/state/$id.status")
-  assert_contains "$status" \
+  status=$(cat "$dir/home/state/$id.status" 2>/dev/null)
+  assert_contains "$out" \
     "model pin mismatch: pin 'anthropic/claude-opus-5-5' but the resumed pi session reports 'anthropic/claude-opus-5'" \
     "the record must name both the pin and the model the resumed turn reported"
   assert_not_contains "$status" "blocked" \
@@ -2790,7 +2790,7 @@ test_herdr_relaunch_reports_a_pinned_pi_resume_turn_that_differs_from_the_pin() 
 }
 
 test_herdr_relaunch_records_a_pinned_pi_resume_as_unverified_without_a_new_turn() {
-  local dir out rc=0 session_file id=resume-model-silent status
+  local dir out rc=0 session_file id=resume-model-silent
   herdr_case_or_skip "resume-model-silent" "$id" || {
     echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
     return 0
@@ -2810,16 +2810,15 @@ test_herdr_relaunch_records_a_pinned_pi_resume_as_unverified_without_a_new_turn(
   out=$(FM_MODEL_PIN_POLLS=2 FM_MODEL_PIN_POLL_INTERVAL=0.01 \
     run_spawn "$dir" "$id" --relaunch --harness pi --model anthropic/claude-opus-5-5) || rc=$?
   expect_code 0 "$rc" "a silent resumed session must not fail the relaunch"$'\n'"$out"
-  status=$(cat "$dir/home/state/$id.status")
-  assert_contains "$status" "model pin unverified: pin 'anthropic/claude-opus-5-5'" \
+  assert_contains "$out" "model pin unverified: pin 'anthropic/claude-opus-5-5'" \
     "a session that states no new model must be recorded as unverified"
-  assert_not_contains "$status" "model pin mismatch" \
+  assert_not_contains "$out" "model pin mismatch" \
     "inherited history must never be reported as this launch's model"
   pass "fm-spawn --relaunch: a silent pinned Pi resume is recorded as unverified"
 }
 
 test_herdr_relaunch_requires_a_completed_pi_response() {
-  local dir out rc session_file id status reason retry verdict
+  local dir out rc session_file id reason retry verdict
   for reason in error aborted; do
     for retry in 0 1; do
       id="resume-$reason-$retry"
@@ -2837,11 +2836,10 @@ test_herdr_relaunch_requires_a_completed_pi_response() {
       expect_code 0 "$rc" "failed requests must not fail the relaunch"$'\n'"$out"
       verdict=unverified
       [ "$retry" = 0 ] || verdict=asserted
-      status=$(cat "$dir/home/state/$id.status")
-      assert_contains "$status" "model pin $verdict:" "only a completed response provides model evidence"
-      assert_not_contains "$status" "model pin mismatch:" "a failed attempt must not become a mismatch"
+      assert_contains "$out" "model pin $verdict:" "only a completed response provides model evidence"
+      assert_not_contains "$out" "model pin mismatch:" "a failed attempt must not become a mismatch"
       if [ "$retry" = 0 ]; then
-        assert_not_contains "$status" "model pin asserted:" "a failed attempt must not assert a model"
+        assert_not_contains "$out" "model pin asserted:" "a failed attempt must not assert a model"
       else
         [ "$(jq -r 'select(.type == "message") | .message.stopReason' "$session_file")" = "$reason"$'\nstop' ] \
           || fail "the retry must complete after the failed attempt"
