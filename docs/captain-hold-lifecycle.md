@@ -38,6 +38,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 | `complete` | Records the reviewed captain-held task ids in the originating task's metadata. | [Recording a reviewed inventory](#recording-a-reviewed-inventory-complete) |
 | `verify` | Read-only check that scout teardown runs before removing source state. | [Checking before scout teardown](#checking-before-scout-teardown-verify) |
 | `open` | Read-only check of whether a row is still an open captain call. | [Cleanup never closes a captain call](#cleanup-never-closes-a-captain-call) |
+| `open-origin` | Read-only check of whether an open captain call is held on another task for an origin. | [Calls held for an origin](#calls-held-for-an-origin-open-origin) |
 | `answers` | Channel-agnostic entry point for keyed answers. | [Answer-time resolution](#answer-time-resolution) |
 | `bind`, `unbind`, `binding` | Record that a captured-answer source feeds the keyed-answer intake. | [Source bindings](#source-bindings) |
 | `reconcile-requests` | Internal intake that records a reconcile request from a board selection. | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
@@ -202,6 +203,23 @@ The refusal names the record and the validation reason, so the captain can repai
 `--force` does not lift the deferral, because it authorizes discarding unlanded work, never the captain's question.
 Only `answer` with the captain's words or evidence-backed `reconcile close` resolves the call, by either closing the question or releasing the gated work.
 `bin/fm-backlog-transition-lib.sh` owns the transition and its record, and `bin/fm-captain-hold.sh --help` owns the predicate's contract.
+
+## Calls held for an origin (`open-origin`)
+
+An investigation never holds its own row: each call it raises is held on a separate task recorded with `Captain hold origin: <origin>`.
+`open-origin <origin-id> [--identity]` is the read-only predicate for those calls, with `open`'s meaning of "open" applied to every row.
+A row counts only when its `Captain hold origin:` line names the origin or its backend identity.
+The origin's own row never counts, because `open` owns it.
+
+| `open-origin` exit | Meaning |
+| --- | --- |
+| 0 | At least one such call is open. With `--identity`, each is printed as `<task-id>@<hold-set stamp>#<answer count>`, sorted and space-separated. |
+| 1 | No such call is open, or this home has no backlog file. |
+| 2 | The answer could not be established. |
+
+`bin/fm-watch.sh` consults it only for a task whose newest status line is an open `needs-decision` or `blocked` it wrote.
+Such a parked task is then bounded like a task whose own row is held: its stale alarms, wedge escalations, and open-decision reminders take the captain-call cadence.
+A task still working beside an open origin-linked call keeps every alarm.
 
 ## Answer-time resolution
 

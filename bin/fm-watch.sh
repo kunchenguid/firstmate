@@ -2542,30 +2542,49 @@ pause_state_class() {  # <window> <task>
 # captain's whole thinking time, on exactly the work they already have in hand.
 #
 # `open` is that record's own read-only predicate and owns its semantics: exit 0
-# still an open captain call, 1 not, 2 could not be established. Only a 0 bounds
+# still an open captain call, 1 not, 2 could not be established; `open-origin`
+# answers the same for calls held on other tasks. Only a 0 bounds
 # an alarm here, so an unreadable backlog, an incompatible or absent tasks-axi,
 # and a row this home does not carry all keep alarming exactly as they do today -
 # a wait this watcher cannot prove is not a wait.
 #
-# The read costs one subprocess and runs where the watcher is about to
-# alarm: for stale-pane callers, at most once per distinct stale hash per window, or once per
-# STALE_ESCALATE_SECS at the wedge threshold (wedge_wait_evidence), beside the
-# crew-state read the same paths already pay. The secondmate stale gate deliberately runs
-# before this bound and admits only status-declared waits: a backlog-only hold
-# whose mate still says `working:` or `done:` does not reach this read. Reaching
-# it would put backlog reads into windows deliberately skipped on ordinary polls.
+# The read costs one `open` subprocess. Only for a task whose newest line is an
+# open captain-relevant wait (below) does it add one `open-origin` subprocess,
+# which reads the backlog listing once, shows the origin, and shows each open
+# captain call whose listed body names it as origin. It runs where the watcher
+# is about to alarm: for stale-pane callers, at most once per
+# distinct stale hash per window, or once per STALE_ESCALATE_SECS at the wedge
+# threshold (wedge_wait_evidence), beside the crew-state read the same paths
+# already pay. The secondmate stale gate deliberately runs before this bound and
+# admits only status-declared waits: a backlog-only hold whose mate still says
+# `working:` or `done:` does not reach this read. Reaching it would put backlog
+# reads into windows deliberately skipped on ordinary polls.
 # The opt-in open-decision reminder tick also reads it for overdue keys whose
 # per-key backoff has elapsed, independently of pane classification.
 STALE_WAIT_DECLARATION=
 
 CAPTAIN_CALL_IDENTITY=
 
+# The call need not sit on the task's own row. An investigation never holds its
+# own row: captain-hold-lifecycle has it hold each call on a separate task that
+# records it as the origin. Such a call is a wait only while the task is parked
+# on it - its newest line an open `needs-decision` or `blocked` it wrote - so a
+# task still working beside an open origin-linked call keeps every alarm and its
+# wedge ladder. `open-origin` reads those rows, and both answers are folded into
+# one identity, so a call newly held on either side - or released and re-held -
+# is a new identity and its first sight still alarms.
 task_captain_call_open() {  # <task>
-  local task=$1
+  local task=$1 own='' linked=''
   CAPTAIN_CALL_IDENTITY=
   [ -n "$task" ] || return 1
-  CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
-    open "$task" --identity 2>/dev/null) || return 1
+  own=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
+    open "$task" --identity 2>/dev/null) || own=
+  if status_worker_wait_verb "$STATE/$task.status" >/dev/null; then
+    linked=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
+      open-origin "$task" --identity 2>/dev/null) || linked=
+  fi
+  [ -n "$own" ] || [ -n "$linked" ] || return 1
+  CAPTAIN_CALL_IDENTITY="own=$own;origin=$linked"
   return 0
 }
 
