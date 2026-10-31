@@ -323,7 +323,7 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 | Requirement | Tools |
 | --- | --- |
 | Always required | `git`, `jq`, `herdr`, compatible `tasks-axi`, and `treehouse` |
-| At least one of | `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi` |
+| At least one of | `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `omp` |
 | Additionally required on macOS | `lsof`, so the doctor and guard can prove which process owns the session socket |
 
 ## Provision a route
@@ -534,6 +534,9 @@ Only a structured `report=data/....md` pointer offers a document.
 A bare path inside prose is a mention.
 So writing about a document, including one the mate has not created yet, never asks this channel to fetch it.
 
+The adapter cleans up ingest staging, in-flight document-fetch, and source-read temporary files after normal handling, continuity breaks, payload validation failures, and SIGTERM during a fetch or source read.
+The focused cleanup regression is in [`tests/fm-remote-reply.test.sh`](../tests/fm-remote-reply.test.sh).
+
 ### Replay identity
 
 Each normalized source line, before its delivered `report=` pointers are rewritten, is the replay identity.
@@ -722,6 +725,7 @@ bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+bin/fm-test-run.sh tests/fm-remote-secondmate-omp.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 ```
 

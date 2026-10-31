@@ -627,6 +627,75 @@ test_lock_resumes_own_interrupted_steal_reap() {
   pass "a steal reap interrupted in this process is resumed from its own tombstone"
 }
 
+# Interrupt the real cleanup at its unlink, after it publishes its tombstone.
+test_lock_tombstone_tracks_reaper_start_time() (
+  local dir state lockdir owner reaper tomb i rc holder_start unrelated_start unrelated
+  sleep "$FM_TEST_STUB_MAX_BLOCK_SECONDS" &
+  unrelated=$!
+  trap 'kill "$unrelated" 2>/dev/null || true; wait "$unrelated" 2>/dev/null || true' EXIT
+  # macOS start times have one-second precision.
+  sleep 2
+  dir=$(make_case lock-reaper-pid-reuse)
+  state="$dir/state"
+  lockdir="$state/.contend.lock.steal"
+  owner="$lockdir.owner.fixture"
+  mkdir "$owner"
+  printf '%s\n' "$(dead_pid)" > "$owner/pid"
+  ln -s "$owner" "$lockdir"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$2
+    ready=$3
+    release=$4
+    rm() {
+      if [ "${!#}" = "$lock" ]; then
+        : > "$ready"
+        while [ ! -e "$release" ] && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null \
+          && [ "$SECONDS" -lt "$FM_TEST_STUB_MAX_BLOCK_SECONDS" ]; do
+          sleep 0.05
+        done
+      fi
+      command rm "$@"
+    }
+    fm_lock_reap_dead_link "$lock"
+  ' _ "$LIB" "$lockdir" "$dir/reaper.ready" "$dir/release" &
+  reaper=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$dir/reaper.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$dir/reaper.ready" ] \
+    || { kill "$reaper" 2>/dev/null || true; fail "reaper did not publish its election tombstone"; }
+  holder_start=$(start_time_of "$reaper")
+  unrelated_start=$(start_time_of "$unrelated")
+  [ -n "$holder_start" ] && [ -n "$unrelated_start" ] && [ "$holder_start" != "$unrelated_start" ] \
+    || { kill "$reaper" 2>/dev/null || true; fail "reaper and unrelated process must have distinct starts"; }
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_reap_dead_link "$2"' _ "$LIB" "$lockdir" || rc=$?
+  if [ "$rc" -eq 0 ] || [ ! -L "$lockdir" ]; then
+    : > "$dir/release"
+    wait "$reaper" 2>/dev/null || true
+    fail "contender cleared a genuinely live reaper's tombstone"
+  fi
+  kill -KILL "$reaper" 2>/dev/null || true
+  wait "$reaper" 2>/dev/null || true
+  tomb=
+  for tomb in "$owner".reaped.*; do [ ! -d "$tomb" ] || break; done
+  [ -d "$tomb" ] || fail "interrupted reaper left no tombstone"
+  # Model PID reuse by substituting a known unrelated live process, preserving
+  # whatever start-time identity the production election actually published.
+  mv -- "$tomb" "$owner.reaped.$unrelated${tomb#"$owner.reaped.$reaper"}"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_reap_dead_link "$2"' _ "$LIB" "$lockdir" \
+    || fail "recycled reaper pid kept an abandoned tombstone alive"
+  [ ! -L "$lockdir" ] || fail "recycled-pid cleanup left the stale link"
+  for tomb in "$owner".reaped.*; do
+    [ ! -d "$tomb" ] || fail "recycled-pid cleanup left a tombstone"
+  done
+  is_live_non_zombie "$unrelated" || fail "cleanup disturbed the unrelated live process"
+  pass "tombstone cleanup respects a live reaper and recovers a recycled reaper pid"
+)
+
 test_lock_steal_reap_cannot_remove_successor() {
   # Two reapers verify the same dead steal owner. The competitor runs to
   # completion exactly when the first one is about to remove the link; at most
@@ -1057,6 +1126,58 @@ test_lock_late_claim_loses_after_recreate() {
   [ -n "$before" ] || fail "recreated lock did not record a pid: $out"
   [ "$before" = "$after" ] || fail "late claim changed the recreated lock pid: $out"
   pass "late original claimant cannot claim a recreated lock"
+}
+
+test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid() {
+  # A creator killed inside its claim write leaves a linked owner dir with no
+  # pid. Every contender defers to that residue as a fresh mid-acquire lock
+  # for the whole freshness window, so a bounded wait no larger than the
+  # window could never become reclaimable: it would return 1 on its deadline
+  # while the lock sat un-stealable one tick away. The bounded wait earns one
+  # extra freshness window for that unpublished-pid case only; a lock with a
+  # published live holder still fails at the original bound.
+  local dir state lockdir out pid live live_elapsed
+  dir=$(make_case lock-bounded-unpublished-pid)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sleep 30 &
+  live=$!
+  out=$(FM_LOCK_STALE_AFTER=2 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    live=$4
+    owner=$(fm_lock_owner_dir "$2") || exit 20
+    ln -s "$owner" "$2" || exit 21
+    start=$SECONDS
+    if fm_lock_acquire_wait_max "$2" 1; then rc=0; else rc=1; fi
+    printf "rc=%s elapsed=%s pid=%s\n" "$rc" "$((SECONDS - start))" "$(cat "$2/pid" 2>/dev/null || true)"
+    fm_lock_release "$2" || true
+    owner=$(fm_lock_owner_dir "$3") || exit 22
+    printf "%s\n" "$live" > "$owner/pid" || exit 23
+    ln -s "$owner" "$3" || exit 24
+    start=$SECONDS
+    if fm_lock_acquire_wait_max "$3" 1; then rc=0; else rc=1; fi
+    printf "live_rc=%s live_elapsed=%s\n" "$rc" "$((SECONDS - start))"
+  ' _ "$LIB" "$lockdir" "$state/.contend-live.lock" "$live")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "bounded wait did not outlast an unpublished-pid lock: $out" ;;
+  esac
+  pid=${out#*pid=}; pid=${pid%% *}
+  [ -n "$pid" ] || fail "bounded wait left the lock unowned after reclaim: $out"
+  case "$out" in
+    *"live_rc=1"*) ;;
+    *) fail "bounded wait no longer bounds a published live holder: $out" ;;
+  esac
+  live_elapsed=${out##*live_elapsed=}
+  case "$live_elapsed" in
+    ''|*[!0-9]*) fail "missing live-holder elapsed time: $out" ;;
+  esac
+  # Original bound (1s) plus one default freshness window (2s). This leaves
+  # nearly two seconds of scheduling slack but rejects the extra grace wait.
+  [ "$live_elapsed" -lt 3 ] || fail "published live holder earned unpublished-pid grace: $out"
+  pass "bounded wait earns one grace window for an unpublished-pid lock, still bounds a live holder"
 }
 
 test_lock_paused_mid_acquire_claim_fails_during_steal() {
@@ -1924,6 +2045,7 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_lock_tombstone_tracks_reaper_start_time || exit 1
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
@@ -1953,6 +2075,7 @@ test_lock_reclaims_holder_whose_identity_no_longer_recomputes
 test_lock_keeps_live_daemon_holder_with_stale_identity
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
+test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer

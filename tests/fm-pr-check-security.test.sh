@@ -2635,8 +2635,9 @@ test_self_merge_and_poll_publish_one_outcome() {
     || fail "merge-outcome-uncommitted: could not arm merge poll"
   cat >"$dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
-case " $* " in
-  *pr-poll-merge-notified*) exit 1 ;;
+# Reject only the marker commit, not pid.tmp publication inside its lock.
+case "${!#}" in
+  *.pr-poll-merge-notified) exit 1 ;;
 esac
 exec "$FM_TEST_REAL_MV" "$@"
 SH

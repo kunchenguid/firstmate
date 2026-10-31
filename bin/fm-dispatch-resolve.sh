@@ -4,6 +4,7 @@
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
+#   fm-dispatch-resolve.sh --supports-credential-source <source>
 #
 # Opt-in gate: FM_DISPATCH_PROVIDER and FM_DISPATCH_MODEL select the provider
 #   and model from the environment or $FM_HOME/.env (environment wins). With no
@@ -13,9 +14,33 @@
 #   (http:// or https://) and posts to <base>/v1/systemone; its optional
 #   FM_DISPATCH_API_KEY, when absent, means no Authorization header. The openai
 #   provider maps the System One request to OpenAI's Decisions API and maps its
-#   answer back before validation. The selected key lives in a non-exported
-#   shell variable and reaches curl through fd 3, never argv, logs, or child
-#   environments.
+#   answer back before validation. The typesafe and openrouter keys come from the
+#   environment, else $FM_HOME/.env, else the credential source declared for that
+#   provider (below); the openai and systemone keys come from the environment or
+#   $FM_HOME/.env only. The selected key lives in a non-exported shell variable
+#   and reaches curl through fd 3, never argv, logs, or child environments.
+#
+# Credential source declaration: the optional $CONFIG/dispatch-credential-sources.json
+#   ($CONFIG is FM_CONFIG_OVERRIDE, else $FM_HOME/config) is a JSON object keyed
+#   by provider (typesafe or openrouter). Each value says where that provider's
+#   key lives and holds no key: {"source": "macos-keychain", "service": "<name>",
+#   "account": "<name>"}, where account is optional and no other field is
+#   accepted. bin/fm-credential-source-lib.sh owns the schema and its adapters;
+#   macos-keychain reads the generic-password item with `security
+#   find-generic-password -s <service> [-a <account>] -w`, so only the service
+#   and account reach argv. The file is read only when neither the environment
+#   nor .env supplied a key, and only the selected provider's entry is used.
+#   With no entry for that provider and no key the tool is off as above. An
+#   unreadable or invalid file exits 2 naming the problem, never a value. A
+#   declared source this host cannot run, or that yields no key within
+#   5 seconds, is an error outcome ending "nothing sent", with no network or
+#   quota call, so it is not mistaken for an unconfigured resolver.
+#
+# Capability probe: --supports-credential-source <source> prints "supported"
+#   and exits 0, or prints "unsupported" and exits 1, for a source name such as
+#   macos-keychain on this host. It reads no declaration, retrieves no
+#   credential, and runs no credential tool, so a configuration installer can
+#   refuse an unsupported activation before it writes anything.
 #
 # What it does when on with at least one rule: one POST with the project name and the brief's
 #   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
@@ -38,6 +63,17 @@
 #   The model never sees quota, catalogs, approvals, preferred_provider,
 #   confidence floors, `why`, or `use`. With no rules, it returns a non-clear
 #   result so firstmate keeps using the existing intake.
+#
+# Shared-quota opt-out: an optional top-level "shared_quota": true in the
+#   rules file declares this home draws every provider's usage from one single
+#   shared budget, so per-provider quota rows do not describe what is left.
+#   With it set, this tool makes no quota-axi call, applies no quota floor or
+#   runway gate, ranks nothing by spendPriority, and resolves the matched
+#   rule's `use` profiles in declared order; preferred_provider still narrows
+#   the pool; declared order then picks within it. Every candidate line still
+#   prints, stating quota ranking is off by home declaration. Without the
+#   setting, behavior is unchanged. The declared value must be a boolean;
+#   anything else is an actionable configuration error.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
@@ -60,16 +96,19 @@
 #     reason: <why the status is not clear>
 #     preferred_provider: <family and preference or fallback decision, when applied>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
+#        (with the shared-quota opt-out: <harness>:<model> provider=.. -> eligible (quota ranking off: home declares a single shared quota))
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
-#   error     -> API, network, response, or quota-axi failure; decide as today
+#   error     -> API, network, response, quota-axi, or declared credential source failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
-#   existing unreadable rules file, malformed rules, missing jq, an unknown
-#   provider, a selected non-typesafe provider without a model, or systemone
-#   without a valid base URL), which is actionable, never selected around.
+#   existing unreadable rules file, malformed rules, an unreadable or invalid
+#   credential source declaration, missing jq, an unknown provider, a selected
+#   non-typesafe provider without a model, or systemone without a valid base
+#   URL), which is actionable, never selected around.
+#   The capability probe is the one other exit: 1 for an unsupported source.
 #
 # Environment:
 #   FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL, FM_DISPATCH_BASE_URL,
@@ -109,6 +148,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$SCRIPT_DIR/fm-brief-heading-lib.sh"
+# shellcheck source=bin/fm-credential-source-lib.sh
+. "$SCRIPT_DIR/fm-credential-source-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
@@ -126,6 +167,12 @@ no_rules() {
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
   exit 0
 }
+emit_error() {
+  local reason=$1
+  echo "dispatch-resolve: error ($reason)" >&2
+  printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  exit 0
+}
 usage() {
   awk '
     NR == 1 { next }
@@ -136,9 +183,14 @@ usage() {
 
 BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
 NEVER_SEND_PATH="$CONFIG/dispatch-never-send"
+CRED_PATH="$CONFIG/dispatch-credential-sources.json"
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
+    --supports-credential-source)
+      [ $# -ge 2 ] || die "--supports-credential-source needs a value"
+      if fm_credsrc_supported "$2"; then echo supported; exit 0; fi
+      echo unsupported; exit 1 ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown flag $1" ;;
     *) [ -z "$BRIEF" ] || die "one brief file only"; BRIEF=$1; shift ;;
@@ -146,6 +198,47 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- opt-in gate ---------------------------------------------------------------
+# declared_key <provider> <private variable>: set the variable from the source
+# $CRED_PATH declares for <provider>. Returns 1 when none is declared, which
+# leaves the off gate in charge. Past that point nothing is mistaken for an
+# unconfigured resolver: an unreadable or invalid declaration is a
+# configuration error, and a declared source this host cannot run or that
+# yields no key is an error outcome. Nothing is sent in either case.
+declared_key() {
+  local provider=$1 src problem value rc
+  [ -e "$CRED_PATH" ] || [ -L "$CRED_PATH" ] || return 1
+  [ -r "$CRED_PATH" ] || die "credential source declaration not readable: $CRED_PATH"
+  command -v jq >/dev/null 2>&1 || die "jq required"
+  problem=$(fm_credsrc_check "$CRED_PATH" typesafe openrouter) \
+    || die "malformed credential source declaration: $CRED_PATH - $problem"
+  fm_credsrc_declares "$CRED_PATH" "$provider" || return 1
+  src=$(fm_credsrc_field "$CRED_PATH" "$provider" source)
+  fm_credsrc_supported "$src" \
+    || emit_error "credential source $src declared for $provider is not supported on this host; nothing sent"
+  value=$(fm_credsrc_read "$CRED_PATH" "$provider"); rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$value" ]; then
+    if fm_timed_out "$rc"; then
+      emit_error "credential source $src declared for $provider did not answer in time; nothing sent"
+    fi
+    emit_error "credential source $src declared for $provider is unavailable; nothing sent"
+  fi
+  printf -v "$2" '%s' "$value"
+}
+
+# select_key <provider> <KEY_NAME> <private variable>: the selected provider's
+# key is the environment copy already in the variable, else KEY_NAME in
+# $FM_HOME/.env, else the source declared for the provider. With none of them
+# the tool is off, exactly as it was before declarations existed.
+select_key() {
+  local provider=$1 name=$2 var=$3
+  [ -n "${!var}" ] || printf -v "$var" '%s' "$(fmx_env_get "$name" "$FM_HOME/.env")"
+  [ -n "${!var}" ] || declared_key "$provider" "$var"
+  if [ -z "${!var}" ]; then
+    echo "dispatch-resolve: off ($name absent from the environment and $FM_HOME/.env)" >&2
+    exit 0
+  fi
+}
+
 DISPATCH_PROVIDER=${FM_DISPATCH_PROVIDER:-}
 [ -n "$DISPATCH_PROVIDER" ] || DISPATCH_PROVIDER=$(fmx_env_get FM_DISPATCH_PROVIDER "$FM_HOME/.env")
 DISPATCH_MODEL=${FM_DISPATCH_MODEL:-}
@@ -154,27 +247,15 @@ case "$DISPATCH_PROVIDER" in
   '')
     DISPATCH_PROVIDER=typesafe
     DISPATCH_MODEL=$TS_MODEL
-    [ -n "$TYPESAFE_API_KEY_PRIVATE" ] || TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-    if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-      echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-      exit 0
-    fi
+    select_key typesafe TYPESAFE_API_KEY TYPESAFE_API_KEY_PRIVATE
     ;;
   typesafe)
     [ -n "$DISPATCH_MODEL" ] || DISPATCH_MODEL=$TS_MODEL
-    [ -n "$TYPESAFE_API_KEY_PRIVATE" ] || TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-    if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-      echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-      exit 0
-    fi
+    select_key typesafe TYPESAFE_API_KEY TYPESAFE_API_KEY_PRIVATE
     ;;
   openrouter)
     [ -n "$DISPATCH_MODEL" ] || die "FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=openrouter"
-    [ -n "$OPENROUTER_API_KEY_PRIVATE" ] || OPENROUTER_API_KEY_PRIVATE=$(fmx_env_get OPENROUTER_API_KEY "$FM_HOME/.env")
-    if [ -z "$OPENROUTER_API_KEY_PRIVATE" ]; then
-      echo "dispatch-resolve: off (OPENROUTER_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-      exit 0
-    fi
+    select_key openrouter OPENROUTER_API_KEY OPENROUTER_API_KEY_PRIVATE
     ;;
   systemone)
     [ -n "$DISPATCH_MODEL" ] || die "FM_DISPATCH_MODEL required when FM_DISPATCH_PROVIDER=systemone"
@@ -265,6 +346,7 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   elif any((.rules // [])[]; has("select") and ((.select | type) != "string" or (.select | length) == 0)) then "select must be a non-empty string"
   elif any((.rules // [])[]; has("select") and .select != "quota-balanced") then
     "unknown select: " + ([.rules[] | select(has("select") and .select != "quota-balanced") | .select] | unique | join(", "))
+  elif has("shared_quota") and (.shared_quota | type) != "boolean" then "shared_quota must be true or false when present"
   elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
   elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
   elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
@@ -308,13 +390,6 @@ done < <(jq -r '
   | map(.harness) | unique | .[]' "$RULES")
 
 RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
-
-emit_error() {
-  local reason=$1
-  echo "dispatch-resolve: error ($reason)" >&2
-  printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
-  exit 0
-}
 
 if [ "$RULE_COUNT" -eq 0 ]; then
   no_rules
@@ -481,13 +556,21 @@ jq -e --slurpfile rules "$RULES" '
        (.usage.output_tokens | type) == "number"))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 
-# ---- quota evidence: one quota-axi --json snapshot -----------------------------
-command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
-quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
-fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
+# ---- quota evidence: one quota-axi --json snapshot, skipped entirely under the
+# ---- shared-quota opt-out (a stub keeps the slurpfile contract intact) ---------
+SQ=false
+SHARED_QUOTA=$(jq -r '.shared_quota // false' "$RULES" 2>/dev/null) || SHARED_QUOTA=false
+if [ "$SHARED_QUOTA" = true ]; then
+  printf '{"providers":[]}\n' > "$QUOTA"
+  SQ=true
+else
+  command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
+  quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
+  fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
+fi
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
-RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
+RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" --argjson sq "$SQ" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -517,7 +600,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
     (provider_of($c)) as $p | (lane_of($c)) as $lane |
-    if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
+    if $sq then
+      {profile: $c, provider: $p, eligible: true, sq: true, reason: "ok"}
+    elif $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
     elif prov($p; $lane) == null then
       {profile: $c, provider: $p, eligible: true, unranked: true,
        reason: (if any($q.providers[]; .provider == $p)
@@ -585,7 +670,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
    end) as $fb |
   (if $fb.to then $fb.to else $picked end) as $choice |
   (rule_at($choice)) as $rule |
-  (if $rule == null then "none" else floor_state($rule.floor; $rule.floor.provider; "") end) as $rule_floor_state |
+  (if $sq or $rule == null then "none" else floor_state($rule.floor; $rule.floor.provider; "") end) as $rule_floor_state |
   (if $choice != "default" and $rule == null then []
    elif $rule == null then profiles($cfg.default // null)
    else profiles($rule.use)
@@ -631,8 +716,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         (if ($preferred | length) > 0 then " in preferred provider \($cfg.preferred_provider); uncertainty does not authorize fallback" else "" end)),
       note: $sel.note, candidates: $cands}
     else
-      ($elig | max_by(.spendPriority)) as $best |
-      ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
+      (if $sq then ($elig | first) else ($elig | max_by(.spendPriority)) end) as $best |
+      (if $sq then 1 else ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) end) as $ties |
       if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
       else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
         + (if ($unranked | length) > 0 then
@@ -660,7 +745,7 @@ TEXT=$(jq -r '
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
-      + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
+      + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .sq then "eligible (quota ranking off: home declares a single shared quota)" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
