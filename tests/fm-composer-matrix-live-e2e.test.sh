@@ -47,6 +47,10 @@ SESSION="cmxlive"
 ZELLIJ_SESSION="fm-cmx-live-zj-$$"
 CHECKED=0
 FAILED=0
+# The throwaway Pi agent directory, tracked as soon as it is created so a
+# failed run removes it too: `fail` exits through cleanup, which runs before
+# this section's own removals.
+PI_DIR=
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -58,6 +62,8 @@ cleanup() {
   if command -v zellij >/dev/null 2>&1; then
     zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
   fi
+  [ -z "${PI_DIR:-}" ] || fm_test_remove_tree "$PI_DIR"
+  PI_DIR=
 }
 trap cleanup EXIT
 
@@ -294,6 +300,7 @@ check_pi_model_selector() {  # <name> <version>
   win='pi-model'
   target="$SESSION:$win"
   dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-cmx-pi.XXXXXX")
+  PI_DIR=$dir
   mkdir -p "$dir/agent"
   cat > "$dir/agent/models.json" <<'JSON'
 {
@@ -344,6 +351,7 @@ JSON
     printf '%s\n' "$screen" | grep '[^[:space:]]' | tail -18 | sed 's/^/#   /' >&2
     tmux -L "$SOCKET" kill-window -t "$target" 2>/dev/null || true
     fm_test_remove_tree "$dir"
+    PI_DIR=
     FAILED=1
     printf 'not ok - %s (%s): the /model selector was not named by its rendered rows; a steer to this harness would submit into it\n' \
       "$name" "$version" >&2
@@ -383,6 +391,7 @@ JSON
   tmux -L "$SOCKET" send-keys -t "$target" Escape 2>/dev/null || true
   tmux -L "$SOCKET" kill-window -t "$target" 2>/dev/null || true
   fm_test_remove_tree "$dir"
+  PI_DIR=
 }
 
 if command -v pi >/dev/null 2>&1; then
