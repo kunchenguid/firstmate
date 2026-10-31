@@ -1571,7 +1571,8 @@ treehouse_pool_report() {
     pool_has_owner=0
     duplicate_reported=0
     status=$(jq -c '.worktrees // [] | .[]' "$state" 2>/dev/null) || continue
-    while IFS= read -r slot_record; do
+    if [ -n "$status" ]; then
+      while IFS= read -r slot_record; do
       slot=$(printf '%s\n' "$slot_record" | jq -r '.path // ""')
       created_at=$(printf '%s\n' "$slot_record" | jq -r '.created_at // ""')
       slot_leased=$(printf '%s\n' "$slot_record" | jq -r '(.leased == true) or ((.lease_id // "") != "") or ((.lease_holder // "") != "")')
@@ -1620,7 +1621,10 @@ treehouse_pool_report() {
         age_days=$(( (now - lease_epoch) / 86400 ))
         [ "$age_days" -lt "$threshold" ] || echo "TREEHOUSE_POOL_REPORT: unowned slot older than ${threshold}d: $slot (age ${age_days}d)"
       fi
-    done < <(printf '%s\n' "$status" | jq -c '.')
+      done <<EOF
+$status
+EOF
+    fi
     case "${pool##*/}" in
       project-*|scratch-project-*)
         [ "$pool_has_owner" -eq 1 ] || echo "TREEHOUSE_POOL_REPORT: test-leftover pool $pool"
