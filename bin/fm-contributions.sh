@@ -519,7 +519,7 @@ publish_pending() { # task canonical-url record-file
   [ "$count" -gt 0 ] || return 0
   while IFS=$'\t' read -r token type source age; do
     [ -n "$token" ] || continue
-    key=$(printf '%s\n%s\n' "$url" "$token" | shasum -a 256 | awk '{print $1}')
+    key=$(printf '%s\n%s\n' "$url" "$token" | fm_pr_sha256 -) && [ -n "$key" ] || return 1
     emitted=0
     status=0
     reason="check: contributions $task $key"
