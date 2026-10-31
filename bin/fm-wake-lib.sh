@@ -562,10 +562,13 @@ fm_lock_role() {
   cat "$1/role" 2>/dev/null
 }
 
+# Refuse an empty basename rather than returning the parent directory, which
+# reads as a valid but different path and lets a caller act on the wrong one.
 fm_lock_abs_path() {
   local path=$1 dir base
   fm_dirname_to dir "$path"
   fm_basename_to base "$path"
+  [ -n "$base" ] || return 1
   dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
   printf '%s/%s\n' "$dir" "$base"
 }
@@ -1331,21 +1334,46 @@ fm_lock_reap_dead_link() {
   fm_lock_discard_owner "$tomb"
 }
 
+# Remove a stale holder that is not a link lock, such as a directory lock left
+# by an older revision. Link locks go through fm_lock_reap_dead_link instead,
+# whose tombstone election keeps competing reapers off a successor's link.
+_fm_lock_reclaim_if_stale() {  # <path>
+  local path=$1 pid
+  [ -e "$path" ] && [ ! -L "$path" ] || return 1
+  pid=$(cat "$path/pid" 2>/dev/null || true)
+  fm_lock_recheck_stale_owner "$path" '' "$pid" || return 1
+  fm_lock_remove_path "$path"
+}
+
+# Reap a dead holder of <path> by the form it was created in.
+_fm_lock_reap_stale_holder() {  # <path>
+  if [ -L "$1" ]; then
+    fm_lock_reap_dead_link "$1"
+  else
+    _fm_lock_reclaim_if_stale "$1"
+  fi
+}
+
 # Acquire the short-lived steal mutex without recursively creating another
-# steal mutex. A dead holder is reaped once; a dead nested steal marker left by
-# the former recursive reclaim is reaped too so it cannot block the claim. A
-# hold abandoned by this very process (a trap interrupted its critical section)
-# is reclaimed like fm_lock_try_acquire's self-held branch.
+# steal mutex. Recovering it with the primary algorithm would descend onto
+# "<lock>.steal.steal" for as long as each level looks stale, and every crashed
+# stealer leaves one more stale level behind, so the descent runs until the
+# pathname and process stack give out. A dead holder is reaped once instead; a
+# dead nested steal marker left by the former recursive reclaim is reaped too so
+# it cannot block the claim. A hold abandoned by this very process (a trap
+# interrupted its critical section) is reclaimed like fm_lock_try_acquire's
+# self-held branch. The stale test is fm_lock_holder_alive's, so residue whose
+# holder crashed is reclaimed even once its pid names something else.
 fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
   local lockdir=$1 current
   FM_LOCK_OWNER_DIR=
   fm_lock_try_create "$lockdir" && return 0
   fm_current_pid current || return 1
-  fm_lock_reap_dead_link "$lockdir.steal" || true
+  _fm_lock_reap_stale_holder "$lockdir.steal" || true
   if [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$current" ]; then
     fm_lock_remove_path "$lockdir" || true
   elif [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
-    fm_lock_reap_dead_link "$lockdir" || return 1
+    _fm_lock_reap_stale_holder "$lockdir" || return 1
   fi
   fm_lock_try_create "$lockdir"
 }
@@ -1410,6 +1438,7 @@ fm_lock_try_acquire() {
   fi
   if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
     fm_lock_release "$steal"
+    fm_lock_discard_owner "$steal_owner"
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
@@ -2368,10 +2397,15 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
 
 # Remove a proven-abandoned legacy claim so the next claimant can arm. The
 # proof is re-verified while holding the lock's steal mutex, the same
-# serialization fm_lock_try_acquire uses for stale-owner reclaim: while it is
-# held no other process can publish the primary lock, so the window between
-# proving abandonment and removing the lock cannot swallow a genuine new
-# claim.
+# serialization fm_lock_try_acquire uses for stale-owner reclaim, so a genuine
+# new claim cannot be swallowed in the window between proving abandonment and
+# removing the lock.
+#
+# Reclaiming a STALE steal mutex is itself unserialized, so two reclaimers can
+# each end up believing they hold it - the loser's link no longer points at the
+# owner directory it created. The mutex is therefore re-proven to still be ours
+# before anything destructive runs, as fm_lock_try_acquire does before its own
+# steal.
 #
 # Old-build code cannot re-check generations, so a LIVE proven-abandoned
 # legacy owner whose recorded identity is verified to match its pid is retired
@@ -2385,14 +2419,20 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
 # TERM and the ledger graft below, keeping the documented bounded
 # upgrade-window residual instead of the deadlock.
 fm_autoarm_release_abandoned() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal epoch lock_pid recorded current owner line1 tmp i
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} lock steal steal_owner epoch lock_pid recorded current owner line1 tmp i
   lock="$state/.claude-autoarm.lock"
   steal="$lock.steal"
   epoch="$state/.claude-autoarm-epoch"
   fm_autoarm_claim_abandoned "$state" "$grace" || return 1
   fm_lock_try_acquire_steal_mutex "$steal" || return 1
+  steal_owner=${FM_LOCK_OWNER_DIR:-}
   if ! fm_autoarm_claim_abandoned "$state" "$grace"; then
     fm_lock_release "$steal"
+    return 1
+  fi
+  if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
+    fm_lock_release "$steal"
+    fm_lock_discard_owner "$steal_owner"
     return 1
   fi
   lock_pid=$(cat "$lock/pid" 2>/dev/null || true)
