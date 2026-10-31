@@ -606,6 +606,10 @@ fm_busy_lines_match() {  # [harness]
 # a dead-shell prompt and must never read `empty`. Newline-separated and
 # consumed by `read` rather than word splitting, so `$`, `%`, and `#` stay
 # literal and no entry is ever exposed to pathname expansion.
+# fm_composer_blocking_dialog, which only asks whether a row below a quoted
+# dialog's closing rule opens with a prompt, is the one decision that adds a
+# glyph of its own: it uses the AGENT list plus the single shell glyph `>`, and
+# its own comment says why it stays narrower than this SHELL set.
 FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→' '❭')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 
@@ -2230,8 +2234,8 @@ EOF
 #
 # Per-harness records for both entries are in
 # docs/verification/runtime-backends.md ("Claude background-task exit
-# picker", "Pi model selector"), and the live check that refreshes them is
-# tests/fm-composer-matrix-live-e2e.test.sh.
+# picker", "Pi model selector"); tests/fm-composer-matrix-live-e2e.test.sh is
+# the live check that refreshes the Pi entry.
 #
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
 # is still running opens this picker, and its selected row is Exit and stop tasks.
@@ -2267,10 +2271,11 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
   # status bar, which carries no box glyph and no prompt glyph, so either under
   # the rule means the cursor sits below a dialog-shaped fragment of ordinary
   # content: the quoted selector was scrolled above a live composer, and the
-  # next Enter would go to that composer rather than to the quoted rows. The
-  # prompt glyphs come from the one declared list, so a bare composer of any
-  # harness is caught below the rule and not only a bordered one. The shell
-  # prompt is deliberately limited to >.
+  # next Enter would go to that composer rather than to the quoted rows. A bare
+  # composer of any harness is caught below the rule and not only a bordered
+  # one: the agent glyphs are the declared list, and the shell prompt is the
+  # single literal >. That is deliberately narrower than the declared SHELL set,
+  # because each extra rejection can only make this guard miss a real selector.
   if printf '%s\n' "$screen" | fm_composer_strip_ansi \
     | LC_ALL=C awk -v glyphs="$FM_COMPOSER_AGENT_PROMPT_GLYPHS
 >" '
