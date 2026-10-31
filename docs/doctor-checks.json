@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "description": "Presentation inventory for bin/fm-doctor.sh. Each check names an existing owner's fact (a bootstrap line prefix, a bare token, or a read-only owner verb) and says how to show it: area, severity, and a fix hint. Detection stays with the owners; bin/fm-doctor.sh validates this file; bin/fm-lint.sh checks that every line prefix the emitters (and the bin/ libraries they source) can print is mapped here, and that every owner exists.",
+  "emitters": ["bin/fm-bootstrap.sh", "bin/fm-startup-network.sh", "bin/backends/*.sh"],
+  "areas": ["doctor", "tools", "backend", "config", "permissions", "no-mistakes", "auth", "supervision", "fleet", "memory"],
+  "sources": {
+    "bootstrap": {
+      "command": ["bin/fm-bootstrap.sh"],
+      "env": {"FM_BOOTSTRAP_DETECT_ONLY": "1", "FM_BOOTSTRAP_NETWORK": "skip"},
+      "timeout": 30
+    },
+    "bootstrap-network": {
+      "command": ["bin/fm-bootstrap.sh"],
+      "env": {"FM_BOOTSTRAP_DETECT_ONLY": "1", "FM_BOOTSTRAP_NETWORK": "only"},
+      "timeout": 30,
+      "network": true
+    },
+    "startup-network-report": {
+      "command": ["bin/fm-startup-network.sh", "report"],
+      "timeout": 15,
+      "network": true,
+      "scan": true,
+      "complete": "^completed off the startup path in [^:]*: GitHub authentication, "
+    }
+  },
+  "checks": [
+    {"id": "tools/missing", "area": "tools", "kind": "line", "prefix": "MISSING", "phase": "local", "source": "bootstrap", "severity": "fail", "owner": "bin/fm-bootstrap.sh", "fix": "Ask the captain, then run bin/fm-bootstrap.sh install <tool> (the line names the install command)."},
+    {"id": "tools/outdated", "area": "tools", "kind": "line", "prefix": "OUTDATED", "phase": "local", "source": "bootstrap", "severity": "fail", "owner": "bin/fm-bootstrap.sh", "fix": "Ask the captain, then run the upgrade command the line names."},
+    {"id": "tools/missing-manual", "area": "tools", "kind": "line", "prefix": "MISSING_MANUAL", "phase": "local", "source": "bootstrap", "severity": "fail", "owner": "bin/fm-bootstrap.sh", "fix": "Give the captain the printed instructions URL; never pass the tool to bin/fm-bootstrap.sh install."},
+    {"id": "tools/presentation", "area": "tools", "kind": "line", "prefix": "PRESENTATION_UNAVAILABLE", "phase": "local", "source": "bootstrap", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "Work in plain text; install or upgrade lavish-axi with captain consent before using Lavish."},
+    {"id": "tools/provenance", "area": "tools", "kind": "line", "prefix": "TOOL_PROVENANCE", "phase": "local", "source": "bootstrap", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "Restore the pinned build named in config/tool-provenance (a plain reinstall replaced it), or drop the pin once the upstream release carries the change."},
+    {"id": "backend/invalid", "area": "backend", "kind": "line", "prefix": "BACKEND_INVALID", "phase": "local", "source": "bootstrap", "severity": "fail", "owner": "bin/fm-bootstrap.sh", "fix": "Correct config/backend or FM_BACKEND to one of the listed backends before dispatching."},
+    {"id": "backend/herdr-launcher", "area": "backend", "kind": "line", "prefix": "HERDR_LAUNCHER", "phase": "local", "source": "bootstrap", "severity": "fail", "owner": "bin/fm-bootstrap.sh", "fix": "Find the live pane with herdr pane list --workspace <workspace> and pass corrected HERDR_PANE_ID, HERDR_WORKSPACE_ID, and HERDR_TAB_ID on the spawn command line, or relaunch the primary inside herdr."},
+    {"id": "config/crew-dispatch", "area": "config", "kind": "line", "prefix": "CREW_DISPATCH", "phase": "local", "source": "bootstrap", "severity": "fail", "owner": "bin/fm-bootstrap.sh", "fix": "Fix the named problem in config/crew-dispatch.json; do not dispatch by profile until it validates."},
+    {"id": "config/startup-memory-budget", "area": "config", "kind": "line", "prefix": "STARTUP_MEMORY_BUDGET", "phase": "sweep", "severity": "fail", "owner": "bin/fm-bootstrap.sh", "fix": "Correct config/startup-memory-budget; the memory/budget check reads it on demand."},
+    {"id": "config/relay", "area": "config", "kind": "line", "prefix": "FMX", "phase": "sweep", "severity": "info", "owner": "bin/fm-bootstrap.sh", "fix": "No action; restart the watcher only when a cadence change must apply immediately."},
+    {"id": "permissions/claude-fm-scripts", "area": "permissions", "kind": "line", "prefix": "CLAUDE_PERMISSIONS", "phase": "local", "source": "bootstrap", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "Give the captain the exact allow rule the line names for the home's .claude/settings.local.json; a present rule does not prove auto mode honors it."},
+    {"id": "no-mistakes/agents", "area": "no-mistakes", "kind": "line", "prefix": "NO_MISTAKES_AGENTS", "phase": "local", "source": "bootstrap", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "Install the named agent or remove it from the agent: list (ask the captain before editing their no-mistakes config); confirm with no-mistakes doctor."},
+    {"id": "auth/github", "area": "auth", "kind": "token", "prefix": "NEEDS_GH_AUTH", "phase": "network", "source": "bootstrap-network", "severity": "fail", "owner": "bin/fm-bootstrap.sh", "fix": "Confirm the network is reachable, then ask the captain to run: ! gh auth login"},
+    {"id": "fleet/tangle", "area": "fleet", "kind": "line", "prefix": "TANGLE", "phase": "local", "source": "bootstrap", "severity": "fail", "owner": "bin/fm-bootstrap.sh", "fix": "The session holding the fleet lock restores the primary to its default branch as the line says."},
+    {"id": "fleet/backlog-reconcile", "area": "fleet", "kind": "line", "prefix": "BACKLOG_RECONCILE", "phase": "local", "source": "bootstrap", "severity": "fail", "owner": "bin/fm-bootstrap.sh", "fix": "Follow the bootstrap-diagnostics skill for the named variant; never delete backlog-close records by hand."},
+    {"id": "fleet/home-summary", "area": "fleet", "kind": "line", "prefix": "HOME_SUMMARY", "phase": "local", "source": "bootstrap", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "Reproduce with bin/fm-home-summary-refresh.sh (no --best-effort) and fix the reported failure."},
+    {"id": "fleet/secondmate-handoff", "area": "fleet", "kind": "line", "prefix": "SECONDMATE_HANDOFF", "phase": "local", "source": "bootstrap", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "Keep the outbox; rerun bin/fm-backlog-handoff.sh --resume-pending once the route is fixed."},
+    {"id": "fleet/info", "area": "fleet", "kind": "line", "prefix": "BOOTSTRAP_INFO", "phase": "local", "source": "bootstrap", "severity": "info", "owner": "bin/fm-bootstrap.sh", "fix": "No action unless the fact says an interrupted cleanup may have left an endpoint or local copy."},
+    {"id": "fleet/sync", "area": "fleet", "kind": "line", "prefix": "FLEET_SYNC", "phase": "network", "source": "startup-network-report", "severity": "warn", "rules": [{"match": ": STUCK:", "status": "warn"}, {"match": ": recovered:", "status": "info"}, {"match": ": skipped:", "status": "info"}], "owner": "bin/fm-fleet-sync.sh", "fix": "A STUCK clone needs hands-on attention; a skip is one-off unless it names the registry entry."},
+    {"id": "fleet/secondmate-sync", "area": "fleet", "kind": "line", "prefix": "SECONDMATE_SYNC", "phase": "network", "source": "startup-network-report", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "Inspect the reason; the second mate's instructions or inherited settings may be stale."},
+    {"id": "fleet/secondmate-liveness", "area": "fleet", "kind": "line", "prefix": "SECONDMATE_LIVENESS", "phase": "network", "source": "startup-network-report", "severity": "warn", "rules": [{"match": "respawn failed", "status": "fail"}], "owner": "bin/fm-bootstrap.sh", "fix": "Investigate the reason; the second mate is not guaranteed to be running."},
+    {"id": "fleet/secondmate-nudge", "area": "fleet", "kind": "line", "prefix": "NUDGE_SECONDMATES", "phase": "network", "source": "startup-network-report", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "Keep the pending marker; fix the endpoint and rerun session start to retry the re-read nudge."},
+    {"id": "fleet/config-reread", "area": "fleet", "kind": "line", "prefix": "CONFIG_REREAD", "phase": "network", "source": "startup-network-report", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "Keep the retry records; fix the named problem and rerun session start to resend the re-read instruction."},
+    {"id": "supervision/network-checks", "area": "supervision", "kind": "line", "prefix": "NETWORK_CHECKS", "phase": "network", "source": "startup-network-report", "severity": "warn", "owner": "bin/fm-startup-network.sh", "fix": "Rerun the command the line prints; the named checks are unknown, not failed."},
+    {"id": "supervision/ready", "area": "supervision", "kind": "verb", "command": ["bin/fm-inbox.sh", "ready"], "timeout": 15, "parse": "json", "rules": [{"field": "can_receive", "equals": "true", "status": "ok"}, {"field": "lock.state", "equals": "free", "status": "warn"}, {"field": "wake_consumer.state", "equals": "down", "status": "warn"}], "default": "info", "fix": "Start or resume a firstmate session for this home and keep its supervision cycle live."},
+    {"id": "supervision/startup-network", "area": "supervision", "kind": "verb", "command": ["bin/fm-startup-network.sh", "report"], "timeout": 15, "parse": "text", "rules": [{"match": "did not finish cleanly", "status": "warn"}, {"match": "^NETWORK_CHECKS:", "status": "warn"}, {"match": "^completed off the startup path", "status": "ok"}, {"match": "^(IN PROGRESS|not started)", "status": "info"}], "default": "warn", "fix": "Read bin/fm-startup-network.sh report and rerun the command it names."},
+    {"id": "config/role", "area": "config", "kind": "verb", "command": ["bin/fm-role.sh", "report"], "timeout": 10, "parse": "text", "rules": [{"match": "^fm-role: [a-z]+.* - ", "status": "warn"}, {"match": "^fm-role: (user|maintainer)", "status": "ok"}], "default": "warn", "fix": "Correct config/firstmate-role as docs/configuration.md \"Firstmate role\" describes."},
+    {"id": "config/harness", "area": "config", "kind": "verb", "command": ["bin/fm-harness.sh"], "timeout": 10, "parse": "text", "rules": [{"match": "^(claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex)$", "status": "ok"}], "default": "warn", "fix": "Run the doctor from inside the firstmate session's own agent so its harness can be detected."},
+    {"id": "config/crew-harness", "area": "config", "kind": "verb", "command": ["bin/fm-harness.sh", "crew"], "timeout": 10, "parse": "text", "rules": [{"match": "^(claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex)$", "status": "ok"}], "default": "warn", "fix": "Set config/crew-harness to a verified adapter, or leave it absent to use this session's harness."},
+    {"id": "memory/budget", "area": "memory", "kind": "verb", "command": ["bin/fm-startup-memory-budget.sh", "report"], "timeout": 10, "parse": "text", "rules": [{"match": "^budget_status=over-budget$", "status": "warn"}, {"exit": 0, "status": "ok"}, {"match": "file is absent", "status": "info"}], "default": "warn", "fix": "An absent budget is written at the next locked session start; correct a malformed config/startup-memory-budget by hand."}
+  ]
+}

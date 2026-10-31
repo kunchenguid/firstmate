@@ -14,6 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
+| Toolchain checks | [Toolchain](#toolchain), [watched tool updates](#watched-tool-updates-configwatched-toolsjson), and [tool provenance pins](#tool-provenance-pins-configtool-provenance) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -2112,6 +2113,7 @@ A herdr, zellij, cmux, paseo, rex, t3code, or tern home is therefore never told 
 
 **Feature-specific requirements**
 
+- The on-demand [firstmate doctor](../bin/fm-doctor.sh) requires `jq` regardless of the selected backend.
 - When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 - When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 - When `config/record-export-root` exists, record sync and teardown archival require `python3` for descriptor-relative filesystem transactions and strict manifest parsing.
@@ -2326,6 +2328,23 @@ Arm the check once per home with `bin/fm-usage-warner.sh arm`.
 That writes `state/usage-warner.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns a crossing into a `check:` wake; no separate schedule is involved.
 `arm` refuses on any platform other than macOS.
 `bin/fm-usage-warner.sh disarm` removes the shim, its trust binding, and the de-dupe record (`state/.usage-warner`).
+
+## Tool provenance pins (config/tool-provenance)
+
+`config/tool-provenance` is an optional local, gitignored list of tools whose installed build matters, not only their version: for example a locally patched build that an upstream release does not carry yet.
+A plain reinstall can replace such a build with an upstream one of the same version and the same flags, which neither a version floor nor a feature probe can tell apart.
+
+Each non-blank line is `<tool> <absolute-path-prefix>`; `#` starts a comment.
+At every session start, and in `bin/fm-doctor.sh`, bootstrap resolves `<tool>` on `PATH`, follows every symlink, and prints a `TOOL_PROVENANCE:` line when the result does not start with the prefix, when the tool is not on `PATH`, or when a line is malformed.
+It only reports; it never runs, installs, or changes the tool.
+
+```text
+# tasks-axi carries a local patch until the upstream release includes it
+tasks-axi /home/me/.local/src/tasks-axi-patched/
+```
+
+Remove a pin once the upstream release carries what it was protecting, or the check reports every correct upgrade.
+The file is not inherited by secondmate homes; each home pins the builds it actually depends on.
 
 ## Mail plane (.env)
 

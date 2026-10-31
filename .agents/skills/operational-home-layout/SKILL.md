@@ -72,6 +72,7 @@ config/watched-tools.json  optional list of the tools this home depends on, read
 config/self-update-source  optional one-line "<remote> <branch>" that /updatefirstmate follows instead of origin, and nothing else does; LOCAL, gitignored, and not inherited; an unusable file stops the update, so report it to the captain and never edit or remove it; see docs/configuration.md "Self-update source"
 config/watch.env     optional home-local watcher tuning as exported shell assignments; LOCAL, gitignored, never removed by bootstrap; loaded by bin/fm-watch-arm.sh before x-mode.env; see docs/configuration.md "Relay (.env)"
 config/usage-warner  optional Claude usage-window thresholds for the opt-in macOS threshold warner armed with bin/fm-usage-warner.sh; LOCAL, gitignored, and NOT inherited by secondmate homes; see docs/configuration.md "Local Claude usage warner"
+config/tool-provenance  optional "<tool> <absolute-path-prefix>" pins for builds whose provenance matters, read by bootstrap's TOOL_PROVENANCE check; LOCAL, gitignored, captain-owned, and NOT inherited by secondmate homes; see docs/configuration.md "Tool provenance pins"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history

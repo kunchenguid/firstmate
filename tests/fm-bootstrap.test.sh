@@ -261,6 +261,193 @@ assert_timeout_report() {
   [ "$elapsed" -ge "$timeout" ] || fail "expected elapsed >= timeout, got elapsed=${elapsed}s timeout=${timeout}s"
 }
 
+# add_fake_herdr <fakebin>: a read-only herdr stub answering the launcher
+# identity reads. FM_FAKE_HERDR_MODE selects live (one consistent pane, tab, and
+# workspace), stale (pane get fails), or hang (every read blocks). The session
+# socket is FM_FAKE_HERDR_SOCKET.
+add_fake_herdr() {
+  cat > "$1/herdr" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_FAKE_HERDR_MODE:-live}" != hang ] || exec sleep 30
+case "${1:-} ${2:-}" in
+  "session list")
+    printf '{"sessions":[{"name":"%s","running":true,"socket_path":"%s"}]}\n' \
+      "${HERDR_SESSION:-default}" "$FM_FAKE_HERDR_SOCKET" ;;
+  "pane get")
+    [ "${FM_FAKE_HERDR_MODE:-live}" = live ] || { echo "pane not found" >&2; exit 1; }
+    printf '{"result":{"pane":{"pane_id":"%s","tab_id":"t1","workspace_id":"w1"}}}\n' "$3" ;;
+  "tab get") printf '{"result":{"tab":{"tab_id":"t1","workspace_id":"w1"}}}\n' ;;
+  "workspace list") printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' ;;
+  "status --json") printf '{}\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$1/herdr"
+}
+
+# The launcher-pane check runs only for a herdr home whose process carries
+# HERDR_PANE_ID. Each row: <label>^<mode>^<pane id or ->^<socket: same|other>^<expect>
+test_herdr_launcher() {
+  local label mode pane socket expect case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label mode pane socket expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/herdr-launcher-$n"
+    mkdir -p "$case_dir/home/config" "$case_dir/sock"
+    printf '%s\n' herdr > "$case_dir/home/config/backend"
+    fakebin=$(make_fake_toolchain_no_tmux "$case_dir" herdr)
+    add_real_jq "$fakebin"
+    add_fake_herdr "$fakebin"
+    out=$(
+      [ "$pane" = - ] || export HERDR_PANE_ID="$pane"
+      if [ "$socket" = other ]; then export HERDR_SOCKET_PATH="$case_dir/sock/other.sock"; else export HERDR_SOCKET_PATH="$case_dir/sock/herdr.sock"; fi
+      PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+        FM_FAKE_HERDR_MODE="$mode" FM_FAKE_HERDR_SOCKET="$case_dir/sock/herdr.sock" \
+        FM_BOOTSTRAP_HERDR_LAUNCHER_TIMEOUT=2 \
+        FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+        "$ROOT/bin/fm-bootstrap.sh")
+    expect=${expect//@CASE@/$case_dir}
+    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
+  done <<'ROWS'
+a live launcher pane is silent^live^w1:p1^same^
+no inherited pane is silent^live^-^same^
+a stale launcher pane is reported^stale^w1:p9^same^HERDR_LAUNCHER: herdr launcher pane 'w1:p9' could not be read in session 'default' - every spawn from this session will refuse; find the live pane with herdr pane list --workspace <workspace> and pass corrected HERDR_PANE_ID, HERDR_WORKSPACE_ID, and HERDR_TAB_ID on the spawn command line, or relaunch the primary inside herdr
+a pane from another server is reported^live^w1:p1^other^HERDR_LAUNCHER: herdr launcher pane 'w1:p1' belongs to the server at '@CASE@/sock/other.sock', not session 'default' at '@CASE@/sock/herdr.sock' - every spawn from this session will refuse; find the live pane with herdr pane list --workspace <workspace> and pass corrected HERDR_PANE_ID, HERDR_WORKSPACE_ID, and HERDR_TAB_ID on the spawn command line, or relaunch the primary inside herdr
+a wedged herdr server is bounded^hang^w1:p1^same^HERDR_LAUNCHER: herdr launcher pane 'w1:p1' could not be confirmed within 2s - a spawn from this session may stall or refuse; find the live pane with herdr pane list --workspace <workspace> and pass corrected HERDR_PANE_ID, HERDR_WORKSPACE_ID, and HERDR_TAB_ID on the spawn command line, or relaunch the primary inside herdr
+ROWS
+  pass "a herdr home reports a stale, foreign, or unanswerable launcher pane at session start"
+}
+
+# Claude auto mode without a bin/fm-* allow rule. Each row:
+# <label>^<local settings or ->^<user settings or ->^<harness pin>^<home kind>^<expect>
+# The harness is pinned through the supervision-branch primary pin so the
+# verdict does not depend on the shell running the suite; @LINE@ expands to the
+# expected warning for the user settings file.
+test_claude_permissions() {
+  local label local_body user_body harness kind expect case_dir fakebin out n line
+  n=0
+  while IFS='^' read -r label local_body user_body harness kind expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/claude-perms-$n"
+    mkdir -p "$case_dir/home" "$case_dir/root/.claude" "$case_dir/user"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    add_real_jq "$fakebin"
+    local_body=${local_body//@CASE@/$case_dir}
+    user_body=${user_body//@CASE@/$case_dir}
+    [ "$local_body" = - ] || printf '%s\n' "$local_body" > "$case_dir/root/.claude/settings.local.json"
+    [ "$user_body" = - ] || printf '%s\n' "$user_body" > "$case_dir/user/settings.json"
+    [ "$kind" != secondmate ] || : > "$case_dir/home/.fm-secondmate-home"
+    line="CLAUDE_PERMISSIONS: Claude auto mode is on ($case_dir/user/settings.json) but no Bash(...bin/fm-*...) allow rule is in any Claude settings layer, so the auto-mode classifier may refuse firstmate's own scripts - add Bash($case_dir/root/bin/fm-*:*) to $case_dir/root/.claude/settings.local.json (a present rule does not prove the classifier honors it)"
+    expect=${expect//@LINE@/$line}
+    expect=${expect//@CASE@/$case_dir}
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/root" \
+      FM_BOOTSTRAP_CLAUDE_USER_SETTINGS="$case_dir/user/settings.json" \
+      FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS="$harness" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      "$ROOT/bin/fm-bootstrap.sh")
+    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
+  done <<'ROWS'
+auto mode without a rule is reported^-^{"permissions":{"defaultMode":"auto"}}^claude^primary^@LINE@
+auto mode off without a rule is not reported^-^{"permissions":{"defaultMode":"default"}}^claude^primary^
+a local allow rule clears it^{"permissions":{"allow":["Bash(@CASE@/root/bin/fm-*:*)"]}}^{"permissions":{"defaultMode":"auto"}}^claude^primary^
+a user allow rule clears it^-^{"permissions":{"defaultMode":"auto","allow":["Bash(bin/fm-*:*)"]}}^claude^primary^
+a single script rule does not clear it^-^{"permissions":{"defaultMode":"auto","allow":["Bash(@CASE@/root/bin/fm-doctor.sh:*)"]}}^claude^primary^@LINE@
+a different checkout rule does not clear it^-^{"permissions":{"defaultMode":"auto","allow":["Bash(/home/me/firstmate/bin/fm-*:*)"]}}^claude^primary^@LINE@
+a local mode overrides user auto mode^{"permissions":{"defaultMode":"default"}}^{"permissions":{"defaultMode":"auto"}}^claude^primary^
+a non-Claude primary is never checked^-^{"permissions":{"defaultMode":"auto"}}^pi^primary^
+a secondmate home is never checked^-^{"permissions":{"defaultMode":"auto"}}^claude^secondmate^
+malformed settings are reported^{not json^{"permissions":{"defaultMode":"default"}}^claude^primary^CLAUDE_PERMISSIONS: @CASE@/root/.claude/settings.local.json is not a valid JSON settings object, so Claude may ignore the permissions it holds
+ROWS
+  pass "Claude auto mode with no bin/fm-* allow rule is reported only for a Claude primary home"
+}
+
+# no-mistakes' agent: setting, read from FM_BOOTSTRAP_NO_MISTAKES_HOME/config.yaml.
+# Each row: <label>^<config body, \n for newlines>^<expected output, exact>.
+# The fake toolchain has codex and acpx; nothing else named here is installed.
+test_no_mistakes_agents() {
+  local label body expect case_dir fakebin out n line location config
+  for location in global repository; do
+    n=0
+    while IFS='^' read -r label body expect; do
+      [ -n "$label" ] || continue
+      n=$((n + 1))
+      case_dir="$TMP_ROOT/nm-agents-$location-$n"
+      mkdir -p "$case_dir/home" "$case_dir/nm"
+      fakebin=$(make_fake_toolchain "$case_dir")
+      fm_fake_exit0 "$fakebin" codex acpx
+      if [ "$location" = global ]; then
+        config="$case_dir/nm/config.yaml"
+      else
+        config="$case_dir/home/.no-mistakes.yaml"
+      fi
+      [ "$body" = - ] || printf '%b\n' "$body" > "$config"
+      out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+        FM_BOOTSTRAP_NO_MISTAKES_HOME="$case_dir/nm" \
+        FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+        "$ROOT/bin/fm-bootstrap.sh")
+      line="NO_MISTAKES_AGENTS: $config agent: lists"
+      expect=${expect//@LINE@/$line}
+      [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
+    done <<'ROWS'
+absent config is silent^-^
+installed flow list is silent^agent: [codex]^
+missing agent in a flow list^agent: [codex, "claude"]  # fallback order^@LINE@ claude, but claude is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+missing agent in a block list^agent:\n  - codex\n  # comment\n  - grok\nci_timeout: 1h^@LINE@ grok, but grok is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+missing agent in an unindented block list^agent:\n- codex\n# comment\n\n- claude\nci_timeout: 1h\nother_list:\n- not-an-agent^@LINE@ claude, but claude is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+installed unindented block list is silent^agent:\n- codex\nci_timeout: 1h\nother_list:\n- not-an-agent^
+commented unindented block header^agent: # fallback order\n- codex\n- claude^@LINE@ claude, but claude is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+commented indented block header^agent:   # fallback order\n  - codex\n  - claude^@LINE@ claude, but claude is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+commented installed block header^agent: # fallback order\n- codex^
+commented scalar remains installed^agent: codex # chosen agent^
+commented acpx path uses the default^agent: acp:gemini\nacpx_path: # default executable^
+scalar auto is never checked^agent: auto^
+rovodev resolves through acli^agent: rovodev^@LINE@ rovodev, but acli is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+acp targets need the configured acpx^agent: acp:gemini\nacpx_path: /nonexistent/acpx^@LINE@ acp:gemini, but /nonexistent/acpx is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)
+ROWS
+  done
+  pass "no-mistakes agent: entries that this host cannot run are reported"
+}
+
+# config/tool-provenance pins a tool to an absolute path prefix that its fully
+# resolved executable must start with. Each row: <label>^<pin file body, \n for
+# newlines>^<expected output, exact; empty means silence>. The pinned tool is a
+# PATH symlink into $case/src/patched or $case/src/upstream.
+test_tool_provenance_pins() {
+  local label body expect case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label body expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/provenance-$n"
+    mkdir -p "$case_dir/home/config" "$case_dir/src/patched/bin" "$case_dir/src/upstream/bin"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/src/patched/bin/pinned-tool"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/src/upstream/bin/pinned-tool"
+    chmod +x "$case_dir/src/patched/bin/pinned-tool" "$case_dir/src/upstream/bin/pinned-tool"
+    case "$label" in
+      *upstream*) ln -s "$case_dir/src/upstream/bin/pinned-tool" "$fakebin/pinned-tool" ;;
+      *absent*) ;;
+      *) ln -s "$case_dir/src/patched/bin/pinned-tool" "$fakebin/pinned-tool" ;;
+    esac
+    body=${body//@CASE@/$case_dir}
+    expect=${expect//@CASE@/$case_dir}
+    printf '%b\n' "$body" > "$case_dir/home/config/tool-provenance"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      "$ROOT/bin/fm-bootstrap.sh")
+    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out"
+  done <<'ROWS'
+patched build matches its pin silently^# patched until upstream ships it\n\npinned-tool @CASE@/src/patched/^
+upstream reinstall is reported^pinned-tool @CASE@/src/patched/^TOOL_PROVENANCE: pinned-tool resolves to @CASE@/src/upstream/bin/pinned-tool, not the pinned @CASE@/src/patched/; a reinstall may have replaced the pinned build - restore it, or remove the pin once the upstream release carries what it needs
+absent pinned tool is reported^pinned-tool @CASE@/src/patched/^TOOL_PROVENANCE: pinned-tool is pinned in config/tool-provenance but not on PATH
+pin without a prefix is malformed^pinned-tool^TOOL_PROVENANCE: invalid config/tool-provenance line 1 - expected '<tool> <absolute-path-prefix>'
+relative prefix is malformed^pinned-tool src/patched/^TOOL_PROVENANCE: invalid config/tool-provenance line 1 - 'src/patched/' is not an absolute path
+ROWS
+  pass "config/tool-provenance pins report a replaced, missing, or malformed pinned build"
+}
+
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
 #   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
@@ -1539,6 +1726,10 @@ SH
 
 test_bootstrap_reporting
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
+test_tool_provenance_pins
+test_no_mistakes_agents
+test_claude_permissions
+test_herdr_launcher
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
