@@ -1492,7 +1492,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           TERMINAL_PR=$NEWEST_PR
           emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
           ;;
-        failed|cancelled)
+        failed)
           if [ "$NEWEST_ROW_AGREES" != 1 ]; then
             LEDGER_DETAIL="run $LEDGER_STATUS from the ledger's row for this worktree; the $READING_DETAIL reading could not be bound to it"
             TERMINAL_PR=$NEWEST_PR

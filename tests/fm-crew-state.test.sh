@@ -3819,7 +3819,7 @@ test_failed_run_with_no_later_run_still_surfaces() {
 # --- A terminal FAILED run must be proven current before it is reported -----
 # Regression family for the 2026-08-27 incident: bin/fm-crew-state.sh matched a
 # run against the worktree's current code and so inherited whatever run last sat
-# on that head. A stale FAILED (or CANCELLED, which reads the same) run then
+# on that head. A stale FAILED run then
 # outranked every newer record - a declared pause, a terminal done line, and even
 # a live run in flight on the same branch - and that false failure was promoted
 # into a captain-facing terminal outcome. The fixtures below drive each newer
@@ -4052,6 +4052,15 @@ EOF
   assert_not_contains "$out" "run failed · pr=" \
     "a ledger-sourced verdict never stands bare beside another record's pull request"
   pass "a ledger-sourced verdict never names the attributed run as its own"
+
+  # A newer cancellation at this same head contradicts the old failure but
+  # supplies no replacement failure verdict or terminal pull request.
+  FM_FAKE_RUNS_LIST="$(printf '%s\n' "$FM_FAKE_RUNS_LIST" | sed '1s/failed/cancelled/')"
+  out=$(run_crew_state "$d" feat-s2k)
+  assert_contains "$out" "state: unknown" "a newer cancelled row is not a failed verdict"
+  assert_not_contains "$out" "state: failed" "the earlier failure must not override cancellation"
+  assert_not_contains "$out" "pr=" "cancellation publishes neither run's terminal pull request"
+  pass "a newer cancelled ledger row leaves an earlier failure unprovable"
 }
 
 # A record cannot supersede itself. On the coarse path the emitted reading is
@@ -4073,10 +4082,10 @@ test_coarse_terminal_reading_claims_no_supersession() {
 EOF
 )"
   out=$(run_crew_state "$d" feat-s2l)
-  assert_contains "$out" "state: failed" "the coarse terminal row still reads failed"
+  assert_contains "$out" "state: unknown" "a coarse cancelled row has no verdict"
   assert_contains "$out" "run cancelled" "the coarse reading keeps its own detail"
   assert_not_contains "$out" "(earlier " "one ledger row must not be reported as superseding itself"
-  assert_contains "$out" "pr=https://github.com/o/r/pull/3333" "the coarse path keeps its own terminal pull request"
+  assert_not_contains "$out" "pr=" "a coarse cancelled row publishes no terminal pull request"
   pass "a coarse terminal reading claims no supersession"
 }
 
@@ -4221,8 +4230,8 @@ test_later_declared_pause_leaves_the_failure_unprovable() {
   pass "a stale failed reading behind a declared pause reads unknown"
 }
 
-# CANCELLED reads FAILED through the same inheritance path, so it inherits the
-# same defect and needs the same cover.
+# Cancellation has no verdict, and a later declared pause must not turn it into
+# a terminal result through the failed-run precedence path.
 test_later_declared_pause_leaves_the_cancelled_reading_unprovable() {
   reset_fakes
   local d; d=$(new_case stale-cancelled-later-pause)
