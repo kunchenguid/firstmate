@@ -89,7 +89,9 @@ fm_secondmate_liveness_unlock() {  # <id>
 # fm_secondmate_liveness_relaunch captured into FM_SM_LIVE_OUT; a reporting caller
 # prints them unchanged so the evidence its own spawner observed is not dropped.
 fm_sm_live_model_verdicts() {
-  printf '%s\n' "$FM_SM_LIVE_OUT" | sed -n '/^model pin \(asserted\|mismatch\|unverified\):/p' || true
+  # `sed -E`: `\|` alternation in a basic expression is a GNU extension, so stock
+  # BSD/macOS sed would match nothing and silently drop the verdict it forwards.
+  printf '%s\n' "$FM_SM_LIVE_OUT" | sed -nE '/^model pin (asserted|mismatch|unverified):/p' || true
 }
 
 fm_sm_live_first_line() {

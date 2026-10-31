@@ -1493,7 +1493,9 @@ spawn_remote_secondmate() {
     fi
     return "$rc"
   fi
-  printf '%s\n' "$out" | sed -n '/^model pin \(asserted\|mismatch\|unverified\):/p' >&2 || true
+  # `sed -E`: `\|` alternation in a basic expression is a GNU extension, so stock
+  # BSD/macOS sed would match nothing and silently drop the verdict it relays.
+  printf '%s\n' "$out" | sed -nE '/^model pin (asserted|mismatch|unverified):/p' >&2 || true
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
