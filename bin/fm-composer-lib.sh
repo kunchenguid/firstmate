@@ -603,6 +603,10 @@ fm_busy_lines_match() {  # [harness]
 # a dead-shell prompt and must never read `empty`. Newline-separated and
 # consumed by `read` rather than word splitting, so `$`, `%`, and `#` stay
 # literal and no entry is ever exposed to pathname expansion.
+# fm_composer_blocking_dialog, which only asks whether a row below a quoted
+# dialog's closing rule opens with a prompt, is the one decision that adds a
+# glyph of its own: it uses the AGENT list plus the single shell glyph `>`, and
+# its own comment says why it stays narrower than this SHELL set.
 FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→' '❭')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 
@@ -2172,14 +2176,30 @@ EOF
 
 # fm_composer_blocking_dialog: name a screen whose next Enter would answer it.
 # Prints the name and returns 0 only for the recorded structure of one dialog:
-# the heading on its own line, then its selected row alone on a row, with the
-# recorded footer as the last non-blank row. A heading buried in a sentence,
+# the heading on its own line, then its selected row alone on a row, closed by
+# the recorded footer. What closes the dialog after that footer differs per
+# entry, and each entry below states its own. A heading buried in a sentence,
 # or a last line that only starts with the same words, is not that dialog.
 # The strings alone are not enough, because a diff, a note, or a test fixture
 # on the pane can quote all of them above a normal composer. A miss returns 1
 # and prints nothing.
+#
+# Each entry below is one recorded screen, matched by its own structure. A
+# shared "looks like a picker" heuristic is deliberately not used: the
+# footers below differ per harness, and a footer-only match would
+# reclassify ordinary screens that happen to end in the same words.
+#
+# Per-harness records for both entries are in
+# docs/verification/runtime-backends.md ("Claude background-task exit
+# picker", "Pi model selector"); tests/fm-composer-matrix-live-e2e.test.sh is
+# the live check that refreshes the Pi entry.
+#
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell
 # is still running opens this picker, and its selected row is Exit and stop tasks.
+# Its footer IS the pane's last non-blank row.
+#
+# Recorded 2026-10-20 and re-measured 2026-10-31 on pi 1.3.0 and 1.4.0: /model
+# opens the model selector, drawn above the pane's status bar.
 fm_composer_blocking_dialog() {  # <screen> -> dialog name
   local screen=${1-}
   [ -n "$screen" ] || return 1
@@ -2190,6 +2210,65 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
     END { exit !(selected && last ~ /^[ \t]*Enter to confirm · Esc to cancel[ \t\r]*$/) }
   '; then
     printf '%s' 'Claude background-task exit picker'
+    return 0
+  fi
+  # The class is [^[:space:]] and not \S: a stock macOS awk and mawk both
+  # read \S as a literal S, so a \S pattern would never match the
+  # recorded row and the guard would be silently dead there.
+  #
+  # The footer closes the DIALOG, never the pane: pi always draws its status
+  # bar under the selector, so a screen whose next Enter would answer it still
+  # ends with that bar. Reading the footer as the pane's last row matched only
+  # an excerpt cut at the closing rule and missed every live selector, which
+  # left the guard dead exactly where it was needed.
+  # The dialog's own closing rule is therefore the row after the footer when
+  # one is present, and it counts only when it is as wide as the widest row of
+  # the screen: that is what a rule spanning the whole pane is, and what a rule
+  # quoted above a bordered composer is not. Rows below it are the harness's
+  # status bar, which carries no box glyph and no prompt glyph, so either under
+  # the rule means the cursor sits below a dialog-shaped fragment of ordinary
+  # content: the quoted selector was scrolled above a live composer, and the
+  # next Enter would go to that composer rather than to the quoted rows. A bare
+  # composer of any harness is caught below the rule and not only a bordered
+  # one: the agent glyphs are the declared list, and the shell prompt is the
+  # single literal >. That is deliberately narrower than the declared SHELL set,
+  # because each extra rejection can only make this guard miss a real selector.
+  if printf '%s\n' "$screen" | fm_composer_strip_ansi \
+    | LC_ALL=C awk -v glyphs="$FM_COMPOSER_AGENT_PROMPT_GLYPHS
+>" '
+    function starts_with_glyph(s,   j) {
+      sub(/^[ \t]+/, "", s)
+      for (j = 1; j <= glyph_count; j++)
+        if (g[j] != "" && substr(s, 1, length(g[j])) == g[j]) return 1
+      return 0
+    }
+    BEGIN { glyph_count = split(glyphs, g, "\n") }
+    { row[NR] = $0
+      line = $0
+      sub(/[ \t\r]+$/, "", line)
+      if (length(line) > widest) widest = length(line)
+      if (line ~ /^[ \t]*→[ \t]+(✓[ \t]+)?[^[:space:]]/) selected = 1
+      if (line ~ /^[ \t]*Enter to select · Ctrl\+S to set as default · Escape\/Ctrl\+C to cancel[ \t]*$/) footer = NR
+    }
+    END {
+      if (!(selected && footer)) exit 1
+      i = footer + 1
+      while (i <= NR && row[i] ~ /^[ \t\r]*$/) i++
+      if (i > NR) exit 0
+      border = row[i]
+      sub(/[ \t\r]+$/, "", border)
+      if (border !~ /^([ \t]|\342\224[\200\201])*$/) exit 1
+      if (length(border) < widest) exit 1
+      i++
+      while (i <= NR) {
+        if (row[i] ~ /\342[\224\225][\200-\277]/) exit 1
+        if (starts_with_glyph(row[i])) exit 1
+        i++
+      }
+      exit 0
+    }
+  '; then
+    printf '%s' 'Pi model selector'
     return 0
   fi
   return 1

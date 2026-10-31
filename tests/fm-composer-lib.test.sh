@@ -21,6 +21,9 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-timeout-lib.sh"
+
 # classify <bordered> <content> [idle_re] -> echoes the verdict.
 classify() { fm_composer_classify_content "$@"; }
 
@@ -1750,6 +1753,263 @@ test_dialog_heading_and_footer_must_be_the_recorded_lines() {
   pass "a buried heading or a different last line is not the exit picker"
 }
 
+# The Pi model selector, captured from a live pi session (2026-10-31, pi
+# 1.3.0 and 1.4.0 render the same frame) in a 76x44 tmux pane, driven with
+# /model against a local `models.json` provider whose baseUrl is an unreachable
+# port (the `[localfake]` badge) so no provider was called.
+# These are bytes from `tmux capture-pane -p`, from the selector's top rule to
+# the pane's last row: the highlight sits on a model that is not the current
+# one, so the `→` cursor and the `✓` current marker are on different rows, and
+# pi draws its status bar under the dialog's closing rule. The right-aligned
+# model name in the last row is the status bar's own furniture.
+pi_model_picker_screen() {
+  printf '%s\n' \
+    '────────────────────────────────────────────────────────────────────────────' \
+    '' \
+    'Only showing models from configured providers. Use /login to add providers.' \
+    '' \
+    '>' \
+    '' \
+    '  ✓ alpha-model-one [localfake]' \
+    '→   beta-model-two [localfake]' \
+    '    gamma-model-three [localfake]' \
+    '' \
+    '  Model Name: beta-model-two' \
+    '' \
+    '  Model catalogs refreshed.' \
+    '' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '────────────────────────────────────────────────────────────────────────────' \
+    '/tmp/pilive' \
+    '0.0%/128k (auto)                                             alpha-model-one'
+}
+
+# The same selector captured as the dialog region alone, ending at its closing
+# rule. Both shapes are real: a bounded tail can end at the rule, a viewport
+# capture always carries the status bar under it.
+pi_model_picker_excerpt_screen() {
+  pi_model_picker_screen | sed '$d' | sed '$d'
+}
+
+test_pi_model_selector_is_named_and_blocks_enter() {
+  local screen out rc sink
+  screen=$(pi_model_picker_screen)
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the recorded Pi model selector should match"
+  [ "$out" = 'Pi model selector' ] || fail "dialog name was '$out'"
+  # A picker must be named even when the composer classifier cannot see a
+  # cursor or a styled row, which is the case on a plain capture.
+  sink=$(mktemp)
+  FM_COMPOSER_DIALOG_SINK=$sink
+  out=$(fm_composer_classify_screen 'styled=0' "$screen")
+  [ "$(cat "$sink")" = 'Pi model selector' ] \
+    || fail "classify should note the dialog, got '$(cat "$sink")'"
+  unset FM_COMPOSER_DIALOG_SINK
+  rm -f "$sink"
+  # The footer alone, without the selected row, is not this dialog: the
+  # strings can be quoted above a normal composer.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    'the fixture quotes: Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "a quoted footer without the selected row must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  # The selected row without the recorded footer is not this dialog either.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→ ✓ alpha-model-one [localfake]' \
+    '    beta-model-two [localfake]' \
+    '  Model catalogs refreshed.')"); rc=$?
+  [ "$rc" -eq 1 ] || fail "the rows without the recorded footer must not match"
+  [ -z "$out" ] || fail "a miss must print nothing, got '$out'"
+  pass "the Pi model selector is named by its recorded rows and footer"
+}
+
+test_pi_selector_ends_at_its_closing_rule_not_at_the_pane() {
+  local screen out rc tail
+  # The dialog region alone, ending at its closing rule.
+  out=$(fm_composer_blocking_dialog "$(pi_model_picker_excerpt_screen)"); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = 'Pi model selector' ] \
+    || fail "the selector's dialog region alone should match: rc=$rc name='$out'"
+  # What a real pane capture hands the matcher: pi's own status bar follows
+  # the closing rule, so the footer is the dialog's last row, never the
+  # pane's. Reading the footer as the pane's last row made the guard miss
+  # every live selector screen.
+  screen=$(pi_model_picker_screen)
+  out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = 'Pi model selector' ] \
+    || fail "a selector with pi's status bar under its closing rule should match: rc=$rc name='$out'"
+  # The same footer quoted above a bordered composer, closed by a pane-wide
+  # rule, is content: box glyphs under the rule are not a status bar.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→ ✓ alpha-model-one [localfake]' \
+    '    beta-model-two [localfake]' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '────────────────────────────────────────────────────────────────────────' \
+    '╭──────────────╮' \
+    '│ > next steer │' \
+    '╰──────────────╯')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] \
+    || fail "quoted footer closed by a pane-wide rule must not be a selector, got '$out'"
+  # The same case with a bare composer under the rule, which carries no box
+  # glyph: an ordinary codex `›` row under the rule means the cursor sits in
+  # that composer, so the quoted rows above it are content and the next Enter
+  # must reach the composer rather than be refused as this selector.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→ ✓ alpha-model-one [localfake]' \
+    '    beta-model-two [localfake]' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '────────────────────────────────────────────────────────────────────────' \
+    '› ' \
+    '  gpt-5.5 default · /tmp/project')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] \
+    || fail "quoted footer closed by a pane-wide rule above a bare composer must not be a selector, got '$out'"
+  # A bare composer holding typed text is the same proof: the glyph is the
+  # whole test, so the row's own words are free text.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→   beta-model-two [localfake]' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '────────────────────────────────────────────────────────────────────────' \
+    '› fix the failing test')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] \
+    || fail "a bare composer holding typed text under the rule must not be a selector, got '$out'"
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→   beta-model-two [localfake]' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '────────────────────────────────────────────────────────────────────────' \
+    '> next command')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] \
+    || fail "a bare > shell prompt under the rule must not be a selector, got '$out'"
+  # Nor is a rule that spans only part of the screen a closing rule.
+  out=$(fm_composer_blocking_dialog "$(printf '%s\n' \
+    '→   beta-model-two [localfake]' \
+    '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+    '──────' \
+    '  Model catalogs refreshed.')"); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] \
+    || fail "a short rule under a quoted footer must not be a selector, got '$out'"
+  # A dialog whose closing rule is cut off by a bounded tail still matches.
+  tail=$(pi_model_picker_excerpt_screen | sed '$d')
+  out=$(fm_composer_blocking_dialog "$tail"); rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = 'Pi model selector' ] \
+    || fail "a selector tail ending at its footer should match: rc=$rc name='$out'"
+  pass "the Pi selector ends at its closing rule, not at the pane's last row"
+}
+
+fm_test_pi_picker_state() {
+  fm_composer_classify_screen 'styled=1' "$FM_TEST_PICKER_SCREEN"
+}
+
+test_pi_model_selector_variants_and_quoted_content() {
+  local current border screen out rc sink enters
+  for current in '✓ ' ''; do
+    for border in '' '────────────────────────────────────────'; do
+      screen=$(printf '%s\n' '────────────────────────────────────────' \
+        "→ ${current}alpha-model-one [localfake]" \
+        '    beta-model-two [localfake]' \
+        '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
+        "$border")
+      out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+      [ "$rc" -eq 0 ] && [ "$out" = 'Pi model selector' ] \
+        || fail "Pi selector variant did not match: current='$current', border='$border'"
+      FM_TEST_PICKER_SCREEN=$screen
+      FM_TEST_PICKER_ENTERS=$(mktemp)
+      fm_composer_dialog_sink_prepare || fail "could not prepare dialog sink"
+      sink=$FM_COMPOSER_DIALOG_SINK
+      out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_pi_picker_state win 3 0)
+      [ "$(cat "$sink")" = 'Pi model selector' ] || fail "retry must report Pi selector"
+      fm_composer_dialog_sink_release
+      enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+      [ "$out" = unknown ] && [ "$enters" -eq 1 ] \
+        || fail "Pi selector must stop retry: verdict='$out', enters='$enters'"
+      rm -f "$FM_TEST_PICKER_ENTERS"
+      screen=$(printf '%s\n' "$screen" '╭──────────────╮' '│ > next steer │' '╰──────────────╯')
+      out=$(fm_composer_blocking_dialog "$screen"); rc=$?
+      [ "$rc" -eq 1 ] && [ -z "$out" ] || fail "quoted Pi selector must not match"
+      FM_TEST_PICKER_SCREEN=$screen
+      FM_TEST_PICKER_ENTERS=$(mktemp)
+      fm_composer_dialog_sink_prepare || fail "could not prepare dialog sink"
+      sink=$FM_COMPOSER_DIALOG_SINK
+      out=$(fm_composer_submit_retry_core fm_test_picker_send fm_test_pi_picker_state win 3 0)
+      [ ! -s "$sink" ] || fail "quoted Pi selector must not be reported"
+      fm_composer_dialog_sink_release
+      enters=$(grep -c '^Enter$' "$FM_TEST_PICKER_ENTERS" || true)
+      [ "$out" = pending ] && [ "$enters" -eq 3 ] \
+        || fail "quoted Pi selector must retain retries: verdict='$out', enters='$enters'"
+      rm -f "$FM_TEST_PICKER_ENTERS"
+    done
+  done
+  unset FM_TEST_PICKER_SCREEN FM_TEST_PICKER_ENTERS
+  pass "Pi selector marker and border variants block retries; quoted content does not"
+}
+
+test_dialog_matcher_is_portable_awk() (
+  # The matcher runs under whatever awk the host has. A stock macOS awk
+  # and mawk both read a \S as a literal S, so a \S pattern would never
+  # match the recorded row and the guard would be silently dead on
+  # those hosts while passing on a GNU-awk host.
+  #
+  # Every awk the host provides is exercised: the case must match under
+  # all of them, and a pattern the host's awk cannot read must not be
+  # what the matcher uses. This asserts the BEHAVIOUR under each awk,
+  # never the bytes of the matcher's source.
+  local screen out rc awk_bin probe_bin dir fixture legacy group processes probed=0
+  fixture=$(mktemp -d "${TMPDIR:-/tmp}/fm-awk-probe.XXXXXX") || fail "could not create awk probe fixture"
+  trap 'fm_test_remove_tree "$fixture"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  trap 'exit 131' QUIT
+  mkdir "$fixture/bin"
+  cat > "$fixture/bin/gawkbug" <<'SENTINEL'
+#!/usr/bin/env bash
+fixture=$(dirname "$0")/..
+printf "%s\n" "$$" > "$fixture/invoked"
+ps -o pgid= -p "$$" > "$fixture/group"
+trap 'trap "" TERM; wait; exit 0' TERM
+sleep 300 &
+printf "%s\n" "$!" > "$fixture/child"
+wait
+SENTINEL
+  chmod +x "$fixture/bin/gawkbug"
+  legacy=$(PATH="$fixture/bin:$PATH" compgen -c gawk)
+  case "$legacy" in *gawkbug*) ;; *) fail "legacy prefix discovery missed gawkbug sentinel" ;; esac
+  screen=$(pi_model_picker_screen)
+  for awk_bin in awk mawk gawk nawk; do
+    probe_bin=$(PATH="$fixture/bin:$PATH" command -v "$awk_bin" 2>/dev/null) || continue
+    probed=$((probed + 1))
+    dir="$fixture/$awk_bin"
+    mkdir "$dir"
+    ln -sf "$probe_bin" "$dir/awk"
+    # Expansion is intentionally deferred to the child bash passed to -c.
+    # shellcheck disable=SC2016
+    out=$(fm_run_timed 10 env PATH="$dir:$PATH" bash -c '
+      . "$1"
+      fm_composer_blocking_dialog "$2"
+    ' _ "$ROOT/bin/fm-composer-lib.sh" "$screen" 2>/dev/null </dev/null); rc=$?
+    fm_test_remove_tree "$dir"
+    fm_timed_out "$rc" \
+      && fail "$probe_bin did not finish within 10s as awk; the name is not an awk implementation"
+    [ "$rc" -eq 0 ] \
+      || fail "the recorded Pi model selector did not match under $awk_bin (rc $rc)"
+    [ "$out" = 'Pi model selector' ] \
+      || fail "under $awk_bin the dialog name was '$out'"
+  done
+  [ "$probed" -gt 0 ] \
+    || fail "no awk implementation on this host: the matcher's portability is unproven"
+  [ ! -e "$fixture/invoked" ] || fail "exact awk discovery invoked gawkbug sentinel"
+  out=$(fm_run_timed 1 "$fixture/bin/gawkbug" "$fixture"); rc=$?
+  [ "$rc" -eq 124 ] || fail "blocking sentinel returned $rc instead of timeout status 124"
+  [ -s "$fixture/invoked" ] && [ -s "$fixture/child" ] \
+    || fail "blocking sentinel did not start its descendant"
+  group=$(cat "$fixture/group")
+  case "$group" in ''|*[!0-9[:space:]]*) fail "invalid sentinel process group: $group" ;; esac
+  processes=$(ps -eo pgid=,stat=) || fail "could not inspect sentinel process group"
+  if printf '%s\n' "$processes" | awk -v group="$group" '$1 == group && $2 !~ /^Z/ { found=1 } END { exit !found }'; then
+    fail "awk probe process group $group still has a live process"
+  fi
+  fm_test_remove_tree "$fixture"
+  [ ! -e "$fixture" ] || fail "awk probe fixture cleanup failed"
+  pass "the recorded Pi model selector matches under every awk on this host"
+)
+
 test_dialog_note_skips_the_match_when_no_sink_is_set() {
   local screen out rc before after
   screen=$(exit_picker_screen)
@@ -1804,8 +2064,12 @@ test_quoted_exit_picker_text_is_not_a_dialog() {
 
 test_background_exit_picker_stays_pending_and_blocks_retry
 test_dialog_heading_and_footer_must_be_the_recorded_lines
+test_pi_model_selector_is_named_and_blocks_enter
+test_pi_selector_ends_at_its_closing_rule_not_at_the_pane
+test_dialog_matcher_is_portable_awk || exit 1
 test_dialog_note_skips_the_match_when_no_sink_is_set
 test_quoted_exit_picker_text_is_not_a_dialog
 test_kiro_near_gray_ghost_is_stripped_and_real_text_survives
 test_kiro_palette_gray_ghost_is_stripped_and_chromatic_indexes_survive
 test_composer_widening_is_kiro_only
+test_pi_model_selector_variants_and_quoted_content
