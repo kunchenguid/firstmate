@@ -243,17 +243,18 @@ read_saved() {
   # watcher's check timeout once a home holds a few hundred records.
   [ "${#files[@]}" -gt 0 ] || { printf '[]\n' > "$TMP/saved.json"; return 0; }
   printf '%s\0' "${tasks[@]}" | jq -Rs 'split("\u0000")[:-1]' > "$TMP/tasks.json"
-  printf '%s\0' "${files[@]}" | jq -Rs 'split("\u0000")[:-1]' > "$TMP/files.json"
-  jq -L "$SCRIPT_DIR" -nR --slurpfile tasks "$TMP/tasks.json" --slurpfile paths "$TMP/files.json" 'include "fm-contributions";
-    (reduce inputs as $line ({}; .[input_filename] += [$line])) as $lines
-    | [range(0; $paths[0] | length) as $i
-      | [try ($lines[$paths[0][$i]] | join("\n") | fromjson) catch empty] as $parsed
+  local -a args=()
+  local i
+  for i in "${!files[@]}"; do args+=(--rawfile "rec$i" "${files[$i]}"); done
+  jq -L "$SCRIPT_DIR" -n --slurpfile tasks "$TMP/tasks.json" "${args[@]}" 'include "fm-contributions";
+    [range(0; $tasks[0] | length) as $i
+      | [try ($ARGS.named["rec\($i)"] | fromjson) catch empty] as $parsed
       | if ($parsed | length) == 1
           and (try ($parsed[0] | valid_record) catch false)
           and $parsed[0].task == $tasks[0][$i]
         then $parsed[0] else null end] as $checked
     | {records: [$checked[] | select(. != null)], errors: ($checked | map(select(. == null)) | length)}' \
-    "${files[@]}" > "$TMP/checked.json"
+    > "$TMP/checked.json"
   ERRORS=$((ERRORS + $(jq '.errors' "$TMP/checked.json")))
   jq '.records' "$TMP/checked.json" > "$TMP/saved.json"
 }
