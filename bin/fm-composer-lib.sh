@@ -2229,8 +2229,8 @@ EOF
 # reclassify ordinary screens that happen to end in the same words.
 #
 # Per-harness records for both entries are in
-# docs/verification/runtime-backends.md ("Claude exit picker", "Pi model
-# selector"), and the live check that refreshes them is
+# docs/verification/runtime-backends.md ("Claude background-task exit
+# picker", "Pi model selector"), and the live check that refreshes them is
 # tests/fm-composer-matrix-live-e2e.test.sh.
 #
 # Recorded 2026-10-05 on Claude Code 2.1.289: /exit while a background shell

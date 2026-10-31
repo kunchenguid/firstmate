@@ -1703,10 +1703,11 @@ The rows in that capture come from a local `models.json` provider whose `baseUrl
 That provider is how this screen is reproduced on a host with no authorised login: `PI_CODING_AGENT_DIR` names a throwaway agent directory whose `models.json` declares the provider and its models, and `/model` then lists them.
 A second Enter would confirm the selected model, so the screen is a modal the same way the Claude exit picker is.
 The selector is recognised by a highlighted row marked with an arrow and an optional current-model check, together with the exact `Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel` footer.
-That footer closes the dialog and not the pane: the next non-blank row must be a horizontal rule at least as wide as every other row of the frame, and the rows below that rule are the harness's own status bar, which may carry no box glyph.
+That footer closes the dialog and not the pane: the next non-blank row, when the capture has one, must be a horizontal rule at least as wide as every other row of the frame, and the rows below that rule are the harness's own status bar, which may carry no box glyph; a capture that ends at the footer matches, because a bounded tail can be cut there.
 Reading the footer as the pane's last row missed this live screen entirely, because pi always draws its status bar under the closing rule; that reading only ever matched a capture excerpted at the rule.
 A screen that quotes those words above ordinary composer content is not a selector, because a rule that spans only part of the screen is not a closing rule and a box glyph below one is composer content, not a status bar.
 The matcher is per recorded screen rather than a shared "looks like a picker" heuristic: the footers differ per harness, and a footer-only match would reclassify ordinary screens that happen to end in the same words.
+Its portable half is `test_dialog_matcher_is_portable_awk` in `tests/fm-composer-lib.test.sh`, which runs this recorded frame as each of `awk`, `mawk`, `gawk`, and `nawk` the host actually provides, under a fixed 10-second bound per probe, and fails when the host provides none, so the guard cannot pass only where awk is GNU awk.
 No recorded screen was available for a Codex, Cursor, Grok, Kimi, OpenCode, Gemini, or omp modal picker, so those dialogs are not covered.
 Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
 
