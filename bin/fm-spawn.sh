@@ -3563,7 +3563,11 @@ spawn_model_pin_verdict() {  # <harness> <pin> <actual> <subject>
 # its assistant records name the provider and model that turn ran on. That is the
 # only model statement Pi emits, and a Herdr-bound relaunch hands the replacement
 # this exact identity through `--session <path|id>`, which is what makes the
-# resumed session readable here. A fresh Pi launch addresses no session this
+# resumed session readable here. A registered absolute path that does not exist
+# yet is that same identity rather than a missing one: Pi recreates the session at
+# exactly that path (docs/herdr-backend.md "Agent status authority and relaunch"),
+# so it is returned as-is and the caller's probe waits for the replacement's own
+# turn in the file Pi then writes. A fresh Pi launch addresses no session this
 # launcher knows, so it is reported unverified rather than guessed at.
 spawn_pi_session_file() {  # <ref> [agent-dir] -> path
   local ref=${1-} root=${2:-${PI_CODING_AGENT_DIR:-${HOME:-$PWD}/.pi/agent}} candidate
