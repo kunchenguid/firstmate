@@ -54,7 +54,10 @@ fail() {
 assistant_models() {  # <session-record>
   jq -r 'select((.type == "message" or .type == "assistant")
       and .message.role == "assistant")
-    | (.message.provider // "") + "/" + (.message.model // "")' "$1" 2>/dev/null
+    | if (.message.provider | type) == "string" and (.message.provider | length) > 0
+      then .message.provider + "/" + (.message.model // "")
+      else (.message.model // "")
+      end' "$1" 2>/dev/null
 }
 
 # --- Pi: a resumed turn reports the pin, and the history it inherited does not --
