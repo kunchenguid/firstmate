@@ -337,7 +337,7 @@ case " \$* " in
     exit 70
     ;;
 esac
-exec $ROOT/bin/fm-extension.mjs "\$@"
+exec "$ROOT/bin/fm-extension.mjs" "\$@"
 SHIM
     chmod 0755 "$case_root/code/bin/fm-extension.mjs"
     FM_HOME="$home" "$ROOT/bin/fm-extension.mjs" bind "$PACKAGE" --adapter ext-sleep \
