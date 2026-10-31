@@ -872,7 +872,7 @@ FM_LOCK_INSPECT_STATE=unknown
 FM_LOCK_INSPECT_PID=
 FM_LOCK_INSPECT_LIVE_HARNESS=unknown
 fm_session_lock_inspect() {  # <state>
-  local state=$1 lock pid winpid win_rc
+  local state=$1 lock pid
   # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
   FM_LOCK_INSPECT_STATE=unknown
   # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
@@ -897,14 +897,10 @@ fm_session_lock_inspect() {  # <state>
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
   FM_LOCK_INSPECT_PID=$pid
   fm_session_pid_valid "$pid" || return 0
-  if winpid=$(fm_win_untag_pid "$pid"); then
-    # The same verdicts as a local pid below, read from the Windows table.
-    if fm_harness_pid_alive "$pid"; then
-      FM_LOCK_INSPECT_STATE=held
-      FM_LOCK_INSPECT_LIVE_HARNESS=true
-      return 0
-    fi
-  fi
+  # One verdict for every identity form. A tagged Windows pid is resolved by
+  # this same call through the Windows table, so the match below is the single
+  # place "live verified harness" is decided; deciding it a second time ahead
+  # of this one is what let a holder read as held there and unknown here.
   fm_session_lock_pid_verdict "$pid"
   case "$FM_SESSION_LOCK_PID_VERDICT" in
     dead)
@@ -914,8 +910,15 @@ fm_session_lock_inspect() {  # <state>
       FM_LOCK_INSPECT_LIVE_HARNESS=false
       ;;
     readable)
-      FM_LOCK_INSPECT_STATE=unknown
-      FM_LOCK_INSPECT_LIVE_HARNESS=false
+      if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
+        # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
+        FM_LOCK_INSPECT_STATE=held
+        # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
+        FM_LOCK_INSPECT_LIVE_HARNESS=true
+      else
+        # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
+        FM_LOCK_INSPECT_LIVE_HARNESS=false
+      fi
       ;;
   esac
 }
