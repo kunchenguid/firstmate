@@ -245,11 +245,11 @@ home_summary_record_deadline_miss() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  # SECONDS counts from this child's start. Stopping the wait at 4 s leaves
-  # the write a full second inside the parent's 5 s reap bound, however slow
-  # each lock try is under load.
+  # SECONDS counts from this child's start. Reclaiming a killed worker's dead
+  # lock takes several seconds on a loaded host, so the wait runs to 8 s and
+  # still leaves the write two seconds inside the parent's 10 s reap bound.
   until fm_lock_try_acquire "$REFRESH_LOCK"; do
-    [ "$SECONDS" -lt 4 ] || return 0
+    [ "$SECONDS" -lt 8 ] || return 0
     sleep 0.1
   done
   HOME_SUMMARY_LOCK_HELD=1
@@ -301,7 +301,7 @@ if [ "$HOME_SUMMARY_MODE" = parent ]; then
   fi
   deadline_missed=0
   [ "$refresh_rc" -ne 124 ] || deadline_missed=1
-  fm_run_timed 5 env \
+  fm_run_timed 10 env \
     FM_HOME_SUMMARY_ATTEMPT="$$" \
     FM_HOME_SUMMARY_DEADLINE_MISSED="$deadline_missed" \
     FM_HOME_SUMMARY_ATTEMPT_EPOCH="$attempt_epoch" \
