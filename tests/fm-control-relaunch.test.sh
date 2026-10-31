@@ -3141,6 +3141,90 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
+test_relaunch_refuses_an_active_captain_hold_before_stopping() {
+  local dir out rc
+  fm_tasks_axi_compatible || { fail "captain-hold regression requires compatible tasks-axi"; }
+  dir=$(new_case captain-hold rlhold)
+  add_ship_task "$dir" rlhold claude
+  seed_backlog "$dir" rlhold in_flight
+  mkdir -p "$dir/home/config"
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  tasks-axi hold rlhold --reason 'frozen pending captain approval' --kind captain \
+    --until 2099-11-02 --file "$dir/home/data/backlog.md" >/dev/null
+  cp "$dir/home/state/rlhold.meta" "$dir/before.meta"
+  cp "$dir/home/data/rlhold/brief.md" "$dir/before-brief.md"
+
+  out=$(run_control "$dir" rlhold relaunch --note 'recover after daemon restart'); rc=$?
+  expect_code 1 "$rc" "a captain-held task must refuse relaunch even with manual backlog editing"$'\n'"$out"
+  assert_contains "$out" 'captain-held' "the refusal must explain the hold"
+  [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] \
+    || fail "the held task received lifecycle input"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the held agent was stopped"
+  cmp -s "$dir/before.meta" "$dir/home/state/rlhold.meta" || fail "refusal changed metadata"
+  cmp -s "$dir/before-brief.md" "$dir/home/data/rlhold/brief.md" || fail "refusal changed the brief"
+  [ ! -e "$dir/home/state/rlhold.control-relaunch" ] || fail "refusal began a relaunch transaction"
+  assert_contains "$(tasks-axi show rlhold --file "$dir/home/data/backlog.md")" 'held: yes' \
+    "refusal released the hold"
+  pass "fm-control relaunch: an active captain hold refuses before stopping or changing the task"
+}
+
+test_relaunch_respects_captain_hold_expiry() {
+  local dir out rc until
+  for until in indefinite 2000-01-01; do
+    dir=$(new_case "captain-hold-$until" rlholdexpiry)
+    add_ship_task "$dir" rlholdexpiry claude
+    seed_backlog "$dir" rlholdexpiry queued
+    mkdir -p "$dir/home/config"
+    printf 'manual\n' > "$dir/home/config/backlog-backend"
+    if [ "$until" = indefinite ]; then
+      tasks-axi hold rlholdexpiry --reason 'wait for approval' --kind captain \
+        --file "$dir/home/data/backlog.md" >/dev/null
+    else
+      tasks-axi hold rlholdexpiry --reason 'deferred work' --kind captain \
+        --until "$until" --file "$dir/home/data/backlog.md" >/dev/null
+    fi
+    out=$(run_control "$dir" rlholdexpiry relaunch --note 'recover validation'); rc=$?
+    if [ "$until" = indefinite ]; then
+      expect_code 1 "$rc" "an undated captain hold must refuse relaunch"$'\n'"$out"
+      assert_contains "$out" 'captain-held' "the refusal must name the hold"
+      [ ! -s "$dir/fake/literal" ] || fail "an undated hold allowed lifecycle input"
+    else
+      expect_code 0 "$rc" "an expired hold must allow relaunch"$'\n'"$out"
+      assert_contains "$out" 'relaunched rlholdexpiry' "an expired deferral blocked recovery"
+    fi
+  done
+  pass "fm-control relaunch: undated captain holds block and expired deferrals allow recovery"
+}
+
+test_relaunch_refuses_when_captain_hold_state_is_unreadable() {
+  local dir out rc real
+  dir=$(new_case captain-hold-unreadable rlholdread)
+  add_ship_task "$dir" rlholdread claude
+  seed_backlog "$dir" rlholdread in_flight
+  mkdir -p "$dir/home/config"
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  real=$(command -v tasks-axi)
+  cat > "$dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = show ]; then
+  echo 'error: backlog backend unavailable' >&2
+  exit 1
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+  out=$(run_control "$dir" rlholdread relaunch --note 'recover validation'); rc=$?
+  expect_code 1 "$rc" "unknown captain hold state must refuse relaunch"$'\n'"$out"
+  assert_contains "$out" 'cannot verify task rlholdread' "the refusal must explain the missing proof"
+  [ ! -s "$dir/fake/literal" ] && [ ! -s "$dir/fake/keys" ] \
+    || fail "an unreadable hold allowed lifecycle input"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "unknown hold state stopped the agent"
+  pass "fm-control relaunch: unreadable captain hold state refuses before stopping the agent"
+}
+
+test_relaunch_refuses_an_active_captain_hold_before_stopping
+test_relaunch_respects_captain_hold_expiry
+test_relaunch_refuses_when_captain_hold_state_is_unreadable
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock

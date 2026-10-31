@@ -102,6 +102,9 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              An active captain hold refuses before stopping the agent, even
+#              with manual backlog editing; tasks-axi owns --until expiry.
+#              An unreadable hold record refuses rather than resuming work.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -206,6 +209,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -1217,8 +1224,25 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line hold_status=0
   local -a spawn_args
+
+  if [ "$KIND" != secondmate ]; then
+    FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" || hold_status=$?
+    case "$hold_status" in
+      0)
+        # An expired deferral remains an open captain call; only its active
+        # dispatch hold prevents recovery from relaunching the worker.
+        fm_backlog_row_probe "$DATA" "$ID" \
+          || die "cannot verify task $ID's captain hold before relaunch ($FM_BACKLOG_ROW_ERROR)"
+        case "$FM_BACKLOG_ROW_HOLD_KIND ${FM_BACKLOG_ROW_STATE#* }" in
+          'captain yes '*) die "task $ID is captain-held; relaunch skipped before stopping the agent" ;;
+        esac
+        ;;
+      1) ;;
+      *) die "cannot verify task $ID's captain hold before relaunch" ;;
+    esac
+  fi
 
   require_state_verified_backend relaunch
   fm_control_backend_relaunch_supported "$BACKEND" \
