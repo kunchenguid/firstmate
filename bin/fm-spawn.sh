@@ -240,7 +240,14 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex|kiro)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   new adapters. A raw command that already names __BRIEF__ or __BRIEFDOORBELL__
+#   is left alone, and kimi or rovo get their post-readiness brief pointer. Any other
+#   raw command gets the launch brief appended as its last argument only when it is
+#   a plain single command: its first word is a known harness that takes a positional
+#   prompt, it holds none of the shell metacharacters $( ` | ; & < > # or a newline, and
+#   it does not start with a wrapper (env, nice, timeout, caffeinate, sudo, command,
+#   exec) or a VAR=value assignment. Every other raw command launches exactly as given,
+#   with a one-line warning suggesting __BRIEF__. For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -3009,6 +3016,28 @@ launch_template() {
   esac
 }
 
+# raw_launch_takes_brief <command> <harness>: succeeds only for a plain single
+# command that is safe to append the launch brief to. <harness> is the basename
+# of its first word and must be a known harness that takes a positional prompt
+# (kimi and rovo deliver their brief after a readiness gate instead); the
+# command must not start with a VAR=value assignment, and must hold none of the
+# shell metacharacters $( ` | ; & < > # or a newline. Wrappers such as env, nice,
+# timeout, caffeinate, sudo, command and exec are not known harnesses, so a
+# wrapped command never qualifies.
+raw_launch_takes_brief() {
+  local cmd=$1 harness=$2
+  case "$harness" in
+  claude | codex | pi | pi-signed | omp | grok | cursor | gemini | devin | commandcode | cortex | muse) : ;;
+  *) return 1 ;;
+  esac
+  case "${cmd%% *}" in *=*) return 1 ;; esac
+  # shellcheck disable=SC2016 # literal $( and backtick are the patterns
+  case "$cmd" in
+  *'$('* | *'`'* | *'|'* | *';'* | *'&'* | *'<'* | *'>'* | *'#'* | *$'\n'*) return 1 ;;
+  esac
+  return 0
+}
+
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
   RAW_LAUNCH=1
@@ -3021,6 +3050,30 @@ case "$ARG3" in
       ;;
     esac
   done
+  # A named adapter template embeds the launch-brief arg itself; a raw command
+  # has no such placeholder and would start the agent at an empty prompt.
+  # Append it after the caller's own argv. Kimi and rovo reject a positional
+  # prompt and get their brief pointer after their readiness gate, claude takes
+  # the record-backed doorbell its named template uses, and a command that
+  # already names __BRIEF__ or __BRIEFDOORBELL__ is left alone.
+  case "$LAUNCH" in
+  *__BRIEF__* | *__BRIEFDOORBELL__*) : ;;
+  *)
+    if [ "$HARNESS" = kimi ] || [ "$HARNESS" = rovo ]; then
+      : # delivers its brief pointer after the readiness gate
+    elif raw_launch_takes_brief "$LAUNCH" "$HARNESS"; then
+      if [ "$HARNESS" = claude ]; then
+        LAUNCH="$LAUNCH __BRIEFDOORBELL__"
+      else
+        # shellcheck disable=SC2016 # literal text, expanded by the launched shell
+        LAUNCH=$LAUNCH' "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+    else
+      # shellcheck disable=SC2016 # literal text shown to the operator
+      echo "warning: raw launch command is not a plain single command for a known harness (it is compound, substituted, wrapped, or starts with an unknown program), so the launch brief was not appended; put __BRIEF__ where the agent takes its prompt, for example: my-agent --flag \"\$(__OPINPUT__ encode launch-brief < __BRIEF__)\"" >&2
+    fi
+    ;;
+  esac
   ;;
 '')
   # No explicit harness: resolve from config. A secondmate AGENT launches on the
