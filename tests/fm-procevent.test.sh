@@ -5139,4 +5139,105 @@ PATH="$UNDISP/bin:$PATH" FM_HOME="$UNDISP/home" \
   "$ROOT/bin/fm-procevent-lavish.sh" retire "$undisp_art" >/dev/null 2>&1 || true
 pass "arm does not launch beside a stale claim whose process group is alive"
 
+# --- end-user-aligned regression: reconcile stays cheap as boards accumulate --
+# A home that arms a review board per task accumulates registered Lavish sources:
+# worker-owned boards whose captured round waits for its worker, and firstmate
+# boards with a live listener. The watcher reconciles on every cycle, so work it
+# repeats per board on every pass makes each pass grow with every board ever
+# armed until the pass outlasts the watcher's liveness grace. A round already in
+# its worker's inbox must not be re-classified by its adapter on every pass, and
+# a board that needs nothing from the pass must not wait on its source lock.
+SCALE="$TMP_ROOT/scale"; mkdir -p "$SCALE"; new_home "$SCALE/home"
+fm_test_track_procevent_home "$SCALE/home"
+SCALE_BIN=$(fm_fakebin "$SCALE")
+cat > "$SCALE_BIN/lavish-axi" <<SH
+#!/usr/bin/env bash
+case "\${2-}" in
+  *live-board*)
+    while [ ! -e "$SCALE/live-release" ]; do
+      [ "\$SECONDS" -lt 120 ] || exit 75
+      sleep 0.05
+    done
+    ;;
+esac
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","board note","","message",""\n'
+SH
+chmod +x "$SCALE_BIN/lavish-axi"
+scale_ids=()
+for n in 1 2 3 4 5 6; do
+  printf '<h1>board %s</h1>\n' "$n" > "$SCALE/board-$n.html"
+  lavish_session "$SCALE/board-$n.html"
+  scale_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$SCALE/board-$n.html")
+  new_task_endpoint "$SCALE/home" "scale-$n"
+  PATH="$SCALE_BIN:$PATH" FM_HOME="$SCALE/home" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=60 \
+    "$ROOT/bin/fm-procevent-lavish.sh" arm "$SCALE/board-$n.html" --for "scale-$n" >/dev/null \
+    || fail "fixture invalid: worker board $n did not arm"
+  wait_capture "$SCALE/home" "$scale_id" \
+    || fail "fixture invalid: worker board $n captured no round"
+  wait_for "$SCALE/home/state/scale-$n.inbox/001.msg" \
+    || fail "fixture invalid: worker board $n round never reached its worker"
+  scale_ids+=("$scale_id")
+done
+printf '<h1>live board</h1>\n' > "$SCALE/live-board.html"
+lavish_session "$SCALE/live-board.html"
+scale_live_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$SCALE/live-board.html")
+PATH="$SCALE_BIN:$PATH" FM_HOME="$SCALE/home" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=60 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$SCALE/live-board.html" >/dev/null \
+  || fail "fixture invalid: the live firstmate board did not arm"
+[ "$(pe "$SCALE/home" list | awk -v id="$scale_live_id" '$1 == id { print $3 }')" = live ] \
+  || fail "fixture invalid: the firstmate board has no live listener"
+scale_ids+=("$scale_live_id")
+
+# Count every adapter verdict a pass asks for by routing the built-in Lavish
+# adapter through a recording wrapper around the real one.
+mkdir -p "$SCALE/adapter-root/bin"
+cat > "$SCALE/adapter-root/bin/fm-procevent-lavish.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${1-}" >> "$SCALE/adapter-calls"
+exec "$ROOT/bin/fm-procevent-lavish.sh" "\$@"
+SH
+chmod +x "$SCALE/adapter-root/bin/fm-procevent-lavish.sh"
+scale_out=$(PATH="$SCALE_BIN:$PATH" FM_ROOT_OVERRIDE="$SCALE/adapter-root" FM_HOME="$SCALE/home" \
+  "$ROOT/bin/fm-procevent.sh" reconcile)
+assert_contains "$scale_out" "published=6 started=0 stopped=0 uncertain=0 failed=0" \
+  "reconcile did not report the delivered rounds and settled boards: $scale_out"
+scale_verdicts=$(grep -cE '^(terminal|silent)$' "$SCALE/adapter-calls" 2>/dev/null || true)
+[ "${scale_verdicts:-0}" -eq 0 ] \
+  || fail "reconcile re-ran $scale_verdicts adapter verdicts for rounds already in their workers' inboxes"
+for n in 1 2 3 4 5 6; do
+  [ "$(find "$SCALE/home/state/scale-$n.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "reconcile re-delivered worker board $n's round"
+done
+
+# A pass over boards that need nothing completes while every one of their
+# source locks is busy - a listener posting a reply to a slow review server
+# holds its lock for as long as that server takes.
+scale_holders=()
+for scale_id in "${scale_ids[@]}"; do
+  hold_source_lock "$scale_id" "$SCALE/$scale_id.ready" "$SCALE/locks-release"
+  scale_holders+=("$HOLDER_PID")
+  wait_for "$SCALE/$scale_id.ready" || fail "fixture invalid: could not hold the lock of $scale_id"
+done
+pe "$SCALE/home" reconcile > "$SCALE/held.out" 2>&1 &
+scale_reconcile=$!
+for _ in $(seq 1 150); do
+  kill -0 "$scale_reconcile" 2>/dev/null || break
+  sleep 0.1
+done
+scale_blocked=0
+kill -0 "$scale_reconcile" 2>/dev/null && scale_blocked=1
+: > "$SCALE/locks-release"
+wait "$scale_reconcile" 2>/dev/null || true
+for scale_holder in "${scale_holders[@]}"; do
+  wait "$scale_holder" 2>/dev/null || true
+done
+[ "$scale_blocked" -eq 0 ] \
+  || fail "reconcile waited on the source lock of a board that needed nothing from it"
+assert_contains "$(cat "$SCALE/held.out")" "published=6 started=0 stopped=0 uncertain=0 failed=0" \
+  "reconcile under busy source locks did not settle every board"
+: > "$SCALE/live-release"
+PATH="$SCALE_BIN:$PATH" FM_HOME="$SCALE/home" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$SCALE/live-board.html" >/dev/null 2>&1 || true
+pass "reconcile neither re-classifies delivered rounds nor waits on boards that need nothing"
+
 printf '\nall procevent tests passed\n'

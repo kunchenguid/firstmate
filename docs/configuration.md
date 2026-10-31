@@ -2826,6 +2826,7 @@ The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
 
 - The captured result is stored with immutable task-owner routing evidence and delivered directly to that task's steering inbox, without a firstmate `check` wake for the captain's words.
 - The doorbell rings only when that idempotent write creates a fresh inbox record; filing the note into `handled/` is the worker's own acknowledgement of the delivery, so a later reconcile never moves an already-filed note back into the active inbox or re-rings its owner, and re-delivery of a note still open in the inbox is left to the steering inbox's own re-ring ladder.
+- A successful delivery is recorded beside the captured result, so later reconciles settle that round from the record without asking its adapter again or rescanning the owner's inbox; a delivery that has not succeeded is attempted again on every reconcile.
 - A task-owned source with an unhandled capture is not relaunched, so delivery failure cannot consume a round and start another poll.
 - That record is the only ownership evidence there is, so while any captured round of it is unacknowledged every retirement path refuses - the runner's own terminal retirement and an explicit `retire` alike - and the refusal names the acknowledgement that releases it.
 
@@ -2878,9 +2879,11 @@ Discovery is never a timer.
 Each registered source has its own child process blocking on that source.
 On every cycle, the watcher's `reconcile`:
 
-- Republishes every captured result without a durable handled acknowledgement, regardless of earlier publication.
+- Republishes every captured result without a durable handled acknowledgement, regardless of earlier publication, except a worker-owned round already delivered to its owner's steering inbox.
 - Restarts a source whose owner is gone.
 - Stops this home's runner if its registration disappeared unexpectedly.
+
+A source that needs nothing from the cycle - a live listener with no launch or cleanup failure to clear, or a worker-owned board whose round is still open - is settled without waiting on its source lock, so a pass does not queue behind a busy listener or pay a lock round-trip per board.
 
 In supported steady state, a home with no registered source runs nothing, generates no state, and keeps its ordinary cadence.
 

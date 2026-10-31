@@ -66,11 +66,13 @@
 #            registered until its owner concludes it with `handled`.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
 #            republish every durably captured result with no handled
-#            acknowledgement yet - regardless of any earlier publication - and
+#            acknowledgement yet - regardless of any earlier publication, except
+#            a task-owned round already delivered to its owner's inbox - and
 #            start a runner for any registered source that has no live owner and
-#            no open task-owned round. This is liveness repair only - it never
-#            discovers results by
-#            polling the source, because the child blocks on the source itself.
+#            no open task-owned round. A source needing neither is settled
+#            without waiting on its source lock. This is liveness repair only -
+#            it never discovers results by polling the source, because the child
+#            blocks on the source itself.
 #            A start is REPORTED only once it is confirmed: starting a runner is
 #            detached and its errors reach no caller, so a source that cannot
 #            start would otherwise be counted exactly like one that is
@@ -416,9 +418,20 @@ source_field() {  # <source-id> <field>
 }
 source_kind() { source_field "$1" kind; }
 source_owner_task() { source_field "$1" owner_task; }
-# Every captured round of one source with no handled acknowledgement yet.
+# Every captured round of one source with no handled acknowledgement yet, oldest
+# first. Only that source's own results are read, so checking each board does
+# not rescan every result the home has ever captured.
 source_pending() {  # <source-id>
-  fm_procevent_pending "$STATE" | awk -v id="$1" 'index($0, "/" id ".") { print }'
+  local inbox result seq
+  inbox=$(fm_procevent_inbox_dir "$STATE")
+  for result in "$inbox/$1".*.result; do
+    [ -f "$result" ] && [ ! -L "$result" ] || continue
+    [ -e "${result%.result}.handled" ] && continue
+    seq=${result#"$inbox/$1."}
+    seq=${seq%.result}
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    printf '%s\t%s\n' "$seq" "$result"
+  done | sort -n -k1,1 | cut -f2-
 }
 # The registration record is a worker-owned board's ONLY ownership evidence, so
 # it cannot be retired while a captured round of it is still unacknowledged.
@@ -809,9 +822,19 @@ cmd_register_extension() {
 # events - and it republishes on every call regardless of any earlier
 # publication, so a result stays eligible for re-announcement across restarts
 # and drains until `fm_procevent_mark_handled` records it.
+#
+# A worker-owned round is the exception, because its delivery is itself durable:
+# once its record is in the owner's steering inbox, the inbox re-ring ladder owns
+# re-delivery and only the owner's acknowledgement changes anything. The first
+# delivery is recorded beside the result, and every later call settles that
+# round without the source lock, the adapter's verdicts, or another scan of the
+# owner's inbox - work that would otherwise repeat on every reconcile for every
+# round still waiting on its worker, so each pass would grow with every board
+# ever armed.
+delivered_file() { printf '%s.delivered\n' "${1%.result}"; }
 publish_result() {  # <result-file>
   local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
-  local ring_backend ring_target ring_meta inbox_dir handled_dir pre_existing existing new_record
+  local ring_backend ring_target ring_meta inbox_dir handled_dir pre_existing existing new_record delivered
   id=$(fm_procevent_result_source_id "$result")
   seq=$(fm_procevent_result_sequence "$result")
   fm_procevent_source_id_valid "$id" || return 1
@@ -819,6 +842,10 @@ publish_result() {  # <result-file>
   [ -n "$adapter" ] || return 1
   line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || return 1
   owner_task=$(fm_procevent_result_owner_task "$result" 2>/dev/null || true)
+  if [ -n "$owner_task" ] && [ -f "$(delivered_file "$result")" ] && [ ! -L "$(delivered_file "$result")" ]; then
+    fm_procevent_is_handled "$STATE" "$id" "$seq" && return 1
+    return 0
+  fi
   fm_procevent_source_lock_acquire "$id" || return 1
   if ! fm_procevent_is_handled "$STATE" "$id" "$seq"; then
     if [ -n "$owner_task" ]; then
@@ -849,7 +876,12 @@ publish_result() {  # <result-file>
       handled_dir=$(fm_task_inbox_handled_dir "$STATE" "$owner_task")
       pre_existing=$(printf '%s\n' "$inbox_dir"/*.msg "$handled_dir"/*.msg 2>/dev/null)
       record=$(fm_task_inbox_write_idempotent "$STATE" "$owner_task" "$message" 2>/dev/null || true)
-      [ -n "$record" ] && status=0
+      if [ -n "$record" ]; then
+        status=0
+        # Best effort: an unrecorded delivery is only redone by the next call.
+        delivered=$(umask 077; mktemp "${result%/*}/.delivered.XXXXXX" 2>/dev/null) \
+          && { mv -f -- "$delivered" "$(delivered_file "$result")" 2>/dev/null || rm -f -- "$delivered"; }
+      fi
       new_record=0
       if [ "$status" -eq 0 ]; then
         new_record=1
@@ -1707,6 +1739,25 @@ stranded_leaderless_detail() {  # <source-id>
   printf '%s' "its runner died and its polling child may still be attached to the source's session, so reconcile preserves that claim and starts no replacement, and nothing automatic will touch that group. Verify whether anything is still polling $1; once that process group is empty, the next reconcile reclaims the source on its own."
 }
 
+# Whether this pass has nothing to do for a registered source, read without its
+# lock: a worker-owned board whose captured round is still open, or a live
+# listener with no launch or cleanup failure episode to end. Under the lock
+# either one leads reconcile to change nothing, and that verdict goes stale the
+# moment the lock is released anyway, so taking it settles nothing more. It
+# does make the pass wait behind every busy source - a listener posting a reply
+# to a slow review server holds its lock for as long as that server takes - and
+# the acquire and release alone cost more than the rest of the check, for every
+# source on every cycle. Anything else takes the locked path below.
+source_settled_unlocked() {  # <source-id>
+  local id=$1
+  if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ] \
+    && [ -n "$(source_pending "$id" | head -1)" ]; then
+    return 0
+  fi
+  [ ! -e "$(launch_failed_file "$id")" ] && [ ! -e "$REG/.$id.cleanup-failed" ] || return 1
+  fm_procevent_claim_state_locked "$id"
+}
+
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending
   local launch_identity launch_stamp launch_mark unconfirmed entry
@@ -1726,6 +1777,11 @@ cmd_reconcile() {
     [ -e "$claim" ] || continue
     id=${claim##*/}; id=${id%.claim}
     fm_procevent_source_id_valid "$id" || continue
+    # Still registered is nothing to stop, read without the lock for the
+    # reason source_settled_unlocked gives.
+    if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
+      continue
+    fi
     fm_procevent_source_lock_acquire "$id" || continue
     if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
       fm_procevent_source_lock_release "$id"
@@ -1766,6 +1822,7 @@ cmd_reconcile() {
       [ -e "$rec" ] || continue
       id=${rec##*/}; id=${id%.source}
       fm_procevent_source_id_valid "$id" || continue
+      ! source_settled_unlocked "$id" || continue
       fm_procevent_source_lock_acquire "$id" || continue
       if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
         fm_procevent_claim_state_locked "$id"
