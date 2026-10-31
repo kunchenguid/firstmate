@@ -680,6 +680,14 @@
     {
       "path": "docs/professions/gunner-v1.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/professions/pilot-v1.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/professions/partnership-v1.md",
+      "audience": "agent-runtime"
     }
   ]
 }

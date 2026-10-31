@@ -25,11 +25,12 @@ fm_profile_file_valid() {
   FM_PROFILE_ERROR="invalid profile schema, profession, theme or chat field; see docs/configuration.md Professional profile"
   FM_PROFILE_JSON=$(jq -cse '
     def only($fields): (keys - $fields | length) == 0;
-    def address: type == "string" and test("^[A-Za-z][A-Za-z0-9_-]{0,31}$") and all(explode[]; . >= 32 and . != 127);
+    def address: . == "Captain (Κυβερνήτης)" or (type == "string" and test("^[A-Za-z][A-Za-z0-9_-]{0,31}$") and all(explode[]; . >= 32 and . != 127));
+    def marker: if . == "gunner-v1" then "🎯" elif . == "pilot-v1" then "✈️" else "" end;
     if length != 1 then error("one JSON object required") else .[0] end
     | select(type == "object")
     | select(only(["schema_version", "profession", "theme", "chat"]))
-    | select(.schema_version == 1 and (.profession == "firstmate-v1" or .profession == "gunner-v1"))
+    | select(.schema_version == 1 and (.profession == "firstmate-v1" or .profession == "gunner-v1" or .profession == "pilot-v1"))
     | select((has("theme") | not) or .theme == "nautical" or .theme == "space-fleet")
     | select((has("chat") | not) or (.chat | type == "object"))
     | .theme = (.theme // "nautical")
@@ -39,10 +40,10 @@ fm_profile_file_valid() {
     | select((.chat | has("user_marker") | not) or (.chat.user_marker == "✈️" or .chat.user_marker == ""))
     | .profession as $profession
     | select((.chat | has("assistant_reply_marker") | not)
-      or .chat.assistant_reply_marker == (if $profession == "gunner-v1" then "🎯" else "" end))
-    | .chat.user_address = (.chat.user_address // "pilot")
-    | .chat.user_marker = (.chat.user_marker // "✈️")
-    | .chat.assistant_reply_marker = (if .profession == "gunner-v1" then "🎯" else "" end)
+      or .chat.assistant_reply_marker == ($profession | marker))
+    | .chat.user_address = (.chat.user_address // (if .profession == "pilot-v1" then "Captain (Κυβερνήτης)" else "pilot" end))
+    | .chat.user_marker = (.chat.user_marker // (if .profession == "pilot-v1" then "" else "✈️" end))
+    | .chat.assistant_reply_marker = (.profession | marker)
     | .configured = true
   ' "$file" 2>/dev/null) && [ -n "$FM_PROFILE_JSON" ] || return 1
   FM_PROFILE_ERROR=

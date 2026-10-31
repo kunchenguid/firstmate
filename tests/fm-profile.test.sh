@@ -47,6 +47,38 @@ test_profession_theme_and_refresh() {
   pass 'profession and theme resolve independently and refresh rereads disk duties'
 }
 
+test_captain_pilot_pair_is_independent() {
+  local out
+  write_profile '{"schema_version":1,"profession":"pilot-v1","theme":"space-fleet","chat":{"user_address":"Captain (Κυβερνήτης)","user_marker":"","assistant_reply_marker":"✈️"}}'
+  out=$(profile inspect --json)
+  printf '%s\n' "$out" | jq -e '.profession == "pilot-v1" and .profession_name == "Pilot (Πιλότος)" and .chat.user_address == "Captain (Κυβερνήτης)" and .chat.user_marker == "" and .chat.assistant_reply_marker == "✈️"' >/dev/null || fail 'Captain/Pilot pairing did not resolve'
+  out=$(profile refresh)
+  assert_contains "$out" 'Pilot (Πιλότος) profession v1' 'Pilot contract was not loaded from disk'
+  assert_contains "$out" 'chooses the mission' 'Pilot contract omitted user mission ownership'
+  assert_contains "$out" 'implementation remains delegated' 'Pilot contract expanded direct execution'
+  assert_contains "$out" 'thoughtful partner' 'Pilot lost shared partnership duties'
+  assert_contains "$out" 'every complete unit of work' 'Pilot lost wiki duty'
+  assert_contains "$out" 'rebuild its derived graph' 'Pilot lost graph duty'
+  write_profile '{"schema_version":1,"profession":"pilot-v1","theme":"space-fleet"}'
+  profile inspect --json | jq -e '.chat.user_address == "Captain (Κυβερνήτης)" and .chat.user_marker == "" and .chat.assistant_reply_marker == "✈️"' >/dev/null || fail 'Pilot defaults invented a user marker or wrong pairing'
+  write_profile '{"schema_version":1,"profession":"gunner-v1","theme":"space-fleet","chat":{"user_address":"Captain (Κυβερνήτης)"}}'
+  profile inspect --json | jq -e '.profession == "gunner-v1" and .profession_name == "Gunner (WSO)" and .chat.assistant_reply_marker == "🎯"' >/dev/null || fail 'user title changed assistant profession'
+  pass 'Captain/Pilot is a separate disk profession; presentation titles do not choose agent roles'
+}
+
+test_missing_shared_duties_refuses_selection() {
+  local code="$TMP_ROOT/incomplete-code" out rc=0
+  mkdir -p "$code/bin" "$code/docs/professions"
+  cp "$PROFILE" "$ROOT/bin/fm-profile-lib.sh" "$code/bin/"
+  cp "$ROOT/docs/professions/pilot-v1.md" "$code/docs/professions/"
+  write_profile '{"schema_version":1,"profession":"pilot-v1","theme":"space-fleet"}'
+  out=$(FM_TASK_ID='' FM_HOME="$PROFILE_HOME" bash "$code/bin/fm-profile.sh" refresh 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail 'incomplete professional contract was applied'
+  assert_contains "$out" 'PROFILE_INVALID: missing shipped duties' 'incomplete selection lacked a concrete diagnostic'
+  assert_not_contains "$out" 'Your profession is Pilot' 'incomplete selection partially activated the profession'
+  pass 'a missing shared duties contract refuses the named profession before rendering'
+}
+
 test_rejects_invalid_and_injected_configuration() {
   local value out rc
   # shellcheck disable=SC2016 # Keep the malicious command-substitution fixture literal.
@@ -101,12 +133,15 @@ test_inheritance_copies_only_profile_and_preserves_charter() {
   assert_contains "$(cat "$TMP_ROOT/reread.md")" "$(cat "$child/config/profile.json")" 'reread did not contain exact destination profile bytes'
   cmp -s "$PROFILE_HOME/config/profile.json" "$child/config/profile.json" || fail 'profile was not inherited'
   FM_TASK_ID='' FM_HOME="$child" bash "$PROFILE" inspect --json | jq -e '.profession=="gunner-v1"' >/dev/null || fail 'inherited profile cannot resolve'
+  write_profile '{"schema_version":1,"profession":"pilot-v1","theme":"space-fleet"}'
+  propagate_inheritable_config "$PROFILE_HOME/config" "$child/config"
+  FM_TASK_ID='' FM_HOME="$child" bash "$PROFILE" inspect --json | jq -e '.profession=="pilot-v1" and .chat.user_address=="Captain (Κυβερνήτης)" and .chat.assistant_reply_marker=="✈️"' >/dev/null || fail 'alternate pairing did not inherit through the same workflow'
   write_profile '{"schema_version":1,"profession":"bad"}'
   rc=0
   out=$(propagate_inheritable_config "$PROFILE_HOME/config" "$child/config" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail 'invalid profile propagation succeeded'
   assert_contains "$out" 'profile.json' 'invalid propagation omitted item'
-  FM_TASK_ID='' FM_HOME="$child" bash "$PROFILE" inspect --json | jq -e '.profession=="gunner-v1"' >/dev/null || fail 'invalid primary replaced valid inherited profile'
+  FM_TASK_ID='' FM_HOME="$child" bash "$PROFILE" inspect --json | jq -e '.profession=="pilot-v1"' >/dev/null || fail 'invalid primary replaced valid inherited profile'
   [ "$(cat "$child/data/charter.md")" = 'local charter' ] || fail 'inheritance changed charter'
   [ "$(cat "$child/data/captain.md")" = 'local prefs' ] || fail 'inheritance changed local preferences'
   rm "$PROFILE_HOME/config/profile.json"
@@ -123,20 +158,26 @@ test_remote_receiver_validates_profile_before_commit() {
   hash=$(shasum -a 256 "$payload" | awk '{print $1}')
   FM_HOME="$child" bash "$ROOT/bin/fm-remote-inherit.sh" put config/profile.json "$bytes" "$hash" 1 < "$payload" >/dev/null
   cmp -s "$child/config/profile.json" "$payload" || fail 'receiver did not publish valid profile'
+  printf '%s\n' '{"schema_version":1,"profession":"pilot-v1","theme":"space-fleet"}' > "$payload"
+  bytes=$(wc -c < "$payload" | tr -d ' ')
+  hash=$(shasum -a 256 "$payload" | awk '{print $1}')
+  FM_HOME="$child" bash "$ROOT/bin/fm-remote-inherit.sh" put config/profile.json "$bytes" "$hash" 2 < "$payload" >/dev/null
   printf '%s\n' '{"schema_version":1,"profession":"injected"}' > "$payload"
   bytes=$(wc -c < "$payload" | tr -d ' ')
   hash=$(shasum -a 256 "$payload" | awk '{print $1}')
   rc=0
-  out=$(FM_HOME="$child" bash "$ROOT/bin/fm-remote-inherit.sh" put config/profile.json "$bytes" "$hash" 2 < "$payload" 2>&1) || rc=$?
+  out=$(FM_HOME="$child" bash "$ROOT/bin/fm-remote-inherit.sh" put config/profile.json "$bytes" "$hash" 3 < "$payload" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail 'receiver accepted invalid profile'
   assert_contains "$out" 'invalid inherited profile' 'receiver did not explain refusal'
-  FM_TASK_ID='' FM_HOME="$child" bash "$PROFILE" inspect --json | jq -e '.profession=="gunner-v1"' >/dev/null || fail 'receiver corrupted previous selection'
-  [ "$(head -1 "$child/config/.fm-inherit-profile.json.generation")" = 1 ] || fail 'receiver committed invalid generation'
+  FM_TASK_ID='' FM_HOME="$child" bash "$PROFILE" inspect --json | jq -e '.profession=="pilot-v1"' >/dev/null || fail 'receiver corrupted previous selection'
+  [ "$(head -1 "$child/config/.fm-inherit-profile.json.generation")" = 2 ] || fail 'receiver committed invalid generation'
   pass 'remote receiver validates profile payload before generation and destination publication'
 }
 
 test_absent_profile_preserves_preferences
 test_profession_theme_and_refresh
+test_captain_pilot_pair_is_independent
+test_missing_shared_duties_refuses_selection
 test_rejects_invalid_and_injected_configuration
 test_worker_precedence_ignores_home_profile
 test_inheritance_copies_only_profile_and_preserves_charter

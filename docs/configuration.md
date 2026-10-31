@@ -1059,12 +1059,12 @@ The complete version 1 schema accepts only these fields:
 | Field | Accepted values and default |
 | --- | --- |
 | `schema_version` | Required number `1`. |
-| `profession` | Required `firstmate-v1` or `gunner-v1`. |
+| `profession` | Required `firstmate-v1`, `gunner-v1` or `pilot-v1`. |
 | `theme` | `nautical` (default) or `space-fleet`, independently of profession. |
 | `chat` | Optional object with only the three fields below. |
-| `chat.user_address` | One ASCII name/title token, starting with a letter, followed by at most 31 letters, digits, underscores or hyphens; default `pilot`. |
-| `chat.user_marker` | `✈️` (default) or empty string; this marks the user, not the assistant. |
-| `chat.assistant_reply_marker` | `🎯` for Gunner (WSO) or empty string for firstmate; omission selects the profession's marker. |
+| `chat.user_address` | One ASCII name/title token, starting with a letter, followed by at most 31 letters, digits, underscores or hyphens, or the exact display title `Captain (Κυβερνήτης)`; defaults to that Captain title for `pilot-v1`, otherwise `pilot`. |
+| `chat.user_marker` | `✈️` or empty string; default empty for `pilot-v1`, otherwise `✈️`; this marks the user, not the assistant. |
+| `chat.assistant_reply_marker` | `🎯` for Gunner (WSO), `✈️` for Pilot (Πιλότος), or empty string for firstmate; omission selects the profession's marker. |
 
 A profile is one JSON object in a regular, readable, single-linked file of at most 4096 bytes beneath a non-symlinked config directory.
 Unknown fields, professions, themes, null values, control characters and instruction-like address strings are rejected rather than interpreted as operating instructions.
@@ -1087,14 +1087,33 @@ For the Gunner (WSO) profession with space fleet presentation:
 }
 ```
 
-The shipped [firstmate-v1](professions/firstmate-v1.md) and [gunner-v1](professions/gunner-v1.md) files own the professional contracts.
-The Gunner (WSO) completion knowledge duty does not install a wiki, graph builder or provider integration.
+The alternate space fleet pairing is user Captain (Κυβερνήτης) with assistant Pilot (Πιλότος):
+
+```json
+{
+  "schema_version": 1,
+  "profession": "pilot-v1",
+  "theme": "space-fleet",
+  "chat": {
+    "user_address": "Captain (Κυβερνήτης)",
+    "user_marker": "",
+    "assistant_reply_marker": "✈️"
+  }
+}
+```
+
+The [Pilot contract](professions/pilot-v1.md) owns this pairing's mission relationship and operating duties.
+Selecting the user-address word Captain does not select an agent role or grant authority, and selecting this alternative never happens merely because the sample exists.
+No human Captain marker is selected by the alternate example.
+The shipped [firstmate-v1](professions/firstmate-v1.md), [gunner-v1](professions/gunner-v1.md) and [pilot-v1](professions/pilot-v1.md) files own the named professional contracts.
+Gunner and Pilot share [partnership duties v1](professions/partnership-v1.md), which the resolver renders with either named contract and identifies as `duties_source` in inspection.
+The shared completion knowledge duty does not install a wiki, graph builder or provider integration.
 Theme labels are presentation: space fleet uses fleet command, mission lead and specialist while internal primary/secondmate/worker identifiers remain unchanged.
 The user's airplane and the assistant's target marker remain separate from those labels.
 Profiles grant no merge/publication permission, select no models and change no running worker.
 
 `bin/fm-profile.sh --help` owns the read-only inspect, JSON inspection, context and explicit refresh commands.
-Inspection also reports the known human-readable profession name, `Gunner (WSO)` or `Firstmate`.
+Inspection also reports the known human-readable profession name, `Gunner (WSO)`, `Pilot (Πιλότος)` or `Firstmate`.
 All use the same resolver and the shipped contracts from the executable's checkout, even when `FM_HOME` selects private data elsewhere.
 Refresh renders current disk duties for the receiving supervisor to apply; it does not inject text into another session or prove that another model consumed it.
 The digest renders the selected contract on fresh startup and context re-emission, and a supported resume/reload/fork through the run wrapper refreshes a configured profile when the same session still owns the home.

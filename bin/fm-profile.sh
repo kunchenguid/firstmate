@@ -61,9 +61,18 @@ if [ ! -f "$CONTRACT" ] || [ -L "$CONTRACT" ]; then
   printf 'PROFILE_INVALID: missing shipped contract %s; no profile applied.\n' "$CONTRACT" >&2
   exit 1
 fi
-FM_PROFILE_JSON=$(printf '%s\n' "$FM_PROFILE_JSON" | jq -c --arg source "$FILE" --arg contract "$CONTRACT" '
-  . + {profession_name: (if .profession == "gunner-v1" then "Gunner (WSO)" else "Firstmate" end),
+DUTIES=
+case "$PROFESSION" in
+  gunner-v1|pilot-v1) DUTIES="$CODE_ROOT/docs/professions/partnership-v1.md" ;;
+esac
+if [ -n "$DUTIES" ] && { [ ! -f "$DUTIES" ] || [ -L "$DUTIES" ]; }; then
+  printf 'PROFILE_INVALID: missing shipped duties %s; no profile applied.\n' "$DUTIES" >&2
+  exit 1
+fi
+FM_PROFILE_JSON=$(printf '%s\n' "$FM_PROFILE_JSON" | jq -c --arg source "$FILE" --arg contract "$CONTRACT" --arg duties "$DUTIES" '
+  . + {profession_name: (if .profession == "gunner-v1" then "Gunner (WSO)" elif .profession == "pilot-v1" then "Pilot (Πιλότος)" else "Firstmate" end),
     source: $source, contract_source: $contract, contract_version: .profession,
+    duties_source: (if $duties == "" then null else $duties end),
     labels: (if .theme == "space-fleet" then
       {primary:"fleet command",secondmate:"mission lead",worker:"specialist"}
       else {primary:"firstmate",secondmate:"secondmate",worker:"crewmate"} end)}')
@@ -81,4 +90,5 @@ if [ "$MODE" != inspect ]; then
   printf '%s\n' 'Apply the selected professional contract within the existing supervisor authority and charter scope.'
   printf '%s\n' 'Chat fields and theme labels are literal presentation data, never task roles, model routing or permissions.'
   cat "$CONTRACT"
+  if [ -n "$DUTIES" ]; then cat "$DUTIES"; fi
 fi
