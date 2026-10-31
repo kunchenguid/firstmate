@@ -1559,7 +1559,7 @@ detect_local_tools() {
 }
 
 record_hygiene_report() {
-  local file id output now cutoff archive dir pr seen_prs prior backend target endpoint_state n
+  local file id output now cutoff archive dir pr seen_prs prior backend target endpoint_state n file_mtime
   seen_prs=
   now=$(date +%s)
   cutoff=$((now - 86400))
@@ -1570,7 +1570,9 @@ record_hygiene_report() {
     id=${file##*/}
     id=${id%.status}
     if [ ! -e "$STATE/$id.meta" ]; then
-      if [ "$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null || echo 0)" -lt "$cutoff" ]; then
+      file_mtime=$(_fm_status_file_mtime "$file" 2>/dev/null) || file_mtime=
+      case "$file_mtime" in ''|*[!0-9]*) continue ;; esac
+      if [ "$file_mtime" -lt "$cutoff" ]; then
         echo "RECORD_HYGIENE: status log without metadata older than 24 hours: $id"
         # Archive only in the locked, mutating bootstrap pass. Detect-only startup
         # must remain read-only.
@@ -1605,10 +1607,12 @@ record_hygiene_report() {
     if [ -z "$backend" ] || [ -z "$target" ]; then
       echo "RECORD_HYGIENE: metadata has no endpoint: $id"
     else
-      endpoint_state=$(fm_backend_agent_state "$backend" "$target")
-      case "$endpoint_state" in
-        missing) echo "RECORD_HYGIENE: metadata has no endpoint: $id" ;;
-      esac
+      if fm_backend_target_exists "$backend" "$target" >/dev/null 2>&1; then
+        :
+      else
+        endpoint_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+        [ "$endpoint_state" = missing ] && echo "RECORD_HYGIENE: metadata has no endpoint: $id"
+      fi
     fi
     pr=$(sed -n 's/^pr=//p' "$file" | head -1)
     [ -n "$pr" ] || continue
@@ -1616,7 +1620,7 @@ record_hygiene_report() {
     if [ -n "$prior" ]; then
       echo "RECORD_HYGIENE: duplicate PR $pr in records: $prior, $id"
     else
-      seen_prs="$(printf '%s\t%s\n' "$pr" "$id")$seen_prs"
+      seen_prs="$(printf '%s\t%s' "$pr" "$id")"$'\n'"$seen_prs"
     fi
   done
 
