@@ -2012,7 +2012,7 @@ assert_autoarm_commits_attended_alarm_on_exhausted_continuation() {
   : > "$dir/state/task1.meta"
   install_integrated_autoarm "$dir"
   case "$variant" in
-    arm)
+    arm|alarm-signal)
       printf '#!/usr/bin/env bash\nsleep 1\nprintf '"'"'watcher: FAILED - persistent fixture failure\\n'"'"'\nexit 1\n' > "$dir/bin/fm-watch-arm.sh"
       ;;
     signal)
@@ -2034,6 +2034,24 @@ SH
       chmod +x "$dir/bin/fm-supervision-host.sh"
       ;;
   esac
+  if [ "$variant" = alarm-signal ]; then
+    # Deterministically TERM after the alarm commit, at budget-lock release.
+    # The final-rewake contract requires exit 2 with the banner, not the quiet
+    # exit used when some earlier invocation committed the episode's alarm.
+    cat >> "$dir/bin/fm-wake-lib.sh" <<'SH'
+fixture_alarm_present=0
+[ ! -e "$FM_HOME/state/.claude-autoarm-failure-alarmed" ] || fixture_alarm_present=1
+eval "$(declare -f fm_lock_release | sed '1s/fm_lock_release/fixture_lock_release/')"
+fm_lock_release() {
+  fixture_lock_release "$@"
+  if [ "$fixture_alarm_present" -eq 0 ] \
+    && [ "$1" = "$FM_HOME/state/.turnend-claude-blocks.lock" ] \
+    && [ -e "$FM_HOME/state/.claude-autoarm-failure-alarmed" ]; then
+    kill -TERM "${BASHPID:-$$}"
+  fi
+}
+SH
+  fi
   chmod +x "$dir/bin/fm-watch-arm.sh" 2>/dev/null || true
   # Each Stop fires both hooks as children of one fake Claude session process
   # that holds state/.lock, as the harness does: the guard then recognizes the
@@ -2097,12 +2115,13 @@ SH
   done
   assert_present "$dir/state/.claude-autoarm-failure-notified" "the failure episode notice was never consumed ($variant)"
   [ "$alarmed" -ge 0 ] || fail "the auto-arm never committed the attended alarm ($variant)"
+  expect_code 2 "$(cat "$dir/auto-$alarmed.status")" "the committing invocation must deliver its final rewake ($variant)"
   [ "$loud" -eq 1 ] || fail "the final supervision-down rewake fired $loud times instead of once ($variant)"
   [ "$suppressed_reasons" -ge 1 ] || fail "no suppressed continuation carried its one-line reason ($variant)"
   [ "$empty" -eq 0 ] || fail "$empty rewake-triggering continuations carried an empty body ($variant)"
   expect_code 2 "$(cat "$dir/auto-1.status")" "the first exhausted failure must still notify ($variant)"
   case "$variant" in
-    arm) assert_contains "$(cat "$dir/auto-1.out")" "automatic supervision mechanism is broken" "the first failure omitted its notice" ;;
+    arm|alarm-signal) assert_contains "$(cat "$dir/auto-1.out")" "automatic supervision mechanism is broken" "the first failure omitted its notice" ;;
     signal) assert_contains "$(cat "$dir/auto-1.out")" "firstmate watcher auto-arm INTERRUPTED" "the first interruption omitted its notice" ;;
     *) assert_contains "$(cat "$dir/auto-1.out")" "auto-arm FAILED - the supervision host returned an actionable wake" "the first lost hand-back omitted its notice" ;;
   esac
@@ -2143,7 +2162,8 @@ test_hook_claude_mode_autoarm_commits_attended_alarm_on_lost_handback() {
 
 test_hook_claude_mode_autoarm_commits_attended_alarm_on_interruption() {
   assert_autoarm_commits_attended_alarm_on_exhausted_continuation signal
-  pass "fm-turnend-guard --claude: a repeatedly interrupted auto-arm reaches the attended alarm"
+  assert_autoarm_commits_attended_alarm_on_exhausted_continuation alarm-signal
+  pass "fm-turnend-guard --claude: interruption reaches the attended alarm and preserves its final rewake after commit"
 }
 
 test_hook_claude_mode_stale_rewake_epoch_blocks() {

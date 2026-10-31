@@ -149,6 +149,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+# Only this invocation's commit must survive an interruption as a final rewake.
+AUTOARM_COMMITTED_ALARM=0
 # The guard's attended-block budget (bin/fm-turnend-guard.sh --claude owns the
 # accounting): the auto-arm reads this session's consumed count when its own
 # terminal continuation failure is reached, to decide whether it must also
@@ -350,6 +352,7 @@ autoarm_commit_attended_alarm() {
       if [ "$budget_session" = "$session_id" ] \
         && [ "$budget_count" -gt "$BLOCK_BUDGET" ] \
         && _fm_autoarm_write_owned_locked "$STATE" "$MY_GEN" failed-suppressed "$FAILURE_ALARM"; then
+        AUTOARM_COMMITTED_ALARM=1
         rc=0
       fi
     fi
@@ -357,6 +360,23 @@ autoarm_commit_attended_alarm() {
   fm_lock_release "$BUDGET_LOCK"
   fm_lock_release "$OWNER_LOCK"
   return "$rc"
+}
+
+autoarm_alarm_banner() {
+  local need_desc
+  if [ "${FM_SUP_IN_FLIGHT:-0}" -gt 0 ]; then
+    need_desc="$FM_SUP_IN_FLIGHT task(s) in flight"
+  elif [ "${FM_SUP_SOURCES:-0}" -gt 0 ]; then
+    need_desc="$FM_SUP_SOURCES process-event source(s) registered"
+  elif [ "${FM_SUP_CHECKS:-0}" -gt 0 ]; then
+    need_desc="$FM_SUP_CHECKS registered custom check(s)"
+  else
+    need_desc="X-mode relay polling active"
+  fi
+  {
+    printf 'FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s - the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no live watcher or automatic continuation exists, and this session block budget is exhausted.\n' "$need_desc"
+    printf 'Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision; do not launch a manual background arm from this notice.\n'
+  } >&2
 }
 
 # The one terminal exhaustion decision every failed-suppressed continuation
@@ -373,23 +393,11 @@ autoarm_commit_attended_alarm() {
 # anything else keeps it alive (exit 2). Text already on stderr, such as the
 # host's actionable wake lines, is delivered with whichever rewake wins.
 autoarm_exit_suppressed() {  # <cause>
-  local cause=$1 rc need_desc
+  local cause=$1 rc
   autoarm_commit_attended_alarm
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    if [ "${FM_SUP_IN_FLIGHT:-0}" -gt 0 ]; then
-      need_desc="$FM_SUP_IN_FLIGHT task(s) in flight"
-    elif [ "${FM_SUP_SOURCES:-0}" -gt 0 ]; then
-      need_desc="$FM_SUP_SOURCES process-event source(s) registered"
-    elif [ "${FM_SUP_CHECKS:-0}" -gt 0 ]; then
-      need_desc="$FM_SUP_CHECKS registered custom check(s)"
-    else
-      need_desc="X-mode relay polling active"
-    fi
-    {
-      printf 'FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s - the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no live watcher or automatic continuation exists, and this session block budget is exhausted.\n' "$need_desc"
-      printf 'Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision; do not launch a manual background arm from this notice.\n'
-    } >&2
+    autoarm_alarm_banner
     [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
     exit 2
   fi
@@ -434,6 +442,10 @@ handle_autoarm_signal() {
     wait "$ARM_PID" 2>/dev/null || true
   fi
   [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+  if [ "$AUTOARM_COMMITTED_ALARM" -eq 1 ]; then
+    autoarm_alarm_banner
+    exit 2
+  fi
   if [ -e "$FAILURE_ALARM" ]; then
     printf 'firstmate watcher auto-arm interrupted by %s after the attended alarm - the failure episode is already alarmed, so this suppressed continuation emits no further rewake.\n' "$signal" >&2
     autoarm_record failed-suppressed

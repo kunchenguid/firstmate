@@ -1136,13 +1136,13 @@ test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid() {
   # while the lock sat un-stealable one tick away. The bounded wait earns one
   # extra freshness window for that unpublished-pid case only; a lock with a
   # published live holder still fails at the original bound.
-  local dir state lockdir out pid live
+  local dir state lockdir out pid live live_elapsed
   dir=$(make_case lock-bounded-unpublished-pid)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   sleep 30 &
   live=$!
-  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+  out=$(FM_LOCK_STALE_AFTER=2 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     live=$4
     owner=$(fm_lock_owner_dir "$2") || exit 20
@@ -1170,6 +1170,13 @@ test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid() {
     *"live_rc=1"*) ;;
     *) fail "bounded wait no longer bounds a published live holder: $out" ;;
   esac
+  live_elapsed=${out##*live_elapsed=}
+  case "$live_elapsed" in
+    ''|*[!0-9]*) fail "missing live-holder elapsed time: $out" ;;
+  esac
+  # Original bound (1s) plus one default freshness window (2s). This leaves
+  # nearly two seconds of scheduling slack but rejects the extra grace wait.
+  [ "$live_elapsed" -lt 3 ] || fail "published live holder earned unpublished-pid grace: $out"
   pass "bounded wait earns one grace window for an unpublished-pid lock, still bounds a live holder"
 }
 
