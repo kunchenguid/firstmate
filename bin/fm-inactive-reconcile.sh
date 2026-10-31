@@ -524,11 +524,11 @@ arm_ready_pr_watches() {
     valid_id "$id" || continue
     [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue
     arm_ready_pr_watch "$id" "$meta" || true
-    printf '%s\\n' "$id" > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
+    printf '%s\n' "$id" > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
     seen=1
   done
   if [ "$seen" -eq 0 ] && [ -n "$cursor" ]; then
-    printf '\\n' > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
+    printf '\n' > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
   fi
 }
 
