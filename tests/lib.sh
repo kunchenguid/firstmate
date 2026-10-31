@@ -111,22 +111,55 @@ pass() {
 # fm_test_run <test-function>...
 # Print a TAP plan 1..N derived from the function names (N is $#), run each
 # function (each must emit exactly one `ok - ` line via pass), then print
-# FM_TEST_COMPLETE. Adding a test is adding a name to this call; N is not a
-# separately maintained numeral. The names given are the names run.
+# FM_TEST_COMPLETE after all registered calls return. If the suite exits during
+# a call, FM_TEST_ABORT names that invocation and the registered names never run.
+# Abort reporting precedes a suite-owned EXIT handler installed before fm_test_run,
+# which receives the original exit status even if it exits explicitly.
+# An explicit fm_test_cleanup call during a test does not itself report an abort.
+# Adding a test is adding a name to this call; N is not a separately maintained
+# numeral. The names given are the names run.
 # bin/fm-test-tap-verify.sh is the completeness checker the stock macOS Bash
 # job uses against that plan and marker.
 fm_test_run() {
-  local name kind
+  local name kind exit_trap exit_handler
   [ "$#" -gt 0 ] || fail "fm_test_run: no tests registered"
+  exit_trap=$(trap -p EXIT)
+  exit_handler=${exit_trap#trap -- }
+  exit_handler=${exit_handler% EXIT}
+  # Keep trap -p's quoting for eval. Restore $? in a conditional so errexit
+  # cannot skip cleanup when the suite exited nonzero.
+  trap 'FM_TEST_EXIT_STATUS=$?; fm_test_report_abort
+if (exit "$FM_TEST_EXIT_STATUS"); then
+  eval '"$exit_handler"'
+else
+  eval '"$exit_handler"'
+fi' EXIT
+  FM_TEST_RUN_ACTIVE=1
+  FM_TEST_RUN_SHELL=$$
+  FM_TEST_RUN_SUBSHELL=$BASH_SUBSHELL
   printf '1..%s\n' "$#"
   while [ "$#" -gt 0 ]; do
     name=$1
     shift
+    FM_TEST_CURRENT=$name
+    FM_TEST_PENDING=("$@")
     kind=$(type -t "$name" 2>/dev/null || true)
     [ "$kind" = function ] || fail "fm_test_run: $name is not a function"
     "$name"
   done
+  FM_TEST_RUN_ACTIVE=0
+  eval "$exit_trap"
   printf 'FM_TEST_COMPLETE\n'
+}
+
+fm_test_report_abort() {
+  [ "${FM_TEST_RUN_ACTIVE:-0}" -eq 1 ] || return 0
+  # An expected failure in a subshell must not report its parent's plan.
+  [ "$$:$BASH_SUBSHELL" = "$FM_TEST_RUN_SHELL:$FM_TEST_RUN_SUBSHELL" ] || return 0
+  FM_TEST_RUN_ACTIVE=0
+  local IFS=,
+  printf 'FM_TEST_ABORT failed=%s skipped_after_failure=%s unexecuted=%s\n' \
+    "$FM_TEST_CURRENT" "${#FM_TEST_PENDING[@]}" "${FM_TEST_PENDING[*]-}" >&2
 }
 
 # Harness argument assertions reuse the emitted prefix rather than duplicating
