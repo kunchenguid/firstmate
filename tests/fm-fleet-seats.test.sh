@@ -342,6 +342,24 @@ test_orphan_secondmates_cannot_become_authorities() {
   pools "$grandchild" 1
   task_record "$root" existing pool-model-a
   new_holder
+  out=$(reserve "$grandchild" contender pool-model-a 2>&1)
+  expect_code 4 "$?" "a descendant must share the occupied primary: $out"
+  assert_present "$grandchild/state/.fm-fleet-seats-authority" "the caller did not save its authority"
+  assert_absent "$child/state/.fm-fleet-seats-authority" "the intermediate home unexpectedly saved authority"
+  mv "$child/.fm-secondmate-parent" "$child/parent.saved"
+  out=$(reserve "$grandchild" contender pool-model-a 2>&1)
+  expect_code 4 "$?" "a descendant's saved authority must survive an intermediate orphan: $out"
+  assert_contains "$out" "existing" "the descendant lost the primary's occupied seat"
+  assert_absent "$grandchild/state/fleet-seats" "the descendant created an independent ledger"
+  pools "$root" 2
+  out=$(reserve "$grandchild" admitted pool-model-a 2>&1)
+  expect_code 0 "$?" "saved caller authority must permit available primary capacity: $out"
+  assert_equals reserved "$(lifecycle_of "$grandchild" admitted g-admitted)" "show lost the caller's authority"
+  out=$(seats "$grandchild" release admitted --generation g-admitted --reason prelaunch 2>&1)
+  expect_code 0 "$?" "release through saved caller authority failed: $out"
+  assert_equals released "$(lifecycle_of "$grandchild" admitted g-admitted)" "release missed the primary ledger"
+  pools "$root" 1
+  mv "$child/parent.saved" "$child/.fm-secondmate-parent"
   for home in "$root" "$child" "$grandchild"; do
     out=$(reserve "$home" contender pool-model-a 2>&1)
     expect_code 4 "$?" "a valid ancestry must share the occupied primary: $out"
