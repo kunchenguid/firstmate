@@ -17,6 +17,7 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+# Set FM_TEST_ONLY to a test function name for a focused executable regression.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -29,6 +30,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -364,6 +367,31 @@ SH
   chmod +x "$dir/fakebin/tasks-axi"
 }
 
+# Relaunch <id> once on claude so its worktree carries the real generated
+# worker hooks that a later relaunch must retire.
+arm_claude_worker_wiring() {  # <case-dir> <id>
+  local out
+  out=$(run_control "$1" "$2" relaunch --note "arm worker wiring") \
+    || fail "arming the claude worker wiring failed"$'\n'"$out"
+  [ -s "$1/wt/.claude/settings.local.json" ] \
+    || fail "the claude incarnation left no worker wiring"
+  : > "$1/fake/literal"
+}
+
+# Succeeds when <settings> ends each Claude busy event with exactly one hook
+# group carrying <gen>, and is <expected> once those groups are removed.
+worker_settings_match() {  # <settings> <expected> <gen>
+  jq -e --slurpfile expected "$2" --arg gen "$3" '
+    reduce ("UserPromptSubmit", "Stop", "StopFailure", "SessionEnd") as $event (.;
+      if (.hooks[$event][-1].hooks | length) == 1 and
+        (.hooks[$event][-1].hooks[0].command | contains($gen)) then
+        .hooks[$event] |= .[:-1] |
+        if .hooks[$event] == [] then del(.hooks[$event]) else . end
+      else error("no current \($event) hook") end
+    ) | . == $expected[0]
+  ' "$1" >/dev/null
+}
+
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
@@ -390,6 +418,130 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "cd -- '$dir/wt'" "$dir/fake/keys" "the replacement launch must enter the recorded worktree"
   assert_grep "Firstmate operational input waiting: read" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+# A crewmate's settings.local.json also carries the worker's own saved rules
+# and hooks. Each relaunch retires only the previous incarnation's generated
+# busy hooks and merges the replacement's, so the worker's settings, its hook
+# groups, and a hook it added beside a generated one all survive.
+test_relaunch_keeps_worker_local_settings_and_refreshes_only_firstmate_hooks() {
+  local dir out rc settings expected gen1 gen2 event cmd record
+  dir=$(new_case worker-settings rl44)
+  add_ship_task "$dir" rl44 claude
+  settings="$dir/wt/.claude/settings.local.json"
+  expected="$dir/expected.json"
+  mkdir -p "${settings%/*}"
+  cat > "$expected" <<'JSON'
+{
+  "permissions": {"allow": ["Read(./docs/**)"], "deny": ["Bash(rm *)"], "defaultMode": "default"},
+  "env": {"FIXTURE_FLAG": "enabled"},
+  "nestedFixture": {"keep": [true, null, 7]},
+  "hooks": {
+    "Stop": [{"matcher": "fixture", "hooks": [{"type": "command", "command": "printf fixture-stop", "timeout": 9}]}],
+    "PreToolUse": [{"matcher": "Read", "hooks": [{"type": "command", "command": "printf fixture-read", "async": true}]}]
+  }
+}
+JSON
+  cp "$expected" "$settings"
+
+  out=$(run_control "$dir" rl44 relaunch --note "first replacement"); rc=$?
+  expect_code 0 "$rc" "the first relaunch should succeed"$'\n'"$out"
+  gen1=$(meta_field "$dir" rl44 busy_gen)
+  worker_settings_match "$settings" "$expected" "$gen1" \
+    || fail "the first relaunch lost worker settings or did not add one current hook per event"
+
+  # The worker adds its own hook to the group generated for Stop.
+  jq '.hooks.Stop[-1].hooks += [{"type": "command", "command": "printf fixture-mixed"}]' \
+    "$settings" > "$dir/mixed.json"
+  cp "$dir/mixed.json" "$settings"
+  jq '.hooks.Stop += [{"hooks": [{"type": "command", "command": "printf fixture-mixed"}]}]' \
+    "$expected" > "$dir/expected-mixed.json"
+  cp "$dir/expected-mixed.json" "$expected"
+
+  out=$(run_control "$dir" rl44 relaunch --note "second replacement"); rc=$?
+  expect_code 0 "$rc" "the second relaunch should succeed"$'\n'"$out"
+  gen2=$(meta_field "$dir" rl44 busy_gen)
+  [ -n "$gen2" ] && [ "$gen2" != "$gen1" ] || fail "the second relaunch did not arm a fresh generation"
+  worker_settings_match "$settings" "$expected" "$gen2" \
+    || fail "the same-task relaunch lost worker settings or did not refresh one current hook per event"
+  jq -e --arg gen "$gen1" '[.. | strings | select(contains($gen))] == []' "$settings" >/dev/null \
+    || fail "the same-task relaunch kept a hook from the retired incarnation"
+  for event in UserPromptSubmit Stop; do
+    cmd=$(jq -r --arg event "$event" '.hooks[$event][-1].hooks[0].command' "$settings")
+    sh -c "$cmd"
+    record=$(fm_busy_record_read "$dir/home/state" rl44)
+    case "$event:$record" in
+      "UserPromptSubmit:busy claude-hook user-prompt-submit "*|"Stop:idle claude-hook stop "*) ;;
+      *) fail "the refreshed $event hook did not drive the current record: $record" ;;
+    esac
+  done
+  assert_present "$dir/home/state/rl44.turn-ended" "the refreshed Stop hook lost its notification"
+
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl44 relaunch --harness codex --note "switch runtime"); rc=$?
+  expect_code 0 "$rc" "switching away from claude should succeed"$'\n'"$out"
+  jq -e --slurpfile expected "$expected" '. == $expected[0]' "$settings" >/dev/null \
+    || fail "switching away from claude did not leave exactly the worker's own settings"
+  pass "fm-control relaunch: worker-local settings survive same-task refreshes and a harness switch"
+}
+
+test_malformed_worker_settings_refuse_relaunch_untouched() {
+  local dir out rc settings
+  dir=$(new_case worker-settings-invalid rl45)
+  add_ship_task "$dir" rl45 claude
+  settings="$dir/wt/.claude/settings.local.json"
+  mkdir -p "${settings%/*}"
+  printf '{"permissions": {"allow": [\n' > "$dir/prior.json"
+  cp "$dir/prior.json" "$settings"
+  out=$(run_control "$dir" rl45 relaunch --note "retry with malformed settings"); rc=$?
+  expect_code 1 "$rc" "malformed worker settings should refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "could not refresh Claude worker hooks without losing existing settings" \
+    "the refusal should name the settings it would lose"
+  assert_contains "$out" "could not retire claude wiring" \
+    "the refusal should come from prior wiring retirement"
+  cmp -s "$dir/prior.json" "$settings" || fail "malformed worker settings were rewritten or removed"
+  assert_no_grep "Firstmate operational input waiting: read" "$dir/fake/literal" \
+    "replacement launch must not be armed over malformed worker settings"
+  pass "fm-control relaunch: malformed worker settings refuse retirement and stay untouched"
+}
+
+test_failed_worker_settings_publication_refuses_relaunch_untouched() {
+  local dir out rc settings expected real_mv gen
+  dir=$(new_case worker-settings-publish rl47)
+  add_ship_task "$dir" rl47 claude
+  arm_claude_worker_wiring "$dir" rl47
+  settings="$dir/wt/.claude/settings.local.json"
+  expected="$dir/expected.json"
+  printf '%s\n' '{"permissions": {"allow": ["Read(./docs/**)"]}, "hooks": {"PreToolUse": [{"matcher": "Read", "hooks": [{"type": "command", "command": "printf fixture-read"}]}]}}' \
+    > "$expected"
+  jq --slurpfile expected "$expected" '.permissions = $expected[0].permissions |
+    .hooks.PreToolUse = $expected[0].hooks.PreToolUse' "$settings" > "$dir/prior.json"
+  cp "$dir/prior.json" "$settings"
+  chmod 600 "$settings"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$settings" \
+    run_control "$dir" rl47 relaunch --note "retry after settings publication"); rc=$?
+  expect_code 1 "$rc" "a failed settings publication should refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "could not publish refreshed Claude worker hooks" \
+    "the refusal should name the failed settings publication"
+  assert_contains "$out" "could not retire claude wiring" \
+    "the refusal should come from prior wiring retirement"
+  cmp -s "$dir/prior.json" "$settings" || fail "a failed settings publication changed the worker settings"
+  [ "$(ls -A "${settings%/*}")" = settings.local.json ] \
+    || fail "a failed settings publication left staged settings behind: $(ls -A "${settings%/*}")"
+  assert_no_grep "Firstmate operational input waiting: read" "$dir/fake/literal" \
+    "replacement launch must not be armed after a failed settings publication"
+
+  out=$(FM_REAL_MV="$real_mv" run_control "$dir" rl47 relaunch --note "settings publication works"); rc=$?
+  expect_code 0 "$rc" "the relaunch should succeed once settings publication works"$'\n'"$out"
+  gen=$(meta_field "$dir" rl47 busy_gen)
+  worker_settings_match "$settings" "$expected" "$gen" \
+    || fail "the relaunch after a failed publication did not refresh only the generated hooks"
+  [ -n "$(find "$settings" -prune -perm 600)" ] || fail "the refreshed worker settings lost their mode"
+  [ "$(ls -A "${settings%/*}")" = settings.local.json ] \
+    || fail "the refreshed worker settings left staged settings behind"
+  pass "fm-control relaunch: a failed worker settings publication refuses and leaves the settings untouched"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
@@ -707,8 +859,7 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   dir=$(new_case switch rl4)
   add_ship_task "$dir" rl4 claude
   # Wiring the previous claude incarnation left in the worktree.
-  mkdir -p "$dir/wt/.claude"
-  printf '{"hooks":{}}\n' > "$dir/wt/.claude/settings.local.json"
+  arm_claude_worker_wiring "$dir" rl4
   printf 'codex' > "$dir/fake/becomes"
   out=$(run_control "$dir" rl4 relaunch --harness codex --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
@@ -1162,8 +1313,7 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
   dir=$(new_case wiring-failure rl29)
   add_ship_task "$dir" rl29 claude
   hook="$dir/wt/.claude/settings.local.json"
-  mkdir -p "${hook%/*}"
-  printf '{}\n' > "$hook"
+  arm_claude_worker_wiring "$dir" rl29
   real_rm=$(command -v rm)
   make_rm_failure_stub "$dir"
   out=$(FM_REAL_RM="$real_rm" FM_FAKE_RM_FAIL_PATH="$hook" \
@@ -1964,6 +2114,34 @@ test_prepublication_abort_retires_replacement_wiring_and_busy_state() {
   [ "$(journal_field "$dir" rl28 rollback)" = prior-record-kept ] \
     || fail "the journal should record the unpublished replacement rollback"
   pass "fm-spawn relaunch: prepublication abort removes replacement state"
+}
+
+test_prepublication_abort_keeps_worker_local_settings() {
+  local dir out rc real_mv meta settings
+  dir=$(new_case prepublishsettings rl46)
+  add_ship_task "$dir" rl46 claude
+  arm_claude_worker_wiring "$dir" rl46
+  settings="$dir/wt/.claude/settings.local.json"
+  jq '.permissions = {"allow": ["Read(./docs/**)"]} |
+    .hooks.Stop[-1].hooks += [{"type": "command", "command": "printf fixture-mixed"}] |
+    .hooks.PreToolUse = [{"matcher": "Read", "hooks": [{"type": "command", "command": "printf fixture-read"}]}]' \
+    "$settings" > "$dir/seeded.json"
+  cp "$dir/seeded.json" "$settings"
+  meta="$dir/home/state/rl46.meta"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+    run_control "$dir" rl46 relaunch --note "clean partial replacement state"); rc=$?
+  expect_code 1 "$rc" "a failed metadata publication should fail closed"$'\n'"$out"
+  jq -e '. == {
+    "permissions": {"allow": ["Read(./docs/**)"]},
+    "hooks": {
+      "Stop": [{"hooks": [{"type": "command", "command": "printf fixture-mixed"}]}],
+      "PreToolUse": [{"matcher": "Read", "hooks": [{"type": "command", "command": "printf fixture-read"}]}]
+    }
+  }' "$settings" >/dev/null \
+    || fail "an aborted replacement should remove only generated hooks and keep the worker's settings"
+  pass "fm-spawn relaunch: prepublication abort keeps worker-local settings"
 }
 
 test_journal_records_the_checkpoint_it_proved() {
@@ -3011,10 +3189,22 @@ SH
   pass "fm-control exit removes the dialog file before it releases the control lock"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  case "$FM_TEST_ONLY" in
+    test_*) declare -F "$FM_TEST_ONLY" >/dev/null || fail "unknown FM_TEST_ONLY test: $FM_TEST_ONLY" ;;
+    *) fail "FM_TEST_ONLY must name a test_ function: $FM_TEST_ONLY" ;;
+  esac
+  "$FM_TEST_ONLY"
+  exit
+fi
+
 test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_keeps_worker_local_settings_and_refreshes_only_firstmate_hooks
+test_malformed_worker_settings_refuse_relaunch_untouched
+test_failed_worker_settings_publication_refuses_relaunch_untouched
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
@@ -3070,6 +3260,7 @@ test_post_publication_launch_failure_keeps_the_new_record
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state
+test_prepublication_abort_keeps_worker_local_settings
 test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home

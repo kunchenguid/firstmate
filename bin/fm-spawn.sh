@@ -565,6 +565,7 @@
 #     __KIROBIN__   resolved, kiro-verified executable for a kiro launch
 #     __KIROHOME__  firstmate-owned per-task KIRO_HOME dir (hook agent config + trust setting)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# docs/configuration.md "Installed hooks and launch details" owns Claude worker-settings preservation.
 # A --secondmate launch arms the same semantic busy contract (bin/fm-busy-lib.sh) in THIS
 # parent home for claude, opencode, pi, pi-signed, and omp, so the parent's active-turn
 # gate can read a busy verdict. Those hooks do not touch the parent's turn-ended marker:
@@ -1991,6 +1992,79 @@ EOF
   done <<EOF
 $(fm_control_harness_wiring_dirs "$harness" "$state" "$id")
 EOF
+  if [ "$harness" = claude ] && [ "$kind" != secondmate ]; then
+    claude_worker_settings_update "$wt/.claude/settings.local.json" || return 1
+  fi
+}
+
+# Worker-saved rules and hooks share this file: ownership is limited to commands
+# invoking this code root's fm-busy-event.sh with the Claude-hook source.
+# A group containing a generated command is not necessarily wholly owned.
+claude_worker_settings_update() {  # <settings-file> [generated-settings-json]
+  local settings=$1 generated=${2-} current='{}' updated staged
+  if [ -e "$settings" ]; then
+    current=$(cat "$settings") || current=
+  elif [ -z "$generated" ]; then
+    return 0
+  fi
+  [ -n "$generated" ] || generated='{"hooks":{}}'
+  if ! updated=$(printf '%s\n' "$current" | jq -s \
+    --argjson generated "$generated" \
+    --arg prefix "$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply " '
+      def firstmate_hook:
+        .type == "command" and
+        ((.command // "") | startswith($prefix) or contains("; " + $prefix)) and
+        ((.command // "") | contains(" --source claude-hook --event "));
+      def owned_group: any(.hooks[]?; firstmate_hook);
+      if length != 1 or (.[0] | type) != "object" then
+        error("worker settings must contain one JSON object")
+      else .[0] end |
+      if has("hooks") and (.hooks | type) != "object" then
+        error("worker hooks must be an object")
+      else . end |
+      . as $current |
+      reduce ((.hooks // {}) | keys_unsorted[]) as $event (.;
+        if (.hooks[$event] | type) == "array" and any(.hooks[$event][]; owned_group) then
+          .hooks[$event] |= map(
+            if owned_group then
+              .hooks |= map(select(firstmate_hook | not)) |
+              select(.hooks | length > 0)
+            else . end
+          ) |
+          if .hooks[$event] == [] then del(.hooks[$event]) else . end
+        else . end
+      ) |
+      if . != $current and .hooks == {} then del(.hooks) else . end |
+      reduce ($generated.hooks | keys_unsorted[]) as $event (.;
+        if (.hooks // {} | has($event)) and (.hooks[$event] | type) != "array" then
+          error("worker hook event must be an array")
+        else
+          .hooks[$event] = (.hooks[$event] // []) + $generated.hooks[$event]
+        end
+      ) |
+      if . == $current then empty else . end
+    '); then
+    echo "error: could not refresh Claude worker hooks without losing existing settings in $settings" >&2
+    return 1
+  fi
+  if [ -z "$updated" ]; then
+    return 0
+  elif [ "$updated" = '{}' ]; then
+    rm -f -- "$settings"
+  elif ! staged=$(mktemp "${settings%/*}/.${settings##*/}.XXXXXX"); then
+    echo "error: could not stage refreshed Claude worker hooks beside $settings" >&2
+    return 1
+  elif ! {
+    if [ -e "$settings" ]; then
+      cp -p -- "$settings" "$staged"
+    else
+      chmod "$(printf '%o' $((0666 & ~8#$(umask))))" "$staged"
+    fi && (printf '%s\n' "$updated" >"$staged") && mv -f -- "$staged" "$settings"
+  }; then
+    rm -f -- "$staged"
+    echo "error: could not publish refreshed Claude worker hooks to $settings; left it unchanged" >&2
+    return 1
+  fi
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -6213,10 +6287,8 @@ BUSY_GEN=
     # the ordinary Stop idle hook, without the parent turn-ended touch. Every
     # hook command tolerates a refused event (|| true) so a stale-gen writer
     # can never break Claude's own lifecycle.
-    # A crewmate writes those hooks into the disposable worktree's
-    # .claude/settings.local.json. A secondmate does not: that file in a
-    # persistent home is where Claude Code stores the captain's "don't ask
-    # again" rules, and rewriting it drops them. The secondmate hooks go in
+    # Worker-settings ownership is documented in docs/configuration.md under
+    # "Installed hooks and launch details". The secondmate hooks go in
     # a firstmate-owned state/<id>.claude-settings.json passed through
     # --settings. Claude Code merges hook entries across settings files
     # (https://code.claude.com/docs/en/hooks) and keeps any key
@@ -6253,7 +6325,7 @@ BUSY_GEN=
       printf '{%s%s}\n' "$session_keys" "$hooks_json" >"$STATE_REAL/$ID.claude-settings.json"
     else
       mkdir -p "$WT/.claude"
-      printf '{%s}\n' "$hooks_json" >"$WT/.claude/settings.local.json"
+      claude_worker_settings_update "$WT/.claude/settings.local.json" "{$hooks_json}" || exit 1
       exclude_path '.claude/settings.local.json'
     fi
     ;;
