@@ -452,6 +452,7 @@ The watcher's liveness tick applies the identical rule during ordinary supervisi
 - The remote endpoint is probed read-only once per cadence.
 - Only a positive `dead` or `missing` reply relaunches through that command.
 - An unreachable transport or inconclusive state is left untouched rather than replaced locally.
+  A persistent inconclusive episode raises one inspection wake, while an unreachable transport stays silent; [architecture.md](architecture.md) owns that bound.
 
 ### Inventory reconcile for markerless routes
 

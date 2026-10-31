@@ -19,6 +19,9 @@
 #   unverified  - the endpoint is recorded under a session this home does not
 #                 own, so probing is not authorized
 #
+# A remote probe whose host cannot be reached reports `unavailable`, and one
+# whose state verb fails reports `unreadable`; neither is a classifier verdict.
+#
 # Only `dead` and `missing` authorize recovery. The probe and recovery functions
 # below own whether that means resuming the endpoint or proving its close before
 # replacement; docs/t3code-backend.md owns T3's native status meanings.
@@ -115,6 +118,70 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
     "$ledger" 2>/dev/null
 }
 
+# The watcher keeps one bounded episode marker for remote or local endpoints
+# whose probe remains ambiguous or unreadable. A remote host that cannot be
+# reached (`unavailable`) is never part of an episode: host loss is not evidence
+# about the endpoint, so it neither counts toward nor clears one. The marker
+# records the state, the consecutive count, and a unique token for the episode;
+# that token names the episode in FM_SM_LIVE_UNCERTAIN_EPISODE so each episode
+# queues under its own key and never dedupes against a row an earlier episode
+# left queued. The count is separate from the alert marker so a failed queue
+# append never suppresses a later alert.
+fm_secondmate_liveness_uncertain_record() {  # <id> <ambiguous|unreadable> <threshold>
+  local id=$1 state=$2 threshold=$3 marker tmp='' previous_state='' previous_count=0 episode=''
+  FM_SM_LIVE_UNCERTAIN_COUNT=0
+  FM_SM_LIVE_UNCERTAIN_EPISODE=''
+  case "$state" in ambiguous|unreadable) ;; *) return 1 ;; esac
+  case "$threshold" in ''|*[!0-9]*|0) return 2 ;; esac
+  marker="$STATE/.secondmate-liveness-uncertain-$id"
+  if [ -L "$marker" ] || { [ -e "$marker" ] && [ ! -f "$marker" ]; }; then
+    return 2
+  fi
+  if [ -f "$marker" ]; then
+    read -r previous_state previous_count episode < "$marker" || return 2
+    case "$previous_state:$previous_count:$episode" in
+      ambiguous:[0-9]*:[A-Za-z0-9._-]*|unreadable:[0-9]*:[A-Za-z0-9._-]*) ;;
+      *) return 2 ;;
+    esac
+  else
+    # mktemp supplies a unique episode token even when two episodes begin in
+    # the same second. Keep that temporary file for the atomic marker publish.
+    tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-$id.XXXXXX") || return 2
+    episode=${tmp##*.}
+  fi
+  # The episode is uncertainty itself, so uncertain probes stay consecutive
+  # when the verdict alternates between those states.
+  previous_count=$((previous_count + 1))
+  [ -n "$tmp" ] || tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-$id.XXXXXX") || return 2
+  if ! printf '%s\t%s\t%s\n' "$state" "$previous_count" "$episode" > "$tmp" || \
+     ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 2
+  fi
+  FM_SM_LIVE_UNCERTAIN_COUNT=$previous_count
+  FM_SM_LIVE_UNCERTAIN_EPISODE=$episode
+  [ "$previous_count" -ge "$threshold" ] || return 1
+  [ ! -e "$STATE/.secondmate-liveness-uncertain-alert-$id" ] && \
+    [ ! -L "$STATE/.secondmate-liveness-uncertain-alert-$id" ]
+}
+
+fm_secondmate_liveness_uncertain_mark_alert() {  # <id>
+  local id=$1 marker tmp
+  marker="$STATE/.secondmate-liveness-uncertain-alert-$id"
+  [ ! -L "$marker" ] || return 1
+  [ ! -e "$marker" ] || return 0
+  tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-alert-$id.XXXXXX") || return 1
+  if ! printf 'alerted\n' > "$tmp" || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_secondmate_liveness_uncertain_clear() {  # <id>
+  rm -f -- "$STATE/.secondmate-liveness-uncertain-$1" \
+    "$STATE/.secondmate-liveness-uncertain-alert-$1"
+}
+
 # fm_secondmate_liveness_probe <meta> <id> <full|poll>
 #
 # Read-only probe of one registered secondmate's recorded endpoint. Populates:
@@ -151,6 +218,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
       remote_rc=0
       fm_remote_readiness_ensure "$FM_SM_LIVE_LIB_DIR" "$id" || remote_rc=$?
       if [ "$remote_rc" -eq 255 ]; then
+        FM_SM_LIVE_STATE=unavailable
         FM_SM_LIVE_REASON="remote host unavailable or endpoint state unknown; route preserved on $remote_host"
         return 0
       fi
@@ -169,10 +237,12 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
       remote_rc=$?
     fi
     if [ "$remote_rc" -eq 255 ]; then
+      FM_SM_LIVE_STATE=unavailable
       FM_SM_LIVE_REASON="remote host unavailable or endpoint state unknown; route preserved on $remote_host"
       return 0
     fi
     if [ "$remote_rc" -ne 0 ]; then
+      FM_SM_LIVE_STATE=unreadable
       FM_SM_LIVE_REASON="remote endpoint probe unreadable on $remote_host"
       return 0
     fi
