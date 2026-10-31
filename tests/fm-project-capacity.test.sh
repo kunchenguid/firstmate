@@ -79,6 +79,7 @@ make_case() {  # <name> [task-id...]
 printf '%s\n' "$*" >> "$FM_FAKE_CALL_LOG"
 window_file="$FM_FAKE_CALL_LOG.window"
 case "$*" in
+  *"#{pane_current_command}"*) printf 'bash\n'; exit 0 ;;
   *"#{pane_current_path}"*)
     # A spawn that is told to hold waits here, after its capacity check and
     # while it still holds the project lock, until the test releases it.
@@ -355,6 +356,44 @@ test_restart_does_not_count_its_own_record() {
   expect_code "$DEFER_EXIT" "$rc" "another task ignored the restarted task's place: $out"
   assert_contains "$out" "1 already hold a place (task-c)" "another task did not count the restarted task"
   pass "a restart of a task id does not count that task's own record"
+}
+
+test_relaunch_reclaims_a_finished_workers_place() {
+  local scenario kind mode case_dir home wt out rc
+  for scenario in scout local-only; do
+    kind=scout mode=
+    [ "$scenario" != local-only ] || { kind=ship; mode=local-only; }
+    case_dir=$(make_case "relaunch-$scenario" task-a task-b)
+    home="$case_dir/home"
+    wt=$(new_worktree "$case_dir" task-a)
+    if [ "$kind" = ship ]; then
+      sed 's/mode=no-mistakes/mode=local-only/' "$home/data/task-a/brief.md" > "$home/data/task-a/brief.tmp"
+      mv "$home/data/task-a/brief.tmp" "$home/data/task-a/brief.md"
+    fi
+    declare_capacity "$home" 'project 1'
+    fm_write_meta "$home/state/task-a.meta" \
+      'window=firstmate:fm-task-a' 'endpoint_task_id=task-a' \
+      "worktree=$wt" "project=$case_dir/project" \
+      'harness=codex' "kind=$kind" "mode=$mode" 'yolo=off' \
+      'branch=wt-task-a' 'spawn_gen=old-a'
+    printf 'fm-task-a\n' > "$case_dir/calls.log.window"
+    printf 'done: finished\ncaptain-held: decision transferred\n' > "$home/state/task-a.status"
+    write_live "$home" live-b "$case_dir/project"
+    rc=0
+    out=$(run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
+    expect_code "$DEFER_EXIT" "$rc" "a finished $scenario relaunched into a full project: $out"
+    assert_equals $'done: finished\ncaptain-held: decision transferred' \
+      "$(cat "$home/state/task-a.status")" "a deferred relaunch changed completion state"
+    printf 'pr=123\n' >> "$home/state/live-b.meta"
+    rc=0
+    out=$(run_spawn "$case_dir" "$home" "$wt" task-a --relaunch) || rc=$?
+    expect_code 0 "$rc" "a finished $scenario could not reclaim an empty place: $out"
+    rc=0
+    out=$(spawn_ship "$case_dir" task-b "$case_dir/unused") || rc=$?
+    expect_code "$DEFER_EXIT" "$rc" "a relaunched $scenario did not reserve its place: $out"
+    assert_contains "$out" '1 already hold a place (task-a)' "the relaunched worker was not counted"
+  done
+  pass "relaunching finished scouts and local-only ships reserves their place"
 }
 
 # A place frees when a worker records its ready PR and when a task is cleaned
@@ -703,6 +742,7 @@ test_symlinked_home_counts_each_worker_once
 test_release_frees_a_place
 test_finished_worker_frees_a_place
 test_restart_does_not_count_its_own_record
+test_relaunch_reclaims_a_finished_workers_place
 test_occupancy_counts_only_this_projects_workers
 test_capacity_is_shared_by_every_local_home
 test_unreadable_holders_refuse_admission
