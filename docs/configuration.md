@@ -2133,6 +2133,8 @@ An absent required tool with an automated install path reports `MISSING:` with i
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 
+Bootstrap reports a `STALE_DAEMON:` line when the running `no-mistakes` daemon started before the installed binary was replaced; the supervisor restarts the daemon, and workers never do. [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh)'s header owns the exact detection rules.
+
 **Project refresh at startup**
 
 The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact clone-refresh overlap, liveness-before-convergence, per-mate concurrency, ordered diagnostic replay, and sequential-fallback contract.

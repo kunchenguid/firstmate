@@ -97,6 +97,10 @@ if [ "${1:-}" = --version ]; then
   printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z}"
   exit 0
 fi
+if [ "${1:-}" = daemon ] && [ "${2:-}" = status ]; then
+  printf '%s\n' "${FM_FAKE_NM_DAEMON_STATUS:-daemon not running}"
+  exit 0
+fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
@@ -421,6 +425,51 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.45.4 (fake)^ou
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^outdated^unparseable
 ROWS
   pass "bootstrap separates an absent no-mistakes from one below its version floor"
+}
+
+test_stale_no_mistakes_daemon() {
+  local label status order mode etime case_dir fakebin out expect n daemon_pid
+  n=0
+  while IFS='^' read -r label status order mode etime; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/nm-daemon-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    if [ "$order" = binary_first ]; then
+      touch -d @1 "$fakebin/no-mistakes"
+      sleep 3
+    fi
+    sleep 300 &
+    daemon_pid=$!
+    if [ -n "$etime" ]; then
+      printf '#!/bin/sh\necho "%s"\n' "$etime" > "$fakebin/ps"
+      chmod +x "$fakebin/ps"
+    fi
+    if [ "$order" = daemon_first ]; then
+      sleep 3
+      touch -d @1 "$fakebin/no-mistakes"
+    fi
+    expect="STALE_DAEMON: no-mistakes daemon (pid $daemon_pid) started before the installed no-mistakes was replaced; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NM_DAEMON_STATUS="${status//PID/$daemon_pid}" "$ROOT/bin/fm-bootstrap.sh")
+    kill "$daemon_pid" 2>/dev/null
+    case "$mode" in
+      silent) [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      stale) [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
+    esac
+  done <<'ROWS'
+binary installed before the daemon start stays silent despite epoch mtime^daemon running (pid PID)^binary_first^silent
+binary installed after the daemon start reports despite epoch mtime^daemon running (pid PID)^daemon_first^stale
+no daemon running stays silent^daemon not running^daemon_first^silent
+unreadable daemon pid stays silent^daemon running (pid 99999999)^daemon_first^silent
+unparseable daemon status stays silent^something else entirely^daemon_first^silent
+hours with leading zeros are parsed^daemon running (pid PID)^daemon_first^stale^08:09:09
+days with leading zeros are parsed^daemon running (pid PID)^daemon_first^stale^2-08:09:09
+minutes with leading zeros are parsed^daemon running (pid PID)^daemon_first^stale^09:08
+ROWS
+  pass "bootstrap reports a no-mistakes daemon older than the installed binary"
 }
 
 test_gh_axi_min_version() {
@@ -1541,6 +1590,7 @@ test_bootstrap_reporting
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version
 test_gh_axi_min_version
+test_stale_no_mistakes_daemon
 test_lavish_axi_min_version
 test_tasks_axi_min_version
 test_quota_axi_min_version

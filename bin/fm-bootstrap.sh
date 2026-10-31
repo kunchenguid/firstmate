@@ -17,6 +17,7 @@
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
+#                 "STALE_DAEMON: no-mistakes daemon (pid <pid>) started before the installed no-mistakes was replaced; ...",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -63,6 +64,11 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is OUTDATED when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
+#          STALE_DAEMON is read-only: the running no-mistakes daemon started
+#          before the installed no-mistakes binary on PATH was last replaced
+#          (inode change time), so its next pipeline run can fail on config only the new build knows.
+#          It names the supervisor remedy and never restarts the daemon; it is
+#          silent when no daemon runs or its pid or start time cannot be read.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there.
 #          Missing or board-incompatible lavish-axi reports PRESENTATION_UNAVAILABLE;
@@ -1513,6 +1519,31 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
   fi
 fi
 
+# A daemon outlives a binary upgrade, so compare its start time with the
+# installed binary's inode change time (Nix pins mtime to 1); both are readable on macOS and Linux.
+etime_seconds() {
+  local etime=$1 days=0 a b c h=0 m s
+  case "$etime" in *-*) days=${etime%%-*}; etime=${etime#*-} ;; esac
+  IFS=: read -r a b c <<< "$etime"
+  if [ -n "${c:-}" ]; then h=$((10#$a)); m=$((10#$b)); s=$((10#$c)); else m=$((10#$a)); s=$((10#$b)); fi
+  echo $((10#$days * 86400 + h * 3600 + m * 60 + s))
+}
+
+detect_stale_no_mistakes_daemon() {
+  local bin pid etime age ctime
+  bin=$(command -v no-mistakes 2>/dev/null) || return 0
+  pid=$(no-mistakes daemon status 2>/dev/null | sed -n 's/.*daemon running (pid \([0-9][0-9]*\)).*/\1/p' | head -n 1)
+  [ -n "$pid" ] || return 0
+  etime=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
+  [ -n "$etime" ] || return 0
+  age=$(etime_seconds "$etime" 2>/dev/null) || return 0
+  ctime=$(stat -L -c %Z "$bin" 2>/dev/null || stat -L -f %c "$bin" 2>/dev/null) || return 0
+  [ -n "$ctime" ] || return 0
+  if [ $(( $(date +%s) - age )) -lt "$ctime" ]; then
+    echo "STALE_DAEMON: no-mistakes daemon (pid $pid) started before the installed no-mistakes was replaced; restart it with 'no-mistakes daemon restart' before the next pipeline run (add --force only on the captain's word when runs are active)"
+  fi
+}
+
 # Local detection: presence, version floors, and configuration. Nothing here
 # leaves this machine, so it stays on the session-start critical path.
 detect_local_tools() {
@@ -1536,6 +1567,7 @@ detect_local_tools() {
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "OUTDATED: no-mistakes (installed: $(tool_version no-mistakes); requires $NO_MISTAKES_MIN; upgrade: $(upgrade_cmd no-mistakes))"
   fi
+  detect_stale_no_mistakes_daemon
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "OUTDATED: gh-axi (installed: $(tool_version gh-axi); requires $GH_AXI_MIN; upgrade: $(upgrade_cmd gh-axi))"
   fi
