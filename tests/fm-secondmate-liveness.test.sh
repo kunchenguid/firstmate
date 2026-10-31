@@ -451,6 +451,20 @@ SH
   pass "sweep: secondmate recovery resolves its durable account despite a different ambient login"
 }
 
+test_sweep_reports_replacement_model_verdict() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-model-verdict)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  printf 'codex gpt-5.6-sol medium\n' > "$w/home/config/secondmate-harness"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+  assert_contains "$out" "model pin unverified: pin 'gpt-5.6-sol'" \
+    "automatic recovery must report the model verdict of its replacement"
+  assert_contains "$(cat "$log")" "new-window" "recovery must actually launch the replacement"
+  pass "automatic recovery forwards the replacement's observed model verdict"
+}
+
 test_sweep_serializes_distinct_secondmate_relaunches() {
   local w fb tmuxfb log out id
   w=$(new_world sweep-concurrent-relaunch)
@@ -996,6 +1010,7 @@ test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_respawns_on_the_recorded_backend
+test_sweep_reports_replacement_model_verdict
 test_sweep_recovers_the_durable_secondmate_account
 test_sweep_serializes_distinct_secondmate_relaunches
 test_sweep_keeps_tmux_best_effort_kill_when_close_fails
