@@ -13,6 +13,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/rex-fake-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/rex-fake-fixture.sh"
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the herdr adapter parses its JSON)"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (plistlib parses the owned launch-agent contract)"; exit 0; }
 
@@ -393,19 +395,25 @@ assert_no_dangerous_calls() { # <msg>
   assert_absent "$CASE_HOME/kcpassword" "the doctor wrote an auto-login password"
 }
 
-# --- a host with no herdr is never ready, and --fix cannot install one -------
+# --- a host with no session backend is never ready ---------------------------
 
 new_case Darwin no-herdr gui
 doctor
-expect_code 1 "$DOCTOR_RC" "a host without herdr was reported ready"
-assert_contains "$DOCTOR_OUT" 'check herdr=human:' "a missing herdr CLI was not tagged as a human gap"
-assert_contains "$DOCTOR_OUT" 'action: herdr:' "a missing herdr CLI came with no operator action"
+expect_code 1 "$DOCTOR_RC" "a host without any session backend was reported ready"
+assert_contains "$DOCTOR_OUT" 'check backend=human:' "a missing backend CLI was not tagged as a human gap"
+assert_contains "$DOCTOR_OUT" 'action: backend:' "a missing backend CLI came with no operator action"
+assert_contains "$DOCTOR_OUT" 'required backend=MISSING' "the unresolved backend slot was not reported missing"
+assert_not_contains "$DOCTOR_OUT" 'check herdr-server=' "a backend-less host still ran backend-specific server checks"
 doctor --fix
-expect_code 1 "$DOCTOR_RC" "--fix reported a host without herdr as ready"
-assert_contains "$DOCTOR_OUT" 'check herdr=human:' "--fix stopped reporting the missing herdr CLI"
-assert_not_contains "$DOCTOR_OUT" 'fix herdr=applied' "--fix claimed to have installed herdr"
+expect_code 1 "$DOCTOR_RC" "--fix reported a host without any session backend as ready"
+assert_contains "$DOCTOR_OUT" 'check backend=human:' "--fix stopped reporting the missing backend"
+assert_not_contains "$DOCTOR_OUT" 'fix backend=applied' "--fix claimed to have installed a backend"
 assert_no_dangerous_calls "the doctor reached for auto-login, FileVault, or the keychain"
-pass "a missing herdr CLI is a human gap that --fix never claims to close"
+doctor --backend herdr
+expect_code 1 "$DOCTOR_RC" "an explicit herdr request reported a herdr-less host as ready"
+assert_contains "$DOCTOR_OUT" 'check herdr=human:' "an explicit herdr request did not report the missing CLI"
+assert_contains "$DOCTOR_OUT" 'required herdr=MISSING' "an explicit herdr request did not name the missing tool"
+pass "a missing session backend is a human gap that --fix never claims to close"
 
 # --- an absent launch agent is a fixable gap that --fix installs -------------
 
@@ -896,3 +904,148 @@ assert_contains "$DOCTOR_OUT" 'check entrypoint-link=human:' "an operator-owned 
 unset FM_ROOT_OVERRIDE
 pass "the entrypoint symlink is recreated when absent and never overwritten when operator-owned"
 
+
+# --- the rex backend: CLI, API floor, and the persistent-server contract ------
+
+# install_case_rex [endpoint]: put the shared stateful rex fake on the case
+# PATH with a private state dir reporting a persistent unix:// server.
+install_case_rex() {
+  local endpoint=${1:-unix://$CASE_STATE/rex.sock}
+  write_rex_fake_cli "$CASE_BIN/rex" "D='$CASE_STATE/rexfake'"
+  install_rex_fake_state "$CASE_STATE/rexfake" "$endpoint"
+}
+
+new_case Darwin no-herdr gui
+install_case_rex
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "a rex host with an absent job worker was reported ready"
+assert_contains "$DOCTOR_OUT" 'required rex=' "the rex CLI was not reported as a required tool"
+assert_not_contains "$DOCTOR_OUT" 'required herdr=' "a rex verification still required the herdr CLI"
+assert_contains "$DOCTOR_OUT" 'check rex=ok:' "the fake rex CLI was not detected"
+assert_contains "$DOCTOR_OUT" 'check rex-server=ok: persistent rex server' "a persistent rex server was not accepted"
+assert_not_contains "$DOCTOR_OUT" 'check herdr=' "a rex verification still ran the herdr checks"
+assert_not_contains "$DOCTOR_OUT" 'check herdr-server=' "a rex verification still ran the herdr server check"
+assert_not_contains "$DOCTOR_OUT" 'check launchagent=' "a rex verification still ran the Herdr launch-agent checks"
+assert_contains "$DOCTOR_OUT" 'check gui-session=ok:' "the backend-independent Aqua check did not run"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker' "the backend-independent worker check did not run"
+doctor --backend rex --fix
+expect_code 0 "$DOCTOR_RC" "a rex host was not ready after --fix"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker-loaded=ok:' "--fix did not load the remote job worker for rex"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=' "--fix touched a herdr server on the rex backend"
+assert_not_contains "$DOCTOR_OUT" 'fix launchagent=' "--fix wrote a Herdr launch agent on the rex backend"
+assert_no_grep 'dev.firstmate.herdr' "$CASE_LAUNCHCTL_LOG" \
+  "--fix bootstrapped a herdr launch agent on the rex backend"
+assert_no_dangerous_calls "the rex repair reached for auto-login, FileVault, or the keychain"
+pass "a rex-verified host checks rex, its persistent server, and the backend-independent worker"
+
+# A host offering both backends still verifies the default under `any`.
+new_case Darwin with-herdr gui
+install_case_rex
+doctor
+assert_contains "$DOCTOR_OUT" 'check herdr=ok:' "a host with both backends did not resolve herdr"
+assert_contains "$DOCTOR_OUT" 'required herdr=' "an any-resolution did not require the resolved backend CLI"
+assert_not_contains "$DOCTOR_OUT" 'check rex-server=' "an any-resolution ran rex checks on a herdr host"
+pass "backend resolution keeps herdr the default on a host offering both"
+
+# A rex-only host resolves rex under `any`.
+new_case Darwin no-herdr gui
+install_case_rex
+doctor
+assert_contains "$DOCTOR_OUT" 'check rex=ok:' "a rex-only host did not resolve rex"
+assert_contains "$DOCTOR_OUT" 'required rex=' "a rex-only host did not require the rex CLI"
+assert_not_contains "$DOCTOR_OUT" 'check herdr=' "a rex-only host still ran the herdr checks"
+pass "backend resolution falls to rex when herdr is absent"
+
+# A missing rex server is fixable through `rex server start`.
+new_case Darwin no-herdr gui
+install_case_rex
+touch "$CASE_STATE/rexfake/down"
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "a rex host with no answering server was reported ready"
+assert_contains "$DOCTOR_OUT" 'check rex-server=fixable:' "a stopped rex server was not tagged fixable"
+assert_contains "$DOCTOR_OUT" 'check rex=ok:' "the rex CLI was not reported independent of its server"
+doctor --backend rex --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not start the rex server"
+assert_contains "$DOCTOR_OUT" 'fix rex-server=applied: started a persistent rex server' \
+  "--fix did not report starting the rex server"
+assert_contains "$DOCTOR_OUT" 'check rex-server=ok: persistent rex server' \
+  "the started rex server was not confirmed persistent by the re-check"
+assert_grep 'rex server start' "$CASE_STATE/rexfake/log" "--fix never ran rex server start"
+assert_no_grep 'dev.firstmate.herdr' "$CASE_LAUNCHCTL_LOG" \
+  "the rex server repair touched a herdr launch agent"
+pass "--fix starts a missing rex server as the persistent shape"
+
+# An exit-empty server is durable-looking but ephemeral; --fix restarts it
+# persistent on the same socket.
+new_case Darwin no-herdr gui
+install_case_rex
+printf 'true\n' > "$CASE_STATE/rexfake/exit-empty"
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "an exit-empty rex server was accepted as durable readiness"
+assert_contains "$DOCTOR_OUT" 'check rex-server=fixable:' "an exit-empty rex server was not tagged fixable"
+assert_contains "$DOCTOR_OUT" 'exits when empty' "the exit-empty gap did not name its durability problem"
+doctor --backend rex --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not restart the exit-empty rex server persistent"
+assert_contains "$DOCTOR_OUT" 'check rex-server=ok: persistent rex server' \
+  "the restarted rex server was not confirmed persistent"
+assert_grep 'rex server stop' "$CASE_STATE/rexfake/log" "--fix did not stop the exit-empty server first"
+assert_grep 'rex server start' "$CASE_STATE/rexfake/log" "--fix did not start the persistent server"
+pass "--fix restarts an exit-empty rex server as the persistent shape"
+
+# A rex CLI below the verified API floor is a human gap, as is a server one.
+new_case Darwin no-herdr gui
+install_case_rex
+printf '3\n' > "$CASE_STATE/rexfake/client-api"
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "an older rex CLI was reported ready"
+assert_contains "$DOCTOR_OUT" 'check rex=human:' "a rex CLI below the API floor was not tagged human"
+assert_contains "$DOCTOR_OUT" 'API revision 3' "the gap did not name the reported revision"
+printf '8\n' > "$CASE_STATE/rexfake/client-api"
+printf '4\n' > "$CASE_STATE/rexfake/server-api"
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "an older rex server was reported ready"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "a rex server below the API floor was not tagged human"
+assert_contains "$DOCTOR_OUT" 'API revision 4' "the server gap did not name the reported revision"
+pass "a rex CLI or server below the verified API floor is a human gap"
+
+# A rex endpoint that is not a local unix socket is refused, like the adapter's
+# own locality gate.
+new_case Darwin no-herdr gui
+install_case_rex tcp://127.0.0.1:7299
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "a non-local rex endpoint was reported ready"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "a tcp rex endpoint was not tagged human"
+assert_contains "$DOCTOR_OUT" 'not a local unix socket' "the endpoint gap did not name its locality problem"
+pass "a rex endpoint that is not a local unix socket is a human gap"
+
+# An explicit rex request on a rex-less host names the missing CLI and cannot
+# be fixed; an unknown --backend value is a usage error.
+new_case Darwin no-herdr gui
+doctor --backend rex
+expect_code 1 "$DOCTOR_RC" "a rex-less host was reported ready for rex"
+assert_contains "$DOCTOR_OUT" 'check rex=human:' "a missing rex CLI was not tagged as a human gap"
+assert_contains "$DOCTOR_OUT" 'required rex=MISSING' "the missing rex CLI was not reported"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "server status was attempted without both rex and jq"
+doctor --backend rex --fix
+expect_code 1 "$DOCTOR_RC" "--fix reported a rex-less host as ready for rex"
+assert_not_contains "$DOCTOR_OUT" 'fix rex=applied' "--fix claimed to have installed rex"
+assert_not_contains "$DOCTOR_OUT" 'fix rex-server=applied' "--fix claimed a rex server without a rex CLI"
+doctor --backend tmux
+expect_code 2 "$DOCTOR_RC" "an unknown --backend was accepted"
+pass "an explicit rex request needs the CLI on PATH, and --backend rejects unknown backends"
+
+# On Linux the rex backend skips every Aqua requirement and reports ready on
+# the worker's own PATH.
+new_case Linux no-herdr
+install_case_rex
+doctor --backend rex
+expect_code 0 "$DOCTOR_RC" "a Linux rex host with a persistent server was not ready"
+assert_contains "$DOCTOR_OUT" 'check gui-session=skip:' "an Aqua login session was required for rex on linux"
+assert_not_contains "$DOCTOR_OUT" 'check launchagent=' "a launch agent was checked for rex on linux"
+assert_contains "$DOCTOR_OUT" 'check rex-server=ok: persistent rex server' \
+  "a persistent rex server was not accepted on linux"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' \
+  "the Linux job worker was not checked for rex"
+assert_not_contains "$DOCTOR_OUT" 'check herdr-server=' "the herdr server was checked for rex on linux"
+[ ! -s "$CASE_LAUNCHCTL_LOG" ] || fail "the linux rex path invoked launchctl"
+pass "a Linux host verifies rex without any Aqua-specific requirement"

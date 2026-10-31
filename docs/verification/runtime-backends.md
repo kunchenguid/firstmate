@@ -2477,6 +2477,24 @@ ok - real rex: no state-changing call left the test sessions and every other ses
 
 Use the [Rex regression entry points](../rex-backend.md#regression-entry-points) to refresh this record after a Rex upgrade, and the opt-in live composer guard after any tool upgrade.
 
+### Remote second mate durability on Linux
+
+Verified on 2026-10-30 against `rex 0.1.0-preview.12` (commit `e6592f7`, API revision 8) installed through the public `install.sh --tarball` inside a disposable Apple `container` VM: Debian GNU/Linux 12, glibc 2.36, aarch64, 2 CPUs, 4 GB.
+The server ran on a private socket `unix:///tmp/rv/rex.sock` with a private `--state-dir /tmp/rv/state`; the container and image were deleted afterwards.
+This run cleared Rex as a remote second mate backend on Linux and fixed the durability contract the remote readiness gate now verifies; the full transcript lives outside the repository.
+
+Every check passed:
+
+- Foreground tracking follows a nested interactive shell: after typing `bash` into a login-shell block, `block call ... process` reported the inner bash as foreground with the login shell among its ancestors, and typed input reached the innermost shell.
+- The earlier reported nested-shell bug does not reproduce: typing `treehouse` into the nested shell delivered the input, and the outer login shell was never left as a stale foreground.
+- A harder stub case where `treehouse` exec'd another interactive bash behaved the same, with correct process ancestry.
+- `rex whoami --json` distinguishes a unix `peer` principal from a loopback TCP `anonymous`, and `TERM_PROGRAM=rex` is present inside blocks.
+- `rex do` Lua handlers ran, and `rex events --json` streamed events including `terminal.child_exited`.
+- Durability is shape-dependent: `rex server run --exit-empty` exits about ten seconds after its last session or control connection disappears, so an ephemeral server cannot hold a remote route.
+- `rex server start` is a detached persistent daemon (`exit_empty: false`) that survives SSH disconnection, and it binds only the default personal socket (`$HOME/.local/state/rex/run/server.sock`); `start` has no `--listen` flag.
+- Sessions restore across a server stop when the restarted server binds the same endpoint and state directory: after `server stop` plus `server start`, the sessions returned with the same ids, each block as a fresh login shell preserving its cwd.
+- A server started on a different socket with the same state directory restored nothing (`session_count: 0`), so restore is keyed to the server's endpoint identity, not merely its state directory.
+
 ## T3 Code
 
 ### Orchestrator V2 transport
