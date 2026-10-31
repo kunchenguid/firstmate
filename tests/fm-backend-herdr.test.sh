@@ -154,7 +154,7 @@ case "${1:-}" in
     ;;
   server)
     {
-      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_HERDR_SENTINEL HERDR_SESSION; do
+      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_SNAPSHOT_NOW FM_CREW_STATE_NO_FORGE FM_HERDR_SENTINEL HERDR_SESSION; do
         eval 'value=${'"$name"'-<unset>}'
         printf '%s=%s\n' "$name" "$value"
       done
@@ -1263,11 +1263,13 @@ test_server_ensure_scrubs_home_and_harness_identity() {
     FM_HOME=/tmp/wrong-home FM_ROOT_OVERRIDE=/tmp/wrong-root FM_STATE_OVERRIDE=/tmp/wrong-state \
     FM_DATA_OVERRIDE=/tmp/wrong-data FM_PROJECTS_OVERRIDE=/tmp/wrong-projects FM_CONFIG_OVERRIDE=/tmp/wrong-config \
     CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed GROK_AGENT=1 FM_SUPERVISION_MODEL=autoarm \
+    FM_SNAPSHOT_NOW=2026-01-01T00:00:00Z FM_CREW_STATE_NO_FORGE=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
   expect_code 0 $? "server_ensure should start under a polluted launcher environment"
   output=$(cat "$log")
   for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
-    CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL; do
+    CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL \
+    FM_SNAPSHOT_NOW FM_CREW_STATE_NO_FORGE; do
     assert_contains "$output" "$name=<unset>" "server_ensure leaked $name into the long-lived Herdr server"
   done
   assert_contains "$output" "FM_HERDR_SENTINEL=kept" "server_ensure removed an unrelated environment variable"
@@ -1378,6 +1380,29 @@ test_server_ensure_reports_a_replacement_that_never_ends() {
   [ "$(cat "$dir/sleep-count")" = 60 ] || fail "server_ensure should give up after its 60 bounded waits, got $(cat "$dir/sleep-count")"
   assert_contains "$out" "is being replaced ($dir/session/firstmate-server-replacing)" "the error should name the replacement marker"
   pass "fm_backend_herdr_server_ensure: a replacement that never ends fails naming its marker instead of starting or using a server"
+}
+
+test_server_ensure_never_starts_an_externally_owned_session() {
+  local dir log marker fb out status
+  dir="$TMP_ROOT/server-external"; mkdir -p "$dir/config"; log="$dir/env"; marker="$dir/running"
+  printf 'other\n fmtest \n' > "$dir/config/herdr-server-external"
+  fb=$(make_herdr_server_env_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" FM_CONFIG_OVERRIDE="$dir/config" \
+    bash -c 'seq() { printf "1\n"; }; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "server_ensure should fail when an externally owned server is down"
+  [ ! -e "$log" ] || fail "server_ensure started a server for an externally owned session"
+  assert_contains "$out" "externally owned" "server_ensure did not name the external owner"
+  : > "$marker"
+  PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" FM_CONFIG_OVERRIDE="$dir/config" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  expect_code 0 $? "server_ensure should adopt a running externally owned server"
+  rm -f "$marker"
+  PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" FM_CONFIG_OVERRIDE="$dir/config" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmlab' "$ROOT"
+  expect_code 0 $? "server_ensure should still start a session the config does not list"
+  assert_contains "$(cat "$log")" "args=server --session fmlab" "server_ensure did not start the unlisted session"
+  pass "fm_backend_herdr_server_ensure: waits for but never starts a session listed in config/herdr-server-external"
 }
 
 test_container_ensure_reuses_existing_workspace() {
@@ -6210,6 +6235,7 @@ test_server_ensure_waits_out_a_server_replacement
 test_server_ensure_holds_callers_off_a_running_server_during_a_replacement
 test_server_ensure_resumes_ownership_after_a_replacement_clears
 test_server_ensure_reports_a_replacement_that_never_ends
+test_server_ensure_never_starts_an_externally_owned_session
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label
