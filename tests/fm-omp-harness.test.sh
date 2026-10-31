@@ -126,30 +126,43 @@ test_lock_identity_and_liveness_classification() {
   pass "session lock and tmux liveness: omp is anchored, decoys stay out"
 }
 
+# A Bun argv element carrying a space is ONE token: fm_bun_harness_argv_name
+# decides from real argv slots, so each case below passes every argument
+# separately, exactly as the kernel recorded it.
+bun_argv_must_reject() {  # <argv0> [args...]
+  if fm_bun_harness_argv_name "$@" >/dev/null; then
+    fail "an ordinary Bun argv was misidentified as a harness: $*"
+  fi
+}
+
 test_bun_hosted_omp_detection_and_lock() {
   local bin="$TMP_ROOT/bun-hosted/bin" home="$TMP_ROOT/bun-hosted/home"
-  local out owner args
-  local -a rejected=(
-    'bun /tmp/tool.js build --tag claude'
-    'bun /tmp/tool.js --cwd /opt/omp'
-    'bun /tmp/tool.js /opt/omp'
-    'bun --cwd /opt/omp /tmp/tool.js'
-    'bun --smol --cwd /opt/omp /tmp/tool.js'
-    'bun -e claude'
-    'bun tool.js claude'
-    'bun /opt/omp/data/file.js'
-    'bun /tmp/cli.js --x'
-    'bun /tmp/ompd'
-  )
-  fm_harness_process_matches bun 'bun /Users/u/.bun/bin/omp --resume session' \
+  local out owner
+  [ "$(fm_bun_harness_argv_name bun /Users/u/.bun/bin/omp --resume session)" = omp ] \
     || fail "session-lock identity must accept a Bun-hosted omp script"
-  fm_harness_process_matches bun 'bun --smol /usr/local/bin/pi' \
+  [ "$(fm_bun_harness_argv_name bun --smol /usr/local/bin/pi)" = pi ] \
     || fail "session-lock identity must accept a valueless Bun option before the script"
-  for args in "${rejected[@]}"; do
-    if fm_harness_process_matches bun "$args"; then
-      fail "an ordinary Bun command was misidentified as a harness: $args"
-    fi
-  done
+  bun_argv_must_reject bun /tmp/tool.js build --tag claude
+  bun_argv_must_reject bun /tmp/tool.js --cwd /opt/omp
+  bun_argv_must_reject bun /tmp/tool.js /opt/omp
+  bun_argv_must_reject bun --cwd /opt/omp /tmp/tool.js
+  bun_argv_must_reject bun --smol --cwd /opt/omp /tmp/tool.js
+  bun_argv_must_reject bun -e claude
+  bun_argv_must_reject bun tool.js claude
+  bun_argv_must_reject bun /opt/omp/data/file.js
+  bun_argv_must_reject bun /tmp/cli.js --x
+  bun_argv_must_reject bun /tmp/ompd
+  # The two directions a re-split flattened command line gets wrong: one
+  # argument with a space inside must not manufacture a harness path, and a
+  # real harness under a spaced directory must keep its basename.
+  bun_argv_must_reject bun '/tmp/omp tools/task.js'
+  [ "$(fm_bun_harness_argv_name bun '/opt/My Tools/omp')" = omp ] \
+    || fail "a real omp under a spaced directory must identify as omp"
+  # Without a live pid there is no boundary-preserving argv source at all, so
+  # the flattened-string entry point fails closed.
+  if fm_harness_process_matches bun 'bun /Users/u/.bun/bin/omp --resume session'; then
+    fail "a flattened Bun command line without a pid must fail closed"
+  fi
 
   mkdir -p "$bin" "$home/state"
   ln -sf /bin/bash "$bin/bun"
@@ -172,7 +185,36 @@ SH
     || fail "a Bun-hosted omp could not acquire its home lock: $out"
   [ "$(cat "$home/state/.lock")" = "$owner" ] \
     || fail "the Bun-hosted omp lock names $(cat "$home/state/.lock"), expected $owner"
-  pass "fm-harness and session lock: Bun-hosted omp is identified without admitting ordinary Bun commands"
+
+  # Live spaced-path proofs through the real argv readers (/proc cmdline on
+  # Linux, KERN_PROCARGS2 on macOS): a Bun script whose SINGLE argument
+  # contains a space must never be re-split into an omp path...
+  mkdir -p "$TMP_ROOT/omp tools"
+  cat > "$TMP_ROOT/omp tools/task.js" <<'SH'
+#!/usr/bin/env bash
+"$1"
+:
+SH
+  chmod +x "$TMP_ROOT/omp tools/task.js"
+  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    "$bin/bun" "$TMP_ROOT/omp tools/task.js" "$HARNESS")
+  [ "$out" != omp ] \
+    || fail "a space inside one Bun script argument must not manufacture an omp path"
+  # ...and a genuine omp script under a spaced directory is identified from
+  # its real argv boundary, so the marker outranks an inherited CLAUDECODE.
+  mkdir -p "$TMP_ROOT/My Tools"
+  cat > "$TMP_ROOT/My Tools/omp" <<'SH'
+#!/usr/bin/env bash
+"$1"
+:
+SH
+  chmod +x "$TMP_ROOT/My Tools/omp"
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    "$bin/bun" "$TMP_ROOT/My Tools/omp" "$HARNESS")
+  [ "$out" = omp ] \
+    || fail "a Bun-hosted omp under a spaced directory must outrank an inherited Claude marker, got '$out'"
+  pass "fm-harness and session lock: Bun-hosted omp is identified from real argv boundaries without admitting ordinary Bun commands"
 }
 
 # --- 2. Launch ---------------------------------------------------------------
