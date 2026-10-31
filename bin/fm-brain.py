@@ -167,8 +167,8 @@ def connections(text):
     """Exact path links from the owned section only, excluding fenced examples."""
     active = False
     fence = None
-    targets = []
-    for line in text.splitlines():
+    targets = {}
+    for lineno, line in enumerate(text.splitlines(), 1):
         match = re.match(r'^\s*(`{3,}|~{3,})', line)
         if match:
             marker = match[1][0]
@@ -183,8 +183,10 @@ def connections(text):
             active = line.strip() == '## Connections'
             continue
         if active:
-            targets.extend(re.findall(r'\[\[([A-Za-z0-9][A-Za-z0-9._/-]*)\]\]', line))
-    return sorted(set(targets))
+            for target in re.findall(r'\[\[([A-Za-z0-9][A-Za-z0-9._/-]*)\]\]', line):
+                targets.setdefault(target, lineno)
+    require(fence is None, 'unclosed Markdown fence; close summary fences and retry')
+    return sorted(targets.items())
 
 
 def build(home, project, cfg, unit=None, summary=None, task=False):
@@ -212,17 +214,25 @@ def build(home, project, cfg, unit=None, summary=None, task=False):
                 require(all(sources[s]['status'] == 'current' for s in summary['sources']), 'completion evidence is missing; restore input and retry')
             units[unit] = summary
         # Stable identity excludes observation time: unchanged content is a no-op.
-        identity = dict(renderer_version=1, project=project, sources=fingerprints(sources), units=units)
+        identity = dict(renderer_version=2, project=project, sources=fingerprints(sources), units=units)
         require(len(encoded(units).encode()) <= 2_000_000, 'unit synthesis exceeds 2 MB; curate before adding more')
         input_sha = digest(encoded(identity))
         generation_id = input_sha
-        if previous and prior_manifest.get('input_sha256') == input_sha and not usable(previous, prior_manifest):
-            generation_id = digest(input_sha + ':repair:' + previous.name)
         destination = brain / 'generations' / generation_id
         if previous and prior_manifest.get('input_sha256') == input_sha and usable(previous, prior_manifest):
             destination = previous
             atomic(state, encoded({'status': 'ok', 'generation': str(destination), 'changed': False}))
             return {'status': 'current', 'generation': str(destination), 'changed': False}
+        while destination.exists():
+            try:
+                manifest = decode(read(destination / 'manifest.json'))
+                valid = manifest.get('input_sha256') == input_sha and usable(destination, manifest)
+            except (Invalid, OSError, ValueError):
+                valid = False
+            if valid:
+                break
+            generation_id = digest(input_sha + ':repair:' + generation_id)
+            destination = brain / 'generations' / generation_id
         stage = Path(tempfile.mkdtemp(prefix='.generation-', dir=brain))
         pages = {}
         for sid, source in sources.items():
@@ -255,13 +265,12 @@ def build(home, project, cfg, unit=None, summary=None, task=False):
             page_hashes[pid] = digest(text)
             node_id = f'{project}/{pid}'
             nodes.append(dict(status=unit_states.get(pid.removeprefix('units/'), {}).get('status', 'current') if pid.startswith('units/') else 'current', id=node_id, label=text.splitlines()[0][2:], source_file=f'pages/{pid}.md', source_location=f'pages/{pid}.md:1', type='wiki-page', confidence='EXTRACTED'))
-            for target in connections(text):
+            for target, lineno in connections(text):
                 if target not in pages:
                     # Source deletion is expected drift; unknown unit links are author errors.
                     require(target.startswith('sources/'), f'unresolved unit connection: {target}; fix summary and retry')
                     unresolved.append(dict(source=pid, target=target))
                     continue
-                lineno = next(i for i, line in enumerate(text.splitlines(), 1) if f'[[{target}]]' in line)
                 links.append(dict(source=node_id, target=f'{project}/{target}', relation='connects_to', confidence='EXTRACTED', weight=1, source_location=f'pages/{pid}.md:{lineno}'))
         manifest = dict(schema_version=1, project=project, generation=generation_id, input_sha256=input_sha, sources=fingerprints(sources), pages=page_hashes, units=unit_states)
         graph = dict(directed=True, multigraph=False, graph=dict(project=project, mode='connections-wikilinks', generation=generation_id, source_snapshot_sha256=input_sha), nodes=nodes, links=links)

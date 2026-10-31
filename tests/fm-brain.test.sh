@@ -31,6 +31,38 @@ manifest=json.loads((generation/'manifest.json').read_text());old=manifest['sour
 raw=home/'data/brains/alpha/raw'/f'{old}.md';assert raw.read_text()==a.read_text()
 run('check','alpha');same=json.loads(run('complete','alpha','--unit','unit-1','--summary',str(summary)).stdout)
 assert same['generation']==str(generation)
+baseline=summary.read_text()
+for marker in ['```','~~~']:
+ for refs in [[],['units/ghost']]:
+  summary.write_text(json.dumps({'title':'Unclosed example','body':f'Example:\n{marker}markdown\n[[sources/a]]','sources':['a','b'],'connections':refs}))
+  pointer=(home/'data/brains/alpha/CURRENT').read_text()
+  run('complete','alpha','--unit','unit-1','--summary',str(summary),ok=False)
+  assert (home/'data/brains/alpha/CURRENT').read_text()==pointer
+summary.write_text(json.dumps({'title':'Cited examples','body':'```markdown\n[[units/unit-1]]\n[[sources/a]]\n```\n\n~~~markdown\n[[sources/b]]\n~~~','sources':['a','b'],'connections':['units/unit-1','units/unit-1']}))
+cited=Path(json.loads(run('complete','alpha','--unit','unit-1','--summary',str(summary)).stdout)['generation'])
+page=(cited/'pages/units/unit-1.md').read_text().splitlines()
+section=page.index('## Connections')+1
+edges=json.loads((cited/'graphify-out/graph.json').read_text())['links']
+assert {edge['target'] for edge in edges}=={'alpha/sources/a','alpha/sources/b','alpha/units/unit-1'} and len(edges)==3
+for edge in edges:
+ location,lineno=edge['source_location'].rsplit(':',1)
+ assert location=='pages/units/unit-1.md' and int(lineno)>section
+ assert page[int(lineno)-1]==f'- [[{edge["target"].removeprefix("alpha/")}]]'
+summary.write_text(baseline)
+assert json.loads(run('complete','alpha','--unit','unit-1','--summary',str(summary)).stdout)['generation']==str(generation)
+(generation/'graphify-out/graph.json').write_text('{}\n')
+a.write_text('# Alpha\nTemporary input.\n');run('build','alpha')
+a.write_text(original)
+historical_repair=Path(json.loads(run('build','alpha').stdout)['generation'])
+assert historical_repair!=generation and generation.exists()
+run('check','alpha')
+(historical_repair/'pages/units/unit-1.md').write_text('Damaged page.\n')
+a.write_text('# Alpha\nTemporary input.\n');run('build','alpha')
+a.write_text(original)
+second_repair=Path(json.loads(run('build','alpha').stdout)['generation'])
+assert second_repair not in [generation,historical_repair] and historical_repair.exists()
+run('check','alpha')
+assert json.loads(run('build','alpha').stdout)['generation']==str(second_repair)
 a.write_text('# Alpha\nChanged fact.\n');run('check','alpha',ok=False)
 new=json.loads(run('build','alpha').stdout);assert new['generation']!=str(generation) and raw.read_text()==original
 # Deleted derived graph is detected and rebuilt without erasing historical generations.
