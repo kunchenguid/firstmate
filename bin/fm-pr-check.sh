@@ -6,10 +6,11 @@
 # head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
-# are all accepted, including a merge request or change on a self-hosted
-# instance and a GitHub Enterprise pull request on a host this home names in
-# config/github-hosts.
+# GitHub, Bitbucket Cloud, and Forgejo pull requests, GitLab merge requests,
+# and Gerrit changes are accepted, including self-hosted GitLab, Forgejo, and
+# Gerrit instances and a GitHub Enterprise pull request on a host this home
+# names in config/github-hosts. Bitbucket additionally watches terminal build
+# states (notification only, never merge authority) and requires bkt plus jq.
 # A GitHub pull request the forge reports as a draft is refused, naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
@@ -93,6 +94,14 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
 # The Gerrit poll also needs jq, because Gerrit's status has to be read out of a
 # structured record rather than off a rendered line: the tool's own table prints
 # a change's subject before its status, and a subject is free text.
+if [ "$PROVIDER" = bitbucket ]; then
+  for tool in bkt jq; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "error: watching a Bitbucket pull request requires $tool on PATH" >&2
+      exit 1
+    fi
+  done
+fi
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
@@ -160,6 +169,13 @@ WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+
+if [ "$PROVIDER" = bitbucket ]; then
+  if REMOTE_HEAD=$(fm_pr_bitbucket_head "$PROJECT_PATH" "$NUMBER") \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi

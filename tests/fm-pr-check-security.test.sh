@@ -326,6 +326,19 @@ run_merge_entry() {
 
 # shellcheck disable=SC2016 # Literal rejected URL bytes are parser test data.
 INVALID_URLS=(
+  'https://bitbucket.org/o/r/pull-requests/0'
+  'https://bitbucket.org/o/r/pull-requests/01'
+  'https://bitbucket.org/o/r/pull-requests/1/'
+  'https://bitbucket.org/o/r/pull-requests/1?x=1'
+  'https://bitbucket.org/o/r/pull-requests/1#comment'
+  'https://bitbucket.org/o/r/pull-requests/1;id'
+  'https://bitbucket.org/-o/r/pull-requests/1'
+  'https://bitbucket.org/o/../pull-requests/1'
+  'https://bitbucket.org/o/a/r/pull-requests/1'
+  'https://bitbucket.org:443/o/r/pull-requests/1'
+  'https://user@bitbucket.org/o/r/pull-requests/1'
+  'https://bitbucket.org.evil/o/r/pull-requests/1'
+  'http://bitbucket.org/o/r/pull-requests/1'
   'https://gitlab.com/single/-/merge_requests/1'
   'https://gitlab.com/g/p/-/merge_requests/0'
   'https://gitlab.com/g/p/-/merge_requests/01'
@@ -2292,6 +2305,258 @@ SH
   pass "Forgejo login match parses tea's JSON in every line shape, in the helper and the static poll"
 }
 
+# API-shaped fixtures confirmed with bkt 0.30.0: the view wraps pull_request,
+# checks carry commit plus statuses, and Cloud may abbreviate the source hash.
+BB_URL=https://bitbucket.org/team/repo/pull-requests/7
+BB_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BB_NEXT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+make_bitbucket_case() {
+  local dir
+  dir=$(make_case "$1")
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  cat > "$dir/fakebin/bkt" <<'SH'
+#!/usr/bin/env bash
+set -eu
+dir=$(dirname "$(dirname "$0")")
+printf '%s\n' "$*" >> "$dir/bkt.log"
+[ "$BKT_HOST" = https://bitbucket.org ] || exit 91
+case "$*" in
+  'pr view 7 --workspace team --repo repo --json')
+    [ ! -f "$dir/read-error" ] || exit 1
+    cat "$dir/pr.json"
+    ;;
+  'pr checks 7 --workspace team --repo repo --json')
+    [ ! -f "$dir/check-error" ] || exit 1
+    cat "$dir/checks.json"
+    [ ! -f "$dir/after.json" ] || cp "$dir/after.json" "$dir/pr.json"
+    ;;
+  'api /repositories/fork/source/commit/aaaaaaaaaaaa --json')
+    cat "$dir/commit.json"
+    ;;
+  *) exit 92 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/bkt"
+  write_bitbucket_pr "$dir" OPEN "$BB_HEAD"
+  write_bitbucket_checks "$dir" "$BB_HEAD" SUCCESSFUL
+  printf '{"hash":"%s"}\n' "$BB_HEAD" > "$dir/commit.json"
+  printf '%s\n' "$dir"
+}
+
+write_bitbucket_pr() {  # <dir> <state> <head>
+  jq -n --arg state "$2" --arg head "$3" \
+    '{workspace:"team",repo:"repo",pull_request:{id:7,state:$state,
+      source:{commit:{hash:$head},repository:{full_name:"fork/source"}},
+      destination:{repository:{full_name:"team/repo"}}}}' > "$1/pr.json"
+}
+
+write_bitbucket_checks() {  # <dir> <head> [states...]
+  local dir=$1 head=$2
+  shift 2
+  printf '%s\n' "$@" | jq -Rsc --arg head "$head" \
+    '{workspace:"team",repo:"repo",pull_request:7,commit:$head,
+      statuses:(split("\n") | map(select(length > 0)) | to_entries
+        | map({key:(.key|tostring),state:.value}))}' > "$dir/checks.json"
+}
+
+run_bitbucket_poll() {
+  PATH="$1/fakebin:$BASE_PATH" bash "$POLL" --validated bitbucket "$BB_URL" bitbucket.org team/repo 7
+}
+
+test_bitbucket_read_and_arm() {
+  local dir state out value before rc
+  dir=$(make_bitbucket_case bitbucket-read-arm)
+  state="$dir/home/state"
+  fm_pr_url_parse "$BB_URL" || fail "Bitbucket URL was refused"
+  [ "$FM_PR_PROVIDER:$FM_PR_HOST:$FM_PR_PATH:$FM_PR_NUMBER" = bitbucket:bitbucket.org:team/repo:7 ] \
+    || fail "Bitbucket canonical identity was wrong"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a "$BB_URL" > "$dir/arm.out" 2> "$dir/arm.err" \
+    || fail "Bitbucket arming failed: $(cat "$dir/arm.err")"
+  grep -qxF "pr=$BB_URL" "$state/task-a.meta" || fail "Bitbucket PR not recorded"
+  grep -qxF "pr_head=$BB_HEAD" "$state/task-a.meta" || fail "Bitbucket head not recorded"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "Bitbucket poll not authenticated"
+
+  write_bitbucket_pr "$dir" OPEN aaaaaaaaaaaa
+  write_task_meta "$dir" task-b
+  run_check_entry "$dir" task-b "$BB_URL" >/dev/null 2> "$dir/arm.err" || fail "short hash arming failed"
+  grep -qxF "pr_head=$BB_HEAD" "$state/task-b.meta" || fail "abbreviated hash not expanded"
+  grep -qxF 'api /repositories/fork/source/commit/aaaaaaaaaaaa --json' "$dir/bkt.log" \
+    || fail "head expansion did not address the source fork"
+  printf '{"hash":"%s"}\n' "$BB_NEXT" > "$dir/commit.json"
+  write_task_meta "$dir" task-c
+  run_check_entry "$dir" task-c "$BB_URL" >/dev/null 2> "$dir/arm.err" || fail "optional head failure refused arming"
+  ! grep -q '^pr_head=' "$state/task-c.meta" || fail "unrelated expanded head was recorded"
+  write_bitbucket_pr "$dir" OPEN aaaaaaaaaaaaa
+  write_task_meta "$dir" task-malformed
+  : > "$dir/bkt.log"
+  run_check_entry "$dir" task-malformed "$BB_URL" >/dev/null 2> "$dir/arm.err" \
+    || fail "malformed optional head refused arming"
+  ! grep -q '^pr_head=' "$state/task-malformed.meta" || fail "malformed head was recorded"
+  ! grep -q 'api /repositories/' "$dir/bkt.log" || fail "malformed head was submitted for expansion"
+
+  write_bitbucket_pr "$dir" OPEN "$BB_HEAD"
+  for value in INPROGRESS UNKNOWN ''; do
+    write_bitbucket_checks "$dir" "$BB_HEAD" "$value"
+    out=$(run_bitbucket_poll "$dir")
+    [ -z "$out" ] || fail "Bitbucket $value checks were not silent: $out"
+  done
+  for value in SUCCESSFUL FAILED STOPPED; do
+    write_bitbucket_checks "$dir" "$BB_HEAD" "$value"
+    out=$(run_bitbucket_poll "$dir")
+    case "$value:$out" in
+      "SUCCESSFUL:checks passed at $BB_HEAD"|"FAILED:checks failed at $BB_HEAD"|"STOPPED:checks failed at $BB_HEAD") ;;
+      *) fail "Bitbucket terminal state $value was wrong: $out" ;;
+    esac
+  done
+  write_bitbucket_pr "$dir" OPEN aaaaaaaaaaaa
+  write_bitbucket_checks "$dir" aaaaaaaaaaaa SUCCESSFUL
+  [ "$(run_bitbucket_poll "$dir")" = 'checks passed at aaaaaaaaaaaa' ] \
+    || fail "valid abbreviated Bitbucket head did not emit"
+  write_bitbucket_pr "$dir" OPEN aaaaaaaaaaaaa
+  write_bitbucket_checks "$dir" aaaaaaaaaaaaa SUCCESSFUL
+  [ -z "$(run_bitbucket_poll "$dir")" ] || fail "malformed intermediate-length head emitted"
+  write_bitbucket_pr "$dir" OPEN "$BB_HEAD"
+  write_bitbucket_checks "$dir" "$BB_HEAD" FAILED INPROGRESS
+  [ -z "$(run_bitbucket_poll "$dir")" ] || fail "partially running checks emitted"
+  write_bitbucket_checks "$dir" "$BB_NEXT" SUCCESSFUL
+  [ -z "$(run_bitbucket_poll "$dir")" ] || fail "checks at another head emitted"
+  write_bitbucket_checks "$dir" "$BB_HEAD" SUCCESSFUL
+  touch "$dir/check-error"
+  [ -z "$(run_bitbucket_poll "$dir")" ] || fail "check read failure emitted"
+  rm "$dir/check-error"
+  for value in 'null' '{}' '{"statuses":[]}' 'not-json'; do
+    printf '%s\n' "$value" > "$dir/checks.json"
+    [ -z "$(run_bitbucket_poll "$dir")" ] || fail "malformed checks emitted"
+  done
+  write_bitbucket_checks "$dir" "$BB_HEAD" SUCCESSFUL
+  write_bitbucket_pr "$dir" OPEN "$BB_NEXT"
+  cp "$dir/pr.json" "$dir/after.json"
+  write_bitbucket_pr "$dir" OPEN "$BB_HEAD"
+  [ -z "$(run_bitbucket_poll "$dir")" ] || fail "push during checks read emitted stale green"
+  rm "$dir/after.json"
+  for value in DECLINED SUPERSEDED INVALID; do
+    write_bitbucket_pr "$dir" "$value" "$BB_HEAD"
+    [ -z "$(run_bitbucket_poll "$dir")" ] || fail "non-open PR emitted checks"
+  done
+  write_bitbucket_pr "$dir" MERGED "$BB_HEAD"
+  : > "$dir/bkt.log"
+  [ "$(run_bitbucket_poll "$dir")" = merged ] || fail "Bitbucket merge did not emit"
+  ! grep -q 'pr checks' "$dir/bkt.log" || fail "merged PR needlessly read checks"
+  touch "$dir/read-error"
+  [ -z "$(run_bitbucket_poll "$dir")" ] || fail "PR read failure emitted"
+  rm "$dir/read-error"
+  for value in '{}' 'null' 'not-json' '{"workspace":"team","repo":"repo","pull_request":{"id":8,"state":"MERGED"}}'; do
+    printf '%s\n' "$value" > "$dir/pr.json"
+    [ -z "$(run_bitbucket_poll "$dir")" ] || fail "unproven merged payload emitted"
+  done
+
+  # No missing tools or unsupported merge can publish metadata or hit a forge.
+  write_task_meta "$dir" task-d
+  mv "$dir/fakebin/bkt" "$dir/bkt.saved"
+  ! PATH="$dir/fakebin:$BASE_PATH" command -v bkt >/dev/null || fail "missing-bkt fixture found a real tool"
+  rc=0
+  run_check_entry "$dir" task-d "$BB_URL" > "$dir/missing.out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "arming succeeded without bkt"
+  grep -q 'requires bkt' "$dir/missing.out" || fail "missing bkt not named"
+  ! grep -q '^pr=' "$state/task-d.meta" || fail "missing tool recorded PR"
+  mv "$dir/bkt.saved" "$dir/fakebin/bkt"
+  before=$(state_snapshot "$state")
+  : > "$dir/bkt.log"
+  rc=0
+  run_merge_entry "$dir" task-d "$BB_URL" --attended-override -- --close-source=false > "$dir/merge.out" 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "Bitbucket merge not explicitly refused"
+  grep -q 'no atomic head guard' "$dir/merge.out" || fail "refusal omitted atomic head reason"
+  grep -q 'closes the source branch by default' "$dir/merge.out" || fail "refusal omitted branch deletion warning"
+  [ ! -s "$dir/bkt.log" ] || fail "refused merge contacted Bitbucket"
+  [ "$before" = "$(state_snapshot "$state")" ] || fail "refused merge changed task state"
+  pass "Bitbucket arms authenticated identity/head records, classifies only proven states, and never merges"
+}
+
+bitbucket_watch_cycle() {
+  local dir=$1
+  rm -f "$dir/home/state/.last-check"
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" \
+    || fail "Bitbucket watcher failed: $(cat "$dir/watch.err")"
+}
+
+test_bitbucket_notifications_and_trust() {
+  local dir state out before
+  dir=$(make_bitbucket_case bitbucket-notifications)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a "$BB_URL"
+  seed_canonical_poll "$dir" task-a "$BB_URL"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "could not capture Bitbucket poll snapshot"
+  if fm_pr_poll_notify_checks "$state" task-a "$POLL" \
+      'checks passed at aaaaaaaaaaaaa' 'malformed observation'; then
+    fail "malformed intermediate-length observation was accepted"
+  fi
+  [ ! -e "$state/task-a.pr-checks-notified" ] \
+    || fail "malformed intermediate-length observation was recorded"
+  add_stop_custom_check "$dir"
+  bitbucket_watch_cycle "$dir"
+  assert_grep "checks passed at $BB_HEAD" "$dir/watch.out" "terminal checks did not wake"
+  [ -f "$state/task-a.check.sh" ] || fail "checks retired the merge poll"
+  [ ! -e "$state/task-a.pr-merge-notified" ] || fail "checks claimed a landed merge"
+  ack_watcher_cycle "$state" || fail "checks wake acknowledgement failed"
+  bitbucket_watch_cycle "$dir"
+  assert_grep 'stop-cycle' "$dir/watch.out" "unchanged checks woke again after restart"
+  ack_watcher_cycle "$state" || fail "control wake acknowledgement failed"
+
+  write_bitbucket_checks "$dir" "$BB_HEAD" FAILED
+  bitbucket_watch_cycle "$dir"
+  assert_grep "checks failed at $BB_HEAD" "$dir/watch.out" "changed terminal verdict did not wake"
+  ack_watcher_cycle "$state" || fail "red wake acknowledgement failed"
+  bitbucket_watch_cycle "$dir"
+  assert_grep 'stop-cycle' "$dir/watch.out" "unchanged red checks woke again"
+  ack_watcher_cycle "$state" || fail "control acknowledgement failed"
+  write_bitbucket_checks "$dir" "$BB_HEAD" INPROGRESS
+  bitbucket_watch_cycle "$dir"
+  assert_grep 'stop-cycle' "$dir/watch.out" "pending checks woke"
+  ack_watcher_cycle "$state" || fail "control acknowledgement failed"
+  write_bitbucket_checks "$dir" "$BB_HEAD" SUCCESSFUL
+  seed_canonical_poll "$dir" task-a "$BB_URL"
+  bitbucket_watch_cycle "$dir"
+  assert_grep 'stop-cycle' "$dir/watch.out" "rearm repeated an already reported head/verdict"
+  ack_watcher_cycle "$state" || fail "control acknowledgement failed"
+  write_bitbucket_pr "$dir" OPEN "$BB_NEXT"
+  write_bitbucket_checks "$dir" "$BB_NEXT" SUCCESSFUL
+  bitbucket_watch_cycle "$dir"
+  assert_grep "checks passed at $BB_NEXT" "$dir/watch.out" "new head did not wake"
+  ack_watcher_cycle "$state" || fail "new head acknowledgement failed"
+  write_bitbucket_pr "$dir" MERGED "$BB_NEXT"
+  bitbucket_watch_cycle "$dir"
+  assert_grep 'task-a.check.sh: merged' "$dir/watch.out" "Bitbucket merge did not wake"
+  assert_poll_absent "$state" task-a
+  grep -qxF "pr=$BB_URL" "$state/task-a.meta" || fail "merge retirement lost identity"
+  ack_watcher_cycle "$state" || fail "merge acknowledgement failed"
+  seed_canonical_poll "$dir" task-a "$BB_URL"
+  bitbucket_watch_cycle "$dir"
+  assert_grep 'stop-cycle' "$dir/watch.out" "rearmed merged PR woke twice"
+  assert_poll_absent "$state" task-a
+  ack_watcher_cycle "$state" || fail "control acknowledgement failed"
+
+  # A copied or altered artifact is still rejected without executing its bytes
+  # or even consulting the forge, including byte-identical inode replacement.
+  FM_HOME="$dir/home" "$ROOT/bin/fm-check-unregister.sh" z-stop >/dev/null \
+    || fail "could not remove control check before rejection test"
+  seed_canonical_poll "$dir" task-a "$BB_URL"
+  cp "$state/task-a.check.sh" "$state/replacement"
+  mv "$state/replacement" "$state/task-a.check.sh"
+  : > "$dir/bkt.log"
+  bitbucket_watch_cycle "$dir"
+  assert_grep 'rejected unauthenticated state checks:' "$dir/watch.out" "replaced artifact was accepted"
+  [ ! -s "$dir/bkt.log" ] || fail "unauthenticated poll reached the forge"
+  ack_watcher_cycle "$state" || fail "rejection acknowledgement failed"
+  seed_canonical_poll "$dir" task-a "$BB_URL"
+  printf '\nprintf unsafe\n' >> "$state/task-a.check.sh"
+  bitbucket_watch_cycle "$dir"
+  assert_grep 'rejected unauthenticated state checks:' "$dir/watch.out" "edited artifact was accepted"
+  [ ! -s "$dir/bkt.log" ] || fail "edited poll reached the forge"
+  pass "Bitbucket notifications deduplicate across restarts/rearms, retire exact merges, and preserve artifact authentication"
+}
+
 test_gitlab_merge_watch() {
   local dir state out rc url value noglab entry bindir name
   dir=$(make_case gitlab-merge-watch)
@@ -3764,6 +4029,8 @@ SH
 test_parser_matrix
 test_github_enterprise_config_resolution
 test_github_enterprise_hosts
+test_bitbucket_read_and_arm
+test_bitbucket_notifications_and_trust
 test_gitlab_merge_watch
 test_forgejo_merge_watch
 test_forgejo_login_list_shapes

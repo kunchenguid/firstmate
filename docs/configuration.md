@@ -2172,8 +2172,11 @@ It uses the same live secondmate discovery and propagation helper as bootstrap; 
 A project with no `forge=` token is served by the GitHub tooling, `gh` and `gh-axi`, exactly as before the token existed, and the token changes nothing for existing entries.
 A remote-backed project on a Forgejo or Gitea server is registered with `forge=forgejo`, one value of the same closed `forge=` binding that Gerrit uses; `bin/fm-project-mode.sh`'s header owns its grammar, values, and refusals, and `bin/fm-project-mode.sh --forge <name>` reads it back.
 Firstmate passes the binding to `bin/fm-brief.sh --forge` at intake the same way it passes `--mode`, and `bin/fm-spawn.sh` refuses a brief whose forge disagrees with the registry; on `forgejo` the generated ship brief names `tea` instead of `gh-axi`.
-The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
+The URL-driven provider dispatch in [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh) recognizes a GitHub, Bitbucket Cloud, GitLab, Gerrit, or Forgejo PR/MR/change URL once one exists, regardless of this token.
 
+A Bitbucket Cloud project needs no forge token, only `bkt` and `jq` on `PATH`; on a desktop, authenticate `bkt` through its default system keyring.
+On a headless host, supply `BKT_USERNAME`, `BKT_TOKEN`, and `BKT_AUTH_METHOD` in the environment or as named values in `~/.config/firstmate/bkt.env`, kept at mode `0600`.
+Its watch adds terminal build notifications, while the merge entrypoint refuses Bitbucket Cloud; [architecture.md](architecture.md#delivery-modes-are-explicit-per-task) owns the notification, silence, deduplication, and refusal contract, including the manual-path and source-branch warning.
 A Forgejo (or Gitea) project needs `tea` on `PATH` plus a `tea login` registered for that project's host (`tea login add`); the login is matched to a PR's host automatically, never configured per project.
 A GitLab project needs no forge token, only `glab` on `PATH`, authenticated via `glab auth login`.
 [`docs/gitlab-merge-watch.md`](gitlab-merge-watch.md) and [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) hold the empirically verified CLI behavior each provider's watch and merge path depends on.
