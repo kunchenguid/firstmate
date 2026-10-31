@@ -77,7 +77,21 @@ if [ "${1:-}" = --version ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/opencode"
+  # Deterministic stand-in for the host's uuidgen: a pinned Claude launch needs an
+  # addressable session id whether or not the host that runs this suite has
+  # uuidgen installed. Each call yields a distinct id, so the launcher's collision
+  # check never loops. The collision case and the missing-uuidgen case overwrite
+  # this stub in their own case directory.
+  cat > "$fakebin/uuidgen" <<'SH'
+#!/usr/bin/env bash
+count=${0%/*}/.uuidgen-count
+n=$(cat "$count" 2>/dev/null) || n=0
+case "$n" in '' | *[!0-9]*) n=0 ;; esac
+n=$((n + 1))
+printf '%s\n' "$n" > "$count"
+printf '00000000-0000-4000-8000-%012d\n' "$n"
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/opencode" "$fakebin/uuidgen"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -323,6 +337,96 @@ test_claude_model_pin_is_unverified_when_the_session_reports_no_model() {
     "model pin unverified: pin 'claude-opus-5-5'" \
     "a session that states no model must be recorded as unverified, never as a match"
   pass "Claude pin with no reported model: recorded as unverified"
+}
+
+# A host without uuidgen cannot address a fresh Claude session. The launch must
+# still succeed with its line unchanged, and the pin is recorded unverified
+# immediately instead of the launcher polling for a transcript that cannot exist.
+test_claude_model_pin_is_unverified_when_uuidgen_is_unavailable() {
+  local rec id out status launch
+  id=claude-model-no-uuidgen-z1
+  rec=$(make_spawn_case claude-model-no-uuidgen claude "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/uuidgen" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$FAKEBIN_DIR/uuidgen"
+
+  out=$(FM_MODEL_PIN_POLLS=2 FM_MODEL_PIN_POLL_INTERVAL=0.01 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model claude-opus-5-5)
+  status=$?
+  expect_code 0 "$status" "a pinned Claude spawn without uuidgen must still launch"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--session-id" \
+    "an unaddressable pinned launch must not invent a session id"
+  assert_contains "$(cat "$HOME_DIR/state/$id.status")" \
+    "model pin unverified: pin 'claude-opus-5-5'" \
+    "a launch with no addressable session must record the pin as unverified"
+  pass "Claude pin without uuidgen: launch succeeds and records unverified"
+}
+
+# A raw launch has no __CLAUDESESSION__ placeholder, so a Claude session id it
+# never passes to the session cannot address a transcript either. The launcher
+# must not mint one and must record the pin unverified immediately instead of
+# polling for a session that cannot exist; the raw line itself stays as given.
+test_raw_claude_launch_does_not_allocate_a_session_id() {
+  local rec id out status launch uuid_log
+  id=claude-raw-pin-z1
+  rec=$(make_spawn_case claude-raw-pin claude "$id")
+  read_case_record "$rec"
+  uuid_log="$CASE_DIR/uuidgen.log"
+  cat > "$FAKEBIN_DIR/uuidgen" <<SH
+#!/usr/bin/env bash
+printf 'called\n' >> '$uuid_log'
+printf '%s\n' '33333333-3333-4333-8333-333333333333'
+SH
+  chmod +x "$FAKEBIN_DIR/uuidgen"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model claude-opus-5-5 "claude --dangerously-skip-permissions")
+  status=$?
+  expect_code 0 "$status" "a pinned raw Claude launch must still spawn"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--session-id" \
+    "a raw launch must not be given a session id it cannot carry"
+  [ ! -s "$uuid_log" ] \
+    || fail "a raw launch allocated a Claude session id it never passes to the session"
+  assert_contains "$(cat "$HOME_DIR/state/$id.status")" \
+    "model pin unverified: pin 'claude-opus-5-5'" \
+    "a raw launch the pin cannot be read back from must be recorded unverified"
+  pass "Raw Claude launch: no session id allocated, pin recorded unverified"
+}
+
+# Model evidence may never displace what the worker already reported. A scout
+# that writes `done:` in the same delivery the launcher reads the pin back from
+# keeps `done:` as its current state; the verdict is surfaced on stderr instead of
+# being appended after it.
+test_claude_model_pin_note_never_displaces_the_workers_own_state() {
+  local rec id out status current
+  id=claude-model-done-z1
+  rec=$(make_spawn_case claude-model-done claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_CLAUDE_STATUS_FILE="$HOME_DIR/state/$id.status" \
+    FM_FAKE_CLAUDE_STATUS_LINE='done: the scout finished before the readback' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model claude-opus-5-5)
+  status=$?
+  expect_code 0 "$status" "a worker that finishes during the readback must not fail the spawn"$'\n'"$out"
+  [ "$(tail -n 1 "$HOME_DIR/state/$id.status")" = 'done: the scout finished before the readback' ] \
+    || fail "model evidence was appended after the state the worker reported"
+  current=$(bash -c '. "$1"; status_current_line "$2" scout' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$HOME_DIR/state/$id.status")
+  [ "$current" = 'done: the scout finished before the readback' ] \
+    || fail "model evidence hid the worker's own done: state from the current-state read: $current"
+  assert_not_contains "$(cat "$HOME_DIR/state/$id.status")" "model pin" \
+    "a reported state must keep the status log byte-identical, with no model note appended"
+  assert_contains "$out" \
+    "warn: model pin asserted: pin 'claude-opus-5-5' actual 'claude-opus-5-5'" \
+    "the verdict that could not be recorded must still reach the operator on stderr"
+  pass "Claude pin evidence never displaces the worker's own reported state"
 }
 
 test_claude_spawn_without_a_pin_keeps_its_session_id_and_writes_no_pin_note() {
@@ -2846,6 +2950,9 @@ test_claude_model_pin_asserts_the_model_the_session_reports
 test_claude_model_pin_mismatch_is_reported_without_failing_the_spawn
 test_claude_model_pin_snapshot_verdicts
 test_claude_model_pin_is_unverified_when_the_session_reports_no_model
+test_claude_model_pin_is_unverified_when_uuidgen_is_unavailable
+test_raw_claude_launch_does_not_allocate_a_session_id
+test_claude_model_pin_note_never_displaces_the_workers_own_state
 test_claude_spawn_without_a_pin_keeps_its_session_id_and_writes_no_pin_note
 test_claude_secondmate_launch_brief_publishes_into_its_own_home
 test_claude_spawn_refuses_when_the_brief_record_cannot_publish
