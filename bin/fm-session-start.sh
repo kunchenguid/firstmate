@@ -236,6 +236,19 @@
 #             current AGENTS.md to print before the bulky digest. The baseline
 #             remains immutable so every later drifted compaction refreshes
 #             again, while an equal baseline emits no instruction refresh.
+#
+# SECOND MATE POSTURE: this digest is the one startup every home must run for
+# itself, including a marked secondmate home. A secondmate home owns its own
+# state, its own session lock, and its own watcher, so skipping the digest after
+# a restart would leave it locked out of its own durable records and unable to
+# arm supervision - and no other command takes a session lock or reconciles from
+# disk. Every sweep the digest runs is scoped to the effective FM_HOME (the
+# backlog replay, its own project clones, its own secondmate records, and its own
+# Herdr projection journals), so a marked secondmate home runs the same startup
+# as any other home and never reads or mutates the primary home. What
+# distinguishes a secondmate is therefore the marker-derived heading below, not
+# a reduced startup. The launch overlay bin/fm-spawn.sh generates for a
+# secondmate names this posture so the two never read as contradictory.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -377,6 +390,15 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+
+# A marked secondmate home runs this digest for its own home only; see the
+# SECOND MATE POSTURE note in this file's header. The marker is the identity
+# owner, never FM_ROLE or any harness env, so a relaunch that loses env still
+# resolves the same posture.
+SECONDMATE_HOME=0
+fm_root_is_secondmate_home "$FM_HOME" && SECONDMATE_HOME=1
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -687,6 +709,13 @@ if [ "$REEMIT" -eq 1 ]; then
   printf 'secondmate convergence and liveness, pending remote handoff\n'
   printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
+elif [ "$SECONDMATE_HOME" -eq 1 ]; then
+  section "SECOND MATE STARTUP - $FM_HOME"
+  printf '%s\n' \
+    "This is this secondmate home's OWN startup, not the primary home's: it takes" \
+    "this home's session lock and reconciles this home's durable records from disk," \
+    "and every sweep it runs is scoped to this home, never to the primary home." \
+    'The watcher for this home arms once this lock is held.'
 else
   section "SESSION START - $FM_HOME"
 fi
@@ -762,6 +791,9 @@ if [ "$READ_ONLY" -eq 1 ]; then
     FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
     FM_TASKS_AXI_CHECK_REASON="$TASKS_AXI_CHECK_REASON" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 elif [ "$REEMIT" -eq 1 ]; then
+  # The re-emit path already reconciled its sweeps, so it asks bootstrap for its
+  # read-only diagnostics only and never repeats the primary Herdr projection
+  # cleanup.
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
     FM_TASKS_AXI_CHECK_REASON="$TASKS_AXI_CHECK_REASON" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)

@@ -241,7 +241,111 @@ test_claude_secondmate_launch_brief_publishes_into_its_own_home() {
     || fail "the secondmate launch record did not publish into its own home: $record"
   [ -z "$(find "$HOME_DIR/state/operational-inbox" -name '*.msg' -print -quit 2>/dev/null)" ] \
     || fail "the secondmate launch record leaked into the primary's operational inbox"
-  pass "a secondmate claude launch publishes its brief record into the secondmate's own home"
+  grep -q 'You are a secondmate, not the primary Firstmate' "$record" \
+    || fail "the launch record omitted the explicit secondmate role"
+  grep -Fq "Your home is $(cd "$sm" && pwd -P). Your charter is $sm/data/charter.md" "$record" \
+    || fail "the launch record omitted its absolute home and charter paths"
+  grep -q 'Run startup only for your own home' "$record" \
+    || fail "the launch record omitted the own-home startup instruction"
+  grep -q 'Never run startup against the primary home' "$record" \
+    || fail "the launch record omitted the primary-home boundary"
+  grep -q 'never address the captain' "$record" \
+    || fail "the launch record omitted the captain boundary"
+  pass "a secondmate claude launch publishes its identity, home, charter, and boundaries into its own home"
+}
+
+# The identity owner is the home's own charter copy, so its absence is named at
+# the launch boundary instead of being silently replaced by a path outside the
+# home. Recovery still launches, but the session is told not to infer a role
+# from AGENTS.md and to report the gap to its parent.
+test_secondmate_launch_names_a_missing_local_charter() {
+  local rec id sm out status overlay
+  id=charter-check-z3
+  rec=$(make_spawn_case charter-check claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  rm -f "$sm/data/charter.md"
+  printf 'parent copy of the charter\n' > "$HOME_DIR/data/$id/brief.md"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a secondmate launch without a local charter should still launch for recovery"$'\n'"$out"
+  overlay="$HOME_DIR/data/$id/secondmate-launch-brief.md"
+  [ -f "$overlay" ] || fail "the secondmate overlay was not written: $overlay"
+  grep -q "CHARTER: MISSING at $sm/data/charter.md" "$overlay" \
+    || fail "the overlay did not name the missing local charter: $(cat "$overlay")"
+  grep -q 'Do NOT infer any role from AGENTS.md' "$overlay" \
+    || fail "the overlay did not forbid inferring a role from AGENTS.md"
+  grep -q 'CHARTER FALLBACK' "$overlay" \
+    || fail "the overlay did not label the parent copy as a fallback"
+  grep -q 'parent copy of the charter' "$overlay" \
+    || fail "the overlay dropped the parent copy the recovering session needs"
+  pass "a secondmate launch names a missing local charter instead of substituting a path outside the home"
+}
+
+# A symlinked charter that points outside the home is refused before any
+# present/MISSING verdict, and its contents never reach the overlay.
+test_secondmate_launch_refuses_a_charter_symlink_outside_the_home() {
+  local rec id sm out status overlay outside
+  id=charter-escape-z3
+  rec=$(make_spawn_case charter-escape claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  outside="$CASE_DIR/outside-charter.md"
+  printf 'OUTSIDE-CHARTER-CONTENT\n' > "$outside"
+  rm -f "$sm/data/charter.md"
+  ln -s "$outside" "$sm/data/charter.md"
+  printf 'parent copy of the charter\n' > "$HOME_DIR/data/$id/brief.md"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a secondmate launch with an escaping charter symlink should still launch for recovery"$'\n'"$out"
+  overlay="$HOME_DIR/data/$id/secondmate-launch-brief.md"
+  [ -f "$overlay" ] || fail "the secondmate overlay was not written: $overlay"
+  grep -q "CHARTER: UNSAFE at $sm/data/charter.md" "$overlay" \
+    || fail "the overlay did not name the unsafe local charter: $(cat "$overlay")"
+  assert_not_contains "$(cat "$overlay")" "OUTSIDE-CHARTER-CONTENT" \
+    "the overlay read a charter that resolves outside the home"
+  grep -q 'CHARTER FALLBACK' "$overlay" \
+    || fail "the overlay did not label the parent copy as a fallback"
+  pass "a secondmate launch refuses a charter symlink outside the home and never reads it"
+}
+
+# A secondmate launch with neither the home's own charter nor the parent copy
+# must refuse before creating any endpoint, metadata, or launch record.
+test_secondmate_launch_refuses_when_no_charter_text_exists() {
+  local rec id sm out status
+  id=charter-refused-z3
+  rec=$(make_spawn_case charter-refused claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  rm -f "$sm/data/charter.md"
+  rm -f "$HOME_DIR/data/$id/brief.md"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a secondmate launch with no charter text succeeded"$'\n'"$out"
+  assert_contains "$out" "no usable charter" "the refusal did not name the missing charter"
+  assert_contains "$out" "$sm/data/charter.md" "the refusal did not name the home's own charter path"
+  assert_contains "$out" "$HOME_DIR/data/$id/brief.md" "the refusal did not name the absent parent copy"
+  assert_contains "$out" "bin/fm-home-seed.sh" "the refusal did not name the seeding fix"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a launch was sent despite the missing charter text: $(cat "$LAUNCH_LOG")"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refused secondmate launch created metadata"
+  assert_absent "$HOME_DIR/data/$id/secondmate-launch-brief.md" "the refused secondmate launch created an overlay"
+  if [ -e "$sm/state/operational-inbox" ]; then
+    [ -z "$(find "$sm/state/operational-inbox" -name '*.msg' -print -quit 2>/dev/null)" ] \
+      || fail "the refused secondmate launch created a launch record"
+  fi
+  pass "a secondmate launch with no home charter and no parent copy refuses before any endpoint, metadata, or record"
 }
 
 # A claude worker given a typed envelope would see it with the marker stripped,
@@ -1417,7 +1521,16 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
   assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
+  assert_contains "$launch" "< '$HOME_DIR/data/$id/secondmate-launch-brief.md'" \
+    "secondmate launch did not receive its role-and-home overlay"
+  grep -q 'You are a secondmate, not the primary Firstmate' \
+    "$HOME_DIR/data/$id/secondmate-launch-brief.md" \
+    || fail "the secondmate overlay omitted the explicit role"
+  grep -q 'Never run startup against the primary home' \
+    "$HOME_DIR/data/$id/secondmate-launch-brief.md" \
+    || fail "the secondmate overlay omitted the primary-home boundary"
+  tail -n 1 "$HOME_DIR/data/$id/secondmate-launch-brief.md" | grep -Fq 'charter for' \
+    || fail "the secondmate overlay did not carry the original charter last"
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --approve -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape and seeded-home --approve"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
@@ -2718,6 +2831,9 @@ test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
 test_claude_secondmate_launch_brief_publishes_into_its_own_home
+test_secondmate_launch_names_a_missing_local_charter
+test_secondmate_launch_refuses_a_charter_symlink_outside_the_home
+test_secondmate_launch_refuses_when_no_charter_text_exists
 test_claude_spawn_refuses_when_the_brief_record_cannot_publish
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths

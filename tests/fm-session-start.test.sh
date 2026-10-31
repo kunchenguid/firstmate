@@ -205,6 +205,46 @@ SH
   chmod +x "$fakebin/tasks-axi"
 }
 
+# make_fake_tasks_axi_recovery <fakebin> <calls-log>: a compatible tasks-axi
+# whose show reports a live row and whose done records the close, so a seeded
+# pending-close marker can actually replay through the real bootstrap sweep.
+make_fake_tasks_axi_recovery() {
+  local fakebin=$1 log=$2
+  cat > "$fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$*" >> "$log"
+case "\${1:-}" in
+  --version|-v|-V)
+    printf '%s\n' '0.2.6'
+    exit 0
+    ;;
+  update)
+    [ "\${2:-}" = --help ] || exit 1
+    printf '%s\n' 'usage: tasks-axi update <id> [--archive-body]'
+    exit 0
+    ;;
+  mv)
+    [ "\${2:-}" = --help ] || exit 1
+    printf '%s\n' 'usage: tasks-axi mv <dest> [<id>...]'
+    exit 0
+    ;;
+  show)
+    printf 'id: %s\n  state: in_flight\n  held: no\n  blocked: no\n' "\${2:-}"
+    exit 0
+    ;;
+  done|start)
+    exit 0
+    ;;
+  list)
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tasks-axi"
+}
+
 # make_fake_ps_claude <fakebin>: harness_pid()/holder_alive() (fm-lock.sh) walk
 # `ps` output looking for a harness command name; this fake reports EVERY
 # queried pid as a live `claude` harness unless a stable harness pid is set.
@@ -727,6 +767,15 @@ hash_file_for_test() {
   fi
 }
 
+file_mtime_for_test() {
+  perl -e 'print((stat($ARGV[0]))[9])' "$1"
+}
+
+seed_secondmate_close() {  # <home> <id>
+  printf 'id=%s\ndata=%s/data\nspawn_gen=spawn-%s\narg=--note\narg=local%%20main\n' \
+    "$2" "$1" "$2" > "$1/state/$2.backlog-close"
+}
+
 install_pi_turnend_extension_fixture() {
   local root=$1
   mkdir -p "$root/.pi/extensions"
@@ -879,6 +928,129 @@ EOF
   assert_contains "$out" "NEXT STEP" "closing reminder missing on the read-only path"
 
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
+}
+
+test_secondmate_home_restart_retakes_its_lock_and_realigns_from_disk() {
+  local rec root home fakebin mate out status calls lock1 complete1 mtime1 dead_pid \
+    lock2 complete2 mtime2 report primary_before primary_after lock_status
+  rec=$(new_world secondmate-own-startup)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  calls="$fakebin/tasks-axi-calls"
+  make_fake_tasks_axi_recovery "$fakebin" "$calls"
+
+  # A marked secondmate home resolves its own startup exactly as a real seeded
+  # home does: FM_HOME and the root are the same directory, the marker decides
+  # the posture, and bin/ is the tracked code root.
+  mate="$TMP_ROOT/secondmate-own-startup-home"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  printf '%s\n' fmtest-own-startup > "$mate/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  ln -s "$ROOT/bin" "$mate/bin"
+  printf 'backend = "markdown"\n' > "$mate/.tasks.toml"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$mate/data/backlog.md"
+
+  # A live secondmate meta in THIS home is what the deferred network stage's
+  # home-scoped secondmate sweep reads; its output belongs in the published
+  # report, never in the digest's own stdout.
+  mkdir -p "$mate/other-secondmate/state"
+  fm_write_secondmate_meta "$mate/state/sm-x.meta" "$mate/other-secondmate" "firstmate:fm-sm-x" alpha
+
+  # A queued wake and a pending backlog close in this home's own state are the
+  # disk reconciliation a restart must still perform.
+  append_wake "$mate/state" signal sm-own "done: reconciled from the local queue" \
+    || fail "seed wake failed"
+  seed_secondmate_close "$mate" child-before
+  primary_before=$(cd "$home" && find state data -mindepth 1 -print | LC_ALL=C sort)
+
+  status=0
+  out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    run_session_start "$mate" "$mate" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "session start must exit 0 in a marked secondmate home"
+  assert_contains "$out" "SECOND MATE STARTUP - $mate" \
+    "a marked secondmate home did not run its own startup"
+  assert_contains "$out" "this home's session lock" \
+    "the secondmate startup did not state its own lock ownership"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "the secondmate startup did not take a session lock through fm-lock.sh"
+  assert_contains "$out" "$(printf 'signal\tsm-own\tdone: reconciled from the local queue')" \
+    "the secondmate startup did not drain its own wake queue"
+  assert_contains "$out" "FLEET STATE" "the secondmate startup skipped disk reconciliation"
+  assert_contains "$out" "closed the backlog item for child-before" \
+    "the secondmate startup did not replay its own pending backlog close"
+  assert_grep "done child-before" "$calls" \
+    "the pending close never reached the backlog backend"
+  assert_absent "$mate/state/child-before.backlog-close" \
+    "the replayed pending close marker was left behind"
+
+  lock1=$(cat "$mate/state/.lock" 2>/dev/null)
+  complete1=$(cat "$mate/state/.session-start-complete" 2>/dev/null)
+  [ "$lock1" = "$complete1" ] \
+    || fail "the secondmate completion record is not keyed to its own lock holder"
+  mtime1=$(file_mtime_for_test "$mate/state/.session-start-complete")
+
+  wait_for_network_stage "$mate" "$mate" \
+    || fail "the deferred network stage never published: $(network_stage_report "$mate" "$mate")"
+  report=$(network_stage_report "$mate" "$mate")
+  assert_contains "$report" "SECONDMATE_SYNC: secondmate sm-x: skipped:" \
+    "the secondmate home's own deferred sweep did not run in this home"
+
+  # A real restart leaves a dead lock owner behind. Queue fresh work after that
+  # dead session so the second startup has to both retake the lock and realign
+  # the disk on its own.
+  dead_pid=$(bash -c 'printf "%s\n" "$$"')
+  printf '%s\n' "$dead_pid" > "$mate/state/.lock"
+  seed_secondmate_close "$mate" child-after
+  append_wake "$mate/state" signal sm-restart "done: reconciled after restart" \
+    || fail "seed restart wake failed"
+  sleep 1
+
+  status=0
+  out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    run_session_start "$mate" "$mate" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "session start must exit 0 in a restarted marked secondmate home"
+  assert_contains "$out" "SECOND MATE STARTUP - $mate" \
+    "the restarted secondmate home did not run its own startup"
+  assert_contains "$out" "$(printf 'signal\tsm-restart\tdone: reconciled after restart')" \
+    "the restarted secondmate startup did not drain the wake queued while it was down"
+  assert_contains "$out" "closed the backlog item for child-after" \
+    "the restarted secondmate startup did not replay the close left by its dead session"
+  assert_grep "done child-after" "$calls" \
+    "the restart pending close never reached the backlog backend"
+  assert_absent "$mate/state/child-after.backlog-close" \
+    "the restart pending close marker was left behind"
+
+  lock2=$(cat "$mate/state/.lock" 2>/dev/null)
+  complete2=$(cat "$mate/state/.session-start-complete" 2>/dev/null)
+  mtime2=$(file_mtime_for_test "$mate/state/.session-start-complete")
+  [ "$lock2" != "$dead_pid" ] \
+    || fail "the restarted session did not replace the dead lock owner $dead_pid"
+  [ "$lock2" = "$SESSION_START_TEST_HARNESS_PID" ] \
+    || fail "the restarted lock does not name the live harness pid: $lock2"
+  [ "$complete2" = "$lock2" ] \
+    || fail "the restart completion record is not keyed to the new lock holder"
+  [ "$mtime2" -gt "$mtime1" ] \
+    || fail "the completion record was not rewritten newer (before=$mtime1 after=$mtime2)"
+  lock_status=$(FM_HOME="$mate" FM_ROOT_OVERRIDE="$mate" \
+    FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-lock.sh" status)
+  assert_contains "$lock_status" "lock: held by live harness pid $lock2" \
+    "fm-lock.sh does not report the restarted lock held by a live harness pid"
+
+  wait_for_network_stage "$mate" "$mate" \
+    || fail "the restarted deferred network stage never published"
+  primary_after=$(cd "$home" && find state data -mindepth 1 -print | LC_ALL=C sort)
+  [ "$primary_before" = "$primary_after" ] \
+    || fail "the secondmate startup changed the primary home's state or data"
+
+  printf '# restart readings: lock before=%s after=%s complete before=%s after=%s mtime before=%s after=%s\n' \
+    "$lock1" "$lock2" "$complete1" "$complete2" "$mtime1" "$mtime2"
+  pass "a restarted marked secondmate home retakes its own lock and realigns its own disk from scratch"
 }
 
 test_lock_write_failure_read_only_path() {
@@ -3159,4 +3331,5 @@ test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
 
+test_secondmate_home_restart_retakes_its_lock_and_realigns_from_disk
 echo "# fm-session-start.test.sh: all assertions passed"
