@@ -1559,7 +1559,7 @@ detect_local_tools() {
 }
 
 treehouse_pool_report() {
-  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool status seen slot repo common created_at lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} seen_repo seen_pool duplicate duplicate_reported
+  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool status seen slot repo common created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} seen_repo seen_pool duplicate duplicate_reported
   [ -d "$root" ] && command -v jq >/dev/null 2>&1 && command -v treehouse >/dev/null 2>&1 || return 0
   case "$threshold" in ''|*[!0-9]*) threshold=30 ;; esac
   now=$(date +%s)
@@ -1574,17 +1574,18 @@ treehouse_pool_report() {
     while IFS= read -r slot_record; do
       slot=$(printf '%s\n' "$slot_record" | jq -r '.path // ""')
       created_at=$(printf '%s\n' "$slot_record" | jq -r '.created_at // ""')
+      slot_leased=$(printf '%s\n' "$slot_record" | jq -r '.leased // false')
       slot_owner=$(printf '%s\n' "$slot_record" | jq -r '.owner_pid // ""')
       repo=$(git -C "$slot" rev-parse --show-toplevel 2>/dev/null) || repo=
       common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
       [ -n "$common" ] && repo=${common%/.git}
       owner_live=0
       case "$slot_owner" in ''|*[!0-9]*) ;; *) kill -0 "$slot_owner" 2>/dev/null && owner_live=1 ;; esac
-      if [ -e "${slot%/*}/.fm-slot-owner" ] || [ -e "$slot/.fm-slot-owner" ] || [ "$owner_live" -eq 1 ]; then
+      if [ -e "${slot%/*}/.fm-slot-owner" ] || [ -e "$slot/.fm-slot-owner" ] || [ "$owner_live" -eq 1 ] || [ "$slot_leased" = true ]; then
         pool_has_owner=1
       fi
       if [ -z "$repo" ]; then
-        if [ ! -e "${slot%/*}/.fm-slot-owner" ] && [ ! -e "$slot/.fm-slot-owner" ] && [ "$owner_live" -eq 0 ]; then
+        if [ ! -e "${slot%/*}/.fm-slot-owner" ] && [ ! -e "$slot/.fm-slot-owner" ] && [ "$owner_live" -eq 0 ] && [ "$slot_leased" != true ]; then
           echo "TREEHOUSE_POOL_REPORT: unregistered pool $pool (project path unavailable: $slot)"
         fi
         continue
@@ -1609,7 +1610,7 @@ treehouse_pool_report() {
         jq -cn --arg repo "$repo" --arg pool "$pool" '{repo:$repo,pool:$pool}' >> "$seen"
       fi
       if [ ! -e "${slot%/*}/.fm-slot-owner" ] && [ ! -e "$slot/.fm-slot-owner" ] \
-        && [ "$owner_live" -eq 0 ]; then
+        && [ "$owner_live" -eq 0 ] && [ "$slot_leased" != true ]; then
         lease_epoch=
         if [ -n "$created_at" ] && [ "$created_at" != null ]; then
           lease_date=$(printf '%s\n' "$created_at" | sed -E 's/\.[0-9]+([+-][0-9]{2}:[0-9]{2}|Z)$/\1/; s/Z$/+0000/; s/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
