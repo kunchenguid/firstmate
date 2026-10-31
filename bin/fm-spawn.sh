@@ -3572,6 +3572,11 @@ spawn_pi_session_file() {  # <ref> [agent-dir] -> path
     printf '%s' "$ref"
     return 0
   fi
+  if [ ! -e "$ref" ]; then
+    case "$ref" in
+    /*) printf '%s' "$ref"; return 0 ;;
+    esac
+  fi
   [ -d "$root/sessions" ] || return 1
   while IFS= read -r -d '' candidate; do
     if jq -e --arg id "$ref" 'select(.type == "session" and .id == $id)' "$candidate" >/dev/null 2>&1; then
