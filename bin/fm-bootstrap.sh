@@ -1607,7 +1607,8 @@ treehouse_pool_report() {
         && [ "$owner_live" -eq 0 ]; then
         lease_epoch=
         if [ -n "$created_at" ] && [ "$created_at" != null ]; then
-          lease_epoch=$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$created_at" '+%s' 2>/dev/null || date -u -d "$created_at" '+%s' 2>/dev/null || true)
+          lease_date=$(printf '%s\n' "$created_at" | sed -E 's/\.[0-9]+([+-][0-9]{2}:[0-9]{2}|Z)$/\1/; s/Z$/+0000/; s/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
+          lease_epoch=$(date -j -u -f '%Y-%m-%dT%H:%M:%S%z' "$lease_date" '+%s' 2>/dev/null || date -u -d "$lease_date" '+%s' 2>/dev/null || true)
         fi
         case "$lease_epoch" in ''|*[!0-9]*) continue ;; esac
         age_days=$(( (now - lease_epoch) / 86400 ))
