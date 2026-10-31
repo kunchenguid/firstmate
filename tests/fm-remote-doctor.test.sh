@@ -1110,6 +1110,24 @@ assert_contains "$DOCTOR_OUT" 'config/claude-account' "the unresolvable-pin gap 
 assert_contains "$DOCTOR_OUT" 'action: claude-onboarding:' "the unresolvable-pin gap came with no operator action"
 pass "a config/claude-account pin that cannot be resolved is a human gap, not a silent default-store check"
 
+# A broken symlink at config/claude-account is a present-but-unresolvable pin:
+# -e is false for it but -L is true, so the doctor must still reach the resolver
+# rather than reporting readiness. fm_worker_account_read lstats the pin, so the
+# real launch sees the link and refuses; the doctor reports the same human gap.
+# The default account is onboarded to prove the gap comes from the pin, not the
+# default store, and --harness claude is passed so the harness alone cannot be
+# what gates the host.
+new_case Darwin with-herdr gui
+mkdir -p "$CASE_PROJECT_HOME/config"
+ln -s "$CASE_DIR/does-not-exist" "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+doctor --harness claude
+expect_code 1 "$DOCTOR_RC" "a broken-symlink account pin was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a broken-symlink account pin was not tagged human"
+assert_contains "$DOCTOR_OUT" 'config/claude-account' "the broken-symlink-pin gap did not name the pin"
+assert_contains "$DOCTOR_OUT" 'action: claude-onboarding:' "the broken-symlink-pin gap came with no operator action"
+pass "a broken-symlink config/claude-account pin reaches the resolver and is a human gap, not a ready host"
+
 # A pinned account directory with a space in its path still yields an operator
 # command a shell parses as one CLAUDE_CONFIG_DIR assignment: fm-spawn.sh quotes
 # it the same way, so an unquoted path would run the word after the space as a
