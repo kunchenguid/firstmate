@@ -240,8 +240,7 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 # Single owner of durable merge-outcome publication, shared with
 # bin/fm-pr-merge.sh so self and poll origins use the same role-routed outcome.
-# The watcher still owns immediate delivery of its actionable poll result and
-# poll retirement.
+# The watcher owns poll retirement and delivery after the due check sweep.
 # This library is a canonical lint root in its own right, and it reaches the
 # wake queue, PR identity, and secondmate parent libraries. Keep it an analysis
 # boundary here for the same reason as the transition and inbox owners above and
@@ -3766,9 +3765,13 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
+  # One sweep runs every due check and queues each non-empty result, then
+  # touches .last-check once and wakes once. A check that prints cannot skip
+  # the rest of this sweep until the next interval.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     contribution_check_output=
+    sweep_wake_reason=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -3842,7 +3845,6 @@ EOF
             # outcome and no wake; bin/fm-pr-check.sh refuses to arm another.
             retire_merged_pr_poll "$id"
             pr_poll_control_release || exit 1
-            touch "$STATE/.last-check"
             triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
             continue
           fi
@@ -3868,29 +3870,30 @@ EOF
           fi
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
-          touch "$STATE/.last-check"
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
-          wake "$reason"
+          [ -n "$sweep_wake_reason" ] || sweep_wake_reason=$reason
+          continue
         fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
-        touch "$STATE/.last-check"
-        wake "$reason"
+        [ -n "$sweep_wake_reason" ] || sweep_wake_reason=$reason
       fi
       pr_poll_control_release || exit 1
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-      touch "$STATE/.last-check"
-      wake "$reason"
+      [ -n "$sweep_wake_reason" ] || sweep_wake_reason=$reason
     fi
     touch "$STATE/.last-check"
     if [ -n "$contribution_check_output" ]; then
-      wake "$contribution_check_output"
+      [ -n "$sweep_wake_reason" ] || sweep_wake_reason=$contribution_check_output
+    fi
+    if [ -n "$sweep_wake_reason" ]; then
+      wake "$sweep_wake_reason"
     fi
   fi
 
