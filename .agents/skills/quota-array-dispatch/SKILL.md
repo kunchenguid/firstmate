@@ -9,7 +9,7 @@ metadata:
 
 # quota-array-dispatch
 
-This skill is the single owner of the completion-aware profile-array selection procedure.
+This skill is the single owner of the dispatch-time profile-array selection procedure.
 `AGENTS.md` section 4 owns the always-loaded intake boundary, load trigger, malformed-config refusal, every-candidate accounting, and strongest-reasoning/tie safety rules.
 `harness-adapters` owns harness verification, model/provider discovery, and effort fallback.
 `quota-axi` remains data-only: it publishes `spendPriority` as a comparable scalar and never recommends, selects, ranks, or infers a route.
@@ -38,6 +38,8 @@ Authoritative multi-provider routing - including provider discovery from the har
 Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
+Opt-in mid-task relaunch onto the next eligible candidate is not this ranker.
+`midtask-fallback` owns that switch, and it does not re-rank the recorded array by `spendPriority`.
 The opt-in [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) has its own documented gates.
 It never removes this skill's authority, and its `ambiguous`, `escalate`, and `error` outcomes return here.
 

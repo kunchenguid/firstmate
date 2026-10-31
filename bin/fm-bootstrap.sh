@@ -1228,6 +1228,13 @@ crew_dispatch_validate() {
       | unique;
     if type != "object" then "top-level value must be an object"
     elif has("preferred_provider") and (provider_id(.preferred_provider) | not) then "preferred_provider must be a lowercase provider ID (for example codex)"
+    elif has("mid_task_fallback") and (
+      .mid_task_fallback != true and .mid_task_fallback != false and (
+        (.mid_task_fallback | type) != "object"
+        or ((.mid_task_fallback | keys) != ["allow_lower_reasoning_class"])
+        or (.mid_task_fallback.allow_lower_reasoning_class != true)
+      )
+    ) then "mid_task_fallback must be true, false, or an object whose only key is allow_lower_reasoning_class set to true"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
