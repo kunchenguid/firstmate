@@ -252,6 +252,67 @@ if fm_backend_tmux_send_key "$SESSION:fm-v1.0" X; then
 fi
 pass "real tmux: a gone dotted window reads absent beside its undotted neighbor"
 
+# --- typed text refuses stale task names before typing or Enter --------------
+
+# A synthetic line reader records every submission, including empty Enter
+# retries, without starting a model or depending on an interactive shell's init.
+text_receiver() {  # <window> <log>
+  tmux new-window -d -t "$SESSION:" -n "$1" \
+    "bash -c 'printf \"text-receiver-ready\\n\"; while IFS= read -r line; do printf \"%s\\n\" \"\$line\" >> \"\$1\"; done' _ '$2'" \
+    || fail "real tmux: text receiver $1 failed"
+  wait_for_capture_text "$SESSION:$1" text-receiver-ready \
+    || fail "real tmux: text receiver $1 did not become ready"
+}
+
+text_receiver fm-api-v2 "$SHIM_DIR/prefix-text"
+text_receiver fm-release "$SHIM_DIR/dotted-text"
+TEXT_HOME=$(bash "$ROOT/bin/fm-lab-home.sh" create "$SHIM_DIR/home") \
+  || fail "could not create the disposable text-submit home"
+TEXT_HOME=$(cd "$TEXT_HOME" && pwd -P)
+
+for stale_window in fm-api fm-release.0; do
+  case "$stale_window" in
+    fm-api) sibling=fm-api-v2; log="$SHIM_DIR/prefix-text" ;;
+    *) sibling=fm-release; log="$SHIM_DIR/dotted-text" ;;
+  esac
+  before=$(fm_backend_tmux_capture "$SESSION:$sibling" 200)
+  verdict=$(fm_backend_tmux_send_text_submit "$SESSION:$stale_window" /clear 1 0.1 0)
+  after=$(fm_backend_tmux_capture "$SESSION:$sibling" 200)
+  [ "$before" = "$after" ] && [ ! -e "$log" ] \
+    || fail "direct text submit changed the sibling of $stale_window"
+  [ "$verdict" = send-failed ] \
+    || fail "direct text submit to $stale_window returned '$verdict', expected send-failed"
+
+  # Legacy records have neither an explicit backend nor a bound pane id.
+  printf 'window=%s:%s\nharness=codex\nkind=ship\n' \
+    "$SESSION" "$stale_window" > "$TEXT_HOME/state/${stale_window#fm-}.meta"
+  for selector in "${stale_window#fm-}" "$stale_window"; do
+    send_rc=0
+    env -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE \
+      -u FM_DATA_OVERRIDE -u FM_PROJECTS_OVERRIDE \
+      FM_HOME="$TEXT_HOME" FM_SEND_RETRIES=1 FM_SEND_SLEEP=0.1 FM_SEND_SETTLE=0 \
+      bash "$ROOT/bin/fm-send.sh" "$selector" /clear \
+      > "$SHIM_DIR/send.out" 2> "$SHIM_DIR/send.err" || send_rc=$?
+    [ "$send_rc" -eq 1 ] \
+      || fail "fm-send $selector should refuse a stale task, got exit $send_rc"
+    grep -q 'tmux send failed' "$SHIM_DIR/send.err" \
+      || fail "fm-send $selector did not report the text-send failure"
+    after=$(fm_backend_tmux_capture "$SESSION:$sibling" 200)
+    [ "$before" = "$after" ] && [ ! -e "$log" ] \
+      || fail "fm-send $selector changed the sibling pane"
+  done
+done
+pass "real tmux: direct and legacy task text sends refuse gone prefix and dotted targets without changing siblings"
+
+log="$SHIM_DIR/live-text"
+text_receiver fm-api "$log"
+verdict=$(fm_backend_tmux_send_text_submit "$SESSION:fm-api" /clear 1 0.1 0)
+[ "$verdict" != send-failed ] || fail "text submit refused live window fm-api"
+[ -f "$log" ] && [ "$(cat "$log")" = /clear ] \
+  && [ "$(wc -l < "$log" | tr -d ' ')" = 1 ] \
+  || fail "text submit did not send /clear exactly once to fm-api"
+pass "real tmux: an exact live window text submit types and submits once"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"
