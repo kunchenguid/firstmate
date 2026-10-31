@@ -3207,23 +3207,37 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # fm-peek.sh's/fm-watch.sh's `tmux capture-pane -p -t T -S -N`. --source recent
 # is the closest herdr analogue to tmux's scrollback-bounded capture.
 #
+# The read is ANSI, never text. Since Herdr 0.8.0 a TEXT `recent` or
+# `recent-unwrapped` read whose --lines exceeds the visible rows of an idle,
+# recognized agent on the alternate screen (Claude fullscreen) harvests history
+# by sending real mouse-wheel events into the agent and wheeling back down, so
+# every capture visibly scrolled the idle pane up and snapped it back (Herdr
+# docs "Alternate-screen history reads"; herdrdev/herdr #5196 and #2669, closed
+# as intended). ANSI reads never start that harvest, and on a normal-screen
+# pane they return the same scrollback tail. The styling is stripped here, plus
+# the CRLF line ends and the trailing blank cells (ASCII space and NBSP) the
+# text renderer drops, so callers see what a text read printed. A client whose
+# ANSI read fails falls back to the text read; the harvest only exists on
+# 0.8.0+, where ANSI reads are verified, so the fallback cannot twitch a pane.
+#
 # Verified CLI quirk (herdr-verification-p2.md "pane read --lines bug", v0.7.1):
 # `pane read --source recent --lines N` returns COMPLETELY EMPTY output when N
-# is smaller than the pane's current viewport height (observed threshold ~23
-# rows for a default-sized pane), instead of clamping to the last N lines - it
-# does not merely ignore the bound, it drops the read entirely. This silently
-# broke exactly the small bounded reads this adapter relies on most (the peek
-# and watch tails, the rendered busy-footer read, and the shared inbox
-# pending-line read; the adapter's own composer reads now take the viewport
-# instead, so they need no line count at all). Workaround:
-# always request a generous fetch far above any realistic viewport height, then
-# trim to the caller's requested bound ourselves with `tail`.
+# is smaller than the pane's current viewport height, instead of clamping to
+# the last N lines. Herdr 0.9.0 fixed it (#3444; small-N ANSI reads return N
+# lines on 0.9.5), but the adapter still accepts releases back to protocol
+# 14 (v0.7.1), so it keeps requesting a generous fetch far above any realistic
+# viewport height and trims to the caller's bound itself with `tail`.
 fm_backend_herdr_capture() {  # <target> <lines>
   fm_backend_herdr_target_ready "$1" || return 1
-  local lines=${2:-200} fetch out
+  local lines=${2:-200} fetch out cr nbsp
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
+  if out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null); then
+    cr=$(printf '\r'); nbsp=$(printf '\302\240')
+    printf '%s' "$out" | fm_composer_strip_ansi | LC_ALL=C sed -E "s/${cr}\$//; s/( |${nbsp})+\$//" | tail -n "$lines"
+    return 0
+  fi
   out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" 2>/dev/null) || return 1
   printf '%s' "$out" | tail -n "$lines"
 }
