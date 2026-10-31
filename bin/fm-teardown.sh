@@ -120,9 +120,11 @@
 # reused across tasks, so a stale, duplicated, or drifted worktree= record can
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
 # that path and hard-resets it before returning it, so releasing a slot that is
-# not genuinely this task's destroys another worker's live work. Before the first
-# cleanup step, teardown verifies record exclusivity: no OTHER task record in
-# this home or any locally registered Firstmate home may name the same live path
+# not genuinely this task's destroys another worker's live work. These guards
+# apply only to slots recognised by fm_treehouse_pool_slot; its comment in
+# bin/fm-wake-lib.sh owns recognition and the lookup-failure fallback.
+# Before the first cleanup step, teardown verifies record exclusivity: no OTHER
+# task record in this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
 # collision itself, whichever record is stale. The one exception is a slot whose
 # owner claim (below) names another task: this teardown is then records-only and
@@ -2610,7 +2612,7 @@ require_exclusive_task_worktree_slot() {
 }
 
 # Positive slot ownership, read from the claim the task that took the slot wrote
-# into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
+# for it (bin/fm-wake-lib.sh owns the claim, its location, and its states).
 #
 # For a slot this task still claims, or one with no claim, the record scan above
 # proves that no OTHER task record names it. It cannot prove that THIS record is
@@ -2643,7 +2645,7 @@ require_owned_worktree_slot_record() {  # <task-id> <worktree>
       return "$TEARDOWN_SLOT_REASSIGNED_RC"
       ;;
   esac
-  marker=$(fm_treehouse_slot_owner_marker "$worktree" 2>/dev/null) || marker="beside $worktree"
+  marker=$(fm_treehouse_slot_owner_marker "$worktree" 2>/dev/null) || marker="for $worktree"
   echo "REFUSED: task $record_id's recorded worktree $worktree carries a slot-owner claim that cannot be read, so the slot cannot be proved to still be this task's; nothing was changed - not even with --force." >&2
   echo "Inspect or repair the claim file at $marker (task= and home= lines), then re-run teardown." >&2
   return 1
