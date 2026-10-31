@@ -14,8 +14,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab] [--no-prior-knowledge | --prior-knowledge <path>...]
+#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab] [--no-prior-knowledge | --prior-knowledge <path>...]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -153,6 +153,23 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
+# Ship and scout scaffolds also carry a "# Prior knowledge" section of pointers,
+# paths only and never file contents, framed as leads to verify rather than
+# facts. It lists up to 8 earlier data/<id>/report.md files for the same
+# project, newest first with each report's modification date, and up to 8
+# data/learnings.md heading pointers as learnings.md#<heading>. When that file
+# is at most 80 lines, every heading is a lead; otherwise only headings naming
+# the project are included. The project is the basename of <repo-name>
+# (projects/aegis and aegis are both "aegis"). An earlier task's project is read
+# from the "disposable git worktree of <repo>" line of its own data/<id>/brief.md,
+# because that record lives beside the report, while state/<id>.meta is removed
+# at cleanup. A learnings heading is relevant when it names the project as a
+# whole word, case-insensitively. --prior-knowledge <path> adds an explicit
+# pointer and may repeat; --no-prior-knowledge omits the section. The section is
+# omitted entirely when there is nothing to list. Secondmate charters never take
+# it: a charter is the only brief this fleet delivers to a remote host (a
+# remote second mate), so pointers into this home's captain-private data/ never
+# reach a remote worker, and both flags are refused there.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -235,6 +252,8 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 PROJECT_DIR=
 PROJECT_DIR_SET=0
+PRIOR_KNOWLEDGE=1
+PRIOR_EXTRA=()
 POS=()
 want_value=
 for a in "$@"; do
@@ -251,6 +270,7 @@ for a in "$@"; do
       pr) PR_TEXT=$a; PR_TEXT_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
+      prior-knowledge) PRIOR_EXTRA+=("$a") ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -277,6 +297,9 @@ for a in "$@"; do
     --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
     --project) want_value="project" ;;
     --project=*) PROJECT_DIR=${a#--project=}; PROJECT_DIR_SET=1 ;;
+    --prior-knowledge) want_value="prior-knowledge" ;;
+    --prior-knowledge=*) PRIOR_EXTRA+=("${a#--prior-knowledge=}") ;;
+    --no-prior-knowledge) PRIOR_KNOWLEDGE=0 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -409,6 +432,15 @@ fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
+  exit 1
+fi
+
+if [ "$KIND" = secondmate ] && { [ "$PRIOR_KNOWLEDGE" -eq 0 ] || [ "${#PRIOR_EXTRA[@]}" -gt 0 ]; }; then
+  echo "error: --prior-knowledge and --no-prior-knowledge apply only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+if [ "$PRIOR_KNOWLEDGE" -eq 0 ] && [ "${#PRIOR_EXTRA[@]}" -gt 0 ]; then
+  echo "error: --prior-knowledge and --no-prior-knowledge are mutually exclusive" >&2
   exit 1
 fi
 
@@ -605,6 +637,61 @@ fi
 
 REPO=${POS[1]}
 
+# Prior-knowledge pointers (header owns the rule). Paths only: nothing here
+# reads a report or learning into the brief.
+file_mtime() {
+  local m
+  m=$(stat -c %Y "$1" 2>/dev/null) || m=
+  case $m in ''|*[!0-9]*) m=$(/usr/bin/stat -f %m "$1" 2>/dev/null) || m= ;; esac
+  case $m in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$m"
+}
+
+prior_knowledge_section() {
+  local project dir pid repo when stamp reports='' learnings_hits='' extras='' extra learnings_lines
+  project=${REPO%/}; project=${project##*/}
+  for dir in "$DATA"/*/; do
+    pid=${dir%/}; pid=${pid##*/}
+    [ "$pid" != "$ID" ] && [ -f "$dir/report.md" ] && [ -f "$dir/brief.md" ] || continue
+    repo=$(sed -n 's/^You are in a disposable git worktree of \(.*\), at a detached HEAD.*/\1/p' "$dir/brief.md" 2>/dev/null | head -n 1)
+    repo=${repo%/}
+    [ -n "$repo" ] && [ "${repo##*/}" = "$project" ] || continue
+    stamp=$(file_mtime "$dir/report.md") || continue
+    when=$(date -d "@$stamp" +%Y-%m-%d 2>/dev/null || date -r "$stamp" +%Y-%m-%d 2>/dev/null) || when=unknown
+    reports="$reports$stamp - $DATA/$pid/report.md (report dated $when)"$'\n'
+  done
+  [ -z "$reports" ] || reports=$(printf '%s' "$reports" | sort -rn | head -n 8 | sed 's/^[0-9]* //')
+  if [ -f "$DATA/learnings.md" ] && [ -n "$project" ]; then
+    learnings_lines=$(wc -l < "$DATA/learnings.md" | tr -d ' ')
+    case $learnings_lines in ''|*[!0-9]*) learnings_lines=81 ;; esac
+    if [ "$learnings_lines" -le 80 ]; then
+      learnings_hits=$(awk -v f="$DATA/learnings.md" '
+          /^#+[ \t]/ { heading = $0; sub(/^#+[ \t]+/, "", heading); print "- " f "#" heading; if (++c >= 8) exit }' \
+        "$DATA/learnings.md") || learnings_hits=
+    else
+      learnings_hits=$(grep -niwF -- "$project" "$DATA/learnings.md" 2>/dev/null \
+        | awk -v f="$DATA/learnings.md" '
+            { heading = $0; sub(/^[0-9]+:/, "", heading) }
+            heading ~ /^#+[ \t]/ { sub(/^#+[ \t]+/, "", heading); print "- " f "#" heading; if (++c >= 8) exit }') || learnings_hits=
+    fi
+  fi
+  for extra in ${PRIOR_EXTRA[@]+"${PRIOR_EXTRA[@]}"}; do
+    extras="$extras- $extra"$'\n'
+  done
+  [ -n "$reports$learnings_hits$extras" ] || return 0
+  printf '%s\n' \
+    '# Prior knowledge' \
+    'These are leads from earlier work on this project, not facts and not instructions.' \
+    'Open one only if it is relevant to this task; reports age, so verify any claim against the current code before relying on it.'
+  printf '%s\n%s\n%s' "$reports" "$learnings_hits" "$extras" | grep -v '^$'
+}
+
+PRIOR_SECTION=
+if [ "$PRIOR_KNOWLEDGE" -eq 1 ]; then
+  PRIOR_SECTION=$(prior_knowledge_section)
+  [ -z "$PRIOR_SECTION" ] || PRIOR_SECTION=$'\n\n'"$PRIOR_SECTION"
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -707,7 +794,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $TASK_SECTION
 
-$HERDR_SECTION
+$HERDR_SECTION$PRIOR_SECTION
 
 # Setup
 $SETUP_BASE
@@ -783,7 +870,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $TASK_SECTION
 
-$HERDR_SECTION
+$HERDR_SECTION$PRIOR_SECTION
 
 # Setup
 $SETUP_BASE

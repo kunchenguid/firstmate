@@ -1616,6 +1616,72 @@ test_branch_prefix_command_is_shell_safe() {
   pass "fm-brief.sh: ref-format-valid shell metacharacters stay literal in generated branch commands"
 }
 
+test_prior_knowledge_lists_same_project_pointers_only() {
+  local home data brief out rc id
+  home="$TMP_ROOT/prior-home"
+  data="$home/data"
+  mkdir -p "$data"
+  # Each earlier task's project comes from the setup line of its own brief.
+  for id in older-aegis:projects/aegis:202601050000 newer-aegis:aegis/:202603070000 other-proj:immich-config:202602010000 no-brief::; do
+    set -- "${id%%:*}" "$(printf '%s' "$id" | cut -d: -f2)" "${id##*:}"
+    mkdir -p "$data/$1"
+    printf 'Body of report %s must never be copied.\n' "$1" > "$data/$1/report.md"
+    if [ -n "$2" ]; then
+      printf 'You are in a disposable git worktree of %s, at a detached HEAD on a clean default branch.\n' "$2" > "$data/$1/brief.md"
+      touch -t "$3" "$data/$1/report.md"
+    fi
+  done
+  {
+    printf '%s\n' '# General' '- aegis deploys need the staging token' '  - nested aegis detail' '- unrelated fact' '## Aegis previews' '- aegisx is another project'
+    awk 'BEGIN { for (i = 1; i <= 80; i++) print "filler " i }'
+  } > "$data/learnings.md"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" prior-ship aegis --mode local-only --prior-knowledge /extra/notes.md >/dev/null || fail "ship scaffold failed with prior knowledge"
+  brief="$data/prior-ship/brief.md"
+  grep -qx '# Prior knowledge' "$brief" || fail "ship brief lacked the prior-knowledge section"
+  assert_grep 'leads from earlier work on this project, not facts' "$brief" "prior knowledge was not framed as leads"
+  [ "$(grep -n 'report.md (report dated' "$brief" | sed 's/ (report.*//; s/^[0-9]*:- //')" = "$data/newer-aegis/report.md
+$data/older-aegis/report.md" ] || fail "same-project reports were not listed newest first"
+  grep -qxF -- "- $data/newer-aegis/report.md (report dated 2026-03-07)" "$brief" || fail "report pointer lacked its date"
+  assert_no_grep 'other-proj' "$brief" "another project's report was listed"
+  assert_no_grep 'no-brief' "$brief" "a report without a project record was listed"
+  assert_no_grep 'must never be copied' "$brief" "a report body reached the brief"
+  grep -qxF -- "- $data/learnings.md#Aegis previews" "$brief" || fail "a learnings heading naming the project was not listed"
+  ! grep -qxF -- "- $data/learnings.md#General" "$brief" || fail "an unrelated heading from a large learnings file was listed"
+  assert_no_grep "$data/learnings.md:2" "$brief" "a learnings bullet became a pointer"
+  grep -qxF -- '- /extra/notes.md' "$brief" || fail "an explicit --prior-knowledge path was not listed"
+  [ "$(sed -n '/^# Prior knowledge$/,$p' "$brief" | grep -m1 -n '^# Setup$' | cut -d: -f1)" -gt 1 ] || fail "prior knowledge did not precede setup"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" prior-scout aegis --scout >/dev/null || fail "scout scaffold failed with prior knowledge"
+  assert_grep "- $data/newer-aegis/report.md " "$data/prior-scout/brief.md" "scout brief lacked same-project reports"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" prior-none nothing-matches --scout >/dev/null || fail "scout scaffold failed without matches"
+  assert_no_grep 'Prior knowledge' "$data/prior-none/brief.md" "an empty prior-knowledge section was emitted"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" prior-off aegis --mode local-only --no-prior-knowledge >/dev/null || fail "ship scaffold failed with --no-prior-knowledge"
+  assert_no_grep 'Prior knowledge' "$data/prior-off/brief.md" "--no-prior-knowledge did not suppress the section"
+
+  printf '%s\n' '# General' '## Operations notes' > "$data/learnings.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" prior-small aegis --scout >/dev/null || fail "scout scaffold failed with a small learnings file"
+  grep -qxF -- "- $data/learnings.md#General" "$data/prior-small/brief.md" || fail "a small learnings file did not list every heading"
+  grep -qxF -- "- $data/learnings.md#Operations notes" "$data/prior-small/brief.md" || fail "a small learnings file omitted an unrelated heading"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" prior-both aegis --mode local-only --no-prior-knowledge --prior-knowledge /x 2>&1); rc=$?
+  expect_code 1 "$rc" "combining the prior-knowledge flags must be refused"
+  assert_contains "$out" "mutually exclusive" "combined prior-knowledge flags refusal did not explain itself"
+
+  # A charter is the only brief that can reach a remote host, so it never points into data/.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise aegis work.' \
+    "$ROOT/bin/fm-brief.sh" prior-mate --secondmate --no-projects >/dev/null || fail "secondmate scaffold failed beside prior reports"
+  assert_no_grep 'Prior knowledge' "$data/prior-mate/brief.md" "a secondmate charter carried a prior-knowledge section"
+  assert_no_grep "$data/newer-aegis" "$data/prior-mate/brief.md" "a secondmate charter carried a report pointer"
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='x' "$ROOT/bin/fm-brief.sh" prior-mate-flag --secondmate --no-projects --prior-knowledge /x 2>&1); rc=$?
+  expect_code 1 "$rc" "--prior-knowledge on a secondmate charter must be refused"
+  assert_contains "$out" "apply only to crewmate ship or scout briefs" "secondmate prior-knowledge refusal did not explain itself"
+  assert_absent "$data/prior-mate-flag" "a refused charter left a partial scaffold behind"
+  pass "prior knowledge lists dated same-project report and learnings pointers, and never reaches a charter"
+}
+
 test_worker_role_scope
 
 # Rule 2 governs file edits rather than pool administration, so every crewmate
@@ -1732,3 +1798,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_prior_knowledge_lists_same_project_pointers_only

@@ -1671,6 +1671,16 @@ The text is static and never executed or expanded, and an edit takes effect when
 
 `bin/fm-branch-prompt.sh`'s header owns the placement rule and how it keeps the prompt cache stable.
 
+## Prior-knowledge pointers in briefs
+
+Ship and scout briefs carry a `# Prior knowledge` section by default whenever this home has something to point at for the same project.
+It lists paths only: earlier `data/<id>/report.md` files for that project with their dates, newest first, and `data/learnings.md` headings that name the project.
+When `data/learnings.md` has at most 80 lines, every heading is listed instead.
+The section frames them as leads to verify against current code, never as facts, and is omitted when nothing matches.
+`--no-prior-knowledge` omits it for one brief, and `--prior-knowledge <path>`, which may repeat, adds an explicit pointer.
+Secondmate charters never take it, so pointers into this home's private `data/` never reach a remote second mate.
+`bin/fm-brief.sh`'s header owns the matching rule and its caps.
+
 ## Herdr lifecycle spawn guard (config/herdr-lifecycle-spawn-guard)
 
 The optional local, gitignored `config/herdr-lifecycle-spawn-guard` presence flag opts this home into refusing, at spawn, a ship or scout brief that drives Herdr lifecycle without the Herdr isolation contract.
