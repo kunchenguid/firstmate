@@ -1789,7 +1789,10 @@ handle_wake() {  # <reason> <state>
               if [ "$span_failure_repeat" -eq 1 ]; then
                 decision="self|unreadable status span already reported for $task"
               else
-                decision=$(classify_stale "$arg" "$state" "$span_record" "$span_rc")
+                case "$stale_detail" in
+                *"wait overdue - decide or release"*) decision="escalate|$stale_detail" ;;
+                *) decision=$(classify_stale "$arg" "$state" "$span_record" "$span_rc") ;;
+              esac
               fi
               # An enriched wedge reason carries the watcher's own escalation count
               # and its "do not re-absorb on the run-step/pane state alone" demand,
