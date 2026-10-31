@@ -140,6 +140,8 @@ test_durable_home_git_lock_lifecycle() {
   fi
   [ "$(cat "$gitdir/locked")" = "$reason" ] || fail "failed retirement did not restore the exact lock"
   assert_present "$home/state/domain.meta" "failed return cleared route metadata"
+  assert_present "$sub/.fm-secondmate-home" "failed return pruned a home that was never released"
+  assert_present "$sub/data/charter.md" "failed return discarded the retryable home payload"
 
   real_git=$(command -v git)
   cat > "$fakebin/git" <<'SH'
@@ -258,6 +260,71 @@ SH
   assert_absent "$sub" "unpooled retirement retained the home"
   assert_absent "$gitdir" "unpooled retirement leaked Git administrative state"
   pass "failed seed releases attempt protection and preserves earlier owned protection"
+}
+
+# A real Treehouse pool keeps the checkout when it returns a slot, so retirement
+# has to hand back a slot the next seed can lease again. A slot that kept the
+# retired mate's payload refuses the next seed as "already marked for <mate>",
+# which turns one ordinary retirement into a permanently unusable pool slot.
+test_durable_home_pool_slot_reuse() {
+  local fmroot home sub fakebin log gitdir guard
+  fmroot="$TMP_ROOT/slot-reuse-code"
+  home="$TMP_ROOT/slot-reuse-parent"
+  sub="$TMP_ROOT/slot-reuse-subhome"
+  clone_reviewed_head "$ROOT" "$fmroot" || fail "cannot create disposable code root"
+  git -C "$fmroot" worktree add --quiet --detach "$sub" HEAD || fail "cannot create disposable home worktree"
+  mkdir -p "$home/data" "$home/state"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/slot-reuse-fake")
+  log="$TMP_ROOT/slot-reuse-fake/tmux.log"
+  gitdir=$(git -C "$sub" rev-parse --absolute-git-dir)
+
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$sub" FM_FAKE_TMUX_LOG="$log" \
+    FM_SECONDMATE_CHARTER='first slot reuse domain' FM_SECONDMATE_SCOPE='first slot reuse domain' \
+    bash "$ROOT/bin/fm-home-seed.sh" first - --no-projects >/dev/null \
+    || fail "seed failed for the first pooled mate"
+  [ "$(cat "$sub/.fm-secondmate-home")" = first ] || fail "first seed did not mark the pooled home"
+  fm_write_secondmate_meta "$home/state/first.meta" "$sub"
+
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/slot-reuse-fake/pane.txt" FM_FAKE_TREEHOUSE_KEEP_HOME=1 \
+    bash "$ROOT/bin/fm-teardown.sh" first >/dev/null 2>"$TMP_ROOT/slot-reuse-retire.err" \
+    || { cat "$TMP_ROOT/slot-reuse-retire.err" >&2; fail "retirement of a pooled durable home failed"; }
+  assert_absent "$gitdir/locked" "retirement left the Git worktree lock"
+  assert_absent "$gitdir/firstmate-home-lock" "retirement left the ownership receipt"
+  assert_absent "$home/state/first.meta" "retirement left the retired mate's task record"
+  assert_present "$sub/AGENTS.md" "the returned pool slot lost its checkout"
+  assert_absent "$sub/.fm-secondmate-home" "the returned slot still carried the retired home marker"
+  assert_absent "$sub/.fm-secondmate-parent" "the returned slot still carried the retired parent binding"
+  assert_absent "$sub/data" "the returned slot still carried the retired home data"
+  assert_absent "$sub/state" "the returned slot still carried the retired home state"
+  assert_absent "$sub/config" "the returned slot still carried the retired home config"
+  assert_absent "$sub/projects" "the returned slot still carried the retired home project clones"
+
+  # The slot is leasable again, and the next mate owns it without inheriting the
+  # retired mate's identity or its protection.
+  PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fmroot" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$sub" FM_FAKE_TMUX_LOG="$log" \
+    FM_SECONDMATE_CHARTER='second slot reuse domain' FM_SECONDMATE_SCOPE='second slot reuse domain' \
+    bash "$ROOT/bin/fm-home-seed.sh" second - --no-projects >/dev/null 2>"$TMP_ROOT/slot-reuse-reseed.err" \
+    || { cat "$TMP_ROOT/slot-reuse-reseed.err" >&2; fail "the next mate could not lease the returned slot"; }
+  [ "$(cat "$sub/.fm-secondmate-home")" = second ] || fail "the re-leased slot kept the retired mate's identity"
+  assert_present "$sub/data/charter.md" "the re-seeded home carries no charter"
+  grep -F 'id=second' "$gitdir/firstmate-home-lock" >/dev/null || fail "the re-seeded home carries no ownership receipt"
+  grep -F 'Firstmate durable home second' "$gitdir/locked" >/dev/null || fail "the re-seeded home carries no Git lock"
+
+  # The cleanup never deletes a checkout's own tracked files: a home whose tree
+  # tracks a payload path is refused instead of being dirtied into a failed return.
+  guard="$TMP_ROOT/slot-reuse-tracked"
+  git -C "$fmroot" worktree add --quiet --detach "$guard" HEAD || fail "cannot create tracked-payload worktree"
+  mkdir -p "$guard/data"
+  printf 'tracked\n' > "$guard/data/notes.md"
+  git -C "$guard" add -f data/notes.md || fail "cannot stage a tracked payload file"
+  git -C "$guard" -c user.name=test -c user.email=test@example.invalid commit -q -m 'track payload' \
+    || fail "cannot commit a tracked payload file"
+  if bash -c '. "$1"; fm_home_payload_prune "$2"' _ "$ROOT/bin/fm-home-payload-lib.sh" "$guard" 2>/dev/null; then
+    fail "payload prune deleted a payload path that carries tracked files"
+  fi
+  assert_present "$guard/data/notes.md" "refused payload prune removed a tracked file"
+  pass "pooled retirement returns a clean slot, the next seed leases it, and tracked payload is never pruned"
 }
 
 test_fm_home_parameterization() {
@@ -3328,6 +3395,7 @@ EOF
 
 test_durable_home_git_lock_lifecycle
 test_durable_home_git_lock_rollback
+test_durable_home_pool_slot_reuse
 
 test_fm_home_parameterization
 test_lock_status_is_per_home

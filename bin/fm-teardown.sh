@@ -210,6 +210,11 @@
 # Before returning a protected home, the home-lock library verifies and releases
 # only this mate and parent's Git lock; foreign or unknown locks refuse even
 # with --force. A failed return restores owned protection for retry.
+# A slot that goes back to the pool carries no home payload with it, because a
+# returned slot is an ordinary checkout again and a slot still marked for the
+# retired mate refuses the next seed; bin/fm-home-payload-lib.sh owns that
+# cleanup, and it runs only after a successful return so a failed return still
+# leaves the home whole for the retry.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
@@ -352,6 +357,8 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-home-worktree-lock-lib.sh
 . "$SCRIPT_DIR/fm-home-worktree-lock-lib.sh"
+# shellcheck source=bin/fm-home-payload-lib.sh
+. "$SCRIPT_DIR/fm-home-payload-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -2991,6 +2998,12 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend> [<lock-parent>]
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    # A returned slot is a plain pool checkout again, so the retired home's
+    # payload leaves with it; a slot that kept it would refuse the next seed.
+    # This runs after the return, never before, so a failed return still leaves
+    # the whole home intact for the retry the route is preserved for.
+    fm_home_payload_prune "$abs_home_path" \
+      || echo "warning: could not clear the retired home payload at $abs_home_path; the next seed in that slot may refuse it" >&2
     fm_home_worktree_lock_forget "$abs_home_path" "$expected_id" "$lock_parent" || return 1
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0

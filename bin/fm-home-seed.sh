@@ -24,7 +24,8 @@
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
 #       target is safe and belongs to this attempt; existing homes and foreign
-#       locks are preserved. A failed return restores owned protection and warns
+#       locks are preserved. A returned slot keeps no home payload, so the next
+#       seed can lease it. A failed return restores owned protection and warns
 #       because the lease may still be held.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
@@ -53,6 +54,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-home-worktree-lock-lib.sh
 . "$SCRIPT_DIR/fm-home-worktree-lock-lib.sh"
+# shellcheck source=bin/fm-home-payload-lib.sh
+. "$SCRIPT_DIR/fm-home-payload-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -624,6 +627,11 @@ seed_return_treehouse_home() {
     echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
     return 0
   }
+  # A returned slot is an ordinary pool checkout again, so a home this attempt
+  # half-seeded does not leave its payload behind for the next seed to refuse.
+  # Only a released slot is pruned, so a failed return above keeps the home whole.
+  fm_home_payload_prune "$abs_home" \
+    || echo "warning: could not clear the retired home payload at $abs_home; the next seed in that slot may refuse it" >&2
   fm_home_worktree_lock_forget "$abs_home" "$SEED_ID" "$FM_HOME" || return 0
 }
 
