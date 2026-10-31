@@ -615,6 +615,110 @@ test_a_live_row_is_not_superseded() {
   pass "a live row is not superseded by a dispatch that displaced no session"
 }
 
+# The admission boundary may stay busy past the brief wait an invalidation
+# allows: another live process holds it while a fresh process drives the
+# replacement. The uncapped replacement must still continue, and the
+# invalidation it could not apply itself must survive as a pending marker that
+# the next admission applies under the boundary before it counts, or the live
+# replacement would sit behind a row that claims no slot.
+#
+# Start the boundary hold, drive the excluded-model replacement of task-c, and
+# return with the pending marker recorded and the declaration restored. Fails
+# when the replacement was refused, when the busy boundary let it rewrite the
+# registry, or when it lost the invalidation.
+busy_boundary_replacement() {  # <case-dir>
+  local case_dir=$1 lock=$1/home/state/.sol-cap.lock out
+  mkdir "$lock" || fail "the test could not hold the admission boundary"
+  printf '%s\n' "$$" > "$lock/pid"
+  # The declaration excludes the replacement's model, so the replacement
+  # reserves no slot and its invalidation is the best-effort path.
+  printf 'max=4\nmodels=gpt-6-sol\n' > "$case_dir/home/config/sol-cap"
+  out=$(lib_refuse_claim "$case_dir" task-c gpt-6.1-sol) || {
+    rm -rf -- "$lock"
+    fail "a busy admission boundary refused an uncapped replacement: $out"
+  }
+  assert_equals "$out" "not-capped" "an uncapped replacement claimed a slot"
+  rm -rf -- "$lock"
+  assert_equals "-1" "$(registry_row_field "$case_dir" task-c 4)" \
+    "a busy admission boundary let the invalidation rewrite the registry outside it"
+  assert_present "$case_dir/home/state/.sol-cap-supersede-task-c" \
+    "a busy admission boundary lost the replacement's pending invalidation"
+  # The declaration is restored to cover the replacement, so the next
+  # admission must resolve the marker rather than leave the row behind.
+  printf 'max=4\nmodels=gpt-6.1-sol\n' > "$case_dir/home/config/sol-cap"
+}
+
+# The next admission after a pending invalidation runs from a fresh process
+# against the real registry, declaration, and marker files; the endpoint state
+# this fixture cannot provide is stubbed, as the adoption cases above do.
+# Prints "claimed" or the refusal message.
+admit_after_pending() {  # <case-dir> <id> <model>
+  local case_dir=$1 id=$2 model=$3
+  (
+    FM_HOME=$case_dir/home
+    . "$ROOT/bin/fm-wake-lib.sh"
+    . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+    . "$ROOT/bin/fm-sol-cap-lib.sh"
+    fm_backend_of_meta() { printf tmux; }
+    fm_backend_target_of_meta() { printf '%s' "${1##*/}"; }
+    fm_backend_agent_state() { printf alive; }
+    if ! fm_sol_cap_refuse_and_claim "$id" ship codex "$model" \
+      "$case_dir/home/config" "$case_dir/home/state"; then
+      printf '%s\n' "$FM_SOL_CAP_REFUSAL"
+      exit 1
+    fi
+    printf '%s\n' claimed
+  )
+}
+
+test_a_busy_boundary_replacement_lands_its_pending_supersede() {
+  local case_dir out
+  case_dir=$(make_case pending-supersede task-c task-d)
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)" -1
+  fm_write_meta "$case_dir/home/state/task-c.meta" "model=gpt-6.1-sol" "kind=ship"
+  busy_boundary_replacement "$case_dir"
+  out=$(admit_after_pending "$case_dir" task-d gpt-6.1-sol) ||
+    fail "the next admission failed: $out"
+  assert_equals "$out" "claimed" "the next admission did not claim its own slot"
+  assert_absent "$case_dir/home/state/.sol-cap-supersede-task-c" \
+    "the pending invalidation survived the next admission"
+  assert_equals "-2" "$(registry_row_field "$case_dir" task-c 4)" \
+    "the next admission did not supersede the prior incarnation's row"
+  pass "a busy admission boundary keeps the invalidation pending and the next admission supersedes the prior row"
+}
+
+test_a_busy_boundary_supersede_keeps_another_claims_row() {
+  local case_dir out
+  case_dir=$(make_case pending-supersede-other task-c task-d)
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)" -1
+  fm_write_meta "$case_dir/home/state/task-c.meta" "model=gpt-6.1-sol" "kind=ship"
+  write_sol_row "$case_dir/home" other "$(fresh_start)" 0
+  busy_boundary_replacement "$case_dir"
+  out=$(admit_after_pending "$case_dir" task-d gpt-6.1-sol) ||
+    fail "the next admission failed: $out"
+  assert_equals "$out" "claimed" "the next admission did not claim its own slot"
+  assert_equals "0" "$(registry_row_field "$case_dir" other 4)" \
+    "the pending invalidation dropped another admitted claim's row"
+  assert_equals "gpt-6.1-sol" "$(registry_row_field "$case_dir" other 2)" \
+    "the pending invalidation changed another admitted claim's row"
+  pass "a pending invalidation rewrites only its own task id's row"
+}
+
+test_a_busy_boundary_replacement_counts_at_the_ceiling() {
+  local case_dir out
+  case_dir=$(make_case pending-supersede-ceiling task-c task-e)
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)" -1
+  fm_write_meta "$case_dir/home/state/task-c.meta" "model=gpt-6.1-sol" "kind=ship"
+  busy_boundary_replacement "$case_dir"
+  printf 'max=1\nmodels=gpt-6.1-sol\n' > "$case_dir/home/config/sol-cap"
+  out=$(admit_after_pending "$case_dir" task-e gpt-6.1-sol) || true
+  assert_contains "$out" "ceiling reached" \
+    "a capped dispatch counted above the ceiling after a busy-boundary replacement"
+  assert_equals "-2" "$(registry_row_field "$case_dir" task-c 4)" \
+    "the replacement the busy boundary hid was not counted"
+  pass "a busy-boundary replacement holds its slot at the next ceiling decision"
+}
+
 # A superseded row whose current incarnation claims no slot is resolved: the
 # prior incarnation's occupancy must not count forever.
 test_an_uncapped_incarnation_resolves_a_superseded_row() {
@@ -1366,6 +1470,9 @@ test_the_adoption_resolves_a_superseded_row
 test_an_uncapped_incarnation_resolves_a_superseded_row
 test_an_abandoned_replacement_consumes_no_capacity
 test_a_live_row_is_not_superseded
+test_a_busy_boundary_replacement_lands_its_pending_supersede
+test_a_busy_boundary_supersede_keeps_another_claims_row
+test_a_busy_boundary_replacement_counts_at_the_ceiling
 test_relaunched_session_id_replaces_its_own_row
 test_reused_live_sol_endpoint_records_occupancy_at_publication
 test_non_sol_report_releases_a_stale_claim

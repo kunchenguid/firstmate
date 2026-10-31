@@ -34,12 +34,20 @@
 # incarnation a replacement superseded. Only a live positive pid, a delivery
 # reservation, and an adopted claim count toward the ceiling.
 #
+# A replacement that reserves no slot and finds the admission boundary busy
+# records its invalidation outside the registry, as a pending marker file in
+# the task's state directory, because only the boundary may rewrite a registry
+# that retains other tasks' rows. The next admission applies and clears every
+# pending marker under that boundary before it counts, so a busy boundary
+# cannot leave a live replacement behind a row that claims no slot.
+#
 
 # Registries live in each owning state directory; the claim lock lives in
 # the shared local root home's state directory.
 # shellcheck disable=SC2034 # read by bin/fm-spawn.sh after sourcing.
 FM_SOL_REGISTRY_NAME=sol-sessions.tsv
 FM_SOL_LOCK_NAME=.sol-cap.lock
+FM_SOL_PENDING_PREFIX=.sol-cap-supersede-
 
 # The refusal message of the refusing call, and FM_SOL_CLAIM_CREATED set to
 # the claimed task id after a call that both passed the cap and wrote its
@@ -320,12 +328,14 @@ fm_sol_cap_entry_live() {  # <start> <pid>
 
 # fm_sol_cap_active_count <first-state>
 # Count the live capped-session registry rows in every local home's state
-# directory on this machine. Sets FM_SOL_COUNT to the
+# directory on this machine, applying the pending invalidations of each one
+# first, so this is the admission decision pass and expects the admission lock.
+# Sets FM_SOL_COUNT to the
 # count and FM_SOL_ACTIVE_LIST to a "; "-joined listing "<id> (<model>, age
 # N)"; an entry in a state directory other than <first-state> is qualified
 # with " in <state-dir>". Returns 1 with FM_SOL_COUNT_ERROR when the local
-# homes cannot be enumerated, a registry cannot be read, or a row is
-# malformed, because skipping a home could claim a free slot that another
+# homes cannot be enumerated, a registry cannot be read or rewritten, or a row
+# is malformed, because skipping a home could claim a free slot that another
 # home holds.
 fm_sol_cap_home() {
   case "$1" in
@@ -454,6 +464,15 @@ fm_sol_cap_active_count() {  # <first-state>
   fm_epoch_seconds_to FM_SOL_CAP_NOW
   now=$FM_SOL_CAP_NOW
   for state in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
+    # A pending invalidation records a replacement the busy boundary could not
+    # mark itself, so it is applied under this count's admission lock before
+    # any row is counted: a later admission must never count above the
+    # ceiling because a live replacement still looks like the session it
+    # replaced.
+    if ! fm_sol_cap_apply_pending_supersedes "$state"; then
+      FM_SOL_COUNT_ERROR="a pending Sol supersede in $state could not be applied"
+      return 1
+    fi
     file=$state/$FM_SOL_REGISTRY_NAME
     if ! fm_sol_cap_adopt_workers "$state" "$now"; then
       FM_SOL_COUNT_ERROR="cannot reconcile pre-existing capped workers in $state"
@@ -615,6 +634,60 @@ fm_sol_cap_registry_supersede() {  # <registry-file> <id>
   return 0
 }
 
+# fm_sol_cap_supersede_pending <state-dir> <id> <start> <pid>
+# Record, outside the registry, that this task id's row must be superseded as
+# soon as the admission boundary is free. The marker names the row it is
+# invalidating, so a later row of a newer incarnation is left alone. It is
+# written atomically and never rewrites the registry, which only the admission
+# lock may change while it retains other tasks' rows.
+fm_sol_cap_supersede_pending() {  # <state-dir> <id> <start> <pid>
+  local state=$1 id=$2 start=$3 pid=$4 path tmp
+  path=$state/$FM_SOL_PENDING_PREFIX$id
+  tmp=$path.tmp.$$
+  if ! printf '%s\t%s\n' "$start" "$pid" > "$tmp" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  mv -- "$tmp" "$path" 2>/dev/null || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  return 0
+}
+
+# fm_sol_cap_apply_pending_supersedes <state-dir>
+# Apply and clear the pending invalidations of one state directory. The caller
+# holds the admission lock, so the registry rewrite retains every other task's
+# row. A row that still holds the incarnation the marker named is superseded
+# unless it holds live occupancy, because only a row holding no live occupancy
+# may be superseded; a row that has changed since names a later incarnation and
+# is not this invalidation's to resolve, so the marker is simply cleared.
+# Returns 1 when the registry cannot be rewritten, leaving the marker for the
+# next admission rather than counting an unapplied invalidation.
+fm_sol_cap_apply_pending_supersedes() {  # <state-dir>
+  local state=$1 registry path id witness row_start row_pid
+  registry=$state/$FM_SOL_REGISTRY_NAME
+  for path in "$state"/"$FM_SOL_PENDING_PREFIX"*; do
+    [ -e "$path" ] || continue
+    id=${path##*/"$FM_SOL_PENDING_PREFIX"}
+    [ -n "$id" ] || continue
+    witness=$(cat "$path" 2>/dev/null) || return 1
+    row_start=
+    row_pid=
+    if [ -f "$registry" ]; then
+      row_start=$(awk -F'\t' -v id="$id" '$1 == id {print $3; exit}' "$registry" 2>/dev/null || true)
+      row_pid=$(awk -F'\t' -v id="$id" '$1 == id {print $4; exit}' "$registry" 2>/dev/null || true)
+    fi
+    if [ -n "$row_pid" ] &&
+      [ "$row_start"$'\t'"$row_pid" = "$witness" ] &&
+      ! fm_sol_cap_entry_live "$row_start" "$row_pid"; then
+      fm_sol_cap_registry_supersede "$registry" "$id" || return 1
+    fi
+    rm -f -- "$path" || return 1
+  done
+  return 0
+}
+
 # fm_sol_cap_refuse_and_claim <id> <kind> <harness> <model> <config-dir> <state-dir>
 # The guard bin/fm-spawn.sh calls once a spawn's harness/model axis is fully
 # resolved and before any endpoint, worktree, or record exists. A home that
@@ -675,9 +748,14 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
     fi
     # The invalidation waits only briefly for the admission boundary, and it
     # never aborts this dispatch: a dispatch that reserves no slot must not
-    # be refused by ceiling contention, and the next adoption resolves the
-    # marker it writes.
-    fm_sol_cap_lock_try_briefly "$lock" || return 0
+    # be refused by ceiling contention. When the boundary stays busy, the
+    # invalidation becomes a pending marker instead, because the registry is
+    # only rewritten under the boundary; the next admission applies it before
+    # it counts, so the prior row cannot hide the live replacement forever.
+    if ! fm_sol_cap_lock_try_briefly "$lock"; then
+      fm_sol_cap_supersede_pending "$state" "$id" "$row_start" "$row_pid" || true
+      return 0
+    fi
     if ! fm_sol_cap_registry_supersede "$state/$FM_SOL_REGISTRY_NAME" "$id"; then
       fm_lock_release "$lock" || true
       return 0
