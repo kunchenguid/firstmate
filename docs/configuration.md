@@ -1059,12 +1059,12 @@ The complete version 1 schema accepts only these fields:
 | Field | Accepted values and default |
 | --- | --- |
 | `schema_version` | Required number `1`. |
-| `profession` | Required `firstmate-v1` or `director-v1`. |
+| `profession` | Required `firstmate-v1` or `gunner-v1`. |
 | `theme` | `nautical` (default) or `space-fleet`, independently of profession. |
 | `chat` | Optional object with only the three fields below. |
 | `chat.user_address` | One ASCII name/title token, starting with a letter, followed by at most 31 letters, digits, underscores or hyphens; default `pilot`. |
 | `chat.user_marker` | `✈️` (default) or empty string; this marks the user, not the assistant. |
-| `chat.assistant_reply_marker` | `🎬` for director or empty string for firstmate; omission selects the profession's marker. |
+| `chat.assistant_reply_marker` | `🎯` for Gunner (WSO) or empty string for firstmate; omission selects the profession's marker. |
 
 A profile is one JSON object in a regular, readable, single-linked file of at most 4096 bytes beneath a non-symlinked config directory.
 Unknown fields, professions, themes, null values, control characters and instruction-like address strings are rejected rather than interpreted as operating instructions.
@@ -1072,28 +1072,29 @@ A malformed profile emits `PROFILE_INVALID` and applies no selection; the startu
 An invalid explicit inspect/refresh exits nonzero, so the receiving agent must not claim that selection loaded.
 There is no persisted last-good profile cache: correct or remove the invalid file and refresh before claiming a new selection.
 
-For the director profession with space fleet presentation:
+For the Gunner (WSO) profession with space fleet presentation:
 
 ```json
 {
   "schema_version": 1,
-  "profession": "director-v1",
+  "profession": "gunner-v1",
   "theme": "space-fleet",
   "chat": {
     "user_address": "pilot",
     "user_marker": "✈️",
-    "assistant_reply_marker": "🎬"
+    "assistant_reply_marker": "🎯"
   }
 }
 ```
 
-The shipped [firstmate-v1](professions/firstmate-v1.md) and [director-v1](professions/director-v1.md) files own the professional contracts.
-The director's completion knowledge duty does not install a wiki, graph builder or provider integration.
+The shipped [firstmate-v1](professions/firstmate-v1.md) and [gunner-v1](professions/gunner-v1.md) files own the professional contracts.
+The Gunner (WSO) completion knowledge duty does not install a wiki, graph builder or provider integration.
 Theme labels are presentation: space fleet uses fleet command, mission lead and specialist while internal primary/secondmate/worker identifiers remain unchanged.
-The user's airplane and the director's clapboard remain separate from those labels.
+The user's airplane and the assistant's target marker remain separate from those labels.
 Profiles grant no merge/publication permission, select no models and change no running worker.
 
 `bin/fm-profile.sh --help` owns the read-only inspect, JSON inspection, context and explicit refresh commands.
+Inspection also reports the known human-readable profession name, `Gunner (WSO)` or `Firstmate`.
 All use the same resolver and the shipped contracts from the executable's checkout, even when `FM_HOME` selects private data elsewhere.
 Refresh renders current disk duties for the receiving supervisor to apply; it does not inject text into another session or prove that another model consumed it.
 The digest renders the selected contract on fresh startup and context re-emission, and a supported resume/reload/fork through the run wrapper refreshes a configured profile when the same session still owns the home.

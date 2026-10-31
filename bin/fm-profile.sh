@@ -62,7 +62,8 @@ if [ ! -f "$CONTRACT" ] || [ -L "$CONTRACT" ]; then
   exit 1
 fi
 FM_PROFILE_JSON=$(printf '%s\n' "$FM_PROFILE_JSON" | jq -c --arg source "$FILE" --arg contract "$CONTRACT" '
-  . + {source: $source, contract_source: $contract, contract_version: .profession,
+  . + {profession_name: (if .profession == "gunner-v1" then "Gunner (WSO)" else "Firstmate" end),
+    source: $source, contract_source: $contract, contract_version: .profession,
     labels: (if .theme == "space-fleet" then
       {primary:"fleet command",secondmate:"mission lead",worker:"specialist"}
       else {primary:"firstmate",secondmate:"secondmate",worker:"crewmate"} end)}')

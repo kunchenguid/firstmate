@@ -1099,19 +1099,19 @@ test_owned_resume_reloads_disk_profile() {
   make_primary "$root"
   mkdir -p "$root/config"
   printf '%s\n' "$$" > "$root/state/.lock"
-  printf '%s\n' '{"schema_version":1,"profession":"director-v1","theme":"space-fleet"}' > "$root/config/profile.json"
+  printf '%s\n' '{"schema_version":1,"profession":"gunner-v1","theme":"space-fleet"}' > "$root/config/profile.json"
   out=$(FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$RUN" --source resume)
-  assert_contains "$out" 'Director profession v1' 'owned resume did not reload disk profession'
+  assert_contains "$out" 'Gunner (WSO) profession v1' 'owned resume did not reload disk profession'
   assert_contains "$out" 'thoughtful partner' 'owned resume omitted professional duties'
   assert_not_contains "$out" 'SESSION START -' 'owned resume repeated fleet bootstrap'
   printf '%s\n' '{"schema_version":1,"profession":"firstmate-v1"}' > "$root/config/profile.json"
   out=$(FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$RUN" --source reload)
-  assert_contains "$out" 'Firstmate profession v1' 'reload retained stale director profession'
+  assert_contains "$out" 'Firstmate profession v1' 'reload retained stale Gunner profession'
   assert_not_contains "$out" 'thoughtful partner' 'reload still rendered previous profession'
   printf 'malformed\n' > "$root/config/profile.json"
   out=$(FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$RUN" --source resume 2>/dev/null)
   assert_contains "$out" 'PROFILE_INVALID' 'resume lost profile diagnostic on a stderr-suppressing transport'
-  assert_not_contains "$out" 'thoughtful partner' 'invalid resume activated director duties'
+  assert_not_contains "$out" 'thoughtful partner' 'invalid resume activated Gunner duties'
   pass 'owned resume and reload render current disk profession without repeating bootstrap'
 }
 

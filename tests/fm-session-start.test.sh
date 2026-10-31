@@ -3102,14 +3102,14 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_harness "$fakebin" pi
-  printf '%s\n' '{"schema_version":1,"profession":"director-v1","theme":"space-fleet"}' > "$home/config/profile.json"
+  printf '%s\n' '{"schema_version":1,"profession":"gunner-v1","theme":"space-fleet"}' > "$home/config/profile.json"
   out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
-  assert_contains "$out" 'Director profession v1' 'fresh startup omitted profile duties'
+  assert_contains "$out" 'Gunner (WSO) profession v1' 'fresh startup omitted profile duties'
   assert_contains "$out" "$home/config/profile.json" 'startup omitted profile provenance'
   printf '%s\n' '{"schema_version":1,"profession":"firstmate-v1"}' > "$home/config/profile.json"
   out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
   assert_contains "$out" 'Firstmate profession v1' 'compaction did not reread profile selection'
-  assert_not_contains "$out" 'thoughtful partner' 'compaction retained previous director contract'
+  assert_not_contains "$out" 'thoughtful partner' 'compaction retained previous Gunner contract'
   printf 'malformed\n' > "$home/config/profile.json"
   out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source clear 2>&1)
   assert_contains "$out" 'PROFILE_INVALID' 'clear hid invalid profile'

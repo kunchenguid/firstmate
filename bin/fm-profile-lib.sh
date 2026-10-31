@@ -29,7 +29,7 @@ fm_profile_file_valid() {
     if length != 1 then error("one JSON object required") else .[0] end
     | select(type == "object")
     | select(only(["schema_version", "profession", "theme", "chat"]))
-    | select(.schema_version == 1 and (.profession == "firstmate-v1" or .profession == "director-v1"))
+    | select(.schema_version == 1 and (.profession == "firstmate-v1" or .profession == "gunner-v1"))
     | select((has("theme") | not) or .theme == "nautical" or .theme == "space-fleet")
     | select((has("chat") | not) or (.chat | type == "object"))
     | .theme = (.theme // "nautical")
@@ -39,10 +39,10 @@ fm_profile_file_valid() {
     | select((.chat | has("user_marker") | not) or (.chat.user_marker == "✈️" or .chat.user_marker == ""))
     | .profession as $profession
     | select((.chat | has("assistant_reply_marker") | not)
-      or .chat.assistant_reply_marker == (if $profession == "director-v1" then "🎬" else "" end))
+      or .chat.assistant_reply_marker == (if $profession == "gunner-v1" then "🎯" else "" end))
     | .chat.user_address = (.chat.user_address // "pilot")
     | .chat.user_marker = (.chat.user_marker // "✈️")
-    | .chat.assistant_reply_marker = (if .profession == "director-v1" then "🎬" else "" end)
+    | .chat.assistant_reply_marker = (if .profession == "gunner-v1" then "🎯" else "" end)
     | .configured = true
   ' "$file" 2>/dev/null) && [ -n "$FM_PROFILE_JSON" ] || return 1
   FM_PROFILE_ERROR=
