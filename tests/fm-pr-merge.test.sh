@@ -4200,6 +4200,30 @@ test_required_checks_reported_and_green_merge() {
   pass "fm-pr-merge merges when every required check reported and is green"
 }
 
+test_oversized_producer_list_still_verifies() {
+  local case_dir head
+  head=a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7
+  case_dir=$(make_case github-required-oversized-producers)
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED SUCCESS)"
+  write_github_required "$case_dir" classic:ci
+  jq '.protection.required_status_checks.checks[0].app_id = 15368' \
+    "$case_dir/github-branch.json" > "$case_dir/updated.json"
+  mv "$case_dir/updated.json" "$case_dir/github-branch.json"
+  # A busy PR head reports hundreds of check runs, and the producer list
+  # built from them exceeds the kernel exec argument limit when it reaches
+  # jq through --argjson. The required check must still verify and merge.
+  jq -n --argjson head "$head" '{check_runs: [range(700) | {id: ., name: ("job-\(.)|tostring)"), head_sha: $head, app: {id: 15368}, html_url: ("https://github.com/example/repo/actions/runs/\(.)|tostring)"}]}' \
+    > "$case_dir/github-runs.json"
+  [ "$(wc -c < "$case_dir/github-runs.json")" -gt 128000 ] \
+    || fail "oversized-producers: the fixture must exceed the exec argument limit"
+  run_required_case "$case_dir" 105
+  expect_code 0 "$RC" "oversized-producers: a green merge must not fail on producer-list size: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 105 example/repo --squash
+  pass "fm-pr-merge verifies required producers even when the list exceeds the exec argument limit"
+}
+
 test_red_and_unreported_checks_are_reported_together() {
   local case_dir head
   head=a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3
@@ -4588,6 +4612,7 @@ test_check_runs_never_supersede_status_contexts
 test_current_failed_check_run_still_refuses
 test_late_finishing_old_success_does_not_hide_current_failure
 test_late_finishing_old_cancellation_is_superseded
+test_oversized_producer_list_still_verifies
 test_unfinished_rerun_keeps_a_check_red
 test_supersession_never_crosses_check_names
 test_undated_runs_never_supersede

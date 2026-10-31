@@ -992,23 +992,39 @@ github_read_required_contexts() {
 }
 
 github_required_checks_missing() {
-  local json=$1 required=$2 producers=$3
-  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
+  local json=$1 required=$2 producers=$3 tmp
+  # The producers list for a busy PR head can exceed the kernel exec argument
+  # size limit, which turns --argjson into E2BIG and a false "rollup could not
+  # be read" refusal. Stage both documents in temp files and read them with
+  # --slurpfile, which never touches argv size.
+  if ! tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-pr-merge-required.XXXXXX"); then
+    return 1
+  fi
+  if ! printf '%s' "$required" > "$tmp/required.json" \
+    || ! printf '%s' "$producers" > "$tmp/producers.json" \
+    || ! printf '%s' "$json" > "$tmp/pr.json"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  jq -r --slurpfile required "$tmp/required.json" --slurpfile producers "$tmp/producers.json" '
     if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
     | .statusCheckRollup as $reported
-    | $required
+    | $required[0]
     | map(. as $requirement
       | select(any($reported[];
           if $requirement.app_id == null then
             (if .__typename == "CheckRun" then .name else .context end) == $requirement.context
           elif .__typename == "CheckRun" then
             .name == $requirement.context
-            and any($producers[]; .name == $requirement.context and .app.id == $requirement.app_id)
+            and any($producers[0][]; .name == $requirement.context and .app.id == $requirement.app_id)
           else
             .context == $requirement.context
           end) | not)
       | .context) | unique[]
-  ' 2>/dev/null || return 1
+  ' "$tmp/pr.json" 2>/dev/null
+  local rc=$?
+  rm -rf "$tmp"
+  [ "$rc" -eq 0 ]
 }
 
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
