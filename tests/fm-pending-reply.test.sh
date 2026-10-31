@@ -422,6 +422,12 @@ test_partial_resolve_write_blocks_firing() {
     [ "$(phase_of "$state" "$corr")" = resolved ] \
       || fail "partial resolve should leave phase resolved, got $(phase_of "$state" "$corr")"
     [ ! -s "$hook_log" ] || fail "recovery was sent after a partial resolve"
+    # Simulate an exit between phase=resolved and the sidecar removal: a later
+    # watcher pass must still drop the full request text.
+    printf 'leftover request\n' > "$(fm_pending_reply_request_path "$state" "$corr")"
+    fm_pending_reply_tick "$state"
+    [ ! -e "$(fm_pending_reply_request_path "$state" "$corr")" ] \
+      || fail "a later tick must remove a resolved record's leftover request file"
 
     corr=$(fm_pending_reply_create "$home" "$state" "hibit" "partial resolve before escalation")
     fm_pending_reply_mark_delivered "$state" "$corr"
@@ -436,6 +442,12 @@ test_partial_resolve_write_blocks_firing() {
     if grep -qF "blocked [key=pending-reply-$corr]" "$status"; then
       fail "escalation must not publish after a partial resolve"
     fi
+    [ -e "$(fm_pending_reply_request_path "$state" "$corr")" ] \
+      || fail "setup: the interrupted resolve should leave the request file"
+    fm_pending_reply_try_resolve "$state" "$corr" \
+      || fail "a retried resolve of a resolved record should succeed"
+    [ ! -e "$(fm_pending_reply_request_path "$state" "$corr")" ] \
+      || fail "a retried resolve must remove a resolved record's request file"
   ) || exit 1
   pass "a resolve that fails after committing resolved still blocks repost and escalation"
 }
@@ -2123,6 +2135,83 @@ test_summary_keeps_accents_and_caps_by_character() {
   pass "the summary keeps accented letters, drops control characters, and caps by character"
 }
 
+test_recovery_keeps_full_request_and_no_record_is_not_recovery() {
+  local home state corr rec request request_path hook_log msg
+  home=$(setup_parent full-recovery-request)
+  state="$home/state"
+  hook_log="$TMP_ROOT/full-recovery-request.log"
+  : > "$hook_log"
+  request="audit the release chain and then preserve this exact instruction: $(printf 'x%.0s' $(seq 1 180))"
+  FM_PENDING_REPLY_NOW=2200
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  full_request_hook() {
+    printf '%s' "$2" > "$hook_log"
+  }
+  export -f full_request_hook
+  export FM_PENDING_REPLY_SEND_HOOK=full_request_hook
+
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$request")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  printf 'done [corr=%s]: audited access logs, no record of the leaked key\n' "$corr" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "a first-pass report containing no record should resolve"
+  [ ! -e "$(fm_pending_reply_request_path "$state" "$corr")" ] \
+    || fail "a resolved record must not keep the full request"
+
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$request")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  request_path=$(fm_pending_reply_request_path "$state" "$corr")
+  [ "$(cat "$request_path")" = "$request" ] \
+    || fail "the complete original request must be durable"
+  [ "$(fm_pending_reply_get "$rec" request_summary)" != "$request" ] \
+    || fail "the bounded summary must remain separate from the full request"
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  : > "$state/hibit.status"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery should send"
+  msg=$(cat "$hook_log")
+  case "$msg" in
+    *"$request"*) : ;;
+    *) fail "recovery must identify the complete request"$'\\n'"$msg" ;;
+  esac
+  case "$msg" in
+    *"report only - do NOT act"*|*"does not re-issue"*) : ;;
+    *) fail "recovery must keep the full request inert"$'\\n'"$msg" ;;
+  esac
+
+  case "$msg" in
+    *no-record-of-request*) : ;;
+    *) fail "recovery must name the no-record reply word"$'\\n'"$msg" ;;
+  esac
+
+  printf 'done [corr=%s]: no-record-of-request\n' "$corr" > "$state/hibit.status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "a mate that has no record must not count recovery as complete"
+  fi
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "a no-record reply must leave recovery unresolved"
+  [ -f "$request_path" ] || fail "an unresolved record must keep the full request"
+
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null \
+    || fail "a no-record reply should escalate once recovery grace passes"
+  [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated"
+  fm_pending_reply_tick_one "$state" "$corr" idle
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "a no-record reply must not resolve the escalation on a later tick"
+  [ -f "$request_path" ] || fail "an escalated record must keep the full request"
+
+  printf 'done [corr=%s]: audited access logs, no record of the leaked key\n' "$corr" >> "$state/hibit.status"
+  fm_pending_reply_tick_one "$state" "$corr" idle
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "a later real report must resolve past an earlier no-record reply"
+  [ ! -e "$request_path" ] || fail "resolution must remove the full request"
+  unset FM_PENDING_REPLY_SEND_HOOK
+  pass "recovery preserves the full request and no-record is not recovery"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2174,5 +2263,6 @@ test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
 test_same_kind_escalation_reopens_after_operator_close
 test_summary_keeps_accents_and_caps_by_character
+test_recovery_keeps_full_request_and_no_record_is_not_recovery
 
 printf 'ok - all pending-reply tests passed\n'
