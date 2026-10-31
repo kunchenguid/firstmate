@@ -133,6 +133,12 @@ fm_hclab_real_state_roots() {
 # fleet-roots.txt, because a caller may legitimately repoint XDG_STATE_HOME
 # (the liveness test does) and the tripwire must always compare the SAME
 # real-state roots provision saw.
+if [ "$(uname 2>/dev/null)" = Darwin ]; then
+  fm_hclab_file_meta() { /usr/bin/stat -f '%N %i %m %z' "$1" 2>/dev/null; }
+else
+  fm_hclab_file_meta() { stat -c '%n %i %Y %s' "$1" 2>/dev/null; }
+fi
+
 fm_hclab_fleet_state() { # <root>...
   local root files f
   for root in "$@"; do
@@ -140,8 +146,7 @@ fm_hclab_fleet_state() { # <root>...
     files=$(find "$root" \( -type f -o -type s \) -print 2>/dev/null | LC_ALL=C sort) || continue
     [ -n "$files" ] || continue
     printf '%s\n' "$files" | while IFS= read -r f; do
-      # BSD stat first, GNU stat fallback (Linux).
-      stat -f '%N %i %m %z' "$f" 2>/dev/null || stat -c '%n %i %Y %s' "$f" 2>/dev/null
+      fm_hclab_file_meta "$f"
     done
   done | LC_ALL=C sort
 }

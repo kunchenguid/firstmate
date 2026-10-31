@@ -64,8 +64,12 @@ HC_TEST_SOCK=$("$ROOT/bin/fm-hc-lab.sh" socket "$HC_TEST_SES")
 hc_test_refuse_if_unsafe "$HC_TEST_SES" \
   || fail "provisioned session '$HC_TEST_SES' does not satisfy the lab safety contract"
 
+HC_LAB_DIR=$(hc_test_lab_dir)/$HC_TEST_SES
 export HC_SESSION=$HC_TEST_SES FM_HC_SOCKET=$HC_TEST_SOCK
-unset HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE
+export XDG_STATE_HOME="$HC_LAB_DIR/env/xdg-state" \
+  XDG_CONFIG_HOME="$HC_LAB_DIR/env/xdg-config" \
+  XDG_DATA_HOME="$HC_LAB_DIR/env/xdg-data"
+unset HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE HC_SOCKET
 
 FM_HOME_DIR=$TMP_ROOT/home
 WORK_DIR=$TMP_ROOT/work

@@ -408,6 +408,10 @@ fm_backend_required_tool_available() {  # <backend> <tool>
       fm_backend_source rex >/dev/null 2>&1 || return 1
       fm_backend_rex_bin >/dev/null 2>&1
       ;;
+    hc:hc)
+      fm_backend_source hc >/dev/null 2>&1 || return 1
+      fm_backend_hc_bin >/dev/null 2>&1
+      ;;
     *) command -v "$tool" >/dev/null 2>&1 ;;
   esac
 }

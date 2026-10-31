@@ -70,9 +70,12 @@ setup_case() {  # <name> -> sets D, FB, HOMEDIR
 }
 
 # hc_shell <script>: run <script> in bash with the adapter sourced against the
-# stub. HOMETAG is exported so the script can build matching labels.
+# stub. FM_HC_BIN pins the stub so an inherited FM_HC_BIN or an installed
+# herdr-core never wins; CASE_HC_BIN overrides it for binary-resolution cases.
+# HOMETAG is exported so the script can build matching labels.
 hc_shell() {  # <script>
-  FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
+  FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HC_BIN=${CASE_HC_BIN:-$FB/hc} \
+    FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
     HC_SESSION=fmtest bash -c '
       . "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
       fm_backend_source hc || { echo "source failed" >&2; exit 90; }
@@ -141,7 +144,7 @@ test_control_interrupt_delivers_the_harness_keys() {
   mkdir -p "$HOMEDIR/state" "$HOMEDIR/data"
   printf 'window=fmtest:t2\nendpoint_task_id=%s\nworktree=%s\nproject=%s\nharness=claude\nkind=scout\nbackend=hc\nhc_session=fmtest\nhc_terminal=t2\n' \
     "$id" "$D" "$D" > "$HOMEDIR/state/$id.meta"
-  out=$(FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
+  out=$(FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
     FM_STATE_OVERRIDE="$HOMEDIR/state" FM_DATA_OVERRIDE="$HOMEDIR/data" FM_CONTROL_POLL=0.05 \
     "$FM_TEST_ROOT/bin/fm-control.sh" "$id" interrupt 2>&1) || rc=$?
   expect_code 0 "$rc" "interrupt on an hc task should succeed"$'\n'"$out"
@@ -326,14 +329,37 @@ test_send_delimiters_and_binary_socket_pins() {
     "flag-looking text must arrive after the -- delimiter"
   out=$(FM_HC_SOCKET=/tmp/pinned.sock hc_shell 'fm_backend_hc_cli fmtest ls'; cat "$D/log")
   assert_contains "$out" "HC_SOCKET=/tmp/pinned.sock" "FM_HC_SOCKET must pin the socket for the call"
-  FM_HC_BIN=/nonexistent/hc expect_refused hc_shell 'fm_backend_hc_cli fmtest ls'
-  out=$(FM_HC_BIN="$FB/hc" hc_shell 'fm_backend_hc_bin')
-  assert_equals "$out" "$FB/hc" "FM_HC_BIN must win binary resolution"
+  CASE_HC_BIN=/nonexistent/hc expect_refused hc_shell 'fm_backend_hc_cli fmtest ls'
+  mkdir -p "$D/pinned"
+  cp "$FB/hc" "$D/pinned/hc"
+  out=$(CASE_HC_BIN="$D/pinned/hc" hc_shell 'fm_backend_hc_bin')
+  assert_equals "$out" "$D/pinned/hc" "FM_HC_BIN must win over an hc on PATH"
   pass "hc: send text is -- delimited, and FM_HC_BIN/FM_HC_SOCKET pin the call"
+}
+
+test_required_tool_check_uses_the_adapter_resolver() {
+  local out
+  setup_case tools
+  mkdir -p "$D/core-only" "$D/none"
+  cp "$FB/hc" "$D/core-only/herdr-core"
+  out=$(env -u FM_HC_BIN PATH="$D/core-only:/usr/bin:/bin" "$BASH" -c '
+    . "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
+    fm_backend_required_tool_available hc hc && echo core-only-ok' 2>&1)
+  assert_contains "$out" core-only-ok "a herdr-core-only install must satisfy the hc tool check"
+  out=$(FM_HC_BIN="$FB/hc" PATH="$D/none:/usr/bin:/bin" "$BASH" -c '
+    . "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
+    fm_backend_required_tool_available hc hc && echo pinned-ok' 2>&1)
+  assert_contains "$out" pinned-ok "an FM_HC_BIN-only install must satisfy the hc tool check"
+  out=$(FM_HC_BIN=/nonexistent/hc PATH="$FB:/usr/bin:/bin" "$BASH" -c '
+    . "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
+    fm_backend_required_tool_available hc hc && echo found || echo missing' 2>&1)
+  assert_contains "$out" missing "an unusable FM_HC_BIN must report hc missing even with hc on PATH"
+  pass "hc: the bootstrap tool check resolves hc exactly as the adapter does"
 }
 
 fm_test_run \
   test_hc_is_spawn_capable_and_never_autodetected \
+  test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
   test_control_interrupt_delivers_the_harness_keys \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \
