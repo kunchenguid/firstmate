@@ -938,6 +938,30 @@ test_no_mistakes_truly_unpushed_refuses() {
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
 }
 
+test_no_mistakes_mirror_only_branch_refuses() {
+  local case_dir rc local_head
+  case_dir=$(make_case nm-mirror-only)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "mirror-only work"
+  # A branch pushed only to the local pipeline mirror is not on a forge.
+  git init -q --bare "$case_dir/mirror.git"
+  git -C "$case_dir/project" remote add no-mistakes "$case_dir/mirror.git"
+  git -C "$case_dir/wt" push -q no-mistakes fm/task-x1
+  git -C "$case_dir/project" fetch -q no-mistakes
+  git -C "$case_dir/wt" rev-parse --verify -q refs/remotes/no-mistakes/fm/task-x1 >/dev/null \
+    || fail "nm-mirror-only: mirror remote-tracking ref was not created"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "nm-mirror-only: teardown should refuse mirror-only work"
+  grep -q REFUSED "$case_dir/stderr" || fail "nm-mirror-only: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" nm-mirror-only "$local_head"
+  pass "branch pushed only to the no-mistakes mirror is refused as unlanded"
+}
+
 test_squash_merged_branch_deleted_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-merged)
@@ -5976,6 +6000,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_no_mistakes_mirror_only_branch_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_pr_ready_line_waits_for_green_when_opted_in
