@@ -2867,18 +2867,16 @@ EOF
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_PIPELINE_ID=0 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted a degraded line for a pipeline without a readable id"
 
-  # A still-open merge request with a green head pipeline reads its merge-train
-  # car: present is "ontrain", an absent car (404) is a train drop naming the
-  # merge status, and a failed or unknown car read stays silent.
+  # A missing-car response is ambiguous and stays silent; only a present car
+  # is sufficient evidence for ontrain.
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car run_poll "$dir")
   [ "$out" = ontrain ] || fail "GitLab poll did not report a merge request on its train: $out"
   out=$(FM_TEST_GLAB_STDERR_NOTICE=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car run_poll "$dir")
   [ "$out" = ontrain ] || fail "a stderr notice on a good car read spoiled the on-train report: $out"
   out=$(FM_TEST_GLAB_STDERR_NOTICE=1 FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
-  [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941" ] \
-    || fail "stderr noise on a 404 car read hid the train drop: $out"
+  [ -z "$out" ] || fail "GitLab poll treated an ambiguous car-endpoint 404 as a train drop: $out"
   out=$(FM_TEST_GLAB_STATE=locked FM_TEST_GLAB_PIPELINE=canceled FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_DETAIL=need_rebase run_poll "$dir")
-  [ "$out" = "degraded train=dropped url=$url reason=need_rebase pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941" ] || fail "GitLab poll did not report a train drop with a non-failed pipeline: $out"
+  [ -z "$out" ] || fail "GitLab poll treated an ambiguous car-endpoint 404 as a train drop: $out"
   # A train drop names only the pipeline link, so a merge request never on a
   # train costs no pipeline detail reads on each poll.
   : > "$dir/glab.log"

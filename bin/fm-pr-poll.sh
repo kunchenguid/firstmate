@@ -324,20 +324,9 @@ case "$provider" in
           printf '%s' "$car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1 \
             && printf '%s\n' ontrain
         else
-          case $car_err in
-            *'(HTTP 404)'*)
-              reread=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null \
-                | jq -r 'if type == "object" and (.state | type) == "string" then .state else error("invalid") end' 2>/dev/null) \
-                || exit "$unknown"
-              case $reread in opened|locked) ;; *) exit 0 ;; esac
-              line="degraded train=dropped url=$url"
-              [ -z "$reason" ] || line="$line reason=$reason"
-              [ -z "$pipeline" ] || line="$line pipeline_url=https://$host/$path/-/pipelines/$pipeline"
-              [ "${#line}" -le 2000 ] || exit 0
-              printf '%s\n' "$line"
-              ;;
-            *) exit 0 ;;
-          esac
+          # A missing car endpoint response does not prove removal: it can
+          # also mean this endpoint is unavailable or inaccessible.
+          exit 0
         fi
         exit 0
         ;;
