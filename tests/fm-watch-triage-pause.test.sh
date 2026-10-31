@@ -1376,13 +1376,13 @@ test_undated_pause_overdue_bound() {
   local dir state
   dir=$(paused_until_fixture undated-overdue "" 0); state="$dir/state"
   printf 'paused: waiting for an external dependency\n' > "$state/until.status"
-  touch -m -d "@$(( $(date +%s) - 86390 ))" "$state/until.status"
+  set_mtime "$(( $(date +%s) - 86390 ))" "$state/until.status"
+  printf '%s' "$(seen_sig "$state/until.status")" > "$state/.seen-until_status"
   export FM_PAUSE_UNDATED_MAX_SECS=86400
   until_watch "$dir" 240
-  if ! wait_poll_cycle "$state" "$UNTIL_PID"; then reap "$UNTIL_PID"; fail "undated pause exited before its bound"; fi
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "undated pause did not complete its ordinary recheck"; }
   [ -z "$(status_open_decisions "$state/until.status")" ] || fail "undated pause opened a decision before its bound"
-  reap "$UNTIL_PID"
-  touch -m -d "@$(( $(date +%s) - 86410 ))" "$state/until.status"
+  set_mtime "$(( $(date +%s) - 86410 ))" "$state/until.status"
   until_watch "$dir" 240
   wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "overdue undated pause did not surface"; }
   grep -Fq 'paused-overdue-until' < <(status_open_decisions "$state/until.status") || fail "overdue undated pause did not open a decision"
