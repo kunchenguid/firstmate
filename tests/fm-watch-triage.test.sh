@@ -724,6 +724,53 @@ test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
   pass "a secondmate's unmarked routine progress absorbs when provably working; routed, terminal, note, marked, and unknown lines surface"
 }
 
+
+
+test_claimed_run_outcomes() {
+  local outcome dir state fakebin out wt task branch pid expected
+  for outcome in missing matching; do
+    dir=$(make_case "claimed-run-$outcome"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; wt="$dir/worktree"; task=claim
+    mkdir -p "$wt"
+    git -C "$wt" init -q
+    branch=$(git -C "$wt" symbolic-ref --short HEAD)
+    printf 'worktree=%s\\n' "$wt" > "$state/$task.meta"
+    printf 'working: validation started\\n' > "$state/$task.status"
+    { date +%s; printf '%s\\n%s\\n' "$branch" "$(size_of "$state/$task.status")"; } > "$state/.claimed-run-$task"
+    printf 'v2\\t%s\\t%s@%s' "$(status_observed_signature "$state/$task.status")" \
+      "$(size_of "$state/$task.status")" "$(_fm_open_decisions_file_ident "$state/$task.status")" \
+      > "$state/.seen-claim_status"
+    if [ "$outcome" = matching ]; then
+      cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run %s\\n' "$FM_EXPECT_BRANCH"
+SH
+      expected=0
+    else
+      cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run other-branch\\n'
+SH
+      expected=1
+    fi
+    chmod +x "$fakebin/no-mistakes"
+    export FM_EXPECT_BRANCH="$branch"
+    PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "claimed-run $outcome did not surface"; }
+    [ ! -e "$state/.claimed-run-$task" ] || fail "claimed-run $outcome retained its marker"
+    if [ "$expected" = 1 ]; then
+      [ "$(grep -c 'claimed-run-claim' "$out")" -eq 1 ] || fail "missing run did not emit exactly one wake: $(cat "$out")"
+    else
+      [ ! -s "$out" ] || fail "matching run emitted a wake: $(cat "$out")"
+    fi
+  done
+  unset FM_EXPECT_BRANCH
+  pass "delayed validation claims flag only when the branch has no run, then clear their markers"
+}
+
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
