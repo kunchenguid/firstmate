@@ -49,8 +49,11 @@
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
 #          process, an unreadable target, and an unverified backend; respawn
 #          failed names whether the endpoint was missing or agent-less.
-#          Already-live and successfully relaunched secondmates are silent
-#          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
+#          Already-live secondmates are silent unless FM_BOOTSTRAP_VERBOSE_FACTS=1
+#          requests BOOTSTRAP_INFO facts, while a successful relaunch also forwards
+#          the replacement launch's own `model pin ...` verdict line when its launch
+#          recorded one, so the evidence the spawner observed reaches this report;
+#          bin/fm-spawn.sh's header owns that wording.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -826,6 +829,7 @@ secondmate_liveness_one() {  # <meta> <id>
       if fm_secondmate_liveness_relaunch "$meta" "$id"; then
         [ "$FM_SM_LIVE_RESUME" = 1 ] || secondmate_note_respawned "$id"
         report_relaunch "$id" "$FM_SM_LIVE_CAUSE" "$FM_SM_LIVE_WHERE"
+        fm_sm_live_model_verdicts
       elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then
         echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $FM_SM_LIVE_REASON"
       else

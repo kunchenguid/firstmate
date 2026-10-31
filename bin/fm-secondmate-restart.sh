@@ -49,7 +49,11 @@
 # metadata from the identity the host confirmed, since the host-local verb can
 # only rewrite its own endpoint record. The restart decision, the profile, the
 # request text, the bound, the failure vocabulary, and this report are all
-# computed here in the primary and are identical for both.
+# computed here in the primary and are identical for both. A reported restart
+# also carries, unchanged, the one-line `model pin asserted|mismatch|unverified`
+# verdict its relaunch observed: bin/fm-spawn.sh writes that evidence to the
+# launch's own stderr and nowhere else, so a copy dropped here is the only copy
+# that existed. Forwarding it never changes a restart's outcome.
 #
 # Nothing here forces, stashes, or discards anything. bin/fm-control.sh owns the
 # restart transaction, its checkpoint, its journal, and its rollback; a refusal
@@ -72,7 +76,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,69{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in
@@ -183,6 +187,12 @@ restart_mate() {  # <array-index>
     else
       printf 'restarted: %s (%s)\n' "$id" "$ran_on"
     fi
+    # Report the evidence the relaunch observed about the replacement it just
+    # started. bin/fm-spawn.sh writes that one-line model pin verdict to the
+    # launch's stderr and nowhere else, so a copy dropped here is the only copy
+    # that existed. `sed -E`: `\|` alternation in a basic expression is a GNU
+    # extension stock BSD/macOS sed rejects, which would match nothing.
+    printf '%s\n' "$restart_out" | sed -nE '/^model pin (asserted|mismatch|unverified):/p' || true
     return
   fi
 

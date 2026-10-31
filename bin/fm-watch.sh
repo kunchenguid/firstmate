@@ -176,7 +176,11 @@
 #                          same guarded fm-spawn.sh --secondmate path the
 #                          session-start sweep uses; one wake per relaunch, and
 #                          state/.secondmate-relaunch-<id> keeps the durable
-#                          per-mate count (bin/fm-secondmate-liveness-lib.sh)
+#                          per-mate count (bin/fm-secondmate-liveness-lib.sh).
+#                          The same reason carries the replacement's own
+#                          `model pin ...` verdict line, newline-separated,
+#                          when its launch recorded one (bin/fm-spawn.sh's
+#                          header owns that wording).
 #   check: secondmate <id> auto-relaunch failed after <cause>: <detail>
 #                          the same verdict authorized recovery but the
 #                          relaunch itself failed; the attempt is ledgered and
@@ -1137,7 +1141,7 @@ secondmate_liveness_tick() {
   [ "$(age_of "$tick_marker")" -ge "$SECONDMATE_LIVENESS_SECS" ] || return 0
   touch "$tick_marker" || return 1
   local now=$(( $(date +%s) )) meta id kind
-  local bound_marker attempts notify_key reason queued err first_reason='' failed=0
+  local bound_marker attempts notify_key reason queued err verdict first_reason='' failed=0
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
@@ -1164,6 +1168,8 @@ secondmate_liveness_tick() {
           fi
         elif fm_secondmate_liveness_relaunch "$meta" "$id" "$SECONDMATE_LIVENESS_TIMEOUT"; then
           reason="check: secondmate $id auto-relaunched after $FM_SM_LIVE_CAUSE ($FM_SM_LIVE_WHERE)"
+          verdict=$(fm_sm_live_model_verdicts)
+          [ -z "$verdict" ] || reason="$reason"$'\n'"$verdict"
           notify_key="secondmate-relaunch-$id-$now"
         elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then
           err=$FM_SM_LIVE_REASON

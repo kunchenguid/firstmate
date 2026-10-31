@@ -371,6 +371,7 @@ family_for_basename() {
     fm-launch-prompt-signals-live-e2e.test.sh|fm-backend-t3code-live-e2e.test.sh|\
     fm-backend-t3code-pr-tools-live-e2e.test.sh|\
     fm-pi-seeded-home-trust-live-e2e.test.sh|\
+    fm-model-pin-readback-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
     fm-worker-account-live-e2e.test.sh|\
@@ -831,6 +832,7 @@ tests/fm-mail-check.test.sh 7524
 tests/fm-mail.test.sh 9684
 tests/fm-muse-harness.test.sh 46548
 tests/fm-muse-signals-live-e2e.test.sh 52
+tests/fm-model-pin-readback-live-e2e.test.sh 90
 tests/fm-nm-test-contract.test.sh 853
 tests/fm-no-mistakes-required.test.sh 270
 tests/fm-omp-harness.test.sh 63796
@@ -1756,7 +1758,14 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-spawn.sh)
+      # The launcher's own contracts, plus the live guard that proves the vendor
+      # facts its pinned-model assertion reads a model back through.
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' "__script__:fm-model-pin-readback-live-e2e.test.sh"
+      ;;
+    bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
