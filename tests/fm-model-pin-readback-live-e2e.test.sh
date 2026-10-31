@@ -15,7 +15,7 @@
 # regressions in tests/fm-control-relaunch.test.sh and
 # tests/fm-spawn-dispatch-profile.test.sh can only replay the assumption they were
 # written with. pi 1.4.0 and claude 2.1.314 are the releases recorded in
-# docs/verification/runtime-backends.md "Pinned model on a resumed session"; this
+# docs/verification/runtime-backends.md "Pinned model readback after a launch"; this
 # guard is the command that refreshes that record, and it fails naming the harness
 # and version rather than passing over a moved surface:
 #   FM_MODEL_PIN_READBACK_LIVE=1 bin/fm-test-run.sh \
