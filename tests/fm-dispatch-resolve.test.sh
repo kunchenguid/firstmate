@@ -1153,6 +1153,54 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its resolver-only authoritative quota provider"
 assert_contains "$out" "  profile: --harness 'agy'" "provider-less agy rule resolves"
 
+write_agy_tiers() {  # <path> <gemini row JSON or ""> <claude_gpt row JSON or "">
+  jq -n --argjson g "${2:-null}" --argjson c "${3:-null}" '{
+    generatedAt: "2030-01-01T00:00:00Z",
+    schemaVersion: 5,
+    providers: [{ provider: "agy", state: { status: "fresh" }, quotaSemantics: { status: "known", effectiveAvailability: ([$g, $c] | map(select(. != null))) } }]
+  }' > "$1"
+}
+AGY_GEMINI='{"scope":"gemini","status":"known","effectivePercentRemaining":80,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.5}}'
+AGY_CLAUDE_GPT_OK='{"scope":"claude_gpt","status":"known","effectivePercentRemaining":55,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.2}}'
+AGY_CLAUDE_GPT_ZERO_PCT='{"scope":"claude_gpt","status":"known","effectivePercentRemaining":0,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.2}}'
+AGY_CLAUDE_GPT_ZERO='{"scope":"claude_gpt","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"},"selection":{"spendPriority":-1}}'
+QUOTA_SCOPE_RULE='{"rules":[{"when":"Agy work.","use":{"harness":"agy","quota_scope":"claude_gpt"}}]}'
+cp "$QUOTA" "$QUOTA.base"
+
+printf '%s\n' '{"rules":[{"when":"Agy work.","use":{"harness":"agy"}}]}' > "$RULES"
+write_agy_tiers "$QUOTA" "$AGY_GEMINI" "$AGY_CLAUDE_GPT_ZERO"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  -> eligible, unranked: no applicable quota row for provider agy: disclosed uncertainty' "without quota_scope an agy tier row stays unbound, even when exhausted"
+
+printf '%s\n' "$QUOTA_SCOPE_RULE" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=claude_gpt  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at claude_gpt' "a declared exhausted tier row blocks the candidate"
+
+write_agy_tiers "$QUOTA" "$AGY_GEMINI" "$AGY_CLAUDE_GPT_ZERO_PCT"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=claude_gpt  remaining=0%' "a declared 0% tier row is read with a non-exhausted runway"
+assert_contains "$out" '-> not eligible' "a declared 0% tier row blocks the candidate without an exhausted runway"
+assert_not_contains "$out" '  profile:' "a declared 0% tier row emits no profile"
+
+write_agy_tiers "$QUOTA" "$AGY_GEMINI" "$AGY_CLAUDE_GPT_OK"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=claude_gpt  remaining=55%  spendPriority=0.2  runway=through_reset  -> eligible' "a declared healthy tier row ranks the candidate on that row alone"
+assert_contains "$out" "  profile: --harness 'agy'" "the healthy declared tier resolves"
+
+write_agy_tiers "$QUOTA" "$AGY_GEMINI" ""
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=claude_gpt  remaining=-%  spendPriority=-  runway=-  -> eligible, unranked: declared quota_scope claude_gpt has no quota row for provider agy: not rankable: disclosed uncertainty' "a declared tier row missing from the snapshot is eligible with disclosed uncertainty"
+assert_not_contains "$out" 'not eligible' "a missing declared tier row never blocks the candidate"
+
+cp "$QUOTA.base" "$QUOTA"
+cp "$BASE_RULES" "$RULES"
+pass "quota_scope binds an agy candidate to its declared tier row"
+
 GEMINI_RULE="$TMP_ROOT/gemini-rule.json"
 printf '%s\n' '{"rules":[{"when":"Gemini work.","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$GEMINI_RULE"
 cp "$GEMINI_RULE" "$RULES"
@@ -1721,6 +1769,11 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":1.5}]}|min_confidence must be a number from 0 through 1 when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20,"provider":"CLAUDE"}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
+  '{"rules":[{"when":"x","use":{"harness":"agy","quota_scope":""}}]}|each use profile quota_scope must be a non-empty string when present' \
+  '{"rules":[{"when":"x","use":{"harness":"agy","quota_scope":7}}]}|each use profile quota_scope must be a non-empty string when present' \
+  '{"rules":[{"when":"x","use":["codex"]}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":["codex"]}|each default profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"agy"}}],"default":{"harness":"agy","quota_scope":["gemini"]}}|each default profile quota_scope must be a non-empty string when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":" claude"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":"claude\n"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
