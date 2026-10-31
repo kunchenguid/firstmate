@@ -36,6 +36,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -207,6 +209,13 @@ fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_pr_file_link_count "$META")" = 1 ] \
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
+if [ -n "${FM_PR_CHECK_EXPECT_INCARNATION:-}" ]; then
+  CURRENT_LINE=$(last_status_line "$STATE/$ID.status")
+  [ "$(grep '^spawn_gen=' "$META" | tail -1 | cut -d= -f2-)" = "$FM_PR_CHECK_EXPECT_INCARNATION" ] \
+    && [ "$(status_line_verb "$CURRENT_LINE")" = done ] \
+    && [ "$(status_line_note "$CURRENT_LINE")" = "$(status_line_note "$FM_PR_CHECK_EXPECT_READY_LINE")" ] \
+    || { echo "error: ready task outcome changed before PR registration" >&2; exit 1; }
+fi
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }

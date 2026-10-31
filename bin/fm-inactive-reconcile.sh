@@ -464,7 +464,7 @@ report_child_ledger_locked() { # <id> <meta>
 # A canonical CI-ready ship outcome arms its merge poll without waiting for a
 # supervisor turn. fm-pr-check owns validation, metadata, and sidecar creation.
 arm_ready_pr_watch() { # <id> <meta>
-  local id=$1 meta=$2 status line note url recorded arm_output
+  local id=$1 meta=$2 status line note url recorded arm_output incarnation
   [ "$(meta_field "$meta" kind)" != secondmate ] || return 0
   status="$STATE/$id.status"
   line=$(child_terminal_ledger_line "$status") || return 0
@@ -482,11 +482,14 @@ arm_ready_pr_watch() { # <id> <meta>
   url=${url% checks green}
   case "$url" in *[[:space:]]*|'') return 0 ;; esac
   recorded=$(meta_field "$meta" pr)
+  incarnation=$(meta_incarnation "$meta")
   if [ "$recorded" = "$url" ] && [ -f "$STATE/$id.check.sh" ] \
     && [ ! -L "$STATE/$id.check.sh" ]; then
     return 0
   fi
-  if ! arm_output=$("$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1); then
+  if ! arm_output=$(FM_PR_CHECK_EXPECT_INCARNATION="$incarnation" \
+    FM_PR_CHECK_EXPECT_READY_LINE="$line" \
+    "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1); then
     publish_actionable "pr-watch-arm:$id" \
       "PR merge watch could not be armed for task $id ($url): $(clean_field "$arm_output")" || true
   fi
