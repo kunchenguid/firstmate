@@ -2009,7 +2009,7 @@ test_pi_model_selector_variants_and_quoted_content() {
   pass "Pi selector marker and border variants block retries; quoted content does not"
 }
 
-test_dialog_matcher_is_portable_awk() {
+test_dialog_matcher_is_portable_awk() (
   # The matcher runs under whatever awk the host has. A stock macOS awk
   # and mawk both read a \S as a literal S, so a \S pattern would never
   # match the recorded row and the guard would be silently dead on
@@ -2019,32 +2019,43 @@ test_dialog_matcher_is_portable_awk() {
   # all of them, and a pattern the host's awk cannot read must not be
   # what the matcher uses. This asserts the BEHAVIOUR under each awk,
   # never the bytes of the matcher's source.
-  local screen out rc awk_bin probe_bin dir bound probed=0
+  local screen out rc awk_bin probe_bin dir fixture legacy group processes probed=0
+  fixture=$(mktemp -d "${TMPDIR:-/tmp}/fm-awk-probe.XXXXXX") || fail "could not create awk probe fixture"
+  trap 'fm_test_remove_tree "$fixture"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  trap 'exit 131' QUIT
+  mkdir "$fixture/bin"
+  cat > "$fixture/bin/gawkbug" <<'SENTINEL'
+#!/usr/bin/env bash
+fixture=$(dirname "$0")/..
+printf "%s\n" "$$" > "$fixture/invoked"
+ps -o pgid= -p "$$" > "$fixture/group"
+trap 'trap "" TERM; wait; exit 0' TERM
+sleep 300 &
+printf "%s\n" "$!" > "$fixture/child"
+wait
+SENTINEL
+  chmod +x "$fixture/bin/gawkbug"
+  legacy=$(PATH="$fixture/bin:$PATH" compgen -c gawk)
+  case "$legacy" in *gawkbug*) ;; *) fail "legacy prefix discovery missed gawkbug sentinel" ;; esac
   screen=$(pi_model_picker_screen)
-  # A fixed list, never `compgen -c`: compgen -c matches PREFIXES, so
-  # `compgen -c gawk` also yields GNU awk's helper programs such as
-  # gawkbug. Symlinking one of those as `awk` starts a program that is not
-  # an awk at all, and a helper that waits on stdin hangs the shard until
-  # the CI timeout kills the script and leaves it orphaned behind.
   for awk_bin in awk mawk gawk nawk; do
-    probe_bin=$(command -v "$awk_bin" 2>/dev/null) || continue
+    probe_bin=$(PATH="$fixture/bin:$PATH" command -v "$awk_bin" 2>/dev/null) || continue
     probed=$((probed + 1))
-    dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-awk-probe.XXXXXX")
+    dir="$fixture/$awk_bin"
+    mkdir "$dir"
     ln -sf "$probe_bin" "$dir/awk"
-    # A per-call bound, not just stdin redirection: an installed name that is
-    # not an awk must fail this case loudly and quickly instead of blocking
-    # the shard, and fm_run_timed kills the group so no probe child outlives
-    # the failure. stdin is /dev/null so a program that reads it sees EOF.
-    bound=${FM_AWK_PROBE_TIMEOUT_SECS:-20}
     # Expansion is intentionally deferred to the child bash passed to -c.
     # shellcheck disable=SC2016
-    out=$(fm_run_timed "$bound" env PATH="$dir:$PATH" bash -c '
+    out=$(fm_run_timed 10 env PATH="$dir:$PATH" bash -c '
       . "$1"
       fm_composer_blocking_dialog "$2"
     ' _ "$ROOT/bin/fm-composer-lib.sh" "$screen" 2>/dev/null </dev/null); rc=$?
     fm_test_remove_tree "$dir"
     fm_timed_out "$rc" \
-      && fail "$probe_bin did not finish within ${bound}s as awk; the name is not an awk implementation"
+      && fail "$probe_bin did not finish within 10s as awk; the name is not an awk implementation"
     [ "$rc" -eq 0 ] \
       || fail "the recorded Pi model selector did not match under $awk_bin (rc $rc)"
     [ "$out" = 'Pi model selector' ] \
@@ -2052,8 +2063,21 @@ test_dialog_matcher_is_portable_awk() {
   done
   [ "$probed" -gt 0 ] \
     || fail "no awk implementation on this host: the matcher's portability is unproven"
+  [ ! -e "$fixture/invoked" ] || fail "exact awk discovery invoked gawkbug sentinel"
+  out=$(fm_run_timed 1 "$fixture/bin/gawkbug" "$fixture"); rc=$?
+  [ "$rc" -eq 124 ] || fail "blocking sentinel returned $rc instead of timeout status 124"
+  [ -s "$fixture/invoked" ] && [ -s "$fixture/child" ] \
+    || fail "blocking sentinel did not start its descendant"
+  group=$(cat "$fixture/group")
+  case "$group" in ''|*[!0-9[:space:]]*) fail "invalid sentinel process group: $group" ;; esac
+  processes=$(ps -eo pgid=,stat=) || fail "could not inspect sentinel process group"
+  if printf '%s\n' "$processes" | awk -v group="$group" '$1 == group && $2 !~ /^Z/ { found=1 } END { exit !found }'; then
+    fail "awk probe process group $group still has a live process"
+  fi
+  fm_test_remove_tree "$fixture"
+  [ ! -e "$fixture" ] || fail "awk probe fixture cleanup failed"
   pass "the recorded Pi model selector matches under every awk on this host"
-}
+)
 
 test_dialog_note_skips_the_match_when_no_sink_is_set() {
   local screen out rc before after
