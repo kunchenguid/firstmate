@@ -306,7 +306,11 @@
 #     grace period to any survivor whose process identity still matches. Both
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     processes. Idempotent: nothing left to find is a silent no-op. The lsof
+#     binary is resolved by fm_lsof_bin (bin/fm-lock-lib.sh), never by PATH
+#     alone: macOS ships lsof only as /usr/sbin/lsof, and a PATH without
+#     /usr/sbin would otherwise demote every teardown to the process-group
+#     fallback and quietly lose this reaping.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -370,7 +374,7 @@ teardown_require_backend_prerequisites() {  # <backend> <task-id>
 # Retiring a T3 secondmate home needs lsof to prove its provider processes
 # have left it (t3code_secondmate_home_shutdown_barrier).
 t3code_secondmate_lsof_check() {  # <task-id> <home>
-  command -v lsof >/dev/null 2>&1 && return 0
+  fm_lsof_bin >/dev/null 2>&1 && return 0
   echo "REFUSED: cannot prove T3 secondmate $1's provider processes have left ${2:-its home} (lsof is unavailable); preserving the home and its records for retry" >&2
   return 1
 }
@@ -2298,10 +2302,11 @@ conclude_task_no_mistakes_run() {  # <worktree>
 # documents as slow). Never $$ (this script's own pid). Empty output when
 # nothing matches; failure means the scan could not establish a safe result.
 pids_with_cwd_under() {  # <dir>
-  local dir=$1 out pid path line
+  local dir=$1 out pid path line lsof_bin
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
+  lsof_bin=$(fm_lsof_bin) || return 1
+  out=$("$lsof_bin" -a -d cwd -Fpn 2>/dev/null) || return 1
   [ -n "$out" ] || return 0
   pid=
   while IFS= read -r line; do
@@ -2423,12 +2428,14 @@ reap_task_backend_process_group() {  # <label>
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
 # the recheck. A missing lsof uses the backend process-group fallback; an lsof
-# scan error refuses before destructive teardown.
+# scan error refuses before destructive teardown. "Missing" is decided by
+# fm_lsof_bin (bin/fm-lock-lib.sh), which looks past PATH into the standard
+# system locations - a PATH without /usr/sbin is not a host without lsof.
 reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
   shift
-  if ! command -v lsof >/dev/null 2>&1; then
+  if ! fm_lsof_bin >/dev/null 2>&1; then
     reap_task_backend_process_group "$label"
     return 0
   fi
