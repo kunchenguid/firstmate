@@ -616,7 +616,7 @@ test_chained_raw_launch_strips_ai_trailer_in_every_step() {
   launch=$(cat "$LAUNCH_LOG")
   (
     cd "$WT_DIR" || exit 1
-    unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+    unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 FM_GIT_HOOK_ACTIVE
     fm_git_identity 'Captain Tests' 'captain@example.invalid'
     bash -c "$launch"
   ) || fail "executing the chained raw launch failed"$'\n'"launch: $launch"
