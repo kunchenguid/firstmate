@@ -188,20 +188,42 @@ SH
 
   # Live spaced-path proofs through the real argv readers (/proc cmdline on
   # Linux, KERN_PROCARGS2 on macOS): a Bun script whose SINGLE argument
-  # contains a space must never be re-split into an omp path...
+  # contains a space must never be re-split into an omp path. Probe the fake
+  # Bun process DIRECTLY instead of letting fm-harness.sh walk the suite's own
+  # ancestry: when the suite itself runs inside an omp session within eight
+  # hops, that outer session legitimately satisfies the walk and the assertion
+  # would fail even though the script path was rejected correctly.
   mkdir -p "$TMP_ROOT/omp tools"
   cat > "$TMP_ROOT/omp tools/task.js" <<'SH'
 #!/usr/bin/env bash
-"$1"
+"$@"
 :
 SH
   chmod +x "$TMP_ROOT/omp tools/task.js"
-  out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-    "$bin/bun" "$TMP_ROOT/omp tools/task.js" "$HARNESS")
-  [ "$out" != omp ] \
-    || fail "a space inside one Bun script argument must not manufacture an omp path"
-  # ...and a genuine omp script under a spaced directory is identified from
-  # its real argv boundary, so the marker outranks an inherited CLAUDECODE.
+  "$bin/bun" "$TMP_ROOT/omp tools/task.js" sleep 30 &
+  local probe=$! probe_argv='' tries=0
+  # Wait out the fork/exec window: mid-exec the child still carries the
+  # suite's own argv, and probing then would test the wrong command line.
+  while [ "$tries" -lt 100 ]; do
+    probe_argv=$(fm_process_argv "$probe" 2>/dev/null | sed -n 2p)
+    [ "$probe_argv" = "$TMP_ROOT/omp tools/task.js" ] && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ "$probe_argv" = "$TMP_ROOT/omp tools/task.js" ] || {
+    kill "$probe" 2>/dev/null; wait "$probe" 2>/dev/null
+    fail "fixture: the fake Bun process did not publish its spaced script path as one argv element"
+  }
+  if fm_bun_harness_name "$bin/bun" "$probe" >/dev/null; then
+    kill "$probe" 2>/dev/null; wait "$probe" 2>/dev/null
+    fail "a space inside one Bun script argument must not manufacture an omp path"
+  fi
+  kill "$probe" 2>/dev/null || true
+  wait "$probe" 2>/dev/null || true
+  # The other direction, end to end through fm-harness.sh: a genuine omp
+  # script under a spaced directory is identified from its real argv boundary,
+  # so the marker outranks an inherited CLAUDECODE. (The nearest-match walk
+  # finds this fake Bun first, so an outer omp session cannot mask it.)
   mkdir -p "$TMP_ROOT/My Tools"
   cat > "$TMP_ROOT/My Tools/omp" <<'SH'
 #!/usr/bin/env bash
