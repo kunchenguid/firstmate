@@ -63,6 +63,8 @@ SH
   ln -s "$ROOT/bin/fm-omp-process-lib.sh" "$fake/bin/fm-omp-process-lib.sh"
   # fm-home-worktree-lock-lib.sh: teardown sources it for the durable-home lock.
   ln -s "$ROOT/bin/fm-home-worktree-lock-lib.sh" "$fake/bin/fm-home-worktree-lock-lib.sh"
+  # fm-home-payload-lib.sh: teardown sources it for the returned pool slot payload.
+  ln -s "$ROOT/bin/fm-home-payload-lib.sh" "$fake/bin/fm-home-payload-lib.sh"
   ln -s "$ROOT/bin/fm-agent-process-lib.sh" "$fake/bin/fm-agent-process-lib.sh"
   ln -s "$ROOT/bin/fm-gemini-lib.sh" "$fake/bin/fm-gemini-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
@@ -181,6 +183,8 @@ SH
   ln -s "$ROOT/bin/fm-omp-process-lib.sh" "$fake/bin/fm-omp-process-lib.sh"
   # fm-home-worktree-lock-lib.sh: teardown sources it for the durable-home lock.
   ln -s "$ROOT/bin/fm-home-worktree-lock-lib.sh" "$fake/bin/fm-home-worktree-lock-lib.sh"
+  # fm-home-payload-lib.sh: teardown sources it for the returned pool slot payload.
+  ln -s "$ROOT/bin/fm-home-payload-lib.sh" "$fake/bin/fm-home-payload-lib.sh"
   ln -s "$ROOT/bin/fm-agent-process-lib.sh" "$fake/bin/fm-agent-process-lib.sh"
   ln -s "$ROOT/bin/fm-gemini-lib.sh" "$fake/bin/fm-gemini-lib.sh"
   ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
