@@ -103,6 +103,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
@@ -483,10 +485,16 @@ arm_ready_pr_watch() { # <id> <meta>
   case "$url" in *[[:space:]]*|'') return 0 ;; esac
   recorded=$(meta_field "$meta" pr)
   incarnation=$(meta_incarnation "$meta")
-  if [ "$recorded" = "$url" ] && [ -f "$STATE/$id.check.sh" ] \
-    && [ ! -L "$STATE/$id.check.sh" ] \
-    && [ -f "$STATE/$id.pr-poll" ] && [ -f "$STATE/$id.pr-poll-registration" ]; then
-    return 0
+  if [ "$recorded" = "$url" ] \
+    && fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
+    && [ "$FM_PR_DATA_URL" = "$url" ]; then
+    fm_pr_metadata_identity_parse "$meta" \
+      && [ "$FM_PR_META_URL" = "$url" ] && return 0
+  fi
+  if fm_pr_metadata_identity_parse "$meta"; then
+    fm_pr_poll_merge_already_notified "$STATE" "$id" \
+      "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER" \
+      && return 0
   fi
   if ! arm_output=$(fm_run_timed 3 env FM_PR_CHECK_EXPECT_INCARNATION="$incarnation" \
     FM_PR_CHECK_EXPECT_READY_LINE="$line" \
@@ -648,14 +656,15 @@ scan() {
   local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
-  arm_ready_pr_watches
   if self=$(home_secondmate_id); then
-    # The ledger-first delivery is per poll, not per cadence.
+    # The ledger-first delivery is per poll, not per cadence; run it before
+    # bounded PR registration attempts so a slow forge cannot starve delivery.
     ledger_pass
   else
     marker_rc=$?
     self=''
   fi
+  arm_ready_pr_watches
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     return 0
   fi

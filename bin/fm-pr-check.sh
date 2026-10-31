@@ -211,7 +211,22 @@ META_LOCK_HELD=1
   || { echo "error: task metadata is unavailable" >&2; exit 1; }
 if [ -n "${FM_PR_CHECK_EXPECT_INCARNATION:-}" ]; then
   CURRENT_LINE=$(last_status_line "$STATE/$ID.status")
-  [ "$(fm_meta_incarnation "$META")" = "$FM_PR_CHECK_EXPECT_INCARNATION" ] \
+  current_incarnation=$(grep '^spawn_gen=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ -z "$current_incarnation" ]; then
+    current_identity=$(grep '^tasktmp=' "$META" | tail -1 | cut -d= -f2- || true)
+    if [ -z "$current_identity" ]; then
+      current_identity="$(grep '^window=' "$META" | tail -1 | cut -d= -f2- || true)|$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)"
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+      current_hash=$(printf '%s' "$current_identity" | shasum -a 256 | awk '{print substr($1, 1, 32)}')
+    else
+      current_hash=$(printf '%s' "$current_identity" | sha256sum | awk '{print substr($1, 1, 32)}')
+    fi
+    current_incarnation="legacy-$current_hash"
+  elif ! [[ "$current_incarnation" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    current_incarnation=
+  fi
+  [ "$current_incarnation" = "$FM_PR_CHECK_EXPECT_INCARNATION" ] \
     && [ "$(status_line_verb "$CURRENT_LINE")" = "done" ] \
     && [ "$(status_line_note "$CURRENT_LINE")" = "$(status_line_note "$FM_PR_CHECK_EXPECT_READY_LINE")" ] \
     || { echo "error: ready task outcome changed before PR registration" >&2; exit 1; }
