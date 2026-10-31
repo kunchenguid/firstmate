@@ -22,7 +22,12 @@
 # A close that fails is fatal and loud, preserves its pending-close record, and
 # is retried by the next session start. The transition is skipped on a
 # config/backlog-backend=manual home and in a markdown home that keeps no
-# data/backlog.md; those cases print the manual follow-up. A configured
+# data/backlog.md; those cases print the manual follow-up. A proved records-only
+# slot reassignment whose historical backlog row is already absent also skips
+# the transition, without writing a pending-close record, so metadata can retire
+# without a close that tasks-axi would fail; an unreadable row still refuses
+# with nothing changed, and a present row still takes the ordinary paired close
+# or captain-held retain. A configured
 # non-markdown adapter remains active without a markdown file; any active
 # automatic backend without compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
@@ -124,10 +129,13 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale. The one exception is a slot whose
-# owner claim (below) names another task: this teardown is then records-only and
-# touches nothing under the slot, so the scan is skipped rather than stranding
-# the stale record and, with it, the claimant's own teardown.
+# collision itself, whichever record is stale. The exceptions are a slot whose
+# owner claim (below) names another task, and a slot whose claim still names
+# this task but Treehouse reports a complete durable lease to a different
+# persistent second mate whose local registry and exactly one matching
+# kind=secondmate record name that same slot as home: this teardown is then
+# records-only and touches nothing under the slot, so the scan is skipped rather
+# than stranding the stale record and, with it, the current occupant's teardown.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -135,11 +143,12 @@
 # returned out from under a live worker (observed 2026-09-07). So teardown also
 # reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
 # slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
-# owns the claim, its location, and its states. A claim naming another task is
+# owns the claim, its location, and its states. A claim naming another task, or
+# a proved durable secondmate lease on a claim that still names this task, is
 # proof of reassignment: the slot is no longer this task's, so teardown warns,
-# names the claimant, and then finishes only this task's own cleanup - endpoint,
-# status, records, checks, backlog - while every step that would read or touch
-# that slot is skipped: no process kill under it, no dirty or landed-work
+# names the occupant, and then finishes only this task's own cleanup - endpoint,
+# status, records, checks, and backlog when that item still exists - while every
+# step that would read or touch that slot is skipped: no process kill under it, no dirty or landed-work
 # inspection of it, no branch or hook removal in it, no Treehouse return, and
 # never the other task's claim. Skipping the inspection discards nothing of this
 # task's: whatever unlanded work it had in that slot was already destroyed when
@@ -154,7 +163,15 @@
 # strand every task in flight across that change on no evidence at all.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
-# claim comment.
+# claim comment. A durable secondmate lease can answer, but only when status is
+# leased with both lease_id and lease_holder, the holder is not this task, the
+# claim's home is this teardown's home, the holder has exactly one local
+# non-remote registry binding at this slot across local Firstmate homes, and
+# exactly one matching secondmate record names that same path; missing, duplicate, unreadable, or contradictory
+# evidence refuses with nothing changed. treehouse status --json lists every
+# pool slot, so a single non-leased match (in-use, available, dirty, unverified,
+# empty lease fields) is not reassignment and leaves the original claim and scan
+# rules in force.
 # The recorded endpoint's exact task identity and the record's spawn incarnation
 # are validated separately
 # before cleanup. Its current working directory is only incidental process
@@ -2569,10 +2586,81 @@ collect_local_firstmate_states() {
   TREEHOUSE_OWNER_STATES=("${FM_LOCAL_FIRSTMATE_STATES[@]}")
 }
 
+# When this task's slot claim is still mine, prove the slot is now a durable
+# secondmate home (header: Worktree-slot ownership). Return 0 after rewriting
+# FM_TREEHOUSE_SLOT_OWNER to other, 1 when there is no such lease, and 2 when
+# Treehouse reports or may hold a lease that cannot be proved.
+verified_secondmate_slot_reassignment() {  # <project> <worktree> <stale-task-id>
+  local project=$1 worktree=$2 stale_id=$3 slot status_json lease_state holder marker_home current_home
+  local states state_dir meta kind home record_path field record_count=0 matched_path
+  local binding_count=0 home_dir reg bound_home
+  slot=$(canonical_existing_dir "$worktree") || return 1
+  fm_treehouse_slot_owner_state "$slot" "$stale_id"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 1
+  status_json=$(cd "$project" && treehouse status --json 2>/dev/null) || return 2
+  lease_state=$(printf '%s\n' "$status_json" | jq -er --arg slot "$slot" '
+    [.[] | select((.path | strings) == $slot)]
+    | if length == 0 then "none"
+      elif length != 1 then "uncertain"
+      elif .[0].status == "leased"
+        and (.[0].lease_holder | strings | length > 0)
+        and (.[0].lease_id | strings | length > 0)
+        then .[0].lease_holder
+      elif .[0].status == "leased" then "uncertain"
+      else "none" end
+  ' 2>/dev/null) || return 2
+  [ "$lease_state" != none ] || return 1
+  [ "$lease_state" != uncertain ] || return 2
+  holder=$lease_state
+  [ "$holder" != "$stale_id" ] || return 2
+  marker_home=$(canonical_existing_dir "$FM_TREEHOUSE_SLOT_OWNER_HOME") || return 2
+  current_home=$(canonical_existing_dir "$FM_HOME") || return 2
+  [ "$marker_home" = "$current_home" ] || return 2
+  fm_local_firstmate_state_dirs "$STATE" || return 2
+  states=("${FM_LOCAL_FIRSTMATE_STATES[@]}")
+  for state_dir in "${states[@]}"; do
+    home_dir=${state_dir%/state}
+    [ "$home_dir" != "$state_dir" ] || return 2
+    reg="$home_dir/data/secondmates.md"
+    [ -e "$reg" ] || [ -L "$reg" ] || continue
+    secondmate_registry_validate_bindings "$reg" secondmate_registry_path_key || return 2
+    secondmate_registry_line_for_id "$reg" "$holder" || continue
+    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || return 2
+    bound_home=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || return 2
+    [ "$bound_home" = "$slot" ] || return 2
+    binding_count=$((binding_count + 1))
+    home=$bound_home
+  done
+  [ "$binding_count" -eq 1 ] || return 2
+  for state_dir in "${states[@]}"; do
+    meta="$state_dir/$holder.meta"
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" = secondmate ] || continue
+    matched_path=0
+    for field in home worktree; do
+      record_path=$(fm_meta_get "$meta" "$field")
+      [ -n "$record_path" ] || continue
+      record_path=$(canonical_existing_dir "$record_path") || return 2
+      [ "$record_path" = "$slot" ] || return 2
+      matched_path=1
+    done
+    [ "$matched_path" -eq 1 ] || return 2
+    record_count=$((record_count + 1))
+  done
+  [ "$record_count" -eq 1 ] || return 2
+  FM_TREEHOUSE_SLOT_OWNER=other
+  FM_TREEHOUSE_SLOT_OWNER_ID=$holder
+  FM_TREEHOUSE_SLOT_OWNER_HOME=$home
+}
+
 require_exclusive_worktree_slot_record() {
-  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
+  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4 project ownership_rc=0
   local slot state_dir other other_id field other_path other_slot
   slot=$(canonical_existing_dir "$worktree") || return 0
+  project=$(fm_meta_get "$record_meta" project)
+  verified_secondmate_slot_reassignment "$project" "$slot" "$record_id" || ownership_rc=$?
+  [ "$ownership_rc" -ne 0 ] || return 0
   # A slot whose owner claim names another task was reassigned, so this record's
   # teardown is records-only and touches nothing under it; another record naming
   # the slot is then no hazard, and refusing would strand this stale record and
@@ -2601,6 +2689,10 @@ require_exclusive_worktree_slot_record() {
       done
     done
   done
+  if [ "$ownership_rc" -eq 2 ]; then
+    echo "REFUSED: Treehouse reports or may hold a lease on $slot, but its persistent secondmate ownership cannot be proved; nothing was changed." >&2
+    return 1
+  fi
 }
 
 require_exclusive_task_worktree_slot() {
@@ -2610,7 +2702,8 @@ require_exclusive_task_worktree_slot() {
 }
 
 # Positive slot ownership, read from the claim the task that took the slot wrote
-# into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
+# into the slot itself (bin/fm-wake-lib.sh owns the claim and its states) and,
+# when that claim is still mine, from verified_secondmate_slot_reassignment.
 #
 # For a slot this task still claims, or one with no claim, the record scan above
 # proves that no OTHER task record names it. It cannot prove that THIS record is
@@ -2619,7 +2712,9 @@ require_exclusive_task_worktree_slot() {
 # up, or it may belong to a home this machine does not register. The claim closes that gap from the other side - it names the
 # task that actually took the slot, and it is written under the same project lock
 # that allocates it - so a claim naming another task is proof the slot was
-# reassigned after this record was written.
+# reassigned after this record was written. A still-mine claim on a slot now
+# durably leased to a persistent second mate is the same reassignment; the
+# header owns the proof and the refuse-when-uncertain boundary.
 #
 # A claim naming another task does not refuse: it means the slot is no longer
 # this task's, so the record's own cleanup proceeds and every slot step is
@@ -2633,8 +2728,19 @@ require_exclusive_task_worktree_slot() {
 # would strand every task in flight across the change for no evidence at all.
 # Those keep exactly the record-scan protection they had before.
 TEARDOWN_SLOT_REASSIGNED_RC=3
-require_owned_worktree_slot_record() {  # <task-id> <worktree>
-  local record_id=$1 worktree=$2 marker
+require_owned_worktree_slot_record() {  # <task-id> <worktree> [project]
+  local record_id=$1 worktree=$2 project=${3:-$PROJ} marker ownership_rc=0
+  verified_secondmate_slot_reassignment "$project" "$worktree" "$record_id" || ownership_rc=$?
+  case "$ownership_rc" in
+    0)
+      echo "warning: task $record_id's recorded worktree $worktree was reassigned to persistent second mate $FM_TREEHOUSE_SLOT_OWNER_ID (home $FM_TREEHOUSE_SLOT_OWNER_HOME), which holds its durable Treehouse lease; only $record_id's own records will be retired." >&2
+      return "$TEARDOWN_SLOT_REASSIGNED_RC"
+      ;;
+    2)
+      echo "REFUSED: Treehouse reports a lease on $worktree, but its persistent secondmate ownership cannot be proved; nothing was changed." >&2
+      return 1
+      ;;
+  esac
   fm_treehouse_slot_owner_state "$worktree" "$record_id"
   case "$FM_TREEHOUSE_SLOT_OWNER" in
     mine|absent) return 0 ;;
@@ -2658,7 +2764,7 @@ TEARDOWN_SLOT_REASSIGNED_HOME=
 require_owned_task_worktree_slot() {
   local slot rc=0
   slot=$(teardown_live_slot_path) || return 0
-  require_owned_worktree_slot_record "$ID" "$slot" || rc=$?
+  require_owned_worktree_slot_record "$ID" "$slot" "$PROJ" || rc=$?
   case "$rc" in
     0) return 0 ;;
     "$TEARDOWN_SLOT_REASSIGNED_RC")
@@ -3224,7 +3330,7 @@ preflight_descendant_treehouse_slots() {
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
     require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
     owner_rc=0
-    require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
+    require_owned_worktree_slot_record "$task_id" "$worktree" "$project" || owner_rc=$?
     case "$owner_rc" in
       0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
       *) return 1 ;;
@@ -3520,12 +3626,12 @@ cleanup_firstmate_home_children() {
       # already named the reassignment on stderr under the same lock.
       child_owner_rc=0
       if fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
-        require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
+        require_owned_worktree_slot_record "$child_id" "$child_wt" "$child_proj" 2>/dev/null || child_owner_rc=$?
       fi
       if [ "$child_owner_rc" -eq "$TEARDOWN_SLOT_REASSIGNED_RC" ]; then
         :
       elif [ "$child_owner_rc" -ne 0 ]; then
-        require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
+        require_owned_worktree_slot_record "$child_id" "$child_wt" "$child_proj" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
@@ -3746,6 +3852,17 @@ BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
 BACKLOG_TRANSITION_FLAGS=()
 [ "$BACKLOG_TRANSITION" = close ] || BACKLOG_TRANSITION_FLAGS=(--retain)
 BACKLOG_SKIP_REASON=
+if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ] && [ "$TEARDOWN_SLOT_REASSIGNED" = 1 ]; then
+  if ! fm_backlog_row_probe "$DATA" "$ID"; then
+    if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+      TEARDOWN_BACKLOG_APPLIES=0
+      TEARDOWN_BACKLOG_SKIP_REASON="historical backlog item $ID is already absent"
+    else
+      echo "error: task $ID cannot be torn down because its backlog item could not be read ($FM_BACKLOG_ROW_ERROR); nothing was changed" >&2
+      exit 1
+    fi
+  fi
+fi
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   backlog_done_args || {
     echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
