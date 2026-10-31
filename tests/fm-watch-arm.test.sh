@@ -1095,6 +1095,7 @@ test_handling_window_close_keeps_the_acknowledgement_valid() {
 # docs/watcher-continuity.md through real watcher processes.
 test_moved_generation_acknowledgement_is_self_healing() {
   local dir home state fakebin pair first_sequence first_generation second_generation
+  local rc
   dir=$(make_case moved-generation-acknowledgement)
   home="$dir/home"
   state="$dir/state"
@@ -1125,11 +1126,12 @@ test_moved_generation_acknowledgement_is_self_healing() {
   [ "$second_generation" != "$first_generation" ] \
     || fail "an acknowledged episode kept its generation instead of opening a new one"
 
-  # Replaying the stale pair must not fail, must not over-consume, and must not
-  # retire the newer episode.
+  # Replaying the stale pair must fail without consuming or retiring anything.
+  rc=0
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$first_sequence" \
     --recovery-generation "$first_generation" 2> "$dir/stale-ack.err" \
-    || fail "a replayed stale acknowledgement was rejected instead of degrading safely"
+    || rc=$?
+  [ "$rc" -ne 0 ] || fail "a replayed stale generation was accepted"
   if ! grep -F 'WAKE_ACK_REQUIRED' "$dir/stale-ack.err" >/dev/null \
     || ! grep -F 're-run' "$dir/stale-ack.err" >/dev/null; then
     fail "a moved recovery generation did not name its own remedy: $(cat "$dir/stale-ack.err")"
@@ -1139,13 +1141,15 @@ test_moved_generation_acknowledgement_is_self_healing() {
   [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:downtime:$second_generation" ] \
     || fail "a stale acknowledgement retired the newer recovery episode"
 
-  # The sequence alone owns consumption, so the handled rows go even while the
-  # generation is stale, and only the episode stays pending.
+  # Even a cutoff covering every row cannot consume under a stale generation.
+  cp "$state/.wake-queue" "$dir/queue.before"
+  rc=0
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 999 \
     --recovery-generation "$first_generation" 2> "$dir/stale-consume.err" \
-    || fail "a stale acknowledgement refused to consume the rows it was given"
-  [ ! -s "$state/.wake-queue" ] \
-    || fail "a stale acknowledgement left its handled rows on the durable queue"
+    || rc=$?
+  [ "$rc" -ne 0 ] || fail "a stale generation consumed its covered rows"
+  cmp -s "$state/.wake-queue" "$dir/queue.before" \
+    || fail "a stale generation changed the durable queue"
   [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "pending:downtime:$second_generation" ] \
     || fail "row consumption under a stale generation retired the pending episode"
 
@@ -1161,7 +1165,7 @@ test_moved_generation_acknowledgement_is_self_healing() {
     acked:*) ;;
     *) fail "following the printed remedy did not retire the newer recovery episode" ;;
   esac
-  pass "watch-arm: a moved recovery generation consumes handled rows and names its remedy"
+  pass "watch-arm: a moved recovery generation refuses consumption and names its remedy"
 }
 
 # The supervision host ends its own cycle on purpose; --stop is the home-scoped
