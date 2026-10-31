@@ -216,6 +216,7 @@ mkdir -p "$STATE"
 # this watcher claimed in. A host that cannot open a directory keeps reading a
 # lock with no holder as a teardown.
 WATCH_STATE_HELD=0
+WATCH_STATE_DEVINO=
 if { exec 6<"$STATE"; } 2>/dev/null; then
   WATCH_STATE_HELD=1
 fi
@@ -305,9 +306,17 @@ WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 # cannot shadow the BSD `-f` syntax.
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
+  stat_devino() { /usr/bin/stat -f '%d %i' "$1" 2>/dev/null; }  # device + inode pair
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
+  stat_devino() { stat -c '%d %i' "$1" 2>/dev/null; }
 fi
+# Record the held state directory's device+inode now that stat_devino exists.
+# The per-poll teardown check re-stats the path instead of comparing /dev/fd/6
+# with -ef: macOS devfs serves each descriptor entry on its own device, so -ef
+# never matches there and a missing lock pid alone read as a torn-down state
+# directory.
+[ "$WATCH_STATE_HELD" -ne 1 ] || WATCH_STATE_DEVINO=$(stat_devino "$STATE")
 # bin/fm-classify-lib.sh owns status reported-state signatures and presentation
 # markers, while bin/fm-wake-lib.sh owns their wake-facing routing, the legacy
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
@@ -349,6 +358,15 @@ case "$CLEANUP_LOCK_BOUND" in
   *) CLEANUP_LOCK_BOUND=$((10#$CLEANUP_LOCK_BOUND)) ;;
 esac
 [ "$CLEANUP_LOCK_BOUND" -gt 0 ] || CLEANUP_LOCK_BOUND=2
+# Bound each startup recovery/queue lock wait, both during singleton steal
+# and after identity publication. This is independent of the arm backstop:
+# expiry of that backstop still waits for cleanup-safe interruption.
+STARTUP_LOCK_BOUND=${FM_WATCHER_STARTUP_LOCK_BOUND:-60}
+case "$STARTUP_LOCK_BOUND" in
+  ''|*[!0-9]*) STARTUP_LOCK_BOUND=60 ;;
+  *) STARTUP_LOCK_BOUND=$((10#$STARTUP_LOCK_BOUND)) ;;
+esac
+[ "$STARTUP_LOCK_BOUND" -gt 0 ] || STARTUP_LOCK_BOUND=60
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
@@ -3374,7 +3392,22 @@ evict_stalled_holder() {
 EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
-while ! fm_lock_try_acquire "$WATCH_LOCK"; do
+while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
+  if [ -n "${FM_LOCK_HELD_PATH:-}" ]; then
+    # The reclaim helper releases its steal and marker locks on publish
+    # failure. No blocking pid means the write failed, not contention.
+    if [ -z "${FM_LOCK_HELD_PID:-}" ]; then
+      echo "watcher: FAILED - could not publish downtime marker $WATCHER_DOWNTIME_MARKER"
+      exit 1
+    fi
+    # A live holder is the typed startup failure; a dying or clearing one is
+    # worth another pass of the claim loop.
+    if fm_pid_alive "$FM_LOCK_HELD_PID"; then
+      echo "watcher: FAILED - startup lock $FM_LOCK_HELD_PATH held by live pid $FM_LOCK_HELD_PID"
+      exit 1
+    fi
+    continue
+  fi
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then
       beat_age=$(fm_path_age "$BEAT")
@@ -3401,15 +3434,140 @@ while ! fm_lock_try_acquire "$WATCH_LOCK"; do
   fi
   exit 0
 done
+rm -f "$BEAT"
 if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
-handling_successor_has_queued_row() {
-  local queued=1
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  [ ! -s "$FM_WAKE_QUEUE" ] || queued=0
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-  return "$queued"
+
+# Test seam: pause after the singleton claim but before the EXIT trap and the
+# lock identity exist - the window bin/fm-watch-arm.sh calls the startup unsafe
+# point. The arm waits it out even past a forced deadline, then TERMs at the
+# safe point.
+case "${FM_TEST_WATCHER_PRE_IDENTITY_DELAY:-0}" in
+  ''|*[!0-9]*|0) ;;
+  *) sleep "$FM_TEST_WATCHER_PRE_IDENTITY_DELAY" ;;
+esac
+
+# The EXIT trap installs immediately after the singleton claim, before any
+# other lock is touched. Everything this watcher does past this line -
+# recovery-marker transitions, queue reads, delivery records - runs inside its
+# coverage, so an interruption can only ever abandon locks this same process
+# self-releases below. The arm forwards a stop only once the identity record
+# below is complete - never inside the claim itself, even past its deadline -
+# so this is also the startup safe point bin/fm-watch-arm.sh waits for.
+WATCHER_PID=${BASHPID:-$$}
+# Scope every staged owner to this watcher, including paths not yet returned
+# by mktemp when a stop arrives. Do not export this to detached workers.
+FM_LOCK_OWNER_SCOPE="$WATCHER_PID.$RANDOM.$RANDOM"
+
+RECONCILE_REQUEST_PID=
+reconcile_requests_pending() {
+  local request
+  [ -d "$STATE/reconcile-notify" ] && [ ! -L "$STATE/reconcile-notify" ] || return 1
+  for request in \
+    "$STATE/reconcile-notify"/.processing-request-*.json \
+    "$STATE/reconcile-notify"/request-*.json; do
+    [ -f "$request" ] && [ ! -L "$request" ] && return 0
+  done
+  return 1
+}
+
+reconcile_requests_detached() {
+  if [ -n "$RECONCILE_REQUEST_PID" ]; then
+    if kill -0 "$RECONCILE_REQUEST_PID" 2>/dev/null; then
+      return 0
+    fi
+    if ! wait "$RECONCILE_REQUEST_PID" 2>/dev/null; then
+      triage_log "secondmate reconcile notify request deferred"
+    fi
+    RECONCILE_REQUEST_PID=
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests </dev/null >/dev/null 2>&1 &
+  RECONCILE_REQUEST_PID=$!
+}
+
+PR_POLL_CONTROL_LOCK=
+PR_POLL_PUBLISH_LOCK=
+
+pr_poll_control_release() {
+  [ -z "$PR_POLL_CONTROL_LOCK" ] || fm_lock_release "$PR_POLL_CONTROL_LOCK" || return 1
+  PR_POLL_CONTROL_LOCK=
+}
+
+pr_poll_publish_release() {
+  [ -z "$PR_POLL_PUBLISH_LOCK" ] || fm_lock_release "$PR_POLL_PUBLISH_LOCK" || return 1
+  PR_POLL_PUBLISH_LOCK=
+}
+
+watcher_cleanup() {
+  local cleanup_status=0 owns_lock=0 transition=release-lock staged lock
+  # Join any interrupted owner creation/publication before the release sweep:
+  # a child must not publish a lock or staging directory after we removed ours.
+  fm_lock_wait_pending_mutation
+  pr_poll_publish_release || cleanup_status=1
+  pr_poll_control_release || cleanup_status=1
+  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
+    owns_lock=1
+    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
+      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
+      transition=release-lock-existing
+    fi
+  fi
+  # Quietly: a stop usually lands inside the waited event wait, and bash would
+  # report the group it kills here as a "Terminated" job line on stderr.
+  fm_active_check_stop 2>/dev/null || cleanup_status=1
+  fm_check_output_cleanup
+  fm_capture_output_cleanup
+  fm_wait_tmp_cleanup
+  fm_custom_check_snapshot_cleanup
+  # A stop can land inside a marker or queue critical section, leaving locks
+  # recorded against this very pid with no frame left to release them. Drop
+  # ours outright - identity-aware no-ops for any lock not ours - so the
+  # downtime publication below cannot self-block and no dead lock survives.
+  fm_lock_release "$WATCH_LOCK.steal" || true
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
+  fm_lock_release "${WATCHER_DOWNTIME_MARKER}.lock" || true
+  fm_lock_release "${WATCHER_DOWNTIME_MARKER}.lock.steal" || true
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK.steal" || true
+  for staged in "$STATE"/.*.owner."$FM_LOCK_OWNER_SCOPE".*; do
+    [ -d "$staged" ] && [ ! -L "$staged" ] || continue
+    lock=${staged%.owner."$FM_LOCK_OWNER_SCOPE".*}
+    fm_lock_discard_staged_owners "$lock" "$FM_LOCK_OWNER_SCOPE" "$WATCHER_PID"
+  done
+  if [ "$owns_lock" -eq 1 ] \
+    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
+      downtime "$CLEANUP_LOCK_BOUND"; then
+    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
+    cleanup_status=1
+  fi
+  return "$cleanup_status"
+}
+trap watcher_cleanup EXIT
+watcher_stop_signals
+# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
+# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
+# substitution, so it matches the stored holder pid for the self-eviction check.
+# shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+FM_WATCH_DELIVERY_PID=$WATCHER_PID
+FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
+if [ -z "$FM_WATCH_DELIVERY_IDENTITY" ] \
+  || ! printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" 2>/dev/null \
+  || ! printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" 2>/dev/null \
+  || ! printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null; then
+  echo "watcher: FAILED - could not publish watcher identity in $WATCH_LOCK"
+  exit 1
+fi
+
+# A bounded startup recovery-lock failure reports the typed line the arm relays; a
+# transient or dead holder keeps the legacy stderr diagnostic.
+startup_lock_failed() {
+  if [ -n "${FM_RECOVERY_HELD_PID:-}" ] && fm_pid_alive "$FM_RECOVERY_HELD_PID"; then
+    echo "watcher: FAILED - startup lock ${FM_RECOVERY_HELD_LOCK:-unknown} held by live pid $FM_RECOVERY_HELD_PID"
+  else
+    echo "watcher: recovery state $1; retaining stale lock evidence" >&2
+  fi
+  exit 1
 }
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
@@ -3417,15 +3575,11 @@ if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
 fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] \
   && [ "${FM_WATCH_FOREGROUND_CHECKPOINT:-0}" != 1 ]; then
-  if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
-    echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
-    exit 1
-  fi
+  fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER" "$STARTUP_LOCK_BOUND" \
+    || startup_lock_failed "could not be reopened safely"
 fi
-if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
-  echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
-  exit 1
-fi
+fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER" "$STARTUP_LOCK_BOUND" \
+  || startup_lock_failed "could not be consumed safely"
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
@@ -3477,85 +3631,6 @@ lane_capacity_publish_detached() {
     "$SCRIPT_DIR/fm-capacity.sh" --publish </dev/null >/dev/null 2>&1 &
   LANE_CAPACITY_PID=$!
 }
-
-RECONCILE_REQUEST_PID=
-reconcile_requests_pending() {
-  local request
-  [ -d "$STATE/reconcile-notify" ] && [ ! -L "$STATE/reconcile-notify" ] || return 1
-  for request in \
-    "$STATE/reconcile-notify"/.processing-request-*.json \
-    "$STATE/reconcile-notify"/request-*.json; do
-    [ -f "$request" ] && [ ! -L "$request" ] && return 0
-  done
-  return 1
-}
-
-reconcile_requests_detached() {
-  if [ -n "$RECONCILE_REQUEST_PID" ]; then
-    if kill -0 "$RECONCILE_REQUEST_PID" 2>/dev/null; then
-      return 0
-    fi
-    if ! wait "$RECONCILE_REQUEST_PID" 2>/dev/null; then
-      triage_log "secondmate reconcile notify request deferred"
-    fi
-    RECONCILE_REQUEST_PID=
-  fi
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests </dev/null >/dev/null 2>&1 &
-  RECONCILE_REQUEST_PID=$!
-}
-
-PR_POLL_CONTROL_LOCK=
-PR_POLL_PUBLISH_LOCK=
-
-pr_poll_control_release() {
-  [ -z "$PR_POLL_CONTROL_LOCK" ] || fm_lock_release "$PR_POLL_CONTROL_LOCK" || return 1
-  PR_POLL_CONTROL_LOCK=
-}
-
-pr_poll_publish_release() {
-  [ -z "$PR_POLL_PUBLISH_LOCK" ] || fm_lock_release "$PR_POLL_PUBLISH_LOCK" || return 1
-  PR_POLL_PUBLISH_LOCK=
-}
-
-watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock
-  pr_poll_publish_release || cleanup_status=1
-  pr_poll_control_release || cleanup_status=1
-  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
-    owns_lock=1
-    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
-      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
-      transition=release-lock-existing
-    fi
-  fi
-  # Quietly: a stop usually lands inside the waited event wait, and bash would
-  # report the group it kills here as a "Terminated" job line on stderr.
-  fm_active_check_stop 2>/dev/null || cleanup_status=1
-  fm_check_output_cleanup
-  fm_capture_output_cleanup
-  fm_wait_tmp_cleanup
-  fm_custom_check_snapshot_cleanup
-  if [ "$owns_lock" -eq 1 ] \
-    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
-      downtime "$CLEANUP_LOCK_BOUND"; then
-    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
-    cleanup_status=1
-  fi
-  return "$cleanup_status"
-}
-trap watcher_cleanup EXIT
-watcher_stop_signals
-# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
-# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
-# substitution, so it matches the stored holder pid for the self-eviction check.
-WATCHER_PID=${BASHPID:-$$}
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
-# shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
-FM_WATCH_DELIVERY_PID=$WATCHER_PID
-FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
-printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -3616,7 +3691,7 @@ resurface_after_downtime() {
       exit 1
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
-    handling_successor_has_queued_row || return 0
+    [ "$FM_RECOVERY_MARKER_QUEUED" = 1 ] || return 0
     wake "check: rearm-resurface"
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
@@ -3649,7 +3724,9 @@ while :; do
     echo "watcher: exiting - state directory no longer exists: $STATE" >&2
     exit 1
   elif [ ! -e "$WATCH_LOCK/pid" ] \
-    && { [ "$WATCH_STATE_HELD" -ne 1 ] || [ ! /dev/fd/6 -ef "$STATE" ]; }; then
+    && { [ -z "$WATCH_STATE_DEVINO" ] \
+      || { STATE_DEVINO_NOW=$(stat_devino "$STATE") \
+        && [ -n "$STATE_DEVINO_NOW" ] && [ "$STATE_DEVINO_NOW" != "$WATCH_STATE_DEVINO" ]; }; }; then
     echo "watcher: exiting - state directory was torn down (singleton lock removed): $STATE" >&2
     exit 1
   elif [ ! -d "$SCRIPT_DIR" ]; then

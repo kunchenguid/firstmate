@@ -574,7 +574,9 @@ fm_lock_abs_path() {
 fm_lock_owner_dir() {
   local lockdir=$1 lock_abs
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
-  mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
+  # An opted-in caller can recover its own staging directories even when a
+  # signal interrupts this command substitution before it returns the path.
+  mktemp -d "${lock_abs}.owner.${FM_LOCK_OWNER_SCOPE:+$FM_LOCK_OWNER_SCOPE.}XXXXXX" 2>/dev/null
 }
 
 # The acquiring process's own fm_pid_start_time, probed once per pid: a
@@ -660,6 +662,19 @@ fm_lock_discard_owner() {
   rmdir "$ownerdir" 2>/dev/null || true
 }
 
+# Discard only this caller's unpublished staging directories. A foreign
+# acquirer uses a different scope; a published owner remains lock evidence.
+fm_lock_discard_staged_owners() {
+  local lockdir=$1 scope=$2 mypid=$3 owner pid
+  for owner in "$lockdir.owner.$scope."*; do
+    [ -d "$owner" ] && [ ! -L "$owner" ] || continue
+    fm_lock_points_to_owner "$lockdir" "$owner" && continue
+    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    [ -z "$pid" ] || [ "$pid" = "$mypid" ] || continue
+    fm_lock_discard_owner "$owner"
+  done
+}
+
 fm_lock_remove_stray_owner_link() {
   local lockdir=$1 ownerdir=$2 stray
   stray="$lockdir/$(basename "$ownerdir")"
@@ -710,10 +725,47 @@ fm_lock_claim() {
   return 0
 }
 
+# A fatal signal can enter EXIT while an external filesystem command is still
+# running. The acquiring frame exposes its pending child through dynamically
+# scoped locals so cleanup can join it before releasing/sweeping ownership.
+# $! covers the small window between launch and recording the child's pid;
+# the previous value distinguishes a signal that arrived before launch.
+fm_lock_wait_pending_mutation() {
+  [ "${FM_LOCK_PENDING_PREVIOUS_PID+x}" = x ] || return 0
+  local pending=${FM_LOCK_PENDING_PID:-}
+  if [ -z "$pending" ]; then
+    pending=$(set +u; printf '%s' "$!")
+  fi
+  [ -n "$pending" ] || return 0
+  [ "$pending" != "$FM_LOCK_PENDING_PREVIOUS_PID" ] || return 0
+  # During an interrupted read, bash has not yet registered its process
+  # substitution as waitable. It still exposes $!, and reaps it on SIGCHLD.
+  # Join that child by liveness if wait cannot join it yet.
+  if ! wait "$pending" 2>/dev/null; then
+    while kill -0 "$pending" 2>/dev/null; do sleep 0.01; done
+  fi
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local FM_LOCK_PENDING_PREVIOUS_PID FM_LOCK_PENDING_PID=
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    # This bash also applies nounset to ${!:-}; isolate the safe probe.
+    FM_LOCK_PENDING_PREVIOUS_PID=$(set +u; printf '%s' "$!")
+    # Bash 3.2 defers fatal signals until command substitutions finish, and
+    # does not expose a process substitution's pid through $!.
+    ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  else
+    FM_LOCK_PENDING_PREVIOUS_PID=${!:-}
+    # Newer bash can enter EXIT before the child finishes. A process
+    # substitution exposes its pid even before read returns the owner path.
+    IFS= read -r ownerdir < <(fm_lock_owner_dir "$lockdir") || return 1
+    FM_LOCK_PENDING_PID=$!
+    wait "$FM_LOCK_PENDING_PID" 2>/dev/null || return 1
+    FM_LOCK_PENDING_PREVIOUS_PID=$FM_LOCK_PENDING_PID
+    FM_LOCK_PENDING_PID=
+  fi
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -722,7 +774,9 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  ln -s "$ownerdir" "$lockdir" 2>/dev/null &
+  FM_LOCK_PENDING_PID=$!
+  if wait "$FM_LOCK_PENDING_PID" && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
@@ -1041,15 +1095,40 @@ _fm_recovery_marker_ack() {
   fm_lock_release "$lock"
 }
 
+# Bounded-or-plain acquire for the recovery transitions a caller may bound.
+# On a bounded refusal it records which lock refused and the last holder the
+# acquire saw, so the caller can print the typed startup diagnostic
+# (bin/fm-watch.sh startup_lock_failed).
+# shellcheck disable=SC2034 # Read by sourcing callers after a bounded refusal.
+FM_RECOVERY_HELD_LOCK=
+# shellcheck disable=SC2034 # Read by sourcing callers after a bounded refusal.
+FM_RECOVERY_HELD_PID=
+fm_recovery_lock_wait() {  # <lockdir> <bound-seconds>
+  FM_RECOVERY_HELD_LOCK=
+  FM_RECOVERY_HELD_PID=
+  if [ -n "$2" ]; then
+    fm_lock_acquire_wait_max "$1" "$2" && return 0
+    # shellcheck disable=SC2034 # Read by sourcing callers after a bounded refusal.
+    FM_RECOVERY_HELD_LOCK=$1
+    # shellcheck disable=SC2034 # Read by sourcing callers after a bounded refusal.
+    FM_RECOVERY_HELD_PID=${FM_LOCK_HELD_PID:-}
+    return 1
+  fi
+  fm_lock_acquire_wait "$1"
+}
+
 _fm_recovery_marker_arm_check() {
-  local marker=$1 lock line quarantine
+  local marker=$1 bound=${2:-} lock line quarantine
   FM_RECOVERY_MARKER_ACTION='none'
+  FM_RECOVERY_MARKER_QUEUED=0
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  if ! fm_lock_acquire_wait "$lock"; then
+  fm_recovery_lock_wait "$FM_WAKE_QUEUE_LOCK" "$bound" || return 1
+  if ! fm_recovery_lock_wait "$lock" "$bound"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
+  # shellcheck disable=SC2034 # Output read by callers after this function returns.
+  [ ! -s "$FM_WAKE_QUEUE" ] || FM_RECOVERY_MARKER_QUEUED=1
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     if [ -s "$FM_WAKE_QUEUE" ]; then
       if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
@@ -1119,10 +1198,10 @@ _fm_recovery_marker_arm_check() {
 # the queue read. Handling successors and foreground checkpoints must not call
 # this transition.
 _fm_recovery_marker_reopen_announced() {
-  local marker=$1 lock
+  local marker=$1 bound=${2:-} lock
   lock="${marker}.lock"
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
-  if ! fm_lock_acquire_wait "$lock"; then
+  fm_recovery_lock_wait "$FM_WAKE_QUEUE_LOCK" "$bound" || return 1
+  if ! fm_recovery_lock_wait "$lock" "$bound"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
@@ -1210,10 +1289,10 @@ fm_recovery_transition() {
       _fm_recovery_marker_ack "$marker" "$target"
       ;;
     arm-check)
-      _fm_recovery_marker_arm_check "$marker"
+      _fm_recovery_marker_arm_check "$marker" "$bound"
       ;;
     reopen-announced)
-      _fm_recovery_marker_reopen_announced "$marker"
+      _fm_recovery_marker_reopen_announced "$marker" "$bound"
       ;;
     handling-settled)
       _fm_recovery_marker_handling_settled "$marker"
@@ -1271,11 +1350,11 @@ fm_recovery_marker_begin_handling() {
 }
 
 fm_recovery_marker_arm_check() {
-  fm_recovery_transition "$1" arm-check
+  fm_recovery_transition "$1" arm-check "" "" "${2:-}"
 }
 
 fm_recovery_marker_reopen_announced() {
-  fm_recovery_transition "$1" reopen-announced
+  fm_recovery_transition "$1" reopen-announced "" "" "${2:-}"
 }
 
 fm_recovery_marker_handover_restore() {  # <marker> <snapshot-token> <snapshot-seq>
@@ -1358,8 +1437,9 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  local lockdir=$1 marker_publish_bound=${2:-} pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
+  FM_LOCK_HELD_PATH=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
 
@@ -1435,9 +1515,17 @@ fm_lock_try_acquire() {
   fi
 
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
-    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
+    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound"; then
     fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$cur
+    if [ -n "$marker_publish_bound" ]; then
+      # The marker lock refused inside the caller's bound: surface it as the
+      # blocking lock rather than the dead watch-lock holder, and keep the
+      # holder pid the marker acquire last reported.
+      # shellcheck disable=SC2034 # Read by sourcing callers after try_acquire fails.
+      FM_LOCK_HELD_PATH="$STATE/.watcher-down.lock"
+    else
+      FM_LOCK_HELD_PID=$cur
+    fi
     FM_LOCK_OWNER_DIR=
     return 1
   fi
