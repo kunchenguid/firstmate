@@ -1577,11 +1577,15 @@ treehouse_pool_report() {
       created_at=$(printf '%s\n' "$slot_record" | jq -r '.created_at // ""')
       slot_leased=$(printf '%s\n' "$slot_record" | jq -r '(.leased == true) or ((.lease_id // "") != "") or ((.lease_holder // "") != "")')
       slot_owner=$(printf '%s\n' "$slot_record" | jq -r '.owner_pid // ""')
+      owner_live=0
+      case "$slot_owner" in ''|*[!0-9]*) ;; *) kill -0 "$slot_owner" 2>/dev/null && owner_live=1 ;; esac
+      if [ -z "$slot" ]; then
+        if [ "$owner_live" -eq 1 ] || [ "$slot_leased" = true ]; then pool_has_owner=1; fi
+        continue
+      fi
       repo=$(git -C "$slot" rev-parse --show-toplevel 2>/dev/null) || repo=
       common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
       [ -n "$common" ] && repo=$common
-      owner_live=0
-      case "$slot_owner" in ''|*[!0-9]*) ;; *) kill -0 "$slot_owner" 2>/dev/null && owner_live=1 ;; esac
       if [ -e "${slot%/*}/.fm-slot-owner" ] || [ -e "$slot/.fm-slot-owner" ] || [ "$owner_live" -eq 1 ] || [ "$slot_leased" = true ]; then
         pool_has_owner=1
       fi
