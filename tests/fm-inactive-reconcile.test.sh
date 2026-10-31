@@ -222,6 +222,32 @@ test_branch_ack_retires_inactive_outcome_receipt() {
   pass "a branch-actor acknowledgement retires the inactive-outcome receipt and later scans stay quiet"
 }
 
+# A canonical ready ledger line is enough to record pr= and install the poll
+# sidecar in a main home, without a supervisor-turn caller.
+test_main_home_arms_ready_pr_watch() {
+  local url='https://github.com/owner/repo/pull/1' head
+  make_world main-ready-watch
+  write_child "$MAIN" child "done: PR $url checks green"
+  head=$(git -C "$MAIN/projects/child" rev-parse HEAD)
+  grep -v '^pr=\|^pr_head=' "$MAIN/state/child.meta" > "$MAIN/state/child.meta.tmp"
+  mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' --json isDraft '*) printf '{"isDraft":false}\n' ;;
+  *' --json headRefOid '*) printf '{"headRefOid":"%s"}\n' "$FM_TEST_HEAD" ;;
+  *) exit 97 ;;
+esac
+SH
+  chmod +x "$WORLD/fakebin/gh"
+  FM_TEST_HEAD=$head run_reconcile "$MAIN"
+  [ "$(sed -n 's/^pr=//p' "$MAIN/state/child.meta")" = "$url" ] \
+    || fail 'canonical CI-ready status did not record its PR automatically'
+  [ -f "$MAIN/state/child.check.sh" ] && [ ! -L "$MAIN/state/child.check.sh" ] \
+    || fail 'canonical CI-ready status did not arm its merge poll'
+  pass 'a main-home ready status automatically records pr= and arms its merge watch'
+}
+
 # An unpushed CI-ready ship done: is not a parent-facing ready signal. The
 # ledger pass reads the child's line before any PR is recorded for it, so the
 # gate tests the worker copy's HEAD.
@@ -1070,6 +1096,7 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_main_home_arms_ready_pr_watch
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_local_done_head_is_pinned_before_parent_delivery

@@ -83,8 +83,9 @@
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
 #
-# The scan reads only durable local state and fm-crew-state.sh; it never invokes
-# gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
+# Ready ship outcomes also arm their merge poll from the durable status ledger;
+# the poll itself remains owned by fm-watch.sh and this scan never reads forge
+# state directly.
 set -u
 export LC_ALL=C
 
@@ -460,10 +461,50 @@ report_child_ledger_locked() { # <id> <meta>
   return 1
 }
 
-# Every direct child's ledger, under its meta lock. File reads, plus a local
-# git reachability check for a ship done: with no delivery record yet, so it
-# runs on every poll in a secondmate home; a delivery failure is already queued as a
-# notice and never fails the scan.
+# A canonical CI-ready ship outcome arms its merge poll without waiting for a
+# supervisor turn. fm-pr-check owns validation, metadata, and sidecar creation.
+arm_ready_pr_watch() { # <id> <meta>
+  local id=$1 meta=$2 status line note url recorded arm_output
+  [ "$(meta_field "$meta" kind)" != secondmate ] || return 0
+  status="$STATE/$id.status"
+  line=$(child_terminal_ledger_line "$status") || return 0
+  [ "$(status_line_verb "$line")" = 'done' ] || return 0
+  note=$(status_line_note "$line")
+  case "$note" in
+    PR\ https://*) ;;
+    *) return 0 ;;
+  esac
+  case "$note" in
+    *' checks green') ;;
+    *) return 0 ;;
+  esac
+  url=${note#PR }
+  url=${url% checks green}
+  case "$url" in *[[:space:]]*|'') return 0 ;; esac
+  recorded=$(meta_field "$meta" pr)
+  if [ "$recorded" = "$url" ] && [ -f "$STATE/$id.check.sh" ] \
+    && [ ! -L "$STATE/$id.check.sh" ]; then
+    return 0
+  fi
+  if ! arm_output=$("$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" 2>&1); then
+    publish_actionable "pr-watch-arm:$id" \
+      "PR merge watch could not be armed for task $id ($url): $(clean_field "$arm_output")" || true
+  fi
+}
+
+# Every ready status is eligible for arming on each scan, in every home.
+arm_ready_pr_watches() {
+  local meta id
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    valid_id "$id" || continue
+    arm_ready_pr_watch "$id" "$meta"
+  done
+}
+
+# Every direct child's ledger is examined on each scan. Parent delivery remains
+# secondmate-only, while merge-watch arming applies to every home.
 ledger_pass() {
   local meta id lock
   for meta in "$STATE"/*.meta; do
@@ -603,6 +644,7 @@ scan() {
   local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
+  arm_ready_pr_watches
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
     ledger_pass
