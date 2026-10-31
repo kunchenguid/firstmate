@@ -4893,6 +4893,212 @@ test_closed_exit_picker_drops_saved_dialog_name() {
   pass "a closed picker drops the saved dialog name, and the stale stays ordinary"
 }
 
+# --- opt-in parked-gate notice (config/parked-gate-wake) ---------------------
+# A ship whose run parks at a gate owed a human can end its turn without
+# escalating it, behind an older `paused:` line. Where the home arms the flag the
+# watcher reads the run's own state every cycle and wakes ONCE per run, step and
+# findings checksum when the task has no decision record for that gate.
+
+gate_wake_case() {  # <name> <status-content> <armed|unarmed> [<kind>] -> case dir
+  local dir
+  dir=$(make_case "$1")
+  fm_write_meta "$dir/state/gate-task.meta" "window=test:fm-gate-task" "kind=${4:-ship}"
+  printf '%s\n' "$2" > "$dir/state/gate-task.status"
+  prime_status_seen "$dir/state" "$dir/state/gate-task.status"
+  mkdir -p "$dir/config"
+  [ "$3" != armed ] || : > "$dir/config/parked-gate-wake"
+  printf '%s\n' "$dir"
+}
+
+# One watcher round against <verdict>: 'woke' when it exited on a wake, 'quiet'
+# once a whole poll cycle completed with none.
+gate_wake_round() {  # <dir> <verdict> -> woke|quiet
+  local dir=$1 verdict=$2 pid
+  local state="$dir/state" out="$dir/watch.out"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+  : > "$out"
+  FM_FAKE_CREW_STATE="$verdict" FM_CONFIG_OVERRIDE="$dir/config" \
+    watch_bg "$state" "$dir/fakebin" "$out"
+  pid=$!
+  if wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"
+    echo quiet
+  else
+    wait "$pid" 2>/dev/null || true
+    echo woke
+  fi
+}
+
+gate_verdict() {  # <run> <step> <checksum>
+  printf 'state: parked · source: run-step · parked at %s: 1 finding(s) · ask-user: authority decision · ask-user findings checksum: %s · run: %s\n' "$2" "$3" "$1"
+}
+
+# Oracle: the requested shared-budget/round-robin contract. A slow external
+# reader must not reach the later ship in this cycle, but must reach it next.
+# This rejects both an unbounded scan and restarting at the hung ship each time.
+test_parked_gate_budget_defers_ships_to_next_cycle() {
+  local dir
+  dir=$(gate_wake_case gate-wake-budget 'paused: waiting' armed)
+  fm_write_meta "$dir/state/z-later.meta" 'kind=ship'
+  cat > "$dir/fakebin/slow-crew-state" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = gate-task ]; then
+  sleep 30
+  exit 1
+fi
+printf '%s\n' 'state: parked · source: run-step · parked at ci: 1 finding(s) · ask-user: authority decision · ask-user findings checksum: abc123 · run: 01LATER'
+EOF
+  chmod +x "$dir/fakebin/slow-crew-state"
+  FM_STATE_OVERRIDE="$dir/state" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_CREW_STATE_BIN="$dir/fakebin/slow-crew-state" bash -c '
+      . "$1"
+      wake() { :; }
+      started=$SECONDS
+      parked_gate_tick
+      [ "$((SECONDS - started))" -lt 9 ] || exit 11
+      [ ! -e "$STATE/.parked-gate-wake-z-later" ] || exit 12
+      parked_gate_tick
+      [ "$(cat "$STATE/.parked-gate-wake-z-later")" = "01LATER|ci|abc123" ] || exit 13
+      awk -F "\t" '\''$3 == "check" && $4 == "parked-gate-z-later-01LATER-ci-abc123" { n++ } END { exit n != 1 }'\'' "$STATE/.wake-queue"
+    ' _ "$WATCH" || fail "shared gate-read budget did not defer and resume the later ship"
+  pass "parked-gate reads share a bounded cycle and resume at deferred ships"
+}
+
+test_parked_gate_wake_is_off_without_its_flag() {
+  local dir r
+  dir=$(gate_wake_case gate-wake-unarmed 'paused [at=1]: waiting on CI' unarmed)
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNA ci aaa111)")
+  [ "$r" = quiet ] || fail "an unarmed home woke on a parked gate: $(cat "$dir/watch.out")"
+  [ ! -e "$dir/state/.parked-gate-wake-gate-task" ] \
+    || fail "an unarmed home wrote a parked-gate marker"
+  pass "with config/parked-gate-wake absent a parked human-owed gate wakes nothing"
+}
+
+test_parked_human_gate_wakes_once_per_gate() {
+  local dir state r
+  dir=$(gate_wake_case gate-wake-once 'paused [at=1]: waiting on CI' armed); state="$dir/state"
+
+  # A stale paused: line does not suppress the wake, and the wake names the gate.
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNA ci aaa111)")
+  [ "$r" = woke ] || fail "a parked human-owed gate behind a paused: line did not wake: $(cat "$dir/watch.out")"
+  grep -F 'check: ask-user gate parked: task=gate-task run=01RUNA step=ci' "$dir/watch.out" >/dev/null \
+    || fail "the gate wake did not name task, run and step: $(cat "$dir/watch.out")"
+  grep -F 'aaa111' "$dir/watch.out" >/dev/null \
+    && fail "the wake reason exposed the findings checksum: $(cat "$dir/watch.out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first gate wake"
+
+  # The same checksum on the next cycle must not wake twice.
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNA ci aaa111)")
+  [ "$r" = quiet ] || fail "the same parked gate woke a second time: $(cat "$dir/watch.out")"
+
+  # A changed findings table at the same step wakes again.
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNA ci bbb222)")
+  [ "$r" = woke ] || fail "a changed findings table did not wake"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the changed-gate wake"
+
+  # So does a new step, and a new run.
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNA review bbb222)")
+  [ "$r" = woke ] || fail "the same table at a new step did not wake"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the new-step wake"
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNB review bbb222)")
+  [ "$r" = woke ] || fail "the same gate on a new run did not wake"
+  pass "a parked human-owed gate wakes once per run, step and findings checksum, past a paused: line"
+}
+
+test_parked_gate_wake_keeps_a_durable_row_when_delivery_is_lost() {
+  local dir state r key wakes
+  dir=$(gate_wake_case gate-wake-durable 'paused [at=1]: waiting on CI' armed); state="$dir/state"
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNA ci aaa111)")
+  [ "$r" = woke ] || fail "a parked gate did not produce its initial wake"
+  key='parked-gate-gate-task-01RUNA-ci-aaa111'
+  wakes=$(awk -F '\t' -v k="$key" '$3 == "check" && $4 == k { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "a delivered parked-gate wake left $wakes durable rows: $(cat "$state/.wake-queue" 2>/dev/null)"
+  awk -F '\t' -v k="$key" '$3 == "check" && $4 == k && $5 == "check: ask-user gate parked: task=gate-task run=01RUNA step=ci" { found = 1 } END { exit !found }' \
+    "$state/.wake-queue" || fail "the durable parked-gate row had the wrong payload: $(cat "$state/.wake-queue")"
+  [ "$(cat "$state/.parked-gate-wake-gate-task" 2>/dev/null)" = '01RUNA|ci|aaa111' ] \
+    || fail "the parked-gate marker was not committed after its durable row"
+  pass "a parked-gate wake remains queued when delivery is not acknowledged"
+}
+
+# A worker that parks at a human-owed gate before ever appending a status line
+# has no status log at all (spawn creates none), which is exactly the silent
+# worker this notice exists for: no log is no decision record, so it wakes.
+test_parked_gate_wake_without_a_status_log_still_wakes() {
+  local dir r
+  dir=$(gate_wake_case gate-wake-no-status 'working [at=1]: placeholder' armed)
+  rm -f "$dir/state/gate-task.status"
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNA ci aaa111)")
+  [ "$r" = woke ] || fail "a parked human-owed gate on a ship with no status log did not wake"
+  grep -F 'check: ask-user gate parked: task=gate-task run=01RUNA step=ci' "$dir/watch.out" >/dev/null \
+    || fail "the no-status-log wake did not name task, run and step: $(cat "$dir/watch.out")"
+  pass "a parked human-owed gate on a ship with no status log still wakes"
+}
+
+test_parked_gate_wake_skips_an_existing_symlinked_status() {
+  local dir state r status_file target
+  dir=$(gate_wake_case gate-wake-symlink-status 'paused [at=1]: waiting on CI' armed); state="$dir/state"
+  status_file="$state/gate-task.status"; target="$dir/status-target"
+  printf 'paused [at=1]: waiting on CI\n' > "$target"
+  rm -f "$status_file"
+  ln -s "$target" "$status_file"
+  prime_status_seen "$state" "$status_file"
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNA ci aaa111)")
+  [ "$r" = quiet ] || fail "an existing symlinked status woke a parked gate: $(cat "$dir/watch.out")"
+  [ ! -e "$state/.parked-gate-wake-gate-task" ] \
+    || fail "an existing symlinked status wrote a parked-gate marker"
+
+  rm -f "$status_file"
+  printf 'paused [at=1]: waiting on CI\n' > "$status_file"
+  prime_status_seen "$state" "$status_file"
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNA ci aaa111)")
+  [ "$r" = woke ] || fail "a readable regular status did not wake the parked gate"
+  pass "an existing symlinked status stays indeterminate until a readable regular record exists"
+}
+
+test_parked_human_gate_with_a_decision_record_does_not_wake() {
+  local dir r
+  local gate
+  gate=$(gate_verdict 01RUNA ci aaa111)
+  # Answered: the closing line fm-send --resolve-key writes at answer time.
+  dir=$(gate_wake_case gate-wake-answered 'needs-decision [at=1] [key=nm-01RUNA-ci]: ask-user findings=ci-1
+resolved [at=2] [key=nm-01RUNA-ci]: answered' armed)
+  r=$(gate_wake_round "$dir" "$gate")
+  [ "$r" = quiet ] || fail "an answered gate woke: $(cat "$dir/watch.out")"
+  # Escalated by the worker under the exact key and still open.
+  dir=$(gate_wake_case gate-wake-escalated 'needs-decision [at=1] [key=nm-01RUNA-ci]: ask-user findings=ci-1
+working [at=2]: still parked' armed)
+  r=$(gate_wake_round "$dir" "$gate")
+  [ "$r" = quiet ] || fail "a gate the worker escalated and left open woke: $(cat "$dir/watch.out")"
+  # Escalated under the worker's own spelling of this run's step.
+  dir=$(gate_wake_case gate-wake-escalated-other-step 'needs-decision [at=1] [key=nm-01RUNA-ci-gate]: ask-user findings=ci-1' armed)
+  r=$(gate_wake_round "$dir" "$gate")
+  [ "$r" = quiet ] || fail "an open decision for this run under another step spelling woke: $(cat "$dir/watch.out")"
+  [ ! -e "$dir/state/.parked-gate-wake-gate-task" ] \
+    || fail "a gate with a decision record wrote a marker"
+  # An open decision for a DIFFERENT run is not a record of this gate.
+  dir=$(gate_wake_case gate-wake-other-run 'needs-decision [at=1] [key=nm-01RUNZ-ci]: ask-user findings=ci-1' armed)
+  r=$(gate_wake_round "$dir" "$gate")
+  [ "$r" = woke ] || fail "an open decision for another run suppressed this run's gate"
+  pass "a parked gate with a decision record for its run stays quiet, while another run's record does not"
+}
+
+test_parked_gate_wake_skips_running_crewmate_owed_and_scout() {
+  local dir r
+  dir=$(gate_wake_case gate-wake-running 'paused [at=1]: waiting on CI' armed)
+  r=$(gate_wake_round "$dir" 'state: working · source: run-step · ci running · run: 01RUNA')
+  [ "$r" = quiet ] || fail "a running step woke as a parked gate: $(cat "$dir/watch.out")"
+  r=$(gate_wake_round "$dir" 'state: parked · source: run-step · parked at review: 1 finding(s) · run: 01RUNA')
+  [ "$r" = quiet ] || fail "a gate owed the crewmate itself woke as a human-owed gate: $(cat "$dir/watch.out")"
+  r=$(gate_wake_round "$dir" 'state: parked · source: run-step · parked at review: 1 finding(s) · ask-user: authority decision · run: 01RUNA')
+  [ "$r" = quiet ] || fail "a human-owed gate with no findings checksum woke: $(cat "$dir/watch.out")"
+  dir=$(gate_wake_case gate-wake-scout 'working [at=1]: investigating' armed scout)
+  r=$(gate_wake_round "$dir" "$(gate_verdict 01RUNA ci aaa111)")
+  [ "$r" = quiet ] || fail "a scout woke as a parked ship gate: $(cat "$dir/watch.out")"
+  pass "a running step, a crewmate-owed gate, an unkeyable verdict and a scout do not wake"
+}
+
+
 # CI's stock macOS Bash lane sets FM_TEST_STOCK_BASH=1 to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 # Adding another stock-bash case means adding it to this list, not to ci.yml.
@@ -5025,4 +5231,12 @@ fm_test_run \
   test_exit_picker_wedge_keeps_climbing \
   test_quoted_exit_picker_stays_ordinary_stale \
   test_secondmate_exit_picker_stays_quiet \
-  test_closed_exit_picker_drops_saved_dialog_name
+  test_closed_exit_picker_drops_saved_dialog_name \
+  test_parked_gate_budget_defers_ships_to_next_cycle \
+  test_parked_gate_wake_is_off_without_its_flag \
+  test_parked_human_gate_wakes_once_per_gate \
+  test_parked_gate_wake_keeps_a_durable_row_when_delivery_is_lost \
+  test_parked_gate_wake_without_a_status_log_still_wakes \
+  test_parked_gate_wake_skips_an_existing_symlinked_status \
+  test_parked_human_gate_with_a_decision_record_does_not_wake \
+  test_parked_gate_wake_skips_running_crewmate_owed_and_scout

@@ -1158,6 +1158,66 @@ test_parked_human_decision_comes_from_the_action_column() {
   pass "the parked human-decision component is derived from the findings table's action column"
 }
 
+# The watcher's opt-in parked-gate notice keys "once per gate" on a digest of the
+# gate's raw findings table, so the digest must be stable for one table, move
+# when that table changes at the same step, and appear only beside the
+# human-decision component it qualifies.
+test_parked_human_gate_carries_a_findings_checksum() {
+  local d out first again changed expected digest_input
+  reset_fakes
+  d=$(new_case parked-findings-checksum)
+  make_repo_on_branch "$d/wt" fm/feat-fc
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fc.meta" "window=fm:fm-feat-fc" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-fc.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-fc)"
+  out=$(run_crew_state "$d" feat-fc)
+  assert_contains "$out" " · ask-user: authority decision · ask-user findings checksum: " \
+    "the checksum component follows the human-decision component"
+  first=$(printf '%s\n' "$out" | sed -n 's/.* · ask-user findings checksum: \([0-9a-f]*\).*/\1/p')
+  [ "${#first}" -eq 64 ] || fail "the findings checksum is not a sha256 digest: '$first' in $out"
+  digest_input=$(cat <<'EOF'
+  findings[2]{id,severity,file,line,action,description}:
+    r1,warning,a.go,,auto-fix,ignored error
+    r2,error,b.go,,ask-user,changes product behavior
+EOF
+)
+  if command -v shasum >/dev/null 2>&1; then
+    expected=$(printf '%s\n' "$digest_input" | shasum -a 256 | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    expected=$(printf '%s\n' "$digest_input" | sha256sum | awk '{print $1}')
+  else
+    fail "no independent SHA-256 tool is available"
+  fi
+  [ "$first" = "$expected" ] \
+    || fail "the findings checksum did not match the serialized table: '$first' vs '$expected'"
+  assert_not_contains "$out" "changes product behavior" "the verdict carries no finding text"
+
+  out=$(run_crew_state "$d" feat-fc)
+  again=$(printf '%s\n' "$out" | sed -n 's/.* · ask-user findings checksum: \([0-9a-f]*\).*/\1/p')
+  [ "$again" = "$first" ] || fail "the same findings table digested differently: '$first' then '$again'"
+
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-fc | sed 's/changes product behavior/changes billing behavior/')"
+  out=$(run_crew_state "$d" feat-fc)
+  assert_contains "$out" " · ask-user: authority decision" "the changed table is still owed a human"
+  changed=$(printf '%s\n' "$out" | sed -n 's/.* · ask-user findings checksum: \([0-9a-f]*\).*/\1/p')
+  [ -n "$changed" ] && [ "$changed" != "$first" ] \
+    || fail "a changed findings table at the same step kept its checksum: '$first' vs '$changed'"
+
+  reset_fakes
+  d=$(new_case parked-findings-checksum-crewmate)
+  make_repo_on_branch "$d/wt" fm/ask-user-authority-fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fx.meta" "window=fm:fm-feat-fx" "worktree=$d/wt" "kind=ship"
+  printf 'working: validation under way\n' > "$d/state/feat-fx.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_crewmate_gate_with_ask_user_prose fm/ask-user-authority-fix)"
+  out=$(run_crew_state "$d" feat-fx)
+  assert_contains "$out" "state: parked" "a crewmate-owed gate still reports parked"
+  assert_not_contains "$out" "ask-user findings checksum" \
+    "a gate owed the crewmate's own answer carries no findings checksum"
+  pass "a human-owed parked gate carries a stable digest of its raw findings table"
+}
+
 test_scalar_gate_parked_not_superseded() {
   reset_fakes
   local d; d=$(new_case parked-scalar-gate)
@@ -6103,6 +6163,7 @@ test_latest_status_preserves_legacy_completions
 test_latest_status_subshell_work_does_not_grow_with_history
 test_genuine_parked_not_superseded
 test_parked_human_decision_comes_from_the_action_column
+test_parked_human_gate_carries_a_findings_checksum
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run

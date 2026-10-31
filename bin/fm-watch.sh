@@ -149,6 +149,15 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+#   check: ask-user gate parked: task=<id> run=<run> step=<step>
+#                          only where config/parked-gate-wake arms it: a live
+#                          ship task's no-mistakes run is parked at a gate owed
+#                          a human and the task has no decision record for that
+#                          run's gate; read from the run's own state each cycle
+#                          whatever the worker last declared, and queued/reported
+#                          at least once per run, step and findings checksum;
+#                          a crash during marker commit may repeat one notice
+#                          (parked_gate_tick)
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -1681,6 +1690,91 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
     return 0
   fi
   return 1
+}
+
+# Opt-in notice for a no-mistakes gate owed a human that nobody was told about,
+# armed only by config/parked-gate-wake; absent the flag this costs one file test
+# and reads nothing. A worker whose run parks at an ask-user gate can end its turn
+# without appending needs-decision, or behind an earlier `paused:` line that
+# defers the wedge ladder, so without this the supervisor learns of the gate only
+# from elapsed idle time. The run's own state is the authority instead: for each
+# live ship task, crew_parked_human_gate reads the crew's current state (the
+# run-step source, never the pane or the status tail), and a gate owed a HUMAN
+# queues ONE check wake naming the task, run and step, whatever the worker last
+# declared and on no timer.
+# A gate the task already has a record for is skipped before any marker is
+# written: an exact `nm-<run>-<step>` key in any state (the worker escalated it,
+# or `fm-send --resolve-key` closed it at answer time), or an open needs-decision
+# for any step of THIS run, the same run-scoped test wedge_wait_evidence uses,
+# because the key's step is the worker's own spelling.
+# At least once per gate: the marker holds run|step|findings-checksum, so the
+# same gate on the next cycle stays quiet while a new run, step or findings table
+# wakes again. A crash during marker commit may repeat one notice.
+# Every way the read can come back empty (no run, a running step, a gate owed the
+# crewmate's own answer, a verdict naming no step or checksum) wakes nothing.
+# It complements config/wedge-defer-parked-gate rather than overlapping it: that
+# flag only changes how the ladder treats a gate firstmate WAS told about (an open
+# decision for the run), which is exactly the case this tick skips.
+# Share five seconds of CLI wait across the scan; resume after the last attempted
+# ship next cycle, including after a timeout, so a hung ship cannot starve peers.
+parked_gate_tick() {
+  local meta task gate run step checksum marker marker_tmp reason key notify_key queued status statusf
+  local deadline remaining count start offset index
+  local -a ships=()
+  [ -e "$CONFIG/parked-gate-wake" ] || return 0
+  deadline=$((SECONDS + 5))
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    [ "$(fm_meta_get "$meta" kind)" = ship ] || continue
+    ships+=("$meta")
+  done
+  count=${#ships[@]}
+  [ "$count" -gt 0 ] || return 0
+  start=$((${PARKED_GATE_NEXT:-0} % count))
+  for ((offset=0; offset<count; offset++)); do
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    index=$(((start + offset) % count))
+    PARKED_GATE_NEXT=$(((index + 1) % count))
+    meta=${ships[$index]}
+    task=${meta##*/}
+    task=${task%.meta}
+    gate=$(crew_parked_human_gate "$task" "$remaining") || continue
+    IFS=$'\t' read -r run step checksum <<EOF
+$gate
+EOF
+    key="nm-$run-$step"
+    statusf="$STATE/$task.status"
+    if [ -e "$statusf" ] || [ -L "$statusf" ]; then
+      [ -f "$statusf" ] && [ -r "$statusf" ] && [ ! -L "$statusf" ] || continue
+    fi
+    [ -z "$(status_key_closing_verb "$statusf" "$key")" ] || continue
+    ! status_has_open_needs_decision "$statusf" "$run" || continue
+    marker="$STATE/.parked-gate-wake-$task"
+    [ "$(cat "$marker" 2>/dev/null || true)" = "$run|$step|$checksum" ] && continue
+    reason="check: ask-user gate parked: task=$task run=$run step=$step"
+    notify_key="parked-gate-$task-$run-$step-$checksum"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || continue
+    status=0
+    queued=$(fm_wake_queued_keys_locked check)
+    if ! printf '%s\n' "$queued" | grep -Fx -- "$notify_key" >/dev/null 2>&1; then
+      fm_wake_append_locked check "$notify_key" "$reason" || status=$?
+    fi
+    if [ "$status" -eq 0 ]; then
+      marker_tmp="$marker.tmp.${BASHPID:-$$}"
+      if printf '%s\n' "$run|$step|$checksum" > "$marker_tmp" \
+        && mv -f -- "$marker_tmp" "$marker"; then
+        :
+      else
+        rm -f -- "$marker_tmp"
+        status=1
+      fi
+    fi
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || [ "$status" -ne 0 ] || status=1
+    [ "$status" -eq 0 ] || continue
+    triage_log "parked human-owed gate with no decision record: $reason"
+    wake "$reason"
+  done
 }
 
 # Defer ONE wedge escalation for a pane whose wait record explains the quiet
@@ -3822,6 +3916,10 @@ while :; do
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
   resurface_after_downtime
+
+  # Opt-in: a gate owed a human, read from the run's own state rather than from
+  # what the worker reported (parked_gate_tick).
+  parked_gate_tick
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation

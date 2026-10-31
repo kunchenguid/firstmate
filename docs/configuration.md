@@ -941,6 +941,24 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 [`architecture.md`](architecture.md) owns the wait-evidence contract and which records may take the ladder away; `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
 
+## Parked-gate notice (config/parked-gate-wake)
+
+The optional local, gitignored `config/parked-gate-wake` presence flag opts this home into a default-off watcher notice for a no-mistakes gate owed a human that nobody was told about.
+Create it with `touch "$FM_HOME/config/parked-gate-wake"`; remove it to restore the default.
+
+With it present, the watcher reads each live ship's own current state once per cycle, and when that ship's no-mistakes run is parked at a gate whose findings include an `ask-user` action, it queues one `check: ask-user gate parked: task=<id> run=<run> step=<step>` notification.
+A worker's own `paused:` or `working:` line does not suppress it, because the gate is read from the run rather than from the worker's report.
+It stays quiet when the task already has a decision record for that gate, whether the worker escalated it under its `nm-<run>-<step>` key, another decision for the same run is still open, or firstmate's answer already closed that key.
+It reports each gate at least once per run, step, and digest of the gate's raw findings table, so the same gate stays quiet on later cycles while a new run, a new step, or a changed findings table notifies again.
+A crash during marker commit may repeat one notice.
+
+It complements the parked-gate wait deferral above: that flag changes how the wedge ladder treats a gate firstmate was already told about, while this notice covers only the gate nobody was told about.
+It is independent of a worker's own background-job completion, which this notice never watches.
+
+With the flag absent the watcher spends no current-state read for it, writes no record, and queues no notification.
+The flag is a home-local supervision preference and is not inherited by secondmate homes.
+`bin/fm-watch.sh`'s `parked_gate_tick` owns the exact derivation and `bin/fm-classify-lib.sh`'s `crew_parked_human_gate` owns which verdicts count.
+
 ## Wedge evidence guards (config/wedge-evidence-guards)
 
 The optional local, gitignored `config/wedge-evidence-guards` file opts this home into consulting operator-owned [Jev guards](jev-guards.md) before the watcher wedge-escalates a quiet live pane.
@@ -3264,7 +3282,7 @@ FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # plain runs-ledger rows scanned for fallback attribution; does not change the CLI's AXI overview window (selection owner: bin/fm-nm-run-lib.sh)
 FM_TEARDOWN_NM_RUNS_LIMIT=200  # recent no-mistakes run rows scanned to prove an unresolved-head parked run belongs to teardown's task
-FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by watcher triage: the working/paused classification, the wedge timer's parked-gate wait evidence, and its opt-in validating-run deferral
+FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by watcher triage: the working/paused classification, the parked-gate notice, the wedge timer's parked-gate wait evidence, and its opt-in validating-run deferral
 FM_MAIL_USER=      # mail-plane IMAP/SMTP login, from .env or environment (docs/configuration.md "Mail plane")
 FM_MAIL_PASS=      # mail-plane IMAP/SMTP password
 FM_IMAP_HOST=      # mail-plane IMAP server hostname

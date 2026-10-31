@@ -4100,7 +4100,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/$ID.claude-settings.json" "$STATE/$ID.devin-config.json" \
   "$STATE/$ID.polytoken-busy.sh" \
-  "$STATE/.$ID.branch-outcome-index" \
+  "$STATE/.$ID.branch-outcome-index" "$STATE/.parked-gate-wake-$ID" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
 # kiro's per-task home is a directory (its relocated KIRO_HOME holds the hook
 # agent config, the trust setting, and this task's sessions), so it needs a
