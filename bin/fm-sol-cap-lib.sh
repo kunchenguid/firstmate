@@ -1247,7 +1247,7 @@ fm_sol_cap_cli() {
     return 1
     ;;
   *)
-    echo "unknown fm-sol-cap-lib.sh mode: $mode (try: status | models | ceiling | refuse-claim | record-actual)" >&2
+    echo "unknown fm-sol-cap-lib.sh mode: $mode (try: status | models | ceiling | refuse-claim | record-actual | run | run-launch)" >&2
     return 2
     ;;
   esac
