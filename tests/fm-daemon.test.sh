@@ -85,6 +85,31 @@ test_afk_start_refuses_tern_supervisor_backend() {
   pass "fm-afk-start.sh refuses tern as an away-mode supervisor backend (unsupported; documented in docs/tern-backend.md)"
 }
 
+# Gap 2 of issue #7168: an Orca primary used to resolve to the tmux default, so
+# the documented unsupported-backend refusal never ran. With ORCA_TERMINAL_HANDLE
+# in the environment and nothing else, startup must name orca and refuse - never
+# touch a tmux pane.
+test_afk_start_refuses_orca_supervisor_backend() {
+  local dir state out status
+  dir=$(make_supercase afk-start-orca-recognized)
+  state="$dir/state"
+
+  out=$(env -u FM_SUPERVISOR_BACKEND -u FM_SUPERVISOR_TARGET -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID \
+    -u REX_SESSION -u REX_BLOCK ORCA_TERMINAL_HANDLE=term_abc123 \
+    FM_STATE_OVERRIDE="$state" "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should refuse an automatically recognized Orca session"
+  assert_contains "$out" "does not support supervisor backend 'orca'" \
+    "away mode did not name orca as the unsupported backend it recognized"
+  assert_not_contains "$out" "does not resolve to a tmux pane" \
+    "away mode aimed a tmux validation at an Orca session instead of refusing the backend"
+  grep -F "unsupported supervisor backend 'orca' (source=ORCA_TERMINAL_HANDLE)" \
+    "$state/.supervise-daemon.log" >/dev/null 2>&1 \
+    || fail "the daemon log did not record ORCA_TERMINAL_HANDLE as the refusal source: $(cat "$state/.supervise-daemon.log" 2>/dev/null)"
+  pass "fm-afk-start.sh recognizes an Orca operator session and refuses it by name (source=ORCA_TERMINAL_HANDLE)"
+}
+
 test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   local dir state out status lock
   dir=$(make_supercase afk-start-stale-lock-reused-pid)
@@ -3167,6 +3192,61 @@ test_discover_supervisor_target_herdr() {
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
 }
 
+# Orca injects ORCA_TERMINAL_HANDLE into every process its terminal hosts (Orca
+# IDE 1.4.232 shipped source; docs/orca-backend.md "Away supervision"). Shared
+# discovery recognizes it LAST, after every innermost signal, so the away daemon
+# gives its documented unsupported-backend refusal for an Orca-hosted captain
+# instead of falling through to the tmux default and aiming escalation at a pane
+# that is not there (issue #7168 gap 2). Ancestor precedence is pinned here too:
+# a tmux/herdr/Rex session nested inside Orca keeps its own transport, and an
+# explicit override still wins.
+test_discover_supervisor_orca_after_inner_signals() {
+  local out
+  out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    REX_SESSION='' REX_BLOCK='' ORCA_TERMINAL_HANDLE='term_abc123' discover_supervisor_backend)
+  [ "$out" = orca ] || fail "ORCA_TERMINAL_HANDLE should resolve the supervisor backend to orca: $out"
+
+  out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    REX_SESSION='' REX_BLOCK='' ORCA_TERMINAL_HANDLE='term_abc123' discover_supervisor_target)
+  [ "$out" = 'term_abc123' ] || fail "an Orca supervisor target should be the terminal handle: $out"
+
+  out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' \
+    ORCA_TERMINAL_HANDLE='term_abc123' discover_supervisor_backend)
+  [ "$out" = tmux ] || fail "a tmux pane nested in Orca should keep tmux: $out"
+  out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' \
+    ORCA_TERMINAL_HANDLE='term_abc123' discover_supervisor_target)
+  [ "$out" = '%3' ] || fail "a tmux pane nested in Orca should keep its pane id as the target: $out"
+
+  out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 \
+    ORCA_TERMINAL_HANDLE='term_abc123' discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "a herdr pane nested in Orca should keep herdr: $out"
+  out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 \
+    HERDR_SESSION=iso1 ORCA_TERMINAL_HANDLE='term_abc123' discover_supervisor_target)
+  [ "$out" = 'iso1:w1:p9' ] || fail "a herdr pane nested in Orca should compose its own target: $out"
+
+  out=$(FM_SUPERVISOR_TARGET='explicit:target' FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='' HERDR_ENV='' \
+    HERDR_PANE_ID='' ORCA_TERMINAL_HANDLE='term_abc123' discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "an explicit FM_SUPERVISOR_BACKEND override should still beat Orca: $out"
+  out=$(FM_SUPERVISOR_TARGET='explicit:target' FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='' HERDR_ENV='' \
+    HERDR_PANE_ID='' ORCA_TERMINAL_HANDLE='term_abc123' discover_supervisor_target)
+  [ "$out" = 'explicit:target' ] || fail "an explicit FM_SUPERVISOR_TARGET override should still beat Orca: $out"
+
+  # An empty marker is not an operator session: it falls through to the legacy
+  # fallback (returning non-zero) rather than naming Orca with no endpoint.
+  if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' \
+    REX_SESSION='' REX_BLOCK='' ORCA_TERMINAL_HANDLE='' FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" \
+    discover_supervisor_backend); then
+    fail "an empty ORCA_TERMINAL_HANDLE should not resolve a supervisor backend"
+  fi
+  [ "$out" = tmux ] || fail "an empty ORCA_TERMINAL_HANDLE should leave the tmux fallback: $out"
+
+  fm_supervisor_backend_supported tmux || fail "tmux should be a supported supervisor backend"
+  fm_supervisor_backend_supported herdr || fail "herdr should be a supported supervisor backend"
+  fm_supervisor_backend_supported t3code || fail "t3code should be a supported supervisor backend"
+  if fm_supervisor_backend_supported orca; then fail "orca must stay an unsupported away supervisor backend"; fi
+  pass "discover_supervisor_*: explicit > tmux > herdr > rex > t3code > Orca (ORCA_TERMINAL_HANDLE) > fallback; orca is recognized but unsupported"
+}
+
 # --- t3code supervisor discovery and busy verdict --------------------------
 # The real adapter is sourced once so fm_backend_source's sourced flag keeps it
 # from re-sourcing over the stub; the stub records every home it is asked about
@@ -3450,6 +3530,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_refuses_tern_supervisor_backend
+test_afk_start_refuses_orca_supervisor_backend
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
@@ -3586,6 +3667,7 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_discover_supervisor_orca_after_inner_signals
 test_discover_supervisor_t3code_after_env_tmux_and_herdr
 test_pane_is_busy_t3code_trusts_native_verdict_without_capture
 test_pane_is_busy_herdr_native_busy_state

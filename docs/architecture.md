@@ -239,7 +239,8 @@ The retries-exhausted queued-Enter decision is owned by `fm_composer_queued_ente
 Composer classification has one shared owner, `bin/fm-composer-lib.sh`: tmux, herdr, Zellij, Orca, cmux, Paseo, Rex, tern, and hc contribute only a screen capture plus declarative styled, cursor, identity, and row capabilities, while the shared classifier owns every shape and the `empty`/`pending`/`pending-unproven`/`unknown` verdict.
 `fm-spawn.sh` also routes Kimi launch readiness through that classifier instead of carrying another shape copy.
 The daemon's pane input guard is owned by [Busy-guard and composer guard](../.agents/skills/afk/SKILL.md#busy-guard-and-composer-guard), with backend details in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
-Unsupported supervisor backends refuse at daemon startup.
+Unsupported supervisor backends refuse at daemon startup and in `bin/fm-afk-launch.sh` before it writes `state/.afk`; a discovery that names no injectable operator session refuses only in `bin/fm-afk-launch.sh` (`start` and `start-native`) before that flag, while direct daemon startup warns and keeps the legacy `firstmate:0` fallback.
+[supervisor backend configuration](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target) owns that refusal contract.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, the record archive, durable catch-up evidence, the return brief, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker the away session could not fix.
 `fm-send.sh` delivers every remote text steer and ordinary local text steer as a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).

@@ -2213,6 +2213,44 @@ Without `tmux -u`, tmux's non-UTF-8 client output sanitized a multiline UTF-8 va
 A name present only in the server-global environment, or only as text inside another value, was refused.
 The fake-Orca cases execute the real staged launch file under synthetic personal credentials and cover refusal before allocation, file privacy and deletion, deletion-failure refusal that keeps the interactive pane with and without errexit, reclaiming a launch file the pane never ran while the terminal stays open, reclaiming it when HUP, INT or TERM interrupts the spawn after the file is published but before the launch command is sent, during the consume wait, or between text delivery and Enter, a pane that wins the deadline unlink race, and the missing-source warning.
 
+### Orca operator-session signal
+
+Observed 2026-10-31 on Orca 1.4.232: `orca --version` reports `1.4.232`, `orca status --json` reports `result.runtime.state=ready`, and the packed application of the `orca-ide` build installed on the verification host is the file inspected below.
+The macOS bundle carries the same packed application at `/Applications/Orca.app/Contents/Resources/app.asar`; pick whichever path exists on the machine being checked.
+`ORCA_TERMINAL_HANDLE` is the marker shared supervisor discovery recognizes for an Orca-hosted captain ([operator guide](../orca-backend.md#away-supervision)).
+
+```sh
+orca --version
+D=<orca app>/resources; grep -ao 'ORCA_TERMINAL_HANDLE' "$D/app.asar" | wc -l
+grep -ao '.\{120\}ORCA_TERMINAL_HANDLE.\{200\}' "$D/app.asar"
+```
+
+The packed application source sets it into the environment of every terminal it spawns, so every process inside that terminal inherits it:
+`env:{...e.env,ORCA_TERMINAL_HANDLE:e.preAllocatedHandle}`, with the same value recorded against the live terminal.
+An inherited value that is not a live terminal of the runtime is replaced, not trusted: `h=m&&i.has(m)?m:t?.preAllocateHandleForPty(e); m&&m!==h&&delete p.ORCA_TERMINAL_HANDLE`.
+So the marker names a terminal this Orca runtime owns, and a stale or foreign value cannot redirect discovery to someone else's endpoint.
+A tmux, Herdr, or Rex session started inside an Orca terminal still carries its own innermost markers, which is why discovery checks Orca last.
+
+With only `ORCA_TERMINAL_HANDLE` set (no `TMUX_PANE`, no herdr, Rex, or T3 markers), both refusal paths were run:
+
+```sh
+env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u REX_SESSION -u REX_BLOCK \
+  -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND ORCA_TERMINAL_HANDLE=term_probe \
+  bash bin/fm-afk-start.sh
+```
+
+```text
+error: away-mode daemon does not support supervisor backend 'orca' yet (supported: tmux herdr rex t3code); ...
+```
+
+`state/.supervise-daemon.log` recorded `startup failed: unsupported supervisor backend 'orca' (source=ORCA_TERMINAL_HANDLE)`, and `bin/fm-afk-launch.sh start-native` refused the same backend by name, with `fm-afk-launch: away supervision does not support supervisor backend 'orca' yet (supported: tmux herdr rex t3code); refusing to arm away mode. ...`, before writing `state/.afk`.
+Not covered here: no Orca-hosted primary was launched, so the marker was read from the shipped source and then supplied explicitly for the refusal run.
+
+```sh
+tests/fm-daemon.test.sh
+tests/fm-afk-launch.test.sh
+```
+
 ## cmux
 
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.

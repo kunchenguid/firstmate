@@ -21,6 +21,25 @@
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 
+# Supervisor backends the away daemon can inject into today. rex goes through
+# the same dispatcher primitives as herdr (bin/backends/rex.sh). zellij, orca,
+# cmux, paseo, and tern are real backends elsewhere in firstmate
+# (bin/fm-backend.sh) but the daemon has no verified composer/busy primitives
+# wired up for them yet - see docs/herdr-backend.md and AGENTS.md section 4's
+# harness-verification discipline. This list is the single owner: the daemon's
+# startup refusal and the away launcher's pre-flag refusal both read it here, so
+# a backend cannot be launchable on one path and refused on the other.
+FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr rex t3code"
+
+# fm_supervisor_backend_supported: is <backend> one the away daemon can inject
+# into? The one predicate behind every supported-backend decision.
+fm_supervisor_backend_supported() {  # <backend>
+  case " $FM_SUPERVISOR_SUPPORTED_BACKENDS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
 # fm_supervisor_in_rex: this process runs directly inside a Rex block.
 fm_supervisor_in_rex() {
   [ "${TERM_PROGRAM:-}" = rex ] && [ -n "${REX_SESSION:-}" ] && [ -n "${REX_BLOCK:-}" ]
@@ -47,6 +66,15 @@ fm_supervisor_in_rex() {
 #      - T3 puts nothing into the agent's environment, so this is a cwd match
 #      over T3's live threads, consulted only when t3code is explicitly
 #      selected and a T3 credential is configured.
+#   4c. $ORCA_TERMINAL_HANDLE - the Orca terminal hosting this process. Orca is
+#      an outer terminal application (like cmux), so it is checked after every
+#      innermost signal: a tmux, herdr, or Rex session nested inside an Orca
+#      terminal keeps its own transport, and an explicitly selected T3 thread
+#      stays the operator session inside an Orca-hosted captain. Recognizing
+#      Orca here is what lets the daemon give its documented unsupported-backend
+#      refusal instead of falling through to the tmux fallback and aiming
+#      escalation at a pane that is not there (issue #7168). See
+#      docs/orca-backend.md "Away supervision".
 #   5. FM_SUPERVISOR_TARGET_DEFAULT - legacy tmux fallback (may not resolve if the
 #      session is named differently). Returns 1 so the caller can warn.
 discover_supervisor_target() {
@@ -69,6 +97,12 @@ discover_supervisor_target() {
   fi
   if t3_thread=$(discover_supervisor_t3code_thread); then
     printf '%s' "$t3_thread"
+    return 0
+  fi
+  if [ -n "${ORCA_TERMINAL_HANDLE:-}" ]; then
+    # An Orca terminal handle is exactly the target `orca terminal ...` takes,
+    # so it stays the endpoint the daemon would use if Orca were supported.
+    printf '%s' "$ORCA_TERMINAL_HANDLE"
     return 0
   fi
   printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"
@@ -101,6 +135,8 @@ discover_supervisor_t3code_thread() {
 #   4. TERM_PROGRAM=rex (with $REX_SESSION and $REX_BLOCK present) - rex.
 #   4b. A live T3 thread in this home - t3code (stderr quiet here; the target
 #      resolver reports an ambiguity once).
+#   4c. $ORCA_TERMINAL_HANDLE present - orca (an outer terminal application, so
+#      checked last; see discover_supervisor_target's header).
 #   5. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) - matches the target fallback. Returns 1.
 discover_supervisor_backend() {
   if [ -n "${FM_SUPERVISOR_BACKEND:-}" ]; then
@@ -121,6 +157,10 @@ discover_supervisor_backend() {
   fi
   if discover_supervisor_t3code_thread >/dev/null 2>&1; then
     printf 't3code'
+    return 0
+  fi
+  if [ -n "${ORCA_TERMINAL_HANDLE:-}" ]; then
+    printf 'orca'
     return 0
   fi
   printf '%s' "$FM_SUPERVISOR_BACKEND_DEFAULT"
