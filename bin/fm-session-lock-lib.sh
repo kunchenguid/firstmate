@@ -128,12 +128,16 @@ fm_bun_harness_argv_name() {  # <argv0> [args...]
 # (argc, then the exec path, padding, and the NUL-separated argv strings,
 # followed by the environment, which is never read) through python3 ctypes -
 # the sysctl(8) CLI has no formatter registered for that oid, so the command
-# cannot print it. Any unreadable or short table fails closed.
+# cannot print it. Any unreadable, empty, or short table fails closed. Size is
+# never the test: procfs reports st_size 0 for cmdline even when it holds
+# arguments, so a -s check would reject every live Linux process.
 fm_process_argv() {  # <pid>
-  local pid=$1
+  local pid=$1 cmdline
   if [ -e "/proc/$pid/cmdline" ]; then
-    [ -s "/proc/$pid/cmdline" ] || return 1
-    tr '\0' '\n' < "/proc/$pid/cmdline"
+    # An empty read is a zombie or kernel thread (no argv); a failed read is a
+    # dead or inaccessible process. Both are unreadable, so both fail closed.
+    cmdline=$(tr '\0' '\n' 2>/dev/null < "/proc/$pid/cmdline") && [ -n "$cmdline" ] || return 1
+    printf '%s\n' "$cmdline"
     return 0
   fi
   case "$(uname -s 2>/dev/null)" in
