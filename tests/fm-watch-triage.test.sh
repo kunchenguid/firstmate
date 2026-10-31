@@ -4501,7 +4501,7 @@ test_heartbeat_no_change_absorbed() {
   local dir state fakebin out pid i sig
   dir=$(make_case heartbeat-absorb); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   mkdir -p "$dir/data"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  fm_test_tasks_toml "$dir/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   printf 'working: routine heartbeat history\n' > "$state/routine.status"
   sig=$(seen_sig "$state/routine.status"); printf '%s' "$sig" > "$state/.seen-routine_status"
@@ -4536,7 +4536,7 @@ test_heartbeat_backstop_surfaces_a_masked_status() {
   local dir state fakebin out sig pid
   dir=$(make_case heartbeat-masked); state="$dir/state"; fakebin="$dir/fakebin"
   mkdir -p "$dir/data"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  fm_test_tasks_toml "$dir/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   out="$dir/watch.out"
   # Same miss as below, but the captain-relevant event is followed by a routine
@@ -4566,7 +4566,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   local dir state fakebin out drain_out sig pid
   dir=$(make_case heartbeat-backstop); state="$dir/state"; fakebin="$dir/fakebin"
   mkdir -p "$dir/data"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  fm_test_tasks_toml "$dir/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   # A captain-relevant status whose .seen-* signature ALREADY matches (so the

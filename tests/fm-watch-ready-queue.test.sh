@@ -60,7 +60,7 @@ test_ready_heartbeat() {
   local mode=${1:-ready} dir pid out
   dir=$(make_case "$mode-heartbeat")
   mkdir -p "$dir/data" "$dir/config"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  fm_test_tasks_toml "$dir/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" add cap-ready 'beyond current spend cap' >/dev/null \
     || fail 'could not queue candidate with stale spending title'
@@ -93,7 +93,7 @@ test_not_ready_heartbeat() {
   local mode=$1 dir pid out i rc
   dir=$(make_case "$mode-heartbeat")
   mkdir -p "$dir/data" "$dir/config"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  fm_test_tasks_toml "$dir/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   if [ "$mode" = held ]; then
     FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" add held 'waiting for captain' >/dev/null \
@@ -148,7 +148,7 @@ test_daemon_heartbeat() {
   dir=$(make_case "daemon-$mode-$skip")
   state="$dir/state"
   mkdir -p "$dir/data" "$dir/config"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  fm_test_tasks_toml "$dir/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   printf 'mode: quiet\n' > "$state/.afk"
   if [ "$mode" != empty ]; then
