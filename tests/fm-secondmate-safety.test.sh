@@ -1554,6 +1554,84 @@ SH
   pass "secondmate spawn validates homes before launch"
 }
 
+# state/<id>.meta and data/secondmates.md both hang off the spawning process's
+# FM_HOME, so a spawn invoked with a stale or inherited FM_HOME (an ancestor home,
+# or any home that never registered this secondmate) used to publish the meta into
+# that wrong home while the registering home kept the registry entry and lost the
+# ability to supervise its own secondmate. The registry binding is now a
+# precondition, so the meta can only ever land in the home that registers the id.
+# The positive control - a registered binding still spawns and writes the meta -
+# is fm-secondmate-harness.test.sh's B2-B5 spawn cases.
+test_secondmate_spawn_requires_registering_home() {
+  local home subhome subhome_abs elsewhere fakebin log err
+  home="$TMP_ROOT/spawn-registry-home"
+  subhome="$TMP_ROOT/spawn-registry-subhome"
+  elsewhere="$TMP_ROOT/spawn-registry-elsewhere"
+  mkdir -p "$home/data" "$home/state" "$subhome/bin" "$subhome/data" "$elsewhere"
+  printf '# Firstmate\n' > "$subhome/AGENTS.md"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf 'charter\n' > "$subhome/data/charter.md"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  fakebin=$(make_fake_tmux "$TMP_ROOT/spawn-registry-fake")
+  log="$TMP_ROOT/spawn-registry-fake/tmux.log"
+  err="$TMP_ROOT/spawn-registry.err"
+
+  # 1. no registry at all in the spawning home: refuse rather than skip the check.
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-registry-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a home with no secondmate registry"
+  fi
+  grep -F 'secondmate registry is unavailable or unsafe' "$err" >/dev/null \
+    || fail "spawn did not explain the absent registry"
+  grep -F "does not register secondmate domain" "$err" >/dev/null \
+    || fail "spawn did not name the home it refused to write the meta into"
+  assert_absent "$home/state/domain.meta" "spawn wrote a meta into a home that does not register the secondmate"
+  grep -F 'new-window' "$log" >/dev/null && fail "spawn created a window before the registry check"
+
+  # 2. a registry that binds other ids but not this one: same refusal.
+  printf -- '- other - other domain (home: %s; scope: other work; projects: ; added 2026-08-05)\n' "$elsewhere" \
+    > "$home/data/secondmates.md"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-registry-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$subhome" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a registry with no binding for this secondmate"
+  fi
+  grep -F 'no registry binding for secondmate domain' "$err" >/dev/null \
+    || fail "spawn did not explain the missing registry binding"
+  assert_absent "$home/state/domain.meta" "spawn wrote a meta for an unregistered secondmate"
+
+  # 3. a binding for this id pointing at a different home: refuse the route swap.
+  printf -- '- domain - domain (home: %s; scope: domain work; projects: ; added 2026-08-05)\n' "$elsewhere" \
+    > "$home/data/secondmates.md"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-registry-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$subhome_abs" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted a home that disagrees with its registry binding"
+  fi
+  assert_absent "$home/state/domain.meta" "spawn wrote a meta for a home its registry does not bind"
+
+  # 4. the parent-route exception needs the task record's state directory to be the
+  # secondmate's own state/parent-route too, not only its data directory: a stale
+  # FM_HOME with FM_DATA_OVERRIDE alone would otherwise publish the meta into an
+  # unrelated home's state. Both the unset and an unrelated state override refuse.
+  mkdir -p "$subhome/data/.parent-route" "$subhome/state/parent-route" "$elsewhere/state"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$subhome/data/.parent-route" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-registry-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$subhome_abs" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted the parent-route data directory with an unrelated state directory"
+  fi
+  grep -F "does not register secondmate domain" "$err" >/dev/null \
+    || fail "spawn did not refuse the parent-route data directory with a mismatched state directory"
+  assert_absent "$home/state/domain.meta" "spawn wrote a meta into the unrelated state directory"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$subhome/data/.parent-route" \
+    FM_STATE_OVERRIDE="$elsewhere/state" \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/spawn-registry-fake/pane.txt" \
+    "$ROOT/bin/fm-spawn.sh" domain "$subhome_abs" codex --secondmate >/dev/null 2>"$err"; then
+    fail "secondmate spawn accepted the parent-route data directory with an overridden unrelated state directory"
+  fi
+  assert_absent "$elsewhere/state/domain.meta" "spawn wrote a meta into an overridden unrelated state directory"
+
+  pass "secondmate spawn refuses to write its meta into a home that does not register the secondmate"
+}
+
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome() {
   local home subhome sink fakebin log err opdir
   home="$TMP_ROOT/spawn-opdir-home"
@@ -3160,6 +3238,7 @@ test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_unsafe_leaf_files
 test_home_seed_preserves_existing_parent_binding
 test_secondmate_spawn_requires_seeded_matching_home
+test_secondmate_spawn_requires_registering_home
 test_secondmate_spawn_refuses_operational_dirs_outside_subhome
 test_fm_send_refuses_bare_window_without_home_meta
 test_secondmate_teardown_retires_empty_home

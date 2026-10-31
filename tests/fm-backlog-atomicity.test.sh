@@ -3054,6 +3054,7 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   printf 'charter for %s\n' "$id" > "$mate/data/charter.md"
   printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$mate/.gitignore"
   git -C "$mate" init -q -b main
+  fm_register_secondmate "$case_dir/home/data/secondmates.md" "$id" "$mate"
 
   # No backlog item exists for the mate, and none should be required: agents are
   # not work items. The dispatch must succeed anyway.

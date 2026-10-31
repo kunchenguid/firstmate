@@ -452,8 +452,20 @@ finish_concurrent_recovery() {  # <id> <home> <status> <stdout> <stderr>
     || fail "concurrent recovery $id retry failed after session-lock contention cleared: $(cat "$err")"
 }
 
+register_secondmate() {  # <id> <home>
+  # A --secondmate spawn refuses unless the launching home's own registry binds
+  # the id to that home, exactly as bin/fm-home-seed.sh writes it before a real
+  # launch. The home is recorded physically resolved because fm-spawn compares
+  # it against the resolved path.
+  local id=$1 home=$2
+  mkdir -p "$HOME_DIR/data"
+  printf -- '- %s - projection fixture (home: %s; scope: projection fixture; projects: ; added 2026-08-05)\n' \
+    "$id" "$(cd "$home" && pwd -P)" >> "$HOME_DIR/data/secondmates.md"
+}
+
 spawn_secondmate_task() {
   local id=$1 home=$2
+  register_secondmate "$id" "$home"
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'while :; do sleep 60; done'" --secondmate --backend herdr
 }

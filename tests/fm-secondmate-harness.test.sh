@@ -653,6 +653,7 @@ make_seeded_home() {
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
   mkdir -p "$world/home/state" "$world/home/data"
+  fm_register_secondmate "$world/home/data/secondmates.md" "$id" "$home"
   fakebin=$(make_noop_tmux "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
   # arg list explicitly so the optional harness is omitted cleanly.
@@ -918,6 +919,7 @@ spawn_secondmate_capture() {
   local world=$1 id=$2 home=$3 launchlog=$4 fakebin
   shift 4
   mkdir -p "$world/home/state" "$world/home/data"
+  fm_register_secondmate "$world/home/data/secondmates.md" "$id" "$home"
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
   : > "$launchlog"
   PATH="$fakebin:$BLIND_BIN:$BASE_PATH" TMUX='' CLAUDECODE=1 \
@@ -1734,6 +1736,7 @@ test_spawn_secondmate_claude_grants_parent_inbox_dir() {
     printf 'claude\n' > "$w/home/config/secondmate-harness"
     printf '%s\n' "$mode" > "$w/home/config/claude-permission-mode"
     make_seeded_home "$sm" sm
+    fm_register_secondmate "$w/home/data/secondmates.md" sm "$sm"
 
     fakebin=$(make_launch_capturing_tmux "$w/tmux")
     fm_fake_claude_outside_read_gate "$fakebin"
@@ -2897,6 +2900,9 @@ test_spawn_quarantines_pending_rereads_on_cleanup_failure() {
   mkdir -p "$w/home/config"
   printf 'codex\n' > "$w/home/config/crew-harness"
   make_seeded_home "$sm" sm
+  # This case drives fm-spawn.sh directly rather than through spawn_secondmate,
+  # so it needs the registry binding a --secondmate spawn requires on its own.
+  fm_register_secondmate "$w/home/data/secondmates.md" sm "$sm"
   mkdir -p "$sm/state"
   report="$sm/state/stale-reread.report"
   printf '%s\n' $'crew-harness\tpushed\t' > "$report"
