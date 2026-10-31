@@ -858,6 +858,42 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### AGY separated composer identity
+
+Portable coverage was refreshed on 2026-10-26 on Linux with tmux 3.6 and Bash 5.3.9.
+The real-tmux regression uses a native process named `agy` with a synthetic separator frame, not a vendor session.
+It proves that foreground-process and tmux-command identity each survive losing the other source, that an unsent draft remains `pending`, and that the same drawn frame without a live agy process remains `unknown`.
+The shared classifier regression also checks cursorless profiles, dim and wrapped drafts, contradictory identity, and an unframed shell glyph.
+
+```sh
+bash bin/fm-test-run.sh --jobs 1 tests/fm-composer-lib.test.sh tests/fm-composer-ghost.test.sh tests/fm-backend-tmux-smoke.test.sh tests/fm-send-agy-confirm.test.sh
+```
+
+```text
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=65665
+```
+
+The real composer was then verified on 2026-10-26 against agy 1.4.7 on the same Linux/tmux host, with no prompt submitted.
+The guard used an already-onboarded account HOME exposed read-only, scratch-only writable log/cache space, and networking disabled; no credential was copied and no terms or data-collection choice was changed.
+The real frame matched the fixture: two horizontal separator rules around the `>` row, with typed text inside the same frame.
+The earlier throwaway-HOME attempt stopped at first-run consent and was not used as classifier evidence.
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 FM_COMPOSER_MATRIX_LIVE_HARNESSES=agy bash tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+```text
+ok - agy (1.4.7): real idle composer classifies empty
+ok - agy (1.4.7): the same idle pane read cursorless is not pending (verdict: empty)
+ok - agy (1.4.7): real unsent draft remains pending on tmux and cursorless profiles
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+ok - live composer-matrix guard verified 3 live surface(s)
+```
+
+`tests/fm-composer-ghost.test.sh` separately verifies the late-footer settle window, no delay for pending text, and fresh identity/frame reads after the wait.
+`tests/fm-backend-herdr.test.sh` verifies that an empty agy composer alone cannot acknowledge a missed literal send, while a native or rendered busy transition across the retry budget still confirms it without resending Enter.
+Other real harnesses and Herdr lifecycle operations were not live-reverified in this targeted refresh.
+
 ### 2026-10-14 opencode 1.19.0 de-emphasised mode/footer row in the left-bar composer
 
 Verified on 2026-10-14 on macOS arm64 against an installed opencode 1.19.0 running as a Firstmate worker in a tmux 3.6a pane, read through `fm_tmux_composer_state` (`bin/fm-tmux-lib.sh`) with the tmux capability descriptor (`styled=1`, `cursor=1`, `identity=1`, `rows=0`).

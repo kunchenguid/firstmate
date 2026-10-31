@@ -304,5 +304,58 @@ got=$(TMUX="/fake,0,$VIEWER_SID" TMUX_PANE="$OWN_PANE" fm_backend_tmux_container
   || fail "container_ensure chose '$got' instead of the pane's surviving session '$SESSION' for a stale \$TMUX session id"
 pass "real tmux: container_ensure falls back to the pane's surviving session when the \$TMUX session id is stale"
 
+# --- agy identity + separated composer (issue #5543) ------------------------
+# A real foreground process supplies kernel/tmux identity; the rendered frame
+# is synthetic, so this is portable logic coverage, not vendor drift evidence.
+cp "$BASH" "$SHIM_DIR/agy" || fail "could not stage the native agy-named process"
+cat > "$SHIM_DIR/agy-frame" <<SH
+#!/usr/bin/env bash
+printf '\033[2J\033[H────────────────────────\n> \n────────────────────────\n? for shortcuts\033[2;3H'
+exec "$SHIM_DIR/agy" --noprofile --norc -c 'read -r -t 120'
+SH
+chmod +x "$SHIM_DIR/agy-frame"
+tmux new-window -d -t "$SESSION:" -n agy-frame "$SHIM_DIR/agy-frame" \
+  || fail "could not launch the isolated agy frame"
+AGY_TARGET="$SESSION:agy-frame"
+wait_for_capture_text "$AGY_TARGET" '? for shortcuts' || fail "agy frame did not render"
+AGY_IDENTITY=$(fm_tmux_composer_identity "$AGY_TARGET") || fail "live agy process produced no identity"
+[ "$AGY_IDENTITY" = $'agy\tidle' ] || fail "unexpected agy identity: $AGY_IDENTITY"
+[ "$(fm_backend_composer_state tmux "$AGY_TARGET")" = empty ] || fail "idle agy frame must be empty"
+
+# Blind each identity source separately and prove the other still carries it.
+(
+  # shellcheck disable=SC2329 # Called by the sourced production library.
+  ps() { return 0; }
+  [ -z "$(ps -t unused)" ] || fail "ps blinding did not take effect"
+  [ "$(tmux display-message -p -t "$AGY_TARGET" '#{pane_current_command}')" = agy ] \
+    || fail "tmux did not retain the agy name when ps was blinded"
+  [ "$(fm_tmux_composer_identity "$AGY_TARGET")" = $'agy\tidle' ] || fail "tmux-only agy identity failed"
+) || exit 1
+(
+  # shellcheck disable=SC2329 # Called by the sourced production library.
+  tmux() {
+    case "$*" in *pane_current_command*) printf 'bash'; return 0 ;; esac
+    "$REAL_TMUX" -L "$SOCKET" "$@"
+  }
+  [ "$(tmux display-message -p -t "$AGY_TARGET" '#{pane_current_command}')" = bash ] \
+    || fail "tmux name blinding did not take effect"
+  AGY_TTY=$(tmux display-message -p -t "$AGY_TARGET" '#{pane_tty}')
+  ps -t "${AGY_TTY#/dev/}" -o pgid=,tpgid=,comm= | awk '$1 == $2 && $3 ~ /(^|\/)agy$/ { found=1 } END { exit !found }' \
+    || fail "foreground ps did not retain agy when tmux was blinded"
+  [ "$(fm_tmux_composer_identity "$AGY_TARGET")" = $'agy\tidle' ] || fail "ps-only agy identity failed"
+) || exit 1
+pass "real tmux: agy identity survives losing either foreground name source"
+
+tmux send-keys -t "$AGY_TARGET" -l 'draft'
+wait_for_capture_text "$AGY_TARGET" '> draft' || fail "agy draft did not echo"
+[ "$(fm_backend_composer_state tmux "$AGY_TARGET")" = pending ] || fail "agy draft must remain pending"
+# Leave exactly the same frame behind, but with a non-agent in the foreground.
+# A stale composer must never authorize delivery after its agent has exited.
+tmux respawn-pane -k -t "$AGY_TARGET" "printf '\033[2J\033[H────────────────────────\n> \n────────────────────────\n? for shortcuts\033[2;3H'; exec sleep 120"
+wait_for_capture_text "$AGY_TARGET" '? for shortcuts' || fail "stale frame did not render"
+if fm_tmux_composer_identity "$AGY_TARGET" >/dev/null; then fail "non-agent acquired agy identity"; fi
+[ "$(fm_backend_composer_state tmux "$AGY_TARGET")" = unknown ] || fail "stale shell frame must stay unknown"
+pass "real tmux: agy draft is pending and the same frame without live agy stays unknown"
+
 cleanup_all
 trap - EXIT

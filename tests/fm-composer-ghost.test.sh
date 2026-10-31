@@ -370,6 +370,53 @@ test_pi_identity_requires_readable_busy_state() (
   pass "fm_tmux_composer_identity: unknown busy state cannot become idle identity"
 )
 
+test_agy_empty_settles_and_refreshes_proof() (
+  local mode out expected
+  local frame="$TMP_ROOT/agy-settle-frame" flag="$TMP_ROOT/agy-settle-flag" waits="$TMP_ROOT/agy-settle-waits"
+  export FM_TMUX_AGY_IDLE_SETTLE_POLLS=2 FM_TMUX_AGY_IDLE_SETTLE_SLEEP=0.01
+  # shellcheck disable=SC2329 # Mocks invoked indirectly by the public adapter.
+  fm_tmux_composer_cursor_row() { printf 1; }
+  # shellcheck disable=SC2329
+  fm_tmux_composer_capture() { cat "$frame"; }
+  # shellcheck disable=SC2329
+  fm_tmux_composer_identity() {
+    [ ! -f "$flag" ] || [ "$mode" != exited ] || return 1
+    printf 'agy\tidle'
+  }
+  # shellcheck disable=SC2329
+  fm_pane_busy_state() {
+    if [ -f "$flag" ] && [ "$mode" = busy ]; then printf busy
+    elif [ -f "$flag" ] && [ "$mode" = unreadable ]; then printf unknown
+    else printf idle; fi
+  }
+  # shellcheck disable=SC2329
+  sleep() {
+    printf 'wait\n' >> "$waits"
+    touch "$flag"
+    if [ "$mode" = draft ]; then
+      printf '────────────────────────\n> new draft\n────────────────────────\n' > "$frame"
+    fi
+  }
+  for mode in busy unreadable draft exited idle pending; do
+    rm -f "$flag" "$waits"
+    printf '────────────────────────\n> \n────────────────────────\n' > "$frame"
+    case "$mode" in
+      pending) printf '────────────────────────\n> draft\n────────────────────────\n' > "$frame"; expected=pending ;;
+      draft) expected=pending ;;
+      idle) expected=empty ;;
+      *) expected=unknown ;;
+    esac
+    out=$(fm_tmux_composer_state fakepane)
+    [ "$out" = "$expected" ] || fail "agy settle $mode: expected $expected, got $out"
+    if [ "$mode" = pending ]; then
+      [ ! -f "$waits" ] || fail "pending agy composer must not settle"
+    elif [ "$mode" = idle ]; then
+      [ "$(wc -l < "$waits" | tr -d ' ')" = 2 ] || fail "empty agy composer must span the settle window"
+    fi
+  done
+  pass "fm_tmux_composer_state: agy settles only empty, then refreshes frame and identity"
+)
+
 test_bordered_busy_signatures_are_pending() {
   local dir fb capture out signature
   dir="$TMP_ROOT/bordered-busy-signatures"; mkdir -p "$dir"
@@ -697,6 +744,7 @@ test_two_row_composer_reads_text_above_empty_cursor_row
 test_wrapped_composer_reads_all_content_rows
 test_proven_box_bottom_border_cursor_classifies_content
 test_pi_identity_requires_readable_busy_state
+test_agy_empty_settles_and_refreshes_proof || exit 1
 test_bordered_busy_signatures_are_pending
 test_non_bordered_busy_footer_is_unknown_strict
 test_clipped_bordered_box_is_unknown

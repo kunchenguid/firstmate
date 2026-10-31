@@ -701,7 +701,8 @@ On an idle or done native baseline, submit confirmation proceeds in this order:
 
 1. Wait for `working` or `blocked` across a bounded polling window.
 2. If native status stays idle, use the shared composer verdict as the next positive signal.
-   A cleared composer is delivery, and proven pending text retries Enter.
+   A cleared composer is delivery, except for agy: without payload proof, its empty composer could also mean the literal send never appeared, so Herdr polls for native or rendered busy across the retry budget without pressing Enter again, reporting `unknown` only if the budget exhausts without busy proof.
+   Proven pending text retries Enter.
 3. After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus a generating busy signal as a queued delivered Enter.
    It keeps an idle pending composer as a genuine swallow.
 

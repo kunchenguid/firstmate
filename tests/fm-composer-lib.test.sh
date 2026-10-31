@@ -706,6 +706,33 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_agy_separated_needs_identity() {
+  local screen typed caps cursor identity status
+  screen=$'────────────────────────\n> \n────────────────────────\n? for shortcuts'
+  for caps in "$CAPS_TMUX" "$CAPS_STYLED"; do
+    cursor=''
+    [ "$caps" != "$CAPS_TMUX" ] || cursor=1
+    identity=$'agy\tidle'
+    assert_screen "agy idle with identity" empty "$caps" "$screen" "$cursor" "$identity"
+    for typed in '> draft' $'> \033[2mdraft\033[0m' $'> \nwrapped draft'; do
+      assert_screen "agy draft stays pending" pending "$caps" \
+        $'────────────────────────\n'"$typed"$'\n────────────────────────' "$cursor" "$identity"
+    done
+    for status in working blocked unknown; do
+      assert_screen "agy $status cannot prove empty" unknown "$caps" "$screen" "$cursor" "agy"$'\t'"$status"
+    done
+    for identity in probe-absent $'zsh\tidle'; do
+      assert_screen "agy shell glyph needs agy identity" unknown "$caps" "$screen" "$cursor" "$identity"
+    done
+    assert_screen "pi keeps treating a typed shell glyph as pending" pending "$caps" "$screen" "$cursor" $'pi\tidle'
+    assert_screen "agy identity cannot prove a blank pi pair" unknown "$caps" \
+      $'────────────────────────\n\n────────────────────────' "$cursor" $'agy\tidle'
+  done
+  assert_screen "agy footer alone is not identity" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "bare shell glyph stays unknown even with agy identity" unknown "$CAPS_TMUX" '> ' 0 $'agy\tidle'
+  pass "matrix: agy separated composer requires live agy identity, rules and an empty prompt"
+}
+
 test_matrix_pi_dollar_status_footer_is_empty() {
   # Pi's status row `$0.000 (sub) 5.4%/272k (auto)` at column 0 used to read
   # as a dead-shell prompt, so an idle separated composer classified unknown.
@@ -1600,6 +1627,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_agy_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_opencode_leftbar_cwd_furniture

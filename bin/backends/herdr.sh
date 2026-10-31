@@ -3342,7 +3342,10 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # A missing read, a shorter suffix, or a paste placeholder followed by a
 # literal remainder does not press Enter: the composer is cleared back to
 # empty and the verdict is send-failed, or unknown when the clear cannot be
-# verified. Other harnesses skip this proof. Verified hazard
+# verified. Other harnesses skip this proof. For agy, an empty composer alone
+# cannot acknowledge delivery: without payload proof it could be a missed
+# literal send. agy requires a native or rendered busy transition instead.
+# Verified hazard
 # (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
 # `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
 # claude/codex popups, so the caller's <settle> before the first Enter matters
@@ -3530,6 +3533,7 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
   local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content busy_harness=''
+  local empty_confirmation=empty
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
   # unless the composer, empty before the send, shows this payload. A suffix
@@ -3537,6 +3541,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   # unproven type-then-Enter path.
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
   [ "${identity%%$'\t'*}" != polytoken ] || busy_harness=polytoken
+  [ "${identity%%$'\t'*}" != agy ] || { empty_confirmation=unknown; busy_harness=agy; }
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1
     content=$(fm_backend_herdr_composer_content "$target") \
@@ -3594,7 +3599,37 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         return 0
       fi
       case "$verdict" in
-        empty) printf 'empty'; return 0 ;;
+        empty)
+          if [ "$empty_confirmation" = empty ]; then
+            printf 'empty'
+            return 0
+          fi
+          # For a harness where empty alone does not confirm delivery (agy),
+          # an empty composer means the payload cleared. Keep polling for
+          # native or rendered busy proof for the rest of the retry budget,
+          # without sending Enter into an empty composer again.
+          if [ "$(fm_backend_herdr_rendered_busy_state "$target" "$busy_harness")" = busy ]; then
+            printf 'empty'
+            return 0
+          fi
+          while :; do
+            i=$((i + 1))
+            if [ "$i" -ge "$retries" ]; then
+              printf '%s' "$empty_confirmation"
+              return 0
+            fi
+            verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+              "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
+            case "$verdict" in
+              busy) printf 'empty'; return 0 ;;
+              unknown) printf 'unknown'; return 0 ;;
+            esac
+            if [ "$(fm_backend_herdr_rendered_busy_state "$target" "$busy_harness")" = busy ]; then
+              printf 'empty'
+              return 0
+            fi
+          done
+          ;;
         pending|pending-unproven) ;;
         *) printf '%s' "$verdict"; return 0 ;;
       esac
@@ -3612,7 +3647,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       fi
       case "$verdict" in
         busy) printf 'empty'; return 0 ;;
-        empty) printf 'empty'; return 0 ;;
+        empty) printf '%s' "$empty_confirmation"; return 0 ;;
         unknown) printf 'unknown'; return 0 ;;
       esac
     fi

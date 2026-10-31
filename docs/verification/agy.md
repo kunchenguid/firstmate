@@ -135,14 +135,16 @@ Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy
 The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
 agy is included in the session-lock name vocabulary in `bin/fm-session-lock-lib.sh` (`FM_HARNESS_RE` and `FM_HARNESS_NAMES`), recognizing an agy ancestor process as a verified session-lock holder.
 
-## Composer: unknown by design
+## Composer: identity-proven separator frame
 
 Byte-level capture of the idle pane shows a bare unstyled `>` between two full-width `─` rules, with an unstyled `? for shortcuts` cell and a dim (`SGR 2`) model cell in the status row below.
-The shared classifier reads that bare `>` as `unknown` under the dead-shell rule, never `empty`.
-Steering still confirms delivery: the Herdr submit core leads with the native `idle`-to-`working` transition, which agy performs, and the delivery footer regex covers the tmux path.
+The shared classifier accepts this separated frame only with proven idle agy identity; an unframed or unidentified bare `>` remains `unknown` under the dead-shell rule.
+The dated real-agy and portable results are recorded in [the runtime-backend composer matrix](runtime-backends.md#agy-separated-composer-identity).
+The tmux adapter settles an empty agy verdict across its late-footer interval, then refreshes foreground identity and the frame; `bin/fm-tmux-lib.sh` owns that window and its tuning controls.
+For ambiguous composers, steering still confirms delivery through the Herdr native `idle`-to-`working` transition or the tmux delivery footer regex.
+Herdr does not acknowledge agy delivery from an empty composer alone, because a missed literal send could leave the same empty frame.
 agy renders the busy footer late for that confirm loop - about 1.5 s after Enter for a short steer and 4-5 s for a realistic longer brief, measured live on `agy 1.2.1` (2026-09-12) against the shared budget's 3 x 0.4 s - so `bin/fm-send.sh` gives agy typed targets a longer default submit-confirm budget (20 retries, about 8 s at the default cadence); an explicit `FM_SEND_RETRIES` still wins and every other harness keeps the shared 3-retry default.
 `tests/fm-send-agy-confirm.test.sh` pins the raised default and `tests/fm-agy-harness.test.sh` pins the Herdr transition path.
-This is the cursor precedent, not a gap to patch in shared code.
 
 ## Supervised task: spawn, steer, relaunch, and exit through the new path
 
