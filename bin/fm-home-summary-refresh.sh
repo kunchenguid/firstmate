@@ -313,7 +313,7 @@ if [ "$HOME_SUMMARY_MODE" = parent ]; then
   fi
   deadline_missed=0
   [ "$refresh_rc" -ne 124 ] || deadline_missed=1
-  fm_run_timed 10 env \
+  fm_run_timed 2 env \
     FM_HOME_SUMMARY_ATTEMPT="$$" \
     FM_HOME_SUMMARY_DEADLINE_MISSED="$deadline_missed" \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_reap >/dev/null 2>&1 || true

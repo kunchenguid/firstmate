@@ -542,8 +542,8 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
 elapsed=$(( $(date +%s) - started ))
 
 # The reap child only tries the held lock, so the caller stays within the
-# documented bound of FM_HOME_SUMMARY_TIMEOUT plus 15 seconds.
-[ "$elapsed" -le 16 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
+# documented bound of FM_HOME_SUMMARY_TIMEOUT plus 7 seconds.
+[ "$elapsed" -le 8 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
   || fail "repeated lock timeout changed the best-effort caller result"
@@ -558,11 +558,11 @@ pass "best-effort refresh bounds publication lock acquisition"
 # fires a refresh worker's deadline when its stall writes the deadline fifo
 # named for the attempt, so a loaded host cannot move the deadline before or
 # after the stall, and returns once the killed worker's whole process group is
-# gone, so its lock is reclaimable. Other bounded calls run under the real runner. An optional
+# gone, so its lock is reclaimable. Other bounded calls run unbounded, so a
+# loaded host cannot cut the reap short either. An optional
 # FM_TEST_AFTER_DEADLINE command runs once the worker is dead.
 DEADLINEBIN="$TMP_ROOT/deadlinebin"
 DEADLINE_DIR="$TMP_ROOT/deadlines"
-REAL_TIMEOUT=$(type -P timeout 2>/dev/null || type -P gtimeout 2>/dev/null || true)
 mkdir -p "$DEADLINEBIN" "$DEADLINE_DIR"
 cat > "$DEADLINEBIN/timeout" <<'SH'
 #!/usr/bin/env bash
@@ -571,7 +571,6 @@ for arg in "$@"; do
   [ "$arg" != --_worker ] || worker=1
 done
 if [ "$worker" -eq 0 ]; then
-  [ -z "$FM_TEST_REAL_TIMEOUT" ] || exec "$FM_TEST_REAL_TIMEOUT" "$@"
   shift 3
   exec "$@"
 fi
@@ -618,7 +617,7 @@ exec "$FM_TEST_REAL_JQ" "$@"
 SH
 chmod +x "$HANGBIN/jq"
 PATH="$DEADLINEBIN:$HANGBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
-  FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=1 \
   "$WRITER" --best-effort \
   || fail "validation timeout changed the best-effort caller result"
@@ -653,7 +652,7 @@ chmod +x "$STUBBORNBIN/jq"
 rm -f "$HOME_DIR/state/.home-summary-refresh.backoff"
 for attempt in 1 2; do
   PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
-    FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+    FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
     "$WRITER" --best-effort \
     || fail "a killed worker changed the best-effort caller result"
@@ -692,7 +691,7 @@ exec "$FM_TEST_REAL_MV" "$@"
 SH
 chmod +x "$GENBIN/mv"
 PATH="$DEADLINEBIN:$GENBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MV="$REAL_MV" \
-  FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$WRITER" --best-effort \
   || fail "a worker killed during its generation write changed the best-effort caller result"
@@ -739,7 +738,7 @@ SH
 chmod +x "$NEWER_PUBLISH"
 printf '1\n' > "$HOME_DIR/state/.home-summary-refresh.backoff"
 PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
-  FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
   FM_TEST_AFTER_DEADLINE="$NEWER_PUBLISH" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$WRITER" --best-effort \
@@ -755,7 +754,7 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$WRITER" || fail "could not publish before the same-second deadline miss"
 touch -t 203801010000 "$HOME_DIR/state/home-summary.json"
 PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
-  FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$WRITER" --best-effort \
   || fail "a killed worker changed the best-effort caller result"
@@ -791,7 +790,7 @@ while [ ! -e "$SNAPSHOT_MARKER" ] && [ "$i" -lt 600 ]; do
 done
 [ -e "$SNAPSHOT_MARKER" ] || fail "could not hold the publication lock for snapshot coverage"
 PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
-  FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$WRITER" --best-effort &
 waiting_pid=$!
@@ -832,7 +831,7 @@ chmod +x "$BACKOFFMVBIN/mv"
 rm -f "$HOME_DIR/state/.home-summary-refresh.backoff"
 PATH="$DEADLINEBIN:$STUBBORNBIN:$BACKOFFMVBIN:$FAKEBIN:$PATH" \
   FM_TEST_REAL_JQ="$REAL_JQ" FM_TEST_REAL_MV="$REAL_MV" \
-  FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$WRITER" --best-effort \
   || fail "a killed reap child changed the best-effort caller result"
@@ -868,8 +867,8 @@ elapsed=$(( $(date +%s) - started ))
 
 # The stalled state directory holds the worker, reap and log children each to
 # its own bound and kill grace, which together are the documented bound of
-# FM_HOME_SUMMARY_TIMEOUT plus 15 seconds.
-[ "$elapsed" -le 16 ] \
+# FM_HOME_SUMMARY_TIMEOUT plus 7 seconds.
+[ "$elapsed" -le 8 ] \
   || fail "best-effort refresh waited $elapsed seconds before bounded state initialization"
 pass "best-effort refresh bounds state initialization"
 
