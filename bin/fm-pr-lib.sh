@@ -1582,3 +1582,109 @@ fm_pr_poll_merge_notified_remove() {  # <state> <id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   rm -f -- "$marker"
 }
+
+# --- degraded ready-PR marker -------------------------------------------------
+# A ready PR/MR that degraded after its ready report - GitHub required checks
+# turning failing, GitLab leaving an active merge train or a failing head
+# pipeline - wakes once per observed head/pipeline identity. The marker below
+# carries the identity that last woke, so the same degraded state stays silent
+# on later polls while a changed identity (a new head, a new failing pipeline)
+# wakes again. The identity is what the static poll (bin/fm-pr-poll.sh) emits
+# after its "degraded " prefix, and both sides validate it so a forged or
+# malformed line can never enter the marker.
+fm_pr_poll_degraded_identity_valid() {  # <identity>
+  local identity=${1-} value
+  local LC_ALL=C
+  case $identity in
+    head=*)
+      value=${identity#head=}
+      [ "${#value}" -eq 40 ] || return 1
+      case $value in
+        *[!0-9a-f]*) return 1 ;;
+      esac
+      ;;
+    pipeline=*)
+      value=${identity#pipeline=}
+      case $value in
+        [1-9]*) ;;
+        *) return 1 ;;
+      esac
+      case $value in
+        *[!0-9]*) return 1 ;;
+      esac
+      [ "${#value}" -le 18 ] || return 1
+      ;;
+    train=on|train=dropped) ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_pr_poll_degraded_marker_matches() {  # <marker> <device> <provider> <host> <path> <number> <identity>
+  local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6 expected_identity=$7
+  local version provider host path number identity
+  fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  IFS= read -r identity <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-degraded-notified-v1 ] \
+    && [ "$provider" = "$expected_provider" ] \
+    && [ "$host" = "$expected_host" ] \
+    && [ "$path" = "$expected_path" ] \
+    && [ "$number" = "$expected_number" ] \
+    && [ "$identity" = "$expected_identity" ]
+}
+
+fm_pr_poll_degraded_already_notified() {  # <state> <id> <provider> <host> <path> <number> <identity>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 identity=$7 marker state_device
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_degraded_identity_valid "$identity" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-degraded"
+  fm_pr_poll_degraded_marker_matches "$marker" "$state_device" \
+    "$provider" "$host" "$path" "$number" "$identity"
+}
+
+fm_pr_poll_degraded_mark_notified() {  # <state> <id> <provider> <host> <path> <number> <identity>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 identity=$7 marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_degraded_identity_valid "$identity" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-degraded"
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-poll-degraded.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-degraded-notified-v1 "$provider" "$host" "$path" "$number" "$identity" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_poll_degraded_marker_matches "$tmp" "$state_device" \
+      "$provider" "$host" "$path" "$number" "$identity" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker" \
+    || ! fm_pr_poll_degraded_marker_matches "$marker" "$state_device" \
+      "$provider" "$host" "$path" "$number" "$identity"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Removed at teardown alongside the other per-task PR-poll artifacts
+# (bin/fm-teardown.sh) so a retired task id leaves no residue behind.
+fm_pr_poll_degraded_remove() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-poll-degraded"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  rm -f -- "$marker"
+}
