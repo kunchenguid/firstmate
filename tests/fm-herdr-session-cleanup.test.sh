@@ -202,15 +202,15 @@ write_v1() { # <id> [token]
   } > "$FM_STATE_OVERRIDE/$id.herdr-presentation"
 }
 
-write_v2() { # <home> <workspace> <tab> <pane>
-  local home=$1 workspace=$2 tab=$3 pane=$4
+write_v2() { # <home> <workspace> <tab> <pane> [workspace-label]
+  local home=$1 workspace=$2 tab=$3 pane=$4 label=${5:-$TITLE}
   {
     printf 'version=2\n'
     printf 'task_id=%s\n' "$ID"
     printf 'projection_id=%s\n' "$TOKEN"
     printf 'home=%s\n' "$home"
     printf 'session=test\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$workspace" "$tab" "$pane"
-    printf 'parent_workspace_id=w1\nparent_label=firstmate\nworkspace_label=%s\ntask_label=fm-%s\n' "$TITLE" "$ID"
+    printf 'parent_workspace_id=w1\nparent_label=firstmate\nworkspace_label=%s\ntask_label=fm-%s\n' "$label" "$ID"
   } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
 }
 
@@ -269,6 +269,18 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
+reset_fixture; printf '%s\n' '└ task' > "$FIXTURE_DIR/title"; write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE" '└ task'
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "visible-title v2 cleanup kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "visible-title v2 cleanup did not close exactly once"
+pass "v2 cleanup accepts the token-free visible title of its exact bound workspace"
+reset_fixture; printf '%s\n' '└ task' > "$FIXTURE_DIR/title"; write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "legacy-label v2 cleanup did not accept the visible title"
+pass "legacy token-label v2 binding also accepts the visible title"
+reset_fixture; printf '%s\n' '└ task' > "$FIXTURE_DIR/title"; assert_preserved "v1 journal with token-free title"
+reset_fixture; printf '%s\n' '└ task' > "$FIXTURE_DIR/title"; write_v2 "$FM_HOME" w9 "$TAB" "$PANE" '└ task'; assert_preserved "token-free title on another bound workspace"
+reset_fixture; printf '%s\n' '└ task' > "$FIXTURE_DIR/title"; write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE" '└ task'; : > "$FIXTURE_DIR/duplicate-token"; assert_preserved "token-free title while another workspace carries the token"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"
