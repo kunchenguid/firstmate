@@ -4006,7 +4006,7 @@ while :; do
     fi
     case "$stamp" in ''|*[!0-9]*) rm -f "$marker"; continue ;; esac
     [ "$(( $(date +%s) - stamp ))" -ge "$CLAIMED_RUN_DELAY" ] || continue
-    runs=$(no-mistakes runs --limit 100 2>/dev/null) || continue
+    runs=$(no-mistakes runs --limit 2147483647 2>/dev/null) || continue
     if ! printf '%s\n' "$runs" | awk -v branch="$branch" '$2 == branch { found=1 } END { exit !found }'; then
       printf '%s\n' "$branch:$size" > "$seen"
       rm -f "$marker"
