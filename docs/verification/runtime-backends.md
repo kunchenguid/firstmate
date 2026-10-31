@@ -1723,6 +1723,13 @@ error: text not sent to pi-live:1.1 (tmux send failed; tried meta=/tmp/pilive/fm
 
 `bin/fm-send.sh` exits 1, the pane is byte-identical before and after, and the selector is still open with the highlight still on `beta-model-two`: no text was typed into it and no Enter was sent.
 Against the pre-fix matcher the same send typed the probe into the selector's search box and pressed Enter, so the guard was dead on a real screen and only a capture cut at the closing rule ever matched.
+The live check below now refuses that failure.
+It opens `/model` on this throwaway provider in an isolated pane and submits nothing, so it spends no model tokens:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:
