@@ -1524,15 +1524,20 @@ _wedge_cap_rollback() {
 # <min-age> replaces the cadence as the absorb-age gate for one call (0 lets a
 # declared `until` time that has just passed re-surface at once), while the
 # throttle keeps the cadence between repeats.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age] [status-file] [blocked-line]
-  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS} statusf=${7-} blocked_line=${8-}
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age] [status-file] [blocked-line] [overdue-marker]
+  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS} statusf=${7-} blocked_line=${8-} overdue_marker=${9-} append_rc size pre_size
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
     [ "$age" -ge "$min_age" ] || return 0
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fi
   if [ -n "$blocked_line" ]; then
-    fm_wake_status_append_self_announced "$STATE" "$statusf" "$blocked_line" || [ "$?" -eq 1 ] || exit 1
+    pre_size=$(_fm_status_file_size "$statusf") || exit 1
+    fm_wake_status_append_self_announced "$STATE" "$statusf" "$blocked_line"; append_rc=$?
+    [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || exit 1
+    size=$(_fm_status_file_size "$statusf") || exit 1
+    [ "$size" -gt "$pre_size" ] || exit 1
+    printf '%s' "$size" > "$overdue_marker"
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
@@ -2431,8 +2436,9 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it once every
-# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
+# dead-agent captain-held transfer. Non-overdue waits re-surface every
+# PAUSE_RESURFACE_SECS; an overdue pause opens a keyed blocked decision and stays
+# quiet until the worker writes another status event. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
@@ -2447,8 +2453,13 @@ busy_stream_snapshot_current() {  # <task> <observed snapshot>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc
   key=$(window_key "$win")
+  pause_overdue_reconcile "$task" "$STATE/$task.status"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    triage_log "absorbed stale (overdue pause decision remains open): $win"
+    return 0
+  fi
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   wedge_episode_end "$key"
@@ -2502,7 +2513,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     fi
   fi
   if [ "$detail" = "paused, wait overdue" ]; then
-    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$statusf" "blocked [key=paused-overdue-$task]: paused ${age}s, wait overdue - decide or release"
+    resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$statusf" "blocked [key=paused-overdue-$task]: paused ${age}s, wait overdue - decide or release" "$STATE/.paused-overdue-$task"
   else
     resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
   fi
@@ -2649,14 +2660,47 @@ clear_pause_tracking() {  # <window-key>
   clear_stale_hash_tracking "$key"
 }
 
+# Keep the overdue decision open until the worker appends another status event.
+# The marker stores the status-log size after the watcher's own blocked line, so an
+# unchanged paused pane never folds its full log on each poll.
+pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or absent
+  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" expected actual open append_rc
+  [ -f "$marker" ] || return 1
+  [ -f "$statusf" ] || { rm -f "$marker"; return 1; }
+  expected=$(cat "$marker" 2>/dev/null || true)
+  actual=$(_fm_status_file_size "$statusf") || return 0
+  case "$expected:$actual" in *[!0-9:]*) return 0 ;; esac
+  [ "$expected" = "$actual" ] && return 0
+  open=$(status_open_decisions "$statusf") || return 0
+  if printf '%s\n' "$open" | awk -F '\t' -v key="paused-overdue-$task" '$1 == key { found = 1 } END { exit !found }'; then
+    fm_wake_status_append_self_announced "$STATE" "$statusf" "resolved [key=paused-overdue-$task]: worker pause changed"
+    append_rc=$?
+    [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || return 0
+  fi
+  rm -f "$marker"
+  return 1
+}
+
+reconcile_overdue_pauses() {
+  local marker task statusf
+  for marker in "$STATE"/.paused-overdue-*; do
+    [ -f "$marker" ] || continue
+    task=${marker##*/}; task=${task#.paused-overdue-}
+    statusf="$STATE/$task.status"
+    pause_overdue_reconcile "$task" "$statusf" || true
+  done
+}
+
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # After fm-crew-state has fallen back to stopped or unknown, paused classification is
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind statusf
+  local win=$1 task=$2 key last recheck_file class agent_alive kind statusf rc
   key=$(window_key "$win")
   statusf="$STATE/$task.status"
+  pause_overdue_reconcile "$task" "$statusf"; rc=$?
+  if [ "$rc" -eq 0 ]; then printf 'paused'; return; fi
   last=$(status_declared_wait_line "$statusf")
   recheck_file="$STATE/.paused-rechecked-$key"
   if status_is_paused_or_captain_held "$last"; then
@@ -2671,14 +2715,8 @@ pause_state_class() {  # <window> <task>
       case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
       [ "$age" -gt "$undated_max" ] && { printf 'paused'; return; }
     fi
-    if status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task"; then
-      fm_wake_status_append_self_announced "$STATE" "$statusf" "resolved [key=paused-overdue-$task]: worker pause changed" || [ "$?" -eq 1 ] || exit 1
-    fi
   fi
   if ! status_is_paused_or_captain_held "$last"; then
-    if status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task"; then
-      fm_wake_status_append_self_announced "$STATE" "$statusf" "resolved [key=paused-overdue-$task]: worker resumed" || [ "$?" -eq 1 ] || exit 1
-    fi
     rm -f "$recheck_file"
     crew_absorb_class "$task"
     return
@@ -4003,6 +4041,7 @@ while :; do
 
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
+  reconcile_overdue_pauses
   resurface_after_downtime
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.
@@ -4158,9 +4197,11 @@ EOF
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  reconcile_overdue_pauses
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
+    reconcile_overdue_pauses
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
