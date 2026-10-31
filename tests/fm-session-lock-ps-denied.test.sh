@@ -671,6 +671,24 @@ test_procinfo_helper_fails_closed() {
   pass "fm-procinfo.py: dead pid and broken offsets both produce an empty refusal"
 }
 
+# Fold the one byte a Linux ps build picks for a control byte onto the
+# placeholder the /proc route writes, so the two routes can be compared
+# by shape instead of by that build's choice. The /proc route renders a
+# newline as a space and every other control byte as '?'; procps builds
+# differ on which of those two a newline gets, and neither choice is this
+# repo's contract. What the contract fixes is one placeholder byte per
+# control byte, in place, with every printable and UTF-8 byte intact, so
+# a byte-for-byte comparison here would pin one procps build instead of
+# the rule and fail on the other. A route that spells control bytes with
+# characters ps itself prints (BSD and the macOS provider render them as
+# ^I / ^J) keeps them through the fold, which is why this touches only
+# the space and non-printable bytes.
+normalize_control_bytes() {  # <text>
+  printf '%s' "$1" \
+    | LC_ALL=C tr -c '\040-\176\200-\377' '?' \
+    | LC_ALL=C tr ' ' '?'
+}
+
 test_control_bytes_match_ps_route() {
   command -v python3 >/dev/null 2>&1 || { pass "control bytes: python3 absent, skipped"; return; }
   local marker="$TMP_ROOT/control-ready" child i got expected
@@ -690,7 +708,41 @@ os.execv(sys.executable, [os.fsencode(sys.executable), b"-c", b"import sys,time;
     || { kill "$child"; fail "provider refused control-byte child"; }
   kill "$child" 2>/dev/null
   wait "$child" 2>/dev/null || :
-  [ "$got" = "$expected" ] || fail "control-byte routes disagree: provider '$got', ps '$expected'"
+  # ppid and comm carry no control bytes, so those fields stay a raw
+  # comparison; only the argv field is compared by shape.
+  [ "${got%$'\t'*}" = "${expected%$'\t'*}" ] \
+    || fail "control bytes changed the ppid/comm fields: provider '${got%$'\t'*}', ps '${expected%$'\t'*}'"
+  [ "$(normalize_control_bytes "$got")" = "$(normalize_control_bytes "$expected")" ] \
+    || fail "control-byte routes disagree: provider '$got', ps '$expected'"
+  # Non-vacuity: every fixture word that sits around a control byte must
+  # still arrive from both routes, so a route that swallowed that text
+  # cannot pass by matching a loss on the other route. The words are
+  # asserted without their placeholder, because a BSD ps and the macOS
+  # provider spell it ^I / ^J while a Linux one spells it as one byte.
+  local word
+  for word in tab newline high; do
+    case $got in
+      *"$word"*) ;;
+      *) fail "the provider's argv field lost '$word': '$got'" ;;
+    esac
+    case $expected in
+      *"$word"*) ;;
+      *) fail "the ps route's argv field lost '$word': '$expected'" ;;
+    esac
+  done
+  # The live pair above only proves agreement with the byte THIS host's ps
+  # writes for the fixture's newline. Pin the fold against both Linux
+  # renderings of it, and assert they really differ, so a comparison that
+  # went back to raw bytes fails here too instead of only on the other
+  # procps build.
+  local prefix render_space render_question
+  prefix=${got%$'\t'*}
+  render_space=$(printf '%s\ttab?newline high' "$prefix")
+  render_question=$(printf '%s\ttab?newline?high' "$prefix")
+  [ "$render_space" != "$render_question" ] \
+    || fail "the two control-byte renderings are no longer distinct: '$render_space'"
+  [ "$(normalize_control_bytes "$render_space")" = "$(normalize_control_bytes "$render_question")" ] \
+    || fail "the argv comparison still depends on the byte a ps build writes for a newline"
   pass "control bytes preserve identical identity fields across routes"
 }
 
