@@ -1540,7 +1540,7 @@ SH
 }
 
 test_treehouse_pool_report_is_read_only_and_classifies_pools() {
-  local case_dir home root fakebin registered unregistered other_home_clone missing_date fractional_repo pool out
+  local case_dir home root fakebin registered unregistered other_home_clone missing_date fractional_repo leased_repo pool out
   case_dir="$TMP_ROOT/pool-report"
   home="$case_dir/home"
   root="$case_dir/pools"
@@ -1550,11 +1550,13 @@ test_treehouse_pool_report_is_read_only_and_classifies_pools() {
   missing_date="$case_dir/missing-date"
   other_home_clone="$case_dir/other-home/projects/repo"
   fractional_repo="$home/projects/fractional"
-  mkdir -p "$home/projects" "$root/one" "$root/two" "$root/orphan" "$root/other-home" "$root/project-leftover" "$root/timestamp" "$other_home_clone" "$missing_date" "$fractional_repo"
+  leased_repo="$home/projects/leased"
+  mkdir -p "$home/projects" "$root/one" "$root/two" "$root/orphan" "$root/other-home" "$root/project-leftover" "$root/timestamp" "$root/leased" "$other_home_clone" "$missing_date" "$fractional_repo" "$leased_repo"
   fakebin=$(make_fake_toolchain "$case_dir")
   git init -q "$registered"
   git init -q "$other_home_clone"
   git init -q "$fractional_repo"
+  git init -q "$leased_repo"
   for pool in one two; do
     mkdir -p "$root/$pool/slot"
     cat > "$root/$pool/treehouse-state.json" <<JSON
@@ -1573,6 +1575,9 @@ JSON
   cat > "$root/timestamp/treehouse-state.json" <<JSON
 {"worktrees":[{"path":"$fractional_repo","created_at":"2026-07-30T23:29:43.458891-06:00"}]}
 JSON
+  cat > "$root/leased/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$leased_repo","created_at":"2020-01-01T00:00:00Z","leased":true,"lease_id":"lease-1","lease_holder":"secondmate-home","leased_at":"2026-10-01T00:00:00Z"}]}
+JSON
   before=$(find "$root" "$registered" "$other_home_clone" -type f -exec shasum -a 256 {} \; | sort)
   out=$(PATH="$fakebin:$BASE_PATH" TREEHOUSE_ROOT="$root" FM_POOL_ORPHAN_DAYS=30 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
@@ -1587,6 +1592,7 @@ JSON
   assert_contains "$out" "unowned slot older than 30d: $registered" "old created_at Z timestamp was not reported"
   assert_contains "$out" "unowned slot older than 30d: $fractional_repo" "fractional timestamp with offset was not reported"
   assert_not_contains "$out" "unowned slot older than 30d: $missing_date" "missing created_at slot was reported stale"
+  assert_not_contains "$out" "unowned slot older than 30d: $leased_repo" "durably leased slot was reported stale"
   pass "bootstrap reports pool orphans, duplicate clones, old unowned slots, and test pools"
 }
 
