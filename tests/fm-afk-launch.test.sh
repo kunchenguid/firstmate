@@ -1744,6 +1744,8 @@ e2e_herdr() {
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
 
+  # This e2e provisions a real captain endpoint, so it runs the real endpoint check (not the unit seam).
+  local FM_AFK_LAUNCH_TARGET_PROBE=
   local SESSION home_tmp cap_ws cap_tab cap_pane target
   local before during after ws_before ws_during ws_after out dtgt dtab
   SESSION="fm-lab-afk-launch-e2e-$$"
@@ -1801,6 +1803,7 @@ e2e_herdr() {
 # detached session).
 # ---------------------------------------------------------------------------
 e2e_tmux() {
+  # This e2e provisions a real captain endpoint, so it runs the real endpoint check (not the unit seam).
   local FM_AFK_LAUNCH_TARGET_PROBE=
   command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (tmux e2e)"; return 0; }
   local cap_session home_tmp cap_pane before during after rec
@@ -1839,6 +1842,8 @@ e2e_tmux() {
 # safety helper gives it a temporary socket, state directory, and config.
 # ---------------------------------------------------------------------------
 e2e_rex() {
+  # This e2e provisions a real captain endpoint, so it runs the real endpoint check (not the unit seam).
+  local FM_AFK_LAUNCH_TARGET_PROBE=
   local home_tmp out cap_sid cap_bid cap_target before during after rec_backend rec_target rec_sid label rc
   # shellcheck source=tests/rex-test-safety.sh
   . "$ROOT/tests/rex-test-safety.sh"
