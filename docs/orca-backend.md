@@ -73,8 +73,8 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 ## Away supervision
 
 `/afk` refuses an Orca-hosted captain by name instead of arming a daemon that cannot inject into it.
-Discovery in [`bin/fm-supervisor-target-lib.sh`](../bin/fm-supervisor-target-lib.sh) recognizes the `ORCA_TERMINAL_HANDLE` Orca puts into every terminal it spawns, after every innermost signal, so a tmux, Herdr, or Rex session inside an Orca terminal keeps its own transport and an explicit T3 selection stays the operator session.
-The away daemon has no Orca composer or busy primitives, so `orca` is absent from the supported supervisor backends: the daemon refuses at startup, and `bin/fm-afk-launch.sh` `start` and `start-native` refuse before they write `state/.afk`.
+Discovery in [`bin/fm-supervisor-target-lib.sh`](../bin/fm-supervisor-target-lib.sh) recognizes the `ORCA_TERMINAL_HANDLE` Orca puts into every terminal it spawns, so an Orca-hosted captain is named instead of falling through to the tmux default.
+The away daemon has no Orca composer or busy primitives, so `orca` is absent from the supported supervisor backends; [supervisor backend configuration](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target) owns its place in the detection order, the supported list, and the refusal both away entry paths give it.
 That keeps "armed" meaning supervision is real, which is why Orca gets a named refusal rather than the tmux fallback it used to land on.
 Recognition is for the refusal only.
 Orca stays explicit-only for task endpoints and is never auto-selected as a spawn backend.

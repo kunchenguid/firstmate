@@ -2243,7 +2243,7 @@ env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u REX_SESSION -u REX_BLO
 error: away-mode daemon does not support supervisor backend 'orca' yet (supported: tmux herdr rex t3code); ...
 ```
 
-The daemon log recorded `unsupported supervisor backend 'orca' (source=ORCA_TERMINAL_HANDLE)`, and `bin/fm-afk-launch.sh start-native` refused in the same words before writing `state/.afk`.
+The daemon log recorded `unsupported supervisor backend 'orca' (source=ORCA_TERMINAL_HANDLE)`, and `bin/fm-afk-launch.sh start-native` refused the same backend by name before writing `state/.afk`.
 Not covered here: no Orca-hosted primary was launched, so the marker was read from the shipped source and then supplied explicitly for the refusal run.
 
 ```sh
