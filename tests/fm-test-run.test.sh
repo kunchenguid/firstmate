@@ -1103,6 +1103,75 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+# Resolve a locale whose collation differs from C, so the guard's locale
+# dependence is observable: an installed UTF-8 locale when the host has one,
+# otherwise one compiled into a private LOCPATH (no root, no host change).
+# Prints "<locale>\t<locpath>", with an empty locpath for an installed locale,
+# or nothing when the host offers neither.
+fm_test_run_non_c_locale() {  # <scratch-dir> (must contain a C-ordered "c-ordered")
+  local scratch=$1 candidate
+  while IFS= read -r candidate; do
+    case "$candidate" in *UTF-8|*utf8|*UTF8) ;; *) continue ;; esac
+    LC_ALL="$candidate" sort -c "$scratch/c-ordered" >/dev/null 2>&1 && continue
+    printf '%s\t\n' "$candidate"
+    return 0
+  done < <(locale -a 2>/dev/null || true)
+
+  command -v localedef >/dev/null 2>&1 || return 1
+  mkdir -p "$scratch/locpath" || return 1
+  localedef -i en_US -f UTF-8 "$scratch/locpath/en_US.UTF-8" >/dev/null 2>&1 || return 1
+  LOCPATH="$scratch/locpath" LC_ALL=en_US.UTF-8 sort -c "$scratch/c-ordered" >/dev/null 2>&1 && return 1
+  printf 'en_US.UTF-8\t%s\n' "$scratch/locpath"
+}
+
+# The guard sorts its file lists under LC_ALL=C and then compares them with
+# comm, which reads the caller's collation. On a host that is not on the C
+# collation the comparison rejected lists that were correctly ordered, so the
+# guard failed with "comm: input is not in sorted order" on a healthy tree.
+# Reproduce that host condition instead of matching the script's source text.
+test_coverage_guard_survives_a_utf8_collation_locale() {
+  local tmp all serial resolved locale locpath out rc
+  tmp=$(fm_test_tmproot fm-test-run-locale-collation) || return 1
+  all=$("$RUNNER" --list --all | LC_ALL=C sort -u)
+  serial=$("$RUNNER" --list --lane portable-serial | LC_ALL=C sort -u)
+  printf '%s\n' "$all" >"$tmp/all"
+  printf '%s\n' "$serial" >"$tmp/serial"
+  printf '%s\n' "$all" >"$tmp/c-ordered"
+
+  resolved=$(fm_test_run_non_c_locale "$tmp") || {
+    printf 'skip: no non-C UTF-8 collation available to exercise the guard\n'
+    return 0
+  }
+  locale=${resolved%%$'\t'*}
+  locpath=${resolved#*$'\t'}
+
+  # The same conditioned host, asserted directly: plain comm must reject these
+  # C-ordered lists, so the run below cannot pass vacuously.
+  set +e
+  if [ -n "$locpath" ]; then
+    LOCPATH="$locpath" LC_ALL="$locale" comm -23 "$tmp/all" "$tmp/serial" \
+      >/dev/null 2>"$tmp/direct-err"
+  else
+    LC_ALL="$locale" comm -23 "$tmp/all" "$tmp/serial" >/dev/null 2>"$tmp/direct-err"
+  fi
+  rc=$?
+  if [ "$rc" -eq 0 ] || ! grep -Fq 'not in sorted order' "$tmp/direct-err"; then
+    fail "$locale did not reproduce the C-order rejection: $(cat "$tmp/direct-err")"
+  fi
+
+  if [ -n "$locpath" ]; then
+    out=$(LOCPATH="$locpath" LC_ALL="$locale" "$RUNNER" --check-coverage 2>&1) && rc=0 || rc=$?
+  else
+    out=$(LC_ALL="$locale" "$RUNNER" --check-coverage 2>&1) && rc=0 || rc=$?
+  fi
+  set -e
+  expect_code 0 "$rc" "the coverage guard must pass under $locale"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker under $locale"
+  assert_not_contains "$out" "not in sorted order" \
+    "the guard must not let comm's collation reject its own C-ordered lists"
+  pass "coverage guard holds in a $locale caller locale, not only under LC_ALL=C"
+}
+
 # The two parallel lanes are only "duration-balanced" while every member has a
 # measured hint and the packing over those hints stays even. Both halves went
 # unchecked until one lane grew past its CI job cap and was cancelled on every
@@ -1921,6 +1990,7 @@ test_tern_family_selection
 test_list_scheduled_proven_isolated_uses_serial_weights
 test_list_scheduled_non_lane_selections_use_serial_weights
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_survives_a_utf8_collation_locale
 test_portable_parallel_lanes_stay_duration_balanced
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_hint_coverage_is_reported_and_bounded
