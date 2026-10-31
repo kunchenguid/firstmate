@@ -111,6 +111,30 @@ test_help_and_usage() {
   pass "fm-usage-warner: help and usage plumbing"
 }
 
+test_notification_sound_preference() {
+  local home fakebin notify_log out mode
+  home=$(make_home sound-preference)
+  fakebin="$home/fakebin"
+  notify_log="$home/notify.log"
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":85}'
+  fake_osascript_recorder "$fakebin" "$notify_log"
+  for mode in default off; do
+    printf 'five_hour:80\n' > "$home/config/usage-warner"
+    [ "$mode" = default ] || printf '  sound:%s  \n' "$mode" >> "$home/config/usage-warner"
+    rm -f "$home/state/.usage-warner"
+    : > "$notify_log"
+    out=$(run_check "$home" "$fakebin")
+    assert_contains "$out" "five_hour at 85% (>=80%)" "sound preference preserves the warning"
+    assert_grep 'Firstmate: Claude usage' "$notify_log" "sound preference preserves the title"
+    if [ "$mode" = off ]; then
+      assert_grep 'sound name ""' "$notify_log" "silent delivery explicitly requests no sound"
+    else
+      grep -q 'sound name' "$notify_log" && fail "default delivery changed its sound arguments"
+    fi
+  done
+  pass "usage banners support silent delivery and preserve the default"
+}
+
 test_unconfigured_home_stays_silent() {
   local home fakebin out rc=0
   home=$(make_home unconfigured)
@@ -567,6 +591,7 @@ EOF
 }
 
 test_help_and_usage
+test_notification_sound_preference
 test_unconfigured_home_stays_silent
 test_config_parses_comments_whitespace_and_model_ids
 test_check_crosses_notifies_stays_quiet_then_rearms
