@@ -1539,7 +1539,47 @@ SH
   pass "bootstrap gates resolver fields and additive harnesses on the typed key or a declared typesafe source"
 }
 
+test_treehouse_pool_report_is_read_only_and_classifies_pools() {
+  local case_dir home root fakebin registered unregistered other_home_clone pool out
+  case_dir="$TMP_ROOT/pool-report"
+  home="$case_dir/home"
+  root="$case_dir/pools"
+  fakebin="$case_dir/bin"
+  registered="$home/projects/registered"
+  unregistered="$case_dir/unregistered"
+  other_home_clone="$case_dir/other-home/projects/repo"
+  mkdir -p "$home/projects" "$root/one" "$root/two" "$root/orphan" "$root/other-home" "$root/project-leftover" "$other_home_clone"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  git init -q "$registered"
+  git init -q "$other_home_clone"
+  for pool in one two; do
+    mkdir -p "$root/$pool/slot"
+    cat > "$root/$pool/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$registered","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  done
+  cat > "$root/orphan/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$unregistered","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  cat > "$root/other-home/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$other_home_clone","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  cat > "$root/project-leftover/treehouse-state.json" <<'JSON'
+{"worktrees":[]}
+JSON
+  out=$(PATH="$fakebin:$BASE_PATH" TREEHOUSE_ROOT="$root" FM_POOL_ORPHAN_DAYS=30 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "unregistered pool $root/orphan" "pool with no existing project repository was not reported"
+  assert_not_contains "$out" "unregistered pool $root/other-home" "another home's existing project clone was falsely reported orphaned"
+  assert_contains "$out" "duplicate-clone pool $root/two" "duplicate clone pool was not reported"
+  assert_contains "$out" "test-leftover pool $root/project-leftover" "test leftover pool was not reported"
+  assert_contains "$out" "unowned slot older than 30d: $registered" "old unowned slot was not reported"
+  pass "bootstrap reports pool orphans, duplicate clones, old unowned slots, and test pools"
+}
+
 test_bootstrap_reporting
+test_treehouse_pool_report_is_read_only_and_classifies_pools
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version
 test_gh_axi_min_version
