@@ -3,7 +3,9 @@
 # for session-provider backends whose container has ONE namespace shared by
 # every firstmate home on the machine, with no native per-home split (cmux's
 # one app-global workspace list, zellij's one shared "firstmate" session's
-# tab bar, tern's one window-global session list). Without a per-home
+# tab bar, tern's one window-global session list, tmux's one shared
+# "firstmate" container session, whose window names the tmux adapter keeps
+# unique). Without a per-home
 # discriminator embedded in the actual title/name, two firstmate homes (two
 # secondmates, a primary plus a secondmate, or two independent primary
 # installations) whose task ids
@@ -50,4 +52,22 @@ fm_backend_hometag() {
     hash=$(printf '%s' "$root" | cksum | awk '{printf "%08x", $1}')
   fi
   printf '%s-%s' "$prefix" "$hash"
+}
+
+# fm_backend_hometag_valid: succeed when <tag> has the shape
+# fm_backend_hometag emits for SOME home - "firstmate-<8hex>" or
+# "2ndmate-<id>-<8hex>" - without recomputing any home's tag. A reader that
+# must accept another home's tag (a parent validating a child home's
+# endpoint) anchors on this shape rather than on any dash-separated text.
+fm_backend_hometag_valid() {  # <tag>
+  local hash=${1##*-} prefix=${1%-*}
+  case "$hash" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) return 1 ;;
+  esac
+  case "$prefix" in
+    *[!A-Za-z0-9._-]*) return 1 ;;
+    firstmate|2ndmate-?*) return 0 ;;
+  esac
+  return 1
 }

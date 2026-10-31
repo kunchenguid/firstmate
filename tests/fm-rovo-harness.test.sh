@@ -308,7 +308,7 @@ test_rovo_readiness_gate_precedes_pointer() {
   assert_contains "$(status_line_note "$line")" 'rovo did not show a verified ready signal' \
     "rovo readiness failure did not leave a supervisor-visible failure"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "rovo pointer was sent before an observable ready signal"
-  grep -q "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" \
+  grep -Fq "kill-window -t =firstmate:=$(fm_test_expected_tmux_window "$id" "$HOME_DIR")" "$CASE_DIR/tmux-calls.log" \
     || fail "a failed rovo readiness gate must tear down the exact endpoint it created instead of leaking an orphaned --yolo process"
   status_line_at_epoch "$line" >/dev/null \
     || fail "new rovo spawn failure has unknown emission time: $line"
@@ -336,7 +336,7 @@ test_rovo_unconfirmed_delivery_fails_loudly() {
     || fail "unconfirmed rovo delivery lost its failed verb"
   assert_contains "$(status_line_note "$(cat "$HOME_DIR/state/$id.status")")" 'rovo brief pointer delivery was not confirmed' \
     "unconfirmed rovo delivery did not leave a supervisor-visible failure"
-  grep -q "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" \
+  grep -Fq "kill-window -t =firstmate:=$(fm_test_expected_tmux_window "$id" "$HOME_DIR")" "$CASE_DIR/tmux-calls.log" \
     || fail "an unconfirmed rovo delivery must tear down the exact endpoint it created instead of leaking an orphaned --yolo process"
   pass "fm-spawn: rovo treats a silent pointer drop as a failed spawn, and tears down the created endpoint"
 }

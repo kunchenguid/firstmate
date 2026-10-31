@@ -67,8 +67,9 @@ chmod +x "$LAB/bin/tmux"
 export PATH="$LAB/bin:$PATH" FM_HOME="$H"
 unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
 unset HERDR_ENV HERDR_PANE_ID HERDR_BIN_PATH
-TARGET="firstmate:fm-$ID"
-"$REAL_TMUX" -S "$SOCKET" new-session -d -s firstmate -n "fm-$ID" -x 120 -y 40 -c "$WT" \
+# Open the endpoint under the exact window name the spawn recorded.
+TARGET=$(fm_meta_get "$H/state/$ID.meta" window)
+"$REAL_TMUX" -S "$SOCKET" new-session -d -s firstmate -n "${TARGET#*:}" -x 120 -y 40 -c "$WT" \
   "/bin/sh '$LAB/launch.sh'; exec /bin/bash --noprofile --norc" || fail 'could not start pane'
 capture() { "$REAL_TMUX" -S "$SOCKET" capture-pane -p -e -t "$TARGET"; }
 screen_text() { "$REAL_TMUX" -S "$SOCKET" capture-pane -p -t "$TARGET"; }

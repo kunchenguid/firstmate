@@ -1153,7 +1153,8 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
     logical) initial_path=$proj ;;
     *) fail "unknown symlink first-reply mode: $first_reply" ;;
   esac
-  fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt" "fm-$id")
+  fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt" \
+    "$(fm_test_expected_tmux_window "$id" "$TMP_ROOT/spawn-home")")
   data="$TMP_ROOT/symlink-data-$label"
   mkdir -p "$data/$id"
   write_spawn_brief "$data/$id/brief.md" "$id"
@@ -1237,6 +1238,11 @@ test_teardown_conformance_old_vs_new() {
   old_bin=$(build_old_bin teardown-old)
   git -C "$ROOT" show "$old_tmux_ref:bin/backends/tmux.sh" > "$old_bin/bin/backends/tmux.sh" \
     || { BASE_REF=$saved_base_ref; fail "could not materialize historical tmux adapter from $old_tmux_ref"; }
+  # The entrypoints come from HEAD, whose endpoint validation calls the current
+  # adapter's home-scoped window check; the historical adapter predates it.
+  (FM_BACKEND_LIB_DIR="$ROOT/bin"; . "$ROOT/bin/backends/tmux.sh" \
+    && declare -f fm_backend_tmux_task_window_valid) >> "$old_bin/bin/backends/tmux.sh" \
+    || { BASE_REF=$saved_base_ref; fail "could not carry the current tmux task-window check into the historical adapter"; }
   BASE_REF=$saved_base_ref
   proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
   id="teardownconform1"

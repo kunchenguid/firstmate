@@ -35,6 +35,11 @@ trap cleanup_all EXIT
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
   [ -n "${SHIM_DIR:-}" ] && rm -rf "$SHIM_DIR"
+  if [ -n "${SPAWN_LAB:-}" ]; then
+    chmod -R u+w "$SPAWN_LAB" 2>/dev/null
+    rm -rf "$SPAWN_LAB"
+  fi
+  return 0
 }
 
 # A `tmux` shim on PATH that transparently redirects every call to the private
@@ -303,6 +308,71 @@ got=$(TMUX="/fake,0,$VIEWER_SID" TMUX_PANE="$OWN_PANE" fm_backend_tmux_container
 [ "$got" = "$SESSION" ] \
   || fail "container_ensure chose '$got' instead of the pane's surviving session '$SESSION' for a stale \$TMUX session id"
 pass "real tmux: container_ensure falls back to the pane's surviving session when the \$TMUX session id is stale"
+
+# --- two homes spawning the same task id into the shared container ----------
+
+# Two firstmate installations that share this tmux server and its "firstmate"
+# container session spawn a task with the same id through the real
+# bin/fm-spawn.sh. The tmux adapter refuses a window name its session already
+# holds, so a bare fm-<id> name let the first home's task stop the second
+# home's worker from ever starting. This block runs last because it repoints the server's
+# default shell and PATH at the spawn fakes.
+SPAWN_LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke-spawn.XXXXXX")
+SPAWN_LAB=$(cd "$SPAWN_LAB" && pwd -P)
+mkdir -p "$SPAWN_LAB/bin"
+# A `treehouse get` stand-in that adds a fresh worktree and keeps a shell in it
+# in the foreground, as the real one does, so the pane's path becomes it.
+cat > "$SPAWN_LAB/bin/treehouse" <<'SH'
+#!/usr/bin/env bash
+wt="$PWD.wt"
+git worktree add -q --detach "$wt" >/dev/null 2>&1 || exit 1
+cd "$wt" && exec /bin/bash --noprofile --norc
+SH
+printf '#!/bin/sh\nexec sleep 600\n' > "$SPAWN_LAB/bin/codex"
+chmod +x "$SPAWN_LAB/bin/treehouse" "$SPAWN_LAB/bin/codex"
+tmux set-option -g default-command "/bin/bash --noprofile --norc"
+tmux set-environment -g PATH "$SPAWN_LAB/bin:$PATH"
+
+spawn_in_home() {  # <home-name>; each home is its own installation root
+  local inst="$SPAWN_LAB/$1" proj="$SPAWN_LAB/$1-project"
+  mkdir -p "$inst/data/same-id" "$inst/projects" "$inst/state" "$inst/config" "$inst/user-home"
+  ln -s "$ROOT/bin" "$inst/bin"
+  printf "# Task\n## Captain's intent\nsame id in two homes\n\n## Firstmate spec\nnone\n" \
+    > "$inst/data/same-id/brief.md"
+  git init -q -b main "$proj"
+  git -C "$proj" -c user.name=smoke -c user.email=smoke@example.invalid commit -q --allow-empty -m init
+  env -u TMUX -u TMUX_PANE FM_ROOT_OVERRIDE="$inst" FM_HOME="$inst" HOME="$inst/user-home" \
+    CLAUDE_CONFIG_DIR='' FM_STATE_OVERRIDE="$inst/state" FM_DATA_OVERRIDE="$inst/data" \
+    FM_PROJECTS_OVERRIDE="$inst/projects" FM_CONFIG_OVERRIDE="$inst/config" \
+    FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 PATH="$SPAWN_LAB/bin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" same-id "$proj" --scout --harness codex 2>&1
+}
+
+out=$(spawn_in_home home-a) || fail "the first home's spawn failed: $out"
+out=$(spawn_in_home home-b) \
+  || fail "the second home's spawn of the same task id was refused in the shared tmux session: $out"
+window_a=$(fm_meta_get "$SPAWN_LAB/home-a/state/same-id.meta" window)
+window_b=$(fm_meta_get "$SPAWN_LAB/home-b/state/same-id.meta" window)
+[ -n "$window_a" ] && [ -n "$window_b" ] && [ "$window_a" != "$window_b" ] \
+  || fail "the two homes must record distinct windows for one task id, got '$window_a' and '$window_b'"
+for window in "$window_a" "$window_b"; do
+  [ "${window%%:*}" = firstmate ] \
+    || fail "a task window outside the shared container session: '$window'"
+  fm_backend_target_exists tmux "$window" || fail "a recorded task window is not live: '$window'"
+done
+pass "real tmux: two homes spawn the same task id into the shared container session side by side"
+
+# Each home's recorded endpoint authorizes its own cleanup, and closing one
+# home's window leaves the other home's same-id window running.
+for home in home-a home-b; do
+  fm_backend_validate_task_endpoint "$SPAWN_LAB/$home/state/same-id.meta" same-id \
+    || fail "$home's recorded home-scoped endpoint does not authorize its own task"
+done
+fm_backend_tmux_kill "$window_a" || fail "closing the first home's window failed"
+fm_backend_target_exists tmux "$window_a" && fail "the first home's window survived its close"
+fm_backend_target_exists tmux "$window_b" \
+  || fail "closing one home's window also closed the other home's same-id window"
+pass "real tmux: each home's recorded window authorizes and closes only that home's task"
 
 cleanup_all
 trap - EXIT
