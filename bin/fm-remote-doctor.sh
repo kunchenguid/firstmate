@@ -2,7 +2,7 @@
 # Check, and optionally repair, one remote account's second-mate readiness.
 #
 # Usage:
-#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix]
+#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--harness <name>] [--fix]
 #
 # Run it through fm-on.sh so the fixed entrypoint invokes this readiness owner
 # over its plain SSH bootstrap. The command reports the same filesystem-composed
@@ -49,9 +49,18 @@
 # both Firstmate-owned Aqua agents, starts the Linux workers where no Aqua agent
 # applies, recreates the entrypoint symlink, and may add an owned ~/.local/bin
 # wrapper for a required tool it can discover under nvm, asdf, or mise. It never
-# installs packages, creates a login session, writes an auto-login password,
-# changes FileVault, stores an account password, or replaces a non-Firstmate
-# wrapper; those remain reported gaps.
+# installs packages, creates a login session, answers Claude Code's first-run
+# onboarding, writes an auto-login password, changes FileVault, stores an
+# account password, or replaces a non-Firstmate wrapper; those remain reported
+# gaps.
+#
+# --harness names the harness the parent launch selected for this host. The
+# Claude first-run onboarding check gates only a host this launch runs Claude
+# on: one that pins a Claude account, or one this argument names as claude. A
+# non-claude --harness, or an omitted one (a manual or seed run with no harness
+# yet), gates that check on the account pin alone. The parent passes --harness on
+# every spawn-time and liveness readiness run, so a Claude launch is caught there
+# even when a bare run would skip it.
 set -eu
 
 # Resolve this script's directory with builtins only: a host missing a required
@@ -67,6 +76,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-remote-herdr-owner-lib.sh
 . "$SCRIPT_DIR/fm-remote-herdr-owner-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
 HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi omp)
 OPTIONAL_TOOLS=(tmux no-mistakes gh)
@@ -84,17 +95,24 @@ ENTRYPOINT_LINK="${HOME:-}/.local/bin/fm-remote-entrypoint.sh"
 usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 MODE=check
-case "${1:-}" in
-  '') ;;
+HARNESS=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
   --fix) MODE=fix; shift ;;
   --worker-tool-probe)
     [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
     MODE='worker-tool-probe'
     shift
     ;;
+  --harness)
+    shift
+    [ "$#" -gt 0 ] || usage
+    HARNESS=$1
+    shift
+    ;;
   *) usage ;;
-esac
-[ "$#" -eq 0 ] || usage
+  esac
+done
 
 PLATFORM=$(fm_remote_job_platform)
 UID_NUM=$(id -u 2>/dev/null) || UID_NUM=
@@ -698,6 +716,114 @@ check_herdr_server() {
     "rerun this command with --fix to start it"
 }
 
+check_claude_onboarding() {
+  local resolved config completed selection declared root pin_account pinned_ordinary pinned account_err reason
+  resolved=$(command -v claude 2>/dev/null || true)
+  if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+    record claude-onboarding "skip: claude is not installed on this host, so its first-run onboarding does not apply"
+    return 0
+  fi
+  # Check the account the launch selects, not just the default store: a remote
+  # home can pin another Claude account through config/claude-account, and
+  # bin/fm-spawn.sh launches Claude with CLAUDE_CONFIG_DIR set to that account's
+  # root. Resolve it through the same read-only helper the launch uses, so the
+  # check and the launch agree on which .claude.json is authoritative. An absent
+  # pin leaves both empty and falls back to today's default store. A pin that
+  # names the ordinary account is different: bin/fm-spawn.sh unsets
+  # CLAUDE_CONFIG_DIR for it (see the WORKER_ACCOUNT_ROOT branch there), so the
+  # launch reads $HOME/.claude.json regardless of any CLAUDE_CONFIG_DIR exported
+  # into this run; this check must read the same store, not the inherited one.
+  root=
+  pin_account=
+  pinned_ordinary=
+  pinned=
+  # Only resolve a pin that is actually present. The resolver shells out to perl
+  # to read the file; a home with no config/claude-account is unpinned, and a
+  # launch that selects another harness must stay ready even where perl is
+  # missing, so an absent pin skips the resolver entirely rather than letting a
+  # missing-perl error masquerade as an unresolvable pin. A pin that exists but
+  # cannot be read still reaches the resolver and remains a human gap below. A
+  # broken symlink counts as present: fm_worker_account_read lstats the pin, so
+  # the launch sees it and refuses, and the doctor must reach the resolver too
+  # rather than reporting readiness -- hence -L alongside -e.
+  if [ -n "${FM_HOME:-}" ] && { [ -e "$FM_HOME/config/claude-account" ] || [ -L "$FM_HOME/config/claude-account" ]; }; then
+    account_err=$(mktemp "${TMPDIR:-/tmp}/fm-doctor-account.XXXXXX" 2>/dev/null) || account_err=/dev/null
+    if selection=$(fm_worker_account_resolve claude "$FM_HOME/config" "config/claude-account" 2>"$account_err"); then
+      # declared<TAB>root<TAB>providers; root is empty for the ordinary account.
+      if [ -n "$selection" ]; then
+        pinned=1
+        declared=${selection%%$'\t'*}
+        root=${selection#*$'\t'}
+        root=${root%%$'\t'*}
+        if [ -n "$root" ]; then
+          pin_account="config/claude-account ($root)"
+        elif [ "$declared" = ordinary ]; then
+          pinned_ordinary=1
+        fi
+      fi
+      [ "$account_err" = /dev/null ] || rm -f "$account_err"
+    else
+      # The pin is malformed, or names a directory that is missing or
+      # unreadable. The real launch refuses the same way, so this host is not
+      # ready rather than quietly reading the default store.
+      reason=$(sed -n '1s/^error: //p' "$account_err" 2>/dev/null || true)
+      [ "$account_err" = /dev/null ] || rm -f "$account_err"
+      [ -n "$reason" ] || reason="config/claude-account could not be resolved"
+      record claude-onboarding "human: the Claude account pinned by config/claude-account cannot be resolved, so a launch would refuse before onboarding: $reason" \
+        "fix config/claude-account in this home so it names 'ordinary' or a readable, signed-in account directory, then rerun this command"
+      return 0
+    fi
+  fi
+  # Gate readiness only on a host this launch will actually start Claude on: one
+  # that pins a Claude account, or one whose parent-selected harness (passed as
+  # --harness) is claude. The remote home's own config is never consulted here,
+  # because the parent selects the harness and passes it to the launch; a freshly
+  # provisioned remote home's config is empty. When --harness names another
+  # harness, or no harness was passed (a manual or seed run), this check gates on
+  # the account pin alone, and the spawn-time readiness run, which always passes
+  # --harness, still catches a Claude launch.
+  if [ -z "$pinned" ] && [ "$HARNESS" != claude ]; then
+    if [ -n "$HARNESS" ]; then
+      record claude-onboarding "skip: claude is installed, but this launch selects the $HARNESS harness and this home pins no Claude account, so Claude's first-run onboarding does not gate this host"
+    else
+      record claude-onboarding "skip: claude is installed, but no launch harness was passed to this run and this home pins no Claude account, so Claude's first-run onboarding is not gated here; the spawn-time readiness check passes the harness and still catches a Claude launch"
+    fi
+    return 0
+  fi
+  if [ -n "$root" ]; then
+    config="$root/.claude.json"
+  elif [ -n "$pinned_ordinary" ]; then
+    config="${HOME:-}/.claude.json"
+  else
+    config="${CLAUDE_CONFIG_DIR:-${HOME:-}}/.claude.json"
+  fi
+  if command -v jq >/dev/null 2>&1 && [ -f "$config" ]; then
+    completed=$(jq -r '.hasCompletedOnboarding // false' "$config" 2>/dev/null || true)
+    if [ "$completed" = true ]; then
+      if [ -n "$pin_account" ]; then
+        record claude-onboarding "ok: Claude Code first-run onboarding is complete for the account selected by $pin_account"
+      else
+        record claude-onboarding "ok: Claude Code first-run onboarding is complete"
+      fi
+      return 0
+    fi
+  fi
+  if [ -n "$root" ]; then
+    record claude-onboarding "human: Claude Code's first-run onboarding is not complete for the account selected by $pin_account, so a launch stalls on the theme picker before it reads its instructions" \
+      "run CLAUDE_CONFIG_DIR=$(launch_agent_shell_quote "$root") claude once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
+  elif [ -n "$pinned_ordinary" ]; then
+    # config/claude-account pins the ordinary account, which bin/fm-spawn.sh
+    # launches with CLAUDE_CONFIG_DIR unset so Claude reads $HOME/.claude.json.
+    # Suggest the same shedding form the launch uses, so an operator whose shell
+    # exports CLAUDE_CONFIG_DIR still onboards $HOME rather than that other store.
+    record claude-onboarding "human: Claude Code's first-run onboarding is not complete for the ordinary Claude account config/claude-account pins, so a launch stalls on the theme picker before it reads its instructions" \
+      "run env -u CLAUDE_CONFIG_DIR claude once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
+  else
+    record claude-onboarding "human: Claude Code's first-run onboarding is not complete on this host, so a launch stalls on the theme picker before it reads its instructions" \
+      "run 'claude' once interactively on that account and finish the first-run onboarding; Firstmate never answers onboarding for you"
+  fi
+}
+
 check_entrypoint_link() {
   local want
   if [ -z "${FM_ROOT_OVERRIDE:-}" ]; then
@@ -729,6 +855,7 @@ run_checks() { # <resolved-login-shell>
   check_launch_agent "$shell"
   check_herdr_server
   check_entrypoint_link
+  check_claude_onboarding
 }
 
 # --- repairs ----------------------------------------------------------------

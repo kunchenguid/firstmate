@@ -150,9 +150,10 @@ argv_b64=$4
 command_fields=$(perl -MMIME::Base64=decode_base64 -e '
   my $data=decode_base64($ARGV[0]);
   my @args=split(/\0/, $data);
-  print join("\t", map { defined $_ ? $_ : "" } @args[0..2]);
+  my $fix=(grep { defined $_ && $_ eq "--fix" } @args[1..$#args]) ? "--fix" : "-";
+  print join("\t", $fix, map { defined $_ ? $_ : "" } @args[0..2]);
 ' "$argv_b64")
-IFS=$'\t' read -r command_name _command_action command_rel <<EOF
+IFS=$'\t' read -r doctor_action command_name _command_action command_rel <<EOF
 $command_fields
 EOF
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
@@ -170,11 +171,11 @@ esac
 # owns the doctor's real behavior against controlled account fixtures; this
 # boundary owns only what the callers do with its verdict.
 if [ "$command_name" = fm-remote-doctor.sh ]; then
-  printf '%s %s\n' "${FM_FAKE_SSH_MODE:-normal}" "${_command_action:--}" >> "$FM_FAKE_DOCTOR_LOG"
+  printf '%s %s\n' "${FM_FAKE_SSH_MODE:-normal}" "$doctor_action" >> "$FM_FAKE_DOCTOR_LOG"
   case "${FM_FAKE_SSH_MODE:-normal}" in
     unreachable) exit 255 ;;
     doctor-fix-unknown)
-      if [ "${_command_action:-}" = --fix ]; then
+      if [ "$doctor_action" = --fix ]; then
         printf 'fix launchagent=applied: wrote the Aqua-scoped launch agent\n'
         exit 255
       fi
@@ -190,7 +191,7 @@ if [ "$command_name" = fm-remote-doctor.sh ]; then
       ;;
     doctor-fixable)
       # Red until --fix runs on this host, green on every later read-only run.
-      if [ "${_command_action:-}" = --fix ]; then
+      if [ "$doctor_action" = --fix ]; then
         touch "$FM_FAKE_DOCTOR_REPAIRED"
         printf 'fix launchagent=applied: wrote the Aqua-scoped launch agent\n'
         printf 'ok: remote second-mate readiness confirmed on this host\n'

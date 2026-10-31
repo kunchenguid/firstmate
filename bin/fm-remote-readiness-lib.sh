@@ -2,7 +2,13 @@
 # fm-remote-readiness-lib.sh - the remote second-mate readiness gate sequence.
 #
 # Source this file and call:
-#   fm_remote_readiness_ensure <bin-dir> <secondmate-id>
+#   fm_remote_readiness_ensure <bin-dir> <secondmate-id> [harness]
+#
+# When <harness> is a non-empty harness name, it is forwarded to the doctor as
+# --harness on every doctor invocation, so the doctor gates Claude first-run
+# onboarding on the harness the parent launch actually selected rather than on
+# the remote home's own config. A seed preflight has no harness yet and passes
+# none, leaving the doctor to gate onboarding on the account pin alone.
 #
 # It runs bin/fm-remote-doctor.sh on that route's configured host, and when the
 # read-only run reports any gap it runs the doctor again with --fix and then a
@@ -21,21 +27,23 @@
 # shellcheck disable=SC2034
 FM_REMOTE_READINESS_OUT=
 
-fm_remote_readiness_ensure() { # <bin-dir> <secondmate-id>
-  local bin_dir=$1 id=$2 out rc
+fm_remote_readiness_ensure() { # <bin-dir> <secondmate-id> [harness]
+  local bin_dir=$1 id=$2 harness=${3:-} out rc
+  local hargs=()
+  [ -z "$harness" ] || hargs=(--harness "$harness")
 
-  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh < /dev/null 2>&1)
+  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh "${hargs[@]+"${hargs[@]}"}" < /dev/null 2>&1)
   rc=$?
   FM_REMOTE_READINESS_OUT=$out
   [ "$rc" -ne 0 ] || return 0
   [ "$rc" -ne 255 ] || return 255
 
-  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh --fix < /dev/null 2>&1)
+  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh "${hargs[@]+"${hargs[@]}"}" --fix < /dev/null 2>&1)
   rc=$?
   FM_REMOTE_READINESS_OUT=$out
   [ "$rc" -ne 255 ] || return 255
 
-  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh < /dev/null 2>&1)
+  out=$("$bin_dir/fm-on.sh" "$id" fm-remote-doctor.sh "${hargs[@]+"${hargs[@]}"}" < /dev/null 2>&1)
   rc=$?
   FM_REMOTE_READINESS_OUT=$out
   [ "$rc" -ne 255 ] || return 255
