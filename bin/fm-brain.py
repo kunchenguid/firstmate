@@ -133,16 +133,19 @@ def load_current(brain):
     name = read(pointer, 100).strip()
     require(re.fullmatch('[a-f0-9]{64}', name), 'invalid CURRENT generation')
     generation = safe(brain / 'generations' / name)
-    return generation, decode(read(generation / 'manifest.json')), decode(read(generation / 'units.json'))
+    return generation, decode(read(generation / 'manifest.json', 20_000_000)), decode(read(generation / 'units.json'))
 
 
 def usable(current, manifest):
     if current is None:
         return False
     try:
+        require(decode(read(current / 'manifest.json', 20_000_000)) == manifest, 'serialized manifest mismatch')
+        decode(read(current / 'units.json'))
+        read(current / 'log.md')
         return (digest(read(current / 'graphify-out/graph.json', 20_000_000)) == manifest.get('graph_sha256')
                 and all(digest(read(current / 'pages' / f'{pid}.md', 8_000_000)) == sha for pid, sha in manifest['pages'].items()))
-    except (Invalid, OSError, KeyError):
+    except (ValueError, OSError, KeyError):
         return False
 
 
@@ -226,7 +229,7 @@ def build(home, project, cfg, unit=None, summary=None, task=False):
             return {'status': 'current', 'generation': str(destination), 'changed': False}
         while destination.exists():
             try:
-                manifest = decode(read(destination / 'manifest.json'))
+                manifest = decode(read(destination / 'manifest.json', 20_000_000))
                 valid = manifest.get('input_sha256') == input_sha and usable(destination, manifest)
             except (Invalid, OSError, ValueError):
                 valid = False
@@ -286,7 +289,7 @@ def build(home, project, cfg, unit=None, summary=None, task=False):
         now = datetime.now(timezone.utc).isoformat()
         (stage / 'log.md').write_text(old_log + f'\n- {now}: generation {generation_id}; unit {unit or "source-refresh"}; previous {prior_manifest.get("generation", "none")}.\n', encoding='utf-8')
         (stage / 'SCHEMA.md').write_text('# Private wiki schema v1\n\nSources are exact content-addressed immutable Markdown snapshots.\nEvidence pages cite original paths, line ranges and hashes.\nUnit pages retain contributor synthesis and explicit source ids; missing/removed sources mark units stale.\nOnly exact path-scoped links in the generated Connections section become EXTRACTED edges.\nThe graph and index are derived; they never close tasks or change decisions/preferences.\n', encoding='utf-8')
-        require(usable(stage, manifest), 'staged graph or pages failed validation; previous generation retained')
+        require(usable(stage, manifest), 'staged generation failed validation; previous generation retained')
         # Recheck approved inputs before switching the sole visible pointer.
         require(configured(home, project) == cfg, 'approved corpus changed during build; retry')
         require(fingerprints(snapshot(cfg)) == fingerprints(sources), 'sources changed during build; retry')

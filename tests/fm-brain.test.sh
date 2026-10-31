@@ -117,6 +117,34 @@ run('build','alpha',ok=False)
 assert (home/'data/brains/alpha/CURRENT').read_text()==pointer
 a.write_text(original);run('build','alpha');run('check','alpha')
 
+pointer=(home/'data/brains/alpha/CURRENT').read_text()
+current=home/'data/brains/alpha/generations'/pointer.strip()
+saved_log=(current/'log.md').read_bytes()
+(current/'log.md').write_bytes(b'x'*1_999_999)
+a.write_text('# Log boundary\n')
+failure=run('build','alpha',ok=False)
+assert 'staged generation failed validation' in failure.stderr
+assert (home/'data/brains/alpha/CURRENT').read_text()==pointer
+assert not list((home/'data/brains/alpha').glob('.generation-*'))
+(current/'log.md').write_bytes(saved_log)
+a.write_text(original);run('check','alpha')
+
+units=json.loads((current/'units.json').read_text())
+for i in range(6000):
+ units[f'bulk-{i:05}-'+('x'*89)]={'title':'Small unit','body':'Done.','sources':['a'],'connections':[]}
+(current/'units.json').write_text(json.dumps(units,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+assert (current/'units.json').stat().st_size<2_000_000
+large=Path(json.loads(run('build','alpha').stdout)['generation'])
+assert (large/'manifest.json').stat().st_size>2_000_000
+assert json.loads(run('status','alpha').stdout)['status']=='current'
+run('check','alpha');run('query','alpha','Small unit')
+assert json.loads(run('build','alpha').stdout)['generation']==str(large)
+assert json.loads(run('complete-task','alpha','--unit','unit-1').stdout)['generation']==str(large)
+a.write_text('# Large manifest drift\n');run('build','alpha')
+a.write_text(original)
+assert json.loads(run('build','alpha').stdout)['generation']==str(large)
+run('check','alpha')
+
 # Output must not recursively ingest itself, and source symlinks are refused.
 a.unlink();a.symlink_to(b);run('build','alpha',ok=False)
 assert json.loads(run('status','alpha').stdout)['status']=='stale'
