@@ -19,6 +19,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 | What the guard enforces | [Current invariant](#current-invariant) |
 | Which sessions are in scope and what counts as supervision need | [Primary scope](#primary-scope) and [supervision need](#supervision-need) |
 | How the turn-end check and the mid-turn pull warning judge watcher health | [Strict watcher check at the turn boundary](#strict-watcher-check-at-the-turn-boundary) and [pull-warning verdict by supervision model](#pull-warning-verdict-by-supervision-model) |
+| Why a healthy turn end was refused as idle | [Idle items](#idle-items) |
 | Away and quiet mode | [Away and quiet mode daemon ownership](#away-and-quiet-mode-daemon-ownership) |
 | How long a beacon stays fresh | [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) |
 | How each harness blocks or follows up | [Harness integrations](#harness-integrations) |
@@ -49,6 +50,8 @@ The mid-turn pull warning uses the model-aware supervision verdict described bel
 Away and quiet mode are the one place the turn-end guard accepts a different supervisor.
 While `state/.afk` exists, in either mode (`bin/fm-wake-lib.sh`'s `fm_afk_mode`), the daemon owns supervision.
 A live identity-matched daemon with a fresh beacon then satisfies that boundary in place of a watcher process holding the lock.
+
+The guard has one sibling refusal for a turn that is supervised but idle, described under [Idle items](#idle-items).
 
 The guard remains a backstop.
 [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
@@ -168,6 +171,16 @@ A cycle the extension never restores is loud once the beacon passes grace.
 Under every persistent-watcher harness a live identity-matched watcher with a fresh beacon is still required, so the pull guard keeps the same strict semantics there.
 Its banner names the true failing condition, either a missing live watcher process or a genuinely stale beacon with its real age.
 It keys the once-per-episode dedup on that condition rather than the beacon mtime.
+
+### Idle items
+
+Healthy supervision does not prove work is moving: a dead worker's row can stay In flight, or finished work can wait to be landed, while every heartbeat is absorbed.
+Wherever the guard would otherwise let a turn end, it runs `bin/fm-progress-sweep.sh`, which owns which of this home's backlog items are orphaned, meaning idle with no typed reason.
+When any exist, the guard refuses that turn end with a `TURN WOULD END IDLE` banner naming each item and its reason.
+A blind turn still gets the blind banner first, because the idle check runs only on the paths that would allow the stop.
+The same bounded one-forced-follow-up rule applies: Codex and Grok allow a `stop_hook_active` stop, the passive adapters allow their own follow-up's stop, and `--claude` keeps a per-session marker so the stop after an idle refusal always ends.
+An absent, failing, or slow sweep lets the turn end, so this refusal can never wedge a session; the watcher heartbeat queues a sweep failure as its own wake instead.
+The banner's clearing actions never include `--force`: a teardown or merge refusal needs the captain's word and becomes a captain hold.
 
 ### Away and quiet mode daemon ownership
 
@@ -453,6 +466,7 @@ The generated prompts use the canonical `turn-end-guard` kind after the U+2063 `
 Each passive adapter owns a loop latch:
 
 - Pi keeps the latch across internal tool turns and clears it only when the generated follow-up settles or delivery fails.
+- Pi, OpenCode, omp, and the Grok fallback relay a `TURN WOULD END IDLE` refusal as written, without the supervision-outage framing they add to every other refusal.
 - OpenCode's forced follow-up is supported for persistent TUI sessions and remains fail-open in headless `opencode run`.
 
 ### Grok capability selection
@@ -577,6 +591,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
+- Cursor and Antigravity consult the guard only after their hook-owned park fails to establish supervision, so they never receive the idle refusal; their watcher heartbeat still raises each orphan as a wake.
 
 ## Regression coverage
 
@@ -604,6 +619,9 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Typed field precedence.
 - Malformed input.
 - Exactly-one-path safety.
+
+`tests/fm-progress-sweep.test.sh` replays a stalled home, a dead worker's In-flight row plus finished work nobody landed, and expects the sweep to name both, the heartbeat to wake and reset its backoff, and the turn end to be refused as idle.
+It expects a paused, a held, and a blocked row to stay silent on all three surfaces, and covers the grace window, the Claude one-follow-up bound, and the Pi adapter's unframed relay.
 
 `tests/fm-turnend-foreign-owner-arm-fix.test.sh` runs the extracted isolated executable reproduction against real auto-arm and turn-end guard scripts.
 It proves that a live foreign owner still prevents arming while repeated non-owner Stops receive a diagnostic and exit safely.

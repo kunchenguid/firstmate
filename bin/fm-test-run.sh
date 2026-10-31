@@ -321,7 +321,7 @@ family_for_basename() {
     fm-watch-triage.test.sh|fm-watch-triage-pause.test.sh|\
     fm-watch-triage-wedge-defer.test.sh|fm-task-inbox.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh|fm-watch-wedge-cap.test.sh|\
-    fm-watch-wedge-cap-unconfigured-parity.test.sh)
+    fm-watch-wedge-cap-unconfigured-parity.test.sh|fm-progress-sweep.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
@@ -1573,7 +1573,7 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-backend-t3code.test.sh"
       ;;
     bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
-    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh|bin/fm-progress-sweep.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)

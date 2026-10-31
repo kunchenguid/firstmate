@@ -223,15 +223,70 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
+# --- TURN WOULD END IDLE: the sibling of TURN WOULD END BLIND ----------------
+# Supervision can be perfectly healthy while nothing moves: a dead worker's row
+# stays In flight, or finished work waits to be landed, and every heartbeat is
+# absorbed. bin/fm-progress-sweep.sh owns which items are orphaned (idle with
+# no typed reason); this refuses one turn end per primary turn while any exist.
+# It is consulted only on the paths that would otherwise let the turn end, so
+# a blind turn still gets the BLIND banner first.
+# Loop guard: the same bounded one-forced-follow-up rule as the BLIND block.
+# Codex and Grok already allowed a stop_hook_active stop above; the passive Pi,
+# OpenCode, and omp adapters allow the follow-up's own stop themselves. Claude
+# marks every hook-driven stop active, so --claude keeps a per-session marker
+# instead: the block records it and the very next stop clears it and ends.
+# Cursor and Antigravity consult this guard only after their hook-owned park
+# failed to establish supervision, so the idle refusal never runs for them.
+# The sweep is time-bounded, and an absent, failing, or slow sweep lets the
+# turn end, so a session can never be wedged here; the heartbeat still queues
+# a progress-sweep failure as its own wake.
+IDLE_MARKER="$STATE/.turnend-idle-followup"
+idle_check() {
+  local out count=0 cls id reason lines='' rule
+  [ "$CURSOR_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] || return 0
+  [ -x "$SCRIPT_DIR/fm-progress-sweep.sh" ] || return 0
+  if [ "$CLAUDE_MODE" -eq 1 ] && [ "$(cat "$IDLE_MARKER" 2>/dev/null)" = "session=$SESSION_ID" ]; then
+    rm -f "$IDLE_MARKER" 2>/dev/null || true
+    return 0
+  fi
+  _fm_wake_require_timeout 2>/dev/null || return 0
+  out=$(fm_run_timed "${FM_PROGRESS_SWEEP_TIMEOUT_SECS:-20}" \
+    env FM_STATE_OVERRIDE="$STATE" FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-progress-sweep.sh" 2>/dev/null) || return 0
+  while IFS=$'\t' read -r cls id reason; do
+    [ "$cls" = orphan ] && [ -n "$id" ] || continue
+    count=$((count + 1))
+    lines="$lines●    $id - $reason"$'\n'
+  done <<EOF
+$out
+EOF
+  [ "$count" -gt 0 ] || return 0
+  if [ "$CLAUDE_MODE" -eq 1 ]; then
+    printf 'session=%s\n' "$SESSION_ID" > "$IDLE_MARKER" 2>/dev/null || return 0
+  fi
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$rule"
+    printf '●  TURN WOULD END IDLE - %s item(s) in flight or ready with no worker, wait, hold, or blocker:\n' "$count"
+    printf '%s' "$lines"
+    printf '●  Give each one a typed reason before ending the turn: dispatch, steer, or relaunch it; land it through the guarded path when that is within authority; record an external wait as a backlog hold or blocker; or hold it for the captain with bin/fm-captain-hold.sh hold.\n'
+    printf '●  A teardown or merge refusal is never cleared with --force: it needs the captain'"'"'s word, so hold it for the captain.\n'
+    printf '●  bin/fm-progress-sweep.sh --all shows every item'"'"'s reason.\n'
+    printf '●%s\n' "$rule"
+  } >&2
+  exit 2
+}
+
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   [ "$AGY_MODE" -eq 1 ] && rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
+  idle_check
   allow_exit
 fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
+  idle_check
   if [ "$AGY_MODE" -eq 1 ]; then
     rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
     printf '{}\n'

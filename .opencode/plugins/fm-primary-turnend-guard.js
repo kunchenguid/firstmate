@@ -44,6 +44,17 @@ function resolvePath(anchor) {
   }
 }
 
+// bin/fm-turnend-guard.sh refuses a turn end for one of two reasons. Its
+// TURN WOULD END IDLE banner (supervision healthy, but orphaned items) is
+// self-describing and must not be framed as a supervision outage; every other
+// refusal is the BLIND repair case.
+function guardFollowupText(stderr) {
+  if (stderr.includes("TURN WOULD END IDLE")) return stderr;
+  return "TURN WOULD END BLIND - supervision is off. " +
+    "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
+    stderr;
+}
+
 function runGuard(root) {
   if (!root) return Promise.resolve({ code: 0, stderr: "" });
   return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], '{"stop_hook_active":false}');
@@ -78,9 +89,7 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
         const text = await encodeFirstmateOperationalInput(
           root,
           "turn-end-guard",
-          "TURN WOULD END BLIND - supervision is off. " +
-            "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-            result.stderr,
+          guardFollowupText(result.stderr),
         );
         await client.session.promptAsync({
           path: { id: sessionID },
@@ -118,9 +127,7 @@ function installTurnendGuard(ctx) {
       const text = await encodeFirstmateOperationalInput(
         root,
         "turn-end-guard",
-        "TURN WOULD END BLIND - supervision is off. " +
-          "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-          result.stderr,
+        guardFollowupText(result.stderr),
       );
       await promptSession(ctx, null, sessionID, text);
       latch.exempt(sessionID);
