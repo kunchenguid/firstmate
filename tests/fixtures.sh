@@ -155,6 +155,7 @@ window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
   display-message)
     case "$*" in
+      *"#{socket_path}"*) printf '/tmp/fm-fixture/socket|12345|123456\n'; exit 0 ;;
       *"#{cursor_y}"*)
         if [ -f "$(fake_opencode_plugin)" ]; then
           reads=$(cat "$(fake_opencode_plugin).fake-composer-reads" 2>/dev/null) || reads=0

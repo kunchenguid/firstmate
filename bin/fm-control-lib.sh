@@ -50,12 +50,13 @@ fm_control_verbs() {
 interrupt
 exit
 relaunch
+bind-tmux
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|exit|relaunch|bind-tmux) return 0 ;;
   esac
   return 1
 }
@@ -442,13 +443,9 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     on the verified server, while an unreachable server reads `unreadable`.
 #     The proof re-reads the thread, but exit and relaunch refuse before it:
 #     V2 has no session stop and a thread cannot host a replacement.
-#   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
-#     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
-#     carry the endpoint's socket identity - so a different but running server
-#     would answer "not anywhere" about a window it was never able to see.
-#     There is no read available here that closes that gap, so tmux always
-#     returns `unproven` and both verbs refuse. tmux is left exactly as
-#     deadlocked as it was before this change - no worse - but deliberately.
+#   tmux proves window absence only on a live, recorded server incarnation,
+#     using the stable window id across all its sessions. Legacy records and
+#     dead, foreign, or inaccessible servers still refuse.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
@@ -458,7 +455,23 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
     tmux)
-      printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity, and a server-wide window inventory only describes the tmux server this process addresses, so a window absent from it may still be alive on another'
+      case "$(fm_backend_tmux_endpoint_absence_recheck "$target" "$meta")" in
+        dead) printf 'dead\t' ;;
+        alive) printf 'alive\t' ;;
+        missing)
+          if [ "$(fm_meta_get "$meta" mode)" = no-mistakes ] \
+            || [ -e "$(fm_meta_get "$meta" worktree)/.no-mistakes" ] \
+            || ! fm_backend_tmux_worktree_free "$(fm_meta_get "$meta" worktree)"; then
+            printf 'unproven\ttmux window is absent, but live agent or validation ownership of the worktree is not proven released'
+          else
+            printf 'gone\t'
+          fi
+          ;;
+        legacy)
+          printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity; bind-tmux requires an independently verified live server and an idle endpoint in the recorded worktree'
+          ;;
+        *) printf 'unproven\tthe recorded tmux server or stable window identity cannot be verified; a dead or reused socket never proves task ownership released' ;;
+      esac
       ;;
     herdr)
       # Start the RECORDED session's server (only the server - nothing is

@@ -51,6 +51,22 @@ _FM_TMUX_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_TMUX_LIB_DIR:-/}/fm-cursor-lib.sh"
 unset _FM_TMUX_LIB_DIR
 
+# A bound lifecycle operation never addresses the ambient server. Recheck the
+# native server incarnation before every read or effect; an inaccessible or
+# restarted server refuses, including when its socket path has been reused.
+fm_tmux() {
+  local identity
+  if [ -z "${FM_TMUX_SOCKET:-}" ]; then
+    command tmux "$@"
+    return
+  fi
+  [ -S "$FM_TMUX_SOCKET" ] && [ -O "$FM_TMUX_SOCKET" ] || return 1
+  identity=$(command tmux -S "$FM_TMUX_SOCKET" display-message -p \
+    '#{socket_path}|#{pid}|#{start_time}' 2>/dev/null) || return 1
+  [ "$identity" = "$FM_TMUX_SOCKET|$FM_TMUX_SERVER_PID|$FM_TMUX_SERVER_START" ] || return 1
+  command tmux -S "$FM_TMUX_SOCKET" "$@"
+}
+
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -74,13 +90,13 @@ fm_tmux_strip_ghost() { fm_composer_strip_ghost; }
 # capture is consumed internally by the classifier and is NEVER surfaced
 # (fm-peek and every human/LLM-facing path stay plain).
 fm_tmux_composer_capture() {  # <target>
-  tmux capture-pane -e -p -t "$1" -S 0 -E - 2>/dev/null
+  fm_tmux capture-pane -e -p -t "$1" -S 0 -E - 2>/dev/null
 }
 
 # fm_tmux_composer_cursor_row: the pane's cursor row, zero-based, relative to
 # the visible pane - tmux's genuine primitive that no other backend has.
 fm_tmux_composer_cursor_row() {  # <target>
-  tmux display-message -p -t "$1" '#{cursor_y}' 2>/dev/null
+  fm_tmux display-message -p -t "$1" '#{cursor_y}' 2>/dev/null
 }
 
 # fm_tmux_composer_caps: the tmux capability descriptor - static data, not
@@ -113,7 +129,7 @@ fm_tmux_composer_caps() {
 # polytoken, or commandcode; exits 1 when the pane is not a live shape owner.
 fm_tmux_composer_identity() {  # <target>
   local target=$1 tty pgid tpgid comm owner='' status
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
+  tty=$(fm_tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || tty=
   case "$tty" in
     /dev/*)
       while read -r _ pgid tpgid comm; do
@@ -131,7 +147,7 @@ EOF
       ;;
   esac
   if [ -z "$owner" ]; then
-    comm=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
+    comm=$(fm_tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || comm=
     case "${comm##*/}" in
       pi|pi-signed|pi-launcher) owner=pi ;;
       polytoken) owner=polytoken ;;
@@ -211,7 +227,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
 # no reclassification.
 fm_tmux_pane_is_cortex() {  # <target>
   local target=$1 tty pgid tpgid comm
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  tty=$(fm_tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
   case "$tty" in /dev/*) ;; *) return 1 ;; esac
   while read -r _ pgid tpgid comm; do
     [ -n "$comm" ] || continue
@@ -232,7 +248,7 @@ EOF
 # no Cursor foreground process and gets no reclassification.
 fm_tmux_pane_is_cursor() {  # <target>
   local target=$1 tty pid pgid tpgid comm args argv0
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  tty=$(fm_tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
   case "$tty" in /dev/*) ;; *) return 1 ;; esac
   while read -r pid pgid tpgid comm; do
     [ -n "$comm" ] || continue
@@ -257,7 +273,7 @@ fm_pane_input_pending() {  # <target>
 # (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
 fm_pane_busy_state() {  # <target> [harness] -> busy|idle|unknown
   local win=$1 harness=${2:-} tail40 visible
-  tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) \
+  tail40=$(fm_tmux capture-pane -p -t "$win" -S -40 2>/dev/null) \
     || { printf 'unknown'; return 0; }
   visible=$(printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12)
   [ -n "$visible" ] || { printf 'unknown'; return 0; }
@@ -303,7 +319,7 @@ fm_pane_is_busy() {  # <target> [harness]
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [busy-harness]
   local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} busy_harness=${5:-} i=0 j state busy_state
   while :; do
-    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    fm_tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
     state=$(fm_tmux_composer_state "$target")
     # The first Enter can open a picker. A later Enter would confirm it.
@@ -363,7 +379,7 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   [ "$baseline_state" = idle ] && baseline_idle=1
   # A failed literal send replays tmux's stderr (for example "command too
   # long") so the caller can log why nothing was typed.
-  if ! err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then
+  if ! err=$(fm_tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then
     [ -z "$err" ] || printf '%s\n' "$err" >&2
     printf 'send-failed'
     return 0

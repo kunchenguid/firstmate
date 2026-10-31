@@ -304,5 +304,108 @@ got=$(TMUX="/fake,0,$VIEWER_SID" TMUX_PANE="$OWN_PANE" fm_backend_tmux_container
   || fail "container_ensure chose '$got' instead of the pane's surviving session '$SESSION' for a stale \$TMUX session id"
 pass "real tmux: container_ensure falls back to the pane's surviving session when the \$TMUX session id is stale"
 
+# --- recorded server identity and legacy migration --------------------------
+
+# shellcheck source=tests/git-config-helpers.sh
+. "$ROOT/tests/git-config-helpers.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-control-lib.sh"
+LAB_HOME="$SHIM_DIR/home"
+LAB_WT="$SHIM_DIR/work"
+mkdir -p "$LAB_HOME/state" "$LAB_HOME/data/identity" "$LAB_WT"
+git -C "$LAB_WT" init -q || fail "private identity repository failed"
+git -C "$LAB_WT" -c user.name=Test -c user.email=test@example.invalid \
+  commit --allow-empty -qm fixture || fail "private fixture commit failed"
+printf 'retained dirty work\n' > "$LAB_WT/dirty"
+printf 'retained instructions\n' > "$LAB_HOME/data/identity/brief.md"
+printf 'working: retained status\n' > "$LAB_HOME/state/identity.status"
+printf 'retained poll\n' > "$LAB_HOME/state/identity.poll"
+mkdir -p "$LAB_HOME/state/identity.inbox"
+printf 'retained steer\n' > "$LAB_HOME/state/identity.inbox/001.msg"
+LAB_TARGET="$SESSION:fm-identity"
+LAB_WID=$(fm_backend_tmux_create_task "$SESSION" fm-identity "$LAB_WT") \
+  || fail "private legacy endpoint failed"
+LAB_META="$LAB_HOME/state/identity.meta"
+{
+  printf 'window=%s\nworktree=%s\nproject=%s\n' "$LAB_TARGET" "$LAB_WT" "$LAB_WT"
+  printf 'harness=claude\nkind=ship\nmode=local-only\nyolo=off\nbranch=task\n'
+} > "$LAB_META"
+printf 'Independently retained private tmux server and window read.\n' > "$SHIM_DIR/proof"
+LAB_SOCKET=$(tmux display-message -p '#{socket_path}')
+LAB_PID=$(tmux display-message -p '#{pid}')
+LAB_START=$(tmux display-message -p '#{start_time}')
+identity_bind() {
+  FM_HOME="$LAB_HOME" bash "$ROOT/bin/fm-control.sh" identity bind-tmux \
+    --socket "$LAB_SOCKET" --server-pid "$LAB_PID" --server-start "$LAB_START" \
+    --window-id "$LAB_WID" --note-file "$SHIM_DIR/proof"
+}
+for _ in $(seq 1 100); do
+  [ "$(fm_backend_tmux_agent_state "$LAB_TARGET")" != dead ] || break
+  sleep 0.1
+done
+[ "$(fm_backend_tmux_agent_state "$LAB_TARGET")" = dead ] || fail "private shell did not become idle"
+identity_bind > "$SHIM_DIR/bind.out" 2>&1 \
+  || fail "verified legacy migration failed: $(cat "$SHIM_DIR/bind.out")"
+fm_backend_tmux_bind_meta "$LAB_META" || fail "native recorded identity did not bind"
+[ "$FM_TMUX_SOCKET" = "$LAB_SOCKET" ] || fail "migration recorded the wrong server"
+[ "$FM_TMUX_WINDOW_ID" = "$LAB_WID" ] || fail "migration recorded the wrong stable window"
+pass "real tmux: independently verified legacy idle endpoint migrates without changing dirty work"
+
+# A different live socket cannot authorize the record, even if its labels match.
+cp "$LAB_META" "$SHIM_DIR/bound-meta"
+sed "s/^tmux_server_pid=.*/tmux_server_pid=1/" "$LAB_META" > "$SHIM_DIR/reused-meta"
+if fm_backend_tmux_bind_meta "$SHIM_DIR/reused-meta" 2>/dev/null; then
+  fail "a reused server identity was accepted"
+fi
+sed "s|^tmux_socket=.*|tmux_socket=$SHIM_DIR/nonexistent|" "$LAB_META" > "$SHIM_DIR/unreachable-meta"
+if fm_backend_tmux_bind_meta "$SHIM_DIR/unreachable-meta" 2>/dev/null; then
+  fail "an inaccessible socket was accepted"
+fi
+sed "s|^tmux_socket=.*|tmux_socket=$SHIM_DIR/foreign|" "$LAB_META" > "$SHIM_DIR/foreign-meta"
+printf 'not a socket\n' > "$SHIM_DIR/foreign"
+if fm_backend_tmux_bind_meta "$SHIM_DIR/foreign-meta" 2>/dev/null; then
+  fail "a foreign non-socket path was accepted"
+fi
+fm_backend_tmux_bind_meta "$LAB_META" || fail "original binding did not survive refusal cases"
+pass "real tmux: reused, foreign, and unreachable server bindings refuse"
+
+# Window names can be reused; stable ids on the same live server cannot.
+tmux rename-window -t "$LAB_WID" renamed-identity || fail "private rename failed"
+absence=$(fm_control_endpoint_absence_verdict tmux "$LAB_TARGET" "$LAB_META")
+case "$absence" in unproven$'\t'*) ;; *) fail "a renamed window authorized replacement" ;; esac
+tmux rename-window -t "$LAB_WID" fm-identity || fail "private rename restore failed"
+tmux kill-window -t "$LAB_WID" || fail "private recorded window close failed"
+absence=$(fm_control_endpoint_absence_verdict tmux "$LAB_TARGET" "$LAB_META")
+[ "$absence" = gone$'\t' ] || fail "positive window absence was not proven: $absence"
+pass "real tmux: server-wide stable identity refuses a renamed window and proves positive absence"
+
+# Kernel cwd evidence must contradict absence when a detached job survives.
+( cd "$LAB_WT" && exec sleep 30 ) &
+LAB_JOB=$!
+sleep 0.1
+absence=$(fm_control_endpoint_absence_verdict tmux "$LAB_TARGET" "$LAB_META")
+kill "$LAB_JOB" 2>/dev/null || true
+wait "$LAB_JOB" 2>/dev/null || true
+case "$absence" in unproven$'\t'*) ;; *) fail "a live validation job authorized replacement" ;; esac
+pass "real tmux: a detached validation job prevents replacement of an absent window"
+
+# A missing legacy record still refuses; no metadata is fabricated from the
+# caller's server. Active validation custody remains a separate refusal.
+sed '/^tmux_/d' "$LAB_META" > "$SHIM_DIR/legacy-meta"
+absence=$(fm_control_endpoint_absence_verdict tmux "$LAB_TARGET" "$SHIM_DIR/legacy-meta")
+case "$absence" in unproven$'\t'*) ;; *) fail "legacy missing endpoint guard weakened" ;; esac
+sed 's/^mode=.*/mode=no-mistakes/' "$LAB_META" > "$SHIM_DIR/validation-meta"
+absence=$(fm_control_endpoint_absence_verdict tmux "$LAB_TARGET" "$SHIM_DIR/validation-meta")
+case "$absence" in unproven$'\t'*) ;; *) fail "unreleased validation custody authorized replacement" ;; esac
+pass "real tmux: legacy missing endpoints and unproven validation custody remain refused"
+
+[ "$(cat "$LAB_WT/dirty")" = "retained dirty work" ] || fail "dirty work changed"
+[ "$(cat "$LAB_HOME/data/identity/brief.md")" = "retained instructions" ] || fail "brief changed"
+[ "$(cat "$LAB_HOME/state/identity.status")" = "working: retained status" ] || fail "status changed"
+[ "$(cat "$LAB_HOME/state/identity.poll")" = "retained poll" ] || fail "poll changed"
+[ "$(cat "$LAB_HOME/state/identity.inbox/001.msg")" = "retained steer" ] || fail "inbox changed"
+pass "real tmux: migration and absence proofs preserve brief, inbox, poll, status, and dirty work"
+unset FM_TMUX_SOCKET FM_TMUX_SERVER_PID FM_TMUX_SERVER_START FM_TMUX_WINDOW_ID
+
 cleanup_all
 trap - EXIT

@@ -559,6 +559,27 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: tmux endpoint '$window' is malformed or does not belong to task $id; preserving task state." >&2
         return 1
       fi
+      if grep -q '^tmux_' "$meta"; then
+        local tmux_key tmux_value
+        [ "$(grep -c '^tmux_' "$meta")" = 4 ] || {
+          echo "REFUSED: incomplete or ambiguous tmux server identity; preserving task state." >&2
+          return 1
+        }
+        for tmux_key in socket server_pid server_start window_id; do
+          tmux_value=$(fm_backend_meta_exact_value "$meta" "tmux_$tmux_key") || return 1
+          case "$tmux_key:$tmux_value" in
+            socket:/*) ;;
+            server_pid:*|server_start:*)
+              case "$tmux_value" in ''|*[!0-9]*) return 1 ;; esac
+              [ "$tmux_value" -gt 0 ] || return 1
+              ;;
+            window_id:@*)
+              case "${tmux_value#@}" in ''|*[!0-9]*) return 1 ;; esac
+              ;;
+            *) return 1 ;;
+          esac
+        done
+      fi
       ;;
     herdr)
       [ "$binding" = "$id" ] || {
