@@ -290,6 +290,8 @@ SH
   printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/first.meta"
   printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/second.meta"
   printf 'kind=ship\nbackend=tmux\nwindow=missing:window\n' > "$case_dir/home/state/no-tab.meta"
+  printf 'backend=tmux\nwindow=outside:window\npr=https://example.test/pull/42\n' > "$case_dir/outside.meta"
+  ln -s "$case_dir/outside.meta" "$case_dir/home/state/linked.meta"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" 'RECORD_HYGIENE: status log without metadata older than 24 hours: orphan' \
@@ -300,6 +302,7 @@ SH
     "bootstrap did not report duplicate PR references"
   assert_contains "$out" 'RECORD_HYGIENE: metadata has no endpoint: no-tab' \
     "bootstrap did not report metadata whose endpoint is missing"
+  assert_not_contains "$out" 'linked' "bootstrap read symlinked metadata"
   [ -f "$case_dir/home/data/orphan/status.log" ] || fail "bootstrap did not archive the orphan status log"
   [ ! -e "$case_dir/home/state/orphan.status" ] || fail "archived orphan status log remained in state"
   pass "bootstrap archives an old orphan status log"

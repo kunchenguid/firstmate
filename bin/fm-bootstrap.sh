@@ -1595,7 +1595,7 @@ record_hygiene_report() {
   done
 
   for file in "$STATE"/*.meta; do
-    [ -f "$file" ] || continue
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
     id=${file##*/}
     id=${id%.meta}
     [ "$(fm_meta_get "$file" kind)" = secondmate ] && continue
