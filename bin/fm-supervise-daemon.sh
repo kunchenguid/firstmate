@@ -102,7 +102,7 @@
 #                                   supported as supervisor backends; the daemon
 #                                   refuses loudly at startup rather than trying
 #                                   tmux primitives against an unsupported endpoint.
-#          FM_INJECT_SKIP           |-prefixes force-self-handle bypassing
+#          FM_INJECT_SKIP           |-prefixes force-self-handle before
 #                                   classification (default "heartbeat"); empty
 #                                   disables. Use sparingly: it overrides the
 #                                   captain-relevant status escalation for matching
