@@ -136,7 +136,7 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
-#   2b. A TERMINAL reading - failed/cancelled OR done - is authoritative only
+#   2b. A TERMINAL reading - failed OR done - is authoritative only
 #      while nothing newer contradicts it, because head identity binds whatever
 #      run last sat on this head, not necessarily this branch's current one -
 #      and a stale terminal reading here is promoted into a captain-facing
@@ -146,9 +146,11 @@
 #      cannot be bound here is reported as unknown - history, but no proof of
 #      the present. A FAILED reading is additionally answered from a newer
 #      record where one states a terminal outcome for this worktree: a later
-#      COMPLETED run the ledger proves is current, or the ledger's own terminal
-#      verdict. A DONE reading claims no such verdict, because unknown is
-#      already the whole answer a contradicted success may publish.
+#      COMPLETED run the ledger proves is current, or the ledger's own FAILED
+#      verdict; a later CANCELLED row carries no verdict, so it leaves the
+#      failure unprovable (unknown) like any other unbindable row. A DONE
+#      reading claims no such verdict, because unknown is already the whole
+#      answer a contradicted success may publish.
 #      Because the ledger has no run ID,
 #      an equal head does not identify a rerun; a terminal row supplies newer
 #      truth when its observable status, head, or PR differs. Nothing else does,
