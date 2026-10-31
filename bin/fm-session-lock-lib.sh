@@ -27,6 +27,22 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
 unset _FM_SESSION_LOCK_LIB_DIR
 
+# --- the fleet lock's acquisition boundary -----------------------------------
+# bin/fm-lock.sh publishes state/.lock only while it holds state/.lock.acquire,
+# and bin/fm-startup-network.sh holds that same lock as the lease a takeover
+# waits for. It is therefore the boundary any reader must hold when an action
+# depends on the lock's verdict: with it held, no other session can publish a
+# new state/.lock underneath that action, so a verdict cannot go stale between
+# a check and the write the check authorized. This printer is the one owner of
+# the path, so no reader can serialize on a different file than the publisher
+# writes under.
+# The hold itself is not here: this file stays a side-effect-free identity
+# owner, and each caller takes the boundary through the shared lock primitive
+# with the bound its own contract needs.
+fm_session_lock_claim_path() {  # <state> -> the acquisition boundary path
+  printf '%s/.lock.acquire\n' "$1"
+}
+
 # Known harness command names; extend when a new adapter is verified. omp and
 # agy are anchored exactly like pi: their process names are the bare words `omp`
 # (verified, omp 18.1.11) and `agy`, and a substring match would claim ompd or
@@ -1033,6 +1049,11 @@ fm_session_lock_process_liveness() {  # <pid>
 # mandate it cannot carry out. The holder is named in the refusal, with its
 # start time and age, so the operator can act on it. Stopping the holder is
 # never automatic.
+#
+# A caller whose refusal must be authoritative holds the acquisition boundary
+# (fm_session_lock_claim_path) across this check and the write it authorizes,
+# because with that boundary held the verdict cannot be overtaken. This
+# function alone does not promise it: it reads a snapshot.
 #
 # A lock this session cannot classify - unreadable, malformed, or owned by a
 # process it cannot inspect - is not proof of a foreign holder, so it does not

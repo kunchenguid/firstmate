@@ -473,6 +473,108 @@ unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
   rm -rf "$st"
 }
 
+# ---------------------------------------------------------------------------
+# UNIT 0c: the away entry serializes its fleet-lock check against lock
+# ACQUISITION, not only against other record writers. bin/fm-lock.sh publishes
+# state/.lock only while it holds state/.lock.acquire, so the entry must hold
+# that boundary across its check and its write. The record lock alone cannot
+# promise it: it excludes record writers, not acquisitions, so an entry could
+# see a free lock and then record a mandate after another session took it.
+# The fixture proves the sequence rather than a timing window: while another
+# process is inside an acquisition, an entry that starts on a FREE lock must
+# neither write nor decide, and once the acquisition finishes it must refuse.
+# ---------------------------------------------------------------------------
+unit_away_entry_serializes_against_lock_acquisition() {
+  local st actor holder_bash holder_pid rc out waited
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock-serialize.XXXXXX")
+  mkdir -p "$st/state"
+  actor="$st/acquire.sh"
+  cat > "$actor" <<'SH'
+#!/usr/bin/env bash
+# Stands in for bin/fm-lock.sh acquiring the fleet lock, in the order that
+# script uses: take state/.lock.acquire, publish state/.lock under it, keep both
+# until the fixture lets go. The publish waits for the fixture's go-ahead so the
+# entry under test starts while the lock is still free and the acquisition is
+# still in flight. argv[0] has to read as a harness, exactly as a real session
+# presents itself, so the away guard sees a live holder, not an unknown process.
+if [ -z "${FM_ACTOR_REEXEC:-}" ]; then
+  export FM_ACTOR_REEXEC=1
+  exec -a /fm-fleet-lock-acquiring-session/claude "$BASH" "$0" "$@"
+fi
+[ "$#" -eq 6 ] || exit 2
+. "$1"
+fm_lock_try_acquire "$2" || exit 1
+: > "$4"
+while [ ! -e "$5" ]; do sleep 0.05; done
+printf '%s\n' "$$" > "$3"
+while [ ! -e "$6" ]; do sleep 0.05; done
+fm_lock_release "$2"
+sleep 60
+SH
+  chmod +x "$actor"
+  holder_bash=$(command -v bash) || holder_bash=bash
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" BASH="$holder_bash" \
+    "$actor" "$ROOT/bin/fm-wake-lib.sh" "$st/state/.lock.acquire" \
+    "$st/state/.lock" "$st/ready" "$st/publish" "$st/go" &
+  holder_pid=$!
+  # The boundary must be held before the entry starts, or the entry simply wins
+  # the race and the case proves nothing.
+  waited=0
+  while [ ! -e "$st/ready" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [ ! -e "$st/ready" ]; then
+    fail "away write: the fixture never reached an acquisition, so nothing was proven"
+    kill "$holder_pid" 2>/dev/null || true
+    rm -rf "$st"
+    return 0
+  fi
+  # The lock is FREE right now and another session is inside its acquisition:
+  # this is the window the record lock alone cannot close.
+  (
+    env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+      FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+      "$CONTRACT" enter --words 'merge it when green' > "$st/enter.out" 2>&1
+    printf '%s\n' "$?" > "$st/enter.rc"
+  ) &
+  waited=0
+  while [ ! -e "$st/enter.rc" ] && [ "$waited" -lt 20 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [ -e "$st/enter.rc" ] || [ -e "$st/state/.afk-contract" ]; then
+    fail "away write: the entry finished while another session was still inside its acquisition, so it decided from a snapshot of a free lock: $(cat "$st/enter.out" 2>/dev/null)"
+  else
+    pass "away write: an entry started on a free lock waits for the acquisition in flight instead of writing the mandate"
+  fi
+  # Let the acquisition publish state/.lock, then release the boundary: the
+  # entry now reaches it, must see the live holder, and must refuse by name.
+  : > "$st/publish"
+  waited=0
+  while [ ! -e "$st/state/.lock" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  : > "$st/go"
+  waited=0
+  while [ ! -e "$st/enter.rc" ] && [ "$waited" -lt 300 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  rc=$(cat "$st/enter.rc" 2>/dev/null || printf 'running')
+  out=$(cat "$st/enter.out" 2>/dev/null)
+  if [ "$rc" != 0 ] && [ ! -e "$st/state/.afk-contract" ] \
+    && printf '%s' "$out" | grep -F "another live firstmate session holds the lock (pid $holder_pid" >/dev/null; then
+    pass "away write: the entry refuses once the serialized acquisition completes, naming the holder it acquired behind"
+  else
+    fail "away write: the entry did not refuse after the acquisition it was serialized behind (rc=$rc): $out"
+  fi
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 unit_away_guard_refuses_when_holder_summary_fails() {
   local out rc
   out=$(bash -c '
@@ -1916,6 +2018,7 @@ e2e_rex() {
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
 unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock
+unit_away_entry_serializes_against_lock_acquisition
 unit_away_guard_refuses_when_holder_summary_fails
 unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon

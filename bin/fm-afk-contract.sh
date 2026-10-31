@@ -3,11 +3,20 @@
 # captain's away words recorded verbatim, the read-back rendering, the entry
 # announcement, and the archive at return.
 #
-# The `enter` path checks the fleet lock under this script's own mutation
-# lock, just before it writes the record: a read-only session must not record
-# an away mandate it cannot carry out. The check is inside the write, so it
-# cannot be overtaken by a concurrent writer, and it applies to every writer
-# of this record, not only the launcher's.
+# The `enter` path checks the fleet lock just before it writes the record: a
+# read-only session must not record an away mandate it cannot carry out. The
+# check runs inside the record's own mutation lock, so no concurrent writer of
+# this record can overtake it, and it applies to every writer of this record,
+# not only the launcher's.
+#
+# The record lock alone cannot make that verdict authoritative, because it
+# excludes record writers and not lock acquisitions. So the check and the write
+# it authorizes both run while this script holds the fleet lock's acquisition
+# boundary, `state/.lock.acquire` (path and contract owned by
+# bin/fm-session-lock-lib.sh's fm_session_lock_claim_path, published under by
+# bin/fm-lock.sh): no other session can publish `state/.lock` between the two,
+# so a session that saw a free lock cannot become read-only before its mandate
+# lands, and a session that acquires the lock first refuses this write instead.
 #
 # POSTURE. Away mode is a posture of the one supervision session, recorded in
 # state/.afk-contract and never inferred from chat. While an away record exists
@@ -151,7 +160,9 @@
 # posture, spend-cap, and lock helpers (fm_afk_contract_path,
 # fm_afk_contract_present, fm_afk_contract_mode, fm_afk_contract_away_present,
 # fm_afk_contract_archive_dir, fm_afk_contract_live_ordinary_workers,
-# fm_afk_contract_lock_hold, fm_afk_contract_lock_release) without running main.
+# fm_afk_contract_lock_hold, fm_afk_contract_lock_release,
+# fm_afk_contract_claim_hold, fm_afk_contract_claim_release,
+# fm_afk_contract_release_locks) without running main.
 set -u
 
 FM_AFK_CONTRACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -175,6 +186,10 @@ FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING='you are present, so nothing waits for your 
 # so the bound only ever trips on something genuinely wedged.
 _FM_AFK_CONTRACT_LOCK_TIMEOUT=120
 FM_AFK_CONTRACT_LOCK_HELD=
+# The acquisition boundary is held only across one acquisition, or across the
+# deferred startup sweep that owns the lock's lease, so the same wedged-holder
+# bound applies to it.
+FM_AFK_CONTRACT_CLAIM_HELD=
 
 fm_afk_contract_path() {  # [state-dir]
   printf '%s/.afk-contract' "${1:-$FM_AFK_CONTRACT_STATE}"
@@ -286,6 +301,56 @@ fm_afk_contract_lock_release() {
   FM_AFK_CONTRACT_LOCK_HELD=
   fm_afk_contract_lock_helpers || return 1
   fm_lock_release "$lock"
+}
+
+# fm_afk_contract_claim_hold [state-dir]: hold the fleet lock's acquisition
+# boundary (the header's authoritative-verdict section), so the away entry's
+# check and its write are one critical section against bin/fm-lock.sh. Bounded
+# like the record lock: a genuinely wedged holder is refused rather than left to
+# wedge a captain's /afk, and the refusal changes nothing.
+#
+# The check is the only reason this exists. A session that already holds the
+# fleet lock takes the boundary too, briefly: an acquisition racing it is then
+# refused by bin/fm-lock.sh's own live-owner rule, which reads the same lock.
+fm_afk_contract_claim_hold() {  # [state-dir]
+  # STATE is local for the same reason fm_afk_contract_lock_hold makes it local:
+  # fm_lock_acquire_wait_bounded hands the state dir to its bounded child.
+  local lock rc=0 STATE timeout
+  STATE=${1:-$FM_AFK_CONTRACT_STATE}
+  lock=$(fm_session_lock_claim_path "$STATE")
+  timeout=${FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT:-$_FM_AFK_CONTRACT_LOCK_TIMEOUT}
+  fm_afk_contract_lock_helpers || {
+    fm_afk_contract_log "could not load the lock primitive for $lock"
+    return 1
+  }
+  fm_lock_acquire_wait_bounded "$lock" "$timeout" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] && [ -n "${FM_LOCK_HELD_PID:-}" ]; then
+      fm_afk_contract_log "a session is starting up or finishing its deferred network sweep (live process $FM_LOCK_HELD_PID holds $lock), so the fleet lock could not be checked; nothing was changed, so run the away entry again once that finishes"
+    else
+      fm_afk_contract_log "could not check the fleet lock, because $lock could not be taken; nothing was changed"
+    fi
+    return 1
+  fi
+  FM_AFK_CONTRACT_CLAIM_HELD=$lock
+}
+
+# Release the boundary taken by fm_afk_contract_claim_hold. Idempotent, so
+# callers can invoke it unconditionally from their own cleanup.
+fm_afk_contract_claim_release() {
+  local lock=$FM_AFK_CONTRACT_CLAIM_HELD
+  [ -n "$lock" ] || return 0
+  FM_AFK_CONTRACT_CLAIM_HELD=
+  fm_afk_contract_lock_helpers || return 1
+  fm_lock_release "$lock"
+}
+
+# Release every lock a record-mutating subcommand can hold: the acquisition
+# boundary the away entry took, then the cross-subsystem record lock. Idempotent
+# and ordered innermost first, the reverse of the order they were taken.
+fm_afk_contract_release_locks() {
+  fm_afk_contract_claim_release || true
+  fm_afk_contract_lock_release || true
 }
 
 fm_afk_contract_log() { printf 'fm-afk-contract: %s\n' "$*" >&2; }
@@ -567,11 +632,15 @@ fm_afk_contract_cmd_enter() {
     [ "$standing" = quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=away
   fi
   # The away posture is a mandate this session has to carry out, so the write
-  # needs the fleet lock: a read-only session must not record one. The check
-  # runs HERE, under the same mutation lock as the write, so it cannot be
-  # overtaken by a concurrent writer between the check and the write, and it
-  # applies to every writer of this record, not only the launcher's.
+  # needs the fleet lock: a read-only session must not record one. The boundary
+  # is taken FIRST and held until this command returns (the caller's cleanup
+  # releases it), so neither the check below nor the write it authorizes can be
+  # overtaken by a concurrent acquisition: the record lock alone excludes record
+  # writers, not acquisitions. The check runs HERE, under both locks, so it also
+  # cannot be overtaken by a concurrent writer of this record, and it applies to
+  # every writer of this record, not only the launcher's.
   if [ "$FM_AFK_CONTRACT_ENTRY_MODE" = away ]; then
+    fm_afk_contract_claim_hold "${FM_AFK_CONTRACT_STATE}" || return 1
     fm_session_lock_may_record "${FM_AFK_CONTRACT_STATE}" || return 1
   fi
   if [ -f "$record" ] && [ -z "$WORDS" ] && [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
@@ -664,10 +733,10 @@ fm_afk_contract_select_path() {  # <args...> -> prints the record path chosen by
 fm_afk_contract_locked_cmd() {  # <command> [args...]
   local rc=0
   fm_afk_contract_lock_hold || return 1
-  trap 'fm_afk_contract_lock_release || true' EXIT
+  trap 'fm_afk_contract_release_locks' EXIT
   "$@" || rc=$?
   trap - EXIT
-  fm_afk_contract_lock_release || true
+  fm_afk_contract_release_locks
   return "$rc"
 }
 

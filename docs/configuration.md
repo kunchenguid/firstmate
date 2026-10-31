@@ -253,6 +253,7 @@ The legacy `state/.afk` daemon flag has no effect on Pi.
 ### Attended and away authority
 
 The away posture is a mandate this session has to carry out, so an entry is refused only when this session does not own the fleet lock and inspection proves another live session holds it.
+The check and the record write are one critical section against the fleet lock's acquisition boundary, so the record cannot land just after another session took the lock (`bin/fm-afk-contract.sh` owns that mechanism).
 Free, stale, unreadable, malformed, and otherwise unclassifiable locks do not block entry; uncertainty is not proof of a foreign holder.
 The refusal reports the lock pid and its current process start time and age when available, or marks those details unknown; these are live observations, not an identity saved at lock acquisition.
 The command never stops the holder, leaving that decision to the operator.
