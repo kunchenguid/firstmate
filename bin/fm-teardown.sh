@@ -5,6 +5,9 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# A successful unforced task teardown that passes worktree safety writes
+# state/<id>.prune-safe with fm-prune-safe-v1 for fm-data-prune.sh.
+# Spawn and teardown invalidate that receipt before another lifecycle attempt.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of
@@ -656,6 +659,7 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
+rm -f -- "$STATE/$ID.prune-safe"
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -3711,6 +3715,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+TEARDOWN_PRUNE_SAFE=0
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -3723,6 +3728,7 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+  TEARDOWN_PRUNE_SAFE=1
 fi
 
 # A Herdr close may reposition shared workspace order, so the whole
@@ -4165,6 +4171,11 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+fi
+if [ "$TEARDOWN_PRUNE_SAFE" = 1 ] && [ "$TEARDOWN_POOL_SLOT_LOST" = 0 ] && [ "$KIND" != secondmate ]; then
+  PRUNE_RECEIPT_TMP=$(umask 077; mktemp "$STATE/$ID.prune-safe.XXXXXX")
+  printf '%s\n' 'fm-prune-safe-v1' > "$PRUNE_RECEIPT_TMP"
+  mv -f -- "$PRUNE_RECEIPT_TMP" "$STATE/$ID.prune-safe"
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0

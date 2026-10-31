@@ -91,6 +91,9 @@ fi
 # the callers that capture its status own the write.
 FM_BACKLOG_ROW_SHOW_WEDGED=0
 
+# shellcheck source=bin/fm-backlog-archive-lib.sh disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-backlog-archive-lib.sh"
+
 # Emit each byte of a value as a decimal number, locale-independently.
 # Deliberately perl rather than od: the spawn and teardown lifecycle runs under a
 # curated PATH (tests/fm-teardown.test.sh make_path_without_lsof pins that set)
@@ -423,7 +426,7 @@ fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
   fi
 }
 
-fm_backlog_row_probe() {  # <data-dir> <id>
+fm_backlog_row_probe() {  # <data-dir> <id> [--include-archived]
   local data authorized_data=$1 id=$2 out state held blocked hold_kind command_status source_status
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
@@ -443,6 +446,11 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   fi
   out=$(fm_backlog_row_show "$data" "$id")
   command_status=$?
+  if [ "${3:-}" = --include-archived ] && [ "$command_status" -ne 0 ] \
+      && printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$'; then
+    out=$(fm_backlog_row_show_archived "$data" "$id")
+    command_status=$?
+  fi
   [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
   if [ "$command_status" -ne 0 ]; then
     if printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$'; then
