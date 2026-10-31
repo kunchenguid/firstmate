@@ -283,6 +283,31 @@ test_claude_model_pin_mismatch_is_reported_without_failing_the_spawn() {
   pass "Claude pin mismatch: recorded against the pin, spawn still succeeds"
 }
 
+test_claude_model_pin_snapshot_verdicts() {
+  local pin actual verdict rec id out status n=0
+  while read -r pin actual verdict; do
+    n=$((n + 1))
+    id="claude-snapshot-$n-z1"
+    rec=$(make_spawn_case "claude-snapshot-$n" claude "$id")
+    read_case_record "$rec"
+    out=$(FM_FAKE_CLAUDE_MODEL="$actual" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model "$pin")
+    status=$?
+    expect_code 0 "$status" "snapshot verdict must preserve the live spawn"$'\n'"$out"
+    assert_contains "$(cat "$HOME_DIR/state/$id.status")" \
+      "model pin $verdict: pin '$pin'" "unexpected verdict for $pin versus $actual"
+  done <<'CASES'
+claude-haiku-4-5 claude-haiku-4-5-20251001 asserted
+claude-haiku-4-5-20251001 claude-haiku-4-5 asserted
+claude-sonnet-4-5 claude-sonnet-4-5-20250929 asserted
+claude-opus-5 claude-opus-5-5 mismatch
+claude-opus-5 claude-opus-5[1m] mismatch
+claude-haiku-4-5 claude-haiku-4-5-5 mismatch
+CASES
+  pass "Claude snapshot equivalence and distinct model status verdicts"
+}
+
 test_claude_model_pin_is_unverified_when_the_session_reports_no_model() {
   local rec id out status
   id=claude-model-unverified-z1
@@ -2819,6 +2844,7 @@ test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
 test_claude_model_pin_asserts_the_model_the_session_reports
 test_claude_model_pin_mismatch_is_reported_without_failing_the_spawn
+test_claude_model_pin_snapshot_verdicts
 test_claude_model_pin_is_unverified_when_the_session_reports_no_model
 test_claude_spawn_without_a_pin_keeps_its_session_id_and_writes_no_pin_note
 test_claude_secondmate_launch_brief_publishes_into_its_own_home

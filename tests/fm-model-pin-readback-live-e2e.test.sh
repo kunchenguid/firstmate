@@ -198,7 +198,7 @@ else
   esac
   case "$CLAUDE_REPORTED" in
     *'<synthetic>'*) ;;
-    "$CLAUDE_PIN" | "$CLAUDE_PIN"-[0-9]*)
+    "$CLAUDE_PIN" | "$CLAUDE_PIN"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
       printf '# %s reported %s for pin %s\n' "$CLAUDE_WHO" "$CLAUDE_REPORTED" "$CLAUDE_PIN"
       ;;
     *)
