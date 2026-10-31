@@ -297,16 +297,6 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
-# The baseline read above replaces the marker of any watch this registration
-# replaces, just before the new poll is published and still under the control
-# lock, so no watcher read falls between them.
-if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
-  if [ -z "$BASELINE" ] || ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
-      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE"; then
-    rm -f -- "$STATE/$ID.pr-poll-degraded"
-  fi
-fi
-
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
 fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
 PR_POLL_PUBLISH_LOCK_HELD=1
@@ -318,6 +308,14 @@ else
   PR_POLL_PUBLISH_LOCK_HELD=0
   echo "error: could not publish PR poll" >&2
   exit 1
+fi
+# Commit the baseline only after the replacement poll is safely published;
+# the control lock prevents a watcher from observing an intermediate pair.
+if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
+  if [ -z "$BASELINE" ] || ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE"; then
+    rm -f -- "$STATE/$ID.pr-poll-degraded"
+  fi
 fi
 if [ "$CONTROL_LOCK_HELD" = 1 ]; then
   fm_lock_release "$CONTROL_LOCK" || exit 1
