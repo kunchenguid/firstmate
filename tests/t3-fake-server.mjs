@@ -18,7 +18,7 @@
 //   - archive is distinct from run end: the active run ends asynchronously;
 //   - a send is committed before its reply, which dropReplyTools can lose;
 //   - pendingRequestCount counts every pending runtime request, while the
-//     t3_pending_request_* tools see only user-input questions.
+//     t3_pending_request tool sees only user-input questions.
 //
 // Usage: t3-fake-server.mjs --case-file <file> --port-file <file> [--parent-pid <pid>]
 // <case-file> holds the path of the current case directory. Every request
@@ -61,8 +61,8 @@ for (let i = 2; i < process.argv.length; i += 2) args[process.argv[i].slice(2)] 
 
 const ALL_TOOLS = [
   "t3_thread_launch", "t3_thread_send", "t3_thread_read", "t3_thread_wait", "t3_thread_interrupt",
-  "t3_thread_organize", "t3_thread_list", "t3_thread_configuration", "t3_project_list", "t3_project_create",
-  "t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond",
+  "t3_thread_organize", "t3_thread_list", "t3_thread_configure", "t3_project_list", "t3_project_create",
+  "t3_pending_request",
   "orchestrator_capabilities", "t3_environment_read",
 ];
 const ACTIVE = new Set(["preparing", "queued", "starting", "running", "waiting"]);
@@ -260,7 +260,7 @@ async function callTool(w, name, a) {
       const nextCursor = cursor + page.length < list.length ? cursor + page.length : null;
       return [ok({ projectId: a.projectId, currentThreadId: null, threads: page.map(listItem), nextCursor, total: list.length }), false];
     }
-    case "t3_thread_configuration": {
+    case "t3_thread_configure": {
       if (!t) return [notFound(a.threadId), false];
       const modelSelection = t.modelSelection ?? { instanceId: t.providerInstanceId, model: t.model };
       return [ok({ threadId: t.threadId, modelSelection, runtimeMode: t.runtimeMode, interactionMode: t.interactionMode ?? "default" }), false];
@@ -296,16 +296,13 @@ async function callTool(w, name, a) {
       }
       return [ok({ threadId: t.threadId, action: a.action }), true];
     }
-    case "t3_pending_request_list": {
+    case "t3_pending_request": {
       if (!t) return [notFound(a.threadId), false];
-      return [ok({ requestIds: pendingRequests(t).filter((r) => r.kind === "user_input").map((r) => r.id) }), false];
-    }
-    case "t3_pending_request_read":
-    case "t3_pending_request_respond": {
-      if (!t) return [notFound(a.threadId), false];
+      if (a.action === "list") return [ok({ requestIds: pendingRequests(t).filter((r) => r.kind === "user_input").map((r) => r.id) }), false];
+      if (a.action !== "read" && a.action !== "respond") return [err("invalid_action", `t3_pending_request has no action ${a.action}.`), false];
       const q = pendingRequests(t).find((r) => r.id === a.requestId && r.kind === "user_input");
       if (!q) return [err("request_not_found", `Request ${a.requestId} is not a pending question in thread ${a.threadId}.`), false];
-      if (name === "t3_pending_request_read") return [ok({ requestId: q.id, questions: q.questions ?? [] }), false];
+      if (a.action === "read") return [ok({ requestId: q.id, questions: q.questions ?? [] }), false];
       q.status = "resolved";
       q.answers = a.answers;
       return [ok({ sequence: 1 }), true];
