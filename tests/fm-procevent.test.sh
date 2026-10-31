@@ -3990,10 +3990,23 @@ ORPHAN_PID=$(cat "$HORPHAN/state/procevent/orphan-src.runner")
 KEEP_PID=$(cat "$HKEEP/state/procevent/keep-src.runner")
 ORPHAN_DESCENDANT=$(cat "$TMP_ROOT/orphan-dead.descendant")
 
+# True when <pid>'s parent is a reaper for orphaned processes: init itself, or
+# a subreaper systemd registers one hop below init (PR_SET_CHILD_SUBREAPER,
+# e.g. `systemd --user`) - a live host's per-user manager adopts orphans there
+# instead of letting them reach real init, and that is just as orphaned for
+# this fixture's purpose.
+is_orphaned() {  # <pid>
+  local parent
+  parent=$(ps -p "$1" -o ppid= 2>/dev/null | tr -d '[:space:]')
+  case "$parent" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$parent" = 1 ] && return 0
+  [ "$(ps -p "$parent" -o ppid= 2>/dev/null | tr -d '[:space:]')" = 1 ]
+}
+
 # The reproduction condition itself: the listener is already an orphan in the
 # kernel's sense before anything is asserted about reaping it.
 orphan_ppid=$(ps -o ppid= -p "$ORPHAN_PID" 2>/dev/null | tr -d '[:space:]')
-[ "$orphan_ppid" = 1 ] \
+is_orphaned "$ORPHAN_PID" \
   || fail "the listener under test was not reparented away from its session (ppid $orphan_ppid)"
 kill -0 -"$ORPHAN_PID" 2>/dev/null \
   || fail "the listener's process group was not running"
