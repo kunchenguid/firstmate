@@ -2585,9 +2585,26 @@ collect_local_firstmate_states() {
 # or the backend-specific absence authority proves a missing endpoint gone.
 # Every other answer, including a validation failure, is not proof.
 other_record_endpoint_proven_gone() {  # <meta-file> <task-id>
-  local meta=$1 task_id=$2 state verdict
+  local meta=$1 task_id=$2 state verdict tmux_server
   local FM_BACKEND_VALIDATED_BACKEND FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_task_endpoint "$meta" "$task_id" 2>/dev/null || return 1
+  if [ "$FM_BACKEND_VALIDATED_BACKEND" = tmux ]; then
+    # A bare tmux read describes only the server selected by this teardown's
+    # environment. It cannot prove anything about a record created on another
+    # server, even when both servers reuse the same session/window names.
+    tmux_server=$(fm_backend_meta_exact_value "$meta" tmux_server) || return 1
+    case "$tmux_server" in
+      /*) ;;
+      *) return 1 ;;
+    esac
+    case "$tmux_server" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+    fm_backend_source tmux || return 1
+    state=$(fm_backend_tmux_agent_state_on_server "$tmux_server" "$FM_BACKEND_VALIDATED_TARGET")
+    case "$state" in
+      dead|missing) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
   state=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")
   case "$state" in
     dead) return 0 ;;

@@ -1163,9 +1163,11 @@ write_two_records_on_one_slot() {  # <case> <stale-id> <owner-id>
   mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$stale.meta" \
     "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "tmux_server=$dir/tmux.sock" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   fm_write_meta "$dir/home/state/$owner.meta" \
     "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+    "tmux_server=$dir/tmux.sock" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
 }
 
@@ -1176,6 +1178,10 @@ make_tmux_endpoint() {  # <case> <task-id-or-empty> <command-or-empty>
   local dir=$1 id=$2 command=$3
   cat > "$dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
+if [ "\${1:-}" = -S ]; then
+  [ "\${2:-}" = '$dir/tmux.sock' ] || exit 94
+  shift 2
+fi
 case "\$1" in
   list-windows)
     [ -z '$id' ] || printf 'fm-%s\\n' '$id'
@@ -1299,6 +1305,8 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   dir=$(make_case two-records-claim-mine-other-missing)
   write_two_records_on_one_slot "$dir" "$stale" "$owner"
   claim_pool_slot "$dir" "$owner"
+  grep -v '^tmux_server=' "$dir/home/state/$stale.meta" > "$dir/home/state/$stale.meta.tmp"
+  mv "$dir/home/state/$stale.meta.tmp" "$dir/home/state/$stale.meta"
   make_tmux_endpoint "$dir" '' ''
   assert_refused_without_mutation "$dir" "$owner" "mine with an unproven missing other record: owner teardown"
   assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
@@ -1367,6 +1375,53 @@ test_two_records_on_one_slot_follow_the_owner_claim() {
   assert_present "$dir/home/state/$stale.meta" "foreign-home claim: the other record was removed"
 
   pass "fm-teardown: two records on one pool slot follow the slot's owner claim"
+}
+
+test_conflicting_record_liveness_uses_its_recorded_tmux_server() {
+  local dir stale=stale-task owner=owner-task idle_socket live_socket rc sleep_bin
+  [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
+  dir=$(make_case two-tmux-servers-same-window)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  idle_socket="$dir/idle.sock"
+  live_socket="$dir/live.sock"
+  sleep_bin=$(command -v sleep) || fail "sleep is required for the tmux server identity test"
+  cp "$sleep_bin" "$dir/claude"
+
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$idle_socket" -f /dev/null \
+    new-session -d -s firstmate -n "fm-$stale" \
+    || fail "could not start the idle tmux server"
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$live_socket" -f /dev/null \
+    new-session -d -s firstmate -n "fm-$stale" "$dir/claude 30" \
+    || fail "could not start the live tmux server"
+  awk -v socket="$live_socket" '
+    /^tmux_server=/ { print "tmux_server=" socket; next }
+    { print }
+  ' "$dir/home/state/$stale.meta" > "$dir/home/state/$stale.meta.tmp"
+  mv "$dir/home/state/$stale.meta.tmp" "$dir/home/state/$stale.meta"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -S ]; then
+  exec '$REAL_TMUX' "\$@"
+fi
+exec '$REAL_TMUX' -S '$idle_socket' "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  set +e
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$idle_socket" kill-server >/dev/null 2>&1 || true
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$live_socket" kill-server >/dev/null 2>&1 || true
+
+  [ "$rc" -ne 0 ] || fail "the idle server authorized teardown over the live conflicting endpoint"
+  assert_present "$dir/home/state/$owner.meta" "wrong-server liveness removed the owner's record"
+  assert_present "$dir/home/state/$stale.meta" "wrong-server liveness removed the conflicting record"
+  assert_present "$dir/worktree/sentinel" "wrong-server liveness reset the shared slot"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
+    "the refusal should identify the live conflicting task"
+  pass "fm-teardown: conflicting tmux liveness is read only from the server recorded for that task"
 }
 
 # The tmux shim used by the endpoint-close tests below: every subcommand
@@ -1759,6 +1814,7 @@ test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
 test_two_records_on_one_slot_follow_the_owner_claim
+test_conflicting_record_liveness_uses_its_recorded_tmux_server
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
