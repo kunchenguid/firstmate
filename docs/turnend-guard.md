@@ -432,11 +432,11 @@ The one loud attended fail-open is available only when all of these hold:
 Two writers can commit `state/.claude-autoarm-failure-alarmed`, both under the same owner-then-budget lock order:
 
 - The guard's `terminal_fail_open`, when a Stop reaches it with the budget already exhausted and no live open generation claim.
-- The Stop auto-arm's own terminal failure: the exhausted continuation is the one participant that knows no automatic continuation remains, so when this session's consumed block count is already over budget it commits the alarm in the same owned critical section as its `failed-suppressed` ledger write and delivers the one loud final rewake. This is also the path a recurring automatic-continuation failure always reaches: the guard's claim-open step-aside would otherwise leave the alarm unwritten on every Stop.
+- The Stop auto-arm's own terminal failure: the exhausted continuation is the one participant that knows no automatic continuation remains, so when this session's consumed block count is already over budget it commits the alarm in the same owned critical section as its `failed-suppressed` ledger write and delivers the one loud final rewake. Every failed-suppressed continuation - an ordinary exhausted failure, a lost supervision-host hand-back, an interrupted hook, or a refused healthy-watcher reset - takes this one exhaustion decision before it commits another retry, because the guard's claim-open step-aside would otherwise leave the alarm unwritten on every Stop.
 
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
-Every suppressed continuation in the episode emits one reason line instead of an empty rewake body.
+Every suppressed continuation in the episode emits one reason line instead of an empty rewake body, stating why no operator notice repeats and whether a Stop-owned retry stays scheduled.
 A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
