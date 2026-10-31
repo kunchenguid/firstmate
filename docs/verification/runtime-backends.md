@@ -3462,6 +3462,7 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 | --- | --- |
 | `HC_SESSION=<private>` with an inherited `HC_TERMINAL_SOCKET` naming another core | `hc ls` listed only the private core's terminals. |
 | `HC_SOCKET=<core a socket> HC_SESSION=<core b> hc ls` (hc 0.1.14, 2026-10-30) | Listed core a's terminals: an exported `HC_SOCKET` wins over `HC_SESSION`. With `env -u HC_SOCKET` it listed core b's, so `fm_backend_hc_cli` drops `HC_SOCKET`. |
+| `hc --version` | Exit 0 and one line `hc <version>`: `hc 0.1.13` on macOS (the live guard below prints it), `hc 0.1.14` on Linux (2026-10-30). `container_ensure` reads the last word and refuses below `0.1.13`, the oldest release measured here. |
 | `hc run --bg --json --no-parent --outlive-parent --no-notify --cwd /tmp --label firstmate.task=x` with no argv | Started the user's login shell; printed `{"address":"t2","agent":"zsh",...}`. |
 | `hc get <missing>` | Exit 3, `{"error":{"kind":"not_found",...}}` on stderr. |
 | `hc kill <t>` on a live shell | Exit 0; `hc get` then reports `state: finished`, `reason: killed`. |

@@ -24,6 +24,11 @@
 # wins over an inherited HC_TERMINAL_SOCKET, so a firstmate running inside an hc
 # terminal still reaches the recorded core.
 #
+# Version floor: container_ensure refuses an hc older than
+# FM_BACKEND_HC_MIN_VERSION, the oldest release this adapter was measured on
+# (docs/verification/runtime-backends.md "hc"), or one whose `hc --version` it
+# cannot read, before any task terminal is created.
+#
 # Identity: each task terminal carries the labels firstmate.task=<window-label>
 # and firstmate.home=<hometag> (bin/fm-backend-hometag-lib.sh). Operations that
 # receive an expected label refuse a terminal whose labels do not match, so a
@@ -66,6 +71,25 @@ fm_backend_hc_cli() {  # <session> <args...>
   shift
   fm_backend_hc_atom_valid "$session" || { echo "error: refusing hc session '$session'" >&2; return 1; }
   env -u HC_SOCKET HC_SESSION="$session" hc "$@"
+}
+
+FM_BACKEND_HC_MIN_VERSION=0.1.13
+
+# fm_backend_hc_version_at_least: whether dotted <have> is at least <want>,
+# compared numerically part by part after dropping a `-pre` or `+build`
+# suffix. Anything else that is not plain dotted digits is no.
+fm_backend_hc_version_at_least() {  # <have> <want>
+  local have=${1%%[-+]*} want=$2 h w
+  case "$have" in ''|.*|*.|*..*|*[!0-9.]*) return 1 ;; esac
+  while [ -n "$have$want" ]; do
+    h=${have%%.*}
+    w=${want%%.*}
+    [ "${h:-0}" -gt "${w:-0}" ] && return 0
+    [ "${h:-0}" -lt "${w:-0}" ] && return 1
+    case "$have" in *.*) have=${have#*.} ;; *) have= ;; esac
+    case "$want" in *.*) want=${want#*.} ;; *) want= ;; esac
+  done
+  return 0
 }
 
 fm_backend_hc_atom_valid() {  # <value>
@@ -149,12 +173,20 @@ fm_backend_hc_target_ready() {  # <target> [expected-label]
   [ "$(fm_backend_hc_endpoint_state "$1" "${2:-}")" = ready ] && fm_backend_hc_parse_target "$1"
 }
 
-# fm_backend_hc_container_ensure: make sure the session's core answers (hc
-# starts its own core on first use) and print the session name.
+# fm_backend_hc_container_ensure: refuse an hc below the version floor, make
+# sure the session's core answers (hc starts its own core on first use), and
+# print the session name.
 fm_backend_hc_container_ensure() {
-  local session
+  local session raw version
   session=$(fm_backend_hc_session)
   fm_backend_hc_atom_valid "$session" || { echo "error: refusing hc session name '$session'" >&2; return 1; }
+  raw=$(env -u HC_SOCKET hc --version 2>/dev/null) || raw=
+  raw=$(printf '%s\n' "$raw" | head -1)
+  version=${raw##* }
+  fm_backend_hc_version_at_least "$version" "$FM_BACKEND_HC_MIN_VERSION" || {
+    echo "error: hc '${raw:-unknown}' is older than $FM_BACKEND_HC_MIN_VERSION, the oldest herdr-core this backend was verified on, or its version is unreadable; update it with 'hc update'" >&2
+    return 1
+  }
   fm_backend_hc_cli "$session" server status --json >/dev/null 2>&1 \
     || { echo "error: 'hc server status' failed for session '$session'; is herdr-core installed and startable?" >&2; return 1; }
   printf '%s' "$session"

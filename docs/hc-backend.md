@@ -11,7 +11,7 @@ The adapter header in `bin/backends/hc.sh` owns design decisions and measured CL
 
 Prerequisites:
 
-- `hc` on `PATH` (measured on `hc 0.1.13`); `hc` starts its own core on first use.
+- `hc` 0.1.13 or newer on `PATH`; `hc` starts its own core on first use, and a spawn refuses an older or unreadable `hc --version` before creating anything.
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
