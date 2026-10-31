@@ -14,7 +14,9 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-hc-tests)
 # The stub answers `get` from <dir>/<address>.json (exit from <address>.exit,
 # 3 = not_found when no file exists), `ls` from <dir>/ls.json, `run` with
 # <dir>/run.json, and removes <address>.json on `rm` unless <dir>/rm-sticks
-# exists. Every call is logged with its HC_SESSION and HC_SOCKET.
+# exists. `--version` prints FAKE_HC_VERSION (default `hc 0.1.14`) and exits
+# FAKE_HC_VERSION_EXIT (default 0). Every call is logged with its HC_SESSION
+# and HC_SOCKET.
 make_hc_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"
   mkdir -p "$fb"
@@ -28,6 +30,7 @@ D="${FAKE_HC_DIR:?}"
   printf '\n'
 } >> "$D/log"
 cmd=${1:-}
+[ "$cmd" != --version ] || { printf '%s\n' "${FAKE_HC_VERSION-hc 0.1.14}"; exit "${FAKE_HC_VERSION_EXIT:-0}"; }
 last=""
 for a in "$@"; do last=$a; done
 case "$cmd" in
@@ -260,6 +263,28 @@ test_endpoint_validation_binds_hc_meta() {
   pass "hc: endpoint validation requires window to equal hc_session:hc_terminal"
 }
 
+test_container_ensure_refuses_an_hc_below_the_version_floor() {
+  local out v
+  setup_case version
+  out=$(hc_shell 'fm_backend_hc_container_ensure') || fail "a verified hc must pass container_ensure"
+  assert_equals "$out" fmtest "container_ensure prints the session"
+  assert_contains "$(cat "$D/log")" $'\x1fserver\x1fstatus' "a verified hc reaches its core"
+  for v in "hc 0.1.12" "hc 0.0.99" "hc" "hc 0.1.x" ""; do
+    : > "$D/log"
+    out=$(FAKE_HC_VERSION=$v hc_shell 'fm_backend_hc_container_ensure' 2>&1) && fail "container_ensure must refuse version '$v'"
+    assert_contains "$out" "0.1.13" "the refusal for '$v' must name the floor"
+    assert_not_contains "$(cat "$D/log")" $'\x1fserver' "version '$v' must be refused before the core is touched"
+  done
+  : > "$D/log"
+  out=$(FAKE_HC_VERSION_EXIT=1 hc_shell 'fm_backend_hc_container_ensure' 2>&1) && fail "container_ensure must refuse a failed version probe"
+  assert_contains "$out" "0.1.13" "the refusal for a failed probe must name the floor"
+  assert_not_contains "$(cat "$D/log")" $'\x1fserver' "a failed version probe must be refused before the core is touched"
+  for v in "hc 0.1.13" "hc 0.1.15-rc.1" "hc 0.2.0" "hc 1.0"; do
+    FAKE_HC_VERSION=$v hc_shell 'fm_backend_hc_container_ensure' >/dev/null || fail "container_ensure must accept version '$v'"
+  done
+  pass "hc: container_ensure refuses an hc older than the verified floor or with no readable version"
+}
+
 fm_test_run \
   test_hc_is_spawn_capable_and_never_autodetected \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
@@ -272,4 +297,5 @@ fm_test_run \
   test_kill_proves_the_terminal_is_gone \
   test_kill_refuses_another_tasks_terminal \
   test_capture_and_current_path_read_the_recorded_terminal \
-  test_endpoint_validation_binds_hc_meta
+  test_endpoint_validation_binds_hc_meta \
+  test_container_ensure_refuses_an_hc_below_the_version_floor
