@@ -3394,10 +3394,15 @@ EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
 while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
   if [ -n "${FM_LOCK_HELD_PATH:-}" ]; then
-    # The steal's downtime publish could not take its marker lock inside the
-    # startup bound. A live holder is the typed startup failure; a dying or
-    # clearing one is worth another pass of the claim loop.
-    if [ -n "${FM_LOCK_HELD_PID:-}" ] && fm_pid_alive "$FM_LOCK_HELD_PID"; then
+    # The reclaim helper releases its steal and marker locks on publish
+    # failure. No blocking pid means the write failed, not contention.
+    if [ -z "${FM_LOCK_HELD_PID:-}" ]; then
+      echo "watcher: FAILED - could not publish downtime marker $WATCHER_DOWNTIME_MARKER"
+      exit 1
+    fi
+    # A live holder is the typed startup failure; a dying or clearing one is
+    # worth another pass of the claim loop.
+    if fm_pid_alive "$FM_LOCK_HELD_PID"; then
       echo "watcher: FAILED - startup lock $FM_LOCK_HELD_PATH held by live pid $FM_LOCK_HELD_PID"
       exit 1
     fi

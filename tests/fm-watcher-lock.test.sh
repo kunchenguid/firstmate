@@ -185,6 +185,33 @@ test_stale_watch_lock_reclaimed() {
   pass "killed watcher stale lock is reclaimed"
 }
 
+test_stale_watch_reclaim_rejects_unwritable_downtime_marker() {
+  # Public contract: an unpublishable downtime marker is a typed startup
+  # failure, not lock contention. A directory deterministically rejects the
+  # marker write; an endless retry would exceed the child-exit bound.
+  local dir state fakebin out dead_pid pid status=0
+  dir=$(make_case stale-lock-marker-directory)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  dead_pid=$(dead_pid)
+  mkdir "$state/.watch.lock" "$state/.watcher-down"
+  printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCHER_STARTUP_LOCK_BOUND=1 \
+    "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 100 || status=$?
+  [ "$status" -ne 124 ] || fail "unpublishable downtime marker hung watcher startup"
+  [ "$status" -ne 0 ] || fail "unpublishable downtime marker accepted watcher startup"
+  grep -F "watcher: FAILED - could not publish downtime marker $state/.watcher-down" "$out" >/dev/null \
+    || fail "marker write failure lacked typed marker-path diagnostic: $(cat "$out")"
+  [ ! -e "$state/.watch.lock.steal" ] && [ ! -L "$state/.watch.lock.steal" ] \
+    || fail "marker write failure retained the steal lock"
+  [ ! -e "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+    || fail "marker write failure retained the marker lock"
+  pass "dead watcher reclaim fails promptly when downtime marker cannot be published"
+}
+
 test_live_stale_watch_lock_is_actionable() {
   local dir state fakebin out err status
   dir=$(make_case live-stale-lock)
@@ -2335,6 +2362,7 @@ test_pid_identity_is_terminal_width_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
+test_stale_watch_reclaim_rejects_unwritable_downtime_marker
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_live_stalled_watch_lock_is_replaced_past_hard_bound
