@@ -1347,6 +1347,12 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   grep -F 'wait overdue - decide or release' "$dir/watch.out" >/dev/null \
     || fail "the overdue recheck did not request a decision: $(cat "$dir/watch.out")"
   grep -F 'possible wedge' "$dir/watch.out" >/dev/null && fail "a due declared wait was mislabeled a possible wedge"
+  grep -F 'paused-overdue-until' < <(status_open_decisions "$state/until.status") >/dev/null \
+    || fail "the overdue pause did not open a keyed decision"
+  local heartbeat
+  heartbeat=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; STATE="$2"; heartbeat_scan_finds_actionable; printf "%s" "$FM_HEARTBEAT_SURFACE_ENDPOINTS"' _ "$WATCH" "$state") \
+    || fail "heartbeat did not classify the overdue pause as actionable"
+  case "$heartbeat" in *until.status*) ;; *) fail "heartbeat omitted overdue pause status: $heartbeat" ;; esac
   # The due recheck fires once per declaration: a second watcher on the same
   # unchanged declaration absorbs it again.
   ack_stopped_cycle "$state" || fail "could not acknowledge the due recheck"
@@ -1356,6 +1362,9 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
     reap "$UNTIL_PID"; fail "the due recheck repeated on every poll instead of once per declaration: $(cat "$dir/watch.out")"
   fi
   reap "$UNTIL_PID"
+  printf 'resolved [key=paused-overdue-until]: worker resumed\n' >> "$state/until.status"
+  [ -z "$(status_open_decisions "$state/until.status")" ] \
+    || fail "resuming the worker did not close the overdue pause decision"
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
