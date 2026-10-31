@@ -365,8 +365,14 @@ while ! jq -e --arg now "$NOW_THREE" '.generated == $now' \
   sleep 0.1
   i=$((i + 1))
 done
-[ ! -e "$BACKOFF_HOME/state/.home-summary-refresh.backoff" ] \
-  || fail "the resumed publication kept the deadline-miss record"
+
+# The worker renames the ledger into place before it removes the record.
+i=0
+while [ -e "$BACKOFF_HOME/state/.home-summary-refresh.backoff" ]; do
+  [ "$i" -lt 50 ] || fail "the resumed publication kept the deadline-miss record"
+  sleep 0.1
+  i=$((i + 1))
+done
 kill "$WATCH_PID" >/dev/null 2>&1 || true
 wait "$WATCH_PID" >/dev/null 2>&1 || true
 WATCH_PID=
@@ -534,7 +540,10 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
   || fail "lock timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 11 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
+
+# The reap child then waits up to 8 s for the same held lock before it gives
+# up on recording the miss.
+[ "$elapsed" -lt 15 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
   || fail "repeated lock timeout changed the best-effort caller result"
@@ -545,6 +554,50 @@ wait "$LOCK_HOLDER_PID" >/dev/null 2>&1 || true
 LOCK_HOLDER_PID=
 pass "best-effort refresh bounds publication lock acquisition"
 
+# The deadline tests below inject the worker's clock. This timeout(1) stand-in
+# fires a refresh worker's deadline when its stall writes the deadline fifo
+# named for the attempt, so a loaded host cannot move the deadline before or
+# after the stall. Other bounded calls run under the real runner. An optional
+# FM_TEST_AFTER_DEADLINE command runs once the worker is dead.
+DEADLINEBIN="$TMP_ROOT/deadlinebin"
+DEADLINE_DIR="$TMP_ROOT/deadlines"
+REAL_TIMEOUT=$(type -P timeout 2>/dev/null || type -P gtimeout 2>/dev/null || true)
+mkdir -p "$DEADLINEBIN" "$DEADLINE_DIR"
+cat > "$DEADLINEBIN/timeout" <<'SH'
+#!/usr/bin/env bash
+worker=0
+for arg in "$@"; do
+  [ "$arg" != --_worker ] || worker=1
+done
+if [ "$worker" -eq 0 ]; then
+  [ -z "$FM_TEST_REAL_TIMEOUT" ] || exec "$FM_TEST_REAL_TIMEOUT" "$@"
+  shift 3
+  exec "$@"
+fi
+shift 3
+fifo="$FM_TEST_DEADLINE_DIR/$PPID"
+mkfifo "$fifo" || exit 125
+set -m
+( "$@"; rc=$?; printf 'exit\n' > "$fifo"; exit "$rc" ) &
+child=$!
+set +m
+read -r event < "$fifo"
+if [ "$event" = exit ]; then
+  wait "$child"
+  rc=$?
+  rm -f "$fifo"
+  exit "$rc"
+fi
+exec 2>/dev/null
+kill -KILL -- "-$child" || true
+wait "$child" || true
+rm -f "$fifo"
+[ -z "${FM_TEST_AFTER_DEADLINE:-}" ] || "$FM_TEST_AFTER_DEADLINE"
+exit 124
+SH
+chmod +x "$DEADLINEBIN/timeout"
+cp "$DEADLINEBIN/timeout" "$DEADLINEBIN/gtimeout"
+
 HANGBIN="$TMP_ROOT/hangbin"
 REAL_JQ=$(command -v jq)
 mkdir -p "$HANGBIN"
@@ -552,19 +605,21 @@ cat > "$HANGBIN/jq" <<'SH'
 #!/usr/bin/env bash
 for arg in "$@"; do
   case "$arg" in
-    */.home-summary.json.*) sleep 30 ;;
+    */.home-summary.json.*)
+      attempt=${arg##*/.home-summary.json.}
+      printf 'deadline\n' > "$FM_TEST_DEADLINE_DIR/${attempt%%.*}"
+      sleep 30
+      ;;
   esac
 done
 exec "$FM_TEST_REAL_JQ" "$@"
 SH
 chmod +x "$HANGBIN/jq"
-started=$(date +%s)
-PATH="$HANGBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+PATH="$DEADLINEBIN:$HANGBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+  FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=1 \
   "$WRITER" --best-effort \
   || fail "validation timeout changed the best-effort caller result"
-elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 7 ] || fail "best-effort refresh waited $elapsed seconds on validation"
 grep -F 'refresh exceeded its 1-second deadline' \
   "$HOME_DIR/state/.home-summary-refresh.log" >/dev/null \
   || fail "publication validation timeout was not logged"
@@ -574,7 +629,6 @@ pass "best-effort refresh bounds validation and publication"
 # must remove that attempt's temporary files and record the miss for the
 # watcher's backoff. A validation stall that ignores TERM forces the KILL path.
 STUBBORNBIN="$TMP_ROOT/stubbornbin"
-STUBBORN_MARKER="$TMP_ROOT/stubborn-stalled"
 mkdir -p "$STUBBORNBIN"
 cat > "$STUBBORNBIN/jq" <<'SH'
 #!/usr/bin/env bash
@@ -582,7 +636,10 @@ for arg in "$@"; do
   case "$arg" in
     */.home-summary.json.*)
       trap '' TERM
-      : > "$FM_TEST_STUBBORN_MARKER"
+      if [ -n "${FM_TEST_DEADLINE_DIR:-}" ]; then
+        attempt=${arg##*/.home-summary.json.}
+        printf 'deadline\n' > "$FM_TEST_DEADLINE_DIR/${attempt%%.*}"
+      fi
       i=0
       while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
       ;;
@@ -593,13 +650,11 @@ SH
 chmod +x "$STUBBORNBIN/jq"
 rm -f "$HOME_DIR/state/.home-summary-refresh.backoff"
 for attempt in 1 2; do
-  rm -f "$STUBBORN_MARKER"
-  PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
-    FM_TEST_STUBBORN_MARKER="$STUBBORN_MARKER" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=5 \
+  PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+    FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
     "$WRITER" --best-effort \
     || fail "a killed worker changed the best-effort caller result"
-  [ -e "$STUBBORN_MARKER" ] || fail "the stubborn validation stall was never reached"
   leftovers=$(find "$HOME_DIR/state" -maxdepth 1 \
     \( -name '.home-summary.json.*' -o -name '.home-summary-error.*' \) -print)
   [ -z "$leftovers" ] || fail "a killed worker left its temporary files behind: $leftovers"
@@ -613,19 +668,14 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
 pass "the parent removes a killed worker's temporary files and counts consecutive deadline misses"
 
 # Two callers that miss together each count, even when one waits on the
-# other's record update and on the killed worker's lock. An aged ledger keeps
-# the superseded-miss guard out of the way.
+# other's record update and on the killed worker's lock.
 rm -f "$HOME_DIR/state/.home-summary-refresh.backoff"
-touch -t 200001010000 "$HOME_DIR/state/home-summary.json"
 for pair in 1 2; do
-  rm -f "$STUBBORN_MARKER"
   PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
-    FM_TEST_STUBBORN_MARKER="$STUBBORN_MARKER" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=3 \
     "$WRITER" --best-effort &
   pair_pid=$!
   PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
-    FM_TEST_STUBBORN_MARKER="$STUBBORN_MARKER" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=3 \
     "$WRITER" --best-effort \
     || fail "a concurrent deadline miss changed the best-effort caller result"
@@ -639,20 +689,41 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
 pass "concurrent deadline misses each count toward the backoff"
 
 # A refresh that published after a timed-out attempt started is the newer
-# result, so that attempt's miss must not restore the record it cleared.
-rm -f "$STUBBORN_MARKER"
-touch -t 203801010000 "$HOME_DIR/state/home-summary.json"
-PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
-  FM_TEST_STUBBORN_MARKER="$STUBBORN_MARKER" \
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" FM_HOME_SUMMARY_TIMEOUT=5 \
+# result, so that attempt's miss must not restore the record it cleared. The
+# newer publication runs after the worker is killed and before its parent reaps.
+NEWER_PUBLISH="$TMP_ROOT/publish-newer"
+cat > "$NEWER_PUBLISH" <<SH
+#!/usr/bin/env bash
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" "$WRITER"
+SH
+chmod +x "$NEWER_PUBLISH"
+printf '1\n' > "$HOME_DIR/state/.home-summary-refresh.backoff"
+PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+  FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_TEST_AFTER_DEADLINE="$NEWER_PUBLISH" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$WRITER" --best-effort \
   || fail "a killed worker changed the best-effort caller result"
-[ -e "$STUBBORN_MARKER" ] || fail "the stubborn validation stall was never reached"
 [ ! -e "$HOME_DIR/state/.home-summary-refresh.backoff" ] \
   || fail "a timed-out attempt restored the record a newer publication cleared"
+pass "a deadline miss superseded by a newer publication leaves the backoff record clear"
+
+# A publication that finished before an attempt started does not supersede
+# that attempt's miss, even when both land in the same second. The ledger's
+# mtime is pushed ahead so no whole-second clock could order the two.
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
-  "$WRITER" || fail "could not publish after the superseded deadline miss"
-pass "a deadline miss older than the published ledger leaves the backoff record clear"
+  "$WRITER" || fail "could not publish before the same-second deadline miss"
+touch -t 203801010000 "$HOME_DIR/state/home-summary.json"
+PATH="$DEADLINEBIN:$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
+  FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" --best-effort \
+  || fail "a killed worker changed the best-effort caller result"
+[ "$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)" = 1 ] \
+  || fail "a miss after a same-second publication was not counted: $(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the same-second deadline miss"
+pass "a deadline miss after a same-second publication is still counted"
 
 MKBIN="$TMP_ROOT/mkdir-hangbin"
 REAL_MKDIR=$(command -v mkdir)
@@ -674,7 +745,10 @@ PATH="$MKBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKDIR="$REAL_MKDIR" \
   "$WRITER" --best-effort >/dev/null 2>"$TMP_ROOT/stalled-state.err" \
   || fail "state initialization timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
-[ "$elapsed" -lt 11 ] \
+
+# The stalled state directory also holds the reap and log children to their
+# own 10 s and 2 s bounds, each with a 1 s kill grace.
+[ "$elapsed" -lt 18 ] \
   || fail "best-effort refresh waited $elapsed seconds before bounded state initialization"
 pass "best-effort refresh bounds state initialization"
 

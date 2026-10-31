@@ -33,9 +33,11 @@
 # a concurrent attempt's files are never touched. The same child records a
 # missed deadline in state/.home-summary-refresh.backoff: one line holding the
 # count of consecutive deadline misses, with the file's mtime marking the latest
-# one. It updates the record under the refresh lock and skips it when the
-# ledger was published after this attempt started. A successful publication
-# removes the record under the same lock. The watcher reads it to back off
+# one. Each successful publication raises the count in
+# state/.home-summary-refresh.generation and removes the record, both under the
+# refresh lock. The parent reads that count before its worker starts, and the
+# child updates the record under the same lock only when no publication has
+# happened since. The watcher reads it to back off
 # its own refresh triggers (bin/fm-watch.sh home_summary_refresh_detached);
 # session start, spawn, and teardown ignore it.
 set -u
@@ -51,11 +53,12 @@ LEDGER="$STATE/home-summary.json"
 ERROR_LOG="$STATE/.home-summary-refresh.log"
 REFRESH_LOCK="$STATE/.home-summary-refresh.lock"
 BACKOFF_RECORD="$STATE/.home-summary-refresh.backoff"
+GENERATION_RECORD="$STATE/.home-summary-refresh.generation"
 ERROR_LOG_MAX_BYTES=${FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES:-65536}
 HOME_SUMMARY_TIMEOUT=${FM_HOME_SUMMARY_TIMEOUT:-60}
 HOME_SUMMARY_IF_IDLE=${FM_HOME_SUMMARY_IF_IDLE:-0}
 HOME_SUMMARY_DEADLINE_MISSED=${FM_HOME_SUMMARY_DEADLINE_MISSED:-0}
-HOME_SUMMARY_ATTEMPT_EPOCH=${FM_HOME_SUMMARY_ATTEMPT_EPOCH:-}
+HOME_SUMMARY_ATTEMPT_GENERATION=${FM_HOME_SUMMARY_ATTEMPT_GENERATION:-}
 BEST_EFFORT=0
 HOME_SUMMARY_MODE=parent
 HOME_SUMMARY_ERROR=
@@ -121,7 +124,7 @@ home_summary_fail() {
 }
 
 home_summary_refresh_once() {
-  local producer_rc producer_error
+  local producer_rc producer_error generation
   if ! mkdir -p "$STATE" 2>/dev/null; then
     home_summary_fail "state directory is unavailable: $STATE"
     return 1
@@ -203,7 +206,13 @@ home_summary_refresh_once() {
     return 1
   fi
   HOME_SUMMARY_TMP=
-  rm -f -- "$BACKOFF_RECORD" 2>/dev/null || true
+  generation=$(head -n 1 "$GENERATION_RECORD" 2>/dev/null) || generation=0
+  case "$generation" in
+    ''|*[!0-9]*) generation=0 ;;
+  esac
+  printf '%s\n' "$((10#$generation + 1))" > "$GENERATION_RECORD.tmp.$$" 2>/dev/null \
+    && mv -f -- "$GENERATION_RECORD.tmp.$$" "$GENERATION_RECORD" 2>/dev/null
+  rm -f -- "$GENERATION_RECORD.tmp.$$" "$BACKOFF_RECORD" 2>/dev/null || true
   fm_lock_release "$REFRESH_LOCK"
   HOME_SUMMARY_LOCK_HELD=0
   trap - EXIT HUP INT TERM
@@ -237,10 +246,11 @@ home_summary_reap_attempt() {
     "$STATE/.home-summary-error.$HOME_SUMMARY_ATTEMPT."* 2>/dev/null || true
 }
 
-# A ledger published after this attempt started means a newer refresh
-# succeeded, so this attempt's miss must not restore the record it cleared.
+# A publication generation that moved since this attempt started means a newer
+# refresh succeeded, so this attempt's miss must not restore the record it
+# cleared.
 home_summary_record_deadline_miss() {
-  local misses tmp ledger_mtime
+  local misses tmp generation
   trap home_summary_cleanup EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
@@ -253,14 +263,11 @@ home_summary_record_deadline_miss() {
     sleep 0.1
   done
   HOME_SUMMARY_LOCK_HELD=1
-  case "$HOME_SUMMARY_ATTEMPT_EPOCH" in
+  case "$HOME_SUMMARY_ATTEMPT_GENERATION" in
     ''|*[!0-9]*) ;;
     *)
-      ledger_mtime=$(fm_path_mtime "$LEDGER") || ledger_mtime=
-      case "$ledger_mtime" in
-        ''|*[!0-9]*) ;;
-        *) [ "$ledger_mtime" -lt "$HOME_SUMMARY_ATTEMPT_EPOCH" ] || return 0 ;;
-      esac
+      generation=$(head -n 1 "$GENERATION_RECORD" 2>/dev/null) || generation=0
+      [ "$generation" = "$HOME_SUMMARY_ATTEMPT_GENERATION" ] || return 0
       ;;
   esac
   misses=$(head -n 1 "$BACKOFF_RECORD" 2>/dev/null) || misses=
@@ -289,7 +296,16 @@ fi
 
 if [ "$HOME_SUMMARY_MODE" = parent ]; then
   attempt_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || attempt_stamp=
-  attempt_epoch=$(date +%s 2>/dev/null) || attempt_epoch=
+
+  # A missing record is generation 0. A read that hits its bound leaves the
+  # generation unknown, and the child then records the miss unguarded.
+  if attempt_generation=$(fm_run_timed 2 head -n 1 "$GENERATION_RECORD" 2>/dev/null); then
+    :
+  elif fm_timed_out $?; then
+    attempt_generation=
+  else
+    attempt_generation=0
+  fi
   if fm_run_timed "$HOME_SUMMARY_TIMEOUT" env \
     FM_HOME_SUMMARY_WORKER_BEST_EFFORT="$BEST_EFFORT" \
     FM_HOME_SUMMARY_IF_IDLE="$HOME_SUMMARY_IF_IDLE" \
@@ -304,7 +320,7 @@ if [ "$HOME_SUMMARY_MODE" = parent ]; then
   fm_run_timed 10 env \
     FM_HOME_SUMMARY_ATTEMPT="$$" \
     FM_HOME_SUMMARY_DEADLINE_MISSED="$deadline_missed" \
-    FM_HOME_SUMMARY_ATTEMPT_EPOCH="$attempt_epoch" \
+    FM_HOME_SUMMARY_ATTEMPT_GENERATION="$attempt_generation" \
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --_reap >/dev/null 2>&1 || true
   if [ "$BEST_EFFORT" -eq 1 ]; then
     if [ "$refresh_rc" -eq 124 ]; then
