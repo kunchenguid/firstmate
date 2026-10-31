@@ -19,8 +19,12 @@
 # away words, so `enter` refuses while another live session holds the lock and
 # names that holder (pid, process start time, process age, read live from the
 # process). Stopping the holder is never automatic; the refusal only names it.
-# The quiet path is settled BEFORE that check, so a read-only session may still
-# enter quiet mode: quiet mode spawns nothing.
+# The quiet path is settled BEFORE that check, and a quiet entry never takes it:
+# quiet mode is presentation only and holds nothing, so a read-only session may
+# still enter it. Where attended supervision already does what quiet mode asks
+# (the host's ordinary session on a ready hosted home, or Pi's in-process
+# branch), that entry writes no record and spawns nothing; where it is
+# unavailable, quiet mode enters through the quiet daemon, which does start one.
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. The same holds for away mode (not quiet
@@ -397,10 +401,14 @@ fm_afk_launch_enter() {
         return 3 ;;
     esac
   fi
-  # The quiet path above is settled first on purpose: quiet mode spawns
-  # nothing, so a read-only session may still enter quiet mode. The fleet-lock
-  # check belongs to the record write itself, so a standing away record keeps
-  # away mode even for a quiet-mode caller, and that write is refused too.
+  # The quiet path above is settled first on purpose: a quiet entry never takes
+  # the fleet-lock check, because quiet mode is presentation only and holds
+  # nothing, so a read-only session may still enter it. Where attended
+  # supervision already does what quiet asks it writes no record and spawns
+  # nothing; otherwise it falls through to the quiet daemon, which does start
+  # one. The fleet-lock check belongs to away-mode record writes, so a standing away
+  # record keeps away mode even for a quiet-mode caller, and that write is
+  # refused too.
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
 }

@@ -372,8 +372,10 @@ unit_fresh_vs_refresh() {
 # carry out the away words, so the entry refuses while another live session
 # holds the lock, and it names that holder (pid, process start time, process
 # age, read live from the process). Stopping the holder is never automatic.
-# The quiet path is settled BEFORE the check, so a read-only session may still
-# enter quiet mode: quiet mode spawns nothing.
+# The quiet path is settled BEFORE the check, and a quiet entry never takes it,
+# because quiet mode is presentation only and holds nothing. A read-only session
+# may still enter it; on a home without the attended supervision host, as here,
+# that entry records quiet mode for the quiet daemon.
 # ---------------------------------------------------------------------------
 unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
   local st st_quiet holder_pid out rc
@@ -403,9 +405,10 @@ unit_away_entry_refuses_while_another_live_session_holds_the_fleet_lock() {
   else
     fail "enter: a live lock holder did not refuse the away entry by name (rc=$rc): $out"
   fi
-  # The quiet path is settled before the check: quiet mode spawns nothing, so
-  # a read-only session may still enter quiet mode. A separate home, so this
-  # case never depends on what the away case wrote.
+  # The quiet path is settled before the check: a quiet entry never takes it, so
+  # a read-only session may still enter quiet mode, here on the daemon path that
+  # records quiet mode. A separate home, so this case never depends on what the
+  # away case wrote.
   st_quiet=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-fleet-lock-quiet.XXXXXX")
   mkdir -p "$st_quiet/state"
   printf '%s\n' "$holder_pid" > "$st_quiet/state/.lock"
