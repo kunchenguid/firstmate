@@ -36,8 +36,9 @@
 # one. Each successful publication raises the count in
 # state/.home-summary-refresh.generation and removes the record, both under the
 # refresh lock. The parent reads that count before its worker starts, and the
-# child updates the record under the same lock only when no publication has
-# happened since. The watcher reads it to back off
+# child updates the record only when it takes the same lock without waiting and
+# no publication has happened since. A held lock leaves the miss unrecorded, so
+# lifecycle callers never wait on another refresh. The watcher reads it to back off
 # its own refresh triggers (bin/fm-watch.sh home_summary_refresh_detached);
 # session start, spawn, and teardown ignore it.
 set -u
@@ -210,9 +211,11 @@ home_summary_refresh_once() {
   case "$generation" in
     ''|*[!0-9]*) generation=0 ;;
   esac
-  printf '%s\n' "$((10#$generation + 1))" > "$GENERATION_RECORD.tmp.$$" 2>/dev/null \
-    && mv -f -- "$GENERATION_RECORD.tmp.$$" "$GENERATION_RECORD" 2>/dev/null
-  rm -f -- "$GENERATION_RECORD.tmp.$$" "$BACKOFF_RECORD" 2>/dev/null || true
+  HOME_SUMMARY_TMP="$GENERATION_RECORD.tmp.$HOME_SUMMARY_ATTEMPT"
+  printf '%s\n' "$((10#$generation + 1))" > "$HOME_SUMMARY_TMP" 2>/dev/null \
+    && mv -f -- "$HOME_SUMMARY_TMP" "$GENERATION_RECORD" 2>/dev/null
+  rm -f -- "$HOME_SUMMARY_TMP" "$BACKOFF_RECORD" 2>/dev/null || true
+  HOME_SUMMARY_TMP=
   fm_lock_release "$REFRESH_LOCK"
   HOME_SUMMARY_LOCK_HELD=0
   trap - EXIT HUP INT TERM
@@ -243,25 +246,20 @@ home_summary_log_failure() {
 # run, so remove the temporary files this attempt tagged.
 home_summary_reap_attempt() {
   rm -f -- "$STATE/.home-summary.json.$HOME_SUMMARY_ATTEMPT."* \
-    "$STATE/.home-summary-error.$HOME_SUMMARY_ATTEMPT."* 2>/dev/null || true
+    "$STATE/.home-summary-error.$HOME_SUMMARY_ATTEMPT."* \
+    "$GENERATION_RECORD.tmp.$HOME_SUMMARY_ATTEMPT" 2>/dev/null || true
 }
 
 # A publication generation that moved since this attempt started means a newer
 # refresh succeeded, so this attempt's miss must not restore the record it
 # cleared.
 home_summary_record_deadline_miss() {
-  local misses tmp generation
+  local misses generation
   trap home_summary_cleanup EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  # SECONDS counts from this child's start. Reclaiming a killed worker's dead
-  # lock takes several seconds on a loaded host, so the wait runs to 8 s and
-  # still leaves the write two seconds inside the parent's 10 s reap bound.
-  until fm_lock_try_acquire "$REFRESH_LOCK"; do
-    [ "$SECONDS" -lt 8 ] || return 0
-    sleep 0.1
-  done
+  fm_lock_try_acquire "$REFRESH_LOCK" || return 0
   HOME_SUMMARY_LOCK_HELD=1
   case "$HOME_SUMMARY_ATTEMPT_GENERATION" in
     ''|*[!0-9]*) ;;
@@ -275,10 +273,9 @@ home_summary_record_deadline_miss() {
     ''|*[!0-9]*) misses=0 ;;
   esac
   [ "$misses" -lt 1000 ] 2>/dev/null || misses=999
-  tmp="$BACKOFF_RECORD.tmp.$$"
-  printf '%s\n' "$((10#$misses + 1))" > "$tmp" 2>/dev/null \
-    && mv -f -- "$tmp" "$BACKOFF_RECORD" 2>/dev/null
-  rm -f -- "$tmp" 2>/dev/null || true
+  HOME_SUMMARY_TMP="$BACKOFF_RECORD.tmp.$HOME_SUMMARY_ATTEMPT"
+  printf '%s\n' "$((10#$misses + 1))" > "$HOME_SUMMARY_TMP" 2>/dev/null \
+    && mv -f -- "$HOME_SUMMARY_TMP" "$BACKOFF_RECORD" 2>/dev/null
 }
 
 if [ "$HOME_SUMMARY_MODE" = reap ]; then
@@ -317,7 +314,7 @@ if [ "$HOME_SUMMARY_MODE" = parent ]; then
   fi
   deadline_missed=0
   [ "$refresh_rc" -ne 124 ] || deadline_missed=1
-  fm_run_timed 10 env \
+  fm_run_timed 2 env \
     FM_HOME_SUMMARY_ATTEMPT="$$" \
     FM_HOME_SUMMARY_DEADLINE_MISSED="$deadline_missed" \
     FM_HOME_SUMMARY_ATTEMPT_GENERATION="$attempt_generation" \

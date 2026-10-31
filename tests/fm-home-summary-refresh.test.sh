@@ -541,9 +541,9 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   || fail "lock timeout changed the best-effort caller result"
 elapsed=$(( $(date +%s) - started ))
 
-# The reap child then waits up to 8 s for the same held lock before it gives
-# up on recording the miss.
-[ "$elapsed" -lt 15 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
+# The reap child only tries the held lock, so the caller stays within the
+# documented FM_HOME_SUMMARY_TIMEOUT bound plus 6 seconds of cleanup steps.
+[ "$elapsed" -le 7 ] || fail "best-effort refresh waited $elapsed seconds on its lock"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   FM_HOME_SUMMARY_TIMEOUT=1 "$WRITER" --best-effort \
   || fail "repeated lock timeout changed the best-effort caller result"
@@ -557,7 +557,8 @@ pass "best-effort refresh bounds publication lock acquisition"
 # The deadline tests below inject the worker's clock. This timeout(1) stand-in
 # fires a refresh worker's deadline when its stall writes the deadline fifo
 # named for the attempt, so a loaded host cannot move the deadline before or
-# after the stall. Other bounded calls run under the real runner. An optional
+# after the stall, and returns once the killed worker's whole process group is
+# gone, so its lock is reclaimable. Other bounded calls run under the real runner. An optional
 # FM_TEST_AFTER_DEADLINE command runs once the worker is dead.
 DEADLINEBIN="$TMP_ROOT/deadlinebin"
 DEADLINE_DIR="$TMP_ROOT/deadlines"
@@ -591,6 +592,7 @@ fi
 exec 2>/dev/null
 kill -KILL -- "-$child" || true
 wait "$child" || true
+while kill -0 -- "-$child" 2>/dev/null; do sleep 0.05; done
 rm -f "$fifo"
 [ -z "${FM_TEST_AFTER_DEADLINE:-}" ] || "$FM_TEST_AFTER_DEADLINE"
 exit 124
@@ -656,7 +658,8 @@ for attempt in 1 2; do
     "$WRITER" --best-effort \
     || fail "a killed worker changed the best-effort caller result"
   leftovers=$(find "$HOME_DIR/state" -maxdepth 1 \
-    \( -name '.home-summary.json.*' -o -name '.home-summary-error.*' \) -print)
+    \( -name '.home-summary.json.*' -o -name '.home-summary-error.*' \
+    -o -name '.home-summary-refresh.*.tmp.*' \) -print)
   [ -z "$leftovers" ] || fail "a killed worker left its temporary files behind: $leftovers"
   [ "$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)" = "$attempt" ] \
     || fail "deadline miss $attempt was not counted: $(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)"
@@ -667,8 +670,40 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   || fail "a successful publication kept the deadline-miss record"
 pass "the parent removes a killed worker's temporary files and counts consecutive deadline misses"
 
-# Two callers that miss together each count, even when one waits on the
-# other's record update and on the killed worker's lock.
+# A worker killed between writing and renaming its generation record leaves
+# that temporary file for its parent to reap.
+GENBIN="$TMP_ROOT/generation-stallbin"
+REAL_MV=$(command -v mv)
+mkdir -p "$GENBIN"
+cat > "$GENBIN/mv" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.home-summary-refresh.generation.tmp.*)
+      trap '' TERM
+      printf 'deadline\n' > "$FM_TEST_DEADLINE_DIR/${arg##*.}"
+      i=0
+      while [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+chmod +x "$GENBIN/mv"
+PATH="$DEADLINEBIN:$GENBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MV="$REAL_MV" \
+  FM_TEST_REAL_TIMEOUT="$REAL_TIMEOUT" FM_TEST_DEADLINE_DIR="$DEADLINE_DIR" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" --best-effort \
+  || fail "a worker killed during its generation write changed the best-effort caller result"
+leftovers=$(find "$HOME_DIR/state" -maxdepth 1 -name '.home-summary-refresh.*.tmp.*' -print)
+[ -z "$leftovers" ] || fail "a killed worker left its generation temporary file behind: $leftovers"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  "$WRITER" || fail "could not publish after the generation-write deadline miss"
+pass "the parent removes a killed worker's generation temporary file"
+
+# Two callers that miss together each try the refresh lock once, so a miss
+# whose lock try loses to the other's update goes unrecorded. The pair never
+# adds more than its two misses.
 rm -f "$HOME_DIR/state/.home-summary-refresh.backoff"
 for pair in 1 2; do
   PATH="$STUBBORNBIN:$FAKEBIN:$PATH" FM_TEST_REAL_JQ="$REAL_JQ" \
@@ -681,12 +716,16 @@ for pair in 1 2; do
     || fail "a concurrent deadline miss changed the best-effort caller result"
   wait "$pair_pid" \
     || fail "a concurrent deadline miss changed the best-effort caller result"
-  [ "$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)" = "$((pair * 2))" ] \
-    || fail "concurrent deadline misses were not both counted: $(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)"
+  misses=$(cat "$HOME_DIR/state/.home-summary-refresh.backoff" 2>/dev/null)
+  case "${misses:-0}" in
+    *[!0-9]*) fail "concurrent deadline misses corrupted the record: $misses" ;;
+  esac
+  [ "${misses:-0}" -le "$((pair * 2))" ] \
+    || fail "concurrent deadline misses were over-counted: $misses"
 done
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
   "$WRITER" || fail "could not publish after the concurrent deadline misses"
-pass "concurrent deadline misses each count toward the backoff"
+pass "concurrent deadline misses never wait on each other or over-count"
 
 # A refresh that published after a timed-out attempt started is the newer
 # result, so that attempt's miss must not restore the record it cleared. The
@@ -747,8 +786,8 @@ PATH="$MKBIN:$FAKEBIN:$PATH" FM_TEST_REAL_MKDIR="$REAL_MKDIR" \
 elapsed=$(( $(date +%s) - started ))
 
 # The stalled state directory also holds the reap and log children to their
-# own 10 s and 2 s bounds, each with a 1 s kill grace.
-[ "$elapsed" -lt 18 ] \
+# own 2 s bounds, each with a 1 s kill grace.
+[ "$elapsed" -lt 10 ] \
   || fail "best-effort refresh waited $elapsed seconds before bounded state initialization"
 pass "best-effort refresh bounds state initialization"
 
