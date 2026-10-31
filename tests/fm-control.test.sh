@@ -760,6 +760,24 @@ test_explicit_endpoint_is_refused() {
   pass "fm-control: an explicit backend endpoint is never a control target"
 }
 
+test_unset_fm_home_uses_script_root() {
+  local dir out rc
+  dir="$TMP_ROOT/rootonly"; mkdir -p "$dir/root/state"
+  out=$(env -u FM_HOME FM_ROOT_OVERRIDE="$dir/root" "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 1 "$rc" "an unrecorded task should still refuse"
+  assert_contains "$out" "no task 't1' in $dir/root/state" "unset FM_HOME should resolve against the script root"
+  pass "fm-control: unset FM_HOME resolves against the script root"
+}
+
+test_set_fm_home_differing_from_root_is_honored() {
+  local dir out rc
+  dir="$TMP_ROOT/otherhome"; mkdir -p "$dir/root/state" "$dir/home/state"
+  out=$(env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 1 "$rc" "an unrecorded task should still refuse"
+  assert_contains "$out" "no task 't1' in $dir/home/state" "a set FM_HOME should win over the script root"
+  pass "fm-control: a set FM_HOME that differs from the script root is honored"
+}
+
 test_unknown_task_is_refused() {
   local dir out rc
   dir=$(new_case unknown)
@@ -1323,6 +1341,8 @@ test_commandcode_relaunch_off_tmux_and_herdr_refuses_before_stopping
 test_state_verified_backends_are_exactly_tmux_herdr_and_rex
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
+test_unset_fm_home_uses_script_root
+test_set_fm_home_differing_from_root_is_honored
 test_unknown_task_is_refused
 test_record_bound_to_another_task_is_refused
 test_remote_secondmate_is_refused_by_placement

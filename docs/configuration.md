@@ -34,12 +34,9 @@ When it is set, scripts still run from this repo's `bin/`, while `state/`, `data
 `FM_ROOT_OVERRIDE` overrides the firstmate repo root used by scripts, including the primary checkout watched by the worktree-tangle guard.
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
 
-Normal `bin/fm-send.sh` sends require `FM_HOME` to be set before resolving a
-target, but
-`bin/fm-send.sh --help` prints its usage without resolving a target or requiring
-`FM_HOME`.
-Normal sends do not use the general fallback, because a steer must not silently
-resolve against the wrong home.
+`bin/fm-send.sh`, `bin/fm-control.sh`, and `bin/fm-secondmate-restart.sh` resolve an unset `FM_HOME` to the home at their own script root, through `bin/fm-home-default-lib.sh`.
+A set `FM_HOME` is honored unchanged, so a second home on a shared code root keeps working.
+`bin/fm-send.sh --help` prints its usage without resolving a target.
 These variables override individual operational directories for tests and specialized harness setup:
 
 | Variable | Directory selected |
@@ -3189,7 +3186,7 @@ The two read files use different parsing rules:
 Runtime tuning via environment variables (defaults shown):
 
 ```sh
-FM_HOME=                 # optional operational home for most scripts, unset means this repo root; fm-send requires it explicitly
+FM_HOME=                 # optional operational home for most scripts, unset means this repo root
 FM_ROOT_OVERRIDE=        # override firstmate repo root, tangle-guard target, and zellij/cmux/tern home-title hash; also legacy whole-root override when FM_HOME is unset
 FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests

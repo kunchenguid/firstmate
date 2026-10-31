@@ -406,6 +406,23 @@ test_unknown_mate_is_accounted_for() {
 }
 
 # --- T5: a refused restart leaves the mate running and says so ---------------
+test_unset_fm_home_uses_script_root() {
+  local dir out
+  dir="$TMP_ROOT/rootonly"; mkdir -p "$dir/root/state"
+  out=$(env -u FM_HOME FM_ROOT_OVERRIDE="$dir/root" "$RESTART" nosuch 2>&1)
+  assert_contains "$out" "$dir/root/state/nosuch.meta" "unset FM_HOME should resolve against the script root"
+  pass "fm-secondmate-restart: unset FM_HOME resolves against the script root"
+}
+
+test_set_fm_home_differing_from_root_is_honored() {
+  local dir out
+  dir="$TMP_ROOT/otherhome"; mkdir -p "$dir/root/state" "$dir/home/state"
+  out=$(env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" "$RESTART" nosuch 2>&1)
+  assert_contains "$out" "$dir/home/state/nosuch.meta" "a set FM_HOME should win over the script root"
+  assert_not_contains "$out" "$dir/root/state" "a set FM_HOME must not be replaced by the script root"
+  pass "fm-secondmate-restart: a set FM_HOME that differs from the script root is honored"
+}
+
 test_refused_restart_falls_back_without_claiming_a_reload() {
   local dir out rc before
   dir=$(new_case refused)
@@ -1011,5 +1028,7 @@ test_result_published_while_reaping_is_honored
 test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
 test_t3_mate_stays_on_the_nudge_path
+test_unset_fm_home_uses_script_root
+test_set_fm_home_differing_from_root_is_honored
 
 echo "# all fm-secondmate-restart tests passed"
