@@ -308,8 +308,8 @@ cmd_send_body() {
   fm_lock_release "$meta_lock"
   case "$rec" in
     */handled/*)
-      # The dedup landed on a record the worker already acknowledged: the
-      # steer was delivered and acted on, so there is nothing to announce.
+      # The dedup landed on an acknowledged record, so do not re-ring it.
+      # Worker receipt semantics are owned by bin/fm-brief.sh.
       printf 'notice: this steer was already delivered and acknowledged at %s; nothing re-rung\n' "$rec" >&2
       return 0
       ;;

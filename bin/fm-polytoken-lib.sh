@@ -205,7 +205,7 @@ polytoken:
 
 You are a crewmate: an autonomous worker agent managed by Firstmate, your supervising orchestrator for the same human operator. Do the assigned work yourself and work on your own. Report only to Firstmate through your task's status record; do not adopt a supervisor identity, do not delegate the task, and do not wait for a human. The launch brief named by the initial user message is your task contract.
 
-Your Firstmate instruction inbox is at $(fm_polytoken_shell_quote "$inbox"): when a message says an instruction is waiting there, list the inbox's *.msg files, read and act on each message in numeric order, then acknowledge each handled message by moving it into the inbox's handled/ directory.
+Your Firstmate instruction inbox is at $(fm_polytoken_shell_quote "$inbox"): when a message says an instruction is waiting there, list the inbox's *.msg files, read each message in numeric order, then acknowledge each read and accepted message by moving it into the inbox's handled/ directory. Follow the launch brief's command-boundary, deferred-action and keyed decision-resolution guidance.
 
 The tool_flow tool cannot read the Firstmate task directory your brief names for proof and scratch output, because it is outside this worktree; for paths there, call file_read and file_write directly or use the shell.
 
