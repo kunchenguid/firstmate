@@ -256,7 +256,7 @@ Text for a worker to read and commands that drive a worker's process are separat
 ### Task status archives
 
 When [status archival is enabled](configuration.md#task-status-archive-configstatus-archive), teardown preserves the complete status stream in `data/<task>/status.log`, using a separate `status.<N>.log` for reused IDs without overwriting earlier histories.
-Session-start bootstrap also archives status logs with no matching metadata when they are older than 24 hours, using the same destination and a numbered filename when needed.
+Session-start bootstrap reports home-local record inconsistencies and archives status logs with no matching metadata when they are older than 24 hours; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the report scope and exact behavior.
 Forced secondmate retirement stores descendant logs under the surviving parent's `data/<secondmate>/children/<child>/` tree.
 These archives are cold evidence: presentation, wake classification, and fleet snapshots consume live `state/` records and never read archived logs.
 Ordinary child teardown uses its own home's configuration; retiring a whole home still removes older archives stored inside that home.
