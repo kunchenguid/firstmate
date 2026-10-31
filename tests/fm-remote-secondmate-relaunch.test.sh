@@ -254,3 +254,50 @@ wait "$admission_pid"
 assert_equals 0 "$(cat "$TMP/admission.done")" "post-publication admission restored stale Sol occupancy"
 assert_equals '' "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "confirmed non-Sol replacement retained occupancy"
 pass "remote runtime switches enforce parent admission and retain uncertain occupancy"
+
+cat > "$FAKEBIN/rex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --autostart=false ]; then
+  echo 'error: could not connect to the rex server' >&2
+  exit 4
+fi
+if [ "${1:-}" = whoami ]; then
+  if [ "$FM_TEST_REX_MODE" = foreign ]; then
+    printf '{"endpoint":"unix:///other.sock"}\n'
+  else
+    printf '{"endpoint":"unix:///recorded.sock"}\n'
+  fi
+  exit 0
+fi
+if [ "$FM_TEST_REX_MODE" = gone ]; then
+  echo 'error: block not found' >&2
+  exit 3
+fi
+echo 'error: could not connect to the rex server' >&2
+exit 4
+SH
+chmod +x "$FAKEBIN/rex"
+for entry in relaunch standalone; do
+  for rex_mode in unknown foreign gone; do
+    reset_meta
+    printf 'max=1\nmodels=gpt-6.1-sol\n' > "$HOME_DIR/config/sol-cap"
+    fm_write_meta "$HOME_DIR/state/stopped-rex.meta" "backend=rex" \
+      "window=aaaaaaaa:bbbbbbbb" "rex_server=unix:///recorded.sock" "model=gpt-6.1-sol"
+    printf 'stopped-rex\tgpt-6.1-sol\t1\t-2\n' > "$HOME_DIR/state/sol-sessions.tsv"
+    if [ "$entry" = relaunch ]; then
+      OUT=$(REX_BIN_DIR="$FAKEBIN" FM_TEST_REX_MODE="$rex_mode" run_relaunch ios codex gpt-6.1-sol medium); RC=$?
+    else
+      OUT=$(FM_HOME="$HOME_DIR" REX_BIN_DIR="$FAKEBIN" FM_TEST_REX_MODE="$rex_mode" \
+        bash "$ROOT/bin/fm-sol-cap-lib.sh" refuse-claim fresh ship codex gpt-6.1-sol "$HOME_DIR/config" "$HOME_DIR/state"); RC=$?
+    fi
+    if [ "$rex_mode" = gone ]; then
+      expect_code 0 "$RC" "$entry did not recover stopped Rex capacity: $OUT"
+      assert_equals -1 "$(awk -F '\t' '$1 == "stopped-rex" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "$entry forgot the Rex stop proof"
+    else
+      expect_code 1 "$RC" "$entry admitted against unproven Rex absence: $OUT"
+      assert_equals -2 "$(awk -F '\t' '$1 == "stopped-rex" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "$entry released unproven Rex occupancy"
+    fi
+  done
+  rm -f "$HOME_DIR/state/stopped-rex.meta"
+done
+pass "remote relaunch and standalone admission recover only proven Rex absence"

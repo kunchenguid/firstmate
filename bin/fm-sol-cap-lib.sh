@@ -1085,7 +1085,11 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     echo "error: fm-sol-cap-lib.sh needs FM_HOME to select the dispatching Firstmate home" >&2
     exit 2
   fi
-  # shellcheck source=bin/fm-secondmate-registry-lib.sh
+  # shellcheck source=bin/fm-backend.sh
+  . "$(cd -- "$(dirname -- "$0")" && pwd)/fm-backend.sh"
+  # shellcheck source=bin/fm-control-lib.sh
+  . "$(cd -- "$(dirname -- "$0")" && pwd)/fm-control-lib.sh"
+  # shellcheck source=bin/fm-wake-lib.sh
   # shellcheck disable=SC1091 # the CLI resolves its siblings at runtime.
   . "$(cd -- "$(dirname -- "$0")" && pwd)/fm-wake-lib.sh"
   # shellcheck disable=SC1091 # the CLI resolves its sibling at runtime.
