@@ -94,6 +94,25 @@ test_ready_work_only_on_heartbeat() {
   pass "READY WORK is shown with its since date only when a heartbeat is drained"
 }
 
+test_large_drain_rows_reach_ready_lookup() {
+  local dir state out i payload
+  dir=$(make_case ready-work-large)
+  state="$dir/state"
+  mkdir -p "$dir/home/config" "$dir/home/data"
+  : > "$dir/home/.tasks.toml"
+  printf '# backlog\n' > "$dir/home/data/backlog.md"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  payload=$(printf '%0200d' 0)
+  for ((i = 0; i < 700; i++)); do
+    append_wake "$state" heartbeat "large-$i" "$payload" || fail "queueing large heartbeat $i failed"
+  done
+  out="$dir/large.out"
+  run_drain_with_backlog "$dir" "$state" "$out" || fail "large heartbeat drain failed"
+  grep -F 'ready-task,2026-10-30' "$out" >/dev/null \
+    || fail "large heartbeat rows prevented READY WORK output"
+  pass "large drain rows reach the ready-work lookup"
+}
+
 test_stalled_backlog_gate_does_not_block_drain() {
   local dir state out probe_log
   dir=$(make_case ready-work-stalled-gate)
@@ -336,6 +355,7 @@ test_over_long_decision_note_is_capped_with_a_marker() {
 
 test_buried_decision_still_surfaces
 test_ready_work_only_on_heartbeat
+test_large_drain_rows_reach_ready_lookup
 test_stalled_backlog_gate_does_not_block_drain
 test_manual_backlog_suppresses_ready_work
 test_over_long_decision_note_is_capped_with_a_marker
