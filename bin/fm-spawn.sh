@@ -3582,7 +3582,9 @@ spawn_pi_session_reported_model() {  # <file> [first-line]
   local file=${1-} first=${2:-1} model
   [ -r "$file" ] || return 1
   model=$(tail -n "+$first" "$file" 2>/dev/null | jq -r '
-    select(.type == "message" and .message.role == "assistant" and (.message.model | type) == "string" and (.message.model | length) > 0)
+    select(.type == "message" and .message.role == "assistant"
+      and (.message.stopReason == "stop" or .message.stopReason == "length" or .message.stopReason == "toolUse")
+      and (.message.model | type) == "string" and (.message.model | length) > 0)
     | if (.message.provider | type) == "string" and (.message.provider | length) > 0
       then .message.provider + "/" + .message.model
       else .message.model

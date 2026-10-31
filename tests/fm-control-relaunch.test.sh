@@ -2582,8 +2582,15 @@ case "${1:-} ${2:-}" in
         if [ -n "${FM_FAKE_TURN_MODEL:-}" ]; then
           resumed=$(printf '%s\n' "$payload" | sed -n "s/.*--session '\([^']*\)'.*/\1/p")
           if [ -n "$resumed" ] && [ -f "$resumed" ]; then
-            printf '{"type":"message","message":{"role":"assistant","provider":"%s","model":"%s","content":[]}}\n' \
-              "${FM_FAKE_TURN_MODEL%%/*}" "${FM_FAKE_TURN_MODEL#*/}" >> "$resumed"
+            printf '{"type":"message","message":{"role":"assistant","provider":"%s","model":"%s","stopReason":"%s","content":[]}}\n' \
+              "${FM_FAKE_TURN_MODEL%%/*}" "${FM_FAKE_TURN_MODEL#*/}" "${FM_FAKE_TURN_STOP_REASON:-stop}" >> "$resumed"
+            if [ "${FM_FAKE_RETRY_SUCCESS:-0}" = 1 ]; then
+              (
+                sleep 0.3
+                printf '{"type":"message","message":{"role":"assistant","provider":"%s","model":"%s","stopReason":"stop","content":[]}}\n' \
+                  "${FM_FAKE_TURN_MODEL%%/*}" "${FM_FAKE_TURN_MODEL#*/}" >> "$resumed"
+              ) </dev/null >/dev/null 2>&1 &
+            fi
           fi
         fi ;;
     esac
@@ -2809,6 +2816,39 @@ test_herdr_relaunch_records_a_pinned_pi_resume_as_unverified_without_a_new_turn(
   assert_not_contains "$status" "model pin mismatch" \
     "inherited history must never be reported as this launch's model"
   pass "fm-spawn --relaunch: a silent pinned Pi resume is recorded as unverified"
+}
+
+test_herdr_relaunch_requires_a_completed_pi_response() {
+  local dir out rc session_file id status reason retry verdict
+  for reason in error aborted; do
+    for retry in 0 1; do
+      id="resume-$reason-$retry"
+      herdr_case_or_skip "$id" "$id" || return 0
+      dir=$HERDR_CASE_DIR
+      rm -f "$dir/fake/herdr-stopped"
+      session_file="$dir/fake/pi-bound-session.jsonl"
+      printf '{"result":{"agent":{"agent":"pi","agent_status":"idle","agent_session":{"kind":"path","value":"%s"}}}}\n' \
+        "$session_file" > "$dir/fake/herdr-agent-registration"
+      printf '%s\n' '{"type":"session","id":"pi-bound-session"}' > "$session_file"
+      rc=0
+      out=$(FM_FAKE_TURN_MODEL=anthropic/claude-opus-5-5 FM_FAKE_TURN_STOP_REASON="$reason" \
+        FM_FAKE_RETRY_SUCCESS="$retry" FM_MODEL_PIN_POLLS=20 FM_MODEL_PIN_POLL_INTERVAL=0.05 \
+        run_spawn "$dir" "$id" --relaunch --harness pi --model anthropic/claude-opus-5-5) || rc=$?
+      expect_code 0 "$rc" "failed requests must not fail the relaunch"$'\n'"$out"
+      verdict=unverified
+      [ "$retry" = 0 ] || verdict=asserted
+      status=$(cat "$dir/home/state/$id.status")
+      assert_contains "$status" "model pin $verdict:" "only a completed response provides model evidence"
+      assert_not_contains "$status" "model pin mismatch:" "a failed attempt must not become a mismatch"
+      if [ "$retry" = 0 ]; then
+        assert_not_contains "$status" "model pin asserted:" "a failed attempt must not assert a model"
+      else
+        [ "$(jq -r 'select(.type == "message") | .message.stopReason' "$session_file")" = "$reason"$'\nstop' ] \
+          || fail "the retry must complete after the failed attempt"
+      fi
+    done
+  done
+  pass "Pi model evidence requires a completed response after error or abort"
 }
 
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server() {
@@ -3224,3 +3264,5 @@ test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
+
+test_herdr_relaunch_requires_a_completed_pi_response
