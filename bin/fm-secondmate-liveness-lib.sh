@@ -85,6 +85,9 @@ fm_secondmate_liveness_unlock() {  # <id>
   fm_lock_release "$STATE/.secondmate-liveness-$1.lock" 2>/dev/null || true
 }
 
+# The `model pin ...` verdict lines the replacement launch wrote to stderr, which
+# fm_secondmate_liveness_relaunch captured into FM_SM_LIVE_OUT; a reporting caller
+# prints them unchanged so the evidence its own spawner observed is not dropped.
 fm_sm_live_model_verdicts() {
   printf '%s\n' "$FM_SM_LIVE_OUT" | sed -n '/^model pin \(asserted\|mismatch\|unverified\):/p' || true
 }

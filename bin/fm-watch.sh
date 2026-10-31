@@ -176,7 +176,11 @@
 #                          same guarded fm-spawn.sh --secondmate path the
 #                          session-start sweep uses; one wake per relaunch, and
 #                          state/.secondmate-relaunch-<id> keeps the durable
-#                          per-mate count (bin/fm-secondmate-liveness-lib.sh)
+#                          per-mate count (bin/fm-secondmate-liveness-lib.sh).
+#                          The same reason carries the replacement's own
+#                          `model pin ...` verdict line, newline-separated,
+#                          when its launch recorded one (bin/fm-spawn.sh's
+#                          header owns that wording).
 #   check: secondmate <id> auto-relaunch failed after <cause>: <detail>
 #                          the same verdict authorized recovery but the
 #                          relaunch itself failed; the attempt is ledgered and

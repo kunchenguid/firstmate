@@ -108,12 +108,14 @@
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
 #   A pinned launch is also asserted after delivery: the started session is asked
-#   which model it runs on, and pin-versus-actual goes to stderr. A
+#   which model it runs on, and pin-versus-actual goes to stderr. A canonical
 #   Claude launch with a concrete pin gets a fresh, collision-checked --session-id
 #   so its transcript is readable by address; a Herdr-bound Pi relaunch is read
-#   from the session identity it resumed. A harness with no readable session model
-#   is recorded as unverified, never guessed at, and a mismatch is reported rather
-#   than turned into a launch failure.
+#   from the session identity it resumed. A raw command and a T3 launch execute no
+#   line this script composes, so neither carries an address of its own: their pin
+#   is reported unverified immediately rather than polled for. A harness with no
+#   readable session model is recorded as unverified, never guessed at, and a
+#   mismatch is reported rather than turned into a launch failure.
 #   OpenCode 2 has no interactive model or effort flag, so its selected model
 #   and effort are written as the build agent's model and variant inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
@@ -518,8 +520,10 @@
 #                  state/<task-id>.claude-settings.json for a secondmate
 #     __CLAUDESESSION__ optional `--session-id <uuid> ` on a claude launch carrying
 #                  a concrete pin, minted collision-checked so the pinned-model
-#                  assertion can read that session's own transcript by address
-#                  (supplies its own trailing space, empty otherwise)
+#                  assertion can read that session's own transcript by address;
+#                  only a launch this script actually executes gets one, so a raw
+#                  command and a T3 launch leave it empty (supplies its own
+#                  trailing space, empty otherwise)
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
@@ -530,9 +534,9 @@
 #                  launches (supplies its own leading space, empty otherwise)
 #     __PIRESUME__ optional relaunch-only `--session <reference>` that keeps a
 #                  Pi replacement on the session the endpoint's runtime already
-#                  reports (relaunch_resume_ref below supplies the reference; it supplies its
-#                  own leading space, and is empty on every fresh spawn and for
-#                  every other harness)
+#                  reports (the reference comes from relaunch_resume_ref below;
+#                  the substituted value carries its own leading space, and is
+#                  empty on every fresh spawn and for every other harness)
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi busy-state extension,
@@ -3535,7 +3539,7 @@ spawn_model_pin_matches() {  # <harness> <pin> <actual>
   return 1
 }
 
-spawn_model_pin_note() {  # <asserted|mismatch|unverified>: <tail>
+spawn_model_pin_note() {  # "<asserted|mismatch|unverified>: <tail>"
   printf 'model pin %s\n' "$1" >&2
   return 0
 }
