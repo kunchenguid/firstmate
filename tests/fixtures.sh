@@ -146,6 +146,10 @@ fake_opencode_launched() {
 # its first response, under the session id the launch carried. FM_FAKE_CLAUDE_MODEL
 # makes that response a different model than the pin; FM_FAKE_CLAUDE_NO_REPORT
 # leaves the session silent, which the launcher must record as unverified.
+# FM_FAKE_CLAUDE_STATUS_FILE and FM_FAKE_CLAUDE_STATUS_LINE make the worker report
+# its own state (a `done:` event, say) in that same delivery, while the launcher is
+# still reading the pin back, so a suite can prove the model verdict never lands
+# on top of what the worker already said.
 fake_claude_model_report() {  # <staged-launch-command>
   local launch=$1 session pin actual config_dir
   case "$launch" in *' claude '*) ;; *) return 0 ;; esac
@@ -159,6 +163,9 @@ fake_claude_model_report() {  # <staged-launch-command>
   jq -cn --arg session "$session" --arg model "$actual" \
     '{type:"assistant",sessionId:$session,message:{role:"assistant",model:$model,content:[]}}' \
     > "$config_dir/projects/fm-test/$session.jsonl"
+  if [ -n "${FM_FAKE_CLAUDE_STATUS_FILE:-}" ] && [ -n "${FM_FAKE_CLAUDE_STATUS_LINE:-}" ]; then
+    printf '%s\n' "$FM_FAKE_CLAUDE_STATUS_LINE" >> "$FM_FAKE_CLAUDE_STATUS_FILE"
+  fi
 }
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;

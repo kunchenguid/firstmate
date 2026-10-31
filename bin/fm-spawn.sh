@@ -3534,10 +3534,37 @@ spawn_model_pin_matches() {  # <harness> <pin> <actual>
   return 1
 }
 
+# The worker's own report outranks model evidence: an open decision, a declared
+# wait, or a terminal outcome IS the task's state, so a later note may not become
+# the line a supervisor reads as that state. Read through the shared classifier so
+# this agrees with every other consumer of the status log.
+spawn_model_pin_state_reported() {  # <status-line>
+  local line=${1-} verb
+  [ -n "$line" ] || return 1
+  status_line_verb "$line" verb
+  case "$verb" in
+  done | failed | blocked | needs-decision | \
+    "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" | \
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}")
+    return 0
+    ;;
+  esac
+  return 1
+}
+
 # The single writer for every assertion outcome: one `note:` event, so the record
-# sits in the task's status history without opening a decision event.
+# sits in the task's status history without opening a decision event. The note is
+# never written over a state the worker already reported; the file stays
+# byte-identical there - the worker writes to it concurrently, so nothing here
+# rewrites, truncates, or re-appends its lines - and the verdict goes to the
+# operator on stderr instead.
 spawn_model_pin_note() {  # <asserted|mismatch|unverified>: <tail>
-  local verdict=${1%%:*} tail=${1#*:}
+  local verdict=${1%%:*} tail=${1#*:} current
+  current=$(status_current_line "$STATE/$ID.status" "$KIND" 2>/dev/null) || current=
+  if spawn_model_pin_state_reported "$current"; then
+    printf 'warn: model pin %s:%s\n' "$verdict" "$tail" >&2
+    return 0
+  fi
   printf '%s\n' "$(status_stamp_line "note: model pin $verdict:$tail")" >>"$STATE/$ID.status"
   [ "$verdict" = mismatch ] || return 0
   printf 'warn: model pin was not honored%s\n' "$tail" >&2
@@ -7394,13 +7421,21 @@ CLAUDE_SESSION_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-${HOME:-$PWD}/.claude}
 if [ "$HARNESS" = claude ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
   # A pinned Claude launch takes its own collision-checked session id so the
   # assertion after delivery reads THAT session's transcript instead of guessing
-  # which session in the project is recent. No uuidgen means no address: the
-  # launch line is unchanged and the assertion records the pin as unverified.
-  if CLAUDE_SESSION_ID=$(spawn_claude_fresh_session_id "$CLAUDE_SESSION_CONFIG_DIR"); then
-    CLAUDE_SESSION_ARGS="--session-id $(shell_quote "$CLAUDE_SESSION_ID") "
-  else
-    CLAUDE_SESSION_ID=
-  fi
+  # which session in the project is recent. Only a launch that carries the
+  # __CLAUDESESSION__ placeholder is given one: a raw command has no such slot, so
+  # an id minted for it could never reach Claude or name a transcript. No uuidgen
+  # means no address either: the launch line is unchanged and the assertion
+  # records the pin as unverified instead of polling for a session that cannot be
+  # written.
+  case "$LAUNCH" in
+  *__CLAUDESESSION__*)
+    if CLAUDE_SESSION_ID=$(spawn_claude_fresh_session_id "$CLAUDE_SESSION_CONFIG_DIR"); then
+      CLAUDE_SESSION_ARGS="--session-id $(shell_quote "$CLAUDE_SESSION_ID") "
+    else
+      CLAUDE_SESSION_ID=
+    fi
+    ;;
+  esac
 fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "$OPENCODE_MAJOR")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
