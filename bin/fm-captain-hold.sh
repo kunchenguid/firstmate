@@ -22,6 +22,8 @@
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#   fm-captain-hold.sh reason <task-id>
+#   fm-captain-hold.sh append <task-id> --text-file <path>
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -56,6 +58,13 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+#
+# `reason` prints a held task's current reason as plain text, decoded once, so
+# its line breaks, quotes, slashes, and non-ASCII text read back exactly as they
+# were held. `append` adds the text of a non-empty file (at most 8192 bytes) to
+# that reason on a new line and re-holds the task, keeping its hold kind, its
+# `--until` date, and its hold-set stamp; it refuses a task that is not held.
+# Both reuse bin/fm-hold-reason-lib.sh, so no caller decodes or encodes by hand.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -1183,6 +1192,62 @@ command_hold() {
   printf '%s\n' "$id"
 }
 
+# The held reason of <task-id> as plain text, via the one decoder; sets
+# HELD_REASON, HELD_KIND, and HELD_UNTIL and fails when the task is not held.
+HELD_REASON=
+HELD_KIND=
+HELD_UNTIL=
+load_held_reason() {  # <task-id>
+  local id=$1 show decoded
+  validate_slug task-id "$id"
+  require_tasks_axi
+  task_show_or_fail "$id" "task $id does not exist"
+  # A hold whose --until date has passed reports held: no but keeps its reason.
+  [ "$(show_field_value "$show" state)" != "done" ] || fail "task $id is already closed"
+  decoded=$(printf '%s\n' "$show" | fm_hold_reason_decode_stream toon) \
+    || fail "could not decode the hold reason of $id"
+  HELD_REASON=$(show_field_value "$decoded" hold_reason)
+  HELD_KIND=$(show_field_value "$show" hold_kind)
+  HELD_UNTIL=$(show_field_value "$show" hold_until)
+  [ -n "$HELD_REASON" ] || fail "task $id is not held"
+}
+
+command_reason() {
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  load_held_reason "$1"
+  printf '%s\n' "$HELD_REASON"
+}
+
+command_append() {
+  local id=${1:-} text_file='' text combined stored_reason
+  local -a hold_args=()
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --text-file) shift; text_file=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  [ -n "$text_file" ] || fail "--text-file is required"
+  [ -f "$text_file" ] || fail "text file does not exist: $text_file"
+  text=$(cat "$text_file")
+  [ -n "$text" ] || fail "text file must not be empty"
+  [ "$(printf '%s' "$text" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
+    || fail "text file exceeds 8192 bytes"
+  validate_slug task-id "$id"
+  acquire_task_control_lock "$id"
+  load_held_reason "$id"
+  combined=$(printf '%s\n%s' "$HELD_REASON" "$text")
+  stored_reason=$(fm_hold_reason_encode "$combined") || fail "could not encode the hold reason"
+  [ -z "$HELD_KIND" ] || hold_args+=(--kind "$HELD_KIND")
+  [ -z "$HELD_UNTIL" ] || hold_args+=(--until "$HELD_UNTIL")
+  tasks_axi hold "$id" --reason "$stored_reason" "${hold_args[@]+"${hold_args[@]}"}" >/dev/null \
+    || fail "could not append to the hold reason of $id"
+  printf '%s\n' "$id"
+}
+
 # Record a resolution block beneath any leading active hold-set stamp,
 # preserving the previous body below it and archiving the pristine original.
 # Successful closure removes the stamp to restore resolution-first ordering.
@@ -2212,6 +2277,8 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
 
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
+  reason) shift; command_reason "$@" ;;
+  append) shift; command_append "$@" ;;
   answer) shift; command_answer "$@" ;;
   answers) shift; command_answers "$@" ;;
   reconcile-requests) shift; command_reconcile_requests "$@" ;;
