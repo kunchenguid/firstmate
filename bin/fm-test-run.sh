@@ -395,7 +395,7 @@ family_for_basename() {
     fm-backend-t3code.test.sh|fm-t3-mcp.test.sh|fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
-    fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
+    fm-send-inbox.test.sh|fm-spawn-batch.test.sh|fm-spawn-missing-project-error.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
     fm-worker-account.test.sh|\
     fm-git-strip-ai-trailers.test.sh|\
