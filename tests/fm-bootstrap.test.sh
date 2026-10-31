@@ -22,6 +22,8 @@
 # one run into its local and network halves, and the one-hop tasks-axi
 # compatibility handoff that keeps a session start from paying for that verdict
 # twice.
+# A dedicated case pins the read-only STOP_AUTOARM report of an open Claude Stop
+# auto-arm failure episode.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -789,6 +791,53 @@ test_unknown_backend_reports_invalid_configuration() {
   pass "bootstrap: unknown resolved backends fail closed with an actionable diagnostic"
 }
 
+# An open Claude Stop auto-arm failure episode is two empty marker files that
+# nothing else reports, so session start names each marker present and its age.
+# Reporting must leave both markers exactly as found, in a detect-only run too.
+stop_autoarm_marker_snapshot() {  # <state-dir>
+  local f
+  for f in "$1/.claude-autoarm-failure-alarmed" "$1/.claude-autoarm-failure-notified"; do
+    stat -c '%n %d:%i:%s:%Y:%Z' "$f" 2>/dev/null || stat -f '%N %d:%i:%z:%m:%c' "$f" 2>/dev/null || printf '%s absent\n' "$f"
+  done
+}
+
+test_stop_autoarm_failure_episode_is_reported_read_only() {
+  local case_dir fakebin state out before after
+  case_dir="$TMP_ROOT/stop-autoarm-episode"
+  state="$case_dir/home/state"
+  mkdir -p "$case_dir/home/config" "$state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  : > "$state/.claude-autoarm-failure-notified"
+  touch -t 202001010000 "$state/.claude-autoarm-failure-notified"
+  before=$(stop_autoarm_marker_snapshot "$state")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh") \
+    || fail "bootstrap with an open notice marker exited non-zero"
+  printf '%s\n' "$out" | grep -Eqx 'STOP_AUTOARM: Claude Stop auto-arm failure episode still open: state/\.claude-autoarm-failure-notified \(age [0-9]+d[0-9][0-9]h\); later Stop auto-arm failures in this episode print no notice until a verified healthy watcher clears it' \
+    || fail "bootstrap should name an open notice marker and its age, got: $out"
+  after=$(stop_autoarm_marker_snapshot "$state")
+  [ "$before" = "$after" ] || fail "an ordinary bootstrap changed the failure-episode markers"$'\n'"before: $before"$'\n'"after:  $after"
+
+  : > "$state/.claude-autoarm-failure-alarmed"
+  before=$(stop_autoarm_marker_snapshot "$state")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh") \
+    || fail "a detect-only bootstrap with both markers exited non-zero"
+  printf '%s\n' "$out" | grep -Eqx 'STOP_AUTOARM: Claude Stop auto-arm failure episode still open: state/\.claude-autoarm-failure-alarmed \(age [0-9]+[sm]\), state/\.claude-autoarm-failure-notified \(age [0-9]+d[0-9][0-9]h\); the Stop auto-arm delivers no automatic continuation, including wake handoffs, until a verified healthy watcher clears it' \
+    || fail "a detect-only bootstrap should name both markers with the attended alarm first, got: $out"
+  after=$(stop_autoarm_marker_snapshot "$state")
+  [ "$before" = "$after" ] || fail "reporting the failure episode changed its markers"$'\n'"before: $before"$'\n'"after:  $after"
+
+  rm -f "$state/.claude-autoarm-failure-alarmed" "$state/.claude-autoarm-failure-notified"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh") \
+    || fail "bootstrap with no failure-episode marker exited non-zero"
+  assert_not_contains "$out" "STOP_AUTOARM" "bootstrap reported a failure episode with no marker present"
+  pass "bootstrap: an open Stop auto-arm failure episode is reported with marker ages and left untouched"
+}
+
 test_json_backends_require_jq_not_tmux() {
   local backend case_dir fakebin bash_env out
   # herdr/zellij/cmux parse their backend's JSON output, so jq is a genuine dep.
@@ -1551,6 +1600,7 @@ test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
+test_stop_autoarm_failure_episode_is_reported_read_only
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
