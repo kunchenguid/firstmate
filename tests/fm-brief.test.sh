@@ -666,8 +666,10 @@ test_herdr_lab_contract_is_explicit_and_complete() {
     "Herdr lab brief missing the per-call session option contract"
   assert_grep "direct \`herdr server stop\`" "$brief" \
     "Herdr lab brief missing the forbidden server-global command list"
-  assert_grep "records the live default session before provisioning" "$brief" \
+  assert_grep "records the observed default session before provisioning" "$brief" \
     "Herdr lab brief missing the before tripwire"
+  assert_grep "Its header owns baseline validation, including an observed stopped default" "$brief" \
+    "Herdr lab brief must defer stopped-default validation to the helper"
   assert_grep "verifies the identical fleet state after teardown" "$brief" \
     "Herdr lab brief missing the after tripwire"
   assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
