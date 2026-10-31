@@ -81,7 +81,7 @@ unset REX_SESSION REX_BLOCK
 # FM_NO_LOCK=1, every fixture session start would otherwise stand down
 # (bin/fm-session-standdown-lib.sh); a case that verifies the stand-down sets
 # these itself.
-unset CLAUDE_CODE_SESSION_ATTENDED FM_NO_LOCK FM_SESSIONSTART_ALLOW_UNATTENDED FM_SESSION_STANDDOWN_CHECKED
+unset CLAUDE_CODE_SESSION_ATTENDED CLAUDE_JOB_DIR FM_NO_LOCK FM_SESSIONSTART_ALLOW_UNATTENDED FM_SESSION_STANDDOWN_CHECKED
 
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override

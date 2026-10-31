@@ -194,6 +194,7 @@ The run wrapper also stands down silently, before any state or lock work, for a 
 - A session marked `FM_NO_LOCK=1`, the generic opt-out for any tool that launches Claude in the home and must not take the fleet lock.
 
 `FM_SESSIONSTART_ALLOW_UNATTENDED=1` opts an unattended Claude session back in, for Firstmate's own live checks that drive a throwaway primary through `claude -p`; it never overrides `FM_NO_LOCK=1`.
+A Claude background session (`claude --bg`) is also unattended but may be the captain's primary, so it still takes the helm when its `CLAUDE_JOB_DIR` basename equals the first 8 characters of its own `CLAUDE_CODE_SESSION_ID`; a child `claude -p` that inherited a background parent's `CLAUDE_JOB_DIR` does not match and still stands down.
 `bin/fm-session-standdown-lib.sh` owns this one predicate, and `bin/fm-session-start.sh` applies it too, so an agent in such a session that runs session start itself, because no digest arrived, still never takes the lock.
 Run directly, it reads the unattended signal from the calling session's own environment, prints one stderr line saying it stood down, and exits 0.
 The run wrapper marks its own downstream call with `FM_SESSION_STANDDOWN_CHECKED=1`, so its payload-bound decision is not re-made from an inherited value.
@@ -423,9 +424,9 @@ It also proves the nudge wrapper's exact U+2063 `FIRSTMATE_OP:`-prefixed, `sessi
 It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree, including the internal Pi prerequisite's explicit silent stand-down.
 It proves the run wrapper creates a missing state directory on a fresh primary and delivers the full digest, while an unmarked linked worktree gets none.
 It proves a fresh primary whose state directory cannot be created reports that on one stderr line and stands down without a digest.
-It proves an unattended Claude payload and `FM_NO_LOCK=1` stand down without creating state or taking the lock, while attended, inherited-value, and `FM_SESSIONSTART_ALLOW_UNATTENDED=1` opens still take the helm.
+It proves an unattended Claude payload and `FM_NO_LOCK=1` stand down without creating state or taking the lock, while attended, inherited-value, bound background-session, and `FM_SESSIONSTART_ALLOW_UNATTENDED=1` opens still take the helm.
 The opt-in live guard `tests/fm-sessionstart-unattended-live-e2e.test.sh` proves the same stand-down and override against a real `claude -p`.
-`tests/fm-session-start.test.sh` proves a direct session start stands down with its stderr line and no lock for an unattended or `FM_NO_LOCK=1` session, while attended and opted-in sessions still take the lock.
+`tests/fm-session-start.test.sh` proves a direct session start stands down with its stderr line and no lock for an unattended, mismatched background, or `FM_NO_LOCK=1` session, while attended, bound background, and opted-in sessions still take the lock.
 
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including:
 

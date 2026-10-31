@@ -1084,6 +1084,25 @@ test_run_unattended_claude_stands_down() {
   assert_contains "$out" "$FULL_BANNER$root" \
     "an unattended value inherited from another session stood down this session's start"
 
+  root="$TMP_ROOT/run-background-bound"
+  make_run_primary "$root"
+  out=$(printf '%s' "$payload" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    CLAUDE_JOB_DIR="$TMP_ROOT/jobs/sid-head" run_hook_claude "$root") || status=$?
+  expect_code 0 "$status" "bound background-session startup"
+  assert_contains "$out" "$FULL_BANNER$root" "a Claude background-session primary stood down"
+
+  root="$TMP_ROOT/run-background-mismatched"
+  make_run_primary "$root"
+  printf '%s' "$payload" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    CLAUDE_JOB_DIR="$TMP_ROOT/jobs/parent00" expect_silent_zero "inherited background job dir" run_hook_claude "$root"
+  assert_absent "$root/state/.lock" "a child claude -p with an inherited background job dir took the fleet lock"
+
+  root="$TMP_ROOT/run-background-no-lock"
+  make_run_primary "$root"
+  printf '%s' "$payload" | FM_NO_LOCK=1 CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
+    CLAUDE_JOB_DIR="$TMP_ROOT/jobs/sid-head" expect_silent_zero "FM_NO_LOCK background session" run_hook_claude "$root"
+  assert_absent "$root/state/.lock" "an FM_NO_LOCK=1 background session took the fleet lock"
+
   root="$TMP_ROOT/run-unattended-allowed"
   make_run_primary "$root"
   out=$(printf '%s' "$payload" | CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless \
@@ -1091,7 +1110,7 @@ test_run_unattended_claude_stands_down() {
   expect_code 0 "$status" "opted-in unattended Claude startup"
   assert_contains "$out" "$FULL_BANNER$root" "FM_SESSIONSTART_ALLOW_UNATTENDED=1 did not run session start"
   assert_contains "$out" "lock acquired: harness pid" "an opted-in unattended session did not take the lock"
-  pass "run wrapper: an unattended Claude or FM_NO_LOCK=1 session stands down silently; attended, inherited, and opted-in opens take the helm"
+  pass "run wrapper: an unattended Claude or FM_NO_LOCK=1 session stands down silently; attended, inherited, bound background, and opted-in opens take the helm"
 }
 
 test_run_creates_missing_state_on_a_fresh_primary() {

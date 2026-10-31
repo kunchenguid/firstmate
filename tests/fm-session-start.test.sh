@@ -919,8 +919,27 @@ EOF
   out=$(CLAUDE_CODE_SESSION_ATTENDED=1 CLAUDE_CODE_SESSION_ID=sid-attended \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>/dev/null)
   assert_contains "$out" "lock acquired: harness pid" "an attended direct session start did not take the lock"
+  rm -f "$home/state/.lock"
 
-  pass "a direct session start stands down for an unattended or FM_NO_LOCK=1 session and takes the lock when attended or opted in"
+  status=0
+  out=$(CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless CLAUDE_JOB_DIR="$TMP_ROOT/jobs/parent00" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>"$err") || status=$?
+  expect_code 0 "$status" "a mismatched background job dir direct session start must exit 0"
+  assert_contains "$(cat "$err")" "fm-session-start: stood down" "an inherited background job dir did not stand down"
+  assert_absent "$home/state/.lock" "an inherited background job dir took the fleet lock"
+
+  status=0
+  out=$(FM_NO_LOCK=1 CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless CLAUDE_JOB_DIR="$TMP_ROOT/jobs/sid-head" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>"$err") || status=$?
+  expect_code 0 "$status" "an FM_NO_LOCK=1 background direct session start must exit 0"
+  assert_contains "$(cat "$err")" "fm-session-start: stood down" "an FM_NO_LOCK=1 background session did not stand down"
+  assert_absent "$home/state/.lock" "an FM_NO_LOCK=1 background session took the fleet lock"
+
+  out=$(CLAUDE_CODE_SESSION_ATTENDED=0 CLAUDE_CODE_SESSION_ID=sid-headless CLAUDE_JOB_DIR="$TMP_ROOT/jobs/sid-head" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>/dev/null)
+  assert_contains "$out" "lock acquired: harness pid" "a Claude background-session primary did not take the lock"
+
+  pass "a direct session start stands down for an unattended, mismatched background, or FM_NO_LOCK=1 session and takes the lock when attended, bound background, or opted in"
 }
 
 test_lock_write_failure_read_only_path() {
