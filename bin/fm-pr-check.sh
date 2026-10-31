@@ -245,11 +245,9 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   # bounded by the watcher's own check bound.
   BASELINE_RC=0
   BASELINE=$(fm_run_timed "${FM_CHECK_TIMEOUT:-30}" "$SCRIPT_DIR/fm-pr-poll.sh" --baseline "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null) || BASELINE_RC=$?
-  if [ "$BASELINE_RC" != 0 ]; then
+  if [ "$BASELINE_RC" != 0 ] && [ "$BASELINE_RC" != 3 ]; then
     if [ "$BASELINE_RC" = 124 ]; then
       echo "error: baseline read of the PR poll timed out" >&2
-    elif [ "$BASELINE_RC" = 3 ]; then
-      BASELINE=
     else
       echo "error: baseline read of the PR poll failed" >&2
     fi

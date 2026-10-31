@@ -1576,22 +1576,19 @@ test_arming_baselines_an_already_degraded_change() {
   rm -f "$state/task-a.check.sh"
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success run_check_entry "$dir" task-a "$url1" >/dev/null 2>&1 \
     || fail "arming the first GitLab watch for the unreadable case failed"
-  if FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>&1; then
-    fail "re-arming succeeded although its baseline read failed"
-  fi
-  grep -q "^pr=$url1\$" "$state/task-a.meta" || fail "an unreadable re-arm replaced the task's PR metadata"
+  FM_TEST_GLAB_FAIL=1 run_check_entry "$dir" task-a "$url" >/dev/null 2>&1 \
+    || fail "re-arming failed although an unreadable baseline should be unknown"
+  grep -q "^pr=$url\$" "$state/task-a.meta" || fail "an unreadable re-arm did not publish the new PR metadata"
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
-    || fail "an unreadable re-arm left the previous poll no longer matching its metadata"
+    || fail "an unreadable re-arm left the new poll mismatched with its metadata"
   dir=$(make_case degraded-baseline-unreadable-gh)
   state="$dir/home/state"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   write_task_meta "$dir" task-a
-  if FM_TEST_GH_FAIL=1 run_check_entry "$dir" task-a https://github.com/o/r/pull/9 >/dev/null 2>"$dir/unreadable.err"; then
-    fail "arming a GitHub watch succeeded although its baseline read failed"
-  fi
-  grep -q 'could not read the forge' "$dir/unreadable.err" || fail "arming did not name the unreadable GitHub baseline read"
-  [ ! -e "$state/task-a.check.sh" ] || fail "an unreadable GitHub baseline read published a poll"
-  pass "an unreadable baseline read fails arming and keeps the previous watch"
+  FM_TEST_GH_FAIL=1 run_check_entry "$dir" task-a https://github.com/o/r/pull/9 >/dev/null 2>"$dir/unreadable.err" \
+    || fail "arming failed although an unreadable baseline should be unknown"
+  [ -e "$state/task-a.check.sh" ] || fail "an unreadable GitHub baseline read did not publish a poll"
+  pass "an unreadable baseline read permits arming with an unknown baseline"
 
   # The merge-time re-record makes no forge read of its own, so an unreadable
   # forge cannot fail it before the merge's own live reads, and the watch's
