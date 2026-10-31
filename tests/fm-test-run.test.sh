@@ -1516,6 +1516,282 @@ test_concurrent_runs_are_ordered_longest_first() {
   pass "a concurrent run starts the longest-hint script first"
 }
 
+test_stop_is_scoped_to_one_run() {
+  local tmp repo runner sleeper a_out b_out a_id a_pid b_id b_pid a_fix b_fix a_rc w pid_dir lister_pid
+  # Registered before any background launch so a failure below still reaps the
+  # fixture root and every process naming it.
+  tmp=$(fm_test_tmproot fm-test-run-stop) || fail "could not create the stop fixture root"
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  sleeper=tests/fm-sleep-fixture.test.sh
+  pid_dir="$tmp/fm-test-run-pids-$(id -u)"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
+  # The fixture records its own pid so the test waits for it to be running, and
+  # sleeps in the foreground the way a long suite script does.
+  cat >"$repo/$sleeper" <<'EOF'
+#!/usr/bin/env bash
+printf "%s\n" "$$" >"$TMPDIR/fixture-$FM_STOP_MARK.pid"
+echo "ok - sleeping"
+sleep 60
+EOF
+  chmod +x "$runner" "$repo/$sleeper"
+  a_out="$tmp/a.out"
+  b_out="$tmp/b.out"
+  a_fix="$tmp/fixture-a.pid"
+  b_fix="$tmp/fixture-b.pid"
+  # A lister polls the registry while both runs start, so a record it caught
+  # half-written would be discarded as stale and the run missing below.
+  (while [ ! -e "$tmp/lister.done" ]; do TMPDIR="$tmp" "$runner" --stop >/dev/null 2>&1; done) &
+  lister_pid=$!
+  # The run and --stop use different time zones, as a harness and an agent may.
+  FM_STOP_MARK=a TZ=UTC TMPDIR="$tmp" "$runner" "$sleeper" >"$a_out" 2>&1 &
+  a_pid=$!
+  FM_STOP_MARK=b TMPDIR="$tmp" "$runner" "$sleeper" >"$b_out" 2>&1 &
+  b_pid=$!
+  w=0
+  while { [ ! -s "$a_fix" ] || [ ! -s "$b_fix" ]; } && [ "$w" -lt 100 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  : >"$tmp/lister.done"
+  wait "$lister_pid" 2>/dev/null || true
+  [ -s "$a_fix" ] && [ -s "$b_fix" ] || fail "the fixture scripts never started"
+  [ -z "$(find "$pid_dir" -maxdepth 0 ! -perm 700)" ] || fail "the run registry must be mode 700"
+  a_id=$(TZ=Pacific/Kiritimati TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$a_pid" '$2 == p {print $1}')
+  b_id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$b_pid" '$2 == p {print $1}')
+  [ -n "$a_id" ] && [ -n "$b_id" ] || fail "--stop did not list both live runs"
+  TZ=Pacific/Kiritimati TMPDIR="$tmp" "$runner" --stop "$a_id" >/dev/null || fail "--stop <run> failed"
+  a_rc=0
+  wait "$a_pid" || a_rc=$?
+  [ "$a_rc" -eq 143 ] || fail "a stopped run must exit 143, got $a_rc: $(cat "$a_out")"
+  grep -q "FM_TEST_ABORTED signal=15 run=$a_id" "$a_out" \
+    || fail "stopped run did not report FM_TEST_ABORTED: $(cat "$a_out")"
+  w=0
+  while kill -0 "$(cat "$a_fix")" 2>/dev/null && [ "$w" -lt 50 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  ! kill -0 "$(cat "$a_fix")" 2>/dev/null || fail "the stopped run's script is still running"
+  [ ! -e "$pid_dir/$a_id.pid" ] || fail "the stopped run left its registry record behind"
+  ! grep -q FM_TEST_ABORTED "$b_out" || fail "sibling run aborted: $(cat "$b_out")"
+  kill -0 "$b_pid" 2>/dev/null || fail "sibling run died"
+  kill -0 "$(cat "$b_fix")" 2>/dev/null || fail "sibling run's script died"
+  TMPDIR="$tmp" "$runner" --stop "$b_id" >/dev/null 2>&1 || true
+  wait "$b_pid" 2>/dev/null || true
+  pass "--stop kills one run, emits FM_TEST_ABORTED with exit 143, spares siblings"
+}
+
+# A TERM sent straight to the runner must abort it while a script hangs, not
+# once that script ends on its own.
+test_term_to_runner_aborts_a_hung_suite() {
+  local tmp repo runner sleeper out fix pid rc w started elapsed
+  tmp=$(fm_test_tmproot fm-test-run-term) || fail "could not create the TERM fixture root"
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  sleeper=tests/fm-sleep-fixture.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/$sleeper" <<'EOF'
+#!/usr/bin/env bash
+printf "%s\n" "$$" >"$TMPDIR/fixture.pid"
+sleep 60
+EOF
+  chmod +x "$runner" "$repo/$sleeper"
+  out="$tmp/run.out"
+  fix="$tmp/fixture.pid"
+  TMPDIR="$tmp" "$runner" "$sleeper" >"$out" 2>&1 &
+  pid=$!
+  w=0
+  while [ ! -s "$fix" ] && [ "$w" -lt 100 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  [ -s "$fix" ] || fail "the fixture script never started"
+  started=$(date +%s)
+  kill -TERM "$pid"
+  rc=0
+  wait "$pid" || rc=$?
+  elapsed=$(($(date +%s) - started))
+  [ "$elapsed" -le 5 ] || fail "TERM took ${elapsed}s to abort the runner"
+  [ "$rc" -eq 143 ] || fail "a TERMed run must exit 143, got $rc: $(cat "$out")"
+  grep -q "FM_TEST_ABORTED signal=15 " "$out" || fail "TERMed run did not report FM_TEST_ABORTED: $(cat "$out")"
+  w=0
+  while kill -0 "$(cat "$fix")" 2>/dev/null && [ "$w" -lt 50 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  ! kill -0 "$(cat "$fix")" 2>/dev/null || fail "the TERMed run's script is still running"
+  pass "a TERM sent to the runner aborts a hung script promptly with exit 143"
+}
+
+# A stopped run must not leave behind a script that ignores TERM, since its
+# record is gone once the runner exits and --stop could never reach it again.
+test_stop_kills_term_ignoring_children() {
+  local tmp repo runner sleeper out fix pid id rc w pid_dir p script_pid sleep_pid
+  tmp=$(fm_test_tmproot fm-test-run-stop-ignore) || fail "could not create the fixture root"
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  sleeper=tests/fm-sleep-fixture.test.sh
+  pid_dir="$tmp/fm-test-run-pids-$(id -u)"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/$sleeper" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 60 &
+printf "%s %s\n" "$$" "$!" >"$TMPDIR/fixture.pid"
+wait
+EOF
+  chmod +x "$runner" "$repo/$sleeper"
+  out="$tmp/run.out"
+  fix="$tmp/fixture.pid"
+  TMPDIR="$tmp" "$runner" "$sleeper" >"$out" 2>&1 &
+  pid=$!
+  w=0
+  while [ ! -s "$fix" ] && [ "$w" -lt 100 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  [ -s "$fix" ] || fail "the fixture script never started"
+  id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$pid" '$2 == p {print $1}')
+  [ -n "$id" ] || fail "--stop did not list the live run"
+  TMPDIR="$tmp" "$runner" --stop "$id" >/dev/null || fail "--stop <run> failed"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 143 ] || fail "a stopped run must exit 143, got $rc: $(cat "$out")"
+  grep -q "FM_TEST_ABORTED signal=15 run=$id" "$out" \
+    || fail "stopped run did not report FM_TEST_ABORTED: $(cat "$out")"
+  read -r script_pid sleep_pid <"$fix"
+  for p in "$script_pid" "$sleep_pid"; do
+    case $(ps -o stat= -p "$p" 2>/dev/null) in
+      ''|Z*) ;;
+      *) fail "TERM-ignoring process $p outlived the stopped run" ;;
+    esac
+  done
+  [ ! -e "$pid_dir/$id.pid" ] || fail "the stopped run left its registry record behind"
+  pass "--stop kills children that ignore TERM before the run exits"
+}
+
+# A child pid that exits during the grace and is reused by an unrelated process
+# must not be killed: abort_run only KILLs pids whose start identity is the one
+# it recorded. A stubbed ps reports a changed start time for the fixture's
+# TERM-ignoring sleep, standing in for that reuse.
+test_stop_spares_a_pid_whose_identity_changed() {
+  local tmp repo runner sleeper fakebin out fix pid id rc w script_pid sleep_pid
+  tmp=$(fm_test_tmproot fm-test-run-stop-reuse) || fail "could not create the fixture root"
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  sleeper=tests/fm-sleep-fixture.test.sh
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fakebin"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/$sleeper" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+sleep 60 &
+printf "%s %s\n" "$$" "$!" >"$TMPDIR/fixture.pid"
+wait
+EOF
+  # The first start-time read of the sleep is real; every later one differs.
+  cat >"$fakebin/ps" <<SH
+#!/usr/bin/env bash
+victim=
+[ -s "\$TMPDIR/fixture.pid" ] && read -r _ victim <"\$TMPDIR/fixture.pid"
+if [ -n "\$victim" ] && [ "\$*" = "-o lstart= -p \$victim" ]; then
+  if [ -e "\$TMPDIR/victim.seen" ]; then
+    echo "Thu Jan  1 00:00:00 1970"
+    exit 0
+  fi
+  : >"\$TMPDIR/victim.seen"
+fi
+exec $(command -v ps) "\$@"
+SH
+  chmod +x "$runner" "$repo/$sleeper" "$fakebin/ps"
+  out="$tmp/run.out"
+  fix="$tmp/fixture.pid"
+  PATH="$fakebin:$PATH" TMPDIR="$tmp" "$runner" "$sleeper" >"$out" 2>&1 &
+  pid=$!
+  w=0
+  while [ ! -s "$fix" ] && [ "$w" -lt 100 ]; do
+    sleep 0.1
+    w=$((w + 1))
+  done
+  [ -s "$fix" ] || fail "the fixture script never started"
+  read -r script_pid sleep_pid <"$fix"
+  id=$(TMPDIR="$tmp" "$runner" --stop | awk -v p="pid=$pid" '$2 == p {print $1}')
+  [ -n "$id" ] || fail "--stop did not list the live run"
+  TMPDIR="$tmp" "$runner" --stop "$id" >/dev/null || fail "--stop <run> failed"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 143 ] || fail "a stopped run must exit 143, got $rc: $(cat "$out")"
+  grep -q "FM_TEST_ABORTED signal=15 run=$id" "$out" \
+    || fail "stopped run did not report FM_TEST_ABORTED: $(cat "$out")"
+  case $(ps -o stat= -p "$script_pid" 2>/dev/null) in
+    ''|Z*) ;;
+    *) fail "the TERM-ignoring script $script_pid with an unchanged identity outlived the stopped run" ;;
+  esac
+  rc=0
+  kill -0 "$sleep_pid" 2>/dev/null || rc=1
+  kill -KILL "$sleep_pid" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "abort_run killed pid $sleep_pid although its start identity changed"
+  pass "--stop does not KILL a pid whose start identity changed"
+}
+
+# A registry directory the caller does not exclusively own is refused, never
+# trusted: a planted record could otherwise aim --stop at an unrelated process.
+test_stop_refuses_an_unprivate_registry() {
+  local tmp runner out rc
+  tmp=$(fm_test_tmproot fm-test-run-stop-dir) || fail "could not create the fixture root"
+  runner="$ROOT/bin/fm-test-run.sh"
+  mkdir -m 755 "$tmp/fm-test-run-pids-$(id -u)"
+  rc=0
+  out=$(TMPDIR="$tmp" "$runner" --stop 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--stop must refuse a registry directory that is not mode 700"
+  case "$out" in *"refusing run registry"*) ;; *) fail "the refusal must name the registry: $out" ;; esac
+  pass "--stop refuses a run registry that is not private to the caller"
+}
+
+# Native Windows Bash cannot read process identity, so a run there registers
+# nothing and works as before, and --stop refuses instead of guessing.
+test_windows_bash_skips_run_registration() {
+  local tmp repo runner fakebin out rc form
+  tmp=$(fm_test_tmproot fm-test-run-stop-windows) || fail "could not create the fixture root"
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fakebin"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MINGW64_NT-10.0
+SH
+  cat >"$repo/tests/fm-ok-fixture.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - ran"
+SH
+  chmod +x "$runner" "$fakebin/uname" "$repo/tests/fm-ok-fixture.test.sh"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" TMPDIR="$tmp" "$runner" tests/fm-ok-fixture.test.sh 2>&1) || rc=$?
+  expect_code 0 "$rc" "a run on native Windows Bash"
+  assert_contains "$out" "FM_TEST_SUMMARY total=1 failed=0" "the run on native Windows Bash did not complete"
+  [ ! -e "$tmp/fm-test-run-pids-$(id -u)" ] || fail "a run on native Windows Bash must not create a run registry"
+  for form in --stop "--stop some-run" --stop=some-run; do
+    rc=0
+    # shellcheck disable=SC2086
+    out=$(PATH="$fakebin:$PATH" TMPDIR="$tmp" "$runner" $form 2>&1) || rc=$?
+    [ "$rc" -eq 1 ] || fail "$form must refuse on native Windows Bash, got $rc: $out"
+    case "$out" in *"unsupported on native Windows Bash"*) ;; *) fail "$form refusal must say why: $out" ;; esac
+  done
+  pass "native Windows Bash runs without a registry and --stop refuses"
+}
+
 # --max-wall-ms is checked after the run, so it cannot end a run that never
 # finishes. A hung script has to become a bounded failure, because an unbounded
 # suite is exactly what silently outruns its caller's invocation budget.
@@ -1932,6 +2208,12 @@ test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
 test_changed_t3_sources_select_their_readers
 test_concurrent_runs_are_ordered_longest_first
+test_stop_is_scoped_to_one_run
+test_stop_refuses_an_unprivate_registry
+test_windows_bash_skips_run_registration
+test_term_to_runner_aborts_a_hung_suite
+test_stop_kills_term_ignoring_children
+test_stop_spares_a_pid_whose_identity_changed
 test_per_script_timeout_bounds_a_hang
 test_changed_bound_gives_slow_watcher_suites_headroom
 test_max_wall_ms_is_a_result_not_advice

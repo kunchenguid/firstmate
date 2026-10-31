@@ -28,6 +28,18 @@
 # Aggregation (no suite execution):
 #   fm-test-run.sh --aggregate-json <out.json> <lane.json> [more lane.json...]
 #
+# Scoped stop (kills only that run and its descendants, never sibling suites):
+#   fm-test-run.sh --stop [run-id]   (no run-id: list live runs; run-id: stop it)
+#   fm-test-run.sh --stop=<run-id>
+#   A run stopped by TERM or INT prints FM_TEST_ABORTED signal=<n> run=<id> and
+#   exits 128+n, so callers can tell an aborted run from a failed one.
+#   Runs register in a private per-user directory (mode 700, owned by the
+#   caller; any other directory is refused) keyed by pid plus process start
+#   time, so a reused pid is never signalled. A TERM sent straight to the
+#   runner aborts it the same way and stops the script now running.
+#   Native Windows Bash layers (MINGW/MSYS) cannot read process identity, so
+#   runs there are not registered and --stop refuses.
+#
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run. Each
 #                   script record carries its family, expected gate-skip class,
@@ -225,6 +237,89 @@ usage() {
     /^#/ { sub(/^# ?/, ""); print; next }
     { exit }
   ' "$0" >&2
+}
+
+PID_DIR="${TMPDIR:-/tmp}/fm-test-run-pids-$(id -u)"
+
+# Native Windows Bash layers report synthetic POSIX modes and have no `ps -o`.
+host_is_native_windows_bash() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Invoked by abort_run, which only the TERM/INT trap reaches.
+# shellcheck disable=SC2329
+descendants_of() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do
+    descendants_of "$c"
+    printf '%s\n' "$c"
+  done
+}
+
+# A pid names the same process only while its start time is unchanged.
+process_start_identity() {
+  LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'
+}
+
+# Registration lives in a directory only the caller can write: a pre-created
+# directory, a symlink, or another owner's directory could plant records that
+# make --stop signal an unrelated process.
+pid_dir_is_private() {
+  [ -d "$PID_DIR" ] && [ ! -L "$PID_DIR" ] && [ -O "$PID_DIR" ] \
+    && [ -z "$(find "$PID_DIR" -maxdepth 0 ! -perm 700 2>/dev/null)" ]
+}
+
+# Lists live runs (no argument) or stops exactly one run and its descendants.
+stop_runs() {
+  local want=${1:-} f id line pid start live=0
+  if host_is_native_windows_bash; then
+    printf 'fm-test-run: --stop is unsupported on native Windows Bash: process identity cannot be read\n' >&2
+    return 1
+  fi
+  if [ ! -e "$PID_DIR" ] && [ ! -L "$PID_DIR" ]; then
+    [ -n "$want" ] || { printf 'fm-test-run: no live runs\n' >&2; return 0; }
+    printf 'fm-test-run: no live run %s\n' "$want" >&2
+    return 1
+  fi
+  if ! pid_dir_is_private; then
+    printf 'fm-test-run: refusing run registry %s: it must be a real directory owned by you with mode 700\n' "$PID_DIR" >&2
+    return 1
+  fi
+  for f in "$PID_DIR"/*.pid; do
+    [ -f "$f" ] || continue
+    id=$(basename "$f" .pid)
+    line=$(cat "$f" 2>/dev/null)
+    pid=${line%% *}
+    start=${line#* }
+    case $(ps -o command= -p "$pid" 2>/dev/null) in
+      *fm-test-run.sh*) ;;
+      *) pid= ;;
+    esac
+    if [ -n "$pid" ] && { [ -z "$start" ] || [ "$(process_start_identity "$pid")" != "$start" ]; }; then
+      pid=
+    fi
+    if [ -z "$pid" ]; then
+      rm -f "$f"
+      continue
+    fi
+    live=$((live + 1))
+    if [ -z "$want" ]; then
+      printf '%s pid=%s\n' "$id" "$pid"
+    elif [ "$id" = "$want" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      printf 'fm-test-run: stopped %s\n' "$id"
+      return 0
+    fi
+  done
+  if [ -z "$want" ]; then
+    [ "$live" -gt 0 ] || printf 'fm-test-run: no live runs\n' >&2
+    return 0
+  fi
+  printf 'fm-test-run: no live run %s\n' "$want" >&2
+  return 1
 }
 
 die() {
@@ -2183,6 +2278,14 @@ while [ "$#" -gt 0 ]; do
       LIST_LANES=1
       shift
       ;;
+    --stop)
+      stop_runs "${2:-}"
+      exit $?
+      ;;
+    --stop=*)
+      stop_runs "${1#--stop=}"
+      exit $?
+      ;;
     --check-coverage)
       CHECK_COVERAGE=1
       shift
@@ -2514,11 +2617,64 @@ declare -a WORKER_SCRIPTS=()
 # shellcheck disable=SC2329
 cleanup_run() {
   rm -rf "$RUN_TMP"
+  rm -f "${PID_FILE:-}" "${PID_FILE:-}.tmp"
 }
 
-trap cleanup_run EXIT
-
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
+PID_FILE="$PID_DIR/$RUN_ID.pid"
+
+# Invoked indirectly by the TERM/INT trap below.
+# shellcheck disable=SC2329
+abort_run() {
+  local sig=$1 p pids ids='' live w=0
+  trap - TERM INT
+  pids=$(descendants_of "$$")
+  # Each child's start identity is taken before any signal, so a pid that exits
+  # and is reused by an unrelated process is never mistaken for a survivor.
+  for p in $pids; do
+    ids="$ids$p $(process_start_identity "$p")
+"
+  done
+  for p in $pids; do
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  # Children that ignore TERM get a short grace, then KILL, so none outlive the
+  # record that would let --stop find them again.
+  while :; do
+    live=
+    for p in $pids; do
+      case $(ps -o stat= -p "$p" 2>/dev/null) in
+        ''|Z*) ;;
+        *) live="$live $p" ;;
+      esac
+    done
+    pids=$live
+    [ -n "$live" ] && [ "$w" -lt 20 ] || break
+    sleep 0.1
+    w=$((w + 1))
+  done
+  for p in $live; do
+    printf '%s' "$ids" | grep -Fxq "$p $(process_start_identity "$p")" || continue
+    kill -KILL "$p" 2>/dev/null || true
+  done
+  printf 'FM_TEST_ABORTED signal=%s run=%s\n' "$sig" "$RUN_ID"
+  exit $((128 + sig))
+}
+
+# The traps are live before the record is published, so a --stop that finds the
+# record always reaches a runner that can clean up after itself.
+trap cleanup_run EXIT
+trap 'abort_run 15' TERM
+trap 'abort_run 2' INT
+if ! host_is_native_windows_bash; then
+  (umask 077 && mkdir -p "$PID_DIR") 2>/dev/null
+  pid_dir_is_private \
+    || die "refusing run registry $PID_DIR: it must be a real directory owned by you with mode 700"
+  # The record is written whole and renamed into place, so a concurrent --stop
+  # never reads a partial record and discards a live run as stale.
+  printf '%s %s\n' "$$" "$(process_start_identity "$$")" >"$PID_FILE.tmp"
+  mv "$PID_FILE.tmp" "$PID_FILE"
+fi
 TOTAL=0
 FAILED=0
 SKIPPED_GATE=0
@@ -2650,8 +2806,12 @@ run_one_serial() {
     "$begin_iso" "$script" "$family" "$expected"
 
   set +e
-  # Stream live output while retaining a copy for gate-skip detection.
-  run_script_bounded "$script" "$out" 1 "s$TOTAL"
+  # Stream live output while retaining a copy for gate-skip detection. Bash
+  # defers a trap until a foreground child exits, so the script runs in the
+  # background (keeping the caller's stdin) behind a wait a TERM or INT
+  # interrupts, which lets abort_run stop a hung script promptly.
+  run_script_bounded "$script" "$out" 1 "s$TOTAL" <&0 &
+  wait "$!"
   rc=$?
   set -e
   : "${rc:=1}"
@@ -2679,10 +2839,7 @@ else
   active_workers=0
 
   worker_root_mode_is_enforceable() {
-    case "$(uname -s)" in
-      MINGW*|MSYS*) return 1 ;;
-      *) return 0 ;;
-    esac
+    ! host_is_native_windows_bash
   }
 
   wait_one_job_worker() {
