@@ -2659,6 +2659,22 @@ pause_state_class() {  # <window> <task>
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
   recheck_file="$STATE/.paused-rechecked-$key"
+  if status_is_paused_or_captain_held "$last"; then
+    local mtime now age until undated_max
+    mtime=$(stat_mtime "$statusf"); now=$(date +%s)
+    case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
+    age=$(( now - mtime ))
+    if until=$(status_paused_until "$last"); then
+      [ "$now" -gt "$(( until + PAUSE_RESURFACE_SECS ))" ] && { printf 'paused'; return; }
+    else
+      undated_max=$PAUSE_UNDATED_MAX_SECS
+      case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
+      [ "$age" -gt "$undated_max" ] && { printf 'paused'; return; }
+    fi
+    if status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task"; then
+      fm_wake_status_append_self_announced "$STATE" "$statusf" "resolved [key=paused-overdue-$task]: worker pause changed" || [ "$?" -eq 1 ] || exit 1
+    fi
+  fi
   if ! status_is_paused_or_captain_held "$last"; then
     if status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task"; then
       fm_wake_status_append_self_announced "$STATE" "$statusf" "resolved [key=paused-overdue-$task]: worker resumed" || [ "$?" -eq 1 ] || exit 1
@@ -2685,25 +2701,8 @@ pause_state_class() {  # <window> <task>
   fi
   class=$(crew_absorb_class "$task")
   if [ "$class" = working ]; then
-    local statusf mtime now age until undated_max
-    statusf="$STATE/$task.status"
-    mtime=$(stat_mtime "$statusf"); now=$(date +%s)
-    case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
-    age=$(( now - mtime ))
-    if until=$(status_paused_until "$last"); then
-      [ "$now" -gt "$(( until + PAUSE_RESURFACE_SECS ))" ] && class=paused
-    else
-      undated_max=$PAUSE_UNDATED_MAX_SECS
-      case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
-      [ "$age" -gt "$undated_max" ] && class=paused
-    fi
-    if [ "$class" = working ]; then
-      rm -f "$recheck_file"
-      printf 'working'
-      return
-    fi
-    date +%s > "$recheck_file"
-    printf 'paused'
+    rm -f "$recheck_file"
+    printf 'working'
     return
   fi
   if [ "$kind" != secondmate ]; then
