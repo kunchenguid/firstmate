@@ -178,7 +178,8 @@ Healthy supervision does not prove work is moving: a dead worker's row can stay 
 Wherever the guard would otherwise let a turn end, it runs `bin/fm-progress-sweep.sh`, which owns which of this home's backlog items are orphaned, meaning idle with no typed reason.
 When any exist, the guard refuses that turn end with a `TURN WOULD END IDLE` banner naming each item and its reason.
 A blind turn still gets the blind banner first, because the idle check runs only on the paths that would allow the stop.
-The same bounded one-forced-follow-up rule applies: Codex and Grok allow a `stop_hook_active` stop, the passive adapters allow their own follow-up's stop, and `--claude` keeps a per-session marker so the stop after an idle refusal always ends.
+The same bounded one-forced-follow-up rule applies: Codex and Grok allow a `stop_hook_active` stop, the passive adapters allow their own follow-up's stop, and `--claude` keeps a per-session marker so that session's next stop after an idle refusal always ends.
+A read-only session, whose home lock a different live session owns, is never refused for idle items.
 An absent, failing, or slow sweep lets the turn end, so this refusal can never wedge a session; the watcher heartbeat queues a sweep failure as its own wake instead.
 The banner's clearing actions never include `--force`: a teardown or merge refusal needs the captain's word and becomes a captain hold.
 

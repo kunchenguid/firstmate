@@ -166,11 +166,12 @@ test_sweep_finished_and_unanswered_live_workers() {
   out=$(run_sweep "$home" FM_FAKE_LIVE_PANES="%70 %71 %72 %73" \
     "FM_FAKE_CREW_STATE_landable=state: done · source: status-log · ready" \
     "FM_FAKE_CREW_STATE_approval=state: done · source: status-log · ready" \
-    "FM_FAKE_CREW_STATE_asking=state: blocked · source: status-log · asked") || fail "sweep failed: $out"
+    "FM_FAKE_CREW_STATE_asking=state: blocked · source: status-log · asked" \
+    "FM_FAKE_CREW_STATE_idle=state: working · source: status-log · reading") || fail "sweep failed: $out"
   assert_equals "orphan ready-to-land" "$(row_of "$out" landable)" "finished work within merge authority is an orphan"
   assert_equals "orphan finished-needs-landing-call" "$(row_of "$out" approval)" "finished work needing the captain's word is an orphan until held"
   assert_equals "orphan terminal-needs-decision" "$(row_of "$out" asking)" "an unanswered decision past grace is an orphan"
-  assert_equals "progressing idle-watched" "$(row_of "$out" idle)" "a live idle worker on a nonterminal event stays with stale supervision"
+  assert_equals "progressing idle-watched" "$(row_of "$out" idle)" "a live idle worker whose working comes only from the status log is not working"
   pass "sweep: finished and unanswered work with a live worker is orphaned"
 }
 
@@ -192,6 +193,34 @@ test_sweep_queued_and_out_of_scope_rows() {
   out=$(run_sweep "$TMP_ROOT/no-such-home") || fail "sweep must succeed silently for a home with no data"
   assert_equals "" "$out" "a home with no data directory has no rows"
   pass "sweep: Queued orphans, held and secondmate rows, and a missing task record"
+}
+
+# tasks-axi `ready` also prints delivery-ready public-followup obligations as a
+# second table, ready_public_followups, which tasks-axi documents as never
+# dispatchable. This wraps the real tasks-axi to add one such row in that
+# documented shape, so only the sweep's reading of it is under test.
+test_sweep_ignores_ready_public_followups() {
+  local home out
+  home=$(make_home pred-followups)
+  mkdir -p "$home/bin"
+  cp -R "$ROOT/bin/." "$home/bin/"
+  mv "$home/bin/fm-tasks-axi.sh" "$home/bin/fm-tasks-axi-real.sh"
+  cat > "$home/bin/fm-tasks-axi.sh" <<'SH'
+#!/usr/bin/env bash
+"${0%/*}/fm-tasks-axi-real.sh" "$@" || exit
+if [ "${1:-}" = ready ]; then
+  printf 'ready_public_followups[1]{id,state,kind,repo,title,delivery_state}:\n'
+  printf '  pf-owed,queued,public-followup,demo,Reply owed on the thread,ready\n'
+fi
+SH
+  chmod +x "$home/bin/fm-tasks-axi.sh"
+  axi "$home" add next-unit "Next unit" --repo demo
+  out=$(env PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" "$home/bin/fm-progress-sweep.sh" --all) \
+    || fail "sweep failed: $out"
+  assert_equals "orphan queued-ready" "$(row_of "$out" next-unit)" "the dispatchable ready row is still an orphan"
+  assert_equals "" "$(row_of "$out" pf-owed)" "a never-dispatchable public-followup obligation is not a Queued row"
+  pass "sweep: ready public-followup obligations are not read as dispatchable rows"
 }
 
 # --- watcher heartbeat --------------------------------------------------------
@@ -387,6 +416,50 @@ test_guard_claude_mode_bounds_idle_followup() {
   pass "turn-end guard: Claude allows exactly one forced idle follow-up per turn"
 }
 
+test_guard_claude_idle_followup_is_per_session() {
+  local home out status a b
+  home=$(make_guard_home guard-claude-two)
+  seed_oct31 "$home"
+  arm_fake_watcher "$home"
+  a='{"stop_hook_active":true,"session_id":"sess-a"}'
+  b='{"stop_hook_active":true,"session_id":"sess-b"}'
+  out=$(run_guard "$home" "$a" --claude); status=$?
+  expect_code 2 "$status" "session A's idle stop must be refused"
+  out=$(run_guard "$home" "$b" --claude); status=$?
+  expect_code 2 "$status" "session B's idle stop must be refused"
+  out=$(run_guard "$home" "$a" --claude); status=$?
+  expect_code 0 "$status" "session A's follow-up must end even after B was refused: $out"
+  out=$(run_guard "$home" "$b" --claude); status=$?
+  expect_code 0 "$status" "session B's follow-up must end even after A ended: $out"
+  out=$(run_guard "$home" "$a" --claude); status=$?
+  expect_code 2 "$status" "a later idle stop must be refused again"
+  reap "$GUARD_WATCHER_PID"
+  out=$(run_guard "$home" "$a" --claude); status=$?
+  assert_contains "$out" "TURN WOULD END BLIND" "a follow-up that finds supervision down gets the blind refusal"
+  arm_fake_watcher "$home"
+  out=$(run_guard "$home" "$a" --claude); status=$?
+  reap "$GUARD_WATCHER_PID"
+  expect_code 2 "$status" "a follow-up that took the blind path must not let the next idle stop pass unswept"
+  assert_contains "$out" "TURN WOULD END IDLE" "the next idle stop must carry the IDLE banner"
+  pass "turn-end guard: each Claude session gets its own one forced idle follow-up"
+}
+
+test_guard_readonly_session_not_refused_idle() {
+  local home out status owner
+  home=$(make_guard_home guard-readonly)
+  seed_oct31 "$home"
+  arm_fake_watcher "$home"
+  bash -c 'exec -a claude sleep 120' &
+  owner=$!
+  printf '%s\n' "$owner" > "$home/state/.lock"
+  out=$(run_guard "$home" '{"stop_hook_active":false}'); status=$?
+  reap "$owner"
+  reap "$GUARD_WATCHER_PID"
+  expect_code 0 "$status" "a session whose home lock another live session owns is read-only and must not be refused: $out"
+  assert_not_contains "$out" "TURN WOULD END IDLE" "a read-only session must not be told to dispatch or land"
+  pass "turn-end guard: a read-only second session is never refused for idle items"
+}
+
 test_pi_adapter_relays_idle_banner_unframed() {
   local repo ext out status
   repo="$TMP_ROOT/pi-idle-root"
@@ -430,6 +503,7 @@ fm_test_run \
   test_sweep_grace_and_live_worker_reasons \
   test_sweep_finished_and_unanswered_live_workers \
   test_sweep_queued_and_out_of_scope_rows \
+  test_sweep_ignores_ready_public_followups \
   test_heartbeat_wakes_on_oct31_orphan \
   test_heartbeat_requeue_skips_unacknowledged_orphan \
   test_heartbeat_absorbs_paused_held_blocked_rows \
@@ -437,4 +511,6 @@ fm_test_run \
   test_guard_silent_for_paused_held_blocked_rows \
   test_guard_refuses_idle_with_nothing_in_flight \
   test_guard_claude_mode_bounds_idle_followup \
+  test_guard_claude_idle_followup_is_per_session \
+  test_guard_readonly_session_not_refused_idle \
   test_pi_adapter_relays_idle_banner_unframed

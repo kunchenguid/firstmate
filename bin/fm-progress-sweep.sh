@@ -33,8 +33,9 @@
 #   grace           under FM_PROGRESS_GRACE_SECS (default 600) since the newest
 #                   of the status log, the task record, or a steering-inbox
 #                   message - so a just-answered worker has time to restart
-#   working         bin/fm-crew-state.sh reports the worker working
-#   paused          bin/fm-crew-state.sh reports a declared paused wait
+#   working         bin/fm-crew-state.sh reports the worker working from a
+#                   run step or the pane (never from the status log alone)
+#   paused          bin/fm-crew-state.sh reports a paused run step or pane
 #   idle-watched    a live, idle worker whose latest event is not terminal;
 #                   stale-pane supervision in bin/fm-watch.sh owns that one
 # Orphan reasons for an In-flight row, past every typed reason above:
@@ -128,14 +129,20 @@ newest_anchor_age() {  # <id>
 }
 
 # The current-state verb from bin/fm-crew-state.sh, or unknown. Only the
-# leading `state: <verb>` token is read; the detail prose never is.
+# leading `state: <verb> · source: <source>` tokens are read; the detail prose
+# never is. working and paused count only from a live source (run-step or
+# pane): a status-log working or paused is the last event, not the current
+# state.
 crew_state_verb() {  # <id>
-  local line verb
+  local line verb src
   line=$(FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 "${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}" "$1" 2>/dev/null) || true
   case "$line" in state:\ *) ;; *) printf 'unknown\n'; return ;; esac
   verb=${line#state: }; verb=${verb%% *}
-  case "$verb" in
-    working|parked|done|blocked|paused|failed|unknown) printf '%s\n' "$verb" ;;
+  src=${line#* · source: }; src=${src%% *}
+  case "$verb:$src" in
+    working:run-step|working:pane|paused:run-step|paused:pane) printf '%s\n' "$verb" ;;
+    working:*|paused:*) printf 'unknown\n' ;;
+    parked:*|done:*|blocked:*|failed:*|unknown:*) printf '%s\n' "$verb" ;;
     *) printf 'unknown\n' ;;
   esac
 }
@@ -149,12 +156,13 @@ endpoint_alive() {  # <meta>
   fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1
 }
 
-# Read rows from a tasks-axi listing. Prints `<id>\t<kind>\t<repo>\t<tail...>`
-# where <tail> is the last <n> comma-separated fields; the title in between is
-# never read.
-listing_rows() {  # <tail-field-count>
-  awk -v n="$1" '
-    /^[a-z_]+\[[0-9]+\]\{/ { inrows = 1; next }
+# Read the rows of the one tasks-axi table labelled <label>; any other table in
+# the listing (such as `ready`'s never-dispatchable ready_public_followups) is
+# skipped. Prints `<id>\t<kind>\t<repo>\t<tail...>` where <tail> is the last
+# <n> comma-separated fields; the title in between is never read.
+listing_rows() {  # <label> <tail-field-count>
+  awk -v label="$1" -v n="$2" '
+    index($0, label "[") == 1 { inrows = 1; next }
     inrows && /^  [^ ]/ {
       line = substr($0, 3)
       c = split(line, f, ",")
@@ -230,7 +238,7 @@ while IFS=$'\t' read -r id kind _repo blocked held hold_kind; do
     continue
   fi
   emit progressing "$id" idle-watched
-done < <(printf '%s\n' "$inflight_out" | listing_rows 3)
+done < <(printf '%s\n' "$inflight_out" | listing_rows tasks 3)
 
 # --- Queued and dispatchable now ------------------------------------------------
 away_full=0
@@ -268,6 +276,6 @@ while IFS=$'\t' read -r id kind repo _title; do
   if [ "$away_full" -eq 1 ]; then emit progressing "$id" away-capacity-full; continue; fi
   if project_full "$repo"; then emit progressing "$id" project-capacity-full; continue; fi
   emit orphan "$id" queued-ready
-done < <(printf '%s\n' "$ready_out" | listing_rows 1)
+done < <(printf '%s\n' "$ready_out" | listing_rows ready 1)
 
 exit 0
