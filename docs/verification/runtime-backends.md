@@ -389,7 +389,7 @@ Any other read failure - a momentarily unresponsive server, or a teardown PATH w
 **The confirmed close is a separate contract**
 
 `fm_backend_kill_confirmed` closes the endpoint and then proves it is gone.
-It exists for exactly one caller: the capped-session release decision, which may only release a session's occupancy after its endpoint is confirmed absent.
+It exists for exactly one purpose: the capped-session release decision, which may only release a session's occupancy after its endpoint is confirmed absent.
 It is deliberately NOT the ordinary teardown path: a task that holds no capped occupancy keeps `fm_backend_kill`'s documented per-backend behavior, so no other task's teardown changes.
 
 | Backend | `fm_backend_kill_confirmed` proves absence by |
