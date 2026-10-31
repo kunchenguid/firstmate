@@ -1401,6 +1401,28 @@ test_overdue_resume_race_uses_block_line_offset() {
   pass "a resume racing the overdue marker write closes the decision after the watcher blocked line"
 }
 
+test_overdue_marker_survives_reconcile_and_closes_on_working() {
+  local dir state statusf
+  dir=$(paused_until_fixture overdue-marker-eof "" 90000); state="$dir/state"; statusf="$state/overdue-marker-eof.status"
+  printf 'paused: waiting for an external dependency\n' > "$statusf"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced() { printf "%s\n" "$3" >> "$2"; }
+    fm_wake_append() { :; }
+    wake() { :; }
+    resurface_absorbed test:fm-overdue "$STATE/.paused-resurfaced-overdue-marker-eof" 90000 overdue "" 0 "$2" \
+      "blocked [key=paused-overdue-overdue-marker-eof]: paused 90000s, wait overdue - decide or release" \
+      "$STATE/.paused-overdue-overdue-marker-eof"
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    printf "working: resumed\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 1 ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    grep -Fq "resolved [key=paused-overdue-overdue-marker-eof]" "$2"
+  ' _ "$WATCH" "$statusf" || fail "a freshly written overdue marker did not survive reconcile and close on working"
+  pass "a fresh overdue marker survives reconciliation and closes when the worker resumes"
+}
+
 test_undated_pause_overdue_bound() {
   local dir state statusf class
   dir=$(paused_until_fixture undated-overdue "" 30); state="$dir/state"; statusf="$state/until.status"
@@ -1575,6 +1597,7 @@ fm_test_run \
   test_paused_until_wrong_year_is_bounded_by_the_cadence \
   test_paused_until_that_passed_is_rechecked_before_the_cadence \
   test_overdue_resume_race_uses_block_line_offset \
+  test_overdue_marker_survives_reconcile_and_closes_on_working \
   test_undated_pause_overdue_bound \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
   test_paused_bg_job_until_timeout_rechecks_after_the_job_ends

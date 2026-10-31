@@ -1540,7 +1540,7 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
       END { if (found) print found; else exit 1 }
     ' "$statusf") || exit 1
     case "$size" in ''|*[!0-9]*) exit 1 ;; esac
-    printf '%s:%s' "$(stat_devino "$statusf")" "$size" > "$overdue_marker"
+    printf '%s:%s\n' "$(stat_devino "$statusf")" "$size" > "$overdue_marker"
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
@@ -2671,7 +2671,7 @@ pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || { rm -f "$marker"; return 1; }
   identity=$(stat_devino "$statusf") || return 0
-  IFS=: read -r marker_identity offset < "$marker" || { rm -f "$marker"; return 1; }
+  IFS=: read -r marker_identity offset < "$marker" || [ -n "$offset" ] || { rm -f "$marker"; return 1; }
   actual=$(_fm_status_file_size "$statusf") || return 0
   case "$offset:$actual" in *[!0-9:]*) rm -f "$marker"; return 1 ;; esac
   if [ "$identity" != "$marker_identity" ] || [ "$actual" -lt "$offset" ]; then
