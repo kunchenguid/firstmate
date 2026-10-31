@@ -554,6 +554,9 @@ use strict; use warnings;
 #         target:
 #           type: table-cell
 #
+# An empty array is written inline as `prompts: []` and reads as a complete
+# list of zero items.
+#
 # Only a column-zero header opens a block, and the block is the indented lines
 # that follow it. Every captain-supplied value is a single encoded line, so an
 # item or field boundary is only ever an indentation the encoder wrote: in list
@@ -687,6 +690,8 @@ sub lavish_result {
         ($form, $want, @fields) = ("table", $1, split /,/, $2);
       } elsif ($line =~ /^(?:$names)\[(\d+)\]:\s*$/) {
         ($form, $want) = ("list", $1);
+      } elsif ($line =~ /^(?:$names):\s*\[\]\s*$/) {
+        ($form, $want) = ("list", 0);
       } else {
         $form = "unrecognized";
         $want = $1 if $line =~ /^(?:$names)\[(\d+)\]/;
