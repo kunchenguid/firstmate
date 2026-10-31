@@ -243,6 +243,14 @@ case "${1:-} ${2:-}" in
     fi
     exit "$merge_rc"
     ;;
+  "repo view")
+    if [ -f "${FM_TEST_GH_PERMISSION:-}" ]; then
+      cat "$FM_TEST_GH_PERMISSION"
+    else
+      printf 'WRITE\n'
+    fi
+    exit 0
+    ;;
   "api graphql")
     if [ -f "${FM_TEST_GH_GRAPHQL_FAIL:-}" ]; then
       echo 'error: could not reach the GitHub API' >&2
@@ -674,6 +682,7 @@ run_pr_merge() {
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
+  FM_TEST_GH_PERMISSION="$case_dir/github-permission" \
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
   FM_TEST_GH_RULES_FAIL_BODY="$case_dir/github-rules-fail-body" \
   FM_TEST_GH_BRANCH="$case_dir/github-branch.json" \
@@ -1312,6 +1321,60 @@ test_away_plan_gated_403_does_not_block_the_merge() {
     || fail "away-plan-gated-403: a private repo's plan-gated 403 must not block an away merge"
   assert_logged_gh_merge "$case_dir" 91 example/repo --squash
   pass "away merge proceeds on a plan-gated 403 because that repository cannot have a merge queue"
+}
+
+test_away_merge_requires_repository_merge_permission() {
+  local case_dir rc head permission
+  head=abababababababababababababababababababab
+  for permission in READ TRIAGE ''; do
+    case_dir=$(make_case "away-permission-${permission:-unreadable}")
+    mkdir -p "$case_dir/wt" "$case_dir/home"
+    add_gh_mocks "$case_dir" "$head"
+    printf '%s' "$permission" > "$case_dir/github-permission"
+    write_away_record "$case_dir" --words 'good night finish the merges'
+    set +e
+    FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 \
+      https://github.com/example/repo/pull/93 > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 2 "$rc" "away-permission-${permission:-unreadable}: the merge must be refused"
+    assert_grep 'repo view example/repo --json viewerPermission' "$case_dir/gh.log" \
+      "away-permission-${permission:-unreadable}: the repository permission was not read"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "away-permission-${permission:-unreadable}: gh pr merge ran without merge permission"
+    assert_grep 'nothing was handed to the forge' "$case_dir/stderr" \
+      "away-permission-${permission:-unreadable}: the refusal did not say nothing was merged"
+  done
+  assert_grep 'permission on example/repo is TRIAGE, which cannot merge' \
+    "$TMP_ROOT/away-permission-TRIAGE/stderr" \
+    "away-permission-TRIAGE: the refusal did not name the permission"
+  assert_grep 'permission on example/repo could not be read' \
+    "$TMP_ROOT/away-permission-unreadable/stderr" \
+    "away-permission-unreadable: the refusal did not say the permission was unreadable"
+
+  for permission in WRITE MAINTAIN ADMIN; do
+    case_dir=$(make_case "away-permission-$permission")
+    mkdir -p "$case_dir/wt" "$case_dir/home"
+    add_gh_mocks "$case_dir" "$head"
+    printf '%s\n' "$permission" > "$case_dir/github-permission"
+    write_away_record "$case_dir" --words 'good night finish the merges'
+    FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 \
+      https://github.com/example/repo/pull/93 > "$case_dir/stdout" 2> "$case_dir/stderr" \
+      || fail "away-permission-$permission: the merge was refused: $(cat "$case_dir/stderr")"
+    assert_logged_gh_merge "$case_dir" 93 example/repo --squash
+  done
+
+  case_dir=$(make_case attended-permission-READ)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'READ\n' > "$case_dir/github-permission"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/93 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "attended-permission-READ: the attended merge changed behavior: $(cat "$case_dir/stderr")"
+  assert_no_grep 'repo view' "$case_dir/gh.log" \
+    "attended-permission-READ: an attended merge read the repository permission"
+  assert_logged_gh_merge "$case_dir" 93 example/repo --squash
+  pass "an away merge reaches GitHub only when this account can merge in the repository, and attended merges are unchanged"
 }
 
 test_github_no_queue_rule_says_nothing_about_a_queue() {
@@ -4600,6 +4663,7 @@ test_away_branch_actor_merges_green_under_the_record
 test_away_branch_refuses_when_record_archived_during_preflight
 test_away_posture_refuses_asynchronous_merge_paths
 test_away_plan_gated_403_does_not_block_the_merge
+test_away_merge_requires_repository_merge_permission
 test_away_record_does_not_bypass_red_or_identity
 test_unreadable_away_record_refuses_merge
 test_away_record_cannot_change_between_the_authority_read_and_the_merge
