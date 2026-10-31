@@ -2469,7 +2469,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
       return 0
-    elif [ "$now" -ge "$(( until + PAUSE_RESURFACE_SECS ))" ]; then
+    elif [ "$now" -gt "$(( until + PAUSE_RESURFACE_SECS ))" ]; then
       detail="paused, wait overdue"
       reason="paused ${age}s, wait overdue - decide or release"
       declaration="$declaration:overdue"
@@ -2488,7 +2488,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   else
     local undated_max=$PAUSE_UNDATED_MAX_SECS
     case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
-    if [ "$age" -ge "$undated_max" ]; then
+    if [ "$age" -gt "$undated_max" ]; then
       detail="paused, wait overdue"
       reason="paused ${age}s, wait overdue - decide or release"
       declaration="$declaration:overdue"
