@@ -1374,6 +1374,33 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+test_overdue_resume_race_uses_block_line_offset() {
+  local dir state statusf
+  dir=$(paused_until_fixture overdue-resume-race "" 90000); state="$dir/state"; statusf="$state/overdue-resume-race.status"
+  printf 'paused: waiting for an external dependency\n' > "$statusf"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" TEST_STATUS="$statusf" bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced() { printf "%s\\n" "$3" >> "$2"; }
+    fm_wake_append() { :; }
+    wake() { :; }
+    awk() {
+      local arg
+      for arg in "$@"; do
+        case "$arg" in target=*) printf "working: resumed\\n" >> "$TEST_STATUS"; break ;; esac
+      done
+      command awk "$@"
+    }
+    resurface_absorbed test:fm-until "$STATE/.paused-resurfaced-overdue-resume-race" 0 overdue "" 0 "$TEST_STATUS" \
+      "blocked [key=paused-overdue-overdue-resume-race]: paused 90000s, wait overdue - decide or release" \
+      "$STATE/.paused-overdue-overdue-resume-race"
+    pause_overdue_reconcile overdue-resume-race "$TEST_STATUS"
+    [ "$?" -eq 1 ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-overdue-resume-race" ] || exit 1
+    grep -Fq "resolved [key=paused-overdue-overdue-resume-race]" "$TEST_STATUS"
+  ' _ "$WATCH" || fail "a resume appended just after the blocked line was not closed using the recorded byte boundary"
+  pass "a resume racing the overdue marker write closes the decision after the watcher blocked line"
+}
+
 test_undated_pause_overdue_bound() {
   local dir state statusf class
   dir=$(paused_until_fixture undated-overdue "" 30); state="$dir/state"; statusf="$state/until.status"
@@ -1396,6 +1423,11 @@ test_undated_pause_overdue_bound() {
   [ "$class" = paused ] || fail "unchanged overdue pause did not stay classified as paused: $class"
   [ ! -e "$dir/open-fold-called" ] || fail "unchanged overdue poll folded the full status log"
   ack_stopped_cycle "$state" || fail "could not acknowledge the overdue undated wake"
+
+  printf 'resolved [key=unrelated]: another decision closed\n' >> "$statusf"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; pause_overdue_reconcile until "$2"; printf "%s" "$?"' _ "$WATCH" "$statusf")
+  [ "$class" = 0 ] || fail "an unrelated resolved key cleared the overdue pause decision"
+  grep -Fq 'paused-overdue-until' < <(status_open_decisions "$statusf") || fail "the overdue decision closed on an unrelated resolution"
 
   printf 'working: resumed\n' >> "$statusf"
   until_watch "$dir" 240
@@ -1542,6 +1574,7 @@ fm_test_run \
   test_paused_until_near_future_is_quiet_before_the_cadence \
   test_paused_until_wrong_year_is_bounded_by_the_cadence \
   test_paused_until_that_passed_is_rechecked_before_the_cadence \
+  test_overdue_resume_race_uses_block_line_offset \
   test_undated_pause_overdue_bound \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
   test_paused_bg_job_until_timeout_rechecks_after_the_job_ends
