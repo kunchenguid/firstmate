@@ -8,7 +8,8 @@
 # sourced by both the sending parent (bin/fm-remote-home-seed.sh) and the
 # receiving host (bin/fm-remote-home-provision.sh), so an unsafe value is
 # refused at each end rather than trusted because the other end already looked
-# at it.
+# at it. The local seed path (bin/fm-home-seed.sh) applies the same check to
+# the origin it reads from a clone's own config before cloning it.
 #
 # Validation is STRUCTURE AND SAFETY ONLY, never the forge or the domain.
 # Firstmate is a shared template, so any host must be able to serve a project:
