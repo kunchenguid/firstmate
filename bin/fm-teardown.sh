@@ -44,7 +44,9 @@
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
+# upstream-contribution PRs pushed to a fork satisfy this in any mode), after
+# refresh_remote_refs has updated those refs from each remote when the local ones
+# do not show the work, OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
@@ -2107,6 +2109,38 @@ teardown_note_dirty_return() {
   printf '%s\n' "$residue" | sed 's/^/  /' >&2
 }
 
+# A worker may have pushed from another checkout, so tracking refs that do not
+# show the work prove nothing until they are refreshed. Runs at most once per
+# teardown. Each fetch is bounded and non-interactive, and --no-prune keeps a
+# branch a remote has dropped visible, whatever fetch.prune says. The explicit
+# refspec covers every branch even when a clone tracks only some of them. A failed
+# fetch only leaves the last-known refs in place, so the unchanged checks below
+# still refuse work those refs do not show; REMOTE_REFRESH_FAILED names it for the
+# refusal. The no-mistakes gate is skipped: it is a local validation copy, and
+# fetching it would count work as landed that no real remote holds.
+FETCH_TIMEOUT=${FM_TEARDOWN_FETCH_TIMEOUT:-30}
+case "$FETCH_TIMEOUT" in ''|0*|*[!0-9]*) FETCH_TIMEOUT=30 ;; esac
+REMOTE_REFS_REFRESHED=0
+REMOTE_REFRESH_FAILED=
+refresh_remote_refs() {
+  local remote
+  [ "$REMOTE_REFS_REFRESHED" = 0 ] || return 0
+  REMOTE_REFS_REFRESHED=1
+  while IFS= read -r remote; do
+    case "$remote" in ''|no-mistakes) continue ;; esac
+    GIT_TERMINAL_PROMPT=0 fm_run_timed "$FETCH_TIMEOUT" git -C "$WT" fetch --quiet --no-prune --no-tags --no-recurse-submodules \
+      "$remote" "+refs/heads/*:refs/remotes/$remote/*" </dev/null >/dev/null 2>&1 \
+      || REMOTE_REFRESH_FAILED="$REMOTE_REFRESH_FAILED${REMOTE_REFRESH_FAILED:+, }$remote"
+  done <<EOF
+$(git -C "$WT" remote 2>/dev/null)
+EOF
+}
+
+report_remote_refresh_failure() {
+  [ -n "$REMOTE_REFRESH_FAILED" ] || return 0
+  echo "Could not refresh remote: $REMOTE_REFRESH_FAILED. This verdict used the last-known refs, so the work may be there; retry once the remote is reachable." >&2
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -2133,6 +2167,18 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
+  # Dirty work refuses either way, so only a clean copy is worth the network.
+  if [ -n "$unpushed_raw" ] && [ -z "$dirty" ] && [ "$REMOTE_REFS_REFRESHED" = 0 ]; then
+    refresh_remote_refs
+    if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+      if worktree_safety_blocked_by_lock "commits not on a remote"; then
+        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+      fi
+      echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
+      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
@@ -2150,6 +2196,7 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && report_worktree_dirt "$dirty"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+      report_remote_refresh_failure
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
@@ -2172,6 +2219,7 @@ validate_worktree_teardown_safety() {
         echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       fi
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      report_remote_refresh_failure
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
