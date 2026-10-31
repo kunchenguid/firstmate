@@ -387,7 +387,8 @@
 #   Spawn refuses an unsafe pre-existing task temp root or launch namespace, and
 #   task teardown removes only the current home's launch namespace.
 # Launch environment (config/launch-env-allowlist):
-#   Absent means unchanged ambient inheritance. A present readable regular file
+#   Absent disables this filter; launch assignments and trace-context handling
+#   below still apply. A present readable regular file
 #   opts every supported command-line launch (ship, scout, secondmate, raw
 #   command, and relaunch) into /usr/bin/env -i followed by /bin/sh -c of the
 #   existing launch command. T3 Code refuses the file because T3 owns the
@@ -707,9 +708,9 @@
 # consumers can distinguish a replacement worker that reuses the same task id.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
-# one W3C traceparent= carrier, the same value injected into the pane as
-# TRACEPARENT; the default-off path writes neither, leaving the generated meta
-# and launch environment unchanged.
+# one W3C traceparent= carrier, the same value delivered to the worker as
+# TRACEPARENT; the default-off path records no carrier. Backend-specific
+# suppression of inherited TRACEPARENT is described in docs/trace-context.md.
 #   --traceparent <carrier> delivers a carrier that a REMOTE parent already
 #   resolved and will record, instead of resolving one from this home's frozen
 #   decision. It is accepted only for --secondmate spawns, only as a strictly
@@ -7335,7 +7336,7 @@ fi
 # raw launch expression. A pane that never had it, and a remote host whose
 # transport never carried it, both still start the agent with it set. It is
 # unconditional, with no config file or flag gating it, and is inserted outside
-# every generated launch prefix; relaunch trace cleanup may execute first but
+# every generated launch prefix; trace cleanup may execute first but
 # cannot change this value. The cleared-environment floor in the
 # LAUNCH_ENV_PREFIX construction below sets it again at the `env -i` boundary,
 # so under an enabled allowlist the switch is established before the wrapping
@@ -7359,9 +7360,6 @@ LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 # value being set here so ordinary spawns are unchanged.
 if [ -n "${DISABLE_AUTOUPDATER:-}" ]; then
   LAUNCH="export DISABLE_AUTOUPDATER=$(shell_quote "$DISABLE_AUTOUPDATER"); $LAUNCH"
-fi
-if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
-  LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
 
 spawn_record_traceparent() {
@@ -7408,6 +7406,8 @@ if [ "$BACKEND" = t3code ]; then
   fi
   if [ -n "$SPAWN_TRACEPARENT" ] && spawn_record_traceparent; then
     T3CODE_ENV+=("TRACEPARENT=$SPAWN_TRACEPARENT")
+  else
+    T3CODE_ENV+=(TRACEPARENT=)
   fi
   if [ "$KIND" = secondmate ]; then
     # The secondmate launch prefix above, value for value, plus the supervisor
@@ -7447,8 +7447,11 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
 fi
 # Send through the exact pane channel that already ships GOTMPDIR, so every pane
-# backend and harness - ship, scout, and secondmate - gets it before launch. Skipped
-# entirely when trace context is off.
+# backend and harness - ship, scout, and secondmate - gets it before launch. With trace
+# context on the carrier is exported first; with it off the launch command still
+# scrubs any inherited ambient TRACEPARENT (the same prefix the failed sends
+# below use), so the worker sees Firstmate's fresh carrier or none at all and
+# never a stale value the pane or daemon inherited at its own launch.
 if [ -n "$SPAWN_TRACEPARENT" ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
@@ -7462,6 +7465,8 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
+else
+  LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
