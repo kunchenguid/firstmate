@@ -2471,10 +2471,28 @@ clear_pause_tracking() {  # <window-key>
   clear_stale_hash_tracking "$key"
 }
 
+# A declared wait remains authoritative when the pane is live but its runtime
+# state is unreadable.  The exact idle/stopped verdicts keep their existing live
+# endpoint handling; only an unknown semantic verdict cannot contradict the
+# worker's own declaration.
+pause_runtime_unreadable() {  # <window> <task>
+  local win=$1 task=$2 meta verdict
+  meta="$STATE/$task.meta"
+  if [ -f "$meta" ]; then
+    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE")
+  else
+    verdict=$(fm_busy_classify "$(window_backend "$win")" "$win" "$(window_harness "$win")" \
+      "$task" "$STATE")
+  fi
+  case "$verdict" in unknown\ *) return 0 ;; esac
+  return 1
+}
+
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# After fm-crew-state has fallen back to stopped or unknown, paused classification is
-# recovered only for a confidently dead ordinary crew, or for a secondmate, whose
-# endpoint liveness this function deliberately never reads.
+# After fm-crew-state has fallen back to stopped, paused classification is
+# recovered for a confidently dead ordinary crew, a live crew whose semantic
+# pane state is unreadable, or a secondmate, whose endpoint liveness this
+# function deliberately never reads.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive kind
   key=$(window_key "$win")
@@ -2492,7 +2510,7 @@ pause_state_class() {  # <window> <task>
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
+      if [ "$agent_alive" != dead ] && ! pause_runtime_unreadable "$win" "$task"; then
         rm -f "$recheck_file"
         printf 'none'
         return
@@ -2509,16 +2527,16 @@ pause_state_class() {  # <window> <task>
   fi
   if [ "$kind" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
+    if [ "$agent_alive" != dead ] && ! pause_runtime_unreadable "$win" "$task"; then
       rm -f "$recheck_file"
       printf 'none'
       return
     fi
   fi
   # Recover paused classification for a declared wait that authoritative crew state
-  # could not name. Reaching here already proves the only two admissible cases: an
-  # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
-  # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
+  # could not name. Reaching here already proves the only admissible cases: an
+  # ordinary crew whose agent the gate above confirmed dead or whose live pane runtime
+  # state is unreadable, or a secondmate, whose endpoint liveness is deliberately never
   # read and so cannot supply that confirmation. Without the mate case a mate's
   # status-declared `captain-held` transfer - which has no current-state mapping
   # and so arrives as `none` - would be silenced by every caller rather than taking
