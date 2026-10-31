@@ -239,22 +239,29 @@ read_saved() {
     fi
     files+=("$file"); tasks+=("$task")
   done
-  # Validate every record in one jq process; per-file processes outgrow the
-  # watcher's check timeout once a home holds a few hundred records.
+  # Validate records in bounded jq batches: one process per file outgrows the
+  # watcher's check timeout, and one process for all files outgrows ARG_MAX.
   [ "${#files[@]}" -gt 0 ] || { printf '[]\n' > "$TMP/saved.json"; return 0; }
-  printf '%s\0' "${tasks[@]}" | jq -Rs 'split("\u0000")[:-1]' > "$TMP/tasks.json"
-  local -a args=()
-  local i
-  for i in "${!files[@]}"; do args+=(--rawfile "rec$i" "${files[$i]}"); done
-  jq -L "$SCRIPT_DIR" -n --slurpfile tasks "$TMP/tasks.json" "${args[@]}" 'include "fm-contributions";
-    [range(0; $tasks[0] | length) as $i
-      | [try ($ARGS.named["rec\($i)"] | fromjson) catch empty] as $parsed
-      | if ($parsed | length) == 1
-          and (try ($parsed[0] | valid_record) catch false)
-          and $parsed[0].task == $tasks[0][$i]
-        then $parsed[0] else null end] as $checked
-    | {records: [$checked[] | select(. != null)], errors: ($checked | map(select(. == null)) | length)}' \
-    > "$TMP/checked.json"
+  local batch=${FM_CONTRIBUTIONS_READ_BATCH:-100} start n=0
+  local -a args=() part=()
+  for ((start = 0; start < ${#files[@]}; start += batch)); do
+    part=("${tasks[@]:start:batch}")
+    printf '%s\0' "${part[@]}" | jq -Rs 'split("\u0000")[:-1]' > "$TMP/tasks.json"
+    args=()
+    for i in "${!part[@]}"; do args+=(--rawfile "rec$i" "${files[start + i]}"); done
+    jq -L "$SCRIPT_DIR" -n --slurpfile tasks "$TMP/tasks.json" "${args[@]}" 'include "fm-contributions";
+      [range(0; $tasks[0] | length) as $i
+        | [try ($ARGS.named["rec\($i)"] | fromjson) catch empty] as $parsed
+        | if ($parsed | length) == 1
+            and (try ($parsed[0] | valid_record) catch false)
+            and $parsed[0].task == $tasks[0][$i]
+          then $parsed[0] else null end] as $checked
+      | {records: [$checked[] | select(. != null)], errors: ($checked | map(select(. == null)) | length)}' \
+      > "$TMP/checked.$n.json"
+    n=$((n + 1))
+  done
+  jq -s '{records: (map(.records) | add), errors: (map(.errors) | add)}' "$TMP"/checked.*.json > "$TMP/checked.json"
+  rm -f "$TMP"/checked.[0-9]*.json
   ERRORS=$((ERRORS + $(jq '.errors' "$TMP/checked.json")))
   jq '.records' "$TMP/checked.json" > "$TMP/saved.json"
 }
