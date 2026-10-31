@@ -568,7 +568,7 @@ test_archive_retry_removes_stale_files_from_a_partial_generation() {
 }
 
 test_archive_revalidates_sources_immediately_before_publication() {
-  local home export_root archive archive_pid rc=0 wait_count=0 index
+  local home export_root archive release archive_pid stale_present_at_pause=0 rc=0 wait_count=0
   home=$(make_home archive-final-revalidate)
   export_root="$TMP_ROOT/export-archive-final-revalidate"
   printf '%s\n' "$export_root" > "$home/config/record-export-root"
@@ -577,24 +577,25 @@ test_archive_revalidates_sources_immediately_before_publication() {
     || fail "final revalidation setup could not initialize its root: $(cat "$home/sync.err")"
   archive="$export_root/archive/task-a/final-revalidate-generation"
   mkdir -p "$archive/inbox"
-  index=0
-  while [ "$index" -lt 10000 ]; do
-    printf 'stale %s\n' "$index" > "$archive/inbox/$(printf '%05d' "$index").msg"
-    index=$((index + 1))
-  done
+  printf 'stale pending bytes\n' > "$archive/inbox/001.msg"
+  release="$home/archive-revalidation.release"
 
-  run_export "$home" archive-task task-a > "$home/archive.out" 2> "$home/archive.err" &
+  FM_HOME="$home" FM_RECORD_EXPORT_TEST_REVALIDATION_RELEASE="$release" \
+    "$EXPORTER" archive-task task-a > "$home/archive.out" 2> "$home/archive.err" &
   archive_pid=$!
-  while [ -e "$archive/inbox/00000.msg" ]; do
+  while [ ! -e "$release.waiting" ]; do
     kill -0 "$archive_pid" 2>/dev/null || break
     wait_count=$((wait_count + 1))
     [ "$wait_count" -le 1000 ] || break
     sleep 0.01
   done
-  [ ! -e "$archive/inbox/00000.msg" ] \
-    || { wait "$archive_pid" || true; fail "archive did not begin replacing its stale partial generation"; }
+  [ -e "$release.waiting" ] \
+    || { : > "$release"; wait "$archive_pid" || true; fail "archive did not pause before final source revalidation"; }
+  [ ! -e "$archive/inbox/001.msg" ] || stale_present_at_pause=1
   printf 'changed after final comparison\n' >> "$home/state/task-a.status"
+  : > "$release"
   wait "$archive_pid" || rc=$?
+  [ "$stale_present_at_pause" -eq 0 ] || fail "archive paused before removing the stale partial generation"
   [ "$rc" -ne 0 ] || fail "archive committed after a source changed during stale-generation replacement"
   assert_absent "$archive/manifest.v1.json" "archive committed a manifest after its final source comparison"
   assert_present "$home/state/task-a.meta" "final comparison race removed live metadata"
