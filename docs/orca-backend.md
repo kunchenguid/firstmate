@@ -70,6 +70,16 @@ It never raw-deletes an Orca worktree.
 A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
 Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/runtime-backends.md) "Endpoint close" owns what this arm can and cannot prove about its own close.
 
+## Away supervision
+
+`/afk` refuses an Orca-hosted captain by name instead of arming a daemon that cannot inject into it.
+Discovery in [`bin/fm-supervisor-target-lib.sh`](../bin/fm-supervisor-target-lib.sh) recognizes the `ORCA_TERMINAL_HANDLE` Orca puts into every terminal it spawns, after every innermost signal, so a tmux, Herdr, or Rex session inside an Orca terminal keeps its own transport and an explicit T3 selection stays the operator session.
+The away daemon has no Orca composer or busy primitives, so `orca` is absent from the supported supervisor backends: the daemon refuses at startup, and `bin/fm-afk-launch.sh` `start` and `start-native` refuse before they write `state/.afk`.
+That keeps "armed" meaning supervision is real, which is why Orca gets a named refusal rather than the tmux fallback it used to land on.
+Recognition is for the refusal only.
+Orca stays explicit-only for task endpoints and is never auto-selected as a spawn backend.
+The signal and its version record are in [`verification/runtime-backends.md`](verification/runtime-backends.md#orca-operator-session-signal).
+
 ## Active limits
 
 - Orca is macOS-only and explicit-only.
@@ -88,6 +98,8 @@ tests/fm-spawn-orca-worktree.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 tests/fm-teardown-endpoint-safety.test.sh
+tests/fm-daemon.test.sh
+tests/fm-afk-launch.test.sh
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#orca) records the real readiness and response-shape smoke.

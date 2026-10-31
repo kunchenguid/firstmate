@@ -38,6 +38,11 @@ export CLAUDECODE=1 FM_TEST_HARNESS=claude FM_TEST_SEAM=1
 OFF_CONFIG=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-off-config.XXXXXX")
 : > "$OFF_CONFIG/supervision-host-off"
 export FM_CONFIG_OVERRIDE="$OFF_CONFIG"
+# Both away entry paths resolve the operator session BEFORE they arm (issue
+# #7168), so the lifecycle units below pin a supported one instead of depending on
+# whatever backend this suite happens to run inside. The refusal units clear these
+# with no_operator_session, and the e2e topology units pass their own real pane.
+export FM_SUPERVISOR_TARGET=fixture:target FM_SUPERVISOR_BACKEND=tmux
 
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
@@ -60,6 +65,15 @@ trap GLOBAL_CLEANUP EXIT
 
 enter_posture() {  # <home>
   FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" "$CONTRACT" enter >/dev/null 2>&1
+}
+
+# no_operator_session: run a command with every operator-session marker cleared,
+# so a unit proves what happens when discovery can name none, independent of the
+# pane or terminal this suite runs inside.
+no_operator_session() {  # <command...>
+  env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
+    -u REX_SESSION -u REX_BLOCK -u ORCA_TERMINAL_HANDLE \
+    -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -220,6 +234,83 @@ unit_daemon_entry_requires_the_record() {
     fail "daemon entry: the record enter wrote did not permit lifecycle preparation"
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  rm -rf "$st"
+}
+
+unit_native_start_refuses_without_a_verifiable_operator_session() {
+  local st out rc record_before
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-no-session.XXXXXX")
+  mkdir -p "$st/state"
+  enter_posture "$st" || fail "native no-session: could not enter fixture posture"
+  record_before=$(cksum < "$st/state/.afk-contract")
+  out=$(no_operator_session FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && printf '%s' "$out" | grep -F 'refusing to arm away mode' >/dev/null \
+    && printf '%s' "$out" | grep -F 'verifiable operator session' >/dev/null \
+    && [ "$(cksum < "$st/state/.afk-contract")" = "$record_before" ]; then
+    pass "native entry: no verifiable operator session refuses before the armed flag, and leaves the posture record alone"
+  else
+    fail "native entry: armed or wrote state with no verifiable operator session (rc=$rc): $out"
+  fi
+  # A retry is allowed only once a supported session actually exists.
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(head -n 1 "$st/state/.afk")" = away ] \
+    && [ "$(tr '\t' ' ' < "$st/state/.afk-daemon-terminal")" = 'none - native' ]; then
+    pass "native entry: a supported operator session still records the existing 'none - native' terminal shape"
+  else
+    fail "native entry: a supported operator session was refused or recorded wrong (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+unit_native_start_refusal_preserves_existing_away_lifecycle() {
+  local st out rc before
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-refusal-preserves.XXXXXX")
+  mkdir -p "$st/state"
+  enter_posture "$st" || fail "native refusal: could not enter fixture posture"
+  printf 'away\n1793424136\n' > "$st/state/.afk"
+  printf 'escalation-digest\n' > "$st/state/.subsuper-escalations"
+  printf '1793424000\n' > "$st/state/.subsuper-escalations.since"
+  printf 'stale\n' > "$st/state/.subsuper-reported-stale-abc123"
+  before=$(cd "$st/state" && cksum .afk .subsuper-escalations .subsuper-escalations.since .subsuper-reported-stale-abc123)
+  out=$(no_operator_session FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] \
+    && [ "$(cd "$st/state" && cksum .afk .subsuper-escalations .subsuper-escalations.since .subsuper-reported-stale-abc123)" = "$before" ] \
+    && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "native entry: a refused refresh preserves the existing armed flag and stale escalation artifacts byte-for-byte"
+  else
+    fail "native entry: a refused refresh overwrote existing away lifecycle state (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+unit_native_start_refuses_an_orca_operator_session() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-orca.XXXXXX")
+  mkdir -p "$st/state"
+  enter_posture "$st" || fail "native orca: could not enter fixture posture"
+  out=$(no_operator_session ORCA_TERMINAL_HANDLE=term_abc123 \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && printf '%s' "$out" | grep -F "does not support supervisor backend 'orca'" >/dev/null; then
+    pass "native entry: an Orca operator session is recognized and refused by name before the armed flag"
+  else
+    fail "native entry: an Orca operator session armed away mode or was not named (rc=$rc): $out"
+  fi
+  # The same refusal `start` gives, so the two entry paths agree.
+  out=$(no_operator_session ORCA_TERMINAL_HANDLE=term_abc123 \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] \
+    && printf '%s' "$out" | grep -F "does not support supervisor backend 'orca'" >/dev/null; then
+    pass "daemon entry: start refuses an Orca operator session by name too, before arming"
+  else
+    fail "daemon entry: start did not refuse an Orca operator session (rc=$rc): $out"
+  fi
   rm -rf "$st"
 }
 
@@ -1793,6 +1884,9 @@ unit_pi_never_launches_the_daemon
 unit_test_harness_seam_requires_the_marker
 unit_pi_enter_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_the_record
+unit_native_start_refuses_without_a_verifiable_operator_session
+unit_native_start_refusal_preserves_existing_away_lifecycle
+unit_native_start_refuses_an_orca_operator_session
 unit_failed_daemon_launch_preserves_the_record
 unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch
