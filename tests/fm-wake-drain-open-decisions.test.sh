@@ -25,7 +25,7 @@ case "$1 ${2:-}" in
   'mv --help') echo '[<id>...]' ;;
   'ready '*|ready)
     if [ "${FM_FAKE_TASKS_AXI_EMPTY:-0}" = 1 ]; then
-      printf 'ready[0]{id,since}:\n'
+      printf 'ready[0]{id,since}:\nHelp for ready tasks-axi output\n'
     else
       printf 'ready[1]{id,since}:\n  ready-task,2026-10-30\n'
     fi
