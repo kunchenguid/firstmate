@@ -13,7 +13,7 @@ LAB=$(fm_test_tmproot ready-queue-away)
 unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
 export FM_HOME="$LAB/home"
 "$ROOT/bin/fm-lab-home.sh" create "$FM_HOME" >/dev/null
-cp "$ROOT/.tasks.toml" "$FM_HOME/.tasks.toml"
+fm_test_tasks_toml "$FM_HOME/.tasks.toml"
 printf '## In flight\n\n## Queued\n\n## Done\n' > "$FM_HOME/data/backlog.md"
 "$ROOT/bin/fm-tasks-axi.sh" add other 'out of scope ready unit' >/dev/null
 "$ROOT/bin/fm-afk-contract.sh" enter --spend 4 \
