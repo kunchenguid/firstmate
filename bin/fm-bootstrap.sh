@@ -16,6 +16,7 @@
 #                 "HOME_SUMMARY: <ledger never published|not republished since
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
+#                 "RECORD_HYGIENE: <record inconsistency found in this home>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -1557,6 +1558,83 @@ detect_local_tools() {
   fi
 }
 
+record_hygiene_report() {
+  local file id output now cutoff archive dir pr seen_prs prior backend target endpoint_state n
+  seen_prs=
+  now=$(date +%s)
+  cutoff=$((now - 86400))
+  [ -d "$STATE" ] || return 0
+
+  for file in "$STATE"/*.status; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    id=${file##*/}
+    id=${id%.status}
+    if [ ! -e "$STATE/$id.meta" ]; then
+      if [ "$(stat -f %m "$file" 2>/dev/null || stat -c %Y "$file" 2>/dev/null || echo 0)" -lt "$cutoff" ]; then
+        echo "RECORD_HYGIENE: status log without metadata older than 24 hours: $id"
+        # Archive only in the locked, mutating bootstrap pass. Detect-only startup
+        # must remain read-only.
+        if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+          case "$id" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
+          mkdir -p -- "$DATA" || continue
+          dir=$(CDPATH='' cd -- "$DATA" && pwd -P) || continue
+          dir="$dir/$id"
+          if { [ ! -e "$dir" ] && [ ! -L "$dir" ]; } || { [ -d "$dir" ] && [ ! -L "$dir" ]; }; then
+            mkdir -p -- "$dir" || continue
+            archive="$dir/status.log"
+            n=0
+            while [ -e "$archive" ] || [ -L "$archive" ]; do
+              n=$((n + 1))
+              archive="$dir/status.$n.log"
+            done
+            mv -- "$file" "$archive" || echo "RECORD_HYGIENE: could not archive orphan status log: $id" >&2
+          fi
+        fi
+      fi
+    fi
+  done
+
+  for file in "$STATE"/*.meta; do
+    [ -f "$file" ] || continue
+    id=${file##*/}
+    id=${id%.meta}
+    [ "$(fm_meta_get "$file" kind)" = secondmate ] && continue
+    [ -n "$(fm_meta_get "$file" remote_host)" ] && continue
+    backend=$(fm_meta_get "$file" backend)
+    target=$(fm_meta_get "$file" window)
+    if [ -n "$backend" ] && [ -n "$target" ]; then
+      endpoint_state=$(fm_backend_agent_state "$backend" "$target")
+      case "$endpoint_state" in
+        missing) echo "RECORD_HYGIENE: metadata has no endpoint: $id" ;;
+      esac
+    fi
+    pr=$(sed -n 's/^pr=//p' "$file" | head -1)
+    [ -n "$pr" ] || continue
+    prior=$(printf '%s' "$seen_prs" | awk -F '\t' -v pr="$pr" '$1 == pr { print $2; exit }')
+    if [ -n "$prior" ]; then
+      echo "RECORD_HYGIENE: duplicate PR $pr in records: $prior, $id"
+    else
+      seen_prs="$(printf '%s\t%s\n' "$pr" "$id")$seen_prs"
+    fi
+  done
+
+  if command -v tasks-axi >/dev/null 2>&1; then
+    output=$(fm_backlog_row_list "$DATA" --state in_flight --fields id 2>/dev/null || true)
+    while IFS= read -r id; do
+      [ -n "$id" ] && [ ! -e "$STATE/$id.meta" ] && echo "RECORD_HYGIENE: In-flight backlog row without metadata: $id"
+    done < <(printf '%s\n' "$output" | awk '
+      /^tasks\[[0-9][0-9]*\]\{/ { rows=1; next }
+      rows && /^[[:space:]]/ {
+        sub(/^[[:space:]]+/, "")
+        split($0, fields, ",")
+        if (fields[1] != "") print fields[1]
+        next
+      }
+      { rows=0 }
+    ')
+  fi
+}
+
 detect_local_config() {
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
   # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
@@ -1679,6 +1757,7 @@ if network_phase; then
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
 fi
 local_phase && detect_local_config
+local_phase && record_hygiene_report
 
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so

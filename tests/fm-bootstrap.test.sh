@@ -266,6 +266,42 @@ assert_timeout_report() {
 #   mode=empty -> output must be empty (expect/notcontains ignored)
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
+test_record_hygiene_archives_old_orphan_status() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/record-hygiene"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo 0.2.6 ;;
+  update) echo 'usage: tasks-axi update <id> --body-file <path> --archive-body' ;;
+  mv) echo 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+  list) printf 'count: 1\ntasks[1]{id}:\n  missing-record\n' ;;
+esac
+SH
+  chmod +x "$fakebin/tasks-axi"
+  printf '%s\n' 'failed [at=1]: fixture orphan' > "$case_dir/home/state/orphan.status"
+  touch -t 202001010000 "$case_dir/home/state/orphan.status"
+  printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/first.meta"
+  printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/second.meta"
+  printf 'kind=ship\nbackend=tmux\nwindow=missing:window\n' > "$case_dir/home/state/no-tab.meta"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'RECORD_HYGIENE: status log without metadata older than 24 hours: orphan' \
+    "bootstrap did not report an old orphan status log"
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: missing-record' \
+    "bootstrap did not report an In-flight row without a task record"
+  assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
+    "bootstrap did not report duplicate PR references"
+  assert_contains "$out" 'RECORD_HYGIENE: metadata has no endpoint: no-tab' \
+    "bootstrap did not report metadata whose endpoint is missing"
+  [ -f "$case_dir/home/data/orphan/status.log" ] || fail "bootstrap did not archive the orphan status log"
+  [ ! -e "$case_dir/home/state/orphan.status" ] || fail "archived orphan status log remained in state"
+  pass "bootstrap archives an old orphan status log"
+}
+
 test_bootstrap_reporting() {
   local label lease tasks quota backend mode expect notcontains case_dir fakebin base out n archive_body multi_id quota_version
   n=0
@@ -1539,6 +1575,7 @@ SH
   pass "bootstrap gates resolver fields and additive harnesses on the typed key or a declared typesafe source"
 }
 
+test_record_hygiene_archives_old_orphan_status
 test_bootstrap_reporting
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version
