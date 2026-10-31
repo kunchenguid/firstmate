@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "shared_duties": "docs/professions/partnership-v1.md",
+  "themes": {
+    "nautical": {
+      "primary": "firstmate",
+      "secondmate": "secondmate",
+      "worker": "crewmate"
+    },
+    "space-fleet": {
+      "primary": "fleet command",
+      "secondmate": "mission lead",
+      "worker": "specialist"
+    },
+    "farm": {
+      "primary": "farm coordination",
+      "secondmate": "project lead",
+      "worker": "specialist"
+    },
+    "fantasy": {
+      "primary": "planning circle",
+      "secondmate": "project lead",
+      "worker": "specialist"
+    },
+    "kitchen": {
+      "primary": "kitchen coordination",
+      "secondmate": "project lead",
+      "worker": "specialist"
+    }
+  },
+  "professions": {
+    "firstmate-v1": {
+      "name": "Firstmate",
+      "contract": "docs/professions/firstmate-v1.md",
+      "defaults": {
+        "schema_version": 1,
+        "profession": "firstmate-v1",
+        "theme": "nautical",
+        "chat": {
+          "user_address": "pilot",
+          "user_marker": "✈️",
+          "assistant_reply_marker": ""
+        }
+      }
+    },
+    "gunner-v1": {
+      "name": "Gunner (WSO)",
+      "pair": "space-fleet/pilot-gunner"
+    },
+    "pilot-v1": {
+      "name": "Pilot (Πιλότος)",
+      "pair": "space-fleet/captain-pilot"
+    },
+    "donkey-v1": {
+      "name": "Donkey",
+      "pair": "farm/farmer-donkey"
+    },
+    "familiar-v1": {
+      "name": "Familiar",
+      "pair": "fantasy/wizard-familiar"
+    },
+    "sous-chef-v1": {
+      "name": "Sous-chef",
+      "pair": "kitchen/chef-sous-chef"
+    }
+  }
+}

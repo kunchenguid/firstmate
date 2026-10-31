@@ -33,7 +33,7 @@ test_profession_theme_and_refresh() {
   printf '%s\n' "$out" | jq -e '.configured and .profession_name == "Gunner (WSO)" and .profession == "gunner-v1" and .theme == "space-fleet" and .chat.user_address == "pilot" and .chat.user_marker == "✈️" and .chat.assistant_reply_marker == "🎯"' >/dev/null || fail 'Gunner resolution lost independent identity fields'
   out=$(profile refresh)
   assert_contains "$out" "$PROFILE_HOME/config/profile.json" 'refresh omitted disk source'
-  assert_contains "$out" 'docs/professions/gunner-v1.md' 'refresh omitted contract source'
+  assert_contains "$out" 'docs/professions/space-fleet/pilot-gunner/profession.md' 'refresh omitted contract source'
   assert_contains "$out" 'Your profession is Gunner (WSO)' 'refresh omitted actual profession name'
   assert_contains "$out" 'thoughtful partner' 'refresh omitted real professional duty'
   assert_contains "$out" 'challenging assumptions' 'refresh omitted assumption challenge duty'
@@ -68,9 +68,10 @@ test_captain_pilot_pair_is_independent() {
 
 test_missing_shared_duties_refuses_selection() {
   local code="$TMP_ROOT/incomplete-code" out rc=0
-  mkdir -p "$code/bin" "$code/docs/professions"
+  mkdir -p "$code/bin" "$code/docs/professions/space-fleet/captain-pilot"
   cp "$PROFILE" "$ROOT/bin/fm-profile-lib.sh" "$code/bin/"
-  cp "$ROOT/docs/professions/pilot-v1.md" "$code/docs/professions/"
+  cp "$ROOT/docs/professions/catalog.json" "$code/docs/professions/"
+  cp "$ROOT/docs/professions/space-fleet/captain-pilot/"* "$code/docs/professions/space-fleet/captain-pilot/"
   write_profile '{"schema_version":1,"profession":"pilot-v1","theme":"space-fleet"}'
   out=$(FM_TASK_ID='' FM_HOME="$PROFILE_HOME" bash "$code/bin/fm-profile.sh" refresh 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail 'incomplete professional contract was applied'
@@ -79,11 +80,45 @@ test_missing_shared_duties_refuses_selection() {
   pass 'a missing shared duties contract refuses the named profession before rendering'
 }
 
+test_domain_pair_presets_are_real_and_preview_only() {
+  local out pair expected_name expected_marker
+  out=$(profile presets --json)
+  printf '%s\n' "$out" | jq -e 'length == 5' >/dev/null || fail 'known pair list did not expose five real presets'
+  write_profile 'broken'
+  while IFS='|' read -r pair expected_name expected_marker; do
+    out=$(profile inspect --preset "$pair" --json)
+    printf '%s\n' "$out" | jq -e --arg pair "$pair" --arg name "$expected_name" --arg marker "$expected_marker" '
+      .pair == $pair and .profession_name == $name and .chat.assistant_reply_marker == $marker
+      and (.source | endswith("/docs/professions/" + $pair + "/profile.json"))
+      and (.contract_source | endswith("/docs/professions/" + $pair + "/profession.md"))
+    ' >/dev/null || fail "preset did not resolve real domain/pair files: $pair"
+    out=$(FM_TASK_ID=worker-preview FM_HOME="$PROFILE_HOME" bash "$PROFILE" refresh --preset "$pair")
+    assert_contains "$out" 'worker launch contract' "pair $pair promoted a worker"
+    assert_not_contains "$out" 'thoughtful partner' "pair $pair loaded supervisor duties for a worker"
+    out=$(profile refresh --preset "$pair")
+    assert_contains "$out" 'thoughtful partner' "pair $pair lost shared duties"
+    assert_contains "$out" 'every complete unit of work' "pair $pair lost wiki duty"
+    assert_contains "$out" 'rebuild its derived graph' "pair $pair lost graph duty"
+  done <<'PAIRS'
+space-fleet/pilot-gunner|Gunner (WSO)|🎯
+space-fleet/captain-pilot|Pilot (Πιλότος)|✈️
+farm/farmer-donkey|Donkey|🫏
+fantasy/wizard-familiar|Familiar|🐈
+kitchen/chef-sous-chef|Sous-chef|🥄
+PAIRS
+  [ "$(cat "$PROFILE_HOME/config/profile.json")" = broken ] || fail 'preset preview changed the home selection'
+  for pair in ../space-fleet/pilot-gunner space-fleet/../../captain-pilot /tmp/profile.json unknown/pair; do
+    if profile inspect --preset "$pair" >/dev/null 2>&1; then fail "unsafe or unknown preset was accepted: $pair"; fi
+  done
+  pass 'five known domain/pair presets resolve real files without changing home selection or accepting arbitrary paths'
+}
+
 test_rejects_invalid_and_injected_configuration() {
   local value out rc
   # shellcheck disable=SC2016 # Keep the malicious command-substitution fixture literal.
   for value in '{}' 'null' '[]' '{"schema_version":2,"profession":"gunner-v1"}' \
     '{"schema_version":1,"profession":"unknown"}' \
+    '{"schema_version":1,"profession":"../pilot-v1"}' \
     '{"schema_version":1,"profession":"director-v1"}' \
     '{"schema_version":1,"profession":"gunner-v1","chat":{"assistant_reply_marker":"🎬"}}' \
     '{"schema_version":1,"profession":"gunner-v1","theme":"unknown"}' \
@@ -178,6 +213,7 @@ test_absent_profile_preserves_preferences
 test_profession_theme_and_refresh
 test_captain_pilot_pair_is_independent
 test_missing_shared_duties_refuses_selection
+test_domain_pair_presets_are_real_and_preview_only
 test_rejects_invalid_and_injected_configuration
 test_worker_precedence_ignores_home_profile
 test_inheritance_copies_only_profile_and_preserves_charter

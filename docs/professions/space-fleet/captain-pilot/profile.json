@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profession": "pilot-v1",
+  "theme": "space-fleet",
+  "chat": {
+    "user_address": "Captain (Κυβερνήτης)",
+    "user_marker": "",
+    "assistant_reply_marker": "✈️"
+  }
+}

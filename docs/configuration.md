@@ -1059,12 +1059,12 @@ The complete version 1 schema accepts only these fields:
 | Field | Accepted values and default |
 | --- | --- |
 | `schema_version` | Required number `1`. |
-| `profession` | Required `firstmate-v1`, `gunner-v1` or `pilot-v1`. |
-| `theme` | `nautical` (default) or `space-fleet`, independently of profession. |
+| `profession` | Required known selector from the shipped [catalog](professions/catalog.json); existing `firstmate-v1`, `gunner-v1` and `pilot-v1` remain supported. |
+| `theme` | A known theme from the catalog, independently of profession; defaults to the selected pairing preset, or nautical for firstmate. |
 | `chat` | Optional object with only the three fields below. |
-| `chat.user_address` | One ASCII name/title token, starting with a letter, followed by at most 31 letters, digits, underscores or hyphens, or the exact display title `Captain (Κυβερνήτης)`; defaults to that Captain title for `pilot-v1`, otherwise `pilot`. |
-| `chat.user_marker` | `✈️` or empty string; default empty for `pilot-v1`, otherwise `✈️`; this marks the user, not the assistant. |
-| `chat.assistant_reply_marker` | `🎯` for Gunner (WSO), `✈️` for Pilot (Πιλότος), or empty string for firstmate; omission selects the profession's marker. |
+| `chat.user_address` | One ASCII name/title token, starting with a letter, followed by at most 31 letters, digits, underscores or hyphens, or the exact display title `Captain (Κυβερνήτης)`; defaults to the selected preset's user address. |
+| `chat.user_marker` | The selected preset's user marker, empty string, or the legacy `✈️`; default comes from the preset, and marks the user rather than the assistant. |
+| `chat.assistant_reply_marker` | The selected preset's fixed assistant marker; omission uses that marker, including empty for firstmate. |
 
 A profile is one JSON object in a regular, readable, single-linked file of at most 4096 bytes beneath a non-symlinked config directory.
 Unknown fields, professions, themes, null values, control characters and instruction-like address strings are rejected rather than interpreted as operating instructions.
@@ -1102,18 +1102,39 @@ The alternate space fleet pairing is user Captain (Κυβερνήτης) with as
 }
 ```
 
-The [Pilot contract](professions/pilot-v1.md) owns this pairing's mission relationship and operating duties.
+The [Pilot contract](professions/space-fleet/captain-pilot/profession.md) owns this pairing's mission relationship and operating duties.
 Selecting the user-address word Captain does not select an agent role or grant authority, and selecting this alternative never happens merely because the sample exists.
 No human Captain marker is selected by the alternate example.
-The shipped [firstmate-v1](professions/firstmate-v1.md), [gunner-v1](professions/gunner-v1.md) and [pilot-v1](professions/pilot-v1.md) files own the named professional contracts.
+The shipped [firstmate-v1](professions/firstmate-v1.md), [gunner-v1](professions/space-fleet/pilot-gunner/profession.md) and [pilot-v1](professions/space-fleet/captain-pilot/profession.md) files own the named professional contracts.
 Gunner and Pilot share [partnership duties v1](professions/partnership-v1.md), which the resolver renders with either named contract and identifies as `duties_source` in inspection.
 The shared completion knowledge duty does not install a wiki, graph builder or provider integration.
 Theme labels are presentation: space fleet uses fleet command, mission lead and specialist while internal primary/secondmate/worker identifiers remain unchanged.
 The user's airplane and the assistant's target marker remain separate from those labels.
 Profiles grant no merge/publication permission, select no models and change no running worker.
 
+### Known domain/partner presets
+
+[The shipped catalog](professions/catalog.json) is the single mapping from stable profession selectors to known partner pairs and themes.
+Each pair keeps an ordinary `profile.json` and its named `profession.md` together under `docs/professions/<domain>/<partners>/`.
+The firstmate fallback and shared partnership duties retain their existing owners outside the pairing directories.
+
+| Pair | Ordinary preset | Named contract |
+| --- | --- | --- |
+| pilot / Gunner (WSO) | [space-fleet/pilot-gunner/profile.json](professions/space-fleet/pilot-gunner/profile.json) | [profession](professions/space-fleet/pilot-gunner/profession.md) |
+| Captain (Κυβερνήτης) / Pilot (Πιλότος) | [space-fleet/captain-pilot/profile.json](professions/space-fleet/captain-pilot/profile.json) | [profession](professions/space-fleet/captain-pilot/profession.md) |
+| Farmer / Donkey | [farm/farmer-donkey/profile.json](professions/farm/farmer-donkey/profile.json) | [profession](professions/farm/farmer-donkey/profession.md) |
+| Wizard / Familiar | [fantasy/wizard-familiar/profile.json](professions/fantasy/wizard-familiar/profile.json) | [profession](professions/fantasy/wizard-familiar/profession.md) |
+| Chef / Sous-chef | [kitchen/chef-sous-chef/profile.json](professions/kitchen/chef-sous-chef/profile.json) | [profession](professions/kitchen/chef-sous-chef/profession.md) |
+
+The playful names are presentation around the same shared professional duties, never fictional actions or extra permissions.
+Preset defaults own their chat values; the catalog maps known sources rather than duplicating those values in a second runtime table.
+The inspector can enumerate known presets and preview an exact domain/pair without reading or changing the home selection.
+A preset argument is an allowlisted identifier, not a filesystem path: unknown pairs and traversal strings fail before an arbitrary path can be read.
+To change an actual selection, the owner deliberately copies a reviewed preset to the home's profile and uses the existing refresh interface.
+Moving source paths preserves the stable space fleet selectors; a prior live-trial receipt may point at the older layout until its owner refreshes and records the new source.
+
 `bin/fm-profile.sh --help` owns the read-only inspect, JSON inspection, context and explicit refresh commands.
-Inspection also reports the known human-readable profession name, `Gunner (WSO)`, `Pilot (Πιλότος)` or `Firstmate`.
+Inspection reports the known human-readable profession name, domain/pair, contract source/version and shared duties source.
 All use the same resolver and the shipped contracts from the executable's checkout, even when `FM_HOME` selects private data elsewhere.
 Refresh renders current disk duties for the receiving supervisor to apply; it does not inject text into another session or prove that another model consumed it.
 The digest renders the selected contract on fresh startup and context re-emission, and a supported resume/reload/fork through the run wrapper refreshes a configured profile when the same session still owns the home.

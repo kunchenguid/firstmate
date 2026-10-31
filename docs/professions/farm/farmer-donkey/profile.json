@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profession": "donkey-v1",
+  "theme": "farm",
+  "chat": {
+    "user_address": "Farmer",
+    "user_marker": "🌾",
+    "assistant_reply_marker": "🫏"
+  }
+}

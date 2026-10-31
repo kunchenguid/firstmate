@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profession": "gunner-v1",
+  "theme": "space-fleet",
+  "chat": {
+    "user_address": "pilot",
+    "user_marker": "✈️",
+    "assistant_reply_marker": "🎯"
+  }
+}

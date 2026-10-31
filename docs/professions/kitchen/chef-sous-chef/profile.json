@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profession": "sous-chef-v1",
+  "theme": "kitchen",
+  "chat": {
+    "user_address": "Chef",
+    "user_marker": "🍳",
+    "assistant_reply_marker": "🥄"
+  }
+}

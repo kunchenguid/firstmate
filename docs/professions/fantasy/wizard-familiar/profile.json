@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "profession": "familiar-v1",
+  "theme": "fantasy",
+  "chat": {
+    "user_address": "Wizard",
+    "user_marker": "🧙",
+    "assistant_reply_marker": "🐈"
+  }
+}
