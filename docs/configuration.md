@@ -2109,7 +2109,7 @@ A fresh launch with `--model default` has no explicit model pin: the sentinel it
   If a state-directory failure prevents recording the invalidation, the dispatch refuses with the affected path and recovery guidance.
   When the admission lock is still busy after a brief wait, the invalidation is recorded as a pending marker in the task's state directory and the next admission applies it under the lock before it counts, so a busy lock cannot leave a live replacement behind a row that claims no slot.
 - Explicit confirmed-stop release records pid -1 while the capped task's metadata remains, even when no registry row or file existed; that row holds no occupancy, prevents re-adoption of the stopped worker, and is replaced by a new admitted incarnation.
-- Launches that own no capped occupancy bypass the admission lock, including retries whose only registry row is a non-counting stop marker or a dead positive PID; these records remain stop evidence until a new admitted incarnation or pruning replaces them.
+- A launch that owns no capped occupancy claims no slot and is never refused by ceiling contention: with no registry row for its task id it never touches the admission lock, and a retry whose only row is a non-counting stop marker or a dead positive PID resolves that row exactly as the replacement rule above describes.
 - Passing spawns prune stopped rows once their metadata is absent.
 - A malformed registry row (bad shape) refuses every capped dispatch with the row named rather than silently undercounting; staleness is release, but a broken row is a disruption, not a free slot.
 

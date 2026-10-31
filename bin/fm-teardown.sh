@@ -3503,10 +3503,10 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # would die there having removed nothing while this message claimed otherwise.
 # The T3 site refuses under --force because stop and archive must succeed before
 # its worktree or home can be released (see the native cleanup site below).
-# The two forced secondmate child sites refuse because that path is only ever
-# reached under --force, so honoring force would delete the refusal rather
-# than override it, and would contradict the adjacent Herdr child gate that
-# stops forced cleanup for this same hazard.
+# The forced secondmate child close sites refuse because that path is only
+# ever reached under --force, so honoring force would delete the refusal
+# rather than override it, and would contradict the adjacent Herdr child
+# gate that stops forced cleanup for this same hazard.
 #
 # What is retained is this run's records, not a durable guarantee: a task
 # carrying a backlog transition already wrote its pending-close marker, and the
@@ -3573,8 +3573,10 @@ cleanup_firstmate_home_children() {
           return 1
         fi
       elif [ "$child_owned" -eq 0 ]; then
-        # Zellij titles are scoped by the owning home tag, so forced secondmate
-        # cleanup must verify child tabs as that child home, not the parent.
+        # Zellij titles and Rex session labels are scoped by the owning home
+        # tag, so forced secondmate cleanup must verify a child endpoint as
+        # that child home, not the parent: a Rex descendant retired under the
+        # parent's home leaves its emptied per-home session behind.
         child_home=$home
         if [ "$child_backend" = rex ] && [ "$child_kind" = secondmate ]; then
           child_home=$(meta_value "$child_meta" home)
