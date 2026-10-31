@@ -312,13 +312,14 @@ function nonBlankLines(text: string): string[] {
 
 // bin/fm-classify-lib.sh's _fm_open_decisions_file_ident, which stamps each
 // row of state/.status-presentation-cursor. Any failure throws, and the caller
-// then reads the whole log.
+// then reads the whole log. TZ is pinned exactly as there, so a reader in
+// another timezone renders the same birth time.
 function statusFileIdentity(path: string): string {
   const darwin = process.platform === "darwin";
   const output = execFileSync(
     darwin ? "/usr/bin/stat" : "stat",
     darwin ? ["-f", "%d:%i|%B|%FB", path] : ["-c", "%d:%i|%W|%w", path],
-    { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "ignore"] },
+    { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC0" }, stdio: ["ignore", "pipe", "ignore"] },
   ).trim();
   const [ident, birthEpoch, birth] = output.split("|");
   if (!ident || !birthEpoch) throw new Error("status identity unavailable");

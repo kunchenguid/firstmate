@@ -5249,14 +5249,16 @@ const state = `${process.env.FM_HOME}/state`;
 const signalRow = (task) => `1\t1\tsignal\t${task}.status\tsignal: ${task}.status`;
 
 // Write the already-presented history, commit the presentation cursor at its
-// end through the real writer, then append the unread span a new wake covers.
-function stage(task, presented, span) {
+// end through the real writer (in the writer's own timezone when given), then
+// append the unread span a new wake covers.
+function stage(task, presented, span, writerZone) {
   const path = `${state}/${task}.status`;
   writeFileSync(path, presented);
   execFileSync("bash", ["-c",
     'set -e; . "$1"; ident=$(_fm_open_decisions_file_ident "$2/$3.status"); ' +
     'status_commit_presentation_snapshot "$2" "$(printf "%s\\t%s\\t%s" "$3" "$4" "$ident")"',
-    "_", process.env.CLASSIFY_LIB, state, task, String(Buffer.byteLength(presented))]);
+    "_", process.env.CLASSIFY_LIB, state, task, String(Buffer.byteLength(presented))],
+    writerZone ? { env: { ...process.env, TZ: writerZone } } : undefined);
   appendFileSync(path, span);
   writeFileSync(`${state}/.wake-queue`, signalRow(task));
 }
@@ -5301,6 +5303,23 @@ expectRoute("captain-held declaration", "working: history\n", "captain-held [key
 stage("mate", hold, "done: sample-c PR merged\n");
 if (!branchOfferForWake(state, `signal: ${state}/mate.status`, false, true).eligible) {
   throw new Error("the attended-host offer kept a routine second-mate close on main behind an unrelated hold");
+}
+
+// The bash writer and this reader can run in different timezones; a cursor
+// written in one must still bound the span read in the other, both ways.
+// BRT3 and UTC0 are POSIX zones, so no zone database is needed.
+const readerZone = process.env.TZ;
+for (const [writer, reader] of [["BRT3", "UTC0"], ["UTC0", "BRT3"]]) {
+  stage("mate", hold, "done: sample-tz PR merged\n", writer);
+  process.env.TZ = reader;
+  const [pi, host] = verdicts();
+  if (!pi || !host) {
+    throw new Error(`a cursor written in ${writer} did not bound the span read in ${reader}: pi=${pi} host=${host}`);
+  }
+  stage("mate", hold, "blocked: cannot reach the forge\n", writer);
+  if (verdicts().some(Boolean)) throw new Error(`a blocker read across timezones (${writer} to ${reader}) left main`);
+  if (readerZone === undefined) delete process.env.TZ;
+  else process.env.TZ = readerZone;
 }
 
 // Without a readable cursor the whole log is the span, so routing falls back
