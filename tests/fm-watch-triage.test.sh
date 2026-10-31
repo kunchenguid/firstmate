@@ -4794,6 +4794,37 @@ SH
   pass "the cycle-turnover marker is touched exactly once per cycle and stays distinct from the liveness beacon ($turnovers turnovers, $beats beats, $cycles cycles)"
 }
 
+# count_beats <dir> <state> <fakebin> <call>: run <call> against the watcher's
+# own functions in a sourced subshell and print how many times it touched
+# state/.last-watcher-beat. Counting real beacon writes through a logging `touch`
+# on PATH is what makes the rate observable; a live watcher cannot be used here
+# because its other per-cycle beats swamp the per-item ones.
+count_beats() {  # <dir> <state> <fakebin> <call>
+  local dir=$1 state=$2 fakebin=$3 call=$4 log="$1/beat-touch.log"
+  cat > "$fakebin/touch" <<'SH'
+#!/usr/bin/env bash
+set -u
+for _a in "$@"; do
+  case "$_a" in
+    -*) ;;
+    *) printf '%s\n' "$_a" >> "$FM_FAKE_TOUCH_LOG" ;;
+  esac
+done
+for _c in /usr/bin/touch /bin/touch; do
+  [ -x "$_c" ] && exec "$_c" "$@"
+done
+exit 127
+SH
+  chmod +x "$fakebin/touch"
+  PATH="$fakebin:$PATH" FM_FAKE_TOUCH_LOG="$log" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    bash -c ". \"\$1\"
+      : > \"\$FM_FAKE_TOUCH_LOG\"
+      $call >/dev/null 2>&1 || true
+      grep -cxF \"\$STATE/.last-watcher-beat\" \"\$FM_FAKE_TOUCH_LOG\" || true" \
+    _ "$WATCH"
+}
+
 # Every per-item loop in the watcher reports progress once per item, and reports
 # it before the item can leave the body early - at the top of the body, or for
 # the pane capture immediately after the capture - so an item that exits early
