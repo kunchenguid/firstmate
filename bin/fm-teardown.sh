@@ -177,6 +177,8 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
+# A structured selector_not_found removal error is already absent only with
+# --force and an absent recorded path; every other failure preserves retry records.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -3741,6 +3743,10 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+  require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
+fi
+
 BACKLOG_CLOSED=0
 BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
 BACKLOG_TRANSITION_FLAGS=()
@@ -3860,10 +3866,6 @@ if [ "$BACKEND" = t3code ]; then
 fi
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
-    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
-    ORCA_PATH_MATCH_VERIFIED=1
-  fi
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
@@ -3880,7 +3882,25 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  if orca_remove_error=$(fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID" 2>&1); then
+    [ -z "$orca_remove_error" ] || printf '%s\n' "$orca_remove_error"
+  elif [ "$FORCE" = "--force" ] && [ -n "$WT" ] && [ ! -e "$WT" ] && [ ! -L "$WT" ] \
+    && printf '%s' "$orca_remove_error" | node -e '
+try {
+  const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  process.exit(data.ok === false && data.error && data.error.code === "selector_not_found" ? 0 : 1);
+} catch (_) { process.exit(1); }
+'; then
+    echo "Orca worktree $ORCA_WORKTREE_ID already absent at $WT; continuing forced teardown."
+  else
+    printf '%s\n' "$orca_remove_error" >&2
+    fm_backlog_close_marker_clear "$STATE" "$ID" || {
+      echo "error: could not retire the pending backlog transition for $ID ($FM_BACKLOG_TRANSITION_ERROR); reconcile it before startup replay." >&2
+      exit 1
+    }
+    echo "error: Orca worktree removal failed for $ID; preserving task records for retry." >&2
+    exit 1
+  fi
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then

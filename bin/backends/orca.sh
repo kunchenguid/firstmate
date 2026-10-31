@@ -147,8 +147,7 @@ try {
   process.exit(2);
 }
 if (data.ok === false) {
-  const msg = data.error && (data.error.message || data.error.code);
-  if (msg) console.error(msg);
+  console.error(input);
   process.exit(2);
 }
 '
@@ -156,7 +155,10 @@ if (data.ok === false) {
 
 fm_backend_orca_run_json() {
   local out
-  out=$("$@") || return 1
+  out=$("$@") || {
+    printf '%s\n' "$out" >&2
+    return 1
+  }
   printf '%s' "$out" | fm_backend_orca_json_ok
 }
 
