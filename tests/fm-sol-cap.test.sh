@@ -118,7 +118,25 @@ case "${1:-}" in
     grep -Fvx -- "$target" "$window_file" 2>/dev/null > "$window_file.tmp" || true
     mv "$window_file.tmp" "$window_file"
     ;;
-  has-session|new-session|send-keys) : ;;
+  has-session|new-session) : ;;
+  send-keys)
+    # A spawn types a short line sourcing its staged launch file, so record the
+    # staged command itself: what the pane shell would source is what a launch
+    # assertion needs, not the short source line. Other literals are ignored.
+    previous=
+    for arg in "$@"; do
+      if [ "$previous" = -l ]; then
+        case "$arg" in
+          ". '"*"'")
+            staged=${arg#". '"}
+            staged=${staged%"'"}
+            [ ! -f "$staged" ] || cat "$staged" >> "$FM_FAKE_CALL_LOG.launch"
+            ;;
+        esac
+      fi
+      previous=$arg
+    done
+    ;;
 esac
 exit 0
 SH
@@ -172,6 +190,54 @@ spawn_sol_ship() {  # <case-dir> <id> [model] [pane-path]
     "$id" "$case_dir/project" --harness codex --model "$model" --mode no-mistakes --yolo off
 }
 
+# A raw launch command carrying pane-shell-only syntax, the escape hatch a
+# capped launch must not reinterpret: `$(cat <(...))` is process substitution,
+# which POSIX sh rejects outright, so a launch that reaches the worker at all
+# was parsed by the pane's own shell. It records the argv it was handed, so two
+# launches can be compared by the invocation they produced.
+# shellcheck disable=SC2016 # the pane shell expands this text, not this file.
+FM_SOL_TEST_RAW='codex --brief "$(cat <(printf %s pane-syntax))"'
+
+# The stand-ins that raw launch needs: a `paneshell` that names itself as the
+# interpreter and then runs bash, and a `codex` that records the argv it
+# received plus the interpreter that ran it.
+add_raw_launch_probe() {  # <case-dir>
+  local fakebin=$1/fakebin
+  cat > "$fakebin/paneshell" <<'SH'
+#!/usr/bin/env bash
+FM_TEST_PANE_SHELL=paneshell exec bash "$@"
+SH
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_INVOCATION_LOG.argv"
+printf '%s\n' "${FM_TEST_PANE_SHELL:-none}" >> "$FM_FAKE_INVOCATION_LOG.shell"
+SH
+  chmod +x "$fakebin/paneshell" "$fakebin/codex"
+}
+
+spawn_raw_ship() {  # <case-dir> <id> [raw-command]
+  local case_dir=$1 id=$2 raw=${3:-$FM_SOL_TEST_RAW} pane
+  pane=$(new_worktree "$case_dir" "$id")
+  FM_FAKE_INVOCATION_LOG="$case_dir/invocation" \
+    run_spawn "$case_dir" "$case_dir/home" "$pane" \
+      "$id" "$case_dir/project" --harness "$raw" --model gpt-6.1-sol --mode no-mistakes --yolo off
+}
+
+# Run one staged launch line the way its pane would: sourced by a shell that
+# names itself `paneshell`, exactly as that shell reports itself through "$0".
+run_staged_line() {  # <case-dir> <line>
+  local case_dir=$1 line=$2
+  (cd "$case_dir/project" &&
+    FM_FAKE_INVOCATION_LOG="$case_dir/invocation" \
+      PATH="$case_dir/fakebin:$PATH" bash -c "$line" paneshell) 2>&1
+}
+
+# The staged launch line a spawn handed the pane, i.e. what the pane shell
+# would source. The fake tmux records one per send-keys of a source line.
+staged_launch_line() {  # <case-dir>
+  tail -1 "$1/calls.log.launch" 2>/dev/null || true
+}
+
 call_count() { wc -l < "$1/calls.log" | tr -d ' '; }
 
 worktree_list() { git -C "$1/project" worktree list --porcelain; }
@@ -216,6 +282,61 @@ test_under_cap_sol_spawn_launches_and_claims_its_slot() {
 # The ceiling refuses the fifth concurrent Sol dispatch with one actionable
 # error naming each active session and its age, and the refusal leaves no
 # task record, no rendered brief, no endpoint touch, and no worktree behind.
+# The ceiling gates admission only: it must never change the command a capped
+# launch runs. Uncapped, the pane shell sources the raw command line; capped,
+# the same bytes ride behind the reservation handoff, which hands them back to
+# that same shell. Both launches must therefore produce one identical worker
+# invocation, and the capped one must run under the pane's shell rather than a
+# substituted interpreter, which is what process substitution proves here.
+test_capped_launch_keeps_the_uncapped_command_invocation() {
+  local capped_case uncapped_case out capped_line uncapped_line rc=0
+  capped_case=$(make_case launch-shape-capped task-c)
+  uncapped_case=$(make_case launch-shape-uncapped task-c)
+  # The control case is the same dispatch with the guard inert, so the only
+  # difference between the two staged lines is the admission handoff.
+  rm -f "$uncapped_case/home/config/sol-cap"
+  add_raw_launch_probe "$capped_case"
+  add_raw_launch_probe "$uncapped_case"
+  out=$(spawn_raw_ship "$uncapped_case" task-c) || fail "the uncapped raw launch was refused: $out"
+  uncapped_line=$(staged_launch_line "$uncapped_case")
+  assert_contains "$uncapped_line" "$FM_SOL_TEST_RAW" \
+    "an uncapped launch no longer stages the raw command unchanged"
+  out=$(spawn_raw_ship "$capped_case" task-c) || fail "the capped raw launch was refused: $out"
+  capped_line=$(staged_launch_line "$capped_case")
+  [ "$capped_line" != "$uncapped_line" ] ||
+    fail "a capped launch staged no admission handoff: $capped_line"
+  assert_contains "$capped_line" "$FM_SOL_TEST_RAW" \
+    "a capped launch rewrote the raw command instead of handing it through"
+  run_staged_line "$uncapped_case" "$uncapped_line" || rc=$?
+  expect_code 0 "$rc" "the uncapped staged line did not run"
+  rc=0
+  run_staged_line "$capped_case" "$capped_line" || rc=$?
+  expect_code 0 "$rc" "the capped staged line did not run: $(cat "$capped_case/invocation.shell" 2>/dev/null)"
+  assert_equals "--brief pane-syntax" "$(cat "$uncapped_case/invocation.argv")" \
+    "the uncapped launch did not run the raw command it staged"
+  assert_equals "$(cat "$uncapped_case/invocation.argv")" "$(cat "$capped_case/invocation.argv")" \
+    "a capped launch changed the command a raw launch runs"
+  assert_equals paneshell "$(cat "$capped_case/invocation.shell")" \
+    "a capped launch handed the command to an interpreter other than the pane shell"
+  [ "$(registry_row_field "$capped_case" task-c 4)" != 0 ] ||
+    fail "the capped launch did not transfer its reservation to the worker's process"
+  pass "a capped launch runs the uncapped command unchanged under the pane shell"
+}
+
+# The handoff still needs an interpreter when the pane shell cannot be named, so
+# an unusable report falls back to a shell that runs every generated launch line
+# and a POSIX-only one survives it.
+test_run_launch_falls_back_when_the_pane_shell_is_unusable() {
+  local case_dir out rc=0
+  case_dir=$(make_case launch-fallback task-c)
+  write_sol_row "$case_dir/home" task-c "$(fresh_start)"
+  out=$(FM_HOME="$case_dir/home" SHELL='' bash "$ROOT/bin/fm-sol-cap-lib.sh" \
+    run-launch task-c "$case_dir/home/state" /nonexistent/pane-shell 'printf %s fallback-ran') || rc=$?
+  expect_code 0 "$rc" "an unresolvable pane shell refused the launch"
+  assert_contains "$out" fallback-ran "an unresolvable pane shell did not fall back to a working shell"
+  pass "an unnamed pane shell falls back to a shell that runs the launch line"
+}
+
 test_cap_refuses_the_fifth_and_names_its_sessions() {
   local case_dir out before rc=0
   case_dir=$(make_case at-cap task-c)
@@ -1122,6 +1243,8 @@ test_retry_and_confirmed_stop
 test_shared_home_admission
 test_review_regressions
 test_under_cap_sol_spawn_launches_and_claims_its_slot
+test_capped_launch_keeps_the_uncapped_command_invocation
+test_run_launch_falls_back_when_the_pane_shell_is_unusable
 test_cap_refuses_the_fifth_and_names_its_sessions
 test_stale_entries_do_not_count
 test_non_sol_model_never_claims_a_slot

@@ -992,6 +992,41 @@ fm_sol_cap_registry_prune() {  # <registry-file>
   return 0
 }
 
+# fm_sol_cap_launch_shell <pane-shell>
+# The interpreter a capped local launch hands its command line to. The ceiling
+# gates admission only, so a capped launch must run the bytes it would have run
+# uncapped: uncapped, the pane shell sources the staged launch line, so that
+# same shell is the interpreter here too. <pane-shell> is the pane shell's own
+# report of itself, taken as `$0` when it sources the staged line. A report that
+# names an executable is used as given, a bare name is resolved on PATH, and an
+# unusable report falls back to $SHELL and then /bin/sh, the historical wrapper
+# that still runs every Firstmate-generated launch line.
+fm_sol_cap_launch_shell() {  # <pane-shell>
+  local reported=${1#-} resolved
+  if [ -n "$reported" ]; then
+    case "$reported" in
+    */*)
+      if [ -x "$reported" ]; then
+        printf '%s\n' "$reported"
+        return 0
+      fi
+      ;;
+    *)
+      resolved=$(command -v -- "$reported" 2>/dev/null || true)
+      if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+        printf '%s\n' "$resolved"
+        return 0
+      fi
+      ;;
+    esac
+  fi
+  if [ -n "${SHELL:-}" ] && [ -x "$SHELL" ]; then
+    printf '%s\n' "$SHELL"
+    return 0
+  fi
+  printf '%s\n' /bin/sh
+}
+
 # --- CLI ---------------------------------------------------------------------
 # Operator and test seam: drive the same contract from a fresh process, so a
 # declaration or a refusal can be inspected and reproduced without sourcing.
@@ -1009,6 +1044,12 @@ fm_sol_cap_registry_prune() {  # <registry-file>
 #                prints "recorded" or the refusal, exits 0/1.
 #   run <id> <state-dir> <command> [args...]
 #                transfers the reservation to this process, then execs command.
+#   run-launch <id> <state-dir> <pane-shell> <command-line>
+#                transfers the reservation to this process, then execs the
+#                launch line unchanged under <pane-shell> (fm_sol_cap_launch_shell
+#                above owns how that shell is chosen). A capped launch therefore
+#                parses its command exactly as the uncapped launch it replaces
+#                does, and only admission changes.
 
 fm_sol_cap_cli() {
   local mode=$1
@@ -1048,6 +1089,20 @@ fm_sol_cap_cli() {
     shift 3
     fm_sol_cap_promote "$id" "$$" "$state" || return 1
     exec "$@"
+    ;;
+  run-launch)
+    local id line shell
+    [ "$#" -eq 5 ] || {
+      echo "usage: fm-sol-cap-lib.sh run-launch <id> <state-dir> <pane-shell> <command-line>" >&2
+      return 2
+    }
+    id=$2
+    line=$5
+    # The pane shell sourced the launch line, so it owns the command's syntax;
+    # the line is handed back to it unchanged, and only the reservation moves.
+    shell=$(fm_sol_cap_launch_shell "$4") || return 1
+    fm_sol_cap_promote "$id" "$$" "$3" || return 1
+    exec "$shell" -c "$line"
     ;;
   refuse-claim)
     [ "$#" -eq 7 ] || {

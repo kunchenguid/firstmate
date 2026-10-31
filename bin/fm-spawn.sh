@@ -8161,7 +8161,12 @@ else
     exit 1
   fi
   if [ "$FM_SOL_CLAIM_CREATED" = "$ID" ]; then
-    LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") bash $(shell_quote "$SCRIPT_DIR/fm-sol-cap-lib.sh") run $(shell_quote "$ID") $(shell_quote "$STATE") /bin/sh -c $(shell_quote "$LAUNCH")"
+    # The ceiling gates admission only, never the command shape (Greptile P1 on
+    # #7433): uncapped, the pane shell sources this line, so the reservation
+    # handoff hands the very same bytes back to that same shell. "$0" is the
+    # pane shell's own report of itself, expanded right here by the shell that
+    # sources this file, and fm_sol_cap_launch_shell resolves it.
+    LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") bash $(shell_quote "$SCRIPT_DIR/fm-sol-cap-lib.sh") run-launch $(shell_quote "$ID") $(shell_quote "$STATE") \"\$0\" $(shell_quote "$LAUNCH")"
   fi
   if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
     chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then
