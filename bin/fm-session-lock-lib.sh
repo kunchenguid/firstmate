@@ -316,6 +316,10 @@ fm_os_proc_diag_once() {  # <message>
 # identically on any host, which is why the parsing lives here.
 fm_linux_stat_triple() {  # <stat-line> <cmdline-args>
   local line=$1 args=$2 rest comm ppid
+  # stat_fields, like the /proc/stat readers in bin/fm-remote-job-lib.sh and
+  # bin/fm-teardown.sh: ShellCheck follows sources, and bin/backends/rex.sh
+  # assigns a string to `fields`, so an array of that name here trips
+  # SC2178/SC2128 over there.
   case $line in
     *"("*") "*) ;;
     *) return 1 ;;
@@ -331,9 +335,9 @@ fm_linux_stat_triple() {  # <stat-line> <cmdline-args>
   comm=${comm%*) *}
   comm=$(printf '%s' "$comm" | LC_ALL=C tr '\012' ' ' | LC_ALL=C tr -c '\040-\176\200-\377' '?')
   rest=${line##*") "}
-  local -a fields
-  IFS=' ' read -r -a fields <<< "$rest"
-  ppid=${fields[1]:-}
+  local -a stat_fields
+  IFS=' ' read -r -a stat_fields <<< "$rest"
+  ppid=${stat_fields[1]:-}
   case $ppid in
     '' | *[!0-9]*) return 1 ;;
   esac
