@@ -288,10 +288,13 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+NOTE_FILE_SET=0
 TMUX_SOCKET=
 TMUX_SERVER_PID=
 TMUX_SERVER_START=
 TMUX_WINDOW_ID=
+TMUX_IDENTITY_FILE=
+TMUX_ORIGINAL_HOST=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -307,11 +310,13 @@ for control_arg in "$@"; do
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
         NOTE_SET=1
+        NOTE_FILE_SET=1
         ;;
       socket) TMUX_SOCKET=$control_arg ;;
       server_pid) TMUX_SERVER_PID=$control_arg ;;
       server_start) TMUX_SERVER_START=$control_arg ;;
       window_id) TMUX_WINDOW_ID=$control_arg ;;
+      identity_file) TMUX_IDENTITY_FILE=$control_arg ;;
     esac
     control_want_value=
     continue
@@ -330,11 +335,14 @@ for control_arg in "$@"; do
       [ -f "${control_arg#--note-file=}" ] || die "--note-file '${control_arg#--note-file=}' is not a readable file"
       NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
+      NOTE_FILE_SET=1
       ;;
     --socket) control_want_value=socket ;;
     --server-pid) control_want_value=server_pid ;;
     --server-start) control_want_value=server_start ;;
     --window-id) control_want_value=window_id ;;
+    --identity-file) control_want_value=identity_file ;;
+    --original-host) TMUX_ORIGINAL_HOST=1 ;;
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
@@ -348,7 +356,8 @@ if [ "$VERB" != relaunch ] && [ "$VERB" != bind-tmux ]; then
     || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
 fi
 if [ "$VERB" != bind-tmux ]; then
-  [ -z "$TMUX_SOCKET$TMUX_SERVER_PID$TMUX_SERVER_START$TMUX_WINDOW_ID" ] \
+  [ -z "$TMUX_SOCKET$TMUX_SERVER_PID$TMUX_SERVER_START$TMUX_WINDOW_ID$TMUX_IDENTITY_FILE" ] \
+    && [ "$TMUX_ORIGINAL_HOST" = 0 ] \
     || die "tmux identity options apply to bind-tmux only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
@@ -409,6 +418,10 @@ if [ -n "$(fm_meta_get "$META" remote_host)" ]; then
   die "task $ID is a remotely placed secondmate on $(fm_meta_get "$META" remote_host); its agent runs outside this home, so no lifecycle action here could verify that it interrupted, stopped, or came back. Drive its lifecycle on that host, and reconcile it through the secondmate recovery path rather than this plane"
 fi
 
+if [ "$VERB" = bind-tmux ]; then
+  CONTROL_META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+  fm_lock_acquire_wait "$CONTROL_META_LOCK"
+fi
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
@@ -1309,14 +1322,53 @@ do_relaunch() {
 
 case "$VERB" in
   bind-tmux)
-    [ "$BACKEND" = tmux ] && [ "$KIND" != secondmate ] \
-      || die "bind-tmux requires a tmux ship or scout"
+    [ "$BACKEND" = tmux ] || die "bind-tmux requires a tmux ship or scout"
+    case "$KIND" in ship|scout) ;; *) die "bind-tmux requires a tmux ship or scout" ;; esac
     [ -z "${FM_TMUX_SOCKET:-}" ] || die "task $ID already has a tmux binding"
     [ "$HARNESS_SET$MODEL_SET$EFFORT_SET" = 000 ] \
       || die "bind-tmux cannot change the launch profile"
-    [ "$NOTE_SET" = 1 ] && [ -n "$NOTE" ] \
+    [ "$NOTE_FILE_SET" = 1 ] && [ -n "$NOTE" ] \
       || die "bind-tmux requires independent identity proof in --note-file"
+    binding_identity=
+    if [ "$TMUX_ORIGINAL_HOST" = 1 ]; then
+      [ -z "$TMUX_IDENTITY_FILE$TMUX_SERVER_START$TMUX_WINDOW_ID" ] \
+        || die "--original-host requires a legacy reboot proof, without invented historical identity fields"
+      case "$TMUX_SOCKET" in /*) ;; *) die "--original-host requires the independently verified original --socket" ;; esac
+      case "$TMUX_SERVER_PID" in ''|0|*[!0-9]*) die "--original-host requires the independently recorded original --server-pid" ;; esac
+      FM_TMUX_SOCKET=$TMUX_SOCKET
+      FM_TMUX_SERVER_PID=$TMUX_SERVER_PID
+      FM_TMUX_HOST_ID=$(cat /etc/machine-id) || exit 1
+      FM_TMUX_REBOOT_BOOT_ID=$(cat /proc/sys/kernel/random/boot_id) || exit 1
+      FM_TMUX_REBOOT_BOOT_EPOCH=$(awk '$1 == "btime" {print $2}' /proc/stat) || exit 1
+      FM_TMUX_REBOOT_PID_NAMESPACE=$(readlink /proc/self/ns/pid) || exit 1
+      FM_TMUX_REBOOT_SPAWN_GEN=$(fm_backend_meta_exact_value "$META" spawn_gen) || exit 1
+      fm_backend_tmux_reboot_proven \
+        || die "task launch provenance does not prove a pre-boot launch on the confirmed original host; clocks or metadata are inconsistent"
+      binding_identity=$(printf '%s\n' "tmux_socket=$FM_TMUX_SOCKET" "tmux_server_pid=$FM_TMUX_SERVER_PID" \
+        "tmux_host_id=$FM_TMUX_HOST_ID" "tmux_reboot_boot_id=$FM_TMUX_REBOOT_BOOT_ID" \
+        "tmux_reboot_boot_epoch=$FM_TMUX_REBOOT_BOOT_EPOCH" "tmux_reboot_pid_namespace=$FM_TMUX_REBOOT_PID_NAMESPACE" \
+        "tmux_reboot_spawn_gen=$FM_TMUX_REBOOT_SPAWN_GEN")
+    fi
+    if [ -n "$TMUX_IDENTITY_FILE" ]; then
+      [ -z "$TMUX_SOCKET$TMUX_SERVER_PID$TMUX_SERVER_START$TMUX_WINDOW_ID" ] \
+        || die "--identity-file cannot be combined with individual tmux identity options"
+      [ -f "$TMUX_IDENTITY_FILE" ] && [ ! -L "$TMUX_IDENTITY_FILE" ] \
+        || die "--identity-file must be an independently retained regular native task record"
+      fm_backend_validate_task_endpoint "$TMUX_IDENTITY_FILE" "$ID" || exit 1
+      [ "$FM_BACKEND_VALIDATED_BACKEND" = tmux ] \
+        && [ "$FM_BACKEND_VALIDATED_TARGET" = "$T" ] \
+        && [ "$(fm_meta_get "$TMUX_IDENTITY_FILE" worktree)" = "$WT" ] \
+        || die "independent identity receipt does not belong to this task and worktree"
+      fm_backend_tmux_load_meta "$TMUX_IDENTITY_FILE" || exit 1
+      [ -n "${FM_TMUX_HOST_ID:-}" ] || die "dead legacy migration requires independently recorded host, boot, PID namespace, and server-process provenance"
+      TMUX_SOCKET=$FM_TMUX_SOCKET
+      TMUX_SERVER_PID=$FM_TMUX_SERVER_PID
+      TMUX_SERVER_START=$FM_TMUX_SERVER_START
+      TMUX_WINDOW_ID=$FM_TMUX_WINDOW_ID
+      binding_identity=$(grep '^tmux_' "$TMUX_IDENTITY_FILE") || exit 1
+    fi
     case "$TMUX_SOCKET" in /*) ;; *) die "bind-tmux requires an absolute --socket" ;; esac
+    if [ "$TMUX_ORIGINAL_HOST" = 0 ]; then
     case "$TMUX_SERVER_PID:$TMUX_SERVER_START" in
       *[!0-9:]*|:*|*:) die "bind-tmux requires numeric --server-pid and --server-start" ;;
     esac
@@ -1324,52 +1376,63 @@ case "$VERB" in
       @*) case "${TMUX_WINDOW_ID#@}" in ''|*[!0-9]*) die "invalid --window-id" ;; esac ;;
       *) die "bind-tmux requires a stable --window-id" ;;
     esac
+    fi
     FM_TMUX_SOCKET=$TMUX_SOCKET
     FM_TMUX_SERVER_PID=$TMUX_SERVER_PID
     FM_TMUX_SERVER_START=$TMUX_SERVER_START
     FM_TMUX_WINDOW_ID=$TMUX_WINDOW_ID
-    fm_backend_tmux_identity >/dev/null \
-      || die "independently supplied tmux server identity is inaccessible, foreign, or reused"
-    [ "$(agent_state)" = dead ] \
-      || die "bind-tmux requires the exact idle shell; live, missing, or ambiguous ownership refuses"
-    [ "$(fm_backend_tmux_current_path "$T")" = "$WT" ] \
-      || die "bind-tmux endpoint is not in its recorded worktree"
-    [ "$(fm_meta_get "$META" mode)" != no-mistakes ] && [ ! -e "$WT/.no-mistakes" ] \
+    binding_server_state=$(fm_backend_tmux_server_state)
+    pane_pid=
+    case "$binding_server_state" in
+      alive)
+        [ "$(agent_state)" = dead ] \
+          || die "bind-tmux requires the exact idle shell; live, missing, or ambiguous ownership refuses"
+        [ "$(fm_backend_tmux_current_path "$T")" = "$WT" ] \
+          || die "bind-tmux endpoint is not in its recorded worktree"
+        pane_pid=$(fm_tmux display-message -p -t "$T" '#{pane_pid}') || exit 1
+        binding_identity=$(fm_backend_tmux_identity) || exit 1
+        binding_identity="$binding_identity"$'\n'"tmux_window_id=$TMUX_WINDOW_ID"
+        ;;
+      gone)
+        [ -n "$TMUX_IDENTITY_FILE" ] || [ "$TMUX_ORIGINAL_HOST" = 1 ] \
+          || die "dead legacy migration requires an independently retained native identity receipt; current host identity is not historical provenance"
+        ;;
+      *) die "independently supplied tmux server identity is inaccessible, foreign, or reused" ;;
+    esac
+    fm_backend_tmux_validation_free "$WT" "$META" \
       || die "bind-tmux cannot prove no-mistakes validation custody released"
-    pane_pid=$(fm_tmux display-message -p -t "$T" '#{pane_pid}') || exit 1
-    fm_backend_tmux_worktree_free "$WT" "$pane_pid" \
+    fm_backend_tmux_worktree_free "$WT" "$META" "$pane_pid" \
       || die "bind-tmux cannot prove no live agent or validation job owns the worktree"
     safe_checkpoint
-    # Re-read under the same metadata lock used by spawn and teardown.
-    meta_lock=$(fm_meta_lock_path "$META") || exit 1
-    fm_lock_acquire_wait "$meta_lock"
-    CONTROL_META_LOCK=$meta_lock
-    cp -p "$META" "$META_PRIOR" || { fm_lock_release "$meta_lock"; exit 1; }
+    binding_evidence=$(mktemp -d "$DATA/$ID/tmux-binding.XXXXXX") || exit 1
+    cp -p "$META" "$binding_evidence/meta-prior" || exit 1
     if grep -q '^tmux_' "$META" \
-      || [ "$(agent_state)" != dead ] \
-      || ! fm_backend_tmux_worktree_free "$WT" "$pane_pid"; then
-      fm_lock_release "$meta_lock"
+      || [ "$(fm_backend_tmux_server_state)" != "$binding_server_state" ] \
+      || ! fm_backend_tmux_validation_free "$WT" "$META" \
+      || ! fm_backend_tmux_worktree_free "$WT" "$META" "$pane_pid"; then
       die "tmux binding or task ownership changed during migration"
+    fi
+    if [ "$binding_server_state" = alive ]; then
+      [ "$(agent_state)" = dead ] && [ "$(fm_backend_tmux_current_path "$T")" = "$WT" ] \
+        || die "task endpoint ownership changed during migration"
     fi
     # Preserve the PR identity block at the end of metadata.
     {
-      fm_backend_tmux_identity
-      printf 'tmux_window_id=%s\n' "$TMUX_WINDOW_ID"
+      printf '%s\n' "$binding_identity"
       cat "$META"
     } > "$META.bind-tmux.tmp"
-    printf '%s\n' "$NOTE" > "$NOTE_FILE"
+    printf '%s\n' "$NOTE" > "$binding_evidence/proof"
     # shellcheck source=bin/fm-tasks-axi-lib.sh
     . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
     # shellcheck source=bin/fm-backlog-transition-lib.sh
     . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
     if ! fm_backlog_atomic_transition publish "$META.bind-tmux.tmp" "$META" "task record" "$STATE"; then
       rm -f "$META.bind-tmux.tmp"
-      fm_lock_release "$meta_lock"
       die "tmux binding could not be published"
     fi
-    fm_lock_release "$meta_lock"
+    fm_lock_release "$CONTROL_META_LOCK"
     CONTROL_META_LOCK=
-    echo "bound-tmux $ID endpoint=$T worktree=$WT"
+    echo "bound-tmux $ID endpoint=$T worktree=$WT proof=$binding_evidence"
     ;;
   interrupt)
     state=$(agent_state)

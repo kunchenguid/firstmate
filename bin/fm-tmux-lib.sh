@@ -49,24 +49,58 @@ _FM_TMUX_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_TMUX_LIB_DIR:-/}/fm-composer-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "${_FM_TMUX_LIB_DIR:-/}/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-agent-process-lib.sh
+. "${_FM_TMUX_LIB_DIR:-/}/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "${_FM_TMUX_LIB_DIR:-/}/fm-timeout-lib.sh"
 unset _FM_TMUX_LIB_DIR
 
 # A bound lifecycle operation never addresses the ambient server. Recheck the
 # native server incarnation before every read or effect; an inaccessible or
 # restarted server refuses, including when its socket path has been reused.
 fm_tmux() {
-  local identity
+  local identity result arg command_text='' quoted condition status
   if [ -z "${FM_TMUX_SOCKET:-}" ]; then
     command tmux "$@"
-    return
+    status=$?
+    return "$status"
   fi
   [ -S "$FM_TMUX_SOCKET" ] && [ -O "$FM_TMUX_SOCKET" ] || return 1
-  identity=$(command tmux -S "$FM_TMUX_SOCKET" display-message -p \
+  [ -n "${FM_TMUX_SERVER_START:-}" ] || return 1
+  identity=$(fm_run_timed 5 tmux -S "$FM_TMUX_SOCKET" display-message -p \
     '#{socket_path}|#{pid}|#{start_time}' 2>/dev/null) || return 1
   [ "$identity" = "$FM_TMUX_SOCKET|$FM_TMUX_SERVER_PID|$FM_TMUX_SERVER_START" ] || return 1
-  command tmux -S "$FM_TMUX_SOCKET" "$@"
+  if [ -n "${FM_TMUX_HOST_ID:-}" ]; then
+    [ "$(fm_run_timed 5 cat /etc/machine-id 2>/dev/null)" = "$FM_TMUX_HOST_ID" ] \
+      && [ "$(fm_run_timed 5 cat /proc/sys/kernel/random/boot_id 2>/dev/null)" = "$FM_TMUX_BOOT_ID" ] \
+      && [ "$(fm_run_timed 5 readlink /proc/self/ns/pid 2>/dev/null)" = "$FM_TMUX_PID_NAMESPACE" ] \
+      && [ "$(fm_tmux_pid_identity "$FM_TMUX_SERVER_PID" 2>/dev/null)" = "$FM_TMUX_PROCESS_IDENTITY" ] || return 1
+  fi
+  for arg in "$@"; do
+    quoted=$(fm_tmux_quote "$arg")
+    command_text="$command_text $quoted"
+  done
+  # SAFETY: the effect and native incarnation check run in the same server
+  # command queue, so reconnecting to a reused socket cannot execute the effect.
+  condition="#{&&:#{==:#{pid},$FM_TMUX_SERVER_PID},#{==:#{start_time},$FM_TMUX_SERVER_START}}"
+  result=$(fm_run_timed 5 tmux -S "$FM_TMUX_SOCKET" if-shell -F "$condition" \
+    "$command_text" 'display-message -p FM_TMUX_IDENTITY_REFUSED') || return 1
+  [ "$result" != FM_TMUX_IDENTITY_REFUSED ] || return 1
+  [ -z "$result" ] || printf '%s\n' "$result"
+  return 0
 }
 
+fm_tmux_pid_identity() {
+  # shellcheck disable=SC2016 # positional arguments expand in the bounded child
+  fm_run_timed 5 bash -c '. "$1/fm-path-lib.sh"; fm_pid_identity "$2"' \
+    bash "${FM_BACKEND_LIB_DIR:-${BASH_SOURCE[0]%/*}}" "$1"
+}
+
+fm_tmux_quote() {  # one literal token for tmux's command parser
+  local token=$1
+  token=${token//\'/\'\\\'\'}
+  printf "'%s'" "$token"
+}
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised

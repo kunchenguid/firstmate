@@ -8,6 +8,11 @@
 # actual sessions.
 set -u
 
+if [ "$(uname -s)" = Linux ] && [ "${FM_TMUX_TEST_NAMESPACE:-0}" = 0 ]; then
+  exec unshare --user --map-root-user --pid --fork --mount-proc \
+    env FM_TMUX_TEST_NAMESPACE=1 bash "${BASH_SOURCE[0]}"
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
@@ -34,6 +39,7 @@ trap cleanup_all EXIT
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  [ -z "${FOREIGN_SOCKET:-}" ] || "$REAL_TMUX" -S "$FOREIGN_SOCKET" kill-server >/dev/null 2>&1 || true
   [ -n "${SHIM_DIR:-}" ] && rm -rf "$SHIM_DIR"
 }
 
@@ -43,9 +49,12 @@ cleanup_all() {
 SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke.XXXXXX")
 cat > "$SHIM_DIR/tmux" <<SH
 #!/usr/bin/env bash
+case "\${FM_TEST_TMUX_FAIL_SESSION:-0}:\$*" in 1:*new-session*) exit 1 ;; esac
 exec "$REAL_TMUX" -f /dev/null -L "$SOCKET" "\$@"
 SH
 chmod +x "$SHIM_DIR/tmux"
+TMUX_TMPDIR="$SHIM_DIR"
+export TMUX_TMPDIR
 PATH="$SHIM_DIR:$PATH"
 export PATH
 
@@ -63,6 +72,8 @@ PREFIX_SESSION="smoke-prefix-live"
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
+tmux set-option -g default-command 'exec /bin/bash --noprofile --norc' \
+  || fail "private server deterministic shell setup failed"
 tmux new-session -d -s "$OTHER_SESSION" -x 200 -y 50 \
   || fail "real tmux: second new-session failed"
 tmux new-session -d -s "$PREFIX_SESSION" -n "$WINDOW" -x 200 -y 50 \
@@ -306,18 +317,19 @@ pass "real tmux: container_ensure falls back to the pane's surviving session whe
 
 # --- recorded server identity and legacy migration --------------------------
 
-# shellcheck source=tests/git-config-helpers.sh
-. "$ROOT/tests/git-config-helpers.sh"
+[ "$(uname -s)" = Linux ] || { echo "skip - kernel ownership recovery requires Linux"; cleanup_all; exit 0; }
+# shellcheck source=tests/lib.sh
+. "$ROOT/tests/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 LAB_HOME="$SHIM_DIR/home"
 LAB_WT="$SHIM_DIR/work"
-mkdir -p "$LAB_HOME/state" "$LAB_HOME/data/identity" "$LAB_WT"
-git -C "$LAB_WT" init -q || fail "private identity repository failed"
-git -C "$LAB_WT" -c user.name=Test -c user.email=test@example.invalid \
-  commit --allow-empty -qm fixture || fail "private fixture commit failed"
+LAB_PROJ="$SHIM_DIR/project"
+mkdir -p "$LAB_HOME/state" "$LAB_HOME/data/identity"
+fm_git_worktree "$LAB_PROJ" "$LAB_WT" fm/identity || fail "private isolated worktree fixture failed"
 printf 'retained dirty work\n' > "$LAB_WT/dirty"
-printf 'retained instructions\n' > "$LAB_HOME/data/identity/brief.md"
+printf "# Task\n## Captain's intent\nretained instructions\n## Firstmate spec\nPrivate local-only recovery fixture.\n" > "$LAB_HOME/data/identity/brief.md"
+cp "$LAB_HOME/data/identity/brief.md" "$SHIM_DIR/brief-original"
 printf 'working: retained status\n' > "$LAB_HOME/state/identity.status"
 printf 'retained poll\n' > "$LAB_HOME/state/identity.poll"
 mkdir -p "$LAB_HOME/state/identity.inbox"
@@ -327,8 +339,10 @@ LAB_WID=$(fm_backend_tmux_create_task "$SESSION" fm-identity "$LAB_WT") \
   || fail "private legacy endpoint failed"
 LAB_META="$LAB_HOME/state/identity.meta"
 {
-  printf 'window=%s\nworktree=%s\nproject=%s\n' "$LAB_TARGET" "$LAB_WT" "$LAB_WT"
-  printf 'harness=claude\nkind=ship\nmode=local-only\nyolo=off\nbranch=task\n'
+  printf 'window=%s\nworktree=%s\nproject=%s\n' "$LAB_TARGET" "$LAB_WT" "$LAB_PROJ"
+  printf 'harness=codex\nkind=ship\nmode=local-only\nyolo=off\nbranch=fm/identity\n'
+  printf 'tasktmp=%s\n' "$SHIM_DIR/tasktmp"
+  printf 'spawn_gen=s%s.123.456\n' "$(date +%s)"
 } > "$LAB_META"
 printf 'Independently retained private tmux server and window read.\n' > "$SHIM_DIR/proof"
 LAB_SOCKET=$(tmux display-message -p '#{socket_path}')
@@ -344,12 +358,69 @@ for _ in $(seq 1 100); do
   sleep 0.1
 done
 [ "$(fm_backend_tmux_agent_state "$LAB_TARGET")" = dead ] || fail "private shell did not become idle"
+cp "$LAB_META" "$SHIM_DIR/legacy-original"
+cat > "$SHIM_DIR/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "axi") cat "$FM_TEST_NM_OVERVIEW" ;;
+  "axi status --run "*) cat "$FM_TEST_NM_DETAIL.${4}" ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$SHIM_DIR/no-mistakes"
+export FM_TEST_NM_OVERVIEW="$SHIM_DIR/nm-overview" FM_TEST_NM_DETAIL="$SHIM_DIR/nm-detail"
+printf 'unavailable\n' > "$FM_TEST_NM_OVERVIEW"
+cp /bin/sleep "$SHIM_DIR/codex-agent"
+fm_backend_tmux_send_text_line "$LAB_TARGET" "'$SHIM_DIR/codex-agent' 30"
+for _ in $(seq 1 100); do
+  [ "$(fm_backend_tmux_agent_state "$LAB_TARGET")" != alive ] || break
+  sleep 0.1
+done
+[ "$(fm_backend_tmux_agent_state "$LAB_TARGET")" = alive ] || fail "private live-agent fixture failed"
+if identity_bind > "$SHIM_DIR/live-bind.out" 2>&1; then fail "a live agent authorized migration"; fi
+cmp "$LAB_META" "$SHIM_DIR/legacy-original" || fail "live-agent refusal changed metadata"
+fm_backend_tmux_send_key "$LAB_TARGET" C-c
+sleep 0.1
+fm_backend_tmux_send_text_line "$LAB_TARGET" 'sleep 30'
+sleep 0.1
+[ "$(fm_backend_tmux_agent_state "$LAB_TARGET")" = ambiguous ] || fail "private ambiguous-owner fixture failed"
+if identity_bind > "$SHIM_DIR/ambiguous-bind.out" 2>&1; then fail "ambiguous ownership authorized migration"; fi
+fm_backend_tmux_send_key "$LAB_TARGET" C-c
+sleep 0.1
+pass "real tmux: live agents and ambiguous owners refuse migration without changing metadata"
 identity_bind > "$SHIM_DIR/bind.out" 2>&1 \
   || fail "verified legacy migration failed: $(cat "$SHIM_DIR/bind.out")"
 fm_backend_tmux_bind_meta "$LAB_META" || fail "native recorded identity did not bind"
+fm_backend_validate_task_endpoint "$LAB_META" identity || fail "recorded native metadata is invalid"
 [ "$FM_TMUX_SOCKET" = "$LAB_SOCKET" ] || fail "migration recorded the wrong server"
 [ "$FM_TMUX_WINDOW_ID" = "$LAB_WID" ] || fail "migration recorded the wrong stable window"
 pass "real tmux: independently verified legacy idle endpoint migrates without changing dirty work"
+
+# An idle pane is not sufficient when a detached task agent or validation
+# allocation still owns the task. Only its verified idle shell is exempted.
+FM_TASK_INBOX="$LAB_HOME/state/identity.inbox" "$SHIM_DIR/codex-agent" 30 &
+LAB_JOB=$!
+sleep 0.1
+if fm_backend_tmux_idle_custody "$LAB_META" "$LAB_TARGET"; then
+  fail "idle pane bypassed a detached task-marked agent"
+fi
+kill "$LAB_JOB"; wait "$LAB_JOB" 2>/dev/null || true
+sed 's/^mode=.*/mode=no-mistakes/' "$LAB_META" > "$SHIM_DIR/idle-validation-meta"
+printf 'count: 2 of 2 total\nruns[2]{id,branch,status,head,pr}:\n  newer,fm/identity,failed,abcdef0,null\n  older,fm/identity,running,abcdef0,null\n' > "$FM_TEST_NM_OVERVIEW"
+printf 'branch: fm/identity\nstatus: failed\n' > "$FM_TEST_NM_DETAIL.newer"
+printf 'branch: fm/identity\nstatus: running\n' > "$FM_TEST_NM_DETAIL.older"
+if fm_backend_tmux_idle_custody "$SHIM_DIR/idle-validation-meta" "$LAB_TARGET"; then
+  fail "idle pane bypassed an older active validation allocation"
+fi
+printf 'branch: fm/identity\nstatus: completed\n' > "$FM_TEST_NM_DETAIL.older"
+fm_backend_tmux_idle_custody "$SHIM_DIR/idle-validation-meta" "$LAB_TARGET" \
+  || fail "terminal validation history refused an otherwise owner-free idle pane"
+printf 'branch: fm/identity\nstatus: parked\n' > "$FM_TEST_NM_DETAIL.older"
+if fm_backend_tmux_idle_custody "$SHIM_DIR/idle-validation-meta" "$LAB_TARGET"; then
+  fail "parked validation custody authorized idle adoption"
+fi
+printf 'unavailable\n' > "$FM_TEST_NM_OVERVIEW"
+pass "real tmux: idle adoption checks detached agents and every same-branch validation candidate"
 
 # A different live socket cannot authorize the record, even if its labels match.
 cp "$LAB_META" "$SHIM_DIR/bound-meta"
@@ -362,9 +433,11 @@ if fm_backend_tmux_bind_meta "$SHIM_DIR/unreachable-meta" 2>/dev/null; then
   fail "an inaccessible socket was accepted"
 fi
 sed "s|^tmux_socket=.*|tmux_socket=$SHIM_DIR/foreign|" "$LAB_META" > "$SHIM_DIR/foreign-meta"
-printf 'not a socket\n' > "$SHIM_DIR/foreign"
+FOREIGN_SOCKET="$SHIM_DIR/foreign"
+"$REAL_TMUX" -S "$FOREIGN_SOCKET" -f /dev/null new-session -d -s foreign -n fm-identity \
+  || fail "private foreign server fixture failed"
 if fm_backend_tmux_bind_meta "$SHIM_DIR/foreign-meta" 2>/dev/null; then
-  fail "a foreign non-socket path was accepted"
+  fail "a different live server was accepted"
 fi
 fm_backend_tmux_bind_meta "$LAB_META" || fail "original binding did not survive refusal cases"
 pass "real tmux: reused, foreign, and unreachable server bindings refuse"
@@ -389,6 +462,16 @@ wait "$LAB_JOB" 2>/dev/null || true
 case "$absence" in unproven$'\t'*) ;; *) fail "a live validation job authorized replacement" ;; esac
 pass "real tmux: a detached validation job prevents replacement of an absent window"
 
+# A surviving task-marked agent remains an owner after moving its cwd away.
+FM_TASK_INBOX="$LAB_HOME/state/identity.inbox" "$SHIM_DIR/codex-agent" 30 &
+LAB_JOB=$!
+sleep 0.1
+absence=$(fm_control_endpoint_absence_verdict tmux "$LAB_TARGET" "$LAB_META")
+kill "$LAB_JOB" 2>/dev/null || true
+wait "$LAB_JOB" 2>/dev/null || true
+case "$absence" in unproven$'\t'*) ;; *) fail "a moved task-marked agent authorized replacement" ;; esac
+pass "real tmux: task-marked agents outside the worktree still prevent replacement"
+
 # A missing legacy record still refuses; no metadata is fabricated from the
 # caller's server. Active validation custody remains a separate refusal.
 sed '/^tmux_/d' "$LAB_META" > "$SHIM_DIR/legacy-meta"
@@ -400,12 +483,120 @@ case "$absence" in unproven$'\t'*) ;; *) fail "unreleased validation custody aut
 pass "real tmux: legacy missing endpoints and unproven validation custody remain refused"
 
 [ "$(cat "$LAB_WT/dirty")" = "retained dirty work" ] || fail "dirty work changed"
-[ "$(cat "$LAB_HOME/data/identity/brief.md")" = "retained instructions" ] || fail "brief changed"
+cmp "$LAB_HOME/data/identity/brief.md" "$SHIM_DIR/brief-original" || fail "brief changed"
 [ "$(cat "$LAB_HOME/state/identity.status")" = "working: retained status" ] || fail "status changed"
 [ "$(cat "$LAB_HOME/state/identity.poll")" = "retained poll" ] || fail "poll changed"
 [ "$(cat "$LAB_HOME/state/identity.inbox/001.msg")" = "retained steer" ] || fail "inbox changed"
 pass "real tmux: migration and absence proofs preserve brief, inbox, poll, status, and dirty work"
-unset FM_TMUX_SOCKET FM_TMUX_SERVER_PID FM_TMUX_SERVER_START FM_TMUX_WINDOW_ID
+
+# Destroy only this suite's private server. A retained native receipt supports
+# dead legacy migration; a missing receipt still preserves the original guard.
+cp "$LAB_META" "$SHIM_DIR/native-receipt"
+tmux kill-server || fail "private server death fixture failed"
+for _ in $(seq 1 100); do
+  [ -e "/proc/$LAB_PID" ] || break
+  sleep 0.1
+done
+[ ! -e "/proc/$LAB_PID" ] || fail "private server PID was not reaped"
+fm_backend_tmux_bind_meta "$LAB_META" || fail "proven-dead server binding failed"
+absence=$(fm_control_endpoint_absence_verdict tmux "$LAB_TARGET" "$LAB_META")
+[ "$absence" = gone$'\t' ] || fail "positive server death was not proved: $absence"
+sed '/^tmux_/d' "$LAB_META" > "$SHIM_DIR/legacy-dead"
+cp "$SHIM_DIR/legacy-dead" "$LAB_META"
+if identity_bind > "$SHIM_DIR/dead-unbound.out" 2>&1; then fail "dead legacy migration guessed provenance"; fi
+FM_HOME="$LAB_HOME" bash "$ROOT/bin/fm-control.sh" identity bind-tmux \
+  --identity-file "$SHIM_DIR/native-receipt" --note-file "$SHIM_DIR/proof" \
+  > "$SHIM_DIR/dead-bind.out" 2>&1 || fail "dead legacy native receipt migration failed: $(cat "$SHIM_DIR/dead-bind.out")"
+pass "real tmux: kernel-confirmed server death supports retained-receipt migration and refuses missing provenance"
+
+# Simulate a legacy record persisted before reboot. Current boot observations
+# are explicitly recovery evidence; no historical boot or start field is made up.
+cp "$SHIM_DIR/legacy-dead" "$LAB_META"
+BOOT_EPOCH=$(awk '$1 == "btime" {print $2}' /proc/stat)
+sed "s/^spawn_gen=.*/spawn_gen=s$((BOOT_EPOCH - 10)).123.456/" "$LAB_META" > "$SHIM_DIR/preboot-meta"
+cp "$SHIM_DIR/preboot-meta" "$LAB_META"
+FM_HOME="$LAB_HOME" bash "$ROOT/bin/fm-control.sh" identity bind-tmux \
+  --original-host --socket "$LAB_SOCKET" --server-pid "$LAB_PID" --note-file "$SHIM_DIR/proof" \
+  > "$SHIM_DIR/reboot-bind.out" 2>&1 || fail "confirmed-original-host reboot migration failed: $(cat "$SHIM_DIR/reboot-bind.out")"
+fm_backend_validate_task_endpoint "$LAB_META" identity || fail "reboot binding metadata is invalid"
+grep -q '^tmux_reboot_boot_id=' "$LAB_META" || fail "current reboot proof was not recorded"
+if grep -q '^tmux_boot_id=' "$LAB_META"; then fail "historical boot identity was fabricated"; fi
+cp "$LAB_META" "$SHIM_DIR/reboot-bound"
+sed "s/^spawn_gen=.*/spawn_gen=s$(date +%s).123.456/" "$LAB_META" > "$SHIM_DIR/inconsistent-meta"
+absence=$(fm_control_endpoint_absence_verdict tmux "$LAB_TARGET" "$SHIM_DIR/inconsistent-meta")
+case "$absence" in unproven$'\t'*) ;; *) fail "changed launch provenance authorized recovery" ;; esac
+pass "real tmux: confirmed-host reboot proof migrates pre-boot legacy metadata and rejects inconsistent provenance"
+
+# Retain a sibling before starting the successor server. Its launch generation
+# differs, while its independently migrated predecessor server is the same.
+LAB_WT2="$SHIM_DIR/work-sibling"
+LAB_PROJ2="$SHIM_DIR/project-sibling"
+fm_git_worktree "$LAB_PROJ2" "$LAB_WT2" fm/sibling || fail "sibling isolated worktree fixture failed"
+mkdir -p "$LAB_HOME/data/sibling"
+sed -e "s|window=.*|window=$SESSION:fm-sibling|" \
+  -e "s|worktree=.*|worktree=$LAB_WT2|" -e "s|project=.*|project=$LAB_PROJ2|" \
+  -e 's|branch=.*|branch=fm/sibling|' \
+  -e "s|spawn_gen=.*|spawn_gen=s$((BOOT_EPOCH - 20)).456.789|" \
+  -e "s|tmux_reboot_spawn_gen=.*|tmux_reboot_spawn_gen=s$((BOOT_EPOCH - 20)).456.789|" \
+  "$LAB_META" > "$LAB_HOME/state/sibling.meta"
+cp "$LAB_HOME/data/identity/brief.md" "$LAB_HOME/data/sibling/brief.md"
+printf 'sibling dirty work\n' > "$LAB_WT2/dirty"
+
+# Fail after native startup and before session/window/metadata publication.
+# The unchanged record can authorize exactly the durably recorded successor.
+if FM_TEST_TMUX_FAIL_SESSION=1 fm_backend_tmux_recover_server "$LAB_META" "$LAB_WT" "$SESSION"; then
+  fail "startup-before-publication failure injection did not fire"
+fi
+cmp "$LAB_META" "$SHIM_DIR/reboot-bound" || fail "partial server startup changed task metadata"
+fm_backend_tmux_bind_meta "$LAB_META" || fail "durable startup receipt did not authorize the exact successor"
+SUCCESSOR_PID=$FM_TMUX_SERVER_PID
+[ "$SUCCESSOR_PID" != "$LAB_PID" ] || fail "recovery retained dead predecessor identity"
+fm_backend_tmux_bind_meta "$LAB_HOME/state/sibling.meta" \
+  || fail "verified sibling predecessor did not recognize the shared successor"
+[ "$FM_TMUX_SERVER_PID" = "$SUCCESSOR_PID" ] || fail "sibling adopted a different server"
+mkdir -p "$SHIM_DIR/unrelated/state"
+cp "$LAB_META" "$SHIM_DIR/unrelated/state/identity.meta"
+if fm_backend_tmux_bind_meta "$SHIM_DIR/unrelated/state/identity.meta" 2>/dev/null; then
+  fail "unrelated home without successor provenance adopted a reused socket"
+fi
+pass "real tmux: durable startup provenance survives partial failure and recognizes only recorded same-home siblings"
+
+cat > "$SHIM_DIR/codex" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  --version) printf 'codex-cli 0.134.0\\n'; exit 0 ;;
+esac
+exec "$SHIM_DIR/codex-agent" 120
+SH
+chmod +x "$SHIM_DIR/codex"
+mkdir -p "$SHIM_DIR/user-home"
+RETAINED_HEAD=$(git -C "$LAB_WT" rev-parse HEAD)
+FM_HOME="$LAB_HOME" HOME="$SHIM_DIR/user-home" FM_SPAWN_NO_GUARD=1 \
+  FM_CONTROL_LAUNCH_WAIT=20 bash "$ROOT/bin/fm-control.sh" identity relaunch --note 'Resume preserved work after verified private server death.' \
+  > "$SHIM_DIR/recover.out" 2>&1 || fail "dead-server same-task recovery failed: $(cat "$SHIM_DIR/recover.out")"
+fm_backend_tmux_bind_meta "$LAB_META" || fail "replacement identity did not bind"
+[ "$(fm_backend_tmux_agent_state "$LAB_TARGET")" = alive ] || fail "native replacement agent was not confirmed"
+[ "$(git -C "$LAB_WT" rev-parse HEAD)" = "$RETAINED_HEAD" ] || fail "recovery moved committed work"
+[ "$(git -C "$LAB_WT" symbolic-ref --short HEAD)" = fm/identity ] || fail "recovery changed branch"
+[ "$(cat "$LAB_WT/dirty")" = "retained dirty work" ] || fail "recovery changed dirty work"
+[ "$(cat "$LAB_HOME/state/identity.status")" = "working: retained status" ] || fail "recovery truncated status"
+[ "$(cat "$LAB_HOME/state/identity.poll")" = "retained poll" ] || fail "recovery changed poll"
+[ "$(cat "$LAB_HOME/state/identity.inbox/001.msg")" = "retained steer" ] || fail "recovery changed inbox"
+grep -Fqx 'retained instructions' "$LAB_HOME/data/identity/brief.md" || fail "recovery lost the brief"
+grep -Fq 'Resume preserved work' "$LAB_HOME/data/identity/brief.md" || fail "replacement missed the progress note"
+grep -q '^tmux_boot_id=' "$LAB_META" || fail "native replacement server identity was not recorded"
+if grep -q '^tmux_reboot_' "$LAB_META"; then fail "replacement retained obsolete reboot binding"; fi
+pass "real tmux: dead-server recovery launches the same task and preserves commits, branch, dirty work, brief, inbox, poll, and status"
+FM_HOME="$LAB_HOME" HOME="$SHIM_DIR/user-home" FM_SPAWN_NO_GUARD=1 \
+  FM_CONTROL_LAUNCH_WAIT=20 bash "$ROOT/bin/fm-control.sh" sibling relaunch --note 'Resume the preserved sibling on the verified shared successor.' \
+  > "$SHIM_DIR/sibling-recover.out" 2>&1 || fail "same-socket sibling recovery failed: $(cat "$SHIM_DIR/sibling-recover.out")"
+fm_backend_tmux_bind_meta "$LAB_HOME/state/sibling.meta" || fail "sibling replacement identity did not bind"
+[ "$FM_TMUX_SERVER_PID" = "$SUCCESSOR_PID" ] || fail "sibling recovery replaced the shared successor"
+[ "$(fm_backend_tmux_agent_state "$SESSION:fm-sibling")" = alive ] || fail "sibling agent was not confirmed"
+[ "$(cat "$LAB_WT2/dirty")" = "sibling dirty work" ] || fail "sibling dirty work changed"
+[ "$(fm_backend_tmux_agent_state "$LAB_TARGET")" = alive ] || fail "sibling recovery disturbed the first task"
+pass "real tmux: two tasks recover on the same successor socket without disturbing the first live task"
+unset FM_TMUX_SOCKET FM_TMUX_SERVER_PID FM_TMUX_SERVER_START FM_TMUX_WINDOW_ID FM_TMUX_HOST_ID FM_TMUX_BOOT_ID FM_TMUX_PID_NAMESPACE FM_TMUX_PROCESS_IDENTITY
 
 cleanup_all
 trap - EXIT

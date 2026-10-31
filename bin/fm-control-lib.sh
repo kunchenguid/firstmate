@@ -396,7 +396,7 @@ fm_control_backend_relaunch_supported() {  # <backend>
 fm_control_absence_recheck_applies() {  # <backend> <raw-state>
   case "${2-}" in
     missing) return 0 ;;
-    unreadable) [ "${1-}" = rex ] ;;
+    unreadable) case "${1-}" in rex|tmux) return 0 ;; *) return 1 ;; esac ;;
     *) return 1 ;;
   esac
 }
@@ -443,9 +443,10 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     on the verified server, while an unreachable server reads `unreadable`.
 #     The proof re-reads the thread, but exit and relaunch refuse before it:
 #     V2 has no session stop and a thread cannot host a replacement.
-#   tmux proves window absence only on a live, recorded server incarnation,
-#     using the stable window id across all its sessions. Legacy records and
-#     dead, foreign, or inaccessible servers still refuse.
+#   tmux proves window absence on the recorded live server, or server death
+#     from matching local host/boot provenance and positive kernel PID absence.
+#     Both require surviving-process and validation ownership to be released.
+#     Legacy records, foreign/inaccessible hosts, and reused identities refuse.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
@@ -456,12 +457,14 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
   case "$backend" in
     tmux)
       case "$(fm_backend_tmux_endpoint_absence_recheck "$target" "$meta")" in
-        dead) printf 'dead\t' ;;
+        dead)
+          if fm_backend_tmux_idle_custody "$meta" "$target"; then printf 'dead\t'
+          else printf 'unproven\tidle pane still has unproven detached agent or validation custody'; fi
+          ;;
         alive) printf 'alive\t' ;;
         missing)
-          if [ "$(fm_meta_get "$meta" mode)" = no-mistakes ] \
-            || [ -e "$(fm_meta_get "$meta" worktree)/.no-mistakes" ] \
-            || ! fm_backend_tmux_worktree_free "$(fm_meta_get "$meta" worktree)"; then
+          if ! fm_backend_tmux_validation_free "$(fm_meta_get "$meta" worktree)" "$meta" \
+            || ! fm_backend_tmux_worktree_free "$(fm_meta_get "$meta" worktree)" "$meta"; then
             printf 'unproven\ttmux window is absent, but live agent or validation ownership of the worktree is not proven released'
           else
             printf 'gone\t'
@@ -470,7 +473,7 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
         legacy)
           printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity; bind-tmux requires an independently verified live server and an idle endpoint in the recorded worktree'
           ;;
-        *) printf 'unproven\tthe recorded tmux server or stable window identity cannot be verified; a dead or reused socket never proves task ownership released' ;;
+        *) printf 'unproven\tthe recorded tmux host, boot, server process, or stable window identity cannot be verified; a connection refusal alone never proves task ownership released' ;;
       esac
       ;;
     herdr)

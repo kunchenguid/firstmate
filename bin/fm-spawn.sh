@@ -2356,7 +2356,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
     esac
   fi
   case "$RELAUNCH_STATE" in
-    dead) ;;
+    dead)
+      if [ "$BACKEND" = tmux ]; then
+        fm_backend_tmux_idle_custody "$RELAUNCH_META" "$RELAUNCH_TARGET" || {
+          echo "error: idle tmux pane has unproven detached agent or validation custody; refusing replacement" >&2
+          exit 1
+        }
+      fi
+      ;;
     missing) RELAUNCH_REBIND=1 ;;
     *)
       echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
@@ -4490,14 +4497,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
     WT_TARGET=$T
     SES=${T%%:*}
   elif [ "$BACKEND" = tmux ]; then
-    # Reclaim only a positively absent stable window on its recorded live
-    # server. Never create a server or fall back to the launcher's backend.
+    # Recheck before creating anything through the same absence owner used by
+    # control. A proven-dead local server is recreated at its recorded path.
     fm_backend_tmux_bind_meta "$RELAUNCH_META" || exit 1
     SES=${RELAUNCH_TARGET%%:*}
-    fm_backend_tmux_worktree_free "$WT" || {
+    if [ "$(fm_control_endpoint_absence_verdict tmux "$RELAUNCH_TARGET" "$RELAUNCH_META")" != gone$'\t' ] \
+      || ! fm_backend_tmux_worktree_free "$WT" "$RELAUNCH_META"; then
       echo "error: task $ID's worktree ownership changed before tmux replacement" >&2
       exit 1
-    }
+    fi
+    if [ "$(fm_backend_tmux_server_state)" = gone ] || [ "$FM_TMUX_SUCCESSOR" = 1 ]; then
+      fm_backend_tmux_recover_server "$RELAUNCH_META" "$WT" "$SES" || {
+        echo "error: the recorded tmux server could not be safely recreated; preserving task state" >&2
+        exit 1
+      }
+    fi
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$WT") || exit 1
     FM_TMUX_WINDOW_ID=$WID
     T="$SES:$W"
@@ -6625,7 +6639,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend tmux_socket tmux_server_pid tmux_server_start tmux_window_id herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend tmux_socket tmux_server_pid tmux_server_start tmux_window_id tmux_host_id tmux_boot_id tmux_pid_namespace tmux_process_identity tmux_reboot_boot_id tmux_reboot_boot_epoch tmux_reboot_pid_namespace tmux_reboot_spawn_gen herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -6676,6 +6690,7 @@ preserve_relaunch_meta() {
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = tmux ]; then
     if [ "$RELAUNCH" = 0 ]; then
+      [ "$(fm_backend_tmux_identity)" = "$TMUX_TASK_IDENTITY" ] || exit 1
       printf '%s\n' "$TMUX_TASK_IDENTITY" "tmux_window_id=$WID"
     elif [ -n "${FM_TMUX_SOCKET:-}" ]; then
       fm_backend_tmux_identity || exit 1
@@ -6740,6 +6755,9 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+  if [ "$BACKEND" = tmux ]; then
+    fm_backend_tmux_bind_meta "$STATE/$ID.meta" || exit 1
+  fi
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created

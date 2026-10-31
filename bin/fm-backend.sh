@@ -561,21 +561,35 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       fi
       if grep -q '^tmux_' "$meta"; then
         local tmux_key tmux_value
-        [ "$(grep -c '^tmux_' "$meta")" = 4 ] || {
-          echo "REFUSED: incomplete or ambiguous tmux server identity; preserving task state." >&2
-          return 1
-        }
-        for tmux_key in socket server_pid server_start window_id; do
+        local tmux_count tmux_keys
+        tmux_count=$(grep -c '^tmux_' "$meta")
+        tmux_keys="socket server_pid server_start window_id"
+        case "$tmux_count" in
+          4) ;;
+          8) tmux_keys="$tmux_keys host_id boot_id pid_namespace process_identity" ;;
+          7) tmux_keys="socket server_pid host_id reboot_boot_id reboot_boot_epoch reboot_pid_namespace reboot_spawn_gen" ;;
+          *) echo "REFUSED: incomplete or ambiguous tmux server identity; preserving task state." >&2; return 1 ;;
+        esac
+        for tmux_key in $tmux_keys; do
           tmux_value=$(fm_backend_meta_exact_value "$meta" "tmux_$tmux_key") || return 1
           case "$tmux_key:$tmux_value" in
             socket:/*) ;;
-            server_pid:*|server_start:*)
+            server_pid:*|server_start:*|reboot_boot_epoch:*)
               case "$tmux_value" in ''|*[!0-9]*) return 1 ;; esac
               [ "$tmux_value" -gt 0 ] || return 1
               ;;
             window_id:@*)
               case "${tmux_value#@}" in ''|*[!0-9]*) return 1 ;; esac
               ;;
+            host_id:*|boot_id:*|reboot_boot_id:*) case "$tmux_value" in ''|*[!0-9a-f-]*) return 1 ;; esac ;;
+            pid_namespace:pid:\[*\]|reboot_pid_namespace:pid:\[*\])
+              local namespace_number=${tmux_value#pid:[}
+              namespace_number=${namespace_number%]}
+              case "$namespace_number" in ''|*[!0-9]*) return 1 ;; esac ;;
+            reboot_spawn_gen:s*.*.*)
+              printf '%s\n' "$tmux_value" | grep -Eq '^s[0-9]+\.[0-9]+\.[0-9]+$' || return 1 ;;
+            process_identity:linux-starttime=*\ cmdline-hex=*)
+              case "$tmux_value" in *[!0-9a-z=\ -]*) return 1 ;; esac ;;
             *) return 1 ;;
           esac
         done
@@ -993,7 +1007,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
-    tmux) fm_backend_tmux_capture "$@" ;;
+    tmux) fm_backend_tmux_for_target capture "$@" ;;
     herdr) fm_backend_herdr_capture "$@" ;;
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
@@ -1038,7 +1052,8 @@ fm_backend_visible_capture() {  # <backend> <target> [expected-label]
     return 1
   }
   fm_backend_source "$backend" || return 1
-  "fm_backend_${backend}_visible_capture" "$@"
+  if [ "$backend" = tmux ]; then fm_backend_tmux_for_target visible_capture "$@"
+  else "fm_backend_${backend}_visible_capture" "$@"; fi
 }
 
 # fm_backend_send_key: one backend-supported named special key.
@@ -1047,7 +1062,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
-    tmux) fm_backend_tmux_send_key "$@" ;;
+    tmux) fm_backend_tmux_for_target send_key "$@" ;;
     herdr) fm_backend_herdr_send_key "$@" ;;
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
@@ -1091,7 +1106,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     return 1
   fi
   case "$backend" in
-    tmux) fm_backend_tmux_send_text_submit "$@" || rc=$? ;;
+    tmux) fm_backend_tmux_for_target send_text_submit "$@" || rc=$? ;;
     herdr) fm_backend_herdr_send_text_submit "$@" || rc=$? ;;
     zellij) fm_backend_zellij_send_text_submit "$@" || rc=$? ;;
     orca) fm_backend_orca_send_text_submit "$@" || rc=$? ;;
@@ -1127,7 +1142,7 @@ fm_backend_kill() {  # <backend> <target>
   [ -n "${1:-}" ] || { echo "error: refusing empty backend kill target" >&2; return 1; }
   fm_backend_source "$backend" || return 1
   case "$backend" in
-    tmux) fm_backend_tmux_kill "$@" ;;
+    tmux) fm_backend_tmux_for_target kill "$@" ;;
     herdr) fm_backend_herdr_kill "$@" ;;
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
@@ -1197,7 +1212,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
-    tmux) fm_tmux_composer_state "$@" ;;
+    tmux) fm_backend_tmux_for_target composer_state "$@" ;;
     herdr) fm_backend_herdr_composer_state "$@" ;;
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
@@ -1230,7 +1245,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   case "$backend" in
     tmux)
       fm_backend_source tmux || return 1
-      fm_backend_tmux_target_exists "$target"
+      fm_backend_tmux_for_target target_exists "$target"
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -1314,7 +1329,7 @@ fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_state "$target" ;;
+    tmux) fm_backend_tmux_for_target agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
     rex) fm_backend_rex_agent_state "$target" ;;
     t3code) fm_backend_t3code_agent_state "$target" ;;

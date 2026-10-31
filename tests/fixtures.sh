@@ -106,9 +106,26 @@ fm_test_fake_gh_axi() {
 # suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
 fm_test_fake_tmux_spawn() {
   local fakebin=$1
+  export FM_FIXTURE_SERVER_PID=$$
+  export FM_FIXTURE_SOCKET="$fakebin/.spawn-socket"
+  python3 - "$FM_FIXTURE_SOCKET" <<'PY'
+import socket
+import sys
+with socket.socket(socket.AF_UNIX) as listener:
+    listener.bind(sys.argv[1])
+PY
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = -S ]; then shift 2; fi
+if [ "${1:-}" = if-shell ]; then
+  exec python3 - "$0" "$4" <<'PY'
+import os
+import shlex
+import sys
+os.execv(sys.argv[1], [sys.argv[1], *shlex.split(sys.argv[2])])
+PY
+fi
 # Simulate the OpenCode 2 worker's busy-state plugin reporting its turn start,
 # using the exact apply command fm-spawn generated into the worktree plugin.
 fake_opencode_plugin() {
@@ -155,7 +172,7 @@ window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
   display-message)
     case "$*" in
-      *"#{socket_path}"*) printf '/tmp/fm-fixture/socket|12345|123456\n'; exit 0 ;;
+      *"#{socket_path}"*) printf '%s|%s|123456\n' "$FM_FIXTURE_SOCKET" "$FM_FIXTURE_SERVER_PID"; exit 0 ;;
       *"#{cursor_y}"*)
         if [ -f "$(fake_opencode_plugin)" ]; then
           reads=$(cat "$(fake_opencode_plugin).fake-composer-reads" 2>/dev/null) || reads=0

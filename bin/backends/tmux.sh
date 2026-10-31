@@ -24,11 +24,13 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-nm-run-lib.sh"
 
 # Print native server identity for recording at spawn or for comparison with
 # independently supplied operator evidence. The format is metadata, not shell.
 fm_backend_tmux_identity() {
-  local row socket pid started
+  local row socket pid started host boot process namespace
   row=$(fm_tmux display-message -p '#{socket_path}|#{pid}|#{start_time}') || return 1
   IFS='|' read -r socket pid started <<< "$row"
   case "$socket" in /*) ;; *) return 1 ;; esac
@@ -36,16 +38,36 @@ fm_backend_tmux_identity() {
   case "$pid:$started" in *[!0-9:]*|:*|*:) return 1 ;; esac
   [ "$pid" -gt 0 ] && [ "$started" -gt 0 ] || return 1
   printf '%s\n' "tmux_socket=$socket" "tmux_server_pid=$pid" "tmux_server_start=$started"
+  if [ "$(uname -s)" = Linux ]; then
+    host=$(fm_run_timed 5 cat /etc/machine-id) && boot=$(fm_run_timed 5 cat /proc/sys/kernel/random/boot_id) \
+      && namespace=$(fm_run_timed 5 readlink /proc/self/ns/pid) && process=$(fm_tmux_pid_identity "$pid") || return 1
+    case "$host:$boot:$process" in *$'\n'*|*$'\r'*|*$'\t'*|:*|*::*|*:) return 1 ;; esac
+    printf '%s\n' "tmux_host_id=$host" "tmux_boot_id=$boot" "tmux_pid_namespace=$namespace" "tmux_process_identity=$process"
+  fi
 }
 
 # Legacy records retain their ordinary live-endpoint behavior and missing
 # endpoint refusal. A partial binding is an error, never a legacy fallback.
-fm_backend_tmux_bind_meta() {  # <meta>
+fm_backend_tmux_load_meta() {  # <meta>
   local meta=$1 count key value
-  unset FM_TMUX_SOCKET FM_TMUX_SERVER_PID FM_TMUX_SERVER_START FM_TMUX_WINDOW_ID
+  unset FM_TMUX_SOCKET FM_TMUX_SERVER_PID FM_TMUX_SERVER_START FM_TMUX_WINDOW_ID \
+    FM_TMUX_HOST_ID FM_TMUX_BOOT_ID FM_TMUX_PID_NAMESPACE FM_TMUX_PROCESS_IDENTITY \
+    FM_TMUX_REBOOT_BOOT_ID FM_TMUX_REBOOT_BOOT_EPOCH FM_TMUX_REBOOT_PID_NAMESPACE FM_TMUX_REBOOT_SPAWN_GEN
+  FM_TMUX_SUCCESSOR=0
+  FM_TMUX_META=$meta
   count=$(grep -c '^tmux_' "$meta" 2>/dev/null || true)
   [ "$count" != 0 ] || return 0
-  [ "$count" = 4 ] || { echo "error: incomplete or ambiguous tmux identity" >&2; return 1; }
+  if [ "$count" = 7 ]; then
+    FM_TMUX_SOCKET=$(fm_backend_meta_exact_value "$meta" tmux_socket) || return 1
+    FM_TMUX_SERVER_PID=$(fm_backend_meta_exact_value "$meta" tmux_server_pid) || return 1
+    FM_TMUX_HOST_ID=$(fm_backend_meta_exact_value "$meta" tmux_host_id) || return 1
+    FM_TMUX_REBOOT_BOOT_ID=$(fm_backend_meta_exact_value "$meta" tmux_reboot_boot_id) || return 1
+    FM_TMUX_REBOOT_BOOT_EPOCH=$(fm_backend_meta_exact_value "$meta" tmux_reboot_boot_epoch) || return 1
+    FM_TMUX_REBOOT_PID_NAMESPACE=$(fm_backend_meta_exact_value "$meta" tmux_reboot_pid_namespace) || return 1
+    FM_TMUX_REBOOT_SPAWN_GEN=$(fm_backend_meta_exact_value "$meta" tmux_reboot_spawn_gen) || return 1
+    return 0
+  fi
+  case "$count" in 4|8) ;; *) echo "error: incomplete or ambiguous tmux identity" >&2; return 1 ;; esac
   for key in socket server_pid server_start window_id; do
     value=$(fm_backend_meta_exact_value "$meta" "tmux_$key") || return 1
     case "$key" in
@@ -55,11 +77,181 @@ fm_backend_tmux_bind_meta() {  # <meta>
       window_id) FM_TMUX_WINDOW_ID=$value ;;
     esac
   done
-  [ -S "$FM_TMUX_SOCKET" ] && [ -O "$FM_TMUX_SOCKET" ] \
-    && fm_backend_tmux_identity >/dev/null || {
-      echo "error: recorded tmux server is inaccessible, foreign, or its identity was reused; preserving task state" >&2
+  if [ "$count" = 8 ]; then
+    FM_TMUX_HOST_ID=$(fm_backend_meta_exact_value "$meta" tmux_host_id) || return 1
+    FM_TMUX_BOOT_ID=$(fm_backend_meta_exact_value "$meta" tmux_boot_id) || return 1
+    FM_TMUX_PID_NAMESPACE=$(fm_backend_meta_exact_value "$meta" tmux_pid_namespace) || return 1
+    FM_TMUX_PROCESS_IDENTITY=$(fm_backend_meta_exact_value "$meta" tmux_process_identity) || return 1
+  fi
+}
+
+fm_backend_tmux_bind_meta() {  # <meta>
+  fm_backend_tmux_load_meta "$1" || return 1
+  [ -n "${FM_TMUX_SOCKET:-}" ] || return 0
+  case "$(fm_backend_tmux_server_state)" in
+    alive|gone) return 0 ;;
+    successor) fm_backend_tmux_apply_successor "$1" && return 0 ;;
+  esac
+  echo "error: recorded tmux server is inaccessible, foreign, or its identity was reused; preserving task state" >&2
+  return 1
+}
+
+# Scope recorded task operations to their native server without leaking one
+# task's binding into the next watcher iteration or into a supervisor target.
+fm_backend_tmux_for_target() (  # <operation> <target> [args...]
+  local op=$1 target=$2 meta state=${STATE:-$FM_HOME/state} id
+  shift
+  meta=$(fm_backend_meta_for_window "$target" "$state" 2>/dev/null || true)
+  if [ -n "$meta" ] && grep -q '^tmux_' "$meta"; then
+    id=${meta##*/}; id=${id%.meta}
+    if ! fm_backend_validate_task_endpoint "$meta" "$id" \
+      || ! fm_backend_tmux_bind_meta "$meta"; then
+      if [ "$op" = agent_state ]; then printf unreadable; return 0; fi
       return 1
-    }
+    fi
+    if fm_backend_tmux_target_exists "$target"; then
+      [ "$FM_TMUX_SUCCESSOR" = 0 ] \
+        && [ "$(fm_tmux display-message -p -t "$target" '#{window_id}')" = "$FM_TMUX_WINDOW_ID" ] || {
+        if [ "$op" = agent_state ]; then printf unreadable; return 0; fi
+        return 1
+      }
+    fi
+  fi
+  "fm_backend_tmux_$op" "$@"
+)
+
+# A native startup receipt belongs to one recorded task in this home. Its
+# retained predecessor proves which dead server it replaced; its kernel/native
+# successor identity permits other recorded siblings to use that exact server.
+# No unrelated live socket is accepted, even when it has matching task labels.
+fm_backend_tmux_successor() {  # <meta> [apply]
+  local meta=$1 action=${2:-} home taskdir receipt prior key expected observed found='' identity=''
+  local old_socket=$FM_TMUX_SOCKET old_pid=$FM_TMUX_SERVER_PID old_host=$FM_TMUX_HOST_ID
+  local FM_TMUX_SOCKET FM_TMUX_SERVER_PID FM_TMUX_SERVER_START FM_TMUX_HOST_ID
+  local FM_TMUX_BOOT_ID FM_TMUX_PID_NAMESPACE FM_TMUX_PROCESS_IDENTITY
+  home=${meta%/state/*}
+  [ "$home/state/${meta##*/}" = "$meta" ] || return 1
+  for receipt in "$home"/data/*/tmux-start.*/identity; do
+    [ -f "$receipt" ] && [ -O "$receipt" ] && [ ! -L "$receipt" ] || continue
+    prior=${receipt%/*}/meta-prior
+    taskdir=${receipt%/tmux-start.*/identity}
+    [ -d "$taskdir" ] && [ -O "$taskdir" ] && [ ! -L "$taskdir" ] || continue
+    [ -d "${receipt%/*}" ] && [ -O "${receipt%/*}" ] && [ ! -L "${receipt%/*}" ] || continue
+    [ -f "$home/state/${taskdir##*/}.meta" ] && [ -f "$prior" ] && [ -O "$prior" ] && [ ! -L "$prior" ] || continue
+    fm_backend_validate_task_endpoint "$prior" "${taskdir##*/}" >/dev/null 2>&1 || continue
+    [ "$(fm_backend_meta_exact_value "$prior" tmux_socket)" = "$old_socket" ] \
+      && [ "$(fm_backend_meta_exact_value "$prior" tmux_server_pid)" = "$old_pid" ] \
+      && [ "$(fm_backend_meta_exact_value "$prior" tmux_host_id)" = "$old_host" ] || continue
+    for key in tmux_server_start tmux_boot_id tmux_pid_namespace tmux_process_identity \
+      tmux_reboot_boot_id tmux_reboot_boot_epoch tmux_reboot_pid_namespace; do
+      expected=$(fm_meta_get "$meta" "$key")
+      observed=$(fm_meta_get "$prior" "$key")
+      [ "$expected" = "$observed" ] || break
+    done
+    [ "$expected" = "$observed" ] || continue
+    [ "$(grep -c '^tmux_' "$receipt")" = 7 ] || continue
+    FM_TMUX_SOCKET=$(fm_backend_meta_exact_value "$receipt" tmux_socket) || continue
+    [ "$FM_TMUX_SOCKET" = "$old_socket" ] || continue
+    FM_TMUX_SERVER_PID=$(fm_backend_meta_exact_value "$receipt" tmux_server_pid) || continue
+    FM_TMUX_SERVER_START=$(fm_backend_meta_exact_value "$receipt" tmux_server_start) || continue
+    FM_TMUX_HOST_ID=$(fm_backend_meta_exact_value "$receipt" tmux_host_id) || continue
+    FM_TMUX_BOOT_ID=$(fm_backend_meta_exact_value "$receipt" tmux_boot_id) || continue
+    FM_TMUX_PID_NAMESPACE=$(fm_backend_meta_exact_value "$receipt" tmux_pid_namespace) || continue
+    FM_TMUX_PROCESS_IDENTITY=$(fm_backend_meta_exact_value "$receipt" tmux_process_identity) || continue
+    observed=$(fm_backend_tmux_identity 2>/dev/null) || continue
+    [ "$observed" = "$(cat "$receipt")" ] || continue
+    [ -z "$found" ] || [ "$identity" = "$observed" ] || return 1
+    found=$receipt identity=$observed
+  done
+  [ -n "$found" ] || return 1
+  [ "$action" = apply ] || return 0
+  # The caller applies these values after this function's local bindings leave.
+  printf '%s\n' "$identity"
+}
+
+fm_backend_tmux_apply_successor() {
+  local identity key value
+  identity=$(fm_backend_tmux_successor "$1" apply) || return 1
+  while IFS='=' read -r key value; do
+    case "$key" in
+      tmux_socket) FM_TMUX_SOCKET=$value ;;
+      tmux_server_pid) FM_TMUX_SERVER_PID=$value ;;
+      tmux_server_start) FM_TMUX_SERVER_START=$value ;;
+      tmux_host_id) FM_TMUX_HOST_ID=$value ;;
+      tmux_boot_id) FM_TMUX_BOOT_ID=$value ;;
+      tmux_pid_namespace) FM_TMUX_PID_NAMESPACE=$value ;;
+      tmux_process_identity) FM_TMUX_PROCESS_IDENTITY=$value ;;
+    esac
+  done <<< "$identity"
+  unset FM_TMUX_REBOOT_BOOT_ID FM_TMUX_REBOOT_BOOT_EPOCH FM_TMUX_REBOOT_PID_NAMESPACE FM_TMUX_REBOOT_SPAWN_GEN
+  FM_TMUX_SUCCESSOR=1
+}
+
+# SAFETY: a connection refusal alone cannot distinguish a dead server from an
+# inaccessible host. Dead-server proof requires the same local Linux host and
+# boot, positive kernel PID absence, and an owned socket path with a native
+# absent-server result. A live socket or PID reuse never licenses replacement.
+fm_backend_tmux_server_state() {
+  local row err parent
+  [ -n "${FM_TMUX_SOCKET:-}" ] || { printf legacy; return; }
+  if [ -n "${FM_TMUX_REBOOT_BOOT_ID:-}" ]; then
+    fm_backend_tmux_reboot_proven || { printf unreadable; return; }
+  fi
+  if [ -n "${FM_TMUX_HOST_ID:-}" ]; then
+    [ "$(fm_run_timed 5 cat /etc/machine-id 2>/dev/null)" = "$FM_TMUX_HOST_ID" ] || { printf unreadable; return; }
+    if [ -z "${FM_TMUX_REBOOT_BOOT_ID:-}" ]; then
+      [ "$(fm_run_timed 5 cat /proc/sys/kernel/random/boot_id 2>/dev/null)" = "$FM_TMUX_BOOT_ID" ] \
+        && [ "$(fm_run_timed 5 readlink /proc/self/ns/pid 2>/dev/null)" = "$FM_TMUX_PID_NAMESPACE" ] \
+        || { printf unreadable; return; }
+    fi
+  fi
+  [ ! -L "$FM_TMUX_SOCKET" ] || { printf unreadable; return; }
+  if [ -e "$FM_TMUX_SOCKET" ] && { [ ! -S "$FM_TMUX_SOCKET" ] || [ ! -O "$FM_TMUX_SOCKET" ]; }; then
+    printf unreadable; return
+  fi
+  if row=$(fm_run_timed 5 tmux -S "$FM_TMUX_SOCKET" display-message -p \
+    '#{socket_path}|#{pid}|#{start_time}' 2>/dev/null); then
+    if [ -n "${FM_TMUX_REBOOT_BOOT_ID:-}" ] \
+      || [ "$row" != "$FM_TMUX_SOCKET|$FM_TMUX_SERVER_PID|${FM_TMUX_SERVER_START:-}" ] \
+      || { [ -n "${FM_TMUX_PROCESS_IDENTITY:-}" ] \
+        && [ "$(fm_tmux_pid_identity "$FM_TMUX_SERVER_PID" 2>/dev/null)" != "$FM_TMUX_PROCESS_IDENTITY" ]; }; then
+      if fm_backend_tmux_successor "$FM_TMUX_META"; then printf successor; else printf unreadable; fi
+    else
+      printf alive
+    fi
+    return
+  fi
+  parent=${FM_TMUX_SOCKET%/*}
+  [ -n "${FM_TMUX_HOST_ID:-}" ] && [ "$(uname -s)" = Linux ] \
+    && [ -d /proc/self ] && [ -r /proc ] && [ -x /proc ] \
+    && [ ! -e "/proc/$FM_TMUX_SERVER_PID" ] \
+    && [ -d "$parent" ] && [ -O "$parent" ] && [ ! -L "$parent" ] \
+    || { printf unreadable; return; }
+  err=$(LC_ALL=C fm_run_timed 5 tmux -S "$FM_TMUX_SOCKET" display-message -p '#{pid}' 2>&1) \
+    && { printf unreadable; return; }
+  case "$err" in
+    "no server running on $FM_TMUX_SOCKET"|"error connecting to $FM_TMUX_SOCKET (No such file or directory)"|"error connecting to $FM_TMUX_SOCKET (Connection refused)")
+      printf gone ;;
+    *) printf unreadable ;;
+  esac
+}
+
+fm_backend_tmux_reboot_proven() {
+  local boot launch now
+  [ "$(fm_run_timed 5 cat /proc/sys/kernel/random/boot_id 2>/dev/null)" = "$FM_TMUX_REBOOT_BOOT_ID" ] \
+    && [ "$(fm_run_timed 5 readlink /proc/self/ns/pid 2>/dev/null)" = "$FM_TMUX_REBOOT_PID_NAMESPACE" ] \
+    && [ "$(fm_backend_meta_exact_value "$FM_TMUX_META" spawn_gen)" = "$FM_TMUX_REBOOT_SPAWN_GEN" ] || return 1
+  # shellcheck disable=SC2016 # awk fields are not shell substitutions
+  boot=$(fm_run_timed 5 awk '$1 == "btime" {print $2}' /proc/stat) || return 1
+  [ "$boot" = "$FM_TMUX_REBOOT_BOOT_EPOCH" ] || return 1
+  case "$FM_TMUX_REBOOT_SPAWN_GEN" in
+    s*.*.*) launch=${FM_TMUX_REBOOT_SPAWN_GEN#s}; launch=${launch%%.*} ;;
+    *) return 1 ;;
+  esac
+  case "$launch:$boot" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  [ "${#launch}" -le 10 ] && [ "${#boot}" -le 10 ] || return 1
+  now=$(date +%s) || return 1
+  [ "$launch" -gt 0 ] && [ "$launch" -lt "$boot" ] && [ "$boot" -le "$now" ]
 }
 
 # Absence is proved only on the still-live recorded server, using its stable
@@ -67,8 +259,17 @@ fm_backend_tmux_bind_meta() {  # <meta>
 # than being replaced at its old label.
 fm_backend_tmux_endpoint_absence_recheck() {  # <target> <meta>
   local target=$1 meta=$2 rows state
-  fm_backend_tmux_bind_meta "$meta" || { printf 'unreadable'; return 0; }
+  fm_backend_tmux_bind_meta "$meta" 2>/dev/null || { printf 'unreadable'; return 0; }
   [ -n "${FM_TMUX_SOCKET:-}" ] || { printf 'legacy'; return 0; }
+  case "$(fm_backend_tmux_server_state)" in
+    gone) printf missing; return ;;
+    alive) ;;
+    *) printf unreadable; return ;;
+  esac
+  if [ "$FM_TMUX_SUCCESSOR" = 1 ]; then
+    if fm_backend_tmux_target_exists "$target"; then printf unreadable; else printf missing; fi
+    return
+  fi
   rows=$(fm_tmux list-windows -a -F '#{window_id}') || { printf 'unreadable'; return 0; }
   if printf '%s\n' "$rows" | grep -Fqx -- "$FM_TMUX_WINDOW_ID"; then
     state=$(fm_backend_tmux_agent_state "$target")
@@ -80,16 +281,39 @@ fm_backend_tmux_endpoint_absence_recheck() {  # <target> <meta>
   fi
 }
 
-# Cwd ownership is read from the kernel for the current user's processes.
-# Only the target's idle pane shell may retain this worktree. Any other
-# process, including a detached validation command, refuses recovery.
-# lsof absence or an incomplete read cannot prove that no job owns the task.
-fm_backend_tmux_worktree_free() {  # <worktree> [idle-pane-pid]
-  local wt=$1 allowed=${2:-} rows pid= line path err
+# SAFETY: inspect current-user kernel processes for task markers even when an
+# agent or validation job changed cwd, plus open worktree resources. Unreadable
+# surviving processes and platforms without this evidence refuse recovery.
+fm_backend_tmux_worktree_free() {  # <worktree> <meta> [idle-pane-pid]
+  # shellcheck disable=SC2016 # the bounded child reads its exported probe inputs
+  FM_TMUX_PROBE_LIB=$FM_BACKEND_LIB_DIR FM_TMUX_PROBE_WT=$1 FM_TMUX_PROBE_META=$2 \
+    FM_TMUX_PROBE_ALLOWED=${3:-} fm_run_timed 15 bash -c \
+    '. "$FM_TMUX_PROBE_LIB/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_worktree_free_probe "$FM_TMUX_PROBE_WT" "$FM_TMUX_PROBE_META" "$FM_TMUX_PROBE_ALLOWED"'
+}
+
+fm_backend_tmux_worktree_free_probe() {
+  local wt=$1 meta=$2 allowed=${3:-} rows pid='' line path err proc token inbox
+  [ "$(uname -s)" = Linux ] && [ -d /proc/self ] || return 1
   command -v lsof >/dev/null 2>&1 || return 1
   wt=$(cd "$wt" && pwd -P) || return 1
+  inbox=${meta%.meta}.inbox
+  for proc in /proc/[0-9]*; do
+    [ -O "$proc" ] || continue
+    pid=${proc##*/}
+    [ "$pid" != "$allowed" ] || continue
+    if [ ! -r "$proc/environ" ] || [ ! -r "$proc/cmdline" ]; then
+      [ ! -d "$proc" ] || return 1
+      continue
+    fi
+    while IFS= read -r -d '' token; do
+      [ "$token" != "FM_TASK_INBOX=$inbox" ] || return 1
+    done < "$proc/environ" 2>/dev/null || { [ ! -d "$proc" ] || return 1; }
+    while IFS= read -r -d '' token; do
+      case "$token" in *"$wt"*|*"$inbox"*) return 1 ;; esac
+    done < "$proc/cmdline" 2>/dev/null || { [ ! -d "$proc" ] || return 1; }
+  done
   err=$(mktemp) || return 1
-  if ! rows=$(lsof -n -a -u "$(id -u)" -d cwd -F pn 2>"$err") || [ -s "$err" ]; then
+  if ! rows=$(fm_run_timed 10 lsof -n -a -u "$(id -u)" -F pn 2>"$err") || [ -s "$err" ]; then
     rm -f "$err"
     return 1
   fi
@@ -109,6 +333,84 @@ fm_backend_tmux_worktree_free() {  # <worktree> [idle-pane-pid]
     esac
   done <<< "$rows"
 }
+
+fm_backend_tmux_validation_free() {  # <worktree> <meta>
+  local wt=$1 meta=$2 overview selection ids run detail status branch
+  [ "$(fm_meta_get "$meta" mode)" = no-mistakes ] || [ -e "$wt/.no-mistakes" ] || return 0
+  command -v no-mistakes >/dev/null 2>&1 || return 1
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD) || return 1
+  overview=$(fm_nm_run_checked "$wt" 10 axi) || return 1
+  selection=$(fm_nm_select_run "$branch" "$overview" "$wt" 10) || return 1
+  case "$selection" in
+    absent) return 0 ;;
+    selected\|*) ids=${selection##*|} ;;
+    *) return 1 ;;
+  esac
+  [ -n "$ids" ] || return 1
+  # SAFETY: reporting selects the newest run, but replacement must account for
+  # every same-branch candidate, including an older still-running allocation.
+  local -a candidates
+  IFS=',' read -r -a candidates <<< "$ids"
+  for run in "${candidates[@]}"; do
+    run=$(fm_nm_trim "$run")
+    [ -n "$run" ] || return 1
+    detail=$(fm_nm_run_checked "$wt" 10 axi status --run "$run") || return 1
+    [ "$(fm_nm_strip_quotes "$(fm_nm_field "$detail" branch)")" = "$branch" ] || return 1
+    status=$(fm_nm_strip_quotes "$(fm_nm_field "$detail" status)")
+    [ "$(fm_nm_run_status_class "$status")" = terminal ] || return 1
+  done
+}
+
+fm_backend_tmux_idle_custody() {  # <meta> <target>
+  local meta=$1 target=$2 pid wt
+  [ -n "${FM_TMUX_SOCKET:-}" ] || return 0
+  wt=$(fm_meta_get "$meta" worktree)
+  [ "$(fm_backend_tmux_agent_state "$target")" = dead ] \
+    && [ "$(fm_backend_tmux_current_path "$target")" = "$wt" ] || return 1
+  pid=$(fm_tmux display-message -p -t "$target" '#{pane_pid}') || return 1
+  case "$pid" in ''|0|*[!0-9]*) return 1 ;; esac
+  fm_backend_tmux_validation_free "$wt" "$meta" \
+    && fm_backend_tmux_worktree_free "$wt" "$meta" "$pid"
+}
+
+# Recreate only the proven-dead recorded server, through the native spawn
+# owner. This is never an ambient-server fallback or a socket namespace sweep.
+fm_backend_tmux_recover_server() {  # <meta> <worktree> <session>
+  local meta=$1 wt=$2 session=$3 tmp receipt_cmd home id old_socket
+  fm_backend_tmux_bind_meta "$meta" || return 1
+  fm_backend_tmux_worktree_free "$wt" "$meta" \
+    && fm_backend_tmux_validation_free "$wt" "$meta" || return 1
+  if [ "$FM_TMUX_SUCCESSOR" != 1 ]; then
+    [ "$(fm_backend_tmux_server_state)" = gone ] || return 1
+    home=${meta%/state/*}
+    id=${meta##*/}; id=${id%.meta}
+    [ "$home/state/$id.meta" = "$meta" ] && [ -d "$home/data/$id" ] || return 1
+    tmp=$(mktemp -d "$home/data/$id/tmux-start.XXXXXX") || return 1
+    cp -p "$meta" "$tmp/meta-prior" || return 1
+    old_socket=$FM_TMUX_SOCKET
+    receipt_cmd="bash -c "
+    # shellcheck disable=SC2016 # the native startup child expands these inputs
+    receipt_cmd="$receipt_cmd$(fm_tmux_quote \
+      '. "$1/fm-path-lib.sh"; process=$(fm_pid_identity "$3") || exit 1; printf "%s\n" "tmux_socket=$2" "tmux_server_pid=$3" "tmux_server_start=$4" "tmux_host_id=$(cat /etc/machine-id)" "tmux_boot_id=$(cat /proc/sys/kernel/random/boot_id)" "tmux_pid_namespace=$(readlink /proc/self/ns/pid)" "tmux_process_identity=$process"')"
+    receipt_cmd="$receipt_cmd bash $(fm_tmux_quote "$FM_BACKEND_LIB_DIR")"
+    receipt_cmd="$receipt_cmd '#{socket_path}' '#{pid}' '#{start_time}' > $(fm_tmux_quote "$tmp/identity")"
+    {
+      printf 'set-option -g exit-empty off\n'
+      printf 'run-shell %s\n' "$(fm_tmux_quote "$receipt_cmd")"
+    } > "$tmp/init.conf"
+  # SAFETY: startup configuration runs only in a server this invocation starts.
+  # A raced live server ignores it and leaves no native startup receipt; it is
+  # never asked to create a session or endpoint.
+    fm_run_timed 10 tmux -S "$old_socket" -f "$tmp/init.conf" start-server || return 1
+    [ -s "$tmp/identity" ] || return 1
+    fm_backend_tmux_apply_successor "$meta" || return 1
+  fi
+  fm_tmux has-session -t "=$session" 2>/dev/null \
+    || fm_tmux new-session -d -s "$session" -n recovery -c /tmp || return 1
+  fm_tmux set-option -g exit-empty on
+}
+
+fm_backend_tmux_composer_state() { fm_tmux_composer_state "$@"; }
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed

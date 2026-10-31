@@ -19,7 +19,10 @@ _FM_AGENT_PROCESS_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-path-lib.sh
+. "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-path-lib.sh"
 unset _FM_AGENT_PROCESS_LIB_DIR
+
 
 # fm_agent_process_classify_name: the single owner of the process-name
 # vocabulary shared by every liveness signal - `agent` for a verified harness,
