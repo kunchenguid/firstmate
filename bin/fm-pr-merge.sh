@@ -32,12 +32,16 @@
 # required set from classic branch protection and active rulesets. Check-run
 # requirements retain their producer app binding: a same-named check run from another app cannot
 # satisfy them, and a duplicate name-only entry cannot weaken that binding.
-# Unbound requirements match by name. A bound requirement reported as a check
-# run also needs a matching producer in the check-runs read at the verified
-# head, while one reported as a commit status matches by name, because the
-# status carries no app id to compare. Status-creator app binding is not verified
-# here, so an attended --attended-override -- --admin merge can bypass that
-# protection without a missing-check waiver when a same-named status reported.
+# Unbound requirements match by name. A bound requirement is satisfied only by
+# producer evidence for the bound app at the verified head: a check run whose
+# app id matches, or a commit status whose newest entry for that context was
+# created by the bound app's bot account. A status carries no app id, so its
+# creator must be a Bot whose login is the app slug plus "[bot]" and that slug
+# must resolve through the apps API to the bound app id; GitHub itself accepts
+# such a status, for example one an Actions job posts through the statuses API.
+# A status from a user or another app, or one whose slug cannot be resolved,
+# satisfies nothing. The attended --allow-missing <context> remains the explicit
+# waiver for a bound requirement whose producer evidence is missing.
 # An unreadable producer read still refuses.
 # Successfully read requirements remain checked even if another
 # source fails, so known missing checks and all read errors are reported together.
@@ -991,9 +995,43 @@ github_read_required_contexts() {
   [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ]
 }
 
+# Resolve the bound commit statuses at a head to [{context, app_id}] from the
+# statuses read. Only each bound context's newest status counts, and only when
+# its creator is an app bot whose slug the apps API resolves; an unresolvable
+# slug leaves that status unattributed rather than failing the read.
+github_status_producers() {
+  local statuses=$1 required=$2 candidates slug app_response app_id resolved='[]'
+  candidates=$(printf '%s' "$statuses" | jq -sc --argjson required "$required" '
+    [ .[] | if type == "array" then .[] else error("invalid statuses") end
+      | if type == "object" and (.context | type) == "string" then . else error("invalid status") end ]
+    | [ group_by(.context)[] | max_by([.created_at, .id])
+        | select(.context as $c | any($required[]; .app_id != null and .context == $c))
+        | select(.creator.type == "Bot" and ((.creator.login // "") | test("^[a-z0-9][a-z0-9-]*\\[bot\\]$")))
+        | {context, slug: (.creator.login | rtrimstr("[bot]"))} ]' 2>/dev/null) || return 1
+  while IFS= read -r slug; do
+    [ -n "$slug" ] || continue
+    if ! app_response=$(gh api "apps/$slug" --include 2>/dev/null); then
+      case "${app_response%%$'\n'*}" in
+        HTTP/*' 404 '*) continue ;;
+        *) return 1 ;;
+      esac
+    fi
+    app_id=$(printf '%s' "$app_response" | sed '1,/^[[:space:]]*$/d' | jq -ser '
+      if length == 1 then .[0].id else null end
+      | select(type == "number" and . > 0 and floor == .)' 2>/dev/null) || return 1
+    resolved=$(printf '%s' "$resolved" | jq -c --arg slug "$slug" --argjson id "$app_id" '. + [{slug: $slug, id: $id}]')
+  done <<EOF
+$(printf '%s' "$candidates" | jq -r '[.[].slug] | unique[]')
+EOF
+  printf '%s' "$candidates" | jq -c --argjson resolved "$resolved" '
+    [ .[] | .slug as $slug | {context, app_id: ([$resolved[] | select(.slug == $slug) | .id] | first)}
+      | select(.app_id != null) ]'
+}
+
 github_required_checks_missing() {
-  local json=$1 required=$2 producers=$3
-  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
+  local json=$1 required=$2 producers=$3 status_producers=$4
+  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" \
+    --argjson status_producers "$status_producers" '
     if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
     | .statusCheckRollup as $reported
     | $required
@@ -1006,6 +1044,7 @@ github_required_checks_missing() {
             and any($producers[]; .name == $requirement.context and .app.id == $requirement.app_id)
           else
             .context == $requirement.context
+            and any($status_producers[]; .context == $requirement.context and .app_id == $requirement.app_id)
           end) | not)
       | .context) | unique[]
   ' 2>/dev/null || return 1
@@ -1016,7 +1055,7 @@ github_required_checks_missing() {
 # the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
 # caller can retry a still-computing mergeability read instead of refusing.
 github_verify_mergeable() {
-  local json fields line red name covered missing unreported producers runs
+  local json fields line red name covered missing unreported producers runs statuses status_producers
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
@@ -1112,6 +1151,7 @@ $FM_PR_GITHUB_REQUIRED_ERROR
 EOF
   fi
   producers='[]'
+  status_producers='[]'
   if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
     if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
       || [ -z "$runs" ] \
@@ -1123,8 +1163,15 @@ EOF
       refusals="$refusals  - required check producers at head $live_head could not be read
 "
     fi
+    if ! statuses=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/statuses" 2>/dev/null) \
+      || [ -z "$statuses" ] \
+      || ! status_producers=$(github_status_producers "$statuses" "$FM_PR_GITHUB_REQUIRED"); then
+      status_producers='[]'
+      refusals="$refusals  - required status producers at head $live_head could not be read
+"
+    fi
   fi
-  if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers"); then
+  if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers" "$status_producers"); then
     refusals="$refusals  - the GitHub pull request check rollup could not be read
 "
   else
