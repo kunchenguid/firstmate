@@ -3534,12 +3534,16 @@ watcher_stop_signals
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
-printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+if [ -z "$FM_WATCH_DELIVERY_IDENTITY" ] \
+  || ! printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" 2>/dev/null \
+  || ! printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" 2>/dev/null \
+  || ! printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null; then
+  echo "watcher: FAILED - could not publish watcher identity in $WATCH_LOCK"
+  exit 1
+fi
 
 handling_successor_has_queued_row() {
   local queued=1

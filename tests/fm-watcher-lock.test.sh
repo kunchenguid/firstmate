@@ -1961,6 +1961,42 @@ test_forced_term_before_the_safe_point_stays_clean() {
   pass "a stop forced before the safe point waits for it and leaves no lock evidence"
 }
 
+# A watcher whose startup identity probe fails can never reach the arm's
+# startup safe point, so it must exit through its own cleanup with a typed
+# failure instead of polling as a child no arm can confirm or stop. The fake ps
+# fails only the lstart+command probe fm_pid_identity uses on a /proc-less host.
+test_unpublishable_identity_exits_through_cleanup() {
+  local dir state fakebin no_proc armout armpid status
+  dir=$(make_case arm-identity-probe-fails)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  no_proc="$dir/no-proc"
+  armout="$dir/arm.out"
+  mkdir -p "$no_proc"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" lstart= "*" command= "*) exit 1 ;;
+esac
+exec /bin/ps "$@"
+SH
+  chmod +x "$fakebin/ps"
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  status=0
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS" || status=$?
+  [ "$status" -ne 124 ] \
+    || fail "arm hung on a child that could not publish its identity: $(cat "$armout")"
+  [ "$status" -ne 0 ] || fail "arm exited zero for a child with no published identity"
+  grep -qF "watcher: FAILED - could not publish watcher identity" "$armout" \
+    || fail "arm did not relay the typed identity failure: $(cat "$armout")"
+  assert_no_startup_lock_evidence "$state" "identity-publication failure"
+  pass "a watcher that cannot publish its identity exits through its cleanup"
+}
+
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   local dir state fakebin armout armpid watcher_pid i status
   dir=$(make_case stopped-watcher)
@@ -2235,4 +2271,5 @@ test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_arm_confirms_a_slow_post_claim_startup
 test_arm_relays_a_startup_lock_held_by_live_pid
 test_forced_term_before_the_safe_point_stays_clean
+test_unpublishable_identity_exits_through_cleanup
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
