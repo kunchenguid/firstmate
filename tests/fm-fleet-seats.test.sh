@@ -1667,24 +1667,20 @@ test_unpooled_grants_exist_before_certificate_publication() {
   pass "unpooled grants are materialized before certificates and remain counted across policy changes"
 }
 
-test_remote_host_supervisor_requires_parent_accounting() {
-  local out policy digest epoch meta reservation
+test_remote_host_supervisor_adopts_existing_generation() {
+  local out policy meta reservation
   make_remote_fleet remote-host-accounting 1
   serve_remotes >/dev/null || fail "initial serve"
   policy=$R_REMOTE/state/fleet-seats/policy.json
-  digest=$(jq -r .digest "$R_REMOTE/state/fleet-seats/served.json")
-  epoch=$(jq -r '"\(.issuer).\(.seq)"' "$R_REMOTE/state/fleet-seats/served.json")
   mkdir -p "$R_REMOTE/state/parent-route"
   meta=$R_REMOTE/state/parent-route/theshop.meta
   printf 'kind=secondmate\nmodel=pool-model-a\nspawn_gen=host.1\n' > "$meta"
-  out=$(seats "$R_REMOTE" serve --digest "$digest" --epoch "$epoch" --allowance shared=1 < "$policy" 2>&1)
-  expect_code 5 "$?" "cached serve omitted an untracked host supervisor: $out"
-  assert_contains "$out" "host supervisor theshop has unaccounted occupancy" "host occupancy refusal"
   out=$(serve_remotes 2>&1)
-  assert_contains "$out" "unreachable theshop" "untracked host supervisor was certified"
+  assert_contains "$out" "served theshop" "an existing remote supervisor blocked first pooled serve"
+  assert_equals true "$(jq --arg st "$R_REMOTE/state/parent-route" '.holders | any(.state_dir == $st and .task == "theshop" and .generation == "host.1" and .model == "pool-model-a")' "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "first serve did not adopt the existing supervisor into its certificate"
   new_holder
   out=$(reserve "$R_ROOT" contender pool-model-a 2>&1)
-  expect_code 5 "$?" "primary admitted work with unresolved host occupancy: $out"
+  expect_code 4 "$?" "the adopted supervisor did not consume capacity: $out"
   task_record "$R_ROOT" theshop pool-model-a secondmate 'remote_host=theshop'
   reservation=$R_REMOTE/state/parent-route/theshop.seat-reservation.host.1
   jq -n --arg h "$R_REMOTE" '{schema:"fm-fleet-seat-holder.v2", task:"theshop",
@@ -1701,7 +1697,7 @@ test_remote_host_supervisor_requires_parent_accounting() {
   out=$(serve_remotes 2>&1)
   assert_contains "$out" "served theshop" "untracked host supervisor prevented policy clearing"
   assert_equals 0 "$(jq '.pools | length' "$policy")" "clearing retained remote caps"
-  pass "host supervisors require parent accounting before nonempty remote serves"
+  pass "remote serve adopts a preexisting host supervisor once and respects later parent accounting"
 }
 
 test_remote_descendants_prevent_incomplete_certificates() {
@@ -2260,7 +2256,7 @@ SH
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_remote_host_supervisor_requires_parent_accounting) "$focused_test" ;;
+      test_remote_host_supervisor_adopts_existing_generation) "$focused_test" ;;
       test_policy_requires_one_object) "$focused_test" ;;
       test_reservation_uses_one_policy_snapshot) "$focused_test" ;;
       test_remote_descendants_prevent_incomplete_certificates|test_generationless_predecessor_stays_counted|test_remote_without_pools_confirms_unpooled_models|test_managed_records_and_legacy_import|test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
@@ -2271,7 +2267,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 test_no_pool_configured_is_off
-test_remote_host_supervisor_requires_parent_accounting
+test_remote_host_supervisor_adopts_existing_generation
 test_policy_requires_one_object
 test_reservation_uses_one_policy_snapshot
 test_pool_names_do_not_escape_the_seat_directory
