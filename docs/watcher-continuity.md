@@ -236,14 +236,22 @@ Its ordinary arm check still announces a never-announced generation, including o
 
 ### Generation reuse
 
-An ordinary watcher close attempts to publish downtime, and every durable queue append publishes it.
+A planned watcher close publishes an open episode and leaves an acknowledged episode closed.
+A close is planned only when `state/.watcher-planned-stop` names that watcher's pid and its process identity.
+The arm writes that record before the signal for `--restart`, `--stop`, and `--take-over`.
+The supervision host stops the watcher with `--stop` before it signals any arm, at its park boundary and when it retires a successor cycle.
+After it retires the arm, it hands an acknowledged episode back as announced, so the owner rewake commits and a later arm delivers no empty `rearm-resurface`.
+The watcher writes the same record before its own delivery exit.
+A stall eviction writes no record, and neither does a HUP or other signal that has none.
+A close that is not a planned stop, and every durable queue append, publishes downtime.
 A watcher closing to resurface the recovery it found at its start preserves the existing marker instead, while a handling successor resurfacing a later row publishes downtime like any close.
 If EXIT cleanup cannot acquire the downtime-marker lock within its bound, it retains the stale singleton for the next arm to publish the missing downtime before clearing that lock (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)).
 A downtime republication of a pending episode reuses its generation.
 A watcher close leaves an announced downtime episode announced, while a successful durable append opens a fresh pending generation so a live watcher can recover the new work.
 An announced handling episode becomes pending downtime on the same generation because its handling turn may have been interrupted.
 That handling republication gives a successor exactly one recovery presentation without orphaning the acknowledgement already printed for that generation.
-A watcher stopped so an arm can take its cycle over (`bin/fm-watch-arm.sh --take-over`) publishes downtime like any close, but the taking arm restores an acknowledged episode that stop reopened only when the taken-over arm's cycle-ledger row for that exact arm and watcher records the watcher ending by the take-over's TERM and no wake was appended in between.
+A watcher stopped so an arm can take its cycle over (`bin/fm-watch-arm.sh --take-over`) follows that planned-close rule.
+The taking arm still restores an acknowledged episode that stop reopened only when the taken-over arm's cycle-ledger row for that exact arm and watcher records the watcher ending by the take-over's TERM and no wake was appended in between.
 The taking arm waits within a short bound for that row; a missing row or any other signal leaves downtime for the fresh cycle's ordinary recovery wake, while take-over still proceeds.
 Any other episode is left for the next cycle's arm check.
 
@@ -473,6 +481,8 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The already-acknowledged confirmation no-op for a matching generation, with its mismatched-generation, dead-pid, and lock-mismatch rejections preserved.
 - The manual-restart generation churn that makes a confirmation for the churned generation report a mismatch, which an arm check without a reopen leaves in place.
 - A take-over that stays quiet after a confirmed TERM, including one that lands inside a herdr event wait, still surfaces queued work and self-exit downtime, and attaches without stopping a cycle the named arm does not own.
+- A planned host restart, an actionable-check hand-off, and a non-zero watcher exit that has a planned-stop record leave an acknowledged episode closed.
+- A stall eviction, a HUP with no planned-stop record, a TERM whose status is 143 with no planned-stop record, and a watcher killed without cleanup still resurface.
 - The disposable-checkout arm refusal.
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.

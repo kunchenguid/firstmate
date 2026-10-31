@@ -234,6 +234,35 @@ fm_watcher_lock_matches_pid() {
   FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
+# docs/watcher-continuity.md: a planned close is this record, not the EXIT
+# status. Line 1 is the target pid. Line 2 is its fm_pid_identity.
+fm_watcher_planned_stop_record() {  # <state> <pid> [<identity>]
+  local state=$1 pid=$2 identity=${3:-} tmp
+  [ -n "$identity" ] || identity=$(fm_pid_identity "$pid") || return 1
+  tmp=$(mktemp "$state/.watcher-planned-stop.tmp.XXXXXX") || return 1
+  if ! printf '%s\n%s\n' "$pid" "$identity" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! mv -f "$tmp" "$state/.watcher-planned-stop"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_watcher_planned_stop_matches() {  # <state> <pid>
+  local state=$1 pid=$2 record_pid record_identity current
+  [ -f "$state/.watcher-planned-stop" ] || return 1
+  record_pid=$(sed -n '1p' "$state/.watcher-planned-stop" 2>/dev/null || true)
+  record_identity=$(sed -n '2p' "$state/.watcher-planned-stop" 2>/dev/null || true)
+  [ "$record_pid" = "$pid" ] || return 1
+  [ -n "$record_identity" ] || return 1
+  current=$(fm_pid_identity "$pid") || return 1
+  [ "$record_identity" = "$current" ]
+}
+
+fm_watcher_planned_stop_clear() {  # <state>
+  rm -f -- "$1/.watcher-planned-stop"
+}
+
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
@@ -840,12 +869,14 @@ _fm_recovery_marker_write_locked() {
 # Apply the downtime republication states owned by docs/watcher-continuity.md
 # while preserving an outstanding generation-bound acknowledgement. A handback
 # source republishes the current episode as already announced: the close it
-# hands to main is that episode's delivery.
+# hands to main is that episode's delivery. A close source leaves an
+# acknowledged episode unchanged.
 _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} bound=${3:-} source=${4:-watcher}
   local lock saved_token generation='' status=pending previous_append_token=''
+  local leave_closed=0
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
-  case "$source" in watcher|append|handback) ;; *) return 1 ;; esac
+  case "$source" in watcher|append|handback|close) ;; *) return 1 ;; esac
   if [ "$source" = append ]; then
     FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
     FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
@@ -884,10 +915,19 @@ _fm_recovery_marker_publish() {
             status=announced
           fi
           ;;
+        acked:*)
+          # docs/watcher-continuity.md: a planned close must not open a fresh
+          # episode over a retired one. Appends and outage publication still do.
+          [ "$source" != close ] || leave_closed=1
+          ;;
       esac
     fi
     FM_RECOVERY_MARKER_TOKEN=$saved_token
     [ "$source" != handback ] || status=announced
+  fi
+  if [ "$leave_closed" -eq 1 ]; then
+    fm_lock_release "$lock"
+    return 0
   fi
   if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"; then
     fm_lock_release "$lock"
@@ -1198,7 +1238,7 @@ _fm_recovery_marker_handover_restore() {
 }
 
 fm_recovery_transition() {
-  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-}
+  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-} source=${6:-}
   case "$action" in
     handover-restore)
       _fm_recovery_marker_handover_restore "$marker" "$target" "$value"
@@ -1223,7 +1263,7 @@ fm_recovery_transition() {
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" "${source:-watcher}" || return 1
       fm_lock_release "$target"
       ;;
     release-lock-existing)
