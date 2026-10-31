@@ -29,6 +29,9 @@
 #   7. A fire-and-forget record stays outside the ladder, but one whose first
 #      ring did not land gets exactly one retry ring and never escalates. The
 #      retry waits while the worker has an open decision of its own.
+#   8. Every ring decision is appended to the inbox's bounded .ring-log, and a
+#      secondmate's own watcher queues one wake per oldest unhandled parent
+#      record past the grace (parent_inbox_tick).
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -1372,6 +1375,209 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   pass "watcher: dead-pane recovery overrides stale busy state"
 }
 
+# The ring log records every decision, including the skipped ones that left a
+# parked mate's doorbell unrung (live scenario: a pending composer holding
+# other text), and stays bounded.
+test_ring_log_records_each_decision_and_stays_bounded() {
+  local dir state rec log composer drops doorbell lines
+  dir="$TMP_ROOT/ring-log"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_composer_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; composer="$dir/composer"; drops="$dir/drops"
+  ring() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_DROP_ENTERS="$drops" inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+  }
+  : > "$log"; : > "$composer"
+
+  printf '%s' 'a half-typed draft' > "$composer"
+  ring || true
+  lines=$(cat "$state/t1.inbox/.ring-log")
+  printf '%s\n' "$lines" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z	001.msg	skipped:other-text	composer=pending$' \
+    || fail "a skipped ring must log the record, decision and composer verdict: $lines"
+
+  printf '%s' "$doorbell" > "$composer"
+  ring || true
+  [ "$(wc -l < "$state/t1.inbox/.ring-log" | tr -d ' ')" = 2 ] \
+    || fail "every ring decision must append one line: $(cat "$state/t1.inbox/.ring-log")"
+  tail -1 "$state/t1.inbox/.ring-log" | grep -Eq '	001.msg	rang	composer=own-doorbell submitted$' \
+    || fail "a submitted stuck doorbell must log rang: $(tail -1 "$state/t1.inbox/.ring-log")"
+
+  : > "$composer"
+  ring || true
+  tail -1 "$state/t1.inbox/.ring-log" | grep -Eq '	001.msg	rang	' \
+    || fail "a clean ring must log rang: $(tail -1 "$state/t1.inbox/.ring-log")"
+
+  # Past 64 KiB the log is trimmed to its newest 200 lines.
+  awk 'BEGIN { for (i = 0; i < 1000; i++) printf "2020-01-01T00:00:00Z\told.msg\trang\tfiller-%s-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n", i }' \
+    > "$state/t1.inbox/.ring-log"
+  printf '%s' 'a half-typed draft' > "$composer"
+  ring || true
+  [ "$(wc -l < "$state/t1.inbox/.ring-log" | tr -d ' ')" = 200 ] \
+    || fail "an oversized ring log must be trimmed to 200 lines, got $(wc -l < "$state/t1.inbox/.ring-log")"
+  tail -1 "$state/t1.inbox/.ring-log" | grep -q 'skipped:other-text' \
+    || fail "the trim must keep the newest decision: $(tail -1 "$state/t1.inbox/.ring-log")"
+  pass "inbox: the ring log records each ring decision and trims itself past 64 KiB"
+}
+
+# A dead agent's refusal is logged too, so a record that never got a doorbell
+# can be told apart from one whose doorbell was swallowed.
+test_ring_log_records_a_dead_agent() {
+  local dir state rec log
+  dir="$TMP_ROOT/ring-log-dead"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  log="$dir/send.log"; : > "$log"
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=zsh \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || true
+  grep -Eq '	001.msg	dead	agent=dead$' "$state/t1.inbox/.ring-log" \
+    || fail "a dead agent's refusal must be logged: $(cat "$state/t1.inbox/.ring-log")"
+  pass "inbox: the ring log records a dead agent's refusal"
+}
+
+# The secondmate's own watcher wakes its parked session for an unread parent
+# instruction (live scenario: the remote watcher queued the wake at 100 s).
+# Sourced like the unit cases in tests/fm-watch-inbox-meta.test.sh; the wake
+# callback is the seam the production watcher documents for tests.
+parent_tick() {  # <home> <wake-log>
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_TASK_INBOX_GRACE_SECS=90 WAKE_LOG="$2" \
+    bash -c '
+    . "$1"
+    wake() { printf "%s\n" "$1" >> "$WAKE_LOG"; }
+    parent_inbox_tick
+  ' _ "$WATCH"
+}
+
+test_parent_inbox_tick_wakes_a_parked_mate_once_per_oldest_record() {
+  local home state inbox wakes first second queue
+  home="$TMP_ROOT/parent-tick"
+  state="$home/state"
+  inbox="$state/parent-route/rsm.inbox"
+  mkdir -p "$state/parent-route"
+  printf 'rsm\n' > "$home/.fm-secondmate-home"
+  wakes="$home/wakes.log"; : > "$wakes"
+  first=$(inbox_lib "$state/parent-route" fm_task_inbox_write "$state/parent-route" rsm "first instruction")
+
+  parent_tick "$home" "$wakes"
+  [ ! -s "$wakes" ] || fail "a record inside the inbox grace must not wake the mate: $(cat "$wakes")"
+  [ ! -s "$state/.wake-queue" ] || fail "a record inside the grace must queue nothing"
+
+  touch -d '101 seconds ago' "$first"
+  parent_tick "$home" "$wakes"
+  [ "$(wc -l < "$wakes" | tr -d ' ')" = 1 ] || fail "an aged record must wake the mate once: $(cat "$wakes")"
+  assert_contains "$(cat "$wakes")" "check: parent instruction waiting: 1 unhandled in $inbox, oldest 10" \
+    "the wake must name the count, the inbox and the oldest age (101 s, give or take the second boundary)"
+  queue=$(cat "$state/.wake-queue")
+  case "$queue" in
+    *"	check	parent-inbox-rsm-001	check: parent instruction waiting: 1 unhandled"*) : ;;
+    *) fail "the wake must be queued durably under the oldest record's key: $queue" ;;
+  esac
+  [ "$(cat "$state/.parent-inbox-woken")" = 001.msg ] || fail "the woken marker must name the oldest record"
+
+  # The same oldest record never wakes twice, even with a newer one beside it.
+  second=$(inbox_lib "$state/parent-route" fm_task_inbox_write "$state/parent-route" rsm "second instruction")
+  touch -d '200 seconds ago' "$second"
+  parent_tick "$home" "$wakes"
+  [ "$(wc -l < "$wakes" | tr -d ' ')" = 1 ] || fail "the same oldest record must not wake twice: $(cat "$wakes")"
+  [ "$(wc -l < "$state/.wake-queue" | tr -d ' ')" = 1 ] || fail "the same oldest record must not queue twice"
+
+  # Handling the oldest moves the wake to the next record; an empty inbox
+  # clears the marker so a later record wakes again.
+  mv "$first" "$inbox/handled/"
+  parent_tick "$home" "$wakes"
+  [ "$(wc -l < "$wakes" | tr -d ' ')" = 2 ] || fail "the next oldest aged record must wake the mate: $(cat "$wakes")"
+  assert_contains "$(tail -1 "$wakes")" "1 unhandled" "only the remaining record is counted"
+  mv "$second" "$inbox/handled/"
+  parent_tick "$home" "$wakes"
+  [ ! -e "$state/.parent-inbox-woken" ] || fail "an emptied inbox must clear the woken marker"
+  first=$(inbox_lib "$state/parent-route" fm_task_inbox_write "$state/parent-route" rsm "third instruction")
+  touch -d '120 seconds ago' "$first"
+  parent_tick "$home" "$wakes"
+  [ "$(wc -l < "$wakes" | tr -d ' ')" = 3 ] || fail "a new aged record after an empty inbox must wake again: $(cat "$wakes")"
+  pass "watcher: a secondmate's own watcher wakes its session once per oldest unhandled parent record past the grace"
+}
+
+test_parent_inbox_tick_is_silent_outside_a_secondmate_home() {
+  local home state wakes rec
+  home="$TMP_ROOT/parent-tick-primary"
+  state="$home/state"
+  mkdir -p "$state/parent-route"
+  wakes="$home/wakes.log"; : > "$wakes"
+  rec=$(inbox_lib "$state/parent-route" fm_task_inbox_write "$state/parent-route" rsm "stray instruction")
+  touch -d '500 seconds ago' "$rec"
+  parent_tick "$home" "$wakes"
+  [ ! -s "$wakes" ] || fail "a home that is not a secondmate must never wake for a parent inbox: $(cat "$wakes")"
+  [ ! -s "$state/.wake-queue" ] || fail "a home that is not a secondmate must queue nothing"
+  pass "watcher: a home without a secondmate identity ignores a parent-route inbox"
+}
+
+# On Herdr a bare `[Pasted text #N]` hides its content, so an operator's own
+# paste looks like our collapsed doorbell. It is submitted only once the ring
+# log shows an earlier ring of this record typed the doorbell; a first ring
+# that meets it skips without Enter. The Herdr pane I/O (agent, composer and
+# busy reads, key sends) is a fixture over a composer file; the ring decision
+# and the doorbell match are the production code.
+herdr_ring() {  # <state> <record> <composer-file> <keys-log>
+  FM_STATE_OVERRIDE="$1" FM_FAKE_COMPOSER="$3" FM_SEND_LOG="$4" bash -c '
+    . "$1"
+    fm_backend_source herdr
+    fm_backend_herdr_agent_state() { printf alive; }
+    fm_backend_herdr_busy_state() { printf idle; }
+    fm_backend_herdr_composer_state() { if [ -s "$FM_FAKE_COMPOSER" ]; then printf pending; else printf empty; fi; }
+    fm_backend_herdr_composer_content() { cat "$FM_FAKE_COMPOSER"; }
+    fm_backend_herdr_send_key() { printf "%s\n" "$2" >> "$FM_SEND_LOG"; : > "$FM_FAKE_COMPOSER"; }
+    fm_task_inbox_ring herdr default:w1:p2 "$2"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$2"
+}
+
+test_herdr_bare_placeholder_needs_an_earlier_typed_ring() {
+  local dir state rec composer keys doorbell rc
+  dir="$TMP_ROOT/herdr-placeholder"
+  state="$dir/state"
+  mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  composer="$dir/composer"; keys="$dir/keys"; : > "$keys"
+
+  printf '[Pasted text #1]' > "$composer"
+  rc=0; herdr_ring "$state" "$rec" "$composer" "$keys" || rc=$?
+  [ "$rc" = 1 ] || fail "a first ring meeting a bare placeholder must skip, got rc=$rc"
+  [ ! -s "$keys" ] || fail "a bare placeholder with no earlier typed ring must not get Enter: $(cat "$keys")"
+  [ "$(cat "$composer")" = '[Pasted text #1]' ] || fail "the operator's paste must stay in the composer"
+  tail -1 "$state/t1.inbox/.ring-log" | grep -q '	001.msg	skipped:other-text	' \
+    || fail "the skip must be logged as other text: $(cat "$state/t1.inbox/.ring-log")"
+  printf '[Pasted text #1]%s' "${doorbell: -12}" > "$composer"
+  rc=0; herdr_ring "$state" "$rec" "$composer" "$keys" || rc=$?
+  [ "$rc" = 1 ] && [ ! -s "$keys" ] || fail "a placeholder plus doorbell tail with no earlier typed ring must skip, rc=$rc"
+
+  # Exact whole-line equality is our doorbell without any log entry.
+  printf '%s' "$doorbell" > "$composer"
+  rc=0; herdr_ring "$state" "$rec" "$composer" "$keys" || rc=$?
+  [ "$rc" = 0 ] && [ "$(cat "$keys")" = Enter ] || fail "an exact doorbell must be submitted once, rc=$rc keys=$(cat "$keys")"
+
+  # Right after a ring of this record that typed the doorbell, its collapsed form is ours.
+  : > "$keys"
+  printf '[Pasted text #2]' > "$composer"
+  rc=0; herdr_ring "$state" "$rec" "$composer" "$keys" || rc=$?
+  [ "$rc" = 0 ] && [ "$(cat "$keys")" = Enter ] \
+    || fail "a placeholder after an earlier typed ring must be submitted, rc=$rc keys=$(cat "$keys")"
+
+  # The same earlier ring, long ago: an operator paste now is not our doorbell.
+  awk -F '\t' -v OFS='\t' '{ $1 = "2020-01-01T00:00:00Z"; print }' "$state/t1.inbox/.ring-log" \
+    > "$state/t1.inbox/.ring-log.new" && mv "$state/t1.inbox/.ring-log.new" "$state/t1.inbox/.ring-log"
+  : > "$keys"
+  printf '[Pasted text #3]' > "$composer"
+  rc=0; herdr_ring "$state" "$rec" "$composer" "$keys" || rc=$?
+  [ "$rc" = 1 ] && [ ! -s "$keys" ] \
+    || fail "a placeholder whose only earlier typed ring is old must skip without Enter, rc=$rc keys=$(cat "$keys")"
+  pass "inbox: a Herdr bare paste placeholder is submitted only after a recent ring of the record typed the doorbell"
+}
+
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
@@ -1423,3 +1629,8 @@ test_watcher_retry_keeps_a_newer_mark
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
+test_ring_log_records_each_decision_and_stays_bounded
+test_ring_log_records_a_dead_agent
+test_parent_inbox_tick_wakes_a_parked_mate_once_per_oldest_record
+test_parent_inbox_tick_is_silent_outside_a_secondmate_home
+test_herdr_bare_placeholder_needs_an_earlier_typed_ring

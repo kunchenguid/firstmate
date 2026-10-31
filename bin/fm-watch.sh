@@ -169,6 +169,13 @@
 #                          inbox and a fresh child beacon are not idle proof;
 #                          the foreign queue itself stays read-only, and one
 #                          parent notification covers each no-progress episode
+#   check: parent instruction waiting: <n> unhandled in <inbox>, oldest <s>s; ...
+#                          this home is a secondmate and its own steering inbox
+#                          from its parent (state/parent-route/<id>.inbox, or a
+#                          local mate's $FM_TASK_INBOX) holds a record older than
+#                          FM_TASK_INBOX_GRACE_SECS; queued once per oldest record
+#                          so a parked mate session wakes and reads it without
+#                          depending on a typed doorbell (parent_inbox_tick)
 #   check: secondmate <id> auto-relaunched after <cause> (<where>)
 #                          the liveness tick probed a registered secondmate's
 #                          recorded endpoint, got the recovery-grade `dead` or
@@ -1113,6 +1120,50 @@ EOF
     wake "$reason"
   done
   return 0
+}
+
+# A secondmate's own watcher is a wake source for the steering inbox its parent
+# writes: a parked mate session wakes on that queued check exactly as it does
+# for a child event, so reading a parent instruction never depends on composer
+# typing (a doorbell whose Enter never lands leaves an idle mate deaf, and the
+# remote host runs no re-ring ladder). The inbox is the remote placement's
+# state/parent-route/<id>.inbox in this home, else a local mate's own
+# $FM_TASK_INBOX when it names this home's id. Every unhandled record counts,
+# fire-and-forget included, once the oldest is past the inbox grace; one wake
+# per oldest record (.parent-inbox-woken), queued before that marker is written
+# so a crash can only duplicate a wake, never lose one. The inbox itself stays
+# read-only here: reading and acknowledging records is the woken session's job.
+parent_inbox_tick() {
+  local id inbox_state summary count oldest age woken_marker="$STATE/.parent-inbox-woken"
+  local key reason queued
+  [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] || return 0
+  id=$(cat "$FM_HOME/.fm-secondmate-home" 2>/dev/null || true)
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  inbox_state="$STATE/parent-route"
+  if [ ! -d "$(fm_task_inbox_dir "$inbox_state" "$id")" ]; then
+    case "${FM_TASK_INBOX:-}" in
+      /*/"$id.inbox") [ -d "$FM_TASK_INBOX" ] || return 0; inbox_state=${FM_TASK_INBOX%/*} ;;
+      *) return 0 ;;
+    esac
+  fi
+  if ! summary=$(fm_task_inbox_unhandled_summary "$inbox_state" "$id"); then
+    rm -f "$woken_marker" 2>/dev/null || true
+    return 0
+  fi
+  read -r count oldest age <<EOF
+$summary
+EOF
+  case "$age" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$age" -ge "$(fm_task_inbox_grace_secs)" ] || return 0
+  [ "$(cat "$woken_marker" 2>/dev/null || true)" != "$oldest" ] || return 0
+  key="parent-inbox-$id-${oldest%.msg}"
+  reason="check: parent instruction waiting: $count unhandled in $(fm_task_inbox_dir "$inbox_state" "$id"), oldest ${age}s; read and act on each in numeric order, then mv each into its handled/"
+  queued=$(fm_wake_queued_keys check)
+  if ! printf '%s\n' "$queued" | grep -Fx "$key" >/dev/null 2>&1; then
+    fm_wake_append check "$key" "$reason" || return 1
+  fi
+  printf '%s\n' "$oldest" > "$woken_marker" || return 1
+  wake "$reason"
 }
 
 # The ordinary-supervision half of the secondmate liveness guarantee, paired
@@ -3728,6 +3779,12 @@ while :; do
   # the parent without consuming or rewriting the receiving home's record.
   secondmate_wake_stall_tick || {
     echo "watcher: secondmate wake-loop observation failed" >&2
+    exit 1
+  }
+
+  # A secondmate home wakes its own session for an unread parent instruction.
+  parent_inbox_tick || {
+    echo "watcher: parent-route inbox wake could not be recorded" >&2
     exit 1
   }
 

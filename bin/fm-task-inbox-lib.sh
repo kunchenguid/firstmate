@@ -33,6 +33,10 @@
 #                              so later polls suppress another escalation
 #   <task>.inbox/.retry-ring   name of a fire-and-forget record still owed its
 #                              one retry ring (fm_task_inbox_mark_retry)
+#   <task>.inbox/.ring-log     bounded diagnostic log of every ring decision:
+#                              "<utc>\t<msg>\t<decision>\t<detail>", decision one
+#                              of rang, unconfirmed, skipped:other-text,
+#                              skipped:busy, failed, dead (fm_task_inbox_ring)
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
@@ -80,7 +84,8 @@
 # without this retry the record could sit unread until a checkpoint. A pending ordinary record's
 # ladder rings the same inbox, so the retry waits behind it, and an
 # acknowledged record drops its mark. The remote steer leg has no watcher
-# ladder and owes no retry.
+# ladder and owes no retry; there the receiving mate's own watcher wakes its
+# session for any unhandled record instead (bin/fm-watch.sh parent_inbox_tick).
 #
 # Inbox names containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.
@@ -113,6 +118,13 @@ fm_task_inbox_grace_secs() {
   local g=${FM_TASK_INBOX_GRACE_SECS:-$FM_TASK_INBOX_GRACE_DEFAULT}
   case "$g" in ''|*[!0-9]*) g=$FM_TASK_INBOX_GRACE_DEFAULT ;; esac
   printf '%s' "$g"
+}
+
+# The watcher poll interval the ladder runs at (bin/fm-watch.sh FM_POLL).
+fm_task_inbox_poll_secs() {
+  local p=${FM_POLL:-15}
+  case "$p" in ''|*[!0-9]*|0) p=15 ;; esac
+  printf '%s' "$p"
 }
 
 fm_task_inbox_ring_max() {
@@ -386,24 +398,44 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
+# Every decision is appended to the inbox's .ring-log (see the header), because
+# no caller records why a ring was skipped and a stuck doorbell is otherwise
+# undiagnosable after the fact; the log never changes the return value.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
-  case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
-    dead|missing) return 3 ;;
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict astate
+  astate=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+  case "$astate" in
+    dead|missing) _fm_task_inbox_ring_log "$rec" dead "agent=$astate"; return 3 ;;
   esac
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
+    _fm_task_inbox_ring_log "$rec" failed "doorbell-line-refused"
     return 2
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
-        && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
-        || return 1
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+      if ! fm_task_inbox_composer_holds "$backend" "$target" "$line" "$rec" "$label"; then
+        _fm_task_inbox_ring_log "$rec" skipped:other-text "composer=pending"
+        return 1
+      fi
+      if [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" = busy ]; then
+        _fm_task_inbox_ring_log "$rec" skipped:busy "composer=own-doorbell"
+        return 1
+      fi
+      if ! fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1; then
+        _fm_task_inbox_ring_log "$rec" failed "composer=own-doorbell enter"
+        return 2
+      fi
       sleep 0.3
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+      if ! fm_task_inbox_composer_holds "$backend" "$target" "$line" "$rec" "$label"; then
+        _fm_task_inbox_ring_log "$rec" rang "composer=own-doorbell submitted"
+        return 0
+      fi
+      if ! fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1; then
+        _fm_task_inbox_ring_log "$rec" failed "composer=own-doorbell second-enter"
+        return 2
+      fi
+      _fm_task_inbox_ring_log "$rec" unconfirmed "composer=own-doorbell second-enter"
       return 0
       ;;
   esac
@@ -412,19 +444,94 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 2 0.4 0.3 "$label" 2>/dev/null); then
+    _fm_task_inbox_ring_log "$rec" failed "composer=$cstate submit"
     return 2
   fi
   # The verdict is read only to report a failed keystroke; every other value
   # (empty, pending, unknown, ...) is deliberately ignored, never proof.
-  [ "$verdict" != send-failed ] || return 2
+  if [ "$verdict" = send-failed ]; then
+    _fm_task_inbox_ring_log "$rec" failed "composer=$cstate verdict=send-failed"
+    return 2
+  fi
+  if [ "$verdict" = empty ]; then
+    _fm_task_inbox_ring_log "$rec" rang "composer=$cstate verdict=empty"
+  else
+    _fm_task_inbox_ring_log "$rec" unconfirmed "composer=$cstate verdict=${verdict:-none}"
+  fi
   return 0
 }
 
-# Whether the composer's content, ignoring line wrapping, is exactly <line>.
-fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
+# Append one ring decision to the inbox's .ring-log, best-effort and bounded
+# (trimmed to its newest 200 lines past 64 KiB). Never fails its caller.
+_fm_task_inbox_ring_log() {  # <record-path> <decision> [detail]
+  local dir=${1%/*} log sz
+  dir=${dir%/handled}
+  [ -d "$dir" ] || return 0
+  log="$dir/.ring-log"
+  printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1##*/}" "$2" "${3:-}" \
+    >> "$log" 2>/dev/null || return 0
+  sz=$(wc -c < "$log" 2>/dev/null | tr -d '[:space:]')
+  case "$sz" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$sz" -ge 65536 ]; then
+    tail -n 200 "$log" > "$log.tmp.$$" 2>/dev/null && mv -f "$log.tmp.$$" "$log" 2>/dev/null
+    rm -f "$log.tmp.$$" 2>/dev/null
+  fi
+  return 0
+}
+
+# Whether a Herdr composer read <held> is our own doorbell <line> for
+# <record-path>: equal to it ignoring whitespace and wrapping, or the shape
+# Claude leaves when it collapses the burst typed by the Herdr typing path - one
+# bare `[Pasted text #N]` placeholder, optionally followed by a literal tail that
+# is the end of <line>. A placeholder hides its content, so an operator's paste
+# has the same shape: it is recognised only while the inbox's .ring-log already
+# shows a recent earlier ring of this record that typed the doorbell (rang or
+# unconfirmed). A `+M lines` placeholder or several placeholders are an
+# operator's paste, not a single-line doorbell, and are never recognised.
+_fm_task_inbox_herdr_holds_doorbell() {  # <line> <held> <record-path>
+  local line=$1 held=$2 rec=$3 rest dir now window cutoff
+  fm_composer_normalize_spaces_var line
+  fm_composer_normalize_spaces_var held
+  line=${line//[$' \t\r\n\v\f']/}
+  line=${line//$'\xE2\x81\xA3'/}
+  held=${held//[$' \t\r\n\v\f']/}
+  held=${held//$'\xE2\x81\xA3'/}
+  [ -n "$line" ] && [ -n "$held" ] || return 1
+  [ "$held" = "$line" ] && return 0
+  [[ $held =~ ^\[Pastedtext#[0-9]+\](.*)$ ]] || return 1
+  rest=${BASH_REMATCH[1]}
+  case "$rest" in *'[Pastedtext#'*) return 1 ;; esac
+  [ -z "$rest" ] || [[ $line == *"$rest" ]] || return 1
+  dir=${rec%/*}
+  dir=${dir%/handled}
+  # Recent means within one re-ring spacing (the inbox grace) plus three watcher
+  # passes (FM_POLL, default 15 s): the next re-ring of a doorbell whose Enter
+  # was lost falls inside it, an operator paste long after the last ring does
+  # not. The log's UTC stamps sort as text.
+  now=$(date +%s)
+  window=$(( $(fm_task_inbox_grace_secs) + 3 * $(fm_task_inbox_poll_secs) ))
+  cutoff=$(date -u -r "$((now - window))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$((now - window))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 1
+  awk -F '\t' -v msg="${rec##*/}" -v cutoff="$cutoff" '
+    $2 == msg && ($3 == "rang" || $3 == "unconfirmed") && $1 >= cutoff { found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$dir/.ring-log" 2>/dev/null
+}
+
+# Whether the composer's content is exactly <line>, ignoring line wrapping.
+# Herdr reads its composer with the same visible-viewport reader its typing
+# path uses (fm_backend_herdr_composer_content), so a doorbell that path typed
+# - wrapped, or collapsed into a placeholder - is recognised as our own rather
+# than skipped as someone else's draft. Other backends compare a plain capture.
+fm_task_inbox_composer_holds() {  # <backend> <target> <line> <record-path> [expected-label]
   local cap held
   fm_backend_source "$1" || return 1
-  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
+  if [ "$1" = herdr ]; then
+    held=$(fm_backend_herdr_composer_content "$2" 2>/dev/null) || return 1
+    _fm_task_inbox_herdr_holds_doorbell "$3" "$held" "$4"
+    return
+  fi
+  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${5:-}" 2>/dev/null) || return 1
   held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
   [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
 }
@@ -440,6 +547,27 @@ fm_task_inbox_is_fire_and_forget() {  # <record-path>
     $0 == "delivery=fire-and-forget" { found=1 }
     END { exit(found ? 0 : 1) }
   ' "$rec"
+}
+
+# Every unhandled record, ordinary and fire-and-forget alike: prints
+# "<count> <oldest-basename> <oldest-age-seconds>" with the oldest chosen by
+# sequence, or fails when the inbox holds none. The receiving side's own
+# watcher (bin/fm-watch.sh parent_inbox_tick) and the parent's reply tracker
+# (bin/fm-pending-reply-lib.sh, through the remote inbox-status leg) read it.
+fm_task_inbox_unhandled_summary() {  # <state-dir> <task-id>
+  local dir best='' best_n=0 count=0 f n
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  for f in "$dir"/*.msg; do
+    [ -e "$f" ] || continue
+    n=$(fm_task_inbox_seq_of "${f##*/}") || continue
+    count=$((count + 1))
+    if [ -z "$best" ] || [ "$n" -lt "$best_n" ]; then
+      best=$f
+      best_n=$n
+    fi
+  done
+  [ -n "$best" ] || return 1
+  printf '%s %s %s' "$count" "${best##*/}" "$(fm_path_age "$best")"
 }
 
 # Oldest escalation-tracked unhandled record, or fail when none is due.

@@ -1090,8 +1090,8 @@ remote_recovery_paths_validate() {
 }
 
 # Remove every parent pending-reply record for $ID, plus its delivery
-# confirmation when present. Shared by local and remote secondmate retirement
-# after the home/route is safely gone.
+# confirmation and saved undelivered text when present. Shared by local and
+# remote secondmate retirement after the home/route is safely gone.
 pending_replies_cleanup_for_task() {
   local pending_dir=$1 expected_real=${2-} rec base corr task_id
   [ -d "$pending_dir" ] || return 0
@@ -1109,7 +1109,7 @@ pending_replies_cleanup_for_task() {
       printf '%s' "$base" | grep -Eq '^[a-f0-9]{16}$' || exit 1
       corr=$(fm_meta_get "$rec" corr_id)
       [ -z "$corr" ] || [ "$corr" = "$base" ] || exit 1
-      rm -f -- "./.delivery-confirmed-$base" "$rec" || exit 1
+      rm -f -- "./.delivery-confirmed-$base" "./.undelivered-text-$base" "$rec" || exit 1
     done
   )
 }
