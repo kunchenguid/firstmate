@@ -19,8 +19,9 @@
 #                        marked read (BODY.PEEK), and every surfaced message
 #                        is keyed by its immutable IMAP UID so expunge
 #                        renumbering never re-wakes or loses mail. A uid whose
-#                        header could not be fetched is woken once degraded
-#                        and later re-woken once with recovered metadata. The
+#                        header could not be fetched, without a sender allow
+#                        list, is woken once degraded and later re-woken once
+#                        with recovered metadata. The
 #                        cursor also records the mailbox generation
 #                        (UIDVALIDITY) so a recreated mailbox cannot reuse a
 #                        numeric uid and suppress a new wake, and overlapping
@@ -29,14 +30,17 @@
 #                        `at`/cron, or via the standing check armed by
 #                        bin/fm-mail-check.sh (docs/configuration.md
 #                        "Mail plane").
+#                        Sender filtering and held-mail recovery are defined
+#                        in docs/configuration.md "Mail plane".
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
 #
 # Volume: poll surfaces at most FM_MAIL_POLL_MAX_WAKES messages per run
 # (default 20, valid 1..200); a larger flood is left unseen so the next poll
 # surfaces the next batch, keeping the durable wake queue bounded no matter how
-# much inbound mail arrives. A header fetch that fails is still surfaced once
-# (degraded placeholders) and retried on later polls until the real metadata
+# much inbound mail arrives. Without a sender allow list, a header fetch that
+# fails is still surfaced once (degraded placeholders) and retried on later
+# polls until the real metadata
 # lands; a persistently unfetchable uid is never skipped and never re-wakes.
 #
 # Deployment - credentials and endpoints are read from the environment,
@@ -50,6 +54,7 @@
 #   FM_SMTP_HOST=<smtp host>
 #   FM_SMTP_PORT=<smtp port>     (default 465, implicit TLS)
 #   FM_MAIL_TIMEOUT=<seconds>    (default 20; IMAP/SMTP socket timeout)
+#   FM_MAIL_SOURCE_ALLOW=<list>  (optional; docs/configuration.md "Mail plane")
 # FM_HOME falls back to the repo root when unset. This script carries no secret
 # and no default endpoint that could resolve against a wrong home; FM_MAIL_USER,
 # FM_MAIL_PASS, FM_IMAP_HOST, and FM_SMTP_HOST are always required, and
@@ -155,7 +160,7 @@ CURSOR="$STATE_DIR/.mail-seen"
 # recovery exactly-once instead of racing the drain.
 WOKEN="$STATE_DIR/.mail-woken"
 # Generation-scoped retry set: a uid whose header fetch failed is recorded
-# here after its degraded wake so a later poll can fetch the real metadata.
+# here for degraded or held mail so a later poll can fetch the real metadata.
 # Cleared with the cursor and journal on a UIDVALIDITY change. The retry-scan
 # position (.mail-retry-pos) is a durable cursor over this set so the bounded
 # per-poll retry window marches through every uid; it is cleared with the set.
@@ -188,12 +193,12 @@ EOF
 }
 
 mail_seen() {
-  # $1 = uid; returns 0 when the cursor already records the uid as surfaced.
+  # $1 = uid; returns 0 when the cursor already records the uid as processed.
   grep -Fqx "$1" "$CURSOR"
 }
 
 mail_retry_add() {
-  # $1 = uid; record that a degraded surfacing should be retried.
+  # $1 = uid; retain fetch failures, including unwoken held mail, for retry.
   local id=$1
   [ -n "$id" ] || return 1
   if [ -f "$RETRY" ] && grep -Fqx "$id" "$RETRY"; then
@@ -396,7 +401,7 @@ wake_for() {
   # published, so the retry record is cleared only after a successful append.
   # This removes the kill-window between "retry removed" and "wake published"
   # that could strand recovered metadata: the uid would be cursor-recorded from
-  # the earlier degraded wake but no longer in the retry set, so later polls
+  # degraded or held mail but no longer in the retry set, so later polls
   # would never re-fetch it.
   if { [ "$status" -eq 0 ] || [ "$status" -eq 2 ]; } && [ -n "$retry_id" ]; then
     if ! mail_retry_remove "$retry_id"; then
@@ -479,13 +484,17 @@ mail_heal() {
 mail_poll() {
   # List unseen mail (uid,date,from,subj,status) plus the mailbox generation
   # guard, then wake each NEW uid and each recovered retry uid. status is
-  # ok, retry, or degraded; an empty status is treated as ok so a legacy
-  # four-field row still wakes. Never marks anything read. Overlapping polls
+  # ok, retry, degraded, filtered, or held; an empty status is treated as ok
+  # so a legacy four-field row still wakes. filtered (sender outside
+  # FM_MAIL_SOURCE_ALLOW) is recorded in the cursor and dropped from the retry
+  # set without a wake; held (sender unverifiable) enters cursor/retry state.
+  # Never marks anything read. Overlapping polls
   # are serialized on the mail-seen lock; each poll first heals a run
   # interrupted between its phases (mail_heal), so an overlapping poll or an
   # interrupted run can never lose a mail. wake_for owns the remaining
   # kill-window duplicate residual.
   local list generation first_line uid fr subj status woke=0 need_wake line wake_rc=0
+  local filtered=0 held=0
   if [ ! -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
     echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
     return 1
@@ -542,8 +551,36 @@ mail_poll() {
     [ -z "$status" ] && status=ok
     need_wake=0
     case "$status" in
+      filtered)
+        # A sender outside the allow list never wakes. Record the uid so it
+        # does not re-fetch, and drop any retry entry so it does not resurface
+        # as recovered metadata. A failed write only means the next poll
+        # filters it again, so it never stops the poll.
+        if ! mail_seen "$uid" && ! printf '%s\n' "$uid" >> "$CURSOR"; then
+          echo "fm-mail: could not record a withheld uid; filtered again next poll" >&2
+        fi
+        if ! mail_retry_remove "$uid"; then
+          echo "fm-mail: could not clear retry for a withheld uid; filtered again next poll" >&2
+        fi
+        filtered=$((filtered + 1))
+        continue
+        ;;
+      held)
+        if ! mail_retry_add "$uid"; then
+          echo "fm-mail: could not record retry for a held uid; retried on next poll" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
+          return 1
+        fi
+        if ! mail_seen "$uid" && ! printf '%s\n' "$uid" >> "$CURSOR"; then
+          echo "fm-mail: could not record a held uid; retried on next poll" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
+          return 1
+        fi
+        held=$((held + 1))
+        continue
+        ;;
       retry)
-        # Already cursor-recorded from the degraded wake. Surface recovered
+        # Already cursor-recorded from degraded or held mail. Surface recovered
         # metadata once; if a recovery/ok publish is already journaled, retry
         # the retry-set clear without appending another wake.
         if mail_retry_published "$generation" "$uid"; then
@@ -590,7 +627,7 @@ mail_poll() {
       # Clear the retry record as part of the wake publish transaction. For a
       # recovered uid this removes the dangerous gap where the retry was cleared
       # but the wake had not yet published; a kill in that gap would leave the
-      # uid cursor-recorded from the degraded wake but no longer retry-eligible,
+      # uid cursor-recorded from degraded or held mail but no longer retry-eligible,
       # so its recovered metadata could never surface. For normal (ok) mail it
       # also clears any stale retry entry left by a rolled-back earlier wake.
       # Degraded mail keeps its retry entry so the next poll retries the fetch.
@@ -610,6 +647,13 @@ mail_poll() {
     fi
   done <<< "$list"
   fm_lock_release "$STATE_DIR/.mail-seen.lock"
+  # Counts only: a withheld sender's address and subject are never logged.
+  if [ "$filtered" -gt 0 ]; then
+    echo "fm-mail: withheld $filtered message(s) from senders outside FM_MAIL_SOURCE_ALLOW (not woken, left unread)"
+  fi
+  if [ "$held" -gt 0 ]; then
+    echo "fm-mail: held $held message(s) whose sender could not be verified (header unfetchable); retried next poll"
+  fi
   if [ "$woke" -eq 0 ]; then
     echo "fm-mail: no new mail"
   fi

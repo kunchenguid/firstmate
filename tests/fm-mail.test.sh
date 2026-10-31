@@ -2600,6 +2600,253 @@ SH
   pass "fm-mail: bounded fetch makes progress through a large backlog without re-surfacing mail"
 }
 
+# Sender allow list (FM_MAIL_SOURCE_ALLOW). These drive the real fm-mail.py
+# engine behind bin/fm-mail.sh through a stubbed IMAP connection: the fake
+# python3 execs a harness that patches imaplib, logs every IMAP command, and
+# then runs the engine's own main().
+allow_harness() {
+  # $1 = harness path. The fake mailbox is described by FM_TEST_MAILBOX: one
+  # "uid|raw header" per line, with a literal \r\n in the header text, and the
+  # header "UNFETCHABLE" for a uid whose fetch fails.
+  cat > "$1" <<'PYEOF'
+import imaplib, importlib.util, os, sys
+
+mailbox = {}
+order = []
+for line in open(os.environ['FM_TEST_MAILBOX'], encoding='utf-8'):
+    line = line.rstrip('\n')
+    if not line:
+        continue
+    uid, raw = line.split('|', 1)
+    order.append(uid)
+    mailbox[uid] = raw.replace('\\r\\n', '\r\n').encode()
+
+def log(*parts):
+    with open(os.environ['FM_TEST_IMAP_LOG'], 'a', encoding='utf-8') as f:
+        f.write(' '.join(parts) + '\n')
+
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        log(cmd, *[a.decode() if isinstance(a, bytes) else str(a) for a in args if a is not None])
+        if cmd == 'search':
+            return ('OK', [' '.join(order).encode()])
+        if cmd == 'fetch':
+            raw = mailbox.get(args[0].decode())
+            if raw is None or raw == b'UNFETCHABLE':
+                return ('NO', None)
+            return ('OK', [(b'', raw)])
+        return ('NO', None)
+    def store(self, *a):
+        log('store', *[str(x) for x in a])
+        return ('OK', [])
+    def logout(self):
+        pass
+
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.argv = sys.argv[1:]
+sys.exit(mod.main())
+PYEOF
+}
+
+allow_fixture() {
+  # $1 = test name; prints a fresh home whose fake python3 runs the harness.
+  local home real_py
+  home="$TMP_ROOT/allow-$1"
+  mkdir -p "$home/state" "$home/fakebin"
+  real_py=$(command -v python3)
+  allow_harness "$home/harness.py"
+  cat > "$home/fakebin/python3" <<SH
+#!/bin/bash
+exec "$real_py" "$home/harness.py" "\$@"
+SH
+  chmod +x "$home/fakebin/python3"
+  : > "$home/imap.log"
+  printf '%s\n' "$home"
+}
+
+allow_mail() {
+  # $1 = home, $2 = subcommand; remaining args are extra env(1) arguments.
+  local home=$1 sub=$2
+  shift 2
+  env -u FM_MAIL_SOURCE_ALLOW FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$home" PATH="$home/fakebin:$PATH" \
+    FM_TEST_MAILBOX="$home/mailbox" FM_TEST_IMAP_LOG="$home/imap.log" \
+    "$@" "$MAIL" "$sub"
+}
+
+allow_mixed_mailbox() {
+  cat > "$1/mailbox" <<'MBOX'
+80|From: Alice <alice@Example.COM>\r\nSubject: allowed-domain\r\n\r\n
+81|From: "boss@example.com" <attacker@evil.test>\r\nSubject: display-spoof\r\n\r\n
+82|From: x@example.com.evil.test\r\nSubject: suffix-spoof\r\n\r\n
+83|From: x@sub.example.com\r\nSubject: subdomain\r\n\r\n
+84|From: Friend <Friend@Gmail.com>\r\nSubject: allowed-address\r\n\r\n
+85|From: other@gmail.com\r\nSubject: other-address\r\n\r\n
+86|From: a@example.com, b@evil.test\r\nSubject: two-senders\r\n\r\n
+87|UNFETCHABLE
+MBOX
+}
+
+ALLOW_LEAKS="attacker evil.test display-spoof suffix-spoof subdomain other-address two-senders"
+
+test_poll_sender_allow_wakes_only_matching_senders() {
+  local home out rc=0 wakeq leak u
+  home=$(allow_fixture filter)
+  allow_mixed_mailbox "$home"
+  printf 'uidvalidity=90009\n' > "$home/state/.mail-seen"
+
+  out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=' @example.com , friend@gmail.com ' 2>&1) || rc=$?
+  expect_code 0 "$rc" "allow-listed poll must succeed"
+  assert_contains "$out" "woke for 80" "a sender in an allowed domain wakes, case-insensitively"
+  assert_contains "$out" "woke for 84" "an allowed exact address wakes, case-insensitively"
+  wakeq=$(grep -c "check: mail" "$home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 2 "$wakeq" "only the two matching senders wake"
+  assert_contains "$out" "withheld 5 message(s)" "non-matching mail is reported as a count"
+  assert_contains "$out" "held 1 message(s)" "an unverifiable sender is reported as held"
+  for leak in $ALLOW_LEAKS; do
+    assert_not_contains "$out" "$leak" "the poll log never names a withheld sender or subject ($leak)"
+    assert_not_contains "$(cat "$home/state/.wake-queue")" "$leak" "no wake carries withheld mail ($leak)"
+  done
+  for u in 81 82 83 85 86; do
+    grep -qx -- "$u" "$home/state/.mail-seen" || fail "withheld uid $u is recorded so it never re-wakes"
+  done
+  grep -qx 87 "$home/state/.mail-seen" || fail "a held uid enters progress state"
+  grep -qx 87 "$home/state/.mail-retry" || fail "a held uid remains retryable"
+  assert_no_grep 'store' "$home/imap.log" "the poll never stores a flag"
+  assert_no_grep 'BODY[' "$home/imap.log" "the poll fetches only with BODY.PEEK, never marking mail read"
+
+  : > "$home/imap.log"
+  rc=0
+  out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=' @example.com , friend@gmail.com ' 2>&1) || rc=$?
+  expect_code 0 "$rc" "follow-up allow-listed poll must succeed"
+  assert_contains "$out" "no new mail" "withheld mail never re-wakes"
+  assert_not_contains "$out" "withheld" "recorded withheld mail is not filtered again"
+  assert_grep "fetch 87 " "$home/imap.log" "the held uid is retried"
+  ! grep -Eq '^fetch 8[1-6] ' "$home/imap.log" || fail "recorded withheld uids are not fetched again"
+  pass "fm-mail: a sender allow list wakes only matching From addresses and records the rest without a wake"
+}
+
+test_poll_held_prefix_progresses_and_recovers() {
+  local home out rc cap window u tail wakeq
+  for cap in 20 1; do
+    home=$(allow_fixture "held-prefix-$cap")
+    window=$((cap * 4))
+    [ "$window" -ge "$((cap + 10))" ] || window=$((cap + 10))
+    tail=$((window + 1))
+    for ((u=1; u<=window; u++)); do
+      printf '%s|UNFETCHABLE\n' "$u"
+    done > "$home/mailbox"
+    printf '%s|From: later@example.com\\r\\nSubject: later\\r\\n\\r\\n\n' "$tail" >> "$home/mailbox"
+    rc=0
+    out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=@example.com FM_MAIL_POLL_MAX_WAKES="$cap" 2>&1) || rc=$?
+    expect_code 0 "$rc" "the held prefix poll succeeds"
+    assert_contains "$out" "held $window message(s)" "held headers are counted"
+    ! grep -qs 'check: mail' "$home/state/.wake-queue" || fail "held headers never wake"
+    for ((u=1; u<=window; u++)); do
+      grep -qx "$u" "$home/state/.mail-seen" || fail "held uid $u enters progress state"
+      grep -qx "$u" "$home/state/.mail-retry" || fail "held uid $u remains retryable"
+    done
+    for _ in 1 2; do
+      rc=0
+      out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=@example.com FM_MAIL_POLL_MAX_WAKES="$cap" 2>&1) || rc=$?
+      expect_code 0 "$rc" "later polls succeed despite persistent failures"
+    done
+    assert_grep "mail:90009/$tail" "$home/state/.wake-queue" "later allowed mail wakes past the held prefix"
+    printf '1|From: blocked@evil.test\\r\\nSubject: hidden\\r\\n\\r\\n\n' > "$home/mailbox"
+    printf '%s|From: recovered@example.com\\r\\nSubject: recovered\\r\\n\\r\\n\n' "$window" >> "$home/mailbox"
+    for _ in 1 2 3; do
+      rc=0
+      out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=@example.com FM_MAIL_POLL_MAX_WAKES="$cap" 2>&1) || rc=$?
+      expect_code 0 "$rc" "held retries recover through the rotating scan"
+    done
+    assert_grep "mail:90009/$window" "$home/state/.wake-queue" "an allowed recovered header wakes"
+    assert_no_grep 'hidden' "$home/state/.wake-queue" "a blocked recovered header never wakes"
+    ! grep -qx 1 "$home/state/.mail-retry" || fail "blocked recovery leaves the retry set"
+    ! grep -qx "$window" "$home/state/.mail-retry" || fail "allowed recovery leaves the retry set"
+    wakeq=$(grep -c 'check: mail' "$home/state/.wake-queue")
+    expect_code 2 "$wakeq" "later and recovered allowed mail each wake exactly once"
+  done
+  pass "fm-mail: held prefixes permit later mail and verified retry recovery"
+}
+
+test_poll_without_sender_allow_is_unchanged() {
+  local home out rc=0 wakeq
+  home=$(allow_fixture unset)
+  allow_mixed_mailbox "$home"
+  printf 'uidvalidity=90009\n' > "$home/state/.mail-seen"
+  out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=' ' 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll with a blank allow list must succeed"
+  wakeq=$(grep -c "check: mail" "$home/state/.wake-queue" 2>/dev/null || true)
+  expect_code 8 "$wakeq" "a blank allow list wakes every sender, including the degraded uid"
+  assert_contains "$(cat "$home/state/.wake-queue")" "unfetchable header" "an unfetchable header still surfaces degraded"
+  assert_not_contains "$out" "withheld" "nothing is withheld without an allow list"
+  pass "fm-mail: an unset or blank sender allow list leaves polling unchanged"
+}
+
+test_poll_sender_allow_drops_filtered_retry_uid() {
+  local home out rc=0
+  home=$(allow_fixture retry)
+  printf '%s\n' '41|From: attacker@evil.test\r\nSubject: recovered\r\n\r\n' > "$home/mailbox"
+  printf 'uidvalidity=90009\n41\n' > "$home/state/.mail-seen"
+  printf '41\n' > "$home/state/.mail-retry"
+  out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=@example.com 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll with a withheld retry uid must succeed"
+  assert_not_contains "$out" "woke for 41" "recovered metadata from a withheld sender never wakes"
+  assert_contains "$out" "withheld 1 message(s)" "the withheld retry uid is counted"
+  ! grep -qx 41 "$home/state/.mail-retry" || fail "the withheld uid leaves the retry set"
+  ! grep -qs 'check: mail' "$home/state/.wake-queue" || fail "no wake is queued for the withheld retry uid"
+  pass "fm-mail: a recovered retry uid from a withheld sender is dropped without a wake"
+}
+
+test_sender_allow_malformed_entries_fail_clearly() {
+  local home out rc bad
+  home=$(allow_fixture malformed)
+  allow_mixed_mailbox "$home"
+  printf 'uidvalidity=90009\n' > "$home/state/.mail-seen"
+  for bad in 'example.com' '*@example.com' '@exa mple.com' 'a@b@c' '<a@b.c>'; do
+    rc=0
+    out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW="@ok.test, $bad" 2>&1) || rc=$?
+    expect_code 1 "$rc" "a malformed entry ($bad) must fail the poll"
+    assert_contains "$out" "FM_MAIL_SOURCE_ALLOW has malformed entries: '$bad'" "the poll names the malformed entry ($bad)"
+    rc=0
+    out=$(allow_mail "$home" read FM_MAIL_SOURCE_ALLOW="$bad" 2>&1) || rc=$?
+    expect_code 1 "$rc" "a malformed entry ($bad) must fail read"
+    assert_contains "$out" "malformed entries: '$bad'" "read names the malformed entry ($bad)"
+  done
+  ! grep -qs 'check: mail' "$home/state/.wake-queue" || fail "a malformed list wakes nothing"
+  assert_no_grep 'fetch' "$home/imap.log" "a malformed list fetches no mail"
+  rc=0
+  out=$(allow_mail "$home" poll FM_MAIL_SOURCE_ALLOW=', ,' 2>&1) || rc=$?
+  expect_code 1 "$rc" "a list with no entries must fail rather than empty the filter"
+  assert_contains "$out" "holds no entries" "an entry-less list is reported"
+  pass "fm-mail: malformed sender allow-list entries fail read and poll naming the entry"
+}
+
+test_sender_allow_read() {
+  local home out rc=0 leak
+  home=$(allow_fixture read)
+  allow_mixed_mailbox "$home"
+  out=$(allow_mail "$home" read FM_MAIL_SOURCE_ALLOW='@example.com,friend@gmail.com' 2>&1) || rc=$?
+  expect_code 0 "$rc" "allow-listed read must succeed"
+  assert_contains "$out" "Subj: allowed-domain" "read lists an allowed-domain sender"
+  assert_contains "$out" "Subj: allowed-address" "read lists an allowed address"
+  assert_contains "$out" "(5 unseen message(s) from senders outside FM_MAIL_SOURCE_ALLOW withheld)" "read counts withheld mail"
+  for leak in $ALLOW_LEAKS; do
+    assert_not_contains "$out" "$leak" "read never shows withheld mail ($leak)"
+  done
+  pass "fm-mail: read withholds non-matching mail"
+}
+
 test_missing_secret_fails_cleanly
 test_env_overrides_env_file
 test_status_without_network
@@ -2657,3 +2904,9 @@ test_body_preview_tolerates_none_payload
 test_read_tolerates_none_payload
 test_read_surfaces_unfetchable_uid
 test_invalid_port_fails_cleanly
+test_poll_sender_allow_wakes_only_matching_senders
+test_poll_held_prefix_progresses_and_recovers
+test_poll_without_sender_allow_is_unchanged
+test_poll_sender_allow_drops_filtered_retry_uid
+test_sender_allow_malformed_entries_fail_clearly
+test_sender_allow_read
