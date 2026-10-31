@@ -1,7 +1,27 @@
 [
   {
-    "name": "identity-probe-failure",
-    "result": "pass",
-    "evidence": "~/.no-mistakes/evidence/01M68QJP6Q03GEDV19NYPCD253/identity-probe-failure.log"
+    "name": "Default arm confirms a real local watcher delayed beyond the old ten-second budget",
+    "result": "pass"
+  },
+  {
+    "name": "A real queue-lock holder causes a typed bounded startup refusal, not confirmation from an inherited beacon",
+    "result": "pass"
+  },
+  {
+    "name": "Repeated HUP and TERM during unsafe local startup clean own locks and staging while preserving foreign staging with 30/60-second home overrides",
+    "result": "pass"
+  },
+  {
+    "name": "An expired short confirmation deadline waits for cleanup-safe startup before TERM",
+    "result": "pass"
+  },
+  {
+    "name": "An actual filesystem identity-publication failure exits the watcher and joins the arm rather than hanging",
+    "result": "pass"
+  },
+  {
+    "name": "Handling successors deliver queued synthetic recovery work after real queue contention for pending and acknowledged downtime",
+    "result": "fail",
+    "error": "(2, '')"
   }
 ]

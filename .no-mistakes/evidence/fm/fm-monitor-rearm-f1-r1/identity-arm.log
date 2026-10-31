@@ -1,0 +1,3 @@
+{run-worktree}/bin/fm-watch.sh: line 3550: {run-worktree}/.l/identity/state/.watch.lock/fm-home: Is a directory
+watcher: FAILED - could not publish watcher identity in {run-worktree}/.l/identity/state/.watch.lock
+watcher: FAILED - no live watcher with a fresh beacon

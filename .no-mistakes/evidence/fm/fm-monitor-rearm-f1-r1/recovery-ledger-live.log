@@ -1,0 +1,115 @@
+
+=== Handling successors deliver queued synthetic recovery work after real queue contention for pending and acknowledged downtime ===
+arm exit=0
+watcher: started pid=87434 (beacon fresh)
+check: rearm-resurface
+
+queue=1793452577	1	check	synthetic	check: synthetic queued obligation
+
+DRAIN rc=0
+1793452577	1	check	synthetic	check: synthetic queued obligation
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 88025.1793452576.8PjG6x
+
+ACK 
+arm exit=0
+watcher: started pid=96586 (beacon fresh)
+check: rearm-resurface
+
+queue=1793452589	1	check	synthetic	check: synthetic queued obligation
+
+DRAIN rc=0
+1793452589	1	check	synthetic	check: synthetic queued obligation
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 96586.1793452593.xWNtZk
+
+ACK 
+PASS elapsed=21.87
+
+=== Real synthetic-check wake, successor interruption, and six subsequent cycles all drain and acknowledge recovery with a bounded lifecycle ledger ===
+check: {run-worktree}/.l/ledger/state/synthetic.check.sh: done: synthetic cycle
+
+DRAIN rc=0
+1793452599	1	check	{run-worktree}/.l/ledger/state/synthetic.check.sh	check: {run-worktree}/.l/ledger/state/synthetic.check.sh: done: synthetic cycle
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 5349.1793452599.lYYJan
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 registered custom check(s), but no watcher has a fresh beacon (last beat: 4s ago, grace 0s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  After draining queued wakes, repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e {run-worktree}/.pi/extensions/fm-primary-turnend-guard.ts -e {run-worktree}/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
+
+ACK 
+watcher: started pid=10134 (beacon fresh)
+
+arm signal exit=129
+remaining lock/owner paths: []
+arm_pid=5190	watcher_pid=5349	origin=started	started_at=1793452596	ended_at=1793452600	exit_code=0	signal=none	reason=actionable-check	beacon_age=3	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=started:10134
+arm_pid=10047	watcher_pid=10134	origin=started	started_at=1793452602	ended_at=1793452603	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:10134|identity:Sat Oct 31 13:16:42 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 10134.1793452603.LGn7OP
+
+ACK 
+arm signal exit=129
+remaining lock/owner paths: []
+arm_pid=5190	watcher_pid=5349	origin=started	started_at=1793452596	ended_at=1793452600	exit_code=0	signal=none	reason=actionable-check	beacon_age=3	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=started:10134
+arm_pid=10047	watcher_pid=10134	origin=started	started_at=1793452602	ended_at=1793452603	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:10134|identity:Sat Oct 31 13:16:42 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+arm_pid=12635	watcher_pid=12725	origin=started	started_at=1793452605	ended_at=1793452606	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:12725|identity:Sat Oct 31 13:16:45 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 12725.1793452606.PKnjKb
+
+ACK 
+arm signal exit=129
+remaining lock/owner paths: []
+arm_pid=5190	watcher_pid=5349	origin=started	started_at=1793452596	ended_at=1793452600	exit_code=0	signal=none	reason=actionable-check	beacon_age=3	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=started:10134
+arm_pid=10047	watcher_pid=10134	origin=started	started_at=1793452602	ended_at=1793452603	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:10134|identity:Sat Oct 31 13:16:42 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+arm_pid=12635	watcher_pid=12725	origin=started	started_at=1793452605	ended_at=1793452606	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:12725|identity:Sat Oct 31 13:16:45 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+arm_pid=14626	watcher_pid=14737	origin=started	started_at=1793452608	ended_at=1793452609	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:14737|identity:Sat Oct 31 13:16:48 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 14737.1793452609.7Y1HAH
+
+ACK 
+arm signal exit=129
+remaining lock/owner paths: []
+arm_pid=14626	watcher_pid=14737	origin=started	started_at=1793452608	ended_at=1793452609	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:14737|identity:Sat Oct 31 13:16:48 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+arm_pid=17275	watcher_pid=17326	origin=started	started_at=1793452611	ended_at=1793452613	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:17326|identity:Sat Oct 31 13:16:51 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 17326.1793452613.vMH24l
+
+ACK 
+arm signal exit=129
+remaining lock/owner paths: []
+arm_pid=14626	watcher_pid=14737	origin=started	started_at=1793452608	ended_at=1793452609	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:14737|identity:Sat Oct 31 13:16:48 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+arm_pid=17275	watcher_pid=17326	origin=started	started_at=1793452611	ended_at=1793452613	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:17326|identity:Sat Oct 31 13:16:51 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+arm_pid=19075	watcher_pid=19118	origin=started	started_at=1793452615	ended_at=1793452616	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:19118|identity:Sat Oct 31 13:16:55 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 19118.1793452616.l8EzY0
+
+ACK 
+arm signal exit=129
+remaining lock/owner paths: []
+arm_pid=19075	watcher_pid=19118	origin=started	started_at=1793452615	ended_at=1793452616	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:19118|identity:Sat Oct 31 13:16:55 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+arm_pid=20771	watcher_pid=20832	origin=started	started_at=1793452618	ended_at=1793452620	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:20832|identity:Sat Oct 31 13:16:58 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 20832.1793452620.KnYCMh
+
+ACK 
+arm signal exit=129
+remaining lock/owner paths: []
+arm_pid=19075	watcher_pid=19118	origin=started	started_at=1793452615	ended_at=1793452616	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:19118|identity:Sat Oct 31 13:16:55 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+arm_pid=20771	watcher_pid=20832	origin=started	started_at=1793452618	ended_at=1793452620	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:20832|identity:Sat Oct 31 13:16:58 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+arm_pid=23571	watcher_pid=23619	origin=started	started_at=1793452621	ended_at=1793452623	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:23619|identity:Sat Oct 31 13:17:01 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 23619.1793452623.JNsijm
+
+ACK 
+bounded lifecycle ledger bytes=1074
+PASS elapsed=29.27
+CLEANUP complete: all owned launchers joined, private tmux stopped, disposable homes removed

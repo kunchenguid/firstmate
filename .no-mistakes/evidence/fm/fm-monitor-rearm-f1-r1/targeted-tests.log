@@ -1,8 +1,7 @@
 ok - disposable watcher refuses inherited state outside its marked lab
 ok - arm confirms a watcher whose post-claim startup exceeds the legacy budget
-watcher: FAILED - startup lock {run-worktree}/.test-live/fm-watcher-lock-tests.1IUVeN/arm-startup-lock-held/state/.wake-queue.lock held by live pid 54069
+watcher: FAILED - startup lock /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.9SS24o/arm-startup-lock-held/state/.wake-queue.lock held by live pid 17290
 ok - arm relays a live-holder startup-lock refusal and keeps the downtime drainable
-ok - staged-owner cleanup removes only unpublished empty or self-owned staging
+ok - startup cleanup waits for in-flight staging and publication, preserving foreign owners
 ok - a stop forced before the safe point waits for it and leaves no lock evidence
 ok - a watcher that cannot publish its identity exits through its cleanup
-ok - cycle-exit ledger links a verified successor and remains size-capped

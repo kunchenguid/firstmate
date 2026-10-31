@@ -1,120 +1,113 @@
-import os,sys,time,subprocess,pathlib,shutil,signal,json,re
-ROOT=pathlib.Path.cwd(); E=pathlib.Path('~/.no-mistakes/evidence/01M68QJP6Q03GEDV19NYPCD253'); W=ROOT/'.phase-labs'; W.mkdir(exist_ok=True)
-base=os.environ.copy()
-for k in list(base):
- if k.startswith('FM_') or k in ('STATE','CONFIG','DATA','PROJECTS','TMUX','TMUX_PANE'): base.pop(k,None)
-base.update(FM_POLL='2',FM_SIGNAL_GRACE='1',FM_CHECK_INTERVAL='999999',FM_HEARTBEAT='999999',FM_WEDGE_ALARM_EXEC='discard',FM_HOME_SUMMARY_TIMEOUT='2')
-children=[]; results=[]
-def run(args,env,timeout=60): return subprocess.run(args,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=timeout)
-def waitfor(fn,timeout=30):
- end=time.monotonic()+timeout
+import os, pathlib, subprocess as sp, time, signal, shutil, json
+R=pathlib.Path.cwd(); E=pathlib.Path('~/.no-mistakes/evidence/01M68ZYG4NJWEWWJCVHC20WWH9'); L=R/'.l'; L.mkdir(exist_ok=True)
+base={k:v for k,v in os.environ.items() if not (k.startswith('FM_') or k in ['TMUX','HERDR_ENV','REX_SESSION','REX_BLOCK','NO_MISTAKES_GATE'])}
+base['TMUX']=str(L/'s')+',0,0'
+children=[]; files=[]; results=[]
+def run(cmd,env=None,timeout=30):
+ p=sp.run(cmd,env=env or base,text=True,stdout=sp.PIPE,stderr=sp.STDOUT,timeout=timeout); return p.returncode,p.stdout
+def log(s): print(s,flush=True)
+def wait(pred,sec=30):
+ end=time.monotonic()+sec
  while time.monotonic()<end:
-  if fn(): return
-  time.sleep(.025)
- raise RuntimeError('wait timed out')
-def start(args,env,out):
- f=open(out,'w'); p=subprocess.Popen(args,env=env,stdout=f,stderr=subprocess.STDOUT,start_new_session=True); f.close(); children.append(p); return p
+  if pred(): return
+  time.sleep(.05)
+ raise AssertionError('wait timeout')
+def home(name,**extra):
+ h=L/name; rc,out=run([str(R/'bin/fm-lab-home.sh'),'create',str(h)]); assert rc==0,out
+ env=base|{'FM_HOME':str(h),'FM_POLL':'0.2','FM_CHECK_INTERVAL':'999999','FM_HEARTBEAT':'999999','FM_SIGNAL_GRACE':'1'}|{k:str(v) for k,v in extra.items()}
+ return h,env
+def launch(h,env,which='fm-watch-arm.sh',label='arm'):
+ f=open(E/(h.name+'-'+label+'.log'),'w'); files.append(f)
+ p=sp.Popen([str(R/'bin'/which)],env=env,stdout=f,stderr=sp.STDOUT,start_new_session=True); children.append(p); return p,pathlib.Path(f.name)
 def text(p): return p.read_text() if p.exists() else ''
-def clean(st,foreign=None):
- locks=('.watch.lock','.watch.lock.steal','.wake-queue.lock','.wake-queue.lock.steal','.watcher-down.lock','.watcher-down.lock.steal')
- residue=[str(p.name) for p in st.glob('.*') if any(p.name==k or p.name.startswith(k+'.owner.') for k in locks) and (p.is_dir() or p.is_symlink()) and p.name!=foreign]
- assert not residue, 'lock residue='+repr(residue)
- return 'no singleton, steal, micro-lock, or owner-directory residue'
-def drain(env,log):
- p=run([str(ROOT/'bin/fm-wake-drain.sh')],env); log.append('DRAIN rc='+str(p.returncode)+'\n'+p.stdout); assert p.returncode==0
- m=re.search(r'WAKE_ACK_REQUIRED:.*--ack-through (\d+) --recovery-generation ([A-Za-z0-9._-]+)',p.stdout); assert m,'no recovery ack contract'
- p=run([str(ROOT/'bin/fm-wake-drain.sh'),'--ack-through',m[1],'--recovery-generation',m[2]],env); log.append('ACK rc='+str(p.returncode)+'\n'+p.stdout); assert p.returncode==0
-
-def case(name,fn):
- home=W/name; home.mkdir(); env=base.copy(); env['FM_HOME']=str(home); env['TMUX']=str(home/'tmux/socket')+',0,0'; env['TMUX_TMPDIR']=str(home/'tmux'); log=['SCENARIO '+name]; t=time.monotonic()
- p=run([str(ROOT/'bin/fm-lab-home.sh'),'create',str(home)],env); assert p.returncode==0,p.stdout
- (home/'tmux').mkdir(); st=home/'state'
- try:
-  fn(home,st,env,log)
-  result='pass'
- except Exception as ex:
-  result='fail'; log.append('ERROR '+repr(ex))
- finally:
-  for p in children:
-   if p.poll() is None:
-    os.killpg(p.pid,signal.SIGTERM)
-    try:p.wait(timeout=15)
-    except subprocess.TimeoutExpired:os.killpg(p.pid,signal.SIGKILL);p.wait();log.append('FORCED process cleanup '+str(p.pid))
-  log.append('elapsed=%.2fs'%(time.monotonic()-t))
-  for p in home.glob('*.out'):log.append(p.name+'\n'+text(p))
-  for name2 in ('.watch-cycle-exits.log','.watcher-down','.wake-queue'):
-   p=st/name2
-   if p.exists():log.append(name2+'\n'+text(p))
-  log.append('FINAL_STATE '+repr(sorted(p.name for p in st.iterdir())))
-  # Await detached side-band publishers too before removing their lab.
-  for attempt in range(300):
-   snapshot=subprocess.check_output(['ps','-axo','pid=,ppid=,pgid=,stat=,command='],text=True)
-   owned=[line for line in snapshot.splitlines() if str(home) in line and ' Z' not in line]
-   if not owned:break
-   time.sleep(.1)
-  else:raise RuntimeError('lab descendants remain: '+repr(owned))
-  shutil.rmtree(home)
-  log.append('lab removed; all direct children awaited; no lab descendants in process inventory')
-  (E/(name+'.log')).write_text('\n'.join(log)+'\n')
-  results.append(dict(name=name,result=result,evidence=str(E/(name+'.log')))); print(name,result,log[-3:],flush=True)
-
-def slow(h,st,env,l):
- env['FM_TEST_WATCHER_PRE_IDENTITY_DELAY']='13'; out=h/'arm.out'; p=start([str(ROOT/'bin/fm-watch-arm.sh')],env,out); t=time.monotonic(); waitfor(lambda:'watcher: started' in text(out),120); l.append('confirmed after %.2fs'%(time.monotonic()-t)); assert time.monotonic()-t>10
- p.send_signal(signal.SIGHUP); assert p.wait(timeout=30)==129; l.append(clean(st));drain(env,l)
-
-def held(h,st,env,l):
- # Real production lock library holds a foreign live queue lock, not a watcher stub.
- holder=start(['bash','-c','. "$1"; fm_lock_acquire_wait "$FM_HOME/state/.wake-queue.lock" || exit 2; touch "$FM_HOME/ready"; while [ ! -e "$FM_HOME/release" ]; do sleep .05; done; fm_lock_release "$FM_HOME/state/.wake-queue.lock"','_',str(ROOT/'bin/fm-wake-lib.sh')],env,h/'holder.out');waitfor(lambda:(h/'ready').exists()); (st/'.last-watcher-beat').touch(); env['FM_WATCHER_STARTUP_LOCK_BOUND']='2';t=time.monotonic();p=run([str(ROOT/'bin/fm-watch-arm.sh')],env,30);(h/'arm.out').write_text(p.stdout);l.append('arm rc=%s duration=%.2fs'%(p.returncode,time.monotonic()-t));assert p.returncode!=0;assert 'watcher: started' not in p.stdout;assert 'watcher: FAILED - startup lock' in p.stdout,p.stdout;assert str(holder.pid) in p.stdout
- (h/'release').touch();assert holder.wait(timeout=10)==0;l.append(clean(st));drain(env,l)
-
-def signals(h,st,env,l):
- foreign=st/'.wake-queue.lock.owner.foreign'; foreign.mkdir();(foreign/'pid').write_text(str(os.getpid())+'\n')
- for i in range(12):
-  env['FM_TEST_WATCHER_PRE_IDENTITY_DELAY']='1';(h/'config/watch.env').write_text('FM_ARM_CONFIRM_TIMEOUT='+('30' if i%2==0 else '60')+'\n');out=h/('arm-%02d.out'%i);p=start([str(ROOT/'bin/fm-watch-arm.sh')],env,out)
-  waitfor(lambda:(st/'.watch.lock/pid').exists());pid=text(st/'.watch.lock/pid').strip();sig=signal.SIGHUP if i%2==0 else signal.SIGTERM;p.send_signal(sig);rc=p.wait(timeout=35);assert rc==(129 if sig==signal.SIGHUP else 143),rc
-  assert (foreign/'pid').read_text().strip()==str(os.getpid());l.append('iteration=%s signal=%s watcher=%s rc=%s %s; foreign owner preserved'%(i,sig.name,pid,rc,clean(st,foreign.name)))
-  assert 'lock_after=pid:none' in text(st/'.watch-cycle-exits.log');drain(env,l)
- foreign.unlink() if foreign.is_symlink() else shutil.rmtree(foreign)
- # Exercise the precise interrupted external-mutation race on the real watcher.
- for tool in ('mktemp','ln'):
-  real=shutil.which(tool); faults=h/('fault-'+tool);faults.mkdir(); wrapper=faults/tool
-  wrapper.write_text('''#!/usr/bin/env bash
-trap '' HUP TERM
-case "$*" in
- *".wake-queue.lock"*)
-  if mkdir "$FM_HOME/mutation-once" 2>/dev/null; then
-   kill -"$MUTATION_SIGNAL" "$(cat "$FM_HOME/state/.watch.lock/pid")"
-   sleep .5
-   "$MUTATION_REAL" "$@"
-   rc=$?
-   touch "$FM_HOME/mutation-done"
-   exit "$rc"
-  fi ;;
-esac
-exec "$MUTATION_REAL" "$@"
-''');wrapper.chmod(0o755)
-  for sig in ('HUP','TERM'):
-   for marker in ('mutation-once','mutation-done'):
-    path=h/marker
-    if path.is_dir():path.rmdir()
-    elif path.exists():path.unlink()
-   env2=env.copy();env2.pop('FM_TEST_WATCHER_PRE_IDENTITY_DELAY',None);env2.update(PATH=str(faults)+':'+env['PATH'],MUTATION_SIGNAL=sig,MUTATION_REAL=real)
-   foreign.mkdir();(foreign/'pid').write_text(str(os.getpid())+'\n')
-   p=start([str(ROOT/'bin/fm-watch.sh')],env2,h/('mutation-%s-%s.out'%(tool,sig)));rc=p.wait(timeout=90);waitfor(lambda:(h/'mutation-done').exists(),30)
-   assert rc!=0;assert (foreign/'pid').read_text().strip()==str(os.getpid());l.append('late real %s after %s: watcher rc=%s %s; foreign staging preserved'%(tool,sig,rc,clean(st,foreign.name)));drain(env,l);shutil.rmtree(foreign)
-
-def deadline(h,st,env,l):
- env.update(FM_ARM_CONFIRM_TIMEOUT='2',FM_TEST_WATCHER_PRE_IDENTITY_DELAY='7');t=time.monotonic();p=run([str(ROOT/'bin/fm-watch-arm.sh')],env,35);(h/'arm.out').write_text(p.stdout);elapsed=time.monotonic()-t;l.append('arm rc=%s duration=%.2fs'%(p.returncode,elapsed));assert p.returncode==1;assert elapsed>=7;assert 'reason=confirmation-timeout' in text(st/'.watch-cycle-exits.log');assert 'lock_after=pid:none' in text(st/'.watch-cycle-exits.log');l.append(clean(st));drain(env,l)
-
-def identity(h,st,env,l):
- # Inject ps failure at external OS boundary while running unchanged arm/watcher.
- fake=h/'faultbin';fake.mkdir();ps=fake/'ps';ps.write_text('#!/usr/bin/env bash\ncase " $* " in *" lstart= "*" command= "*) exit 1;; esac\nexec /bin/ps "$@"\n');ps.chmod(0o755);env['PATH']=str(fake)+':'+env['PATH'];env['FM_ARM_CONFIRM_TIMEOUT']='2';env['FM_TEST_WATCHER_PRE_IDENTITY_DELAY']='7'
- p=run([str(ROOT/'bin/fm-watch-arm.sh')],env,40);(h/'arm.out').write_text(p.stdout);l.append('arm rc='+str(p.returncode));assert p.returncode!=0;l.append(clean(st));assert 'could not publish watcher identity' in p.stdout,p.stdout
-
-def recovery(h,st,env,l):
- for i in range(3):
-  out=h/('arm-%s.out'%i);p=start([str(ROOT/'bin/fm-watch-arm.sh')],env,out);waitfor(lambda:'watcher: started' in text(out),120);p.send_signal(signal.SIGHUP);assert p.wait(timeout=35)==129;l.append('cycle=%s %s'%(i,clean(st)));drain(env,l)
-for name,fn in [('slow-start',slow),('held-queue-inherited-beacon',held),('signals-30-60-overrides',signals),('unsafe-deadline',deadline),('identity-probe-failure',identity),('recovery-drain-rearm',recovery)]:
- if len(sys.argv)==1 or name in sys.argv[1:]:case(name,fn)
-(E/'live-results.json').write_text(json.dumps(results,indent=2)+'\n');W.rmdir();assert all(p.poll() is not None for p in children)
-if any(x['result']=='fail' for x in results):sys.exit(1)
+def shell(env,code,args=[]):
+ rc,out=run(['bash','-c','. "$1"; '+code,'_',str(R/'bin/fm-wake-lib.sh'),*map(str,args)],env); assert rc==0,(rc,out); return out
+def clean(h,foreign=None):
+ remains=[str(x.relative_to(h)) for x in (h/'state').glob('.*lock*') if x.name not in ['.watch-cycle-exits.log.lock'] and (not foreign or x!=foreign)]
+ log('remaining lock/owner paths: '+repr(remains)); assert not remains,remains
+ log(text(h/'state/.watch-cycle-exits.log'))
+def drain(h,env):
+ rc,out=run([str(R/'bin/fm-wake-drain.sh')],env); log('DRAIN rc='+str(rc)+'\n'+out); assert rc==0,out
+ import re
+ m=re.search(r'WAKE_ACK_REQUIRED:.*--ack-through (\d+) --recovery-generation ([A-Za-z0-9._-]+)',out); assert m,out
+ rc,out=run([str(R/'bin/fm-wake-drain.sh'),'--ack-through',m[1],'--recovery-generation',m[2]],env); assert rc==0,out; log('ACK '+out)
+def stop(p,sig=signal.SIGHUP):
+ p.send_signal(sig); rc=p.wait(timeout=40); log('arm signal exit='+str(rc)); return rc
+def scenario(name,fn):
+ if os.environ.get('LIVE_ONLY') and fn.__name__ not in os.environ['LIVE_ONLY'].split(','): return
+ log('\n=== '+name+' ==='); start=time.monotonic()
+ try: fn(); results.append({'name':name,'result':'pass'}); log('PASS elapsed='+str(round(time.monotonic()-start,2)))
+ except Exception as ex: results.append({'name':name,'result':'fail','error':str(ex)}); log('FAIL '+repr(ex)); raise
+try:
+ rc,out=run(['tmux','-S',str(L/'s'),'new-session','-d','-s','fm-lab-watch','-x','100','-y','30','sleep 1200']); assert rc==0,out
+ def slow():
+  h,e=home('slow',FM_TEST_WATCHER_PRE_IDENTITY_DELAY=15); t=time.monotonic(); p,o=launch(h,e)
+  wait(lambda:'watcher: started' in text(o),45); log(text(o)); assert time.monotonic()-t>14
+  assert stop(p)==129; clean(h); drain(h,e)
+ scenario('Default arm confirms a real local watcher delayed beyond the old ten-second budget',slow)
+ def held():
+  h,e=home('held',FM_WATCHER_STARTUP_LOCK_BOUND=2)
+  f=open(E/'held-holder.log','w'); files.append(f)
+  holder=sp.Popen(['bash','-c','. "$1"; fm_lock_acquire_wait "$FM_HOME/state/.wake-queue.lock"; touch "$FM_HOME/ready"; while [ ! -e "$FM_HOME/release" ]; do sleep .05; done; fm_lock_release "$FM_HOME/state/.wake-queue.lock"','_',str(R/'bin/fm-wake-lib.sh')],env=e,stdout=f,stderr=f,start_new_session=True); children.append(holder)
+  wait(lambda:(h/'ready').exists()); (h/'state/.last-watcher-beat').touch(); p,o=launch(h,e); rc=p.wait(timeout=30); log('arm exit='+str(rc)+'\n'+text(o)); assert rc==1 and 'startup lock' in text(o) and 'watcher: started' not in text(o)
+  (h/'release').touch(); assert holder.wait(timeout=10)==0; clean(h); drain(h,e)
+ scenario('A real queue-lock holder causes a typed bounded startup refusal, not confirmation from an inherited beacon',held)
+ def signals():
+  for override in [30,60]:
+   for sig in [signal.SIGHUP,signal.SIGTERM]:
+    for i in range(4):
+     h,e=home('signal-%s-%s-%s'%(override,sig.name,i),FM_TEST_WATCHER_PRE_IDENTITY_DELAY=2)
+     (h/'config/watch.env').write_text('FM_ARM_CONFIRM_TIMEOUT=%s\n'%override)
+     foreign=h/'state/.wake-queue.lock.owner.foreign'; foreign.mkdir(); (foreign/'pid').write_text(str(os.getpid())+'\n')
+     p,o=launch(h,e); wait(lambda:(h/'state/.watch.lock/pid').exists()); rc=stop(p,sig); log(h.name+' '+text(o)); assert rc==128+sig
+     assert (foreign/'pid').read_text().strip()==str(os.getpid()); clean(h,foreign); drain(h,e)
+ scenario('Repeated HUP and TERM during unsafe local startup clean own locks and staging while preserving foreign staging with 30/60-second home overrides',signals)
+ def deadline():
+  h,e=home('deadline',FM_TEST_WATCHER_PRE_IDENTITY_DELAY=8,FM_ARM_CONFIRM_TIMEOUT=2); p,o=launch(h,e); t=time.monotonic(); rc=p.wait(timeout=35); log('arm exit='+str(rc)+' elapsed='+str(time.monotonic()-t)+'\n'+text(o)); assert rc==1 and time.monotonic()-t>=7 and 'no live watcher' in text(o); clean(h); drain(h,e)
+ scenario('An expired short confirmation deadline waits for cleanup-safe startup before TERM',deadline)
+ def identity():
+  h,e=home('identity',FM_TEST_WATCHER_PRE_IDENTITY_DELAY=4,FM_ARM_CONFIRM_TIMEOUT=2); p,o=launch(h,e)
+  wait(lambda:(h/'state/.watch.lock/pid').exists()); (h/'state/.watch.lock/fm-home').mkdir()
+  rc=p.wait(timeout=30); log('arm exit='+str(rc)+'\n'+text(o)); assert rc==1 and 'could not publish watcher identity' in text(o)
+  # The deliberate directory refuses writes and is not a lock primitive artifact.
+  residue=h/'state/.watch.lock'; log('identity failure singleton exists='+str(residue.exists())+' symlink='+str(residue.is_symlink()))
+  assert not residue.exists() and not residue.is_symlink(); drain(h,e)
+ scenario('An actual filesystem identity-publication failure exits the watcher and joins the arm rather than hanging',identity)
+ def recovery():
+  for kind in ['pending','acked']:
+   h,e=home('recover-'+kind,FM_WATCH_HANDLING_SUCCESSOR=1); p,o=launch(h,e); wait(lambda:'watcher: started' in text(o))
+   # Stop only this watcher between polls while a production queue writer creates recoverable work.
+   pid=int((h/'state/.watch.lock/pid').read_text()); os.kill(pid,signal.SIGSTOP)
+   shell(e,'fm_recovery_marker_publish "$FM_HOME/state/.watcher-down" downtime; fm_wake_append check synthetic "check: synthetic queued obligation"')
+   if kind=='acked': shell(e,'fm_recovery_marker_read "$FM_HOME/state/.watcher-down"; fm_recovery_marker_ack "$FM_HOME/state/.watcher-down" "${FM_RECOVERY_MARKER_TOKEN##*:}"')
+   # Contend using the actual queue lock for longer than the startup bound.
+   f=open(E/(h.name+'-holder.log'),'w'); files.append(f)
+   holder=sp.Popen(['bash','-c','. "$1"; fm_lock_acquire_wait "$FM_HOME/state/.wake-queue.lock"; touch "$FM_HOME/ready"; sleep 3; fm_lock_release "$FM_HOME/state/.wake-queue.lock"','_',str(R/'bin/fm-wake-lib.sh')],env=e,stdout=f,stderr=f,start_new_session=True); children.append(holder)
+   wait(lambda:(h/'ready').exists()); os.kill(pid,signal.SIGCONT)
+   assert holder.wait(timeout=15)==0; rc=p.wait(timeout=30); log('arm exit='+str(rc)+'\n'+text(o)); assert rc==0 and 'check: rearm-resurface' in text(o); log('queue='+text(h/'state/.wake-queue')); drain(h,e)
+ scenario('Handling successors deliver queued synthetic recovery work after real queue contention for pending and acknowledged downtime',recovery)
+ def ledger():
+  h,e=home('ledger',FM_CHECK_INTERVAL=0,FM_GUARD_GRACE=0,FM_ARM_CONFIRM_TIMEOUT=60)
+  check=h/'state/synthetic.check.sh'; check.write_text('#!/usr/bin/env bash\nprintf "done: synthetic cycle\\n"\n'); check.chmod(0o700)
+  rc,out=run([str(R/'bin/fm-check-register.sh'),'synthetic'],e); assert rc==0,out
+  p,o=launch(h,e,label='initial'); assert p.wait(timeout=90)==0; log(text(o)); drain(h,e)
+  check.unlink(); (h/'state/synthetic.check-trust').unlink(missing_ok=True)
+  e=e|{'FM_CHECK_INTERVAL':'999999','FM_GUARD_GRACE':'300','FM_WATCH_PREDECESSOR_ARM_PID':str(p.pid)}
+  p,o=launch(h,e,label='successor'); wait(lambda:'watcher: started' in text(o),40); log(text(o)); pid=(h/'state/.watch.lock/pid').read_text().strip(); assert 'successor=started:'+pid in text(h/'state/.watch-cycle-exits.log')
+  assert stop(p)==129; clean(h); drain(h,e)
+  for i in range(6):
+   p,o=launch(h,e|{'FM_WATCH_CYCLE_LOG_MAX_BYTES':'1400','FM_WATCH_CYCLE_LOG_KEEP_LINES':'2'},label='bounded-'+str(i)); wait(lambda:'watcher: started' in text(o),40); assert stop(p)==129; clean(h); drain(h,e)
+  size=(h/'state/.watch-cycle-exits.log').stat().st_size; log('bounded lifecycle ledger bytes='+str(size)); assert size<=1400
+ scenario('Real synthetic-check wake, successor interruption, and six subsequent cycles all drain and acknowledge recovery with a bounded lifecycle ledger',ledger)
+finally:
+ for p in children:
+  if p.poll() is None:
+   try: os.killpg(p.pid,signal.SIGCONT); os.killpg(p.pid,signal.SIGTERM); p.wait(timeout=15)
+   except Exception:
+    try: os.killpg(p.pid,signal.SIGKILL); p.wait(timeout=5)
+    except ProcessLookupError: pass
+ run(['tmux','-S',str(L/'s'),'kill-server'])
+ for f in files: f.close()
+ (E/('live-results-'+os.environ.get('LIVE_ONLY','initial').replace(',','-')+'.json')).write_text(json.dumps(results,indent=2)+'\n')
+ shutil.rmtree(L)
+ log('CLEANUP complete: all owned launchers joined, private tmux stopped, disposable homes removed')

@@ -1,0 +1,4 @@
+ok - disposable watcher refuses inherited state outside its marked lab
+ok - startup cleanup waits for in-flight staging and publication, preserving foreign owners
+ok - a stop forced before the safe point waits for it and leaves no lock evidence
+ok - a watcher that cannot publish its identity exits through its cleanup

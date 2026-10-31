@@ -1,0 +1,10 @@
+[
+  {
+    "name": "Handling successors deliver queued synthetic recovery work after real queue contention for pending and acknowledged downtime",
+    "result": "pass"
+  },
+  {
+    "name": "Real synthetic-check wake, successor interruption, and six subsequent cycles all drain and acknowledge recovery with a bounded lifecycle ledger",
+    "result": "pass"
+  }
+]

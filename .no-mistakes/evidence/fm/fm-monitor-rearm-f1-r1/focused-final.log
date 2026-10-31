@@ -1,0 +1,2 @@
+ok - disposable watcher refuses inherited state outside its marked lab
+ok - startup cleanup waits for in-flight staging and publication, preserving foreign owners

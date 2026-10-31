@@ -1,0 +1,740 @@
++ set -u
+++ dirname tests/fm-watcher-lock.test.sh
++ . tests/wake-helpers.sh
++++ dirname tests/wake-helpers.sh
+++ . tests/lib.sh
++++ '[' -n '' ']'
++++ FM_TEST_LIB_SOURCED=1
++++ umask 022
+++++ dirname tests/lib.sh
++++ . tests/git-config-helpers.sh
+++++ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+++++ GIT_CONFIG_GLOBAL=/dev/null
+++++ GIT_CONFIG_NOSYSTEM=1
+++++ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
++++ export FM_GATE_REFUSE_BYPASS=1
++++ FM_GATE_REFUSE_BYPASS=1
++++ export FM_TEST_SEAM=1
++++ FM_TEST_SEAM=1
++++ unset FM_TASK_ID
++++ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
++++ unset REX_SESSION REX_BLOCK
++++++ dirname tests/lib.sh
+++++ cd tests/..
+++++ pwd
++++ ROOT={run-worktree}
+++++ fm_test_tmpdir
+++++ local base=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/ physical
+++++ base=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ '[' -n /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T ']'
+++++ case "$base" in
++++++ CDPATH=
++++++ cd -- /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++++ pwd -P
+++++ physical=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ base=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.git ']'
+++++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++ FM_TEST_TMPDIR=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++ FM_TEST_CLEANUP_DIRS=()
+++++ mktemp /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-cleanup.96929.XXXXXX
++++ FM_TEST_CLEANUP_REGISTRY=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-cleanup.96929.ZL7BvG
+++++ fm_test_pid_identity 96929
+++++ local pid=96929
+++++ FM_STATE_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ bash -c '. "$1"; fm_pid_identity "$2"' _ {run-worktree}/bin/fm-wake-lib.sh 96929
++++ FM_TEST_OWNER_IDENTITY='Sat Oct 31 13:21:35 2026     bash -x tests/fm-watcher-lock.test.sh test_forced_term_before_the_safe_point_stays_clean'
+++++ mktemp /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-procevent.96929.XXXXXX
++++ FM_TEST_PROCEVENT_REGISTRY=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-procevent.96929.P0Ndl4
+++++ mktemp /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-watcher.96929.XXXXXX
++++ FM_TEST_WATCHER_REGISTRY=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-watcher.96929.T5R2Oa
++++ FM_TEST_STUB_MAX_BLOCK_SECONDS=120
++++ export FM_TEST_STUB_MAX_BLOCK_SECONDS
++++ FM_TEST_SUITE_PID=96929
++++ export FM_TEST_SUITE_PID
++++ trap fm_test_cleanup EXIT
++++ trap 'fm_test_cleanup; exit 130' INT
++++ trap 'fm_test_cleanup; exit 143' TERM
++++ trap 'fm_test_cleanup; exit 129' HUP
++++ trap 'fm_test_cleanup; exit 131' QUIT
++++ FM_TEST_ORPHAN_MAX_AGE_SECONDS=3600
++++ '[' 0 '!=' 1 ']'
++++ fm_test_reap_orphans
++++ local marker dir mtime now owner_pid owner_identity current_identity
+++++ date +%s
++++ now=1793452896
++++ for marker in "$FM_TEST_TMPDIR"/fm-*/.fm-test-fixture
++++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.9iaKn0/.fm-test-fixture ']'
+++++ sed -n 1p /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.9iaKn0/.fm-test-fixture
++++ owner_pid=30731
+++++ sed -n '2,$p' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.9iaKn0/.fm-test-fixture
++++ owner_identity='Sat Oct 31 13:17:14 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup'
++++ case "$owner_pid" in
+++++ fm_test_pid_identity 30731
++++ current_identity=
++++ current_identity=
++++ '[' -n 'Sat Oct 31 13:17:14 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup' ']'
++++ '[' '' = 'Sat Oct 31 13:17:14 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup' ']'
+++++ stat -c %Y /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.9iaKn0/.fm-test-fixture
+++++ stat -f %m /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.9iaKn0/.fm-test-fixture
++++ mtime=1793452634
++++ '[' 262 -ge 3600 ']'
++++ continue
++++ for marker in "$FM_TEST_TMPDIR"/fm-*/.fm-test-fixture
++++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.k632pl/.fm-test-fixture ']'
+++++ sed -n 1p /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.k632pl/.fm-test-fixture
++++ owner_pid=4381
+++++ sed -n '2,$p' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.k632pl/.fm-test-fixture
++++ owner_identity='Sat Oct 31 13:06:47 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup test_cycle_exit_ledger_links_successor_and_stays_bounded'
++++ case "$owner_pid" in
+++++ fm_test_pid_identity 4381
++++ current_identity=
++++ current_identity=
++++ '[' -n 'Sat Oct 31 13:06:47 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup test_cycle_exit_ledger_links_successor_and_stays_bounded' ']'
++++ '[' '' = 'Sat Oct 31 13:06:47 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup test_cycle_exit_ledger_links_successor_and_stays_bounded' ']'
+++++ stat -c %Y /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.k632pl/.fm-test-fixture
+++++ stat -f %m /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.k632pl/.fm-test-fixture
++++ mtime=1793452009
++++ '[' 887 -ge 3600 ']'
++++ continue
++++ for marker in "$FM_TEST_TMPDIR"/fm-*/.fm-test-fixture
++++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.9SS24o/.fm-test-fixture ']'
+++++ sed -n 1p /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.9SS24o/.fm-test-fixture
++++ owner_pid=4381
+++++ sed -n '2,$p' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.9SS24o/.fm-test-fixture
++++ owner_identity='Sat Oct 31 13:06:47 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup test_cycle_exit_ledger_links_successor_and_stays_bounded'
++++ case "$owner_pid" in
+++++ fm_test_pid_identity 4381
++++ current_identity=
++++ current_identity=
++++ '[' -n 'Sat Oct 31 13:06:47 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup test_cycle_exit_ledger_links_successor_and_stays_bounded' ']'
++++ '[' '' = 'Sat Oct 31 13:06:47 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup test_cycle_exit_ledger_links_successor_and_stays_bounded' ']'
+++++ stat -c %Y /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.9SS24o/.fm-test-fixture
+++++ stat -f %m /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.9SS24o/.fm-test-fixture
++++ mtime=1793452010
++++ '[' 886 -ge 3600 ']'
++++ continue
++++ for marker in "$FM_TEST_TMPDIR"/fm-*/.fm-test-fixture
++++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.iB0pI4/.fm-test-fixture ']'
+++++ sed -n 1p /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.iB0pI4/.fm-test-fixture
++++ owner_pid=30731
+++++ sed -n '2,$p' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.iB0pI4/.fm-test-fixture
++++ owner_identity='Sat Oct 31 13:17:14 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup'
++++ case "$owner_pid" in
+++++ fm_test_pid_identity 30731
++++ current_identity=
++++ current_identity=
++++ '[' -n 'Sat Oct 31 13:17:14 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup' ']'
++++ '[' '' = 'Sat Oct 31 13:17:14 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup' ']'
+++++ stat -c %Y /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.iB0pI4/.fm-test-fixture
+++++ stat -f %m /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.iB0pI4/.fm-test-fixture
++++ mtime=1793452634
++++ '[' 262 -ge 3600 ']'
++++ continue
++++ for marker in "$FM_TEST_TMPDIR"/fm-*/.fm-test-fixture
++++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.gHAlTe/.fm-test-fixture ']'
+++++ sed -n 1p /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.gHAlTe/.fm-test-fixture
++++ owner_pid=30731
+++++ sed -n '2,$p' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.gHAlTe/.fm-test-fixture
++++ owner_identity='Sat Oct 31 13:17:14 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup'
++++ case "$owner_pid" in
+++++ fm_test_pid_identity 30731
++++ current_identity=
++++ current_identity=
++++ '[' -n 'Sat Oct 31 13:17:14 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup' ']'
++++ '[' '' = 'Sat Oct 31 13:17:14 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup' ']'
+++++ stat -c %Y /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.gHAlTe/.fm-test-fixture
+++++ stat -f %m /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.gHAlTe/.fm-test-fixture
++++ mtime=1793452634
++++ '[' 262 -ge 3600 ']'
++++ continue
++++ for marker in "$FM_TEST_TMPDIR"/fm-*/.fm-test-fixture
++++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.gz5M1z/.fm-test-fixture ']'
+++++ sed -n 1p /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.gz5M1z/.fm-test-fixture
++++ owner_pid=4381
+++++ sed -n '2,$p' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.gz5M1z/.fm-test-fixture
++++ owner_identity='Sat Oct 31 13:06:47 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup test_cycle_exit_ledger_links_successor_and_stays_bounded'
++++ case "$owner_pid" in
+++++ fm_test_pid_identity 4381
++++ current_identity=
++++ current_identity=
++++ '[' -n 'Sat Oct 31 13:06:47 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup test_cycle_exit_ledger_links_successor_and_stays_bounded' ']'
++++ '[' '' = 'Sat Oct 31 13:06:47 2026     bash tests/fm-watcher-lock.test.sh test_arm_confirms_a_slow_post_claim_startup test_arm_relays_a_startup_lock_held_by_live_pid test_startup_cleanup_waits_for_inflight_lock_mutations test_forced_term_before_the_safe_point_stays_clean test_unpublishable_identity_exits_through_cleanup test_cycle_exit_ledger_links_successor_and_stays_bounded' ']'
+++++ stat -c %Y /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.gz5M1z/.fm-test-fixture
+++++ stat -f %m /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.gz5M1z/.fm-test-fixture
++++ mtime=1793452009
++++ '[' 887 -ge 3600 ']'
++++ continue
+++ '[' -z '' ']'
++++ fm_test_tmproot fm-wake-tangle-root
++++ local prefix=fm-wake-tangle-root root tmp_base
+++++ fm_test_tmpdir
+++++ local base=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/ physical
+++++ base=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ '[' -n /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T ']'
+++++ case "$base" in
++++++ CDPATH=
++++++ cd -- /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++++ pwd -P
+++++ physical=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ base=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.git ']'
+++++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++ tmp_base=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++ tmp_base=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ mktemp -d /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.XXXXXX
++++ root=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF
+++++ cd -P -- /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF
+++++ pwd -P
++++ root=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF
++++ printf '%s\n%s\n' 96929 'Sat Oct 31 13:21:35 2026     bash -x tests/fm-watcher-lock.test.sh test_forced_term_before_the_safe_point_stays_clean'
++++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF
++++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF
+++ FM_ROOT_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF
+++ export FM_ROOT_OVERRIDE
++++ fm_test_tmproot fm-wedge-rec
++++ local prefix=fm-wedge-rec root tmp_base
+++++ fm_test_tmpdir
+++++ local base=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/ physical
+++++ base=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ '[' -n /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T ']'
+++++ case "$base" in
++++++ CDPATH=
++++++ cd -- /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++++ pwd -P
+++++ physical=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ base=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.git ']'
+++++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++ tmp_base=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++ tmp_base=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ mktemp -d /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.XXXXXX
++++ root=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV
+++++ cd -P -- /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV
+++++ pwd -P
++++ root=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV
++++ printf '%s\n%s\n' 96929 'Sat Oct 31 13:21:35 2026     bash -x tests/fm-watcher-lock.test.sh test_forced_term_before_the_safe_point_stays_clean'
++++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV
++++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV
+++ _fm_wedge_rec_dir=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV
+++ cat
+++ chmod +x /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV/rec
+++ export FM_WEDGE_ALARM_EXEC=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV/rec
+++ FM_WEDGE_ALARM_EXEC=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV/rec
++ WATCH={run-worktree}/bin/fm-watch.sh
++ WATCH_ARM={run-worktree}/bin/fm-watch-arm.sh
++ DRAIN={run-worktree}/bin/fm-wake-drain.sh
++ LIB={run-worktree}/bin/fm-wake-lib.sh
++ ARM_FAIL_EXIT_POLLS=400
+++ fm_test_tmproot fm-watcher-lock-tests
+++ local prefix=fm-watcher-lock-tests root tmp_base
++++ fm_test_tmpdir
++++ local base=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/ physical
++++ base=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++ '[' -n /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T ']'
++++ case "$base" in
+++++ CDPATH=
+++++ cd -- /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++++ pwd -P
++++ physical=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++ base=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.git ']'
++++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++ tmp_base=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
+++ tmp_base=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T
++++ mktemp -d /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.XXXXXX
+++ root=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh
++++ cd -P -- /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh
++++ pwd -P
+++ root=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh
+++ printf '%s\n%s\n' 96929 'Sat Oct 31 13:21:35 2026     bash -x tests/fm-watcher-lock.test.sh test_forced_term_before_the_safe_point_stays_clean'
+++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh
+++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh
++ TMP_ROOT=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh
++ lab=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/marked-lab
++ foreign_state=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/foreign-state
++ checkout=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/.no-mistakes/worktrees/guard/bin
++ mkdir -p /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/marked-lab /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/foreign-state /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/.no-mistakes/worktrees/guard/bin
++ . {run-worktree}/bin/fm-gate-refuse-lib.sh
+++ FM_GATE_REFUSE_EXIT=3
+++ FM_GATE_LAB_MARKER=.fm-lab-home
+++ FM_GATE_LAB_TOKEN='fm-lab-home v1'
++ fm_gate_lab_mark /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/marked-lab
++ local home=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/marked-lab listing
++ '[' -n /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/marked-lab ']'
++ '[' -d /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/marked-lab ']'
+++ find /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/marked-lab -mindepth 1 -maxdepth 1 -print -quit
++ listing=
++ '[' -z '' ']'
++ printf '%s\n' 'fm-lab-home v1'
++ cp {run-worktree}/bin/fm-watch-arm.sh {run-worktree}/bin/fm-gate-refuse-lib.sh /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/.no-mistakes/worktrees/guard/bin/
++ env -u FM_GATE_REFUSE_BYPASS -u FM_STATE_OVERRIDE FM_HOME=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/marked-lab STATE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/foreign-state bash /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/.no-mistakes/worktrees/guard/bin/fm-watch-arm.sh
++ grep -q 'refusing to arm from a disposable validation checkout' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/lab-guard.out
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/foreign-state/.watch.lock ']'
++ pass 'disposable watcher refuses inherited state outside its marked lab'
++ printf 'ok - %s\n' 'disposable watcher refuses inherited state outside its marked lab'
+ok - disposable watcher refuses inherited state outside its marked lab
++ '[' 1 -gt 0 ']'
++ for test_name in "$@"
++ case "$test_name" in
++ test_forced_term_before_the_safe_point_stays_clean
++ local dir state fakebin armout status armpid i
+++ make_case arm-pre-identity-term
+++ local name=arm-pre-identity-term dir fakebin
+++ dir=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term
+++ fakebin=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/fakebin
+++ mkdir -p /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/fakebin
+++ fm_test_track_watcher_state /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
+++ '[' -n /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state ']'
+++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
+++ cat
+++ chmod +x /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/fakebin/tmux
+++ make_fake_crew_state /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/fakebin
+++ local fakebin=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/fakebin
+++ cat
+++ chmod +x /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/fakebin/fm-crew-state.sh
+++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/fakebin/fm-crew-state.sh
+++ printf '%s\n' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term
++ dir=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term
++ state=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
++ fakebin=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/fakebin
++ armout=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/arm.out
++ status=0
++ PATH=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/fakebin:~/.pi/agent/bin:~/.local/libexec/pi-launcher/bin:~/.nvm/versions/node/v24.13.1/bin:~/.nix-profile/bin:/nix/var/nix/profiles/default/bin:~/google-cloud-sdk/bin:/opt/homebrew/bin:/opt/homebrew/sbin:~/.local/libexec/pi-launcher/bin:/etc/profiles/per-user/kunchen/bin:/run/current-system/sw/bin:~/.local/bin:~/go/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin:~/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/libexec/mosh-signed:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:~/.cargo/bin:~/bin:/usr/local/sbin
++ FM_STATE_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
++ FM_ARM_CONFIRM_TIMEOUT=2
++ FM_TEST_WATCHER_PRE_IDENTITY_DELAY=8
++ FM_POLL=5
++ FM_SIGNAL_GRACE=1
++ FM_CHECK_INTERVAL=999999
++ FM_HEARTBEAT=999999
++ {run-worktree}/bin/fm-watch-arm.sh
++ status=1
++ '[' 1 -ne 0 ']'
++ grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/arm.out
++ grep -q 'reason=confirmation-timeout.*lock_after=pid:none' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch-cycle-exits.log
++ assert_no_startup_lock_evidence /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state 'deadline-forced TERM'
++ local state=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state 'label=deadline-forced TERM' lock owner
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.owner.*' ']'
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.steal ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.steal ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.steal.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.steal.owner.*' ']'
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.owner.*' ']'
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.steal ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.steal ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.steal.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.steal.owner.*' ']'
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.owner.*' ']'
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.steal ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.steal ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.steal.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.steal.owner.*' ']'
++ drain_and_ack /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
++ local state=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state err sequence generation
++ err=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.test-drain.err
++ FM_STATE_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
++ {run-worktree}/bin/fm-wake-drain.sh
+++ sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.test-drain.err
++ sequence=0
+++ sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.test-drain.err
++ generation=97996.1793452916.YUBL4c
++ rm -f /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.test-drain.err
++ '[' -n 0 ']'
++ '[' -n 97996.1793452916.YUBL4c ']'
++ FM_STATE_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
++ {run-worktree}/bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 97996.1793452916.YUBL4c
++ armout=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/arm-hup.out
++ armpid=4860
++ i=0
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 0 -lt 400 ']'
++ sleep 0.1
++ PATH=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/fakebin:~/.pi/agent/bin:~/.local/libexec/pi-launcher/bin:~/.nvm/versions/node/v24.13.1/bin:~/.nix-profile/bin:/nix/var/nix/profiles/default/bin:~/google-cloud-sdk/bin:/opt/homebrew/bin:/opt/homebrew/sbin:~/.local/libexec/pi-launcher/bin:/etc/profiles/per-user/kunchen/bin:/run/current-system/sw/bin:~/.local/bin:~/go/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin:~/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/libexec/mosh-signed:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:~/.cargo/bin:~/bin:/usr/local/sbin
++ FM_STATE_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
++ FM_TEST_WATCHER_PRE_IDENTITY_DELAY=6
++ FM_POLL=5
++ FM_SIGNAL_GRACE=1
++ FM_CHECK_INTERVAL=999999
++ FM_HEARTBEAT=999999
++ {run-worktree}/bin/fm-watch-arm.sh
++ i=1
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 1 -lt 400 ']'
++ sleep 0.1
++ i=2
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 2 -lt 400 ']'
++ sleep 0.1
++ i=3
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 3 -lt 400 ']'
++ sleep 0.1
++ i=4
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 4 -lt 400 ']'
++ sleep 0.1
++ i=5
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 5 -lt 400 ']'
++ sleep 0.1
++ i=6
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 6 -lt 400 ']'
++ sleep 0.1
++ i=7
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 7 -lt 400 ']'
++ sleep 0.1
++ i=8
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 8 -lt 400 ']'
++ sleep 0.1
++ i=9
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 9 -lt 400 ']'
++ sleep 0.1
++ i=10
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 10 -lt 400 ']'
++ sleep 0.1
++ i=11
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 11 -lt 400 ']'
++ sleep 0.1
++ i=12
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 12 -lt 400 ']'
++ sleep 0.1
++ i=13
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 13 -lt 400 ']'
++ sleep 0.1
++ i=14
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 14 -lt 400 ']'
++ sleep 0.1
++ i=15
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 15 -lt 400 ']'
++ sleep 0.1
++ i=16
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' 16 -lt 400 ']'
++ sleep 0.1
++ i=17
++ '[' '!' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ kill -HUP 4860
++ status=0
++ wait 4860
++ status=129
++ '[' 129 -eq 129 ']'
++ grep -q 'reason=arm-interrupted.*lock_after=pid:none' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch-cycle-exits.log
++ assert_no_startup_lock_evidence /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state 'signal-deferred TERM'
++ local state=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state 'label=signal-deferred TERM' lock owner
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.owner.*' ']'
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.steal ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.steal ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.steal.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock.steal.owner.*' ']'
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.owner.*' ']'
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.steal ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.steal ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.steal.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.wake-queue.lock.steal.owner.*' ']'
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.owner.*' ']'
++ for lock in .watch.lock .watch.lock.steal .wake-queue.lock .wake-queue.lock.steal .watcher-down.lock .watcher-down.lock.steal
++ '[' -e /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.steal ']'
++ '[' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.steal ']'
++ for owner in "$state/$lock".owner.*
++ '[' '!' -e '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.steal.owner.*' ']'
++ '[' '!' -L '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watcher-down.lock.steal.owner.*' ']'
++ drain_and_ack /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
++ local state=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state err sequence generation
++ err=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.test-drain.err
++ FM_STATE_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
++ {run-worktree}/bin/fm-wake-drain.sh
+++ sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.test-drain.err
++ sequence=0
+++ sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.test-drain.err
++ generation=4970.1793452957.ANbgiu
++ rm -f /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.test-drain.err
++ '[' -n 0 ']'
++ '[' -n 4970.1793452957.ANbgiu ']'
++ FM_STATE_OVERRIDE=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state
++ {run-worktree}/bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 4970.1793452957.ANbgiu
++ pass 'a stop forced before the safe point waits for it and leaves no lock evidence'
++ printf 'ok - %s\n' 'a stop forced before the safe point waits for it and leaves no lock evidence'
+ok - a stop forced before the safe point waits for it and leaves no lock evidence
++ exit 0
++ fm_test_cleanup
++ local d
++ fm_test_reap_watchers
++ local state lock_home $'seen=\n'
++ '[' -f /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-watcher.96929.T5R2Oa ']'
++ IFS=
++ read -r state
++ '[' -n /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state ']'
++ case "$seen" in
++ seen+=$'/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state\n'
++ '[' -f /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/arm-pre-identity-term/state/.watch.lock/pid ']'
++ continue
++ IFS=
++ read -r state
++ rm -f /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-watcher.96929.T5R2Oa
++ fm_test_reap_procevent_homes
++ local home claim_root $'seen=\n'
++ '[' -f /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-procevent.96929.P0Ndl4 ']'
++ IFS=$'\t'
++ read -r home claim_root
++ rm -f /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-procevent.96929.P0Ndl4
++ for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"
++ '[' -n '' ']'
++ '[' -f /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-cleanup.96929.ZL7BvG ']'
++ IFS=
++ read -r d
++ '[' -n /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF ']'
++ fm_test_reap_root_processes /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF
++ local root=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF chain pid pids signal i
++ '[' -n /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF ']'
++ '[' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF '!=' / ']'
++ chain=' '
++ pid=96929
++ '[' -n 96929 ']'
++ '[' 96929 -gt 1 ']'
++ chain=' 96929 '
+++ ps -o ppid= -p 96929
+++ tr -d '[:space:]'
++ pid=96850
++ '[' -n 96850 ']'
++ '[' 96850 -gt 1 ']'
++ chain=' 96929 96850 '
+++ ps -o ppid= -p 96850
+++ tr -d '[:space:]'
++ pid=96847
++ '[' -n 96847 ']'
++ '[' 96847 -gt 1 ']'
++ chain=' 96929 96850 96847 '
+++ ps -o ppid= -p 96847
+++ tr -d '[:space:]'
++ pid=94112
++ '[' -n 94112 ']'
++ '[' 94112 -gt 1 ']'
++ chain=' 96929 96850 96847 94112 '
+++ tr -d '[:space:]'
+++ ps -o ppid= -p 94112
++ pid=94073
++ '[' -n 94073 ']'
++ '[' 94073 -gt 1 ']'
++ chain=' 96929 96850 96847 94112 94073 '
+++ ps -o ppid= -p 94073
+++ tr -d '[:space:]'
++ pid=91142
++ '[' -n 91142 ']'
++ '[' 91142 -gt 1 ']'
++ chain=' 96929 96850 96847 94112 94073 91142 '
+++ ps -o ppid= -p 91142
+++ tr -d '[:space:]'
++ pid=1
++ '[' -n 1 ']'
++ '[' 1 -gt 1 ']'
++ for signal in TERM KILL
++ i=0
++ '[' 0 -lt 20 ']'
+++ ps -ww -eo pid=,args=
+++ FM_TEST_REAP_ROOT=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF/
+++ awk -v 'chain= 96929 96850 96847 94112 94073 91142 ' 'index($0, ENVIRON["FM_TEST_REAP_ROOT"]) && index(chain, " " $1 " ") == 0 { print $1 }'
++ pids=
++ '[' -n '' ']'
++ return 0
++ fm_test_remove_tree /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF
++ local dir=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF
++ '[' -d /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF ']'
++ find /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF -type d -exec chmod u+rwx '{}' +
++ rm -rf /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wake-tangle-root.zJykzF
++ IFS=
++ read -r d
++ '[' -n /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV ']'
++ fm_test_reap_root_processes /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV
++ local root=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV chain pid pids signal i
++ '[' -n /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV ']'
++ '[' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV '!=' / ']'
++ chain=' '
++ pid=96929
++ '[' -n 96929 ']'
++ '[' 96929 -gt 1 ']'
++ chain=' 96929 '
+++ tr -d '[:space:]'
+++ ps -o ppid= -p 96929
++ pid=96850
++ '[' -n 96850 ']'
++ '[' 96850 -gt 1 ']'
++ chain=' 96929 96850 '
+++ ps -o ppid= -p 96850
+++ tr -d '[:space:]'
++ pid=96847
++ '[' -n 96847 ']'
++ '[' 96847 -gt 1 ']'
++ chain=' 96929 96850 96847 '
+++ ps -o ppid= -p 96847
+++ tr -d '[:space:]'
++ pid=94112
++ '[' -n 94112 ']'
++ '[' 94112 -gt 1 ']'
++ chain=' 96929 96850 96847 94112 '
+++ ps -o ppid= -p 94112
+++ tr -d '[:space:]'
++ pid=94073
++ '[' -n 94073 ']'
++ '[' 94073 -gt 1 ']'
++ chain=' 96929 96850 96847 94112 94073 '
+++ ps -o ppid= -p 94073
+++ tr -d '[:space:]'
++ pid=91142
++ '[' -n 91142 ']'
++ '[' 91142 -gt 1 ']'
++ chain=' 96929 96850 96847 94112 94073 91142 '
+++ ps -o ppid= -p 91142
+++ tr -d '[:space:]'
++ pid=1
++ '[' -n 1 ']'
++ '[' 1 -gt 1 ']'
++ for signal in TERM KILL
++ i=0
++ '[' 0 -lt 20 ']'
+++ ps -ww -eo pid=,args=
+++ FM_TEST_REAP_ROOT=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV/
+++ awk -v 'chain= 96929 96850 96847 94112 94073 91142 ' 'index($0, ENVIRON["FM_TEST_REAP_ROOT"]) && index(chain, " " $1 " ") == 0 { print $1 }'
++ pids=
++ '[' -n '' ']'
++ return 0
++ fm_test_remove_tree /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV
++ local dir=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV
++ '[' -d /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV ']'
++ find /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV -type d -exec chmod u+rwx '{}' +
++ rm -rf /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-wedge-rec.wVCUOV
++ IFS=
++ read -r d
++ '[' -n /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh ']'
++ fm_test_reap_root_processes /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh
++ local root=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh chain pid pids signal i
++ '[' -n /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh ']'
++ '[' /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh '!=' / ']'
++ chain=' '
++ pid=96929
++ '[' -n 96929 ']'
++ '[' 96929 -gt 1 ']'
++ chain=' 96929 '
+++ ps -o ppid= -p 96929
+++ tr -d '[:space:]'
++ pid=96850
++ '[' -n 96850 ']'
++ '[' 96850 -gt 1 ']'
++ chain=' 96929 96850 '
+++ ps -o ppid= -p 96850
+++ tr -d '[:space:]'
++ pid=96847
++ '[' -n 96847 ']'
++ '[' 96847 -gt 1 ']'
++ chain=' 96929 96850 96847 '
+++ ps -o ppid= -p 96847
+++ tr -d '[:space:]'
++ pid=94112
++ '[' -n 94112 ']'
++ '[' 94112 -gt 1 ']'
++ chain=' 96929 96850 96847 94112 '
+++ ps -o ppid= -p 94112
+++ tr -d '[:space:]'
++ pid=94073
++ '[' -n 94073 ']'
++ '[' 94073 -gt 1 ']'
++ chain=' 96929 96850 96847 94112 94073 '
+++ ps -o ppid= -p 94073
+++ tr -d '[:space:]'
++ pid=91142
++ '[' -n 91142 ']'
++ '[' 91142 -gt 1 ']'
++ chain=' 96929 96850 96847 94112 94073 91142 '
+++ tr -d '[:space:]'
+++ ps -o ppid= -p 91142
++ pid=1
++ '[' -n 1 ']'
++ '[' 1 -gt 1 ']'
++ for signal in TERM KILL
++ i=0
++ '[' 0 -lt 20 ']'
+++ ps -ww -eo pid=,args=
+++ FM_TEST_REAP_ROOT=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh/
+++ awk -v 'chain= 96929 96850 96847 94112 94073 91142 ' 'index($0, ENVIRON["FM_TEST_REAP_ROOT"]) && index(chain, " " $1 " ") == 0 { print $1 }'
++ pids=
++ '[' -n '' ']'
++ return 0
++ fm_test_remove_tree /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh
++ local dir=/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh
++ '[' -d /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh ']'
++ '[' '!' -L /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh ']'
++ find /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh -type d -exec chmod u+rwx '{}' +
++ rm -rf /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.kCsvXh
++ IFS=
++ read -r d
++ rm -f /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/.fm-test-cleanup.96929.ZL7BvG
