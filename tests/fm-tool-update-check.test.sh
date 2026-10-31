@@ -396,7 +396,7 @@ SH
   # still exhausts the budget before the announcement check.
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=2
   report=$(cat "$out")
-  assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
+  assert_contains "$report" "no-mistakes not checked: the sweep time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
   pass "an announcement source the budget could not reach is reported, not read as current"
 }
 
@@ -421,8 +421,73 @@ SH
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "no-mistakes check failed: $dir/no-mistakes-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
+  assert_contains "$report" "no-mistakes timed out: $dir/no-mistakes-fixture did not answer within 1s when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
+  assert_not_contains "$report" "check failed" "an announcement probe that was only slow was reported as a failed tool"
   pass "an announcement probe that does not answer is reported, not read as current"
+}
+
+test_a_version_probe_past_its_own_bound_is_timed_out_not_failed() {
+  local home dir out report
+  # A copy that is only slow has not failed. When it overruns its own probe bound
+  # the report says it timed out, so it cannot be read as a broken tool.
+  home=$(make_home version-slow)
+  dir="$TMP_ROOT/version-slow/bin"
+  make_slow_copy "$dir" "$TOOL" 30
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  report=$(cat "$out")
+  assert_contains "$report" "herdr timed out: $dir/$TOOL did not answer within 1s when asked for its version" "a copy past its own probe bound was not reported as timed out"
+  assert_not_contains "$report" "check failed" "a copy that was only slow was reported as a failed tool"
+  pass "a version probe past its own bound is reported as timed out, not as a failed tool"
+}
+
+test_tools_the_sweep_budget_did_not_reach_are_not_checked_not_failed() {
+  local home slow fast out report
+  # On 2026-09-16 healthy tools were reported as failed because the sweep's own
+  # budget ran out: a probe whose bound the budget had cut was said not to
+  # answer, and the tools after it were folded into "check incomplete". Both are
+  # the check's own scheduling, so both must read as not checked.
+  home=$(make_home budget-not-checked)
+  slow="$TMP_ROOT/budget-not-checked/slow/bin"
+  fast="$TMP_ROOT/budget-not-checked/fast/bin"
+  make_slow_copy "$slow" "$TOOL" 30
+  make_copy "$fast" fast-fixture 'fast 1.0.0'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"},{\"name\":\"fast\",\"command\":\"fast-fixture\"}]}"
+  out="$home/out.txt"
+  # The probe bound is wider than the whole budget, so the slow probe's bound is
+  # the budget's remainder and running out of it is the sweep's doing, not the
+  # tool's.
+  run_check "$home" "$(fixture_path "$slow:$fast")" "$out" FM_TOOL_UPDATE_PROBE_SECS=10 FM_TOOL_UPDATE_BUDGET_SECS=2
+  report=$(cat "$out")
+  assert_contains "$report" "herdr not checked: the sweep time budget ran out while $slow/$TOOL was asked for its version" "a probe cut short by the sweep budget was not reported as not checked"
+  assert_contains "$report" "fast not checked: the sweep time budget ran out before it was reached" "a tool the sweep never reached was not reported as not checked"
+  assert_not_contains "$report" "check failed" "the sweep's own budget was reported as a failed tool"
+  assert_not_contains "$report" "timed out" "a probe the sweep budget cut short was blamed on the tool"
+  assert_not_contains "$report" "check incomplete" "an unreached tool was folded into an incomplete-run sentence"
+  pass "a probe cut short by the sweep budget, and a tool never reached, are reported as not checked"
+}
+
+test_each_unreached_tool_is_its_own_finding() {
+  local home slow out
+  # Unreached tools named in one joined finding make any change to that list a
+  # new finding, so a tool already reported as not checked was announced again
+  # whenever another tool was reached. Each one is its own finding instead.
+  home=$(make_home budget-unreached-set)
+  slow="$TMP_ROOT/budget-unreached-set/bin"
+  make_slow_copy "$slow" "$TOOL" 30
+  make_copy "$slow" c-fixture 'c 1.0.0'
+  make_copy "$slow" d-fixture 'd 1.0.0'
+  out="$home/out.txt"
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"},{\"name\":\"c\",\"command\":\"c-fixture\"},{\"name\":\"d\",\"command\":\"d-fixture\"}]}"
+  run_check "$home" "$(fixture_path "$slow")" "$out" FM_TOOL_UPDATE_PROBE_SECS=10 FM_TOOL_UPDATE_BUDGET_SECS=2
+  assert_contains "$(cat "$out")" "c not checked: the sweep time budget ran out before it was reached" "an unreached tool was not reported as not checked"
+  assert_contains "$(cat "$out")" "d not checked: the sweep time budget ran out before it was reached" "an unreached tool was not reported as not checked"
+
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"},{\"name\":\"d\",\"command\":\"d-fixture\"}]}"
+  run_check "$home" "$(fixture_path "$slow")" "$out" FM_TOOL_UPDATE_PROBE_SECS=10 FM_TOOL_UPDATE_BUDGET_SECS=2
+  [ ! -s "$out" ] || fail "an unreached tool already reported was announced again: $(cat "$out")"
+  pass "each tool the sweep did not reach is its own finding, reported once"
 }
 
 test_quiet_tool_with_announce_pattern_is_silent() {
@@ -469,6 +534,9 @@ test_published_version_newer_than_installed_is_reported() {
 
   fresh="$TMP_ROOT/version-url/new/bin"
   make_copy "$fresh" claude-fixture '2.1.272 (Claude Code)'
+  # The record is cleared first because the available update is unchanged, so the
+  # no-nag gate would otherwise report only the new PATH skew.
+  rm -f "$home/state/.tool-updates"
   run_check "$home" "$(fixture_path "$dir:$fresh")" "$out"
   report=$(cat "$out")
   assert_contains "$report" "claude update available: 2.1.273 published at https://downloads.example.invalid/latest, PATH resolves 2.1.271" "a published version newer than every installed copy was not reported"
@@ -529,6 +597,35 @@ test_unreadable_version_url_is_a_failure_not_a_pass() {
   run_check "$home" "$(fixture_path "$dir")" "$out"
   assert_contains "$(cat "$out")" "claude check failed: https://downloads.example.invalid/latest did not report a version" "a version_url body with no version was taken for current"
   pass "a version_url that does not answer with a version is a check failure"
+}
+
+test_a_version_url_read_out_of_time_is_not_a_failed_tool() {
+  local home dir out report url=https://downloads.example.invalid/latest
+  # A version_url read that ran out of time has not failed. Past its own bound it
+  # timed out; past a bound the sweep budget had cut, it was not checked.
+  home=$(make_home version-url-slow)
+  dir="$TMP_ROOT/version-url-slow/bin"
+  make_copy "$dir" claude-fixture '2.1.271 (Claude Code)'
+  make_curl_fixture "$dir" '' 28
+  write_config "$home" "{\"tools\":[{\"name\":\"claude\",\"command\":\"claude-fixture\",\"version_url\":\"$url\"}]}"
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "claude timed out: $url did not answer within 5s when asked for its published version" "a version_url read past curl's own time limit was not reported as timed out"
+  assert_not_contains "$report" "check failed" "a version_url read that was only slow was reported as a failed tool"
+
+  cat > "$dir/curl" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+printf '2.1.273\n'
+SH
+  rm -f "$home/state/.tool-updates"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=10 FM_TOOL_UPDATE_BUDGET_SECS=2
+  report=$(cat "$out")
+  assert_contains "$report" "claude not checked: the sweep time budget ran out while $url was asked for its published version" "a version_url read cut short by the sweep budget was not reported as not checked"
+  assert_not_contains "$report" "check failed" "the sweep's own budget was reported as a failed tool"
+  assert_not_contains "$report" "timed out" "a version_url read the sweep budget cut short was blamed on the tool"
+  pass "a version_url read that runs out of time is timed out or not checked, not a failed tool"
 }
 
 # A probe PATH with every ambient binary except curl, so the version_url probe
@@ -717,7 +814,8 @@ test_git_probes_stop_when_the_sweep_budget_is_gone() {
   # so they are the ones that can push a sweep past the watcher's own timeout and
   # leave it killed with nothing printed at all. Here the tool's command probe
   # spends the whole budget, so its git probes must not start: the sweep says
-  # which tool it did not finish instead of quietly running on.
+  # which tool it did not check instead of quietly running on, and does not
+  # blame the tool for the sweep's own budget.
   home=$(make_home git-budget)
   work=$(git_fixture git-budget-repo)
   git -C "$work" reset -q --hard HEAD~2
@@ -727,7 +825,14 @@ test_git_probes_stop_when_the_sweep_budget_is_gone() {
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$slow")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "check incomplete: the time budget ran out before firstmate" "a sweep with no budget left did not say which tool it did not finish"
+  # The whole-second deadline can be gone before this tool is reached at all, so
+  # either way of saying it was not checked is the right report.
+  case "$report" in
+    *"firstmate not checked: the sweep time budget ran out before $work answered"*) ;;
+    *"firstmate not checked: the sweep time budget ran out before it was reached"*) ;;
+    *) fail "a sweep with no budget left did not say which tool it did not check: $report" ;;
+  esac
+  assert_not_contains "$report" "check failed" "the sweep's own budget was reported as a failed tool"
   assert_not_contains "$report" "commits behind" "the git probes ran after the sweep budget was already gone"
   pass "git probes stop and name their tool once the sweep budget is gone"
 }
@@ -769,7 +874,7 @@ SH
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=3
   report=$(cat "$out")
   assert_not_contains "$report" "update available" "a probe that never answered was reported as an available update"
-  assert_contains "$report" "firstmate check failed: $work did not answer whether it already has" "the stalled object query was not the reported failure"
+  assert_contains "$report" "firstmate timed out: $work did not answer whether it already has" "the stalled object query was not the reported timeout"
   [ "$(git -C "$work" rev-parse HEAD)" = "$head_before" ] || fail "the check moved the watched repository's HEAD"
   pass "a git probe that does not answer is reported as a failure, never as an update"
 }
@@ -801,7 +906,7 @@ SH
   out="$home/out.txt"
   run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "firstmate check failed: $work did not answer whether it is a git repository" "a repository probe that never answered was not reported as such"
+  assert_contains "$report" "firstmate timed out: $work did not answer whether it is a git repository" "a repository probe that never answered was not reported as such"
   assert_not_contains "$report" "is not a git repository" "a repository probe that never answered was reported as not a repository"
   pass "a stalled repository probe is reported as no answer, not as not a repository"
 }
@@ -875,6 +980,63 @@ test_findings_are_reported_once_until_they_change() {
   pass "the same pending update is reported once, and a change is reported again"
 }
 
+test_a_finding_leaving_the_set_does_not_reannounce_the_rest() {
+  local home stale fresh out path report pending
+  # On 2026-09-13 one still-pending update was announced three times in an hour,
+  # because an unrelated finding came and went and the whole finding string was
+  # compared. A finding leaving the set is not news; one joining it is.
+  home=$(make_home leave-set)
+  stale="$TMP_ROOT/leave-set/old/bin"
+  fresh="$TMP_ROOT/leave-set/new/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  out="$home/out.txt"
+  path=$(fixture_path "$stale:$fresh")
+  pending="{\"name\":\"herdr\",\"command\":\"$TOOL\"}"
+  write_config "$home" "{\"tools\":[$pending,{\"name\":\"gone\",\"command\":\"gone-absent-fixture\"}]}"
+
+  run_check "$home" "$path" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "herdr update not in effect" "the first sweep did not report the pending update"
+  assert_contains "$report" "gone check failed" "the first sweep did not report the second finding"
+
+  # The second finding leaves the set: nothing is news, and the record keeps only
+  # what is still found, so its return can be news again.
+  write_config "$home" "{\"tools\":[$pending]}"
+  run_check "$home" "$path" "$out"
+  [ ! -s "$out" ] || fail "a finding leaving the set re-announced the one that remained: $(cat "$out")"
+  assert_no_grep 'gone check failed' "$home/state/.tool-updates" "the record kept a finding the last sweep no longer found"
+
+  # It returns: it alone is news, and the still-pending update is not repeated.
+  write_config "$home" "{\"tools\":[$pending,{\"name\":\"gone\",\"command\":\"gone-absent-fixture\"}]}"
+  run_check "$home" "$path" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "gone check failed" "a returning finding was not reported"
+  assert_not_contains "$report" "herdr update not in effect" "a still-pending update was announced again"
+  pass "a finding leaving the set is not news, and only a new finding is reported"
+}
+
+test_a_record_from_before_set_comparison_is_still_honoured() {
+  local home stale fresh out path
+  # A home upgraded from the record that held the finding set as one joined line
+  # must not announce every finding it already reported again.
+  home=$(make_home v1-record)
+  stale="$TMP_ROOT/v1-record/old/bin"
+  fresh="$TMP_ROOT/v1-record/new/bin"
+  make_copy "$stale" "$TOOL" 'herdr 0.8.0'
+  make_copy "$fresh" "$TOOL" 'herdr 0.8.2'
+  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"},{\"name\":\"gone\",\"command\":\"gone-absent-fixture\"}]}"
+  out="$home/out.txt"
+  path=$(fixture_path "$stale:$fresh")
+  printf '%s\n' fm-tool-updates-v1 epoch=1 \
+    "reported=herdr update not in effect: PATH resolves 0.8.0 at $stale/$TOOL but 0.8.2 is installed at $fresh/$TOOL; gone check failed: gone-absent-fixture is not on PATH" \
+    > "$home/state/.tool-updates"
+  run_check "$home" "$path" "$out"
+  [ ! -s "$out" ] || fail "findings an earlier record already held were announced again: $(cat "$out")"
+  assert_grep 'fm-tool-updates-v2' "$home/state/.tool-updates" "the record was not rewritten in its current form"
+  pass "a record from before set comparison still keeps its findings from repeating"
+}
+
 test_an_overlong_report_says_it_was_cut() {
   local home out report i tools_json=
   # Many watched tools can outgrow one line. The report must say it was cut
@@ -912,13 +1074,15 @@ test_a_finding_past_the_cut_is_still_reported() {
   run_check "$home" "$(fixture_path "$stale:$fresh")" "$out"
   assert_contains "$(cat "$out")" "[truncated]" "the first report was not long enough to be cut, so this case proves nothing"
 
-  # The skew tool goes last, so its finding falls past the cut and the printed
-  # line is byte identical to the one the first sweep already recorded.
+  # The skew tool goes last, so its finding falls past the cut of the whole
+  # finding set and would leave a line of every finding byte identical to the
+  # one the first sweep already printed.
   write_config "$home" "{\"tools\":[$tools_json,{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
   run_check "$home" "$(fixture_path "$stale:$fresh")" "$out"
   report=$(cat "$out")
   [ -n "$report" ] || fail "a finding past the cut produced no report at all, so it can never reach the watcher"
-  assert_contains "$report" "[truncated]" "the second report was not cut, so the finding was not past the cut"
+  assert_contains "$report" "herdr update not in effect" "the finding past the cut was not the one reported"
+  assert_not_contains "$report" "absent-tool-1 " "findings already reported were announced again"
   pass "a finding that lands past the cut is still reported as news"
 }
 
@@ -935,7 +1099,7 @@ test_probes_are_skipped_between_intervals() {
   FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$now" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "first cadence run exit"
-  assert_grep 'fm-tool-updates-v1' "$home/state/.tool-updates" "the first run did not record its sweep"
+  assert_grep 'fm-tool-updates-v2' "$home/state/.tool-updates" "the first run did not record its sweep"
 
   # A finding appears, but the interval has not elapsed, so no probe runs.
   make_copy "$dir" "$TOOL" 'no version here'
@@ -1210,11 +1374,15 @@ test_unusable_announce_pattern_is_reported_not_read_as_silence
 test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep
 test_an_unchecked_announcement_source_is_not_read_as_current
 test_an_announcement_probe_that_does_not_answer_is_reported
+test_a_version_probe_past_its_own_bound_is_timed_out_not_failed
+test_tools_the_sweep_budget_did_not_reach_are_not_checked_not_failed
+test_each_unreached_tool_is_its_own_finding
 test_quiet_tool_with_announce_pattern_is_silent
 test_published_version_newer_than_installed_is_reported
 test_published_version_already_installed_is_not_double_reported
 test_published_version_equal_to_path_is_silent
 test_unreadable_version_url_is_a_failure_not_a_pass
+test_a_version_url_read_out_of_time_is_not_a_failed_tool
 test_missing_curl_is_a_failure_not_a_pass
 test_version_url_must_be_https_with_a_command
 test_commits_behind_origin_are_reported
@@ -1230,6 +1398,8 @@ test_a_stalled_repository_probe_is_not_reported_as_not_a_repository
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
+test_a_finding_leaving_the_set_does_not_reannounce_the_rest
+test_a_record_from_before_set_comparison_is_still_honoured
 test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals
