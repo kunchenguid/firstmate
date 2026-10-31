@@ -1,0 +1,2 @@
+ok - disposable watcher refuses inherited state outside its marked lab
+ok - a watcher that cannot publish its identity exits through its cleanup

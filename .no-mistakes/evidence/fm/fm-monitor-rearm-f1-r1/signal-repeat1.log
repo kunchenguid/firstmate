@@ -1,0 +1,11 @@
+ARM rc=129 elapsed=7.65s
+
+CYCLE LEDGER
+arm_pid=23451	watcher_pid=23478	origin=started	started_at=1793442737	ended_at=1793442744	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+Remaining lock paths: [".wake-queue.lock.owner.CH0uNO"]
+Residual .wake-queue.lock.owner.CH0uNO/pid-start: Sat Oct 31 10:32:17 2026
+
+Residual .wake-queue.lock.owner.CH0uNO/pid: 23478
+
+FAILED AssertionError()

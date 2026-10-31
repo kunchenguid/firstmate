@@ -1,0 +1,4 @@
+ARM rc=1 elapsed=0.07s
+watcher: FAILED - refusing to arm from a disposable validation checkout: {run-worktree}/bin
+
+FAILED AssertionError()

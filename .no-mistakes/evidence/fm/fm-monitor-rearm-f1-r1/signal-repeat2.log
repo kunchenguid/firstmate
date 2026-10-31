@@ -1,0 +1,11 @@
+ARM rc=129 elapsed=7.74s
+
+CYCLE LEDGER
+arm_pid=25979	watcher_pid=26011	origin=started	started_at=1793442745	ended_at=1793442753	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+Remaining lock paths: []
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 26011.1793442753.vfYVAu
+
+ACK rc=0
+

@@ -1,0 +1,18 @@
+[0.00s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/slow-start-default options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '15'} arm_pid=13657
+[15.93s] arm exit=129
+[15.93s] PRODUCT OUTPUT:
+watcher: started pid=13710 (beacon fresh)
+
+[15.93s] PERSISTED CYCLE LEDGER:
+arm_pid=13657	watcher_pid=13710	origin=started	started_at=1793443188	ended_at=1793443203	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=0	lock_before=pid:13710|identity:Sat Oct 31 10:39:48 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+
+[15.93s] startup lock residue=[]
+[16.40s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 13710.1793443203.uUfvV0
+
+[16.60s] ACK exit=0
+
+
+[16.60s] SCENARIO PASS
+[16.60s] Disposable lab removed; all launched process leaders waited.

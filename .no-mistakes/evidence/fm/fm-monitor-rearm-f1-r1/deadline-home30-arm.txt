@@ -1,0 +1,1 @@
+watcher: FAILED - no live watcher with a fresh beacon

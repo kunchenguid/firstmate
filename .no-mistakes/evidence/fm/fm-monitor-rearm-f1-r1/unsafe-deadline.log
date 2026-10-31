@@ -1,0 +1,22 @@
+SCENARIO unsafe-deadline
+arm rc=1 duration=17.60s
+no singleton, steal, micro-lock, or owner-directory residue
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 20633.1793445387.02o9ZO
+
+ACK rc=0
+
+elapsed=22.98s
+arm.out
+watcher: FAILED - no live watcher with a fresh beacon
+
+.watch-cycle-exits.log
+arm_pid=19469	watcher_pid=20633	origin=started	started_at=1793445373	ended_at=1793445387	exit_code=143	signal=TERM	reason=confirmation-timeout	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+.watcher-down
+acked:handling:20633.1793445387.02o9ZO
+
+.wake-queue
+
+FINAL_STATE ['.wake-queue', '.watch-cycle-exits.log', '.watcher-down']
+lab removed; all direct children awaited; no lab descendants in process inventory

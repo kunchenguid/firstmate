@@ -1,0 +1,7 @@
+[
+  {
+    "name": "identity-probe-failure",
+    "result": "pass",
+    "evidence": "~/.no-mistakes/evidence/01M68QJP6Q03GEDV19NYPCD253/identity-probe-failure.log"
+  }
+]

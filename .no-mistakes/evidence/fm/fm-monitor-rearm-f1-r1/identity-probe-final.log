@@ -1,0 +1,7 @@
+ARM rc=1 elapsed=0.80s
+watcher: FAILED - could not publish watcher identity in {run-worktree}/.live-watcher-labs/identity-probe-final/state/.watch.lock
+
+CYCLE LEDGER
+arm_pid=97686	watcher_pid=97828	origin=started	started_at=1793442711	ended_at=1793442712	exit_code=1	signal=none	reason=nonzero-exit	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+Remaining lock paths: []

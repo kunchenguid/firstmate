@@ -1,0 +1,7 @@
+ARM rc=129 elapsed=65.71s
+
+CYCLE LEDGER
+arm_pid=73082	watcher_pid=73150	origin=started	started_at=1793442519	ended_at=1793442585	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+Remaining lock paths: [".watcher-down.lock.owner.GOYlEw"]
+FAILED AssertionError()

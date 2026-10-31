@@ -1,0 +1,150 @@
+[0.01s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-recheck-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=28189
+[3.04s] arm exit=129
+[3.04s] PRODUCT OUTPUT:
+
+[3.04s] PERSISTED CYCLE LEDGER:
+arm_pid=28189	watcher_pid=28365	origin=started	started_at=1793443357	ended_at=1793443359	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[3.04s] startup lock residue=[]
+[3.53s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 28365.1793443359.bBnQlY
+
+[4.47s] ACK exit=0
+
+
+[4.47s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-recheck-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=33355
+[7.52s] arm exit=143
+[7.52s] PRODUCT OUTPUT:
+
+[7.52s] PERSISTED CYCLE LEDGER:
+arm_pid=28189	watcher_pid=28365	origin=started	started_at=1793443357	ended_at=1793443359	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=33355	watcher_pid=33391	origin=started	started_at=1793443361	ended_at=1793443364	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[7.52s] startup lock residue=[]
+[7.93s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 33391.1793443364.2X0ywC
+
+[8.14s] ACK exit=0
+
+
+[8.14s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-recheck-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=36728
+[11.14s] arm exit=129
+[11.14s] PRODUCT OUTPUT:
+
+[11.14s] PERSISTED CYCLE LEDGER:
+arm_pid=28189	watcher_pid=28365	origin=started	started_at=1793443357	ended_at=1793443359	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=33355	watcher_pid=33391	origin=started	started_at=1793443361	ended_at=1793443364	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=36728	watcher_pid=36827	origin=started	started_at=1793443365	ended_at=1793443367	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[11.14s] startup lock residue=[]
+[11.61s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 36827.1793443367.FmAX6K
+
+[11.81s] ACK exit=0
+
+
+[11.81s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-recheck-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=40506
+[14.56s] arm exit=143
+[14.56s] PRODUCT OUTPUT:
+
+[14.56s] PERSISTED CYCLE LEDGER:
+arm_pid=28189	watcher_pid=28365	origin=started	started_at=1793443357	ended_at=1793443359	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=33355	watcher_pid=33391	origin=started	started_at=1793443361	ended_at=1793443364	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=36728	watcher_pid=36827	origin=started	started_at=1793443365	ended_at=1793443367	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=40506	watcher_pid=40563	origin=started	started_at=1793443368	ended_at=1793443371	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[14.56s] startup lock residue=[]
+[15.06s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 40563.1793443371.eB7nW8
+
+[15.30s] ACK exit=0
+
+
+[15.31s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-recheck-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=44235
+[17.99s] arm exit=129
+[17.99s] PRODUCT OUTPUT:
+
+[17.99s] PERSISTED CYCLE LEDGER:
+arm_pid=28189	watcher_pid=28365	origin=started	started_at=1793443357	ended_at=1793443359	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=33355	watcher_pid=33391	origin=started	started_at=1793443361	ended_at=1793443364	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=36728	watcher_pid=36827	origin=started	started_at=1793443365	ended_at=1793443367	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=40506	watcher_pid=40563	origin=started	started_at=1793443368	ended_at=1793443371	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=44235	watcher_pid=44296	origin=started	started_at=1793443372	ended_at=1793443374	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[17.99s] startup lock residue=[]
+[18.45s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 44296.1793443374.3yKqHM
+
+[18.65s] ACK exit=0
+
+
+[18.65s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-recheck-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=48987
+[29.40s] arm exit=143
+[29.40s] PRODUCT OUTPUT:
+
+[29.40s] PERSISTED CYCLE LEDGER:
+arm_pid=28189	watcher_pid=28365	origin=started	started_at=1793443357	ended_at=1793443359	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=33355	watcher_pid=33391	origin=started	started_at=1793443361	ended_at=1793443364	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=36728	watcher_pid=36827	origin=started	started_at=1793443365	ended_at=1793443367	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=40506	watcher_pid=40563	origin=started	started_at=1793443368	ended_at=1793443371	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=44235	watcher_pid=44296	origin=started	started_at=1793443372	ended_at=1793443374	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=48987	watcher_pid=49013	origin=started	started_at=1793443375	ended_at=1793443381	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[29.41s] startup lock residue=[]
+[32.93s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 49013.1793443378.Pw0ICS
+
+[33.33s] ACK exit=0
+
+
+[33.33s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-recheck-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=55284
+[37.15s] arm exit=129
+[37.15s] PRODUCT OUTPUT:
+
+[37.15s] PERSISTED CYCLE LEDGER:
+arm_pid=28189	watcher_pid=28365	origin=started	started_at=1793443357	ended_at=1793443359	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=33355	watcher_pid=33391	origin=started	started_at=1793443361	ended_at=1793443364	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=36728	watcher_pid=36827	origin=started	started_at=1793443365	ended_at=1793443367	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=40506	watcher_pid=40563	origin=started	started_at=1793443368	ended_at=1793443371	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=44235	watcher_pid=44296	origin=started	started_at=1793443372	ended_at=1793443374	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=48987	watcher_pid=49013	origin=started	started_at=1793443375	ended_at=1793443381	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=55284	watcher_pid=55420	origin=started	started_at=1793443390	ended_at=1793443393	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[37.15s] startup lock residue=[]
+[37.67s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 55420.1793443393.iv1awm
+
+[37.93s] ACK exit=0
+
+
+[37.93s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-recheck-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=57349
+[42.72s] arm exit=143
+[42.72s] PRODUCT OUTPUT:
+
+[42.72s] PERSISTED CYCLE LEDGER:
+arm_pid=28189	watcher_pid=28365	origin=started	started_at=1793443357	ended_at=1793443359	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=33355	watcher_pid=33391	origin=started	started_at=1793443361	ended_at=1793443364	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=36728	watcher_pid=36827	origin=started	started_at=1793443365	ended_at=1793443367	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=40506	watcher_pid=40563	origin=started	started_at=1793443368	ended_at=1793443371	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=44235	watcher_pid=44296	origin=started	started_at=1793443372	ended_at=1793443374	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=48987	watcher_pid=49013	origin=started	started_at=1793443375	ended_at=1793443381	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=55284	watcher_pid=55420	origin=started	started_at=1793443390	ended_at=1793443393	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=57349	watcher_pid=57383	origin=started	started_at=1793443394	ended_at=1793443399	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[42.72s] startup lock residue=[]
+[43.52s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 57383.1793443399.Dr7jci
+
+[44.66s] ACK exit=0
+
+
+[44.66s] SCENARIO PASS
+[44.66s] Disposable lab removed; all launched process leaders waited.

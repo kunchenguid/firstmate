@@ -1,0 +1,2 @@
+{run-worktree}/bin/fm-watch.sh: line 3541: {run-worktree}/.live-watcher-labs/identity-write-failure-retry/state/.watch.lock/fm-home: Is a directory
+watcher: FAILED - could not publish watcher identity in {run-worktree}/.live-watcher-labs/identity-write-failure-retry/state/.watch.lock

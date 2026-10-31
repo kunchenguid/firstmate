@@ -1,0 +1,18 @@
+[0.00s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/deadline-home-60 options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '64'} arm_pid=52370
+[64.75s] arm exit=1
+[64.75s] PRODUCT OUTPUT:
+watcher: FAILED - no live watcher with a fresh beacon
+
+[64.75s] PERSISTED CYCLE LEDGER:
+arm_pid=52370	watcher_pid=52403	origin=started	started_at=1793443243	ended_at=1793443308	exit_code=143	signal=TERM	reason=confirmation-timeout	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[64.75s] startup lock residue=[]
+[65.16s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 52403.1793443308.qhy3Qh
+
+[65.35s] ACK exit=0
+
+
+[65.35s] SCENARIO PASS
+[65.35s] Disposable lab removed; all launched process leaders waited.

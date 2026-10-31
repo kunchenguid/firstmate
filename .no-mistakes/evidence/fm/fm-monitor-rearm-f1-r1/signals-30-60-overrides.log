@@ -1,0 +1,151 @@
+SCENARIO signals-30-60-overrides
+iteration=0 signal=SIGHUP watcher=27396 rc=129 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 27396.1793445017.FZMOYd
+
+ACK rc=0
+
+iteration=1 signal=SIGTERM watcher=44743 rc=143 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 44743.1793445066.EUZdwK
+
+ACK rc=0
+
+iteration=2 signal=SIGHUP watcher=63492 rc=129 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 63492.1793445118.5Pz0cS
+
+ACK rc=0
+
+iteration=3 signal=SIGTERM watcher=70962 rc=143 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 70962.1793445140.3N0UdF
+
+ACK rc=0
+
+iteration=4 signal=SIGHUP watcher=91305 rc=129 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 91305.1793445162.DJCvaf
+
+ACK rc=0
+
+iteration=5 signal=SIGTERM watcher=7806 rc=143 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 7806.1793445179.iBTu1x
+
+ACK rc=0
+
+iteration=6 signal=SIGHUP watcher=20708 rc=129 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 20708.1793445217.MdFCQx
+
+ACK rc=0
+
+iteration=7 signal=SIGTERM watcher=39048 rc=143 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 39048.1793445246.fzg8lU
+
+ACK rc=0
+
+iteration=8 signal=SIGHUP watcher=47407 rc=129 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 47407.1793445261.dIM5dt
+
+ACK rc=0
+
+iteration=9 signal=SIGTERM watcher=57620 rc=143 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 57620.1793445274.PBnges
+
+ACK rc=0
+
+iteration=10 signal=SIGHUP watcher=67244 rc=129 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 67244.1793445290.1elGaJ
+
+ACK rc=0
+
+iteration=11 signal=SIGTERM watcher=72974 rc=143 no singleton, steal, micro-lock, or owner-directory residue; foreign owner preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 72974.1793445302.KeUfNi
+
+ACK rc=0
+
+late real mktemp after HUP: watcher rc=-1 no singleton, steal, micro-lock, or owner-directory residue; foreign staging preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 81335.1793445320.RX3fJE
+
+ACK rc=0
+
+late real mktemp after TERM: watcher rc=-15 no singleton, steal, micro-lock, or owner-directory residue; foreign staging preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 92883.1793445333.j15d7o
+
+ACK rc=0
+
+late real ln after HUP: watcher rc=-1 no singleton, steal, micro-lock, or owner-directory residue; foreign staging preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 1313.1793445345.AS92Me
+
+ACK rc=0
+
+late real ln after TERM: watcher rc=-15 no singleton, steal, micro-lock, or owner-directory residue; foreign staging preserved
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 8790.1793445355.ZoA6Jx
+
+ACK rc=0
+
+elapsed=360.43s
+mutation-ln-HUP.out
+
+arm-11.out
+
+arm-05.out
+
+arm-04.out
+
+arm-10.out
+
+arm-06.out
+
+arm-07.out
+
+arm-03.out
+
+arm-02.out
+
+arm-00.out
+
+arm-01.out
+
+arm-09.out
+
+mutation-ln-TERM.out
+
+arm-08.out
+
+mutation-mktemp-HUP.out
+
+mutation-mktemp-TERM.out
+
+.watch-cycle-exits.log
+arm_pid=27276	watcher_pid=27396	origin=started	started_at=1793445004	ended_at=1793445019	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=44642	watcher_pid=44743	origin=started	started_at=1793445058	ended_at=1793445069	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=63347	watcher_pid=63492	origin=started	started_at=1793445115	ended_at=1793445119	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=69358	watcher_pid=70962	origin=started	started_at=1793445133	ended_at=1793445141	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=91073	watcher_pid=91305	origin=started	started_at=1793445156	ended_at=1793445162	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=7507	watcher_pid=7806	origin=started	started_at=1793445175	ended_at=1793445180	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=19589	watcher_pid=20708	origin=started	started_at=1793445205	ended_at=1793445217	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=37262	watcher_pid=39048	origin=started	started_at=1793445238	ended_at=1793445246	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=47139	watcher_pid=47407	origin=started	started_at=1793445258	ended_at=1793445262	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=57070	watcher_pid=57620	origin=started	started_at=1793445270	ended_at=1793445275	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=66498	watcher_pid=67244	origin=started	started_at=1793445284	ended_at=1793445290	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=72859	watcher_pid=72974	origin=started	started_at=1793445297	ended_at=1793445303	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+.watcher-down
+acked:handling:8790.1793445355.ZoA6Jx
+
+.wake-queue
+
+FINAL_STATE ['.wake-queue', '.watch-cycle-exits.log', '.watcher-down']
+lab removed; all direct children awaited; no lab descendants in process inventory

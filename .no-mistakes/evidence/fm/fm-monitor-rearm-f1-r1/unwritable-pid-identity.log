@@ -1,0 +1,20 @@
+[0.00s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/unwritable-pid-identity options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '10'} arm_pid=9088
+[3.44s] arm exit=1
+[3.44s] PRODUCT OUTPUT:
+{run-worktree}/bin/fm-watch.sh: line 3551: {run-worktree}/.test-live/unwritable-pid-identity/state/.watch.lock/pid-identity: Is a directory
+watcher: FAILED - could not publish watcher identity in {run-worktree}/.test-live/unwritable-pid-identity/state/.watch.lock
+
+[3.44s] PERSISTED CYCLE LEDGER:
+arm_pid=9088	watcher_pid=9166	origin=started	started_at=1793443511	ended_at=1793443514	exit_code=1	signal=none	reason=nonzero-exit	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[3.44s] Removed only the intentionally injected directory and its pid-less container.
+[3.44s] startup lock residue=[]
+[4.81s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 9166.1793443514.6fz6w9
+
+[5.40s] ACK exit=0
+
+
+[5.40s] SCENARIO PASS
+[5.40s] Disposable lab removed; all launched process leaders waited.

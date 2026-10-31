@@ -1,0 +1,16 @@
+[
+  {
+    "name": "signal-repeat1",
+    "result": "fail",
+    "error": "AssertionError()"
+  },
+  {
+    "name": "signal-repeat2",
+    "result": "pass"
+  },
+  {
+    "name": "signal-repeat3",
+    "result": "fail",
+    "error": "AssertionError()"
+  }
+]

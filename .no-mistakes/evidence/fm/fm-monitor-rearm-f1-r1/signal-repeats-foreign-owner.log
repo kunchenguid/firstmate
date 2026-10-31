@@ -1,0 +1,80 @@
+[0.00s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-repeats-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=94996
+[2.70s] arm exit=129
+[2.70s] PRODUCT OUTPUT:
+
+[2.70s] PERSISTED CYCLE LEDGER:
+arm_pid=94996	watcher_pid=95058	origin=started	started_at=1793443309	ended_at=1793443311	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[2.70s] startup lock residue=[]
+[3.19s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 95058.1793443311.4HkILo
+
+[3.40s] ACK exit=0
+
+
+[3.40s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-repeats-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=97021
+[6.03s] arm exit=143
+[6.03s] PRODUCT OUTPUT:
+
+[6.03s] PERSISTED CYCLE LEDGER:
+arm_pid=94996	watcher_pid=95058	origin=started	started_at=1793443309	ended_at=1793443311	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=97021	watcher_pid=97060	origin=started	started_at=1793443312	ended_at=1793443315	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[6.03s] startup lock residue=[]
+[6.48s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 97060.1793443315.MzghmE
+
+[6.67s] ACK exit=0
+
+
+[6.67s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-repeats-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=99639
+[9.52s] arm exit=129
+[9.52s] PRODUCT OUTPUT:
+
+[9.52s] PERSISTED CYCLE LEDGER:
+arm_pid=94996	watcher_pid=95058	origin=started	started_at=1793443309	ended_at=1793443311	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=97021	watcher_pid=97060	origin=started	started_at=1793443312	ended_at=1793443315	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=99639	watcher_pid=99702	origin=started	started_at=1793443315	ended_at=1793443318	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[9.52s] startup lock residue=[]
+[10.10s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 99702.1793443318.4TOfc6
+
+[10.28s] ACK exit=0
+
+
+[10.29s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-repeats-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=3618
+[12.86s] arm exit=143
+[12.86s] PRODUCT OUTPUT:
+
+[12.86s] PERSISTED CYCLE LEDGER:
+arm_pid=94996	watcher_pid=95058	origin=started	started_at=1793443309	ended_at=1793443311	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=97021	watcher_pid=97060	origin=started	started_at=1793443312	ended_at=1793443315	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=99639	watcher_pid=99702	origin=started	started_at=1793443315	ended_at=1793443318	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=3618	watcher_pid=3695	origin=started	started_at=1793443319	ended_at=1793443321	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[12.86s] startup lock residue=[]
+[13.95s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 3695.1793443321.brBnXb
+
+[14.24s] ACK exit=0
+
+
+[14.24s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/signal-repeats-foreign-owner options={'FM_TEST_WATCHER_PRE_IDENTITY_DELAY': '2', 'FM_ARM_CONFIRM_TIMEOUT': '1'} arm_pid=7936
+[17.02s] arm exit=129
+[17.02s] PRODUCT OUTPUT:
+
+[17.02s] PERSISTED CYCLE LEDGER:
+arm_pid=94996	watcher_pid=95058	origin=started	started_at=1793443309	ended_at=1793443311	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=97021	watcher_pid=97060	origin=started	started_at=1793443312	ended_at=1793443315	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=99639	watcher_pid=99702	origin=started	started_at=1793443315	ended_at=1793443318	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=0	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=3618	watcher_pid=3695	origin=started	started_at=1793443319	ended_at=1793443321	exit_code=143	signal=TERM	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+arm_pid=7936	watcher_pid=8089	origin=started	started_at=1793443323	ended_at=1793443325	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[17.02s] startup lock residue=['.wake-queue.lock', '.wake-queue.lock.owner.8089.12406.7002.bcWgLw']
+[17.02s] SCENARIO FAIL AssertionError(['.wake-queue.lock', '.wake-queue.lock.owner.8089.12406.7002.bcWgLw'])
+[17.03s] Disposable lab removed; all launched process leaders waited.

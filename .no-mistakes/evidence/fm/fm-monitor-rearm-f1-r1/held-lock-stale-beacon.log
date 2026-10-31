@@ -1,0 +1,18 @@
+[0.10s] RUN bin/fm-watch-arm.sh FM_HOME={run-worktree}/.test-live/held-lock-stale-beacon options={'FM_WATCHER_STARTUP_LOCK_BOUND': '2'} arm_pid=23602
+[2.86s] arm exit=1
+[2.93s] PRODUCT OUTPUT:
+watcher: FAILED - startup lock {run-worktree}/.test-live/held-lock-stale-beacon/state/.wake-queue.lock held by live pid 23476
+
+[2.93s] PERSISTED CYCLE LEDGER:
+arm_pid=23602	watcher_pid=23666	origin=started	started_at=1793443204	ended_at=1793443207	exit_code=1	signal=none	reason=nonzero-exit	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+[2.93s] startup lock residue=[]
+[3.39s] RUN bin/fm-wake-drain.sh exit=0
+
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 23666.1793443207.7jNF6i
+
+[3.60s] ACK exit=0
+
+
+[3.60s] SCENARIO PASS
+[3.60s] Disposable lab removed; all launched process leaders waited.

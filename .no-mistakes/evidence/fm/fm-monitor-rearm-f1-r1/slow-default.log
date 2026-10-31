@@ -1,0 +1,13 @@
+Confirmed after 16.46s (legacy budget 10s)
+ARM rc=129 elapsed=16.79s
+watcher: started pid=40585 (beacon fresh)
+
+CYCLE LEDGER
+arm_pid=40553	watcher_pid=40585	origin=started	started_at=1793442463	ended_at=1793442479	exit_code=129	signal=HUP	reason=arm-interrupted	beacon_age=1	lock_before=pid:40585|identity:Sat Oct 31 10:27:43 2026     bash {run-worktree}/bin/fm-watch.sh	lock_after=pid:none|identity:none	successor=none
+
+Remaining lock paths: []
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 40585.1793442479.PC1CDs
+
+ACK rc=0
+

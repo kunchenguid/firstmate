@@ -1,0 +1,9 @@
+ARM rc=1 elapsed=3.52s
+{run-worktree}/bin/fm-watch.sh: line 3541: {run-worktree}/.live-watcher-labs/identity-write-failure-retry/state/.watch.lock/fm-home: Is a directory
+watcher: FAILED - could not publish watcher identity in {run-worktree}/.live-watcher-labs/identity-write-failure-retry/state/.watch.lock
+
+CYCLE LEDGER
+arm_pid=85545	watcher_pid=85628	origin=started	started_at=1793442688	ended_at=1793442691	exit_code=1	signal=none	reason=nonzero-exit	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+Remaining lock paths: [".watch.lock.owner.mjIYu0"]
+FAILED AssertionError()

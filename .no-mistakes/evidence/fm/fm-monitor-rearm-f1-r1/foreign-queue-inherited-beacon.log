@@ -1,0 +1,12 @@
+ARM rc=1 elapsed=2.55s
+watcher: FAILED - startup lock {run-worktree}/.live-watcher-labs/foreign-queue-inherited-beacon/state/.wake-queue.lock held by live pid 49156
+
+CYCLE LEDGER
+arm_pid=49343	watcher_pid=49389	origin=started	started_at=1793442480	ended_at=1793442482	exit_code=1	signal=none	reason=nonzero-exit	beacon_age=999999	lock_before=pid:none|identity:none	lock_after=pid:none|identity:none	successor=none
+
+Remaining lock paths: []
+DRAIN rc=0
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation 49389.1793442482.1T6yGc
+
+ACK rc=0
+

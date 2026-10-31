@@ -1,0 +1,1 @@
+watcher: FAILED - startup lock {run-worktree}/.live-watcher-labs/foreign-queue-inherited-beacon/state/.wake-queue.lock held by live pid 49156
