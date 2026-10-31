@@ -115,7 +115,8 @@ pass "remote provisioning publishes durable parent state before its completion m
 # --- the remote host's tracked code root, real git repos, one project --------
 (
   cd "$ROOT" || exit
-  tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config -cf - .
+  tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config \
+    --exclude=.fm-secondmate-home --exclude=.fm-secondmate-parent -cf - .
 ) | (cd "$REMOTE_ROOT" && tar -xf -)
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"

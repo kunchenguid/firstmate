@@ -40,7 +40,8 @@ trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-proceven
 # tracked there, and the remote side runs the real scripts under test.
 (
   cd "$ROOT" || exit
-  tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config -cf - .
+  tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config \
+    --exclude=.fm-secondmate-home --exclude=.fm-secondmate-parent -cf - .
 ) | (cd "$REMOTE_ROOT" && tar -xf -)
 
 # The remote host runs the Herdr fixture, whose every invocation is logged

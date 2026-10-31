@@ -20,6 +20,15 @@ LIB="$ROOT/bin/fm-wake-lib.sh"
 # an arm genuinely fails to exit; a passing case returns as soon as it does.
 ARM_FAIL_EXIT_POLLS=400
 
+# Signal-driven arm teardown has no such confirmation budget to spend: measured
+# against both a real arm and its real child watcher it completes in 0-1s. What
+# it has no bound on is scheduler starvation, and an eight-second ceiling is
+# close enough to that spread that a loaded machine fails the case with
+# wait_for_exit's 124 rather than a wrong exit status. Share the ceiling above
+# rather than pick a second number: it is spent only when the teardown genuinely
+# stalls, and a passing case returns as soon as the arm exits.
+ARM_SIGNAL_EXIT_POLLS=$ARM_FAIL_EXIT_POLLS
+
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
 # Execute the actual disposable-checkout guard before any watcher can start.
@@ -445,12 +454,15 @@ test_guard_warnings() {
 }
 
 test_lock_single_winner_under_concurrency() {
-  local dir state lockdir marker i pids pid wins
+  local dir state lockdir marker attempted release i pids pid wins attempts failed
   dir=$(make_case lock-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  attempted="$dir/attempted"
+  release="$dir/release"
   : > "$marker"
+  : > "$attempted"
   pids=
   i=1
   while [ "$i" -le 40 ]; do
@@ -458,17 +470,35 @@ test_lock_single_winner_under_concurrency() {
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "$$" >> "$3"
-        # Stay alive so the held lock names a live pid for the whole window;
-        # otherwise a late contender could legitimately reclaim a dead-pid lock.
-        sleep 1
+        printf "%s\n" "$$" >> "$4"
+        # Stay alive until every contender has tried, so the held lock names a
+        # live pid for the whole window. A fixed hold is not enough: forty
+        # shells sourcing the library can take several seconds to start, and a
+        # contender that starts after the holder exits may legitimately reclaim
+        # the dead-pid lock.
+        while [ ! -e "$5" ]; do sleep 0.05; done
+      else
+        printf "%s\n" "$$" >> "$4"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$attempted" "$release" &
     pids="$pids $!"
     i=$((i + 1))
   done
-  for pid in $pids; do
-    wait "$pid" 2>/dev/null || true
+  i=0
+  while [ "$(awk 'NF { c++ } END { print c + 0 }' "$attempted")" -lt 40 ] && [ "$i" -lt 1200 ]; do
+    sleep 0.05
+    i=$((i + 1))
   done
+  # Count before releasing: a contender that only tries after the release can
+  # legitimately reclaim the winner's dead-pid lock.
+  attempts=$(awk 'NF { c++ } END { print c + 0 }' "$attempted")
+  : > "$release"
+  failed=0
+  for pid in $pids; do
+    wait "$pid" || failed=$((failed + 1))
+  done
+  [ "$attempts" -eq 40 ] || fail "only $attempts of 40 contenders tried the lock before release"
+  [ "$failed" -eq 0 ] || fail "$failed contender(s) exited non-zero"
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
   [ "$wins" -eq 1 ] || fail "expected exactly one lock winner under concurrency, got $wins"
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
@@ -1574,11 +1604,11 @@ test_arm_hup_cleans_child_and_temp_output() {
   grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$ARM_SIGNAL_EXIT_POLLS"
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
   i=0
-  while [ "$i" -lt 80 ] && is_live_non_zombie "$lock_pid"; do
+  while [ "$i" -lt "$ARM_SIGNAL_EXIT_POLLS" ] && is_live_non_zombie "$lock_pid"; do
     sleep 0.1
     i=$((i + 1))
   done
@@ -1713,7 +1743,10 @@ SH
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
     || fail "could not register cycle-ledger check"
 
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  # Like the immediate-wake case, this child runs the registered check before
+  # exiting, which can outlast the production confirmation budget under host
+  # load. The ledger is the assertion here, not the deadline (issue #2844).
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=60 "$WATCH_ARM" > "$armout" &
   first_arm=$!
   wait "$first_arm" || fail "first ledger cycle did not surface its actionable wake"
   grep -q "arm_pid=$first_arm.*reason=actionable-check.*successor=none" "$state/.watch-cycle-exits.log" \

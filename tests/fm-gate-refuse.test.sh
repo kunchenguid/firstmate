@@ -490,7 +490,12 @@ SH
 # run_teardown <cwd> <case_dir> [ASSIGN...] -> combined output
 run_teardown() {
   local cwd=$1 case_dir=$2; shift 2
+  # FM_HOME is pinned beside the other overrides: teardown falls back to
+  # FM_ROOT_OVERRIDE when it is unset, which makes the home under test the
+  # developer's own checkout. A checkout carrying a .fm-secondmate-home marker
+  # then refuses every case here over a second mate the fixture never created.
   ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+      "FM_HOME=$case_dir/home" \
       "FM_ROOT_OVERRIDE=$ROOT" "FM_STATE_OVERRIDE=$case_dir/state" \
       "FM_DATA_OVERRIDE=$case_dir/data" "FM_CONFIG_OVERRIDE=$case_dir/config" \
       "PATH=$case_dir/fakebin:$PATH" "$@" \
