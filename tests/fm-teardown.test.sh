@@ -794,6 +794,42 @@ SH
   pass "teardown closes a landed Gerrit task with its change URL as a note and a GitHub task with --pr"
 }
 
+test_teardown_closes_a_bitbucket_task_with_its_pull_request_url_as_a_note() {
+  local case_dir out real_tasks_axi bitbucket_url=https://bitbucket.org/ws/repo/pull-requests/12
+  case_dir=$(make_case tasks-axi-close-bitbucket)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$bitbucket_url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
+  # GitHub pull request, so this case keeps reproducing whatever the installed
+  # release accepts.
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed Bitbucket task failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left a landed Bitbucket task's backlog item at $(backlog_row_state "$case_dir"): $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "body: \"Bitbucket pull request $bitbucket_url\"" >/dev/null \
+    || fail "closed Bitbucket backlog item did not record its pull request URL as a note"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a landed Bitbucket close left its pending-close record behind"
+
+  pass "teardown closes a Bitbucket task with its pull request URL as a note"
+}
+
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note() {
   local case_dir out real_tasks_axi url forge
   local gitlab_url=https://gitlab.example.com/group/sub/repo/-/merge_requests/12
@@ -5970,6 +6006,7 @@ test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
+test_teardown_closes_a_bitbucket_task_with_its_pull_request_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
