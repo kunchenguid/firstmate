@@ -143,6 +143,21 @@ test_emitted_away_scope_gate() {
   pass 'emitted supervision prompt gates away dispatch to the recorded words and keeps the attended handoff'
 }
 
+test_emitted_unconfirmed_start_contract() {
+  local prompt
+  # Same generated-interface rule as the two cases above. The branch cannot hold
+  # an unconfirmed start in the queue: recovery marks a queued row that this home
+  # already owns a worker record for back to In flight, so a reopen the branch was
+  # told to run would drop the unit out of the queue while its endpoint still
+  # needed attention. The emitted instruction is therefore the surface to pin.
+  prompt=$("$ROOT/bin/fm-branch-prompt.sh") || fail 'could not generate supervision prompt'
+  assert_contains "$prompt" 'If startup cannot be confirmed, keep its endpoint and work intact and leave the unit In flight rather than reopening it' 'emitted prompt sent an unconfirmed start back to the queue'
+  assert_contains "$prompt" 'reads a queued row paired with a worker record this home still owns as work it must mark In flight' 'emitted prompt lost why recovery undoes a reopen'
+  assert_contains "$prompt" 'retry on that endpoint by inspecting it until it proves the start or by relaunching it' 'emitted prompt lost the unconfirmed-start retry path'
+  assert_not_contains "$prompt" 'fm-tasks-axi.sh reopen <unit>' 'emitted prompt still reopened a unit whose worker record exists'
+  pass 'emitted supervision prompt keeps an unconfirmed start out of the queue drop'
+}
+
 test_daemon_heartbeat() {
   local mode=$1 skip=${2:-heartbeat} dir state
   dir=$(make_case "daemon-$mode-$skip")
@@ -213,6 +228,7 @@ test_not_ready_heartbeat empty
 test_not_ready_heartbeat held
 test_emitted_stop_revalidation_contract
 test_emitted_away_scope_gate
+test_emitted_unconfirmed_start_contract
 test_daemon_heartbeat ready
 test_daemon_heartbeat ready signal
 test_daemon_heartbeat empty
