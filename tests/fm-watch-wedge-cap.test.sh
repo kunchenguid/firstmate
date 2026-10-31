@@ -966,12 +966,18 @@ test_wedge_cap_sentinel_probe_keeps_its_cadence() {
   log_tmux_inventory_calls "$fakebin" "$inventory"
 
   # Below the threshold the probe has nothing to decide: five whole polls, no
-  # endpoint read, still no wake.
+  # endpoint read, still no wake - but the operator still sees why the window
+  # is silent, since the cadence that defers the probe must not hide the sentinel.
+  : > "$state/.watch-triage.log"
   hold_capped_polls "$dir" "$max" 240 5 5 \
     || fail "the silenced window did not stay silent and alive below the threshold: $(cat "$out")"
   below=$(inventory_calls "$inventory")
   [ "$below" -eq 0 ] \
     || fail "a window silenced below the escalation threshold read its endpoint $below times across five polls; the dead-endpoint probe belongs behind the same threshold every other wedge route runs it behind"
+  grep -F "rollback-failed sentinel active for $window" "$state/.watch-triage.log" >/dev/null \
+    || fail "a window silenced below the escalation threshold never reported the sentinel to the operator: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  [ "$(queued_wakes_carrying "$state" "$window" "possible wedge")" -eq 0 ] \
+    || fail "the sentinel published a wedge wake below the threshold: $(cat "$state/.wake-queue" 2>/dev/null)"
   [ -e "$sentinel" ] || fail "a poll below the threshold consumed the sentinel; it must hold until TTL expiry or an operator rm"
 
   # At the threshold the probe is owed its one read, and its own re-arm of the

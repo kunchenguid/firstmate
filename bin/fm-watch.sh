@@ -2040,12 +2040,13 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       # escalates behind, and its own re-arm of the shared idle timer - the
       # caller's on its not-dead outcome here, its own on the death it reports -
       # is what advances that gate, so a silenced window pays one backend read
-      # and one line here per STALE_ESCALATE_SECS rather than one of each per
-      # poll for the whole TTL. An unreadable idle timer is repaired and probed
-      # at once, exactly as the uncapped ladder below repairs and absorbs it: a
-      # sentinel must never be the reason a silenced window stops learning
-      # whether its worker is alive, and the repair is what lets the gate bound
-      # that probe afterwards.
+      # per STALE_ESCALATE_SECS rather than one per poll for the whole TTL. The
+      # operator line is not gated: each silenced poll writes it, so the silence
+      # stays visible while the cadence defers the probe. An unreadable idle
+      # timer is repaired and probed at once, exactly as the uncapped ladder
+      # below repairs and absorbs it: a sentinel must never be the reason a
+      # silenced window stops learning whether its worker is alive, and the
+      # repair is what lets the gate bound that probe afterwards.
       _wrb_gate=1
       _wrb_age=0
       _wrb_since=$(cat "$since_file" 2>/dev/null || true)
@@ -2059,8 +2060,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           [ "$_wrb_age" -ge "$STALE_ESCALATE_SECS" ] || _wrb_gate=0
           ;;
       esac
+      triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); escalations silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
       if [ "$_wrb_gate" -eq 1 ]; then
-        triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); escalations silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
         wedge_dead_record "$win" "$since_file" "$label" "$_wrb_age" "$hash" "$task" \
           || { fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
       fi
