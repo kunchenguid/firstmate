@@ -682,7 +682,7 @@ rex_teardown_meta() {  # <state-dir> <id> <kind> <home> <session-id> <window-id>
 }
 
 test_teardown_retires_the_secondmate_session() {
-  local dir mate out sid wid bid crew_sid crew_wid crew_bid rc
+  local dir mate out sid wid bid crew_sid crew_wid crew_bid rc nested nested_sid nested_wid nested_bid
   dir=$(new_case teardown-secondmate)
   mate="$dir/mate"
   mkdir -p "$mate/state" "$mate/data" "$mate/config" "$dir/home/data" "$dir/home/config"
@@ -696,6 +696,15 @@ test_teardown_retires_the_secondmate_session() {
   assert_equals "$sid" "$crew_sid" "the secondmate's crew must share its per-home session"
   rex_teardown_meta "$dir/home/state" sm secondmate "$mate" "$sid" "$wid" "$bid"
   rex_teardown_meta "$mate/state" crew ship "$dir/nonexistent-crew" "$crew_sid" "$crew_wid" "$crew_bid"
+  nested="$mate/nested"
+  mkdir -p "$nested/state" "$nested/data" "$nested/config"
+  printf 'nested-sm' >"$nested/.fm-secondmate-home"
+  out=$(rex_env "$dir" "FM_HOME=$nested" "FM_ROOT=$nested" "STATE=$nested/state" \
+    'fm_backend_rex_create_task fm-nested-sm /tmp other-home') || fail "nested secondmate create_task failed"
+  read -r nested_sid nested_wid nested_bid <<<"$out"
+  rex_teardown_meta "$mate/state" nested-sm secondmate "$nested" "$nested_sid" "$nested_wid" "$nested_bid"
+  printf 'max=2\nmodels=gpt-6.1-sol\n' >"$mate/config/sol-cap"
+  printf 'nested-sm\tgpt-6.1-sol\t1\t-2\n' >"$mate/state/sol-sessions.tsv"
   fake_rex "$dir" new other --window keep --cwd /tmp --json >/dev/null
 
   out=$(env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
@@ -705,6 +714,8 @@ test_teardown_retires_the_secondmate_session() {
   expect_code 0 "$rc" "teardown of a rex secondmate must succeed: $out"
   assert_equals 0 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$sid\")] | length")" \
     "retiring the secondmate must retire its emptied per-home session"
+  assert_equals 0 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$nested_sid\")] | length")" \
+    "retiring a capped descendant without crew must retire its own per-home session"
   assert_equals 1 "$(state_json "$dir" '.sessions | length')" "an unrelated session must survive the retirement"
   pass "fm-teardown rex: retiring a secondmate closes its crew and its own tab and retires its per-home session"
 }

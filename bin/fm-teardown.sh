@@ -3575,7 +3575,12 @@ cleanup_firstmate_home_children() {
       elif [ "$child_owned" -eq 0 ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
-        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill_confirmed "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) \
+        child_home=$home
+        if [ "$child_backend" = rex ] && [ "$child_kind" = secondmate ]; then
+          child_home=$(meta_value "$child_meta" home)
+          [ -n "$child_home" ] || child_home=$child_wt
+        fi
+        ( unset FM_ROOT_OVERRIDE; FM_HOME=$child_home FM_ROOT=$child_home STATE="$child_home/state" fm_backend_kill_confirmed "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) \
           || { echo "error: child $child_id's endpoint $child_t could not be confirmed gone, so its capped occupancy is retained" >&2; return 1; }
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
