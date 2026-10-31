@@ -35,6 +35,10 @@
 #   parent_status=          absolute path of parent state/<task_id>.status
 #   parent_status_scan_signature=
 #   request_summary=        short sanitized summary (no secrets by design)
+#   request_kind=           optional resolution policy; absent or empty keeps
+#                           ordinary acknowledgement behavior; the reply policy
+#                           for secondmate-restart-persist is owned by the
+#                           bin/fm-secondmate-restart.sh header
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
 #                           (empty until delivery; delivery never resolves)
@@ -326,8 +330,8 @@ fm_pending_reply_embed_corr() {  # <message> <corr_id> <result-var>
 
 # Create a durable pending-reply expectation. Prints corr_id on success.
 # Does not deliver anything. Fails if parent paths cannot be prepared.
-fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text>
-  local parent_home=$1 state=$2 task_id=$3 request_text=$4
+fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text> [request-kind]
+  local parent_home=$1 state=$2 task_id=$3 request_text=$4 request_kind=${5-}
   local dir rec corr now summary status_path tmp
   [ -n "$parent_home" ] && [ -n "$state" ] && [ -n "$task_id" ] || return 2
   dir=$(fm_pending_reply_dir "$state")
@@ -363,6 +367,7 @@ parent_home=$parent_home
 parent_status=$status_path
 parent_status_scan_signature=
 request_summary=$summary
+request_kind=$request_kind
 created_epoch=$now
 delivered_epoch=
 phase=awaiting_report
@@ -597,25 +602,33 @@ fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
 
 # 0 if a status line is a correlated acknowledgement for <corr_id>.
 # Accepts short status replies and status lines that point at a document.
+# Request-kind filtering follows the policy owner named in the record schema.
 # Unrelated verbs without the token never match. Stale/wrong corr never match.
 # The parent's own pending-reply-missed escalation line must not self-resolve:
 # it names the request with pending-reply-id= rather than corr=.
-fm_pending_reply_line_resolves() {  # <line> <corr_id>
-  local line=$1 corr=$2
+fm_pending_reply_line_resolves() {  # <line> <corr_id> [request-kind]
+  local line=$1 corr=$2 request_kind=${3-} verb
   [ -n "$line" ] && [ -n "$corr" ] || return 1
   case "$line" in
     *pending-reply-missed*) return 1 ;;
   esac
+  if [ "$request_kind" = secondmate-restart-persist ]; then
+    verb=${line%%[[:space:]:]*}
+    case "$verb" in
+      done|blocked|failed|needs-decision) ;;
+      *) return 1 ;;
+    esac
+  fi
   fm_pending_reply_text_has_corr "$line" "$corr"
 }
 
 # Scan a status file for a correlated resolve. Prints the matching line or empty.
-fm_pending_reply_find_resolve_line() {  # <status-file> <corr_id>
-  local status_file=$1 corr=$2 line
+fm_pending_reply_find_resolve_line() {  # <status-file> <corr_id> [request-kind]
+  local status_file=$1 corr=$2 request_kind=${3-} line
   [ -f "$status_file" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
-    if fm_pending_reply_line_resolves "$line" "$corr"; then
+    if fm_pending_reply_line_resolves "$line" "$corr" "$request_kind"; then
       printf '%s' "$line"
       return 0
     fi
@@ -684,7 +697,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
 
 _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
-  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
+  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now request_kind
   local unconfirmed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -714,7 +727,8 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     previous=$(fm_pending_reply_get "$rec" parent_status_scan_signature)
     [ "$signature" != "$previous" ] || return 1
   fi
-  line=$(fm_pending_reply_find_resolve_line "$status_file" "$corr")
+  request_kind=$(fm_pending_reply_get "$rec" request_kind)
+  line=$(fm_pending_reply_find_resolve_line "$status_file" "$corr" "$request_kind")
   if [ -z "$line" ]; then
     if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
       fm_pending_reply_set "$rec" parent_status_scan_signature "$signature" || return 1
@@ -1436,7 +1450,7 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
 # stay evidence, not acknowledgement.
 fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <secondmate-home>
   local state=$1 corr=$2 sm_home=$3
-  local rec task_id parent_status stranded line
+  local rec task_id parent_status stranded line request_kind
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ -n "$sm_home" ] && [ -d "$sm_home" ] || return 1
@@ -1446,7 +1460,8 @@ fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <se
   stranded="$sm_home/state/${task_id}.status"
   [ -f "$stranded" ] && [ ! -L "$stranded" ] || return 1
   [ "$stranded" != "$parent_status" ] || return 1
-  line=$(fm_pending_reply_find_resolve_line "$stranded" "$corr")
+  request_kind=$(fm_pending_reply_get "$rec" request_kind)
+  line=$(fm_pending_reply_find_resolve_line "$stranded" "$corr" "$request_kind")
   [ -n "$line" ] || return 1
   # Deliberately undirected: bin/fm-parent-channel-lib.sh is expanded once at
   # the fm_pending_reply_detect_wrong_home site; each directed site would
