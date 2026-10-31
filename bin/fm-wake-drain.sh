@@ -792,7 +792,9 @@ print_status_sections() {
 }
 
 print_ready_work_section() {  # <deduped-raw-rows>
-  local rows=$1 ready gate_status
+  local rows=$1 ready gate_status FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
+  case "$FM_TASKS_AXI_TIMEOUT" in ''|*[!0-9]*|0) FM_TASKS_AXI_TIMEOUT=10 ;; esac
+  export FM_TASKS_AXI_TIMEOUT
   printf '%s\n' "$rows" | awk -F '\t' '$3 == "heartbeat" { found=1 } END { exit !found }' || return 0
   if fm_backlog_transition_applies "$CONFIG" "$DATA" ship; then
     :
@@ -809,7 +811,8 @@ print_ready_work_section() {  # <deduped-raw-rows>
   fi
   printf '%s\n' "$ready" | awk '
     /^ready\[/ { in_ready=1; next }
-    in_ready && /^[[:space:]]/ { found=1 }
+    in_ready && /^[[:space:]]/ { found=1; next }
+    { in_ready=0 }
     END { exit !found }
   ' || return 0
   printf 'READY WORK (queued and dispatchable now):\n'
