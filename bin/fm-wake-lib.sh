@@ -843,7 +843,8 @@ _fm_recovery_marker_write_locked() {
 # hands to main is that episode's delivery.
 _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} bound=${3:-} source=${4:-watcher}
-  local lock saved_token generation='' status=pending previous_append_token=''
+  local lock saved_token generation='' status=pending previous_append_token='' guard=${5:-}
+  if [ "$#" -ge 5 ]; then shift 5; else set --; fi
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   case "$source" in watcher|append|handback) ;; *) return 1 ;; esac
   if [ "$source" = append ]; then
@@ -859,6 +860,12 @@ _fm_recovery_marker_publish() {
   if [ -d "$marker" ] && [ ! -L "$marker" ]; then
     fm_lock_release "$lock"
     return 1
+  fi
+  # A guarded append owns the queue lock already. Check after the last lock
+  # wait and before publishing recovery evidence, including an absent marker.
+  if [ -n "$guard" ] && ! "$guard" "$@"; then
+    fm_lock_release "$lock"
+    return 3
   fi
   if [ "$kind" = downtime ]; then
     # Read inline rather than in a command substitution: this runs inside the
@@ -2493,7 +2500,20 @@ fm_wake_append() {
   return "$status"
 }
 
-# fm_wake_append_locked <kind> <key> <payload>
+# fm_wake_append_guarded <predicate> <kind> <key> <payload> [predicate args...]
+# Reject obsolete observations after publication lock waits. A rejection returns
+# 3 before publishing recovery evidence or committing a queue sequence or row.
+fm_wake_append_guarded() {
+  local guard=$1 kind=$2 key=$3 payload=$4 status=0
+  shift 4
+  declare -F "$guard" >/dev/null || return 2
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_wake_append_locked "$kind" "$key" "$payload" "$guard" "$@" || status=$?
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+# fm_wake_append_locked <kind> <key> <payload> [predicate [predicate args...]]
 # Locked core of fm_wake_append: appends the wake row under an already-held
 # FM_WAKE_QUEUE_LOCK. Callers that must commit another durable record atomically
 # with the append (holding this lock excludes the drain's acknowledgement, which
@@ -2501,7 +2521,9 @@ fm_wake_append() {
 # their own write, then release.
 fm_wake_append_locked() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
-  local recovery_marker
+  local recovery_marker guard=${4:-}
+  shift 3
+  [ -z "$guard" ] || shift
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;
@@ -2514,7 +2536,7 @@ fm_wake_append_locked() {
   recovery_marker="$STATE/.watcher-down"
   status=0
 
-  _fm_recovery_marker_publish "$recovery_marker" downtime "" append || status=$?
+  _fm_recovery_marker_publish "$recovery_marker" downtime "" append "$guard" "$@" || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
     case "$seq" in

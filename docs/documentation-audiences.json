@@ -458,6 +458,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/plans/2026-10-12-2032-feat-pi-stream-silence-plan.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
     },

@@ -3220,6 +3220,46 @@ ok - under the away-posture record the wake carries the verbatim read-back tail,
 
 The merge suite and the security suite dominate the wall time.
 
+## Pi worker model-stream observation
+
+Verified on 2026-10-13 with the installed Pi 1.2.0 SDK and Node v24.13.0.
+On an unverified Pi version, the guard exercises the spawn-time inert path with its exact warning, no stream handlers, and ordinary busy/idle classification; stream observation stays off until the version is verified.
+Refresh this token-free guard after a Pi upgrade:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-pi-worker-stream-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Pi 1.2.0 stream, tool, completion, and background request phases
+ok - real Pi 1.2.0 default-off worker
+Firstmate model-stream observation write failed; inspect worker instrumentation.
+ok - real Pi 1.2.0 instrumentation deadline terminated writer and output-holding descendant
+ok - real Pi 1.2.0 stream, tool, completion, and background request phases
+# pi-signed unavailable: signed executable not exercised
+ok - real Pi 1.2.0 worker stream lifecycle, background exclusion, and default-off behavior
+```
+
+The guard runs the generated worker extension through Pi's real resource loader, model runtime, agent loop, and custom tool execution in isolated directories.
+Synthetic transport holds an accepted response, supplies substantive and empty events, enters a tool phase, and completes a subsequent request.
+The real provider callback is also exercised outside the foreground agent loop to disconfirm background-request tracking.
+An isolated copy of the toolkit injects one stalled writer command and a descendant that retains output, proving the real extension's deadline ends both processes and Pi continues through its remaining phases.
+No external provider, credentials, primary extension, or live fleet is used.
+The signed executable was absent and is not credited as live-verified on this version.
+The portable busy-state, adapter-wiring, and watcher-triage suites own generation/request rejection and inspection notification behavior.
+
+The unverified-version fallback was checked on 2026-10-31 with installed Pi 1.4.0 and Node v24.22.1 using the same command above.
+The guard asserted the exact spawn warning and absence of stream handlers, then exercised ordinary busy/idle behavior through the real SDK.
+Observed output:
+
+```text
+ok - real Pi 1.4.0 default-off worker
+# pi-signed unavailable: signed executable not exercised
+ok - real Pi 1.4.0 unverified-version warning, inert stream observation, and existing busy/idle behavior
+```
+
 ## Native Codex through Pi
 
 Verified on 2026-09-08 with Pi 0.85.1 and the installed `pi-codex-native` 0.2.1 adapter.

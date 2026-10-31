@@ -6539,9 +6539,19 @@ EOF
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
     # loaded from inside the project (verified live), but an explicit -e path
     # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+    pi_stream_monitoring=false
+    if [ "$(fm_busy_stream_seconds "${FM_STREAM_SILENT_MAX_SECS:-}")" -gt 0 ]; then
+      pi_stream_version=$(fm_run_timed 5 "$PI_BIN" --version 2>/dev/null || true)
+      if fm_busy_pi_stream_version_supported "$pi_stream_version"; then
+        pi_stream_monitoring=true
+      else
+        echo "warning: $HARNESS model-stream observation unavailable for version ${pi_stream_version:-unknown}; verified version: 1.2.0; existing busy bound remains active" >&2
+      fi
+    fi
     cat >"$STATE/$ID.pi-ext.ts" <<EOF
-// Firstmate semantic busy-state events + turn-end notification; written by
-// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Firstmate semantic busy-state events, turn-end notification, and - when this
+// worker was launched with opted-in stream observation - foreground model-stream
+// evidence; written by fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state: "agent_start" -> busy when a low-level agent run begins;
 // "agent_settled" -> idle only when ctx.isIdle() confirms Pi will not
 // continue automatically - auto-retries, auto-compaction retries, tool
@@ -6553,6 +6563,7 @@ EOF
 import { execFile } from "node:child_process";
 import { appendFileSync } from "node:fs";
 const notifyTurnEnd = $busy_notify_turnend;
+const streamMonitoring = $pi_stream_monitoring;
 const excludeTools = "$EXCLUDE_TOOLS".split(",").filter(Boolean);
 const excludeFile = $(perl -MJSON::PP -MEncode=decode_utf8 -e 'print encode_json(decode_utf8($ARGV[0]))' -- "$CONFIG/crew-exclude-tools");
 const statusFile = $(perl -MJSON::PP -MEncode=decode_utf8 -e 'print encode_json(decode_utf8($ARGV[0]))' -- "$STATE/$ID.status");
@@ -6565,6 +6576,63 @@ const busyEvent = (state: string, event: string) =>
   });
 export default function (pi: any) {
   let checkedExclusions = false;
+  let request = 0;
+  let activeRequest = 0;
+  let lastStreamProgress = -Infinity;
+  let lastContent = "";
+  let streamWrites: Promise<void> = Promise.resolve();
+  const streamEvent = (operation: string, current: number) => {
+    streamWrites = streamWrites.then(() => new Promise<void>((resolve) => {
+      execFile("bash", [
+        "-c", '. "\$1"; shift; fm_exec_timed 5 1 "\$@"', "fm-stream-observation",
+        "$FM_ROOT/bin/fm-timeout-lib.sh", "$FM_ROOT/bin/fm-busy-event.sh",
+        "stream", "$STATE_REAL", "$ID", operation,
+        "--gen", "$BUSY_GEN", "--request", String(current),
+      ], (error) => {
+        if (error) console.error("Firstmate model-stream observation write failed; inspect worker instrumentation.");
+        resolve();
+      });
+    }));
+    return streamWrites;
+  };
+  const closeStream = () => {
+    const current = activeRequest;
+    activeRequest = 0;
+    return current ? streamEvent("close", current) : streamWrites;
+  };
+  if (streamMonitoring) {
+    // Foreground context excludes Pi's background provider/cache-warming calls.
+    pi.on("context", () => {
+      request = Math.max(request + 1, Date.now());
+      activeRequest = request;
+      lastStreamProgress = -Infinity;
+      lastContent = "";
+      return streamEvent("open", request);
+    });
+    pi.on("message_update", (event: any) => {
+      if (!activeRequest || event.message?.role !== "assistant") return streamWrites;
+      const now = Date.now();
+      if (now - lastStreamProgress < 1000) return streamWrites;
+      const content = (event.message.content || []).map((part: any) => {
+        if (part.type === "text" && part.text) return ["text", part.text];
+        if (part.type === "thinking" && (part.thinking || part.thinkingSignature)) {
+          return ["thinking", part.thinking || "", part.thinkingSignature || ""];
+        }
+        if (part.type === "toolCall" && part.name) return ["toolCall", part.name, part.arguments];
+        return null;
+      }).filter(Boolean);
+      if (!content.length) return streamWrites;
+      const signature = JSON.stringify(content);
+      if (signature === lastContent) return streamWrites;
+      lastContent = signature;
+      lastStreamProgress = now;
+      return streamEvent("progress", activeRequest);
+    });
+    pi.on("message_end", (event: any) => {
+      if (event.message?.role === "assistant") return closeStream();
+    });
+    pi.on("tool_execution_start", closeStream);
+  }
   pi.on("agent_start", async () => {
     await busyEvent("busy", "agent-start");
     // Verify only this worker's registry, never connect servers from Firstmate.
@@ -6580,8 +6648,9 @@ export default function (pi: any) {
       checkedExclusions = true;
     }
   });
-  pi.on("agent_settled", (_event: any, ctx: any) => {
+  pi.on("agent_settled", async (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    await closeStream();
     return busyEvent("idle", "agent-settled");
   });
   pi.on("turn_end", () => { if (notifyTurnEnd) execFile("touch", ["$TURNEND"]); });

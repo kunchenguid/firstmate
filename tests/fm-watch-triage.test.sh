@@ -19,6 +19,7 @@
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
 # fm-wake-queue.test.sh.
+#
 set -u
 
 # shellcheck source=tests/watch-triage-helpers.sh
@@ -4712,6 +4713,396 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_pi_stream_silence_uses_inspection_timer() {
+  local dir state fakebin out capture_file window key gen snapshot pid mode enabled
+  for mode in enabled disabled negative invalid_option leading maximum overflow closed foreign fresh malformed stale resumed racing; do
+    dir=$(make_case "pi-stream-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-stream-$mode"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    printf 'Working...' > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stream.meta"
+    record_pi_busy "$state" stream
+    gen=$(cat "$state/stream.busy-gen")
+    "$ROOT/bin/fm-busy-event.sh" stream "$state" stream open --gen "$gen" --request 1
+    # Backdate the owned protocol fixture, not production source or a UI guess.
+    snapshot="v1 gen=$gen request=1 rev=1 ts=$(( $(date +%s) - 600 ))"
+    printf '%s\n' "$snapshot" > "$state/stream.model-stream"
+    printf 'working: setup complete\n' > "$state/stream.status"
+    seen_sig "$state/stream.status" > "$state/.seen-stream_status"
+    enabled=300
+    case "$mode" in
+      disabled) enabled=0 ;;
+      negative) enabled=-1 ;;
+      invalid_option) enabled=invalid ;;
+      leading) enabled=00300 ;;
+      maximum) enabled=999999999 ;;
+      overflow) enabled=1000000000 ;;
+      closed) "$ROOT/bin/fm-busy-event.sh" stream "$state" stream close --gen "$gen" --request 1 ;;
+      foreign) printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/stream.meta"
+               "$ROOT/bin/fm-busy-event.sh" apply "$state" stream busy --gen "$gen" --source claude-hook --event start ;;
+      fresh) "$ROOT/bin/fm-busy-event.sh" stream "$state" stream progress --gen "$gen" --request 1 ;;
+      malformed) printf 'malformed\n' > "$state/stream.model-stream" ;;
+      stale) record_pi_busy "$state" stream
+             printf '%s\n' "$snapshot" > "$state/stream.model-stream" ;;
+    esac
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS="$enabled" FM_BUSY_TURN_MAX_SECS=99999 \
+      FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" > "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "stream case $mode surfaced before inspection delay: $(cat "$out")"; }
+    if [ "$mode" = enabled ] || [ "$mode" = leading ] || [ "$mode" = resumed ] || [ "$mode" = racing ]; then
+      [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "expired stream did not enter inspection timer"; }
+    else
+      [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "$mode stream started inspection timer"; }
+    fi
+    reap "$pid"
+    if [ "$mode" = enabled ] || [ "$mode" = resumed ] || [ "$mode" = racing ]; then
+      ack_stopped_cycle "$state" || fail "cannot acknowledge test stop"
+      echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+      printf 'Working... next tick' > "$capture_file"
+      if [ "$mode" = resumed ]; then
+        "$ROOT/bin/fm-busy-event.sh" stream "$state" stream progress --gen "$gen" --request 1
+      elif [ "$mode" = racing ]; then
+        # The recovery-grade endpoint read runs inside the escalation path.
+        # Close the request there to exercise the final evidence revalidation.
+        mv "$fakebin/tmux" "$fakebin/tmux-base"
+        cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ]; then
+  date +%s > "$state/.wedge-permanent-$key"
+  date +%s > "$state/.wedge-terminal-queued-$key"
+  "$ROOT/bin/fm-busy-event.sh" stream "$state" stream close --gen "$gen" --request 1
+  touch "$dir/race-fired"
+  exit 1
+fi
+exec "$fakebin/tmux-base" "\$@"
+SH
+        chmod +x "$fakebin/tmux"
+      fi
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+        FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS=300 FM_BUSY_TURN_MAX_SECS=99999 \
+        FM_WEDGE_MAX_ESCALATIONS=0 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+        "$WATCH" > "$out" &
+      pid=$!
+      if [ "$mode" = enabled ]; then
+        wait_for_exit "$pid" 100 || { reap "$pid"; fail "expired stream never surfaced"; }
+        grep -F 'model stream silent for' "$out" >/dev/null || fail "stream reason missing: $(cat "$out")"
+        grep -F 'possible wedge' "$out" >/dev/null || fail "stream bypassed inspection reason"
+      else
+        wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$mode request published obsolete stream inspection: $(cat "$out")"; }
+        [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "$mode request retained obsolete timer"; }
+        [ ! -s "$out" ] || { reap "$pid"; fail "$mode request produced a wake"; }
+        if [ "$mode" = racing ]; then
+          [ -e "$dir/race-fired" ] && [ ! -e "$state/stream.model-stream" ] || { reap "$pid"; fail "notification-time close was not exercised"; }
+        fi
+        [ ! -e "$state/.wedge-permanent-$key" ] && [ ! -e "$state/.wedge-terminal-queued-$key" ] || { reap "$pid"; fail "$mode retained old cap markers"; }
+        reap "$pid"
+      fi
+    fi
+  done
+  pass "opted-in current stream silence uses inspection delay across changing panes; disabled, tool, and foreign phases do not"
+}
+
+test_pi_model_progress_and_legacy_fallback() {
+  local dir state fakebin out capture_file window key gen pid mode enabled
+  for mode in enabled disabled stale malformed closed replaced; do
+    dir=$(make_case "pi-anchor-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-anchor-$mode"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    printf 'Working...' > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stream.meta"
+    record_pi_busy "$state" stream
+    gen=$(cat "$state/stream.busy-gen")
+    "$ROOT/bin/fm-busy-event.sh" stream "$state" stream open --gen "$gen" --request 1
+    if [ "$mode" != closed ] && [ "$mode" != replaced ]; then
+      "$ROOT/bin/fm-busy-event.sh" stream "$state" stream progress --gen "$gen" --request 1
+      "$ROOT/bin/fm-busy-event.sh" stream "$state" stream close --gen "$gen" --request 1
+    else
+      printf 'v1 gen=%s request=1 rev=1 ts=%s\n' "$gen" "$(( $(date +%s) - 600 ))" > "$state/stream.model-stream"
+    fi
+    case "$mode" in
+      stale) printf 'v1 gen=obsolete request=1 rev=1 ts=%s\n' "$(date +%s)" > "$state/stream.model-progress" ;;
+      malformed) printf 'invalid\n' > "$state/stream.model-progress" ;;
+    esac
+    touch -t 200001010000 "$state/stream.meta"
+    printf 'working: setup complete\n' > "$state/stream.status"
+    seen_sig "$state/stream.status" > "$state/.seen-stream_status"
+    enabled=300
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS=300 FM_BUSY_TURN_MAX_SECS=60 \
+      FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" > "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "anchor $mode escalated early"; }
+    if [ "$mode" = enabled ] || [ "$mode" = disabled ]; then
+      [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "recent model progress did not postpone legacy bound"; }
+    else
+      [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "anchor $mode failed to start timer"; }
+    fi
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "anchor stop acknowledgement failed"
+    case "$mode" in
+      enabled) continue ;;
+      disabled) enabled=0 ;;
+      closed) "$ROOT/bin/fm-busy-event.sh" stream "$state" stream close --gen "$gen" --request 1 ;;
+      replaced) "$ROOT/bin/fm-busy-event.sh" stream "$state" stream open --gen "$gen" --request 2 ;;
+    esac
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    echo 7 > "$state/.wedge-escalations-$key"
+    if [ "$mode" = closed ] || [ "$mode" = replaced ]; then
+      date +%s > "$state/.wedge-permanent-$key"
+      date +%s > "$state/.wedge-terminal-queued-$key"
+    fi
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS="$enabled" FM_BUSY_TURN_MAX_SECS=60 \
+      FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" > "$out" &
+    pid=$!
+    if [ "$mode" = closed ] || [ "$mode" = replaced ]; then
+      wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$mode inherited obsolete stream timer: $(cat "$out")"; }
+      [ "$(cat "$state/.stale-since-$key")" -gt "$(( $(date +%s) - 100 ))" ] || { reap "$pid"; fail "$mode timer not reset"; }
+      [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "$mode inherited stream escalation count"; }
+      [ ! -e "$state/.wedge-permanent-$key" ] && [ ! -e "$state/.wedge-terminal-queued-$key" ] || { reap "$pid"; fail "$mode retained old stream cap markers"; }
+      reap "$pid"
+    else
+      wait_for_exit "$pid" 100 || { reap "$pid"; fail "$mode legacy bound did not inspect"; }
+      grep -F 'possible wedge' "$out" >/dev/null || fail "$mode missing legacy inspection"
+      if grep -F 'model stream silent' "$out" >/dev/null; then fail "$mode used obsolete stream reason"; fi
+    fi
+  done
+  pass "model progress extends only opted-in bounds and obsolete stream episodes reset before legacy fallback"
+}
+
+test_pi_stream_publication_lock_revalidation() {
+  local dir state fakebin out capture_file window key gen pid lock_kind action lock real_mkdir real_cat
+  local uninterrupted=${1:-0} terminal=${2:-0}
+  for lock_kind in queue recovery; do
+    for action in close progress replace; do
+      dir=$(make_case "pi-publication-$uninterrupted-terminal-$terminal-$lock_kind-$action"); state="$dir/state"; fakebin="$dir/fakebin"
+      out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-publication-$lock_kind-$action"
+      key=$(printf '%s' "$window" | tr ':/.' '___')
+      printf 'Working...' > "$capture_file"
+      printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stream.meta"
+      record_pi_busy "$state" stream
+      gen=$(cat "$state/stream.busy-gen")
+      "$ROOT/bin/fm-busy-event.sh" stream "$state" stream open --gen "$gen" --request 1
+      printf 'v1 gen=%s request=1 rev=1 ts=%s\n' "$gen" "$(( $(date +%s) - 600 ))" > "$state/stream.model-stream"
+      printf 'working: setup complete\n' > "$state/stream.status"
+      seen_sig "$state/stream.status" > "$state/.seen-stream_status"
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+        FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS=300 FM_BUSY_TURN_MAX_SECS=99999 \
+        FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+        "$WATCH" > "$out" &
+      pid=$!
+      wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "publication admission failed"; }
+      if [ "$uninterrupted" -eq 0 ]; then
+        reap "$pid"
+        ack_stopped_cycle "$state" || fail "publication stop acknowledgement failed"
+      else
+        [ ! -e "$state/.watcher-down" ] || { reap "$pid"; fail "fresh watcher unexpectedly has recovery marker"; }
+      fi
+      lock="$state/.wake-queue.lock"
+      [ "$lock_kind" != recovery ] || lock="$state/.watcher-down.lock"
+      real_mkdir=$(command -v mkdir)
+      real_cat=$(command -v cat)
+      cat > "$fakebin/cat" <<SH
+#!/usr/bin/env bash
+if [ "\${!#}" = "$lock/pid" ] && [ -d "$lock" ]; then printf '1\n' > "$dir/append-blocked"; fi
+exec "$real_cat" "\$@"
+SH
+      chmod +x "$fakebin/cat"
+      mv "$fakebin/tmux" "$fakebin/tmux-base"
+      cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ]; then
+  if [ ! -e "$dir/lock-created" ]; then
+    cat "$state/.watcher-down" > "$dir/prior-recovery" 2>/dev/null || : > "$dir/prior-recovery"
+    "$real_mkdir" "$lock"
+    printf '%s\n' '$$' > "$lock/pid"
+    touch "$dir/lock-created"
+  fi
+  exit 1
+fi
+exec "$fakebin/tmux-base" "\$@"
+SH
+      chmod +x "$fakebin/tmux"
+      if [ "$terminal" -eq 1 ]; then
+        printf "1\n" > "$state/.wedge-escalations-$key"
+      fi
+      echo $(( $(date +%s) - 1500 )) > "$state/.stale-since-$key"
+      if [ "$uninterrupted" -eq 0 ]; then
+        PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+        FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS=300 FM_BUSY_TURN_MAX_SECS=99999 \
+        FM_WEDGE_MAX_ESCALATIONS="$terminal" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+        "$WATCH" > "$out" &
+        pid=$!
+      fi
+      wait_numeric_file "$dir/append-blocked" 100 || { reap "$pid"; fail "$lock_kind publication wait not exercised"; }
+      date +%s > "$state/.wedge-permanent-$key"
+      date +%s > "$state/.wedge-terminal-queued-$key"
+      case "$action" in
+        close) "$ROOT/bin/fm-busy-event.sh" stream "$state" stream close --gen "$gen" --request 1 ;;
+        progress) "$ROOT/bin/fm-busy-event.sh" stream "$state" stream progress --gen "$gen" --request 1 ;;
+        replace) "$ROOT/bin/fm-busy-event.sh" stream "$state" stream open --gen "$gen" --request 2 ;;
+      esac
+      rm -f "$lock/pid"
+      rmdir "$lock"
+      wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$lock_kind/$action published obsolete inspection: $(cat "$out")"; }
+      [ ! -s "$out" ] && [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "obsolete publication survived lock wait"; }
+      [ ! -e "$state/.stale-since-$key" ] && [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "rejected publication retained escalation"; }
+      [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "$(cat "$dir/prior-recovery")" ] || { reap "$pid"; fail "$lock_kind/$action rejected append changed prior recovery marker"; }
+      [ ! -e "$state/.wedge-permanent-$key" ] && [ ! -e "$state/.wedge-terminal-queued-$key" ] || { reap "$pid"; fail "obsolete terminal append retained cap"; }
+      reap "$pid"
+    done
+  done
+  pass "stream close, progress, and replacement cancel publication after queue and recovery lock waits"
+}
+
+test_pi_stream_resume_restarts_capped_episode() {
+  local dir state fakebin out capture_file window key gen pid round snapshot
+  dir=$(make_case pi-stream-restall); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window=test:fm-stream-restall
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stream.meta"
+  record_pi_busy "$state" stream
+  gen=$(cat "$state/stream.busy-gen")
+  "$ROOT/bin/fm-busy-event.sh" stream "$state" stream open --gen "$gen" --request 1
+  printf 'working: setup complete\n' > "$state/stream.status"
+  seen_sig "$state/stream.status" > "$state/.seen-stream_status"
+  for round in first resumed; do
+    if [ "$round" = resumed ]; then
+      "$ROOT/bin/fm-busy-event.sh" stream "$state" stream progress --gen "$gen" --request 1
+    fi
+    snapshot=$(cat "$state/stream.model-stream")
+    printf '%s ts=%s\n' "${snapshot% ts=*}" "$(( $(date +%s) - 600 ))" > "$state/stream.model-stream"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS=300 FM_BUSY_TURN_MAX_SECS=99999 \
+      FM_WEDGE_MAX_ESCALATIONS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" > "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$round stream did not start a new inspection timer"; }
+    [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "$round stream missing inspection timer"; }
+    [ ! -e "$state/.wedge-permanent-$key" ] && [ ! -e "$state/.wedge-terminal-queued-$key" ] || { reap "$pid"; fail "$round stream inherited prior cap"; }
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "$round admission acknowledgement failed"
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS=300 FM_BUSY_TURN_MAX_SECS=99999 \
+      FM_WEDGE_MAX_ESCALATIONS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "$round stream did not reach cap"; }
+    grep -F PERMANENTLY-WEDGED "$out" >/dev/null || fail "$round stream missing terminal notification"
+    [ -s "$state/.wedge-permanent-$key" ] && [ -s "$state/.wedge-terminal-queued-$key" ] || fail "$round stream missing cap markers"
+    ack_stopped_cycle "$state" || fail "$round cap acknowledgement failed"
+  done
+  pass "a capped stream that resumes and stalls before rearming starts a fresh episode"
+}
+
+test_pi_stream_counter_write_failures() {
+  local mode dir state fakebin out capture_file window key gen pid cap status real_rm queue_before
+  for mode in uncapped post_append terminal truncation; do
+    dir=$(make_case "pi-counter-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-counter-$mode"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    printf 'Working...' > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/stream.meta"
+    record_pi_busy "$state" stream
+    gen=$(cat "$state/stream.busy-gen")
+    "$ROOT/bin/fm-busy-event.sh" stream "$state" stream open --gen "$gen" --request 1
+    printf 'v1 gen=%s request=1 rev=1 ts=%s\n' "$gen" "$(( $(date +%s) - 600 ))" > "$state/stream.model-stream"
+    printf 'working: setup complete\n' > "$state/stream.status"
+    seen_sig "$state/stream.status" > "$state/.seen-stream_status"
+    cap=1
+    case "$mode" in uncapped) cap=0 ;; post_append) cap=2 ;; esac
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS=300 FM_BUSY_TURN_MAX_SECS=99999 \
+      FM_WEDGE_MAX_ESCALATIONS="$cap" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" > "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$mode admission failed"; }
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "$mode admission acknowledgement failed"
+    if [ "$mode" = truncation ]; then
+      real_rm=$(command -v rm)
+      cat > "$fakebin/rm" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = "$state/.stale-since-$key" ] && [ -e "$state/.wedge-permanent-$key" ]; then
+    "$real_rm" -f "$state/.wedge-escalations-$key"
+    mkdir -p "$state/.wedge-escalations-$key"
+    touch "$dir/fault-fired"
+  fi
+done
+exec "$real_rm" "\$@"
+SH
+      chmod +x "$fakebin/rm"
+    else
+      mkdir "$state/.wedge-escalations-$key"
+    fi
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS=300 FM_BUSY_TURN_MAX_SECS=99999 \
+      FM_WEDGE_MAX_ESCALATIONS="$cap" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" > "$out" &
+    pid=$!
+    status=0
+    wait_for_exit "$pid" 100 || status=$?
+    [ -d "$state/.wedge-escalations-$key" ] || fail "$mode counter write fault was not exercised"
+    [ "$(awk -F '\t' '$3 == "stale" { n++ } END { print n+0 }' "$state/.wake-queue")" -eq 1 ] || fail "$mode lost or duplicated its published notification"
+    grep -F 'model stream silent for' "$state/.wake-queue" >/dev/null || fail "$mode did not exercise the stream publication route"
+    case "$mode" in
+      terminal|truncation) grep -F PERMANENTLY-WEDGED "$state/.wake-queue" >/dev/null || fail "$mode did not publish the terminal row" ;;
+      *) grep -F 'possible wedge' "$state/.wake-queue" >/dev/null || fail "$mode did not publish the regular escalation" ;;
+    esac
+    if [ "$mode" = uncapped ]; then
+      [ "$status" -eq 0 ] || fail "uncapped write failure stopped delivery with status $status"
+      grep -F 'escalation 1' "$out" >/dev/null || fail "uncapped write failure suppressed escalation"
+      grep -F 'escalation counter write FAILED' "$state/.watch-triage.log" >/dev/null || fail "uncapped write failure was not reported"
+      [ ! -e "$state/.wedge-rollback-failed-$key" ] && [ ! -e "$state/.wedge-permanent-$key" ] || fail "uncapped write failure installed suppression"
+    else
+      [ "$status" -eq 1 ] || fail "$mode expected controlled exit 1, got $status"
+      [ -s "$state/.wedge-rollback-failed-$key" ] && [ -s "$state/.stale-since-$key" ] || fail "$mode did not roll back and publish its sentinel"
+      [ ! -s "$out" ] || fail "$mode delivered inline after its failed count write"
+      if [ "$mode" = truncation ]; then
+        [ -e "$dir/fault-fired" ] && [ -s "$state/.wedge-permanent-$key" ] || fail "cap-fire truncation was not reached"
+        grep -F 'reset FAILED AND rollback ALSO FAILED' "$state/.watch-triage.log" >/dev/null || fail "truncation failure missed rollback defense"
+      else
+        [ ! -e "$state/.wedge-permanent-$key" ] || fail "$mode committed a cap after its count write failed"
+        grep -F 'escalation counter write FAILED' "$state/.watch-triage.log" >/dev/null || fail "$mode failure missed count defense"
+      fi
+    fi
+    ack_stopped_cycle "$state" || fail "$mode fault acknowledgement failed"
+    queue_before=$(cat "$state/.wake-queue" 2>/dev/null || true)
+    if [ "$mode" = uncapped ]; then
+      "$ROOT/bin/fm-busy-event.sh" stream "$state" stream close --gen "$gen" --request 1
+    fi
+    echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STREAM_SILENT_MAX_SECS=300 FM_BUSY_TURN_MAX_SECS=99999 \
+      FM_WEDGE_MAX_ESCALATIONS="$cap" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" > "$out" &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$mode failed to continue safely after count failure"; }
+    [ ! -s "$out" ] && [ "$(cat "$state/.wake-queue" 2>/dev/null || true)" = "$queue_before" ] || { reap "$pid"; fail "$mode republished a failed or obsolete episode"; }
+    if [ "$mode" != uncapped ]; then
+      [ -s "$state/.wedge-rollback-failed-$key" ] || { reap "$pid"; fail "$mode retry consumed its sentinel"; }
+      grep -F 'rollback-failed sentinel active' "$state/.watch-triage.log" >/dev/null || { reap "$pid"; fail "$mode retry did not exercise sentinel suppression"; }
+    fi
+    reap "$pid"
+  done
+  pass "stream count writes and cap truncation defend failures while uncapped delivery continues"
+}
+
+test_pi_stream_terminal_publication() {
+  test_pi_stream_publication_lock_revalidation 0 1
+}
+
+test_pi_stream_uninterrupted_publication() {
+  test_pi_stream_publication_lock_revalidation 1
+}
 
 # The recorded Claude background-task exit picker. The footer is the last
 # non-blank row, which is what fm_composer_blocking_dialog requires.
@@ -4906,6 +5297,13 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
 fi
 
 fm_test_run \
+  test_pi_stream_silence_uses_inspection_timer \
+  test_pi_model_progress_and_legacy_fallback \
+  test_pi_stream_publication_lock_revalidation \
+  test_pi_stream_uninterrupted_publication \
+  test_pi_stream_terminal_publication \
+  test_pi_stream_counter_write_failures \
+  test_pi_stream_resume_restarts_capped_episode \
   test_status_span_actionable_classifier \
   test_status_span_survives_a_later_routine_append \
   test_status_span_respects_decision_closure \
