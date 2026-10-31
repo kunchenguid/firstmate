@@ -444,6 +444,17 @@ test_guard_claude_idle_followup_is_per_session() {
   pass "turn-end guard: each Claude session gets its own one forced idle follow-up"
 }
 
+# Runs the guard as its own harness process (argv0 codex), so its session
+# ancestry is fixed by the test rather than by whatever launched the suite.
+# With <own-lock>, that harness pid is first written as the home lock owner.
+run_guard_as_harness() {  # <home> <payload> [own-lock-path]
+  local home=$1 payload=$2 lock=${3:-}
+  # shellcheck disable=SC2016 # Expanded by the inner shell.
+  printf '%s' "$payload" | env -u FM_ROOT_OVERRIDE PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" \
+    bash -c '[ -z "$1" ] || printf "%s\n" "$$" > "$1"; exec -a codex bash "$2"' _ "$lock" "$home/bin/fm-turnend-guard.sh" 2>&1
+}
+
 test_guard_readonly_session_not_refused_idle() {
   local home out status owner
   home=$(make_guard_home guard-readonly)
@@ -452,11 +463,15 @@ test_guard_readonly_session_not_refused_idle() {
   bash -c 'exec -a claude sleep 120' &
   owner=$!
   printf '%s\n' "$owner" > "$home/state/.lock"
-  out=$(run_guard "$home" '{"stop_hook_active":false}'); status=$?
+  out=$(run_guard_as_harness "$home" '{"stop_hook_active":false}'); status=$?
   reap "$owner"
-  reap "$GUARD_WATCHER_PID"
+  if [ "$status" -ne 0 ]; then reap "$GUARD_WATCHER_PID"; fi
   expect_code 0 "$status" "a session whose home lock another live session owns is read-only and must not be refused: $out"
   assert_not_contains "$out" "TURN WOULD END IDLE" "a read-only session must not be told to dispatch or land"
+  out=$(run_guard_as_harness "$home" '{"stop_hook_active":false}' "$home/state/.lock"); status=$?
+  reap "$GUARD_WATCHER_PID"
+  expect_code 2 "$status" "the session that owns the home lock must still be refused for idle items: $out"
+  assert_contains "$out" "TURN WOULD END IDLE" "the lock-owning session must get the IDLE banner"
   pass "turn-end guard: a read-only second session is never refused for idle items"
 }
 
