@@ -322,7 +322,7 @@ fm_linux_stat_triple() {  # <stat-line> <cmdline-args>
   # so flatten them out of the field the kernel lets name anything.
   comm=${line#*(}
   comm=${comm%*) *}
-  comm=$(printf '%s' "$comm" | LC_ALL=C tr '\012' ' ' | LC_ALL=C tr -c '\040-\176' '?')
+  comm=$(printf '%s' "$comm" | LC_ALL=C tr '\012' ' ' | LC_ALL=C tr -c '\040-\176\200-\377' '?')
   rest=${line##*") "}
   local -a fields
   IFS=' ' read -r -a fields <<< "$rest"
@@ -362,7 +362,7 @@ fm_os_proc_triple() {  # <pid>
         done
         if [ "$count" -gt 0 ]; then
           IFS=' '
-          printf '%s' "${argv[*]}" | LC_ALL=C tr '\012' ' ' | LC_ALL=C tr -c '\040-\176' '?'
+          printf '%s' "${argv[*]}" | LC_ALL=C tr '\012' ' ' | LC_ALL=C tr -c '\040-\176\200-\377' '?'
         fi
       ) || return 1
       fm_linux_stat_triple "$stat_line" "$args"

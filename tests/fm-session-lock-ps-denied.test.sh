@@ -413,6 +413,48 @@ test_linux_provider_fixture_tree() {
   fi
 }
 
+test_linux_unicode_owner_identity() {
+  [ "$(uname -s)" = Linux ] || { pass "Unicode owner: Linux-only, skipped"; return; }
+  local dir fakebin alias_path got expected
+  dir="$TMP_ROOT/unicode-owner"
+  fakebin=$(fm_fakebin "$dir")
+  alias_path="$dir/José/.local/bin/agent"
+  mkdir -p "${alias_path%/*}" "$dir/cursor-agent/versions/test" "$dir/proc/700"
+  : > "$dir/cursor-agent/versions/test/cursor-agent"
+  ln -s "$dir/cursor-agent/versions/test/cursor-agent" "$alias_path"
+  printf '700 (José\001) S 1 700 700 0 -1 4194304\n' > "$dir/proc/700/stat"
+  printf '%s\0control\001\177\0' "$alias_path" > "$dir/proc/700/cmdline"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$2" in
+  comm=) printf 'José?\n' ;;
+  args=) printf '%s control??\n' "$FM_TEST_ALIAS" ;;
+  ppid=) printf '1\n' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  expected=$(PATH="$fakebin:$PATH" FM_TEST_ALIAS="$alias_path" bash -c '
+    . "$1"; fm_proc_info 700 || exit 1
+    printf "%s\t%s\t%s" "$FM_PROC_PPID" "$FM_PROC_COMM" "$FM_PROC_ARGS"
+  ' _ "$LIB") || fail "Unicode ps fixture refused identity"
+  make_denied_ps "$fakebin"
+  got=$(PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/proc" bash -c '
+    . "$1"; fm_proc_info 700 || exit 1
+    printf "%s\t%s\t%s" "$FM_PROC_PPID" "$FM_PROC_COMM" "$FM_PROC_ARGS"
+  ' _ "$LIB") || fail "Unicode fallback refused identity"
+  [ "$got" = "$expected" ] || fail "Unicode identity routes disagree: $got / $expected"
+  [ "$got" = "$(printf '1\tJosé?\t%s control??' "$alias_path")" ] \
+    || fail "Unicode bytes or control-byte rendering changed"
+  printf '700 (agent) S 1 700 700 0 -1 4194304\n' > "$dir/proc/700/stat"
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/proc" bash -c '
+    . "$1"
+    kill() { return 0; }
+    fm_harness_pid_alive 700 || exit 1
+    fm_session_lock_pid_blocks_reclaim 700
+  ' _ "$LIB" || fail "live Unicode Cursor alias allowed reclaim"
+  pass "Unicode identity survives denied ps; controls flatten and live Cursor blocks reclaim"
+}
+
 test_denied_ps_still_finds_the_harness() {
   local dir fakebin table got
   dir="$TMP_ROOT/denied-found"
@@ -633,7 +675,7 @@ test_control_bytes_match_ps_route() {
   command -v python3 >/dev/null 2>&1 || { pass "control bytes: python3 absent, skipped"; return; }
   local marker="$TMP_ROOT/control-ready" child i got expected
   python3 -c 'import os, sys
-os.execv(sys.executable, [os.fsencode(sys.executable), b"-c", b"import sys,time; open(sys.argv[1], chr(119)).close(); time.sleep(40)", os.fsencode(sys.argv[1]), b"tab\tnewline\nhigh\xff"])' "$marker" &
+os.execv(sys.executable, [os.fsencode(sys.executable), b"-c", b"import sys,time; open(sys.argv[1], chr(119)).close(); time.sleep(40)", os.fsencode(sys.argv[1]), b"tab\tnewline\nhigh\xc3\xa9"])' "$marker" &
   child=$!
   i=0
   while [ ! -f "$marker" ] && [ "$i" -lt 40 ]; do sleep 0.25; i=$((i + 1)); done
@@ -866,6 +908,7 @@ test_fallback_diagnostic_is_emitted_once
 test_ps_success_with_empty_comm_stays_present
 test_denied_ps_lock_decision_chain
 test_linux_provider_fixture_tree
+test_linux_unicode_owner_identity
 test_denied_ps_still_finds_the_harness
 test_denied_ps_without_provider_fails_closed
 test_denied_ps_rejects_a_foreign_chain
