@@ -1602,7 +1602,9 @@ record_hygiene_report() {
     [ -n "$(fm_meta_get "$file" remote_host)" ] && continue
     backend=$(fm_meta_get "$file" backend)
     target=$(fm_meta_get "$file" window)
-    if [ -n "$backend" ] && [ -n "$target" ]; then
+    if [ -z "$backend" ] || [ -z "$target" ]; then
+      echo "RECORD_HYGIENE: metadata has no endpoint: $id"
+    else
       endpoint_state=$(fm_backend_agent_state "$backend" "$target")
       case "$endpoint_state" in
         missing) echo "RECORD_HYGIENE: metadata has no endpoint: $id" ;;
