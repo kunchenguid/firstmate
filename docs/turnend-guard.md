@@ -622,7 +622,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Exactly-one-path safety.
 
 `tests/fm-progress-sweep.test.sh` replays a stalled home, a dead worker's In-flight row plus finished work nobody landed, and expects the sweep to name both, the heartbeat to wake and reset its backoff, and the turn end to be refused as idle.
-It expects a paused, a held, and a blocked row to stay silent on all three surfaces, and covers the grace window, the Claude one-follow-up bound, and the Pi adapter's unframed relay.
+It expects a paused, a held, and a blocked row to stay silent on all three surfaces, and covers the grace window, the Claude per-session one-follow-up bound, the read-only session exemption, and the Pi adapter's unframed relay.
 
 `tests/fm-turnend-foreign-owner-arm-fix.test.sh` runs the extracted isolated executable reproduction against real auto-arm and turn-end guard scripts.
 It proves that a live foreign owner still prevents arming while repeated non-owner Stops receive a diagnostic and exit safely.
