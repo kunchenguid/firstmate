@@ -3431,6 +3431,174 @@ EOF
   pass "Pi session transitions auto-arm through a generation owner across /new /resume /fork/reload, stale callbacks, and quit"
 }
 
+test_pi_startup_reclaim_arms_after_delayed_ownership() {
+  local repo home plugin child_pid_file child_marker_file marker_root arm_log out status
+  repo="$TMP_ROOT/pi-startup-reclaim-root"
+  home="$TMP_ROOT/pi-startup-reclaim-home"
+  child_pid_file="$TMP_ROOT/pi-startup-reclaim-child.pid"
+  child_marker_file="$TMP_ROOT/pi-startup-reclaim-child.marker"
+  marker_root="$TMP_ROOT/pi-startup-reclaim-markers"
+  arm_log="$TMP_ROOT/pi-startup-reclaim-arm.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+previous=$(cat "${FM_CHILD_PID_FILE:?}" 2>/dev/null || true)
+if [ -n "$previous" ] && kill -0 "$previous" 2>/dev/null; then
+  kill -TERM "$previous" 2>/dev/null || true
+fi
+marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
+cleanup() { rm -f "$marker"; }
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}"
+printf '%s\n' "$marker" > "${FM_CHILD_MARKER_FILE:?}"
+printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
+while :; do sleep 0.2; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CHILD_PID_FILE="$child_pid_file" FM_CHILD_MARKER_FILE="$child_marker_file" FM_MARKER_ROOT="$marker_root" FM_ARM_LOG="$arm_log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+function makePi() {
+  const handlers = new Map();
+  let tool = null;
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async () => {},
+    events: { on() {} },
+  };
+  return { pi, handlers, getTool: () => tool };
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitFor(pred, label, attempts = 250) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+function armRows() {
+  try {
+    return readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((line) => line.startsWith("arm pid="));
+  } catch {
+    return [];
+  }
+}
+
+function armPids() {
+  return armRows()
+    .map((line) => line.replace("arm pid=", "").split(" ")[0])
+    .filter((pid) => pid);
+}
+
+async function waitForArmCount(count, label) {
+  await waitFor(() => armRows().length >= count, label);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (armRows().length !== count) throw new Error(`${label}: expected ${count} arm rows, saw ${armRows().length}`);
+}
+
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+
+// 1. A startup whose lock still names a dead predecessor must arm once the
+// lock is legitimately reclaimed, without any model turn or tool call.
+writeFileSync(lock, "999999\n");
+const startup = makePi();
+mod.default(startup.pi);
+await startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+if (armRows().length !== 0) throw new Error("stale-lock startup armed before the reclaim");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (armRows().length !== 0) throw new Error("stale-lock startup armed during delayed reclaim");
+writeFileSync(lock, `${process.pid}\n`);
+await waitForArmCount(1, "delayed reclaim arm");
+
+// 2. An already-owned startup still arms exactly once.
+await startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await waitForArmCount(1, "already-owned startup");
+
+// 3. Concurrent startup and tool activation must not accumulate watchers.
+const tool = startup.getTool();
+if (!tool) throw new Error("Pi watch tool was not registered");
+await Promise.all([
+  startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {}),
+  tool.execute("tool-call", {}, undefined, undefined, {}),
+  startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {}),
+]);
+await waitForArmCount(1, "concurrent startup and tool activation");
+
+// 4. A live competing owner is neither displaced nor supervised by us.
+const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  writeFileSync(lock, `${other.pid}\n`);
+  const next = makePi();
+  mod.default(next.pi);
+  await next.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  if (armRows().length !== 1) throw new Error(`live-other startup armed ${armRows().length} rows`);
+  if (!pidAlive(other.pid)) throw new Error("live competing owner was displaced");
+} finally {
+  other.kill("SIGTERM");
+}
+
+// 5a. A wait pending across shutdown must not arm after the reclaim.
+writeFileSync(lock, "999999\n");
+const closing = makePi();
+mod.default(closing.pi);
+await closing.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await closing.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+writeFileSync(lock, `${process.pid}\n`);
+await new Promise((resolve) => setTimeout(resolve, 500));
+if (armRows().length !== 1) throw new Error(`post-shutdown reclaim armed ${armRows().length} rows`);
+
+// 5b. A wait pending across a takeover must not arm after the reclaim.
+writeFileSync(lock, "999999\n");
+const taken = makePi();
+mod.default(taken.pi);
+await taken.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+const rival = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+try {
+  writeFileSync(lock, `${rival.pid}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  if (armRows().length !== 1) throw new Error(`takeover reclaim armed ${armRows().length} rows`);
+} finally {
+  rival.kill("SIGTERM");
+}
+await taken.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+
+for (const pid of armPids()) {
+  try {
+    process.kill(Number(pid), "SIGTERM");
+  } catch {}
+}
+await waitFor(() => armPids().every((pid) => !pidAlive(pid)), "arm children exit");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi startup reclaim must arm after delayed ownership without a tool call"
+  [ -z "$out" ] || fail "Pi startup-reclaim test printed output: $out"
+  pass "Pi startup reclaim arms after delayed ownership, keeps owned startup single, spares live owners, and cannot arm after shutdown or takeover"
+}
+
 test_pi_session_replacement_carries_inflight_actionable_close() {
   local repo home plugin log marker_root trigger stop out status
   repo="$TMP_ROOT/pi-session-replacement-handoff-root"
@@ -5797,6 +5965,7 @@ test_pi_arm_distinguishes_session_lock_ownership
 test_pi_arm_reads_a_windows_tagged_session_lock
 test_pi_extension_keeps_marker_of_live_ancestor_session
 test_pi_session_transition_generation_owner
+test_pi_startup_reclaim_arms_after_delayed_ownership
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_replayed_after_replacement
 test_pi_streaming_time_delivery_keeps_the_successor_chain

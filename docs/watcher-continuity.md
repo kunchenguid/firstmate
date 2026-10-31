@@ -45,6 +45,11 @@ Each adapter:
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
 A failed follow-up never cancels continuity restoration.
 
+Pi's `session_start` also observes `state/.lock` when no live session holds it, including when it still names a dead predecessor.
+Once the observer sees this Pi process owning the lock, it activates the generation's watcher without a model turn or tool call.
+This wait is independent of the bounded child-close retry budget; it does not reclaim the lock itself.
+A live competing owner, generation retirement, or intentional shutdown cancels the observer, and an existing live arm child prevents another launch.
+
 ### Pi session replacement
 
 Pi same-process session replacement follows the generation-owner contract in `.pi/extensions/fm-primary-pi-watch.ts`:
@@ -442,6 +447,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 - The predecessor remaining live under a handoff generation until its replacement commits.
 - Bounded retry after that replacement kills the predecessor but fails before readiness.
 - Automatic re-arm before any model turn.
+- Delayed startup lock reclaim beyond the child-close retry budget, repeated owned startup and concurrent tool activation retaining one arm, and pending reclaim cancellation on shutdown or live-owner takeover.
 - A fresh extension-module rebind carrying all in-flight actionable closes exactly once.
 - Stale prior-generation callbacks.
 - Repeated transitions with exactly one live cycle.
