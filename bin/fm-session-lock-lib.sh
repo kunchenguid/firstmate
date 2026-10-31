@@ -289,7 +289,7 @@ fm_win_harness_ancestry_pids() {
 # bin/fm-harness.sh, bin/fm-backend.sh, bin/fm-sessionstart-nudge.sh,
 # and bin/fm-branch-outcome.sh own their own ancestry reads and still
 # require an executable ps; a denied-ps host stays degraded there
-# until they route through a shared provider (follow-up, issue #1).
+# until they route through a shared provider (follow-up).
 
 # One stderr line per shell that runs identity reads when the denied-ps
 # route cannot answer. AGENTS.md session-start contract: a lock refusal
