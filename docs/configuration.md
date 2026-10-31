@@ -2259,6 +2259,14 @@ Local routes use direct guarded filesystem operations, while remote routes deleg
 - If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 - The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 
+**Secondmate sync target (config/secondmate-sync-ref)**
+
+By default every secondmate sync, at startup and at launch, on local and remote routes alike, targets the primary checkout's default-branch commit.
+An optional primary-home `config/secondmate-sync-ref` holding exactly one local branch name, such as `local/patches`, retargets all of them to that branch's commit instead; it is not inherited by secondmate homes and does not affect project fleet sync.
+While it is in effect, a local secondmate home that is not a fast-forward of that branch, as after the branch is rebuilt, moves there with `git reset --keep` only when it is detached, clean, and every commit it holds beyond the target is reachable from `origin/<default>` or from another local branch whose name starts with the configured name (for example `local/patches-prev-<sha>`).
+Such a move counts as an update, so a running home gets the usual re-read nudge; any other divergence is skipped and recorded as before, and a remote route still only fast-forwards.
+A malformed file, or one naming a branch the primary does not have, is ignored with a `SECONDMATE_SYNC:` line (a launch warning at spawn) and sync follows the default branch; [`bin/fm-ff-lib.sh`](../bin/fm-ff-lib.sh)'s `secondmate_sync_target` and `ff_target` own the exact rules.
+
 **Push inherited configuration during a session**
 
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.

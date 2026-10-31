@@ -1477,7 +1477,11 @@ spawn_remote_secondmate() {
   # follows THIS primary's default-branch commit, not the Firstmate copy on that
   # host, so the commit is resolved here and handed over for the host to import
   # and fast-forward to. A skipped sync warns and launches the home unchanged.
-  if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
+  # An optional config/secondmate-sync-ref retargets it (secondmate_sync_target).
+  if secondmate_sync_target "$FM_ROOT" "$CONFIG"; then
+    [ -z "$SECONDMATE_SYNC_REF_ERROR" ] \
+      || echo "warning: $SECONDMATE_SYNC_REF_ERROR; following the default branch" >&2
+    sm_primary_head=$SECONDMATE_SYNC_COMMIT
     if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
       "$sm_primary_head" </dev/null 2>&1); then
       :
@@ -4110,7 +4114,8 @@ if [ "$KIND" = secondmate ]; then
   fi
   WT="$PROJ_ABS"
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
-  # PRIMARY checkout's current default-branch commit, so a freshly spawned or
+  # PRIMARY checkout's current default-branch commit (or the branch an optional
+  # config/secondmate-sync-ref names, with its rebuild move), so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
   # spawn section). Purely local - no fetch: the home is a worktree of this same
 # repo and already holds the commit. The same guarded path can reconcile a clean
@@ -4123,8 +4128,11 @@ if [ "$KIND" = secondmate ]; then
   # the caller turns this step off (bin/fm-remote-secondmate-control.sh).
   if [ "${FM_SKIP_SECONDMATE_SYNC:-0}" = 1 ]; then
     :
-  elif sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes "$ID" "$STATE" 2>&1 || true)
+  elif secondmate_sync_target "$FM_ROOT" "$CONFIG"; then
+    [ -z "$SECONDMATE_SYNC_REF_ERROR" ] \
+      || echo "warning: $SECONDMATE_SYNC_REF_ERROR; following the default branch" >&2
+    sm_primary_head=$SECONDMATE_SYNC_COMMIT
+    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes "$ID" "$STATE" "$SECONDMATE_SYNC_REF" 2>&1 || true)
     case "$sm_ff_out" in
     *': skipped:'*)
       sm_ff_line=$(first_line "$sm_ff_out")

@@ -1425,6 +1425,194 @@ test_remote_launch_does_not_retarget_host_copy() {
   pass "R9 a remote launch leaves the home on the parent's commit while an ordinary spawn follows its own checkout"
 }
 
+# --- config/secondmate-sync-ref: follow a named local branch ------------------
+# The primary may sit on a rebuilt patches branch whose default branch goes
+# stale. These cases drive the startup sweep (and one spawn) against a
+# local/patches branch built with plumbing so the primary checkout stays on main.
+
+# patch_commit <w> <parent> <content>: echo a new commit on <parent> that sets
+# bin/patch.sh to <content>, written without touching any checkout.
+patch_commit() {
+  local w=$1 parent=$2 content=$3 idx blob tree
+  idx="$w/patch.index"
+  rm -f "$idx"
+  GIT_INDEX_FILE="$idx" git -C "$w/main" read-tree "$parent"
+  blob=$(printf '%s\n' "$content" | git -C "$w/main" hash-object -w --stdin)
+  GIT_INDEX_FILE="$idx" git -C "$w/main" update-index --add --cacheinfo "100644,$blob,bin/patch.sh"
+  tree=$(GIT_INDEX_FILE="$idx" git -C "$w/main" write-tree)
+  rm -f "$idx"
+  git -C "$w/main" commit-tree "$tree" -p "$parent" -m "patch $content"
+}
+
+set_sync_ref() { # <w> <content>
+  mkdir -p "$1/home/config"
+  printf '%s' "$2" > "$1/home/config/secondmate-sync-ref"
+}
+
+run_boot() { # <w>; sets BOOT_OUT
+  local fakebin
+  fakebin=$(make_fake_toolchain "$1")
+  BOOT_OUT=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$1/home" FM_ROOT_OVERRIDE="$1/main" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+}
+
+test_sync_ref_absent_keeps_default_branch() {
+  local w c1 c2 p
+  w=$(new_world ref-absent)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm "$c1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  p=$(patch_commit "$w" "$c2" v1)
+  git -C "$w/main" branch local/patches "$p"
+
+  run_boot "$w"
+
+  [ "$(head_of "$w/sm")" = "$c2" ] \
+    || fail "without config/secondmate-sync-ref the home must follow the default branch (out: $BOOT_OUT)"
+  assert_not_contains "$BOOT_OUT" "secondmate-sync-ref" "absent config must not be reported"
+  pass "S1 sync ref absent: homes still follow the primary's default branch"
+}
+
+test_sync_ref_moves_homes_to_named_branch() {
+  local w c1 p
+  w=$(new_world ref-valid)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm "$c1"
+  p=$(patch_commit "$w" "$c1" v1)
+  git -C "$w/main" branch local/patches "$p"
+  set_sync_ref "$w" $'local/patches\n'
+
+  run_boot "$w"
+
+  [ "$(head_of "$w/sm")" = "$p" ] \
+    || fail "home did not follow the configured local/patches branch (out: $BOOT_OUT)"
+  assert_contains "$BOOT_OUT" "BOOTSTRAP_INFO: nudged fm-sm " "a running home whose bin/ changed is re-read nudged"
+  assert_not_contains "$BOOT_OUT" "SECONDMATE_SYNC:" "a valid config and a clean move report nothing actionable"
+  [ "$(git -C "$w/main" symbolic-ref --short HEAD)" = main ] || fail "the primary checkout left main"
+  pass "S2 a valid sync ref moves homes to that branch's commit"
+}
+
+# A rebuilt branch is no fast-forward of the old build a home sits on. The old
+# build stays preserved as local/patches-prev-<sha>, so the move drops nothing.
+test_sync_ref_rebuild_moves_preserved_home() {
+  local w c1 c2 p1 p2
+  w=$(new_world ref-rebuild)
+  c1=$(head_of "$w/main")
+  p1=$(patch_commit "$w" "$c1" v1)
+  add_sm_worktree "$w" sm "$p1"
+  git -C "$w/main" branch "local/patches-prev-${p1:0:8}" "$p1"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  p2=$(patch_commit "$w" "$c2" v2)
+  git -C "$w/main" branch local/patches "$p2"
+  set_sync_ref "$w" 'local/patches'
+  git -C "$w/sm" merge-base --is-ancestor HEAD "$p2" && fail "precondition: the rebuild must not be a fast-forward"
+
+  run_boot "$w"
+
+  [ "$(head_of "$w/sm")" = "$p2" ] || fail "clean detached home was not moved to the rebuilt branch (out: $BOOT_OUT)"
+  git -C "$w/sm" symbolic-ref -q HEAD >/dev/null && fail "moved home is no longer detached"
+  [ "$(git -C "$w/main" rev-parse "local/patches-prev-${p1:0:8}")" = "$p1" ] || fail "the preserved old build moved"
+  assert_contains "$BOOT_OUT" "BOOTSTRAP_INFO: nudged fm-sm " "a rebuild move is an update, so the running home is nudged"
+  assert_not_contains "$BOOT_OUT" "SECONDMATE_SYNC:" "a rebuild move is not reported as a skip"
+  [ ! -e "$w/home/state/.secondmate-update-reconcile/sm.pending" ] || fail "a rebuild move left a reconciliation record"
+  pass "S3 a rebuilt sync ref moves a clean detached home whose commits are preserved"
+}
+
+test_sync_ref_rebuild_skips_unsafe_homes() {
+  local w c1 c2 p1 p2 lone b_unp b_dirty b_branch
+  w=$(new_world ref-rebuild-skip)
+  c1=$(head_of "$w/main")
+  p1=$(patch_commit "$w" "$c1" v1)
+  git -C "$w/main" branch "local/patches-prev-${p1:0:8}" "$p1"
+  # A commit only this home holds: nothing else preserves it.
+  add_sm_worktree "$w" sm-unp "$p1"
+  printf 'unlanded\n' > "$w/sm-unp/README.md"
+  git -C "$w/sm-unp" commit -qam unlanded
+  b_unp=$(head_of "$w/sm-unp")
+  add_sm_worktree "$w" sm-dirty "$p1"
+  printf 'uncommitted local edit\n' >> "$w/sm-dirty/AGENTS.md"
+  b_dirty=$(head_of "$w/sm-dirty")
+  git -C "$w/main" worktree add -q -b home-branch "$w/sm-branch" "$p1"
+  printf 'sm-branch\n' > "$w/sm-branch/.fm-secondmate-home"
+  fm_write_secondmate_meta "$w/home/state/sm-branch.meta" "$w/sm-branch"
+  b_branch=$(head_of "$w/sm-branch")
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  p2=$(patch_commit "$w" "$c2" v2)
+  git -C "$w/main" branch local/patches "$p2"
+  set_sync_ref "$w" 'local/patches'
+  lone=$(git -C "$w/main" branch --list 'local/patches*' | wc -l | tr -d ' ')
+  [ "$lone" = 2 ] || fail "precondition: expected only local/patches and its prev build"
+
+  run_boot "$w"
+
+  [ "$(head_of "$w/sm-unp")" = "$b_unp" ] || fail "a home with an unpreserved commit was moved"
+  assert_contains "$BOOT_OUT" "SECONDMATE_SYNC: secondmate sm-unp: skipped: diverged from $p2; reconciliation required" \
+    "an unpreserved commit keeps today's diverged report"
+  [ -f "$w/home/state/.secondmate-update-reconcile/sm-unp.pending" ] || fail "the unpreserved home has no reconciliation record"
+  [ "$(head_of "$w/sm-dirty")" = "$b_dirty" ] || fail "a dirty home was moved"
+  grep -q 'uncommitted local edit' "$w/sm-dirty/AGENTS.md" || fail "the dirty edit was discarded"
+  assert_contains "$BOOT_OUT" "SECONDMATE_SYNC: secondmate sm-dirty: skipped: dirty working tree" "a dirty home is reported"
+  [ "$(head_of "$w/sm-branch")" = "$b_branch" ] || fail "a home on a named branch was moved"
+  assert_contains "$BOOT_OUT" "SECONDMATE_SYNC: secondmate sm-branch: skipped: on home-branch, expected main" \
+    "a home on a named branch is reported"
+  pass "S4 a rebuilt sync ref skips and reports unpreserved, dirty, and named-branch homes"
+}
+
+test_sync_ref_malformed_is_reported() {
+  local w c1 c2 case_name content
+  for case_name in two-lines missing-branch bad-name; do
+    case "$case_name" in
+      two-lines) content=$'local/patches\nmain\n' ;;
+      missing-branch) content='local/nope' ;;
+      bad-name) content='local/..bad' ;;
+    esac
+    w=$(new_world "ref-malformed-$case_name")
+    c1=$(head_of "$w/main")
+    add_sm_worktree "$w" sm "$c1"
+    git -C "$w/main" branch local/patches "$(patch_commit "$w" "$c1" v1)"
+    bump_primary "$w" instr
+    c2=$(head_of "$w/main")
+    set_sync_ref "$w" "$content"
+
+    run_boot "$w"
+
+    assert_contains "$BOOT_OUT" "SECONDMATE_SYNC: config/secondmate-sync-ref " "$case_name config is reported"
+    assert_contains "$BOOT_OUT" "; following the default branch" "$case_name report names the fallback"
+    [ "$(head_of "$w/sm")" = "$c2" ] || fail "$case_name config did not fall back to the default branch (out: $BOOT_OUT)"
+  done
+  pass "S5 a malformed or unresolvable sync ref is reported and sync follows the default branch"
+}
+
+test_spawn_follows_sync_ref_before_launch() {
+  local w c1 p fakebin
+  w=$(new_world ref-spawn)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  printf 'sm\n' > "$w/sm/.fm-secondmate-home"
+  mkdir -p "$w/sm/data"
+  printf 'charter\n' > "$w/sm/data/charter.md"
+  p=$(patch_commit "$w" "$c1" v1)
+  git -C "$w/main" branch local/patches "$p"
+  set_sync_ref "$w" 'local/patches'
+  fakebin="$w/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$BASE_PATH" TMUX='' \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>&1 || true
+
+  [ "$(head_of "$w/sm")" = "$p" ] || fail "spawn did not move the secondmate home to the configured sync ref"
+  pass "S6 spawn follows config/secondmate-sync-ref before launch"
+}
+
 test_ff_updated
 test_ff_current
 test_ff_dirty
@@ -1458,5 +1646,11 @@ test_bootstrap_syncs_remote_home_to_primary_commit
 test_bootstrap_reports_outdated_host_actionably
 test_bootstrap_nudges_remote_home_only_when_owed
 test_remote_launch_does_not_retarget_host_copy
+test_sync_ref_absent_keeps_default_branch
+test_sync_ref_moves_homes_to_named_branch
+test_sync_ref_rebuild_moves_preserved_home
+test_sync_ref_rebuild_skips_unsafe_homes
+test_sync_ref_malformed_is_reported
+test_spawn_follows_sync_ref_before_launch
 
 echo "# all fm-secondmate-sync tests passed"

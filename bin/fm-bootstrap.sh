@@ -19,6 +19,7 @@
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
+#                 "SECONDMATE_SYNC: config/secondmate-sync-ref <problem>; following the default branch",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
@@ -403,9 +404,17 @@ secondmate_sync() {
   # /updatefirstmate, startup owns the live-convergence send itself because it is
   # a deterministic locked sweep and can report success as BOOTSTRAP_INFO while
   # preserving failed sends as NUDGE_SECONDMATES retry markers.
+  # An optional config/secondmate-sync-ref retargets every route to that local
+  # branch and allows rebuild moves on local routes (secondmate_sync_target and
+  # ff_target in fm-ff-lib.sh); an ignored file is reported, never fatal.
   [ -d "$STATE" ] || return 0
-  local primary_head
-  if ! primary_head=$(primary_head_commit "$FM_ROOT"); then
+  local primary_head sync_ref target_resolved=1
+  secondmate_sync_target "$FM_ROOT" "$CONFIG" || target_resolved=0
+  [ -z "$SECONDMATE_SYNC_REF_ERROR" ] \
+    || echo "SECONDMATE_SYNC: $SECONDMATE_SYNC_REF_ERROR; following the default branch"
+  primary_head=$SECONDMATE_SYNC_COMMIT
+  sync_ref=$SECONDMATE_SYNC_REF
+  if [ "$target_resolved" -eq 0 ]; then
     local meta id
     for meta in "$STATE"/*.meta; do
       [ -f "$meta" ] || continue
@@ -526,7 +535,7 @@ secondmate_sync() {
   local tmp line
   secondmate_retry_pending_nudges
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-secondmate-sync.XXXXXX" 2>/dev/null) || return 0
-  sweep_live_secondmate_metas "$STATE" "$primary_head" yes "$DATA/secondmates.md" >"$tmp"
+  sweep_live_secondmate_metas "$STATE" "$primary_head" yes "$DATA/secondmates.md" "$sync_ref" >"$tmp"
   while IFS= read -r line; do
     case "$line" in
       secondmate\ *': skipped:'*) echo "SECONDMATE_SYNC: $line" ;;
