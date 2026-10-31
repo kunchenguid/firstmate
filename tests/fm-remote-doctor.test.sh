@@ -767,7 +767,7 @@ expect_code 0 "$DOCTOR_RC" "repeated repair drifted when a second shell lookup w
 assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the installed login-shell plist was reported as drifted"
 assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the loaded login-shell agent was reported as drifted"
 [ "$(cat "$CASE_STATE/dscl-count")" = 1 ] || fail "doctor resolved the account login shell more than once"
-assert_no_grep '^bootout\|^bootstrap\|^kickstart' "$CASE_LAUNCHCTL_LOG" \
+assert_no_regex '^(bootout|bootstrap|kickstart)' "$CASE_LAUNCHCTL_LOG" \
   "repeated repair reloaded an already healthy login-shell agent"
 pass "repeated repair reuses one resolved login shell and remains a no-op"
 
