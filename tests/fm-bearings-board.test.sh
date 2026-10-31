@@ -270,7 +270,7 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "an underway row without an explicit name marker was accepted"
 
-  for invalid_filed in "last Tuesday" "2026-13-01" "2026-08-14T99:30:00Z" "2026-02-29"; do
+  for invalid_filed in "last Tuesday" "2026-13-01" "2026-08-14T99:30:00Z" "2026-02-29" "2026-04-31" "2026-08-14T12:00:60Z" "2026-08-14T12:00:61Z"; do
     write_valid_payload "$data"
     jq --arg filed "$invalid_filed" '.charted[0].filed = $filed' "$data" > "$data.tmp" \
       && mv "$data.tmp" "$data"
@@ -307,6 +307,45 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
 
   assert_absent "$board" "a refused payload still produced a board"
   pass "build refuses malformed payloads before touching the board"
+}
+
+# Run the board with a pinned timezone. TZ is local to this helper and exported
+# from there, so a case that forces a zone cannot leak it into the rest of the
+# suite.
+run_board_in_tz() {  # <tz> <home> <args...>
+  local TZ=$1
+  export TZ
+  shift
+  run_board "$@"
+}
+
+# The timezone is set deliberately, because a run that only ever stands on UTC
+# is exactly what hid this for as long as it lasted: valid_filed used to
+# round-trip a filed timestamp through an epoch value, and jq 1.6 applies the
+# local daylight-saving offset on that path, so "2026-08-14T09:30:00Z" read back
+# an hour off and refused the whole board build on every host running summer
+# time.
+test_a_filed_timestamp_is_accepted_in_any_machine_timezone() {
+  local home data tz rc out
+  for tz in UTC Europe/Berlin; do
+    home=$(make_home "filedtz-${tz##*/}")
+    data="$home/payload.json"
+
+    write_valid_payload "$data"
+    jq '.charted[0].filed = "2026-08-14T09:30:00Z"' "$data" > "$data.tmp" \
+      && mv "$data.tmp" "$data"
+    run_board_in_tz "$tz" "$home" build "$data" >/dev/null \
+      || fail "a filed UTC timestamp was refused under TZ=$tz"
+    extract_payload "$home/.lavish/bearings-board.html" \
+      | jq -e '.charted[0].filed == "2026-08-14T09:30:00Z"' >/dev/null \
+      || fail "the built board did not carry the filed timestamp it was given under TZ=$tz"
+
+    write_valid_payload "$data"
+    jq '.charted[0].filed = "2026-02-29"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board_in_tz "$tz" "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "a filed date that never existed was accepted under TZ=$tz: $out"
+  done
+  pass "a filed timestamp is accepted, and an impossible date refused, in any timezone"
 }
 
 test_build_injects_binds_then_arms() {
@@ -771,6 +810,7 @@ test_build_refuses_a_nondecision_reconcile_value() {
 
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
+test_a_filed_timestamp_is_accepted_in_any_machine_timezone
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
