@@ -1,0 +1,29 @@
+lab core session fm-hclab-native ready (server pid 23229)
+resolved={run-worktree}/.live-hc/bin/herdr-core version=hc 0.1.14 dependency_available=yes
+generation=1
+error: expected 'hc x.y.z' from '/etc/profiles/per-user/kunchen/bin/herdr --version' but got 'herdr 0.9.0'; refusing to use a binary that is not Herdr Core
+unrelated Herdr TUI binary rejected before core lifecycle
+{"address":"t1","argv":["/run/current-system/sw/bin/zsh"],"cols":200,"created_ms":1793475774919,"cwd":"{run-worktree}/.live-hc","die_with_parent":false,"exit_code":null,"finished_ms":null,"identity":"ghostty","keep":false,"labels":{"firstmate.home":"firstmate-7f5b2a3f","firstmate.task":"fm-native","herdr.space":"fm-firstmate-7f5b2a3f","herdr.tab":"firstmate-7f5b2a3f-fm-native"},"name":null,"notify":false,"parent":null,"pid":23386,"reason":null,"reported":false,"rm":false,"rows":120,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"","turn":0}
+error: hc terminal for fm-native already exists in session 'fm-hclab-native'
+foreign-label send refused
+foreign-label capture refused
+error: hc terminal fm-hclab-native:t1 does not carry this task's labels; refusing to close it
+foreign-label close refused
+native submit verdict=empty
+{"address":"t1","argv":["/run/current-system/sw/bin/zsh"],"cols":200,"created_ms":1793475774919,"cwd":"{run-worktree}/.live-hc","die_with_parent":false,"exit_code":null,"finished_ms":null,"foreground":{"argv":["/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python","{run-worktree}/.live-hc/status-program.py","{run-worktree}/.live-hc/received.txt"],"cwd":"{run-worktree}/.live-hc","name":"Python","pid":23386},"identity":"ghostty","keep":false,"labels":{"firstmate.home":"firstmate-7f5b2a3f","firstmate.task":"fm-native","herdr.space":"fm-firstmate-7f5b2a3f","herdr.tab":"firstmate-7f5b2a3f-fm-native"},"name":null,"notify":false,"parent":null,"pid":23386,"reason":null,"reported":true,"rm":false,"rows":120,"screen":"exact","signal":null,"state":"live","status":{"app":"lab-status-probe","state":"working"},"status_ms":1793475777597,"template":null,"title":"python3","turn":0}
+error: hc send refused fm-hclab-native:t1 - the terminal is blocked waiting on input (never forced): {"error":{"hint":"typing would answer its dialog; read its screen first (hc read t1), or --force","kind":"blocked","message":"t1 is blocked (waiting)"}}
+blocked submit verdict=unknown
+input receipt file unchanged after blocked send; received only:
+-literal --force
+block
+
+01M697SC5BVAF30GXHZTKHZVV3/.live-hc HEAD*?
+<Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M697SC5BVAF30GXHZTKHZVV3/.live-hc/received.txt'
+STATUS-PROBE-READY
+-literal --force
+RECEIVED:-literal --force
+block
+RECEIVED:block
+native status terminal removed; liveness=missing
+ALL NATIVE AND IDENTITY CHECKS PASSED
+native lab teardown exit=0

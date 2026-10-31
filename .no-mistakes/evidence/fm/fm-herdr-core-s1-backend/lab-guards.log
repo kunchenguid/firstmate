@@ -1,0 +1,36 @@
+fm-hc-lab: refusing session name 'default'
+fm-hc-lab: refusing session name 'default'
+fm-hc-lab: session name must start with 'fm-hclab-' and contain only letters, digits, underscores, or dashes: not-a-lab
+lab core session fm-hclab-a ready (server pid 49263)
+lab core session fm-hclab-a2 ready (server pid 49650)
+{"address":"t1","agent":"sleep","cwd":"{run-worktree}","state":"live","turn":0}
+{"address":"t1","agent":"sleep","cwd":"{run-worktree}","state":"live","turn":0}
+fm-hc-lab: session dir already exists for 'fm-hclab-a'; refusing to adopt or overwrite it
+fm-hc-lab: run forbids a leading option before the hc subcommand; it could shift a lifecycle operation past the guard
+fm-hc-lab: run forbids server operations; use guarded stop or teardown
+fm-hc-lab: run forbids connect; raw protocol writes bypass the CLI guards
+fm-hc-lab: run forbids caller-supplied --session/--socket; the helper pins the lab session and socket
+fm-hc-lab: run forbids caller-supplied --session/--socket; the helper pins the lab session and socket
+prefix sibling after first teardown: {"address":"t1","argv":["/bin/sleep","600"],"cols":200,"created_ms":1793475816334,"cwd":"{run-worktree}","die_with_parent":false,"exit_code":null,"finished_ms":null,"foreground":{"argv":["/bin/sleep","600"],"cwd":"{run-worktree}","name":"sleep","pid":50100},"identity":"ghostty","keep":false,"labels":{},"name":null,"notify":false,"parent":null,"pid":50100,"reason":null,"reported":false,"rm":false,"rows":120,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"","turn":0}
+exact-session teardown left the longer-prefix Core and its sleep process alive
+fm-hc-ci-cleanup.sh: wrote lab session snapshot to {run-worktree}/.live-hc/before.txt (1 names)
+lab core session fm-hclab-a ready (server pid 52627)
+lab core session fm-hclab-b ready (server pid 52884)
+{"address":"t1","agent":"sleep","cwd":"{run-worktree}","state":"live","turn":0}
+{"address":"t1","agent":"sleep","cwd":"{run-worktree}","state":"live","turn":0}
+fm-hc-ci-cleanup.sh: stopping job-owned lab core session fm-hclab-a
+fm-hc-ci-cleanup.sh: removed job-owned lab core session fm-hclab-a
+fm-hc-ci-cleanup.sh: stopping job-owned lab core session fm-hclab-b
+fm-hc-ci-cleanup.sh: removed job-owned lab core session fm-hclab-b
+snapshot-owned sibling after CI cleanup: {"address":"t1","argv":["/bin/sleep","600"],"cols":200,"created_ms":1793475816334,"cwd":"{run-worktree}","die_with_parent":false,"exit_code":null,"finished_ms":null,"foreground":{"argv":["/bin/sleep","600"],"cwd":"{run-worktree}","name":"sleep","pid":50100},"identity":"ghostty","keep":false,"labels":{},"name":null,"notify":false,"parent":null,"pid":50100,"reason":null,"reported":false,"rm":false,"rows":120,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"","turn":0}
+CI cleanup removed both post-snapshot sessions, preserved snapshot session
+lab core session fm-hclab-trip ready (server pid 54887)
+fm-hc-lab: FLEET-STATE TRIPWIRE FAILED: real herdr-core state changed during lab work
+fm-hc-lab: before: 0 files; after: 0 files
+1c1
+< {run-worktree}/.live-hc/synthetic-fleet/herdr-core/owned-sentinel 1610589487 1793475812 10
+---
+> {run-worktree}/.live-hc/synthetic-fleet/herdr-core/owned-sentinel 1610589487 1793475821 8
+safety wrapper propagated changed-fleet tripwire failure and retained the lab record
+restored synthetic fleet; verified teardown succeeds and all lab records removed
+lab guard cleanup exit=0

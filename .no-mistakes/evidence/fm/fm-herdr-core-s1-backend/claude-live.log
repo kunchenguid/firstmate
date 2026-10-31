@@ -1,0 +1,8 @@
+lab core session fm-hclab-claude ready (server pid 61362)
+{run-worktree}/.live-hc/claude-home
+real harness binary=~/.local/bin/claude version=2.1.316 (Claude Code)
+real Claude liveness=alive
+{"address":"t1","argv":["env","-u","NO_MISTAKES_GATE","-u","FM_GATE_REFUSE_BYPASS","-u","FM_ROOT_OVERRIDE","-u","FM_STATE_OVERRIDE","-u","FM_DATA_OVERRIDE","-u","FM_CONFIG_OVERRIDE","-u","FM_PROJECTS_OVERRIDE","FM_HOME={run-worktree}/.live-hc/claude-home","DISABLE_AUTOUPDATER=1","~/.local/bin/claude"],"cols":200,"created_ms":1793475867745,"cwd":"{run-worktree}/.live-hc/claude-wt","die_with_parent":false,"exit_code":null,"finished_ms":null,"foreground":{"argv":["~/.local/bin/claude"],"cwd":"{run-worktree}/.live-hc/claude-wt","name":"2.1.316","pid":63683},"identity":"ghostty","keep":false,"labels":{"firstmate.home":"firstmate-bf57bed1","firstmate.task":"fm-claude"},"name":null,"notify":false,"parent":null,"pid":63683,"reason":null,"reported":false,"rm":false,"rows":120,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"","turn":0}
+
+real Claude terminal closed and removed; liveness=missing
+real harness teardown exit=0

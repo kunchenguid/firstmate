@@ -1,0 +1,8 @@
+lab core session fm-hclab-smoke-2885-21758 ready (server pid 2967)
+ok - hc smoke: create_task started fm-hclab-smoke-2885-21758:t1
+ok - hc smoke: current_path follows the shell's cwd
+ok - hc smoke: send_text_line ran the command and capture shows its output
+ok - hc smoke: send_text_submit delivers through send --wait (verdict empty)
+ok - hc smoke: agent_state reads dead for a shell and alive for an agent-named foreground
+ok - hc smoke: kill closes and removes the terminal
+FM_TEST_COMPLETE

@@ -1,0 +1,2 @@
+fm-install-hc.sh: downloading herdr-core-macos-aarch64.tar.gz from https://releases.herdr.dev/core/0.1.14/herdr-core-macos-aarch64.tar.gz
+fm-install-hc.sh: installed herdr-core 0.1.14 (protocol generation 1) to {run-worktree}/.live-hc/bin/herdr-core
