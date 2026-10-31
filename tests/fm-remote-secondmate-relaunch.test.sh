@@ -81,6 +81,19 @@ case "$FM_FAKE_RELAUNCH_MODE" in
     printf 'error: unverified remote secondmate harness: %s\n' "$harness" >&2
     exit 1
     ;;
+  refuse-preflight)
+    printf 'error: unverified remote secondmate harness: %s\n' "$harness" >&2
+    printf 'relaunch_refused_before_control=%s\n' "$id"
+    exit 1
+    ;;
+  uncertain)
+    printf 'error: remote connection lost\n' >&2
+    exit 255
+    ;;
+  foreign-refusal)
+    printf 'relaunch_refused_before_control=another-task\n'
+    exit 1
+    ;;
   confirm-other)
     harness=claude
     model=claude-opus-5-5
@@ -214,6 +227,32 @@ assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sess
 OUT=$(FM_FAKE_RELAUNCH_MODE=refuse run_relaunch ios claude claude-opus-5-5 medium); RC=$?
 expect_code 1 "$RC" "refused remote replacement unexpectedly succeeded"
 assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" "failed runtime switch released occupancy"
+# The same refusal over the UNCAPPED worker that held no row: this switch
+# created the reservation, so a confirmed pre-control refusal must release it
+# rather than block every later capped dispatch. A failure whose phase the
+# host does not prove, and a proof naming another task, keep it.
+for refusal_mode in refuse-preflight refuse uncertain foreign-refusal; do
+  reset_meta
+  printf 'max=1\nmodels=gpt-6.1-sol\n' > "$HOME_DIR/config/sol-cap"
+  : > "$HOME_DIR/state/sol-sessions.tsv"
+  cp "$HOME_DIR/state/ios.meta" "$TMP/ios-before-capped-refusal.meta"
+  OUT=$(FM_FAKE_RELAUNCH_MODE="$refusal_mode" run_relaunch ios codex gpt-6.1-sol medium); RC=$?
+  [ "$RC" -ne 0 ] || fail "a failed uncapped-to-capped switch unexpectedly succeeded: $OUT"
+  cmp -s "$TMP/ios-before-capped-refusal.meta" "$HOME_DIR/state/ios.meta" \
+    || fail "a failed uncapped-to-capped switch changed the original worker's route"
+  if [ "$refusal_mode" = refuse-preflight ]; then
+    assert_equals '' "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" \
+      "a confirmed pre-control refusal leaked the reservation the switch created"
+    expected_admission=0
+  else
+    assert_equals 0 "$(awk -F'\t' '$1 == "ios" {print $4}' "$HOME_DIR/state/sol-sessions.tsv")" \
+      "a delivery that may have started a replacement released its reservation ($refusal_mode)"
+    expected_admission=1
+  fi
+  OUT=$(FM_HOME="$HOME_DIR" bash "$ROOT/bin/fm-sol-cap-lib.sh" refuse-claim next ship codex gpt-6.1-sol "$HOME_DIR/config" "$HOME_DIR/state"); RC=$?
+  expect_code "$expected_admission" "$RC" "wrong capacity after $refusal_mode: $OUT"
+done
+pass "only a confirmed pre-control refusal releases the reservation a switch created"
 REAL_MV=$(command -v mv)
 export REAL_MV
 cat > "$FAKEBIN/mv" <<'SH'

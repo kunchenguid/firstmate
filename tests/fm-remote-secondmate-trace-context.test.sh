@@ -235,6 +235,18 @@ RELAUNCH_INJECTED=$(remote_injected_traceparent)
   || fail "a remote relaunch must re-export the original carrier (first='$PARENT_TP' injected='$RELAUNCH_INJECTED')"
 pass "relaunch: a remote-routed second mate keeps one stable identity across restarts"
 
+# The real host-side wrapper must distinguish preflight refusal from an
+# uncertain lifecycle result, without entering the control plane.
+cp "$HERDR_LOG" "$TMP_ROOT/herdr-before-refusal.log"
+OUT=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
+  relaunch ios codex gpt-6.1-sol invalid-effort 2>&1); RC=$?
+expect_code 1 "$RC" "invalid remote effort was accepted: $OUT"
+assert_contains "$OUT" 'relaunch_refused_before_control=ios' \
+  "the host did not identify a refusal before control started"
+cmp -s "$HERDR_LOG" "$TMP_ROOT/herdr-before-refusal.log" \
+  || fail "a preflight refusal reached the backend"
+pass "remote relaunch preflight refusal proves control never started"
+
 # --- per-task boundary: ambient carriers are never adopted or shared ---------
 # A persistent supervisor exports its own launch-time TRACEPARENT for its whole
 # life. A second remote route resolved from that same environment must root its

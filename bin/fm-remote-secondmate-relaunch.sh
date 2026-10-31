@@ -59,6 +59,13 @@ REMOTE_HOST=$(fm_meta_get "$META" remote_host)
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
 
 fm_sol_cap_reconcile_remote "$ID" "$STATE" "$SCRIPT_DIR" || die "cannot reconcile $ID's Sol claim"
+# Whether this route already held capped occupancy before the switch decides
+# what a refused switch may release: only a reservation THIS switch created is
+# its own to drop, while a worker that already owned a slot keeps it. An
+# unreadable declaration (2) is treated as owned, so nothing is released
+# against a ceiling this home cannot read.
+PRIOR_OWNED_RC=0
+fm_sol_cap_has_owned_occupancy "$ID" "$STATE" || PRIOR_OWNED_RC=$?
 fm_sol_cap_refuse_and_claim "$ID" secondmate "$HARNESS" "$MODEL" "$CONFIG" "$STATE" reuse || die "$FM_SOL_CAP_REFUSAL"
 if [ "$FM_SOL_CLAIM_CREATED" = "$ID" ]; then
   fm_sol_cap_promote "$ID" 0 "$STATE" || die "cannot preserve $ID's delivery reservation"
@@ -68,6 +75,16 @@ RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
   rc=$?
   printf '%s\n' "$RELAUNCH_OUT" >&2
+  # A transport error or a failed control transaction may have launched a
+  # replacement, so its reservation still may belong to a running worker. Only
+  # the host's explicit pre-control refusal proves this switch started nothing,
+  # and only a route that held no occupancy before it can release the claim the
+  # switch created. An existing capped worker keeps its slot either way.
+  if [ "$FM_SOL_CLAIM_CREATED" = "$ID" ] && [ "$PRIOR_OWNED_RC" = 1 ] &&
+    printf '%s\n' "$RELAUNCH_OUT" | grep -qxF "relaunch_refused_before_control=$ID"; then
+    fm_sol_cap_promote "$ID" remove "$STATE" \
+      || die "the host refused $ID's switch before control started, but the reservation it created could not be released from the Sol registry; release it before the next capped dispatch"
+  fi
   exit "$rc"
 }
 printf '%s\n' "$RELAUNCH_OUT"
