@@ -34,7 +34,9 @@
 #              otherwise reports `cancel=not-running` having sent one press.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
-#              busy, then submits the harness's exit command. Postcondition:
+#              busy, then submits the harness's exit command; the adapter's one
+#              named exit confirmation (fm_control_exit_confirm_dialog) is
+#              answered on its preselected row. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` (or, on Rex, `unreadable`, which is how a stopped Rex
@@ -445,6 +447,22 @@ refuse_blocking_prompt() {  # <dialog-name>
   die "task $ID is blocked on a prompt: $1. Refusing to type Enter into it."
 }
 
+# answer_exit_dialog <dialog-name>: exit's one named confirmation step. Only the
+# adapter's own exit confirmation (fm_control_exit_confirm_dialog) is answered,
+# with one Enter on its preselected row and at most once per exit; any other
+# recognised dialog, or the same one still open after its answer, refuses. A
+# stopped agent whose pane still shows the dialog text receives nothing.
+answer_exit_dialog() {  # <dialog-name>
+  local name=$1
+  [ "$(agent_state)" != dead ] || return 0
+  [ "$EXIT_DIALOG_ANSWERED" = 0 ] \
+    && [ "$name" = "$(fm_control_exit_confirm_dialog "$HARNESS")" ] \
+    || refuse_blocking_prompt "$name"
+  fm_backend_send_key "$BACKEND" "$T" Enter "$LABEL" \
+    || die "the Enter that confirms task $ID's $name could not be sent on $BACKEND"
+  EXIT_DIALOG_ANSWERED=1
+}
+
 # rendered_matches <ere>: whether any row of the visible viewport matches.
 # An unreadable viewport is a no, so every caller treats it as missing proof.
 rendered_matches() {  # <ere>
@@ -701,6 +719,8 @@ retire_busy_incarnation() {
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
+  local exit_command=delivered
+  EXIT_DIALOG_ANSWERED=0
   require_state_verified_backend exit
   fm_control_backend_exit_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, whose T3 Orchestrator V2 tools have no session stop, so 'exit' cannot stop its agent; 'interrupt' ends the running turn and teardown archives the thread"
@@ -775,58 +795,61 @@ do_exit() {
   composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
     || composer_state=unknown
   # The classify that filled the sink ran in a subshell, so read the file
-  # rather than a function that subshell sourced.
+  # rather than a function that subshell sourced. A dialog already open is
+  # answered or refused in place of typing the exit command into it.
   if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
     dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
-    refuse_blocking_prompt "$dialog"
-  fi
-  case "$composer_state" in
-    empty) ;;
-    pending)
-      die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
-      ;;
-    *)
-      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
-      ;;
-  esac
-  # The submit verdict is NOT the postcondition here: a successful exit command
-  # destroys the composer the verdict is read from, so a post-exit read can
-  # legitimately report anything. Only a hard transport failure aborts; the
-  # authoritative proof is the agent-state wait below. The retried Enter still
-  # matters, because a slash command opens a completion popup on some TUIs that
-  # swallows the first Enter. OpenCode 2 exits from an empty composer on a
-  # single Ctrl-C (verified on 2.0.11, 2.0.21, and 2.0.22); typing /exit also
-  # exits but opens a completion popup, so the raw key plane avoids that popup
-  # interacting with the typed submit verification. A Ctrl-C over leftover
-  # composer text only clears it, so Ctrl-U clears the composer first and one
-  # more Ctrl-C follows if the agent is still alive.
-  case "$cmd" in
-    C-c)
-      fm_backend_send_key "$BACKEND" "$T" C-u "$LABEL" \
-        || die "the exit key could not be sent to task $ID on $BACKEND"
-      fm_backend_send_key "$BACKEND" "$T" C-c "$LABEL" \
-        || die "the exit key could not be sent to task $ID on $BACKEND"
-      if ! wait_agent_state "$SETTLE_WAIT" dead >/dev/null; then
+    answer_exit_dialog "$dialog"
+    exit_command=not-needed
+  else
+    case "$composer_state" in
+      empty) ;;
+      pending)
+        die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
+        ;;
+      *)
+        die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+        ;;
+    esac
+    # The submit verdict is NOT the postcondition here: a successful exit command
+    # destroys the composer the verdict is read from, so a post-exit read can
+    # legitimately report anything. Only a hard transport failure aborts; the
+    # authoritative proof is the agent-state wait below. The retried Enter still
+    # matters, because a slash command opens a completion popup on some TUIs that
+    # swallows the first Enter. OpenCode 2 exits from an empty composer on a
+    # single Ctrl-C (verified on 2.0.11, 2.0.21, and 2.0.22); typing /exit also
+    # exits but opens a completion popup, so the raw key plane avoids that popup
+    # interacting with the typed submit verification. A Ctrl-C over leftover
+    # composer text only clears it, so Ctrl-U clears the composer first and one
+    # more Ctrl-C follows if the agent is still alive.
+    case "$cmd" in
+      C-c)
+        fm_backend_send_key "$BACKEND" "$T" C-u "$LABEL" \
+          || die "the exit key could not be sent to task $ID on $BACKEND"
         fm_backend_send_key "$BACKEND" "$T" C-c "$LABEL" \
           || die "the exit key could not be sent to task $ID on $BACKEND"
-      fi
-      ;;
-    *)
-      verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
-        || die "the exit command could not be sent to task $ID on $BACKEND"
-      [ "$verdict" != send-failed ] \
-        || die "the exit command could not be sent to task $ID on $BACKEND"
-      # The submitting Enter can open the picker. The agent is still alive, and
-      # another Enter would confirm the selected row. A dead agent may leave the
-      # same text behind; that is not a prompt still waiting.
-      if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
-        dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
-        if [ "$(agent_state)" != dead ]; then
-          refuse_blocking_prompt "$dialog"
+        if ! wait_agent_state "$SETTLE_WAIT" dead >/dev/null; then
+          fm_backend_send_key "$BACKEND" "$T" C-c "$LABEL" \
+            || die "the exit key could not be sent to task $ID on $BACKEND"
         fi
-      fi
-      ;;
-  esac
+        ;;
+      *)
+        verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
+          || die "the exit command could not be sent to task $ID on $BACKEND"
+        [ "$verdict" != send-failed ] \
+          || die "the exit command could not be sent to task $ID on $BACKEND"
+        # The submitting Enter can open the picker. The agent is still alive, and
+        # another Enter would confirm the selected row. A dead agent may leave the
+        # same text behind; that is not a prompt still waiting.
+        if [ -s "${FM_COMPOSER_DIALOG_SINK:-}" ]; then
+          dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
+          if [ "$(agent_state)" != dead ]; then
+            answer_exit_dialog "$dialog"
+          fi
+        fi
+        ;;
+    esac
+  fi
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
     # A submit can return before any read sees the picker: a native busy
     # verdict needs no composer read, and a cleared composer can be read
@@ -834,9 +857,12 @@ do_exit() {
     : > "$FM_COMPOSER_DIALOG_SINK" || true
     fm_backend_composer_state "$BACKEND" "$T" "$LABEL" >/dev/null 2>&1 || true
     if [ -s "$FM_COMPOSER_DIALOG_SINK" ]; then
-      refuse_blocking_prompt "$(cat "$FM_COMPOSER_DIALOG_SINK")"
+      answer_exit_dialog "$(cat "$FM_COMPOSER_DIALOG_SINK")"
+      state=$(wait_agent_state "$EXIT_WAIT" dead) \
+        || die "exit-delivered $ID interrupt=$interrupt_result exit-command=$exit_command dialog=answered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s of confirming the dialog"
+    else
+      die "exit-delivered $ID interrupt=$interrupt_result exit-command=$exit_command agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
     fi
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.

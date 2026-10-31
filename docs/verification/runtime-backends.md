@@ -1554,15 +1554,26 @@ The picker is recognised by its recorded structure only: the heading on its own 
 The same strings quoted above a normal composer, as a diff, this note, or a test fixture shows them, are not a picker.
 Submit retries now stop after the Enter that opened the picker and report unknown.
 A typed submit to a pane that already shows the picker types nothing and sends no Enter.
-Exit reports that the worker is blocked on the Claude background-task exit picker and does not type another Enter.
-A submit can return before any read sees the picker, so exit reads the screen once more when its wait for the agent to stop times out, and names the picker there too.
-Exit does not report a stopped agent whose pane still shows the picker text as blocked on a prompt.
+Re-measured 2026-10-18 against Claude Code 2.1.302 in an isolated tmux session, with the agent holding a running `sleep 901` background shell:
+
+```sh
+FM_HOME=<scratch-home> bin/fm-control.sh lv1 exit
+```
+
+```text
+stopped lv1 harness=claude backend=tmux endpoint=fmlive:fm-lv1 worktree=<scratch-worktree>
+```
+
+The pane showed the picker during the exit, then returned to `zsh`, and the background `sleep 901` process was gone.
+Exit answers the picker with one Enter on its selected "Exit and stop tasks" row, sent at most once, and reports blocked on the Claude background-task exit picker only when the picker is still open after that answer or another adapter shows it.
+A submit can return before any read sees the picker, so exit reads the screen once more when its wait for the agent to stop times out, and answers or names the picker there too.
+Exit sends nothing to a stopped agent whose pane still shows the picker text and does not report it as blocked on a prompt.
 The watcher reads the picker with the same matcher on the stale-path capture it already takes for a worker.
 A worker pane parked on it keeps the ordinary stale triage and schedule, and its plain stale reason and its final wedge escalation reason name the picker after `blocked-on-prompt:`; the deferral, dead-record, and declared-wait recheck reasons do not.
 A second mate stays off that path, and a finished worker in away mode is handled as before.
 That watcher and away-daemon reporting is covered by fakes in `tests/fm-watch-triage.test.sh` and `tests/fm-daemon.test.sh`, not by a live measurement.
 No recorded screen was available for a model-downgrade confirmation, an MCP approval, or a Claude exit confirmation other than this picker, so those dialogs are not covered.
-Refusing an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
+Stopping submit retries before an Enter that would confirm a dialog restores an existing safety path, so it is not gated behind a flag.
 
 ### Prune and respawn
 

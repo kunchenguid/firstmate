@@ -294,6 +294,23 @@ fm_control_exit_command() {  # <harness> [opencode-major]
   esac
 }
 
+# The one recognised dialog (bin/fm-composer-lib.sh's fm_composer_blocking_dialog
+# name) that `exit` answers rather than refuses, or nothing when the adapter
+# answers none. The answer is one Enter on the dialog's preselected row, never
+# a typed option, and is sent at most once per exit. Claude Code opens its
+# background-task exit picker when /exit meets a running background shell; the
+# matcher recognises it only while "Exit and stop tasks" is the selected row.
+# That row is exit's own contract - stop the agent, keep the worktree and every
+# uncommitted change - while "Move to background and exit" would leave a
+# detached shell outliving its agent, the orphan this plane exists to prevent.
+fm_control_exit_confirm_dialog() {  # <harness>
+  case "${1-}" in
+    claude) printf '%s' 'Claude background-task exit picker' ;;
+    codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|polytoken) ;;
+    *) return 1 ;;
+  esac
+}
+
 # The launch argument that makes a RELAUNCH of <harness> RESUME an exact agent
 # session instead of starting a fresh one, printed only when <registered-agent>
 # is the label that session reference belongs to; nothing otherwise.
