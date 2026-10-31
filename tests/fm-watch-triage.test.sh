@@ -734,22 +734,22 @@ test_claimed_run_outcomes() {
     mkdir -p "$wt"
     git -C "$wt" init -q
     branch=$(git -C "$wt" symbolic-ref --short HEAD)
-    printf 'worktree=%s\\n' "$wt" > "$state/$task.meta"
+    printf 'worktree=%s\n' "$wt" > "$state/$task.meta"
     printf 'working: validation started\\n' > "$state/$task.status"
-    { date +%s; printf '%s\\n%s\\n' "$branch" "$(size_of "$state/$task.status")"; } > "$state/.claimed-run-$task"
+    { date -v-60S +%s; printf '%s\\n%s\\n' "$branch" "$(size_of "$state/$task.status")"; } > "$state/.claimed-run-$task"
     printf 'v2\\t%s\\t%s@%s' "$(status_observed_signature "$state/$task.status")" \
       "$(size_of "$state/$task.status")" "$(_fm_open_decisions_file_ident "$state/$task.status")" \
       > "$state/.seen-claim_status"
     if [ "$outcome" = matching ]; then
       cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-printf 'run %s\\n' "$FM_EXPECT_BRANCH"
+printf 'run %s\n' "$FM_EXPECT_BRANCH"
 SH
       expected=0
     else
       cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-printf 'run other-branch\\n'
+printf 'run other-branch\n'
 SH
       expected=1
     fi
