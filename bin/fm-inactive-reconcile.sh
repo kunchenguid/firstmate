@@ -335,6 +335,15 @@ pr_for_task() { # <meta> [preferred-line]
   local meta=$1 preferred=${2:-} value
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
   value=$(meta_field "$meta" pr)
+  if [ -n "$preferred" ]; then
+    case "$preferred" in
+      done\ *' PR https://'*' checks green')
+        local ready_url=${preferred#* PR }
+        ready_url=${ready_url% checks green}
+        case "$ready_url" in *[[:space:]]*|'') ;; *) value=$ready_url ;; esac
+        ;;
+    esac
+  fi
   if [ -z "$value" ] && [ -n "$preferred" ]; then
     value=$(printf '%s\n' "$preferred" \
       | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
@@ -491,7 +500,7 @@ arm_ready_pr_watch() { # <id> <meta>
     fm_pr_metadata_identity_parse "$meta" \
       && [ "$FM_PR_META_URL" = "$url" ] && return 0
   fi
-  if fm_pr_metadata_identity_parse "$meta"; then
+  if [ "$recorded" = "$url" ] && fm_pr_metadata_identity_parse "$meta"; then
     fm_pr_poll_merge_already_notified "$STATE" "$id" \
       "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER" \
       && return 0
@@ -506,13 +515,21 @@ arm_ready_pr_watch() { # <id> <meta>
 
 # Every ready status is eligible for arming on each scan, in every home.
 arm_ready_pr_watches() {
-  local meta id
+  local meta id cursor seen=0
+  local marker="$STATE/.pr-watch-cursor"
+  cursor=$(cat "$marker" 2>/dev/null || true)
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
     valid_id "$id" || continue
-    arm_ready_pr_watch "$id" "$meta"
+    [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue
+    arm_ready_pr_watch "$id" "$meta" || true
+    printf '%s\\n' "$id" > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
+    seen=1
   done
+  if [ "$seen" -eq 0 ] && [ -n "$cursor" ]; then
+    printf '\\n' > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
+  fi
 }
 
 # Every direct child's ledger is examined on each scan. Parent delivery remains
