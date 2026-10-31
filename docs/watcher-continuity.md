@@ -95,7 +95,7 @@ While supervision is still needed and away mode remains inactive, an actionable 
 The hook handles the session lock as follows:
 
 - A well-formed session-lock owner is a numeric PID, or a tagged `win:<pid>` value on a Cygwin-family Git Bash host.
-  The shared `fm_session_lock_pid_blocks_reclaim` verdict in `bin/fm-session-lock-lib.sh` is the one decision every recovery caller applies: a record is reclaimed only when it is malformed, all-zero, proven dead, or readable but not a verified harness, and an owner whose liveness or identity cannot be read keeps recovery inert.
+  The shared `fm_session_lock_pid_blocks_reclaim` verdict in `bin/fm-session-lock-lib.sh` is the one decision every recovery caller applies: malformed, all-zero, proven-dead, reused non-harness, and live-but-unsignalable records stay reclaimable, while a readable verified harness, and any owner whose identity cannot be read, keeps recovery inert.
   That library also owns the process-info fallback used when the `ps` binary cannot execute.
 - A live owner the session does not own, an absent lock, or a malformed or otherwise unusable lock keeps the competing hook inert.
 

@@ -320,6 +320,10 @@ fm_linux_stat_triple() {  # <stat-line> <cmdline-args>
   # comm may contain spaces and parentheses, so cut the rest off the
   # LAST ") ", not the first. TAB/CR/LF are the record's delimiters,
   # so flatten them out of the field the kernel lets name anything.
+  # Only C0 controls and DEL become '?': procps preserves valid UTF-8,
+  # and a live owner installed under a non-ASCII path (for example
+  # /home/José/.local/bin/agent) must keep the bytes ps reports, or its
+  # identity stops matching and the lock becomes reclaimable.
   comm=${line#*(}
   comm=${comm%*) *}
   comm=$(printf '%s' "$comm" | LC_ALL=C tr '\012' ' ' | LC_ALL=C tr -c '\040-\176\200-\377' '?')
@@ -362,6 +366,8 @@ fm_os_proc_triple() {  # <pid>
         done
         if [ "$count" -gt 0 ]; then
           IFS=' '
+          # Same byte rule as fm_linux_stat_triple: flatten only the
+          # record's control delimiters, keep the bytes ps preserves.
           printf '%s' "${argv[*]}" | LC_ALL=C tr '\012' ' ' | LC_ALL=C tr -c '\040-\176\200-\377' '?'
         fi
       ) || return 1
