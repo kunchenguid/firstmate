@@ -577,10 +577,10 @@ ok - unseeded path without --approve still prompts on Trust project folder?
 
 Portable launch-command coverage lives in `tests/fm-spawn-dispatch-profile.test.sh` (`test_pi_seeded_secondmate_preapproves_project_trust`, `test_pi_worker_launch_omits_seeded_home_approve`, `test_pi_approve_probe_omits_unsupported_flag`).
 
-## Pinned model on a resumed session
+## Pinned model readback after a launch
 
 `bin/fm-spawn.sh` records the model the started session reports against the pin it was given, because `--model` is a request rather than proof.
-Two measurements decide how that read has to work, and both were taken on Linux x86_64 on 2026-10-31.
+The measurements below decide how that read has to work: two taken on Linux x86_64 on 2026-10-31, and the failed-request record from this page's "2026-09-02 historical post-construction provider-error fallback" section further down.
 
 Pi 1.4.0 (`pi --version`) applies `--model` when it resumes a session, so the session's stored model does not win over the pin, and the history a resumed session inherited is not evidence about the replacement that resumed it.
 A session created on `openai-codex/gpt-5.6-luna` and then resumed twice with a different `--model` each time:
@@ -602,13 +602,16 @@ assistant     openai-codex/gpt-6.1-terra  stop=stop
 
 The resumed turn carries the pinned model even with `--provider` confinement, and Pi writes no new `model_change` line on resume, so its stored model line stays at the original model while the resume runs another.
 That is why the assertion reads a turn the launched session produced instead of the last model in the file: refusing a resume whose history disagrees with a changed pin would refuse every legitimate re-pin.
+A turn Pi could not complete is not such a turn either: a rejected request is persisted as an assistant record carrying the model it was asked for with `stopReason: "error"`, the shape the real-SDK guard recorded on Pi 0.84.4 in that 2026-09-02 section.
+So only a record whose own stopReason shows a completed turn (`stop`, `length`, or `toolUse`) counts as evidence, and a session that produced only failed attempts is recorded unverified rather than asserted.
 A Pi launch that starts fresh rather than resuming addresses no session the launcher knows, so it is recorded unverified.
 
 Claude Code 2.1.314 (`claude --version`) honours an explicit `--session-id` and writes that session's transcript to `<config-dir>/projects/<slug>/<session-id>.jsonl`, which is the address `bin/fm-spawn.sh` gives a pinned Claude launch.
 Its assistant records carry the model the API reported for that response, which is the fact the pin is compared with; a session that could not run a model at all records `"model":"<synthetic>"`, which the launcher reads as no statement and therefore unverified.
+Claude documents an alias and its dated snapshot as the same model, so a launch pinned to `claude-haiku-4-5` that reports `claude-haiku-4-5-20251001` is that pin holding, in either direction; `spawn_model_pin_matches` owns which pairs it normalizes, and a different version or a decorated id stays a mismatch.
 
-Portable coverage pins this logic with fixture transcripts and no installed harness: `tests/fm-control-relaunch.test.sh` (`test_herdr_relaunch_asserts_a_pinned_pi_resume_on_the_turn_it_produced`, `test_herdr_relaunch_reports_a_pinned_pi_resume_turn_that_differs_from_the_pin`, `test_herdr_relaunch_records_a_pinned_pi_resume_as_unverified_without_a_new_turn`) and `tests/fm-spawn-dispatch-profile.test.sh` (`test_claude_model_pin_asserts_the_model_the_session_reports`, `test_claude_model_pin_mismatch_is_reported_without_failing_the_spawn`, `test_claude_model_pin_is_unverified_when_the_session_reports_no_model`, `test_claude_spawn_without_a_pin_keeps_its_session_id_and_writes_no_pin_note`).
-Both vendor facts above are re-proven against the installed binaries by `tests/fm-model-pin-readback-live-e2e.test.sh`, which is what refreshes this record after an upgrade; it is opt-in because it spends a few tokens, and it reports an absent harness by name instead of passing over it.
+Portable coverage pins this logic with fixture transcripts and no installed harness: `tests/fm-control-relaunch.test.sh` (`test_herdr_relaunch_asserts_a_pinned_pi_resume_on_the_turn_it_produced`, `test_herdr_relaunch_reports_a_pinned_pi_resume_turn_that_differs_from_the_pin`, `test_herdr_relaunch_records_a_pinned_pi_resume_as_unverified_without_a_new_turn`, `test_herdr_relaunch_requires_a_completed_pi_response`) and `tests/fm-spawn-dispatch-profile.test.sh` (`test_claude_model_pin_asserts_the_model_the_session_reports`, `test_claude_model_pin_mismatch_is_reported_without_failing_the_spawn`, `test_claude_model_pin_snapshot_verdicts`, `test_claude_model_pin_is_unverified_when_the_session_reports_no_model`, `test_claude_spawn_without_a_pin_keeps_its_session_id_and_writes_no_pin_note`).
+The two 2026-10-31 vendor facts above are re-proven against the installed binaries by `tests/fm-model-pin-readback-live-e2e.test.sh`, which is what refreshes this record after an upgrade; it is opt-in because it spends a few tokens, and it reports an absent harness by name instead of passing over it.
 
 ```sh
 FM_MODEL_PIN_READBACK_LIVE=1 bash tests/fm-model-pin-readback-live-e2e.test.sh
@@ -627,6 +630,8 @@ ok - pi 1.4.0: a resumed session's own turn carries the model it was pinned to, 
 # claude 2.1.314 (Claude Code) recorded <synthetic> for pin claude-haiku-4-5, so no model ran and the assertion would record unverified
 ok - claude 2.1.314 (Claude Code): a pinned launch reads back the model its own session id addresses
 ```
+
+That Claude half proves the address, not a model readback: this host's launch ran no model, so the alias-versus-snapshot pairing above rests on the vendor's documented ids and on the portable `test_claude_model_pin_snapshot_verdicts` cases until a host whose credentials answer the pin re-runs the guard.
 
 ## Launch-prompt backstop signatures
 
