@@ -3220,6 +3220,30 @@ ok - under the away-posture record the wake carries the verbatim read-back tail,
 
 The merge suite and the security suite dominate the wall time.
 
+## Pi Calm Codemode
+
+Verified on 2026-10-10 with installed Pi 1.1.0, Node v24.21.0 and a guarded named Herdr lab; private npm installs also exercised Pi 0.99.0 and 1.0.1 without modifying the installed Pi.
+[`calm-mode-feasibility.md`](../calm-mode-feasibility.md#codemode-presentation-boundary) owns the renderer boundary and [`calm.md`](../calm.md#codemode-presentation-capability) owns its operator-visible capability fallback.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-calm-pi-extension.test.sh tests/fm-pi-branch-extension.test.sh tests/fm-pi-primary-types.test.sh
+```
+
+```text
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 1.1.0
+ok - Codemode renderer capability probes, zero-height calls/results, stock framing and expansion, downstream renderers, unrelated tools and immutable results
+ok - repeated real Codemode calls preserve parent/child events, original output, model context, nested usage, session data and stock HTML export
+ok - Pi 1.1.0 Codemode TUI hides repeated script/nested calls gaplessly, restores stock expansion/history and preserves context, usage, session and export
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=144023
+```
+
+The Codemode TUI guard ran on real Herdr with the default-session tripwire unchanged; older tmux-only Calm cases explicitly skipped because tmux was absent.
+The fixture emits the original nested `read` and outcome-tool script twice through Pi's real sandbox, compares its hidden geometry with a no-tool turn, restores expanded and collapsed stock output, restarts the same session, and checks unchanged original messages, provider context, nested usage and exported content.
+The export/share renderer checks perform no public sharing or authenticated model request.
+The same focused fixtures on private Pi 1.0.1 passed with the identical hidden-rendering and preservation outcomes.
+On private Pi 0.99.0 they reported `Pi 0.99.0 discloses its unavailable Codemode renderer capability and preserves stock execution and export`; strict no-emit checking against those older declarations also passed.
+No non-Pi input producer, worker-launch template, runtime transport or fleet execution behavior changed.
+
 ## Native Codex through Pi
 
 Verified on 2026-09-08 with Pi 0.85.1 and the installed `pi-codex-native` 0.2.1 adapter.

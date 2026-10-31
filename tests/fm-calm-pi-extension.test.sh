@@ -31,11 +31,17 @@ record_pi_version_evidence() {
   [ -n "$version" ] || fail "$context could not determine the installed Pi version"
 }
 
+# shellcheck source=tests/assets/fm-calm-codemode.sh
+. "$ROOT/tests/assets/fm-calm-codemode.sh"
+
 cleanup() {
+  local codemode_status=0
+  cleanup_codemode_e2e || codemode_status=1
   if command -v tmux >/dev/null 2>&1; then
     tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
   fi
   fm_test_cleanup
+  [ "$codemode_status" -eq 0 ] || exit 1
 }
 trap cleanup EXIT
 
@@ -257,6 +263,7 @@ const context = {
     getToolsExpanded() {
       return false;
     },
+    addAutocompleteProvider() {},
     onTerminalInput() {
       return () => {};
     },
@@ -994,10 +1001,11 @@ if (!calmCommand || !handlers.has("session_start")) {
 }
 
 // A row constructed before Calm's first-ever activation this session: this is the
-// captain-accepted, documented bound on the gate-at-load fix (see fm-calm.ts's file
-// header and docs/calm.md) - Pi gives no way to re-point an already-constructed
-// ToolExecutionComponent at a definition registered later, so this row can never
-// retroactively collapse. Lock that in explicitly rather than let it regress further.
+// captain-accepted, documented bound on the gate-at-load fix (see
+// docs/calm-mode-feasibility.md and docs/calm.md) - Pi gives no way to re-point an
+// already-constructed ToolExecutionComponent at a definition registered later, so this
+// row can never retroactively collapse. Lock that in explicitly rather than let it
+// regress further.
 const renderUi = { requestRender() {} };
 const preToggleReadArgs = { path: "sample.txt" };
 const preToggleRead = new ToolExecutionComponent(
@@ -1021,6 +1029,7 @@ const ctx = {
   ui: {
     getEditorText: () => "",
     getToolsExpanded: () => false,
+    addAutocompleteProvider() {},
     onTerminalInput: () => () => {},
     setHiddenThinkingLabel() {},
     setStatus() {},
@@ -1222,7 +1231,7 @@ extension.default(pi);
 const visibility = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href}?policy=${Date.now()}`);
 const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?input=${Date.now()}`);
 
-// Registration is gated on config/calm at load (see fm-calm.ts's file header); this
+// Registration is gated on config/calm at load (see docs/calm-mode-feasibility.md); this
 // fixture has no config/calm file, so nothing is registered yet. Every render-
 // equivalence assertion below needs the wrapped definitions the way a user who kept
 // Calm on across a previous session would already have them, so force that here via
@@ -1234,6 +1243,7 @@ const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-
 const earlyActivationUi = {
   getEditorText: () => "",
   getToolsExpanded: () => false,
+  addAutocompleteProvider() {},
   onTerminalInput: () => () => {},
   setHiddenThinkingLabel() {},
   setStatus() {},
@@ -1345,28 +1355,32 @@ const cases = [
 ];
 const renderUi = { requestRender() {} };
 const rows = [];
-for (const [name, args, result] of cases) {
-  const wrapped = tools.find((tool) => tool.name === name);
-  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, stockDefinitions[name](process.cwd()), renderUi, process.cwd());
-  const actual = new ToolExecutionComponent(name, `wrapped-${name}`, args, { showImages: false }, wrapped, renderUi, process.cwd());
-  for (const row of [baseline, actual]) {
-    row.markExecutionStarted();
-    row.setArgsComplete();
-    row.updateResult(result);
+for (const [toolName, args, result] of cases) {
+  const wrapped = tools.find((tool) => tool.name === toolName);
+  for (const outputPad of [1, 0]) {
+    const name = `${toolName} outputPad=${outputPad}`;
+    const options = { showImages: false, outputPad };
+    const baseline = new ToolExecutionComponent(toolName, `baseline-${name}`, args, options, stockDefinitions[toolName](process.cwd()), renderUi, process.cwd());
+    const actual = new ToolExecutionComponent(toolName, `wrapped-${name}`, args, options, wrapped, renderUi, process.cwd());
+    for (const row of [baseline, actual]) {
+      row.markExecutionStarted();
+      row.setArgsComplete();
+      row.updateResult(result);
+    }
+    const collapsedExpected = baseline.render(100);
+    const collapsedActual = actual.render(100);
+    if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedExpected)) {
+      throw new Error(`${name} collapsed rendering changed while calm mode was off`);
+    }
+    baseline.setExpanded(true);
+    actual.setExpanded(true);
+    const expandedExpected = baseline.render(100);
+    const expandedActual = actual.render(100);
+    if (JSON.stringify(expandedActual) !== JSON.stringify(expandedExpected)) {
+      throw new Error(`${name} expanded rendering changed while calm mode was off`);
+    }
+    rows.push({ name, baseline, actual });
   }
-  const collapsedExpected = baseline.render(100);
-  const collapsedActual = actual.render(100);
-  if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedExpected)) {
-    throw new Error(`${name} collapsed rendering changed while calm mode was off`);
-  }
-  baseline.setExpanded(true);
-  actual.setExpanded(true);
-  const expandedExpected = baseline.render(100);
-  const expandedActual = actual.render(100);
-  if (JSON.stringify(expandedActual) !== JSON.stringify(expandedExpected)) {
-    throw new Error(`${name} expanded rendering changed while calm mode was off`);
-  }
-  rows.push({ name, baseline, actual });
 }
 
 const watchPi = {
@@ -1528,6 +1542,7 @@ const commandContext = {
   ui: {
     getEditorText: () => editorText,
     getToolsExpanded: () => expanded,
+    addAutocompleteProvider() {},
     onTerminalInput(handler) {
       terminalInputHandler = handler;
       return () => {
@@ -1874,6 +1889,7 @@ const components = [];
 const ui = {
   getEditorText: () => "",
   getToolsExpanded: () => false,
+  addAutocompleteProvider() {},
   onTerminalInput: () => () => {},
   setHiddenThinkingLabel(value) {
     // Pi's own fan-out: every mounted assistant row re-runs its layout.
@@ -3635,6 +3651,7 @@ const ui = {
   },
   getEditorText: () => "",
   getToolsExpanded: () => false,
+  addAutocompleteProvider() {},
   onTerminalInput: () => () => {},
   setHiddenThinkingLabel() {},
   setStatus() {},
@@ -4309,10 +4326,11 @@ JSON
     # Wait for the redraw this block actually asserts: the collapsed-thinking adapter
     # (unconditional, unaffected by the built-in tool gate below) hides, and the
     # retained genuine rows are back on screen. Built-in tool rows from before this
-    # first-ever activation are a separate, documented exception (see fm-calm.ts's
-    # file header and docs/calm.md): Pi gives no way to re-point an already-rendered
-    # tool row at a definition registered later, so CALM_E2E_OUTPUT and friends stay
-    # on screen through this whole redraw rather than disappearing with it.
+    # first-ever activation are a separate, documented exception (see
+    # docs/calm-mode-feasibility.md and docs/calm.md): Pi gives no way to re-point an
+    # already-rendered tool row at a definition registered later, so CALM_E2E_OUTPUT
+    # and friends stay on screen through this whole redraw rather than disappearing
+    # with it.
     if ! grep -Fq "Thinking..." "$hidden_snapshot" &&
       ! grep -Fq "/calm" "$hidden_snapshot" &&
       ! grep -Fq "I will run one command." "$hidden_snapshot" &&
@@ -4327,7 +4345,7 @@ JSON
   # initial session restore, before Calm's first-ever activation in this session had
   # claimed any built-in name; they keep their stock presentation for the rest of the
   # session. This is the captain-accepted, documented bound on the collision fix (see
-  # fm-calm.ts's file header and docs/calm.md): the alternative was letting Calm
+  # docs/calm-mode-feasibility.md and docs/calm.md): the alternative was letting Calm
   # silently disable a differently loaded extension's own bash/read/etc override. A
   # fresh built-in tool call made after this same activation does hide correctly;
   # that path is covered by this file's own test_calm_activation_collision_and
@@ -4994,5 +5012,7 @@ test_operational_followup_turn_e2e
 test_queued_operational_escape_e2e
 test_hidden_block_geometry_e2e
 test_working_ship_geometry_and_lifecycle
+test_codemode_rendering
+test_codemode_terminal_e2e
 test_export_dom_render_guard
 test_interactive_terminal_e2e

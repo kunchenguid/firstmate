@@ -67,6 +67,7 @@ Calm hides these rows:
 - Collapsed thinking labels.
 - The mid-turn assistant working-note blocks governed by the [shared preservation rule](#shared-preservation-rule-for-assistant-text) above.
 - The shells for the Pi built-in tool names Calm owns.
+- The complete Codemode script and text-result shell, including its nested-call summaries, on Pi surfaces with the supported tool-renderer registration API.
 - Firstmate-owned tool shells listed in the [Pi tool audit](calm-mode-feasibility.md#firstmate-pi-tool-audit).
 - Canonically classified Firstmate operational user rows.
 
@@ -93,6 +94,9 @@ Inputs held behind a running compaction stay there until Pi sends them after com
 
 ### What stays unchanged on Pi
 
+Codemode uses Pi's supported presentation-only renderer registration, not a same-name tool replacement.
+Its execution, nested calls, original output, context, storage, usage and cost stay unchanged.
+Calm off delegates to the installed Codemode renderers, including their collapsed and expanded presentation and restored history.
 Outside Pi's same-name built-in override collision described in [Pi compatibility](#pi-compatibility) below, Calm changes presentation only.
 Calm's built-in wrappers preserve Pi's execution behavior.
 Input delivery, ordering, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged.
@@ -106,13 +110,14 @@ Pi's supported presentation API does not expose a global transcript filter.
 These rows remain visible:
 
 - Expanded reasoning and its reserved spacing.
-- Built-in tool images.
+- Tool images, including Codemode's.
 - User-bash rows.
 - Skill and summary rows.
 - Generic status notices.
 - Other arbitrary custom-tool or extension rows.
 
-These are supported-API boundaries rather than hidden-content failures.
+Other arbitrary custom-tool and extension rows remain outside Calm's owned coverage; Codemode and the Firstmate-owned tool shells stay covered as listed in [What Calm hides on Pi](#what-calm-hides-on-pi).
+The other listed rows are supported-API boundaries rather than hidden-content failures.
 
 ## Pi compatibility
 
@@ -125,6 +130,13 @@ When Calm loads, the collapsed-thinking, operational-user-row, and queued-operat
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter.
 `/calm`, the other adapters, and unrelated Pi extensions remain available.
 
+### Codemode presentation capability
+
+Calm registers only a renderer resolver for the exact `codemode` tool name, whether the saved choice starts on or off.
+On Pi surfaces without `pi.registerToolRenderer()`, or without Codemode's installed call/result renderers, Codemode remains normally visible and executable.
+When Calm is active, one warning names the exact missing presentation capability, as a Pi UI notification when a UI is available and on stderr otherwise; other tools and Calm adapters continue to work.
+Codemode's images retain the [documented image boundary](#what-stays-visible-on-pi), and unrelated custom tools and warnings are not hidden.
+
 ### Session check for queued inputs
 
 Keeping hidden queued inputs across Escape also needs members of Pi's live session, which exist only once a session runs.
@@ -134,6 +146,7 @@ In that case `tests/fm-calm-pi-queue-retention-live-e2e.test.sh` fails naming th
 
 ### Built-in tool override collisions
 
+These collisions do not apply to Codemode's presentation-only resolver.
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
 How Calm handles that shared slot depends on whether Calm was already on when the session started or reloaded.
 
