@@ -3479,6 +3479,18 @@ fm_backend_herdr_composer_content() {  # <target>
   FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$caps" "$cap"
 }
 
+# fm_backend_herdr_proof_squash_var: the payload proof's comparison form, in
+# place through the named variable - Unicode spaces mapped to ASCII, then all
+# whitespace and U+2063 removed (see fm_backend_herdr_composer_payload_shown).
+fm_backend_herdr_proof_squash_var() {  # <varname>
+  local __fmhps_name=$1 __fmhps_text
+  fm_composer_normalize_spaces_var "$__fmhps_name"
+  __fmhps_text=${!__fmhps_name}
+  __fmhps_text=${__fmhps_text//[$' \t\r\n\v\f']/}
+  __fmhps_text=${__fmhps_text//$'\xE2\x81\xA3'/}
+  printf -v "$__fmhps_name" '%s' "$__fmhps_text"
+}
+
 # fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a
 # composer that was empty before the send, shows <text>.
 # Literal equality ignores whitespace, the same comparison zellij uses, so a
@@ -3493,12 +3505,8 @@ fm_backend_herdr_composer_content() {  # <target>
 # remainder, is the head-truncation shape and is not proof.
 fm_backend_herdr_composer_payload_shown() {  # <text> <after>
   local text=$1 after=$2 literal
-  fm_composer_normalize_spaces_var text
-  fm_composer_normalize_spaces_var after
-  text=${text//[$' \t\r\n\v\f']/}
-  text=${text//$'\xE2\x81\xA3'/}
-  after=${after//[$' \t\r\n\v\f']/}
-  after=${after//$'\xE2\x81\xA3'/}
+  fm_backend_herdr_proof_squash_var text
+  fm_backend_herdr_proof_squash_var after
   [ -n "$text" ] && [ -n "$after" ] || return 1
   [ "$after" = "$text" ] && return 0
   literal=$after
@@ -3527,9 +3535,54 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
   return 1
 }
 
+# fm_backend_herdr_composer_clear_queued: press Ctrl+U the full
+# fm_backend_herdr_proof_lines budget without reading between presses. Used
+# when the typed text never rendered inside the proof wait: the target has not
+# consumed its input yet, so every read is stale, and a read-after-press clear
+# would stop after one press and leave all but one wrapped row behind once the
+# target catches up. Queued behind the text, the presses delete every wrapped
+# row whenever it is consumed; extra presses on an empty Claude composer only
+# show its paste-back hint. 0 when every press was sent.
+fm_backend_herdr_composer_clear_queued() {  # <target> <text>
+  local target=$1 presses i=0
+  presses=$(fm_backend_herdr_proof_lines "$2")
+  while [ "$i" -lt "$presses" ]; do
+    fm_backend_herdr_send_key "$target" C-u || return 1
+    i=$((i + 1))
+  done
+}
+
+# fm_backend_herdr_await_payload: after <text> was typed into a composer that
+# was empty, poll the composer for up to FM_BACKEND_HERDR_PROOF_WAIT seconds
+# until it shows the payload. A target that is paged out, waking from sleep,
+# or streaming under load can take seconds to consume typed input, and its
+# composer reads empty, or as a leading part of the payload, or fails to read
+# at all, meanwhile; those reads mean "not yet", never refusal.
+# Returns 0 shown, 1 refused (the composer shows readable text that is not a
+# leading part of the payload, such as the head-truncated suffix), 2 still
+# empty, partial or unreadable at the deadline.
+fm_backend_herdr_await_payload() {  # <target> <text>
+  local target=$1 text=$2 want=$2 content got deadline
+  fm_backend_herdr_proof_squash_var want
+  deadline=$((SECONDS + FM_BACKEND_HERDR_PROOF_WAIT))
+  while :; do
+    if content=$(fm_backend_herdr_composer_content "$target"); then
+      fm_backend_herdr_composer_payload_shown "$text" "$content" && return 0
+      got=$content
+      fm_backend_herdr_proof_squash_var got
+      case "$want" in
+        "$got"*) ;;
+        *) return 1 ;;
+      esac
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || return 2
+    sleep 0.25
+  done
+}
+
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content busy_harness=''
+  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content busy_harness='' shown
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
   # unless the composer, empty before the send, shows this payload. A suffix
@@ -3546,15 +3599,24 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   if [ "$proof" = 1 ]; then
-    if ! content=$(fm_backend_herdr_composer_content "$target") \
-      || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
-      if fm_backend_herdr_composer_clear "$target" "$text"; then
+    shown=0
+    fm_backend_herdr_await_payload "$target" "$text" || shown=$?
+    case "$shown" in
+      0) ;;
+      2)
+        fm_backend_herdr_composer_clear_queued "$target" "$text" || { printf 'unknown'; return 0; }
         printf 'send-failed'
-      else
-        printf 'unknown'
-      fi
-      return 0
-    fi
+        return 0
+        ;;
+      *)
+        if fm_backend_herdr_composer_clear "$target" "$text"; then
+          printf 'send-failed'
+        else
+          printf 'unknown'
+        fi
+        return 0
+        ;;
+    esac
   fi
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")
@@ -3823,6 +3885,14 @@ fm_backend_herdr_busy_state() {  # <target>
 # call-count assertions).
 FM_BACKEND_HERDR_SUBMIT_POLLS=${FM_BACKEND_HERDR_SUBMIT_POLLS:-6}
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=${FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP:-0.6}
+# FM_BACKEND_HERDR_PROOF_WAIT (default 8): whole seconds the Claude payload
+# proof waits for typed text to render (fm_backend_herdr_await_payload). It
+# costs time only while the target lags; a value that is not a non-negative
+# integer falls back to 8.
+case "${FM_BACKEND_HERDR_PROOF_WAIT:-}" in
+  ''|*[!0-9]*) FM_BACKEND_HERDR_PROOF_WAIT=8 ;;
+  *) FM_BACKEND_HERDR_PROOF_WAIT=$((10#$FM_BACKEND_HERDR_PROOF_WAIT)) ;;
+esac
 
 fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
   awk -v b="${1:-0}" -v m="$FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP" 'BEGIN {

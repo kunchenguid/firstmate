@@ -675,6 +675,7 @@ Typed-plane text is typed once; only Enter is retried.
 When native `agent get` identity is Claude, the adapter types only into an empty composer.
 A Claude composer that already holds text, or cannot be read, before the send is refused with nothing typed.
 Before that Enter, the adapter continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
+It polls the composer for up to `FM_BACKEND_HERDR_PROOF_WAIT` seconds (default 8) for that proof, because a paged-out, waking, or heavily loaded Claude can take seconds to consume typed input, and its composer reads empty, partly rendered, or unreadable meanwhile.
 Every herdr adapter composer read (`fm_backend_herdr_composer_state`, `fm_backend_herdr_composer_content`) captures the full visible viewport, never a bounded tail.
 An overlay Claude renders between the composer and the pane bottom - the slash-command popup is the verified shape - pushes the composer outside a tail window, and the composer is by definition inside the viewport.
 [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) owns the separate shared inbox pending-line confirmation read.
@@ -689,8 +690,12 @@ Instead:
 1. The adapter presses Ctrl+U until the shared classifier reads the composer as empty.
 2. It then reports `send-failed`, so a resend starts from a clean composer.
 
+A payload still empty, only partly rendered, or unreadable when the wait ends does not receive Enter either.
+Its composer reads cannot be trusted while the target lags, and Claude's Ctrl+U deletes one wrapped row per press, so a press-then-read clear would stop early and leave the first rows of the text behind once the target catches up.
+The adapter instead sends the full press budget without reading in between, queued behind the typed text, and reports `send-failed`.
+
 Ctrl+C is not used for this, because Claude documents it as interrupting a running operation.
-If the composer cannot be verified empty again, the submit reports `unknown` instead, because text may still be in the composer.
+If the composer cannot be verified empty again, or the queued presses cannot be sent, the submit reports `unknown` instead, because text may still be in the composer.
 
 Other harnesses, and panes with no native identity, skip this proof and keep the type-then-Enter path.
 They skip it because their paste placeholders and composer shapes are not live-verified.

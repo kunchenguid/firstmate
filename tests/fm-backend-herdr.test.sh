@@ -5274,6 +5274,90 @@ test_send_text_submit_clears_a_wrapped_suffix_one_row_per_press() {
   pass "fm_backend_herdr_send_text_submit: a refused 480-character suffix wrapped over five rows is cleared one row per Ctrl+U and reports send-failed"
 }
 
+# A paged-out or waking Claude can take seconds to render typed input; its
+# composer reads empty, then as a leading part of the payload, meanwhile.
+# Those reads are lag, not refusal: the proof keeps reading, and a payload
+# that renders late is submitted without any Ctrl+U.
+test_send_text_submit_waits_for_a_late_claude_render() {
+  local dir log resp fb out enter_count text='hello doorbell'
+  dir="$TMP_ROOT/submit-late-render"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/2.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf hello\n' > "$resp/5.out"
+  printf '  \xe2\x9d\xaf %s\n' "$text" > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/9.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_WAIT=5 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a payload that renders on the third read should confirm delivery, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a late-rendered payload should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a late render must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: an empty read after typing waits for a late Claude render instead of clearing"
+}
+
+# When the payload never renders inside the proof wait, every read is stale,
+# so a read-after-press clear would stop after one Ctrl+U and strand all but
+# the last wrapped row once the target catches up. The full press budget is
+# queued instead, nothing is submitted, and the submit reports send-failed.
+test_send_text_submit_queues_the_full_clear_when_claude_never_renders() {
+  local dir log resp fb out enter_count n text='hello doorbell'
+  dir="$TMP_ROOT/submit-never-renders"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  for ((n = 2; n <= 200; n++)); do printf '  \xe2\x9d\xaf\n' > "$resp/$n.out"; done
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_WAIT=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "a payload that never renders should report send-failed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "an unproven payload must not be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 20 ] || fail "the queued clear should send the full 20-press budget, sent $(herdr_ctrl_u_count "$log")"
+  pass "fm_backend_herdr_send_text_submit: a payload that never renders gets the full queued Ctrl+U budget and reports send-failed"
+}
+
+# A composer read that fails under load is lag, not refusal: the proof keeps
+# reading rather than falling into the read-after-press clear, so a payload
+# that renders after a failed read is submitted without any Ctrl+U.
+test_send_text_submit_waits_past_a_failed_composer_read() {
+  local dir log resp fb out enter_count text='hello doorbell'
+  dir="$TMP_ROOT/submit-failed-read"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/2.out"
+  printf '1\n' > "$resp/4.exit"
+  printf '1\n' > "$resp/5.exit"
+  printf '  \xe2\x9d\xaf %s\n' "$text" > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/9.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_WAIT=5 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "a payload that renders after a failed read should confirm delivery, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a payload rendered after a failed read should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a failed read must not trigger a clear"
+  pass "fm_backend_herdr_send_text_submit: a failed composer read after typing keeps waiting and submits the late render"
+}
+
+# When every composer read after typing fails until the proof wait ends, the
+# payload may still be queued behind a lagging target, so the full Ctrl+U
+# budget is queued rather than a read-after-press clear that stops early.
+test_send_text_submit_queues_the_full_clear_when_composer_reads_keep_failing() {
+  local dir log resp fb out enter_count text='hello doorbell'
+  dir="$TMP_ROOT/submit-reads-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_WAIT=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "a payload whose composer never reads should report send-failed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "an unproven payload must not be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 20 ] || fail "the queued clear should send the full 20-press budget, sent $(herdr_ctrl_u_count "$log")"
+  pass "fm_backend_herdr_send_text_submit: composer reads that keep failing get the full queued Ctrl+U budget and report send-failed"
+}
+
 test_send_text_submit_refused_suffix_then_clean_retry_submits_only_the_message() {
   local dir log resp fb out enter_count text suffix
   dir="$TMP_ROOT/submit-long-suffix-retry"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6367,6 +6451,10 @@ test_send_text_submit_long_literal_submits_when_composer_holds_every_byte
 test_send_text_submit_refuses_enter_when_composer_holds_only_the_suffix
 test_send_text_submit_refused_suffix_that_will_not_clear_is_unknown
 test_send_text_submit_clears_a_wrapped_suffix_one_row_per_press
+test_send_text_submit_waits_for_a_late_claude_render
+test_send_text_submit_queues_the_full_clear_when_claude_never_renders
+test_send_text_submit_waits_past_a_failed_composer_read
+test_send_text_submit_queues_the_full_clear_when_composer_reads_keep_failing
 test_send_text_submit_refused_suffix_then_clean_retry_submits_only_the_message
 test_send_text_submit_claude_refuses_to_type_into_a_nonempty_composer
 test_send_text_submit_refuses_suffix_when_transcript_still_shows_the_head
