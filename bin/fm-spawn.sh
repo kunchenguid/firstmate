@@ -251,8 +251,8 @@
 #   not admit prints `deferred:` and exits 75 with the task exactly as queued,
 #   and an unreadable declaration refuses with exit 1.
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
-#   else failed. A relaunch and a --secondmate spawn are never counted against
-#   either capacity.
+#   else failed. A relaunch reclaims a place before releasing the project lock;
+#   a --secondmate spawn is never counted against capacity.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -7492,6 +7492,12 @@ spawn_report_preserved_state() {
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
+  if [ "$KIND" = scout ] || { [ "$KIND" = ship ] && [ "$MODE" = local-only ]; }; then
+    if ! printf '%s\n' "$(status_stamp_line 'working: relaunch admitted')" >> "$STATE/$ID.status"; then
+      echo "error: could not record working status for relaunch of $ID" >&2
+      exit 1
+    fi
+  fi
   SPAWN_META_PUBLISH_STARTED=1
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
