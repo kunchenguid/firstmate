@@ -2,7 +2,7 @@
 name: ask-user-authority
 description: >-
   Single owner of ask-user finding policy.
-  Load before deciding any ask-user finding.
+  Load before deciding, answering, or resolving any ask-user finding.
 user-invocable: false
 metadata:
   internal: true
