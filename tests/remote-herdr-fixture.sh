@@ -99,8 +99,10 @@ case "${1:-} ${2:-}" in
     jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
   "pane read") printf '\n' ;;
   "pane process-info")
-    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"codex","argv0":"codex","argv":["codex"],"cmdline":"codex"}]}}}\n' \
-      "$pane" "$$" "$$" "$$" ;;
+    proc=codex
+    [ "$(jq_state -r --arg p "$pane" '(.typed[$p] // false) or (.working[$p] // false)')" = true ] || proc=bash
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"%s","argv0":"%s","argv":["%s"],"cmdline":"%s"}]}}}\n' \
+      "$pane" "$$" "$$" "$$" "$proc" "$proc" "$proc" "$proc" ;;
   "agent get")
     pane=${3:-}
     if [ "$(jq_state -r --arg p "$pane" '.working[$p] // false')" = true ]; then
