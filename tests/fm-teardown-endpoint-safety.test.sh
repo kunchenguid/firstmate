@@ -1116,6 +1116,53 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   pass "fm-teardown: a stale record on a claimed slot retires, then the claimant tears down"
 }
 
+# The inverse half of the reassigned-slot relaxation: a claim naming THIS task
+# is positive ownership, but it does not override the record scan. Another
+# live record naming the slot still refuses the full teardown, because that
+# record's task may still hold live work in the copy the claim says is this
+# one's; the exemption fires only when the claim names the OTHER task.
+test_own_slot_claim_with_second_record_still_refuses() {
+  local dir id=owned-task other=live-task worker rc
+
+  dir=$(make_case slot-claim-own-contested)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
+  # Staged in this shell, not a command substitution: a background child of a
+  # $(...) subshell does not outlive it, and the point of this worker is to be
+  # alive in the slot while teardown runs.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the contested pool slot"
+
+  [ "$rc" -ne 0 ] \
+    || fail "teardown returned a pool slot another record still names, on this task's own claim"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  assert_present "$dir/worktree/sentinel" "teardown reset a pool slot another record still names"
+  assert_present "$dir/pool/1/.fm-slot-owner" "teardown removed this task's slot claim while refusing"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$id" \
+    "refusal rewrote this task's slot claim"
+  assert_present "$dir/home/state/$id.meta" "teardown removed the owner's record before refusing"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the other task's record before refusing"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "teardown reached the runtime on a contested slot with an own claim: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "refusal should name the other task holding the slot"
+
+  pass "fm-teardown: a pool slot named by a second record refuses even when the slot claim names this task"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1538,6 +1585,7 @@ test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
+test_own_slot_claim_with_second_record_still_refuses
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
