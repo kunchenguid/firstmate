@@ -294,19 +294,37 @@
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
 #   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
-#     started under the worktree (or its per-task tasktmp) does not receive the
-#     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
-#     process group, so it survives reparented to init (observed 2026-08-03:
-#     two `go test` binaries, deadlines blown past by ~100x, pinning CPU for
-#     hours with no live task meta to attribute them to once teardown had
-#     already removed it). reap_task_worktree_processes finds every process
+#     started under the worktree (or its per-task tasktmp) by the task's own
+#     endpoint shell does not receive the SIGHUP/SIGTERM that closing the
+#     backend pane sends to its own foreground process group (observed
+#     2026-08-03: two `go test` binaries, deadlines blown past by ~100x,
+#     pinning CPU for hours). reap_task_worktree_processes finds every process
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     grace period to any survivor whose process identity still matches.
+#     Cwd alone is not ownership: only descendants of the live endpoint shell
+#     and members of the session it leads (so an init-reparented leaked child
+#     is still reaped) are signaled. Ownership is decided once per process
+#     and kept, so killing the endpoint shell (signaled last) never turns its
+#     other task processes into spared ones.
+#     The session id comes from /proc or, where /proc is absent, python3's
+#     os.getsid; an unreadable session id proves nothing, so that process is
+#     spared.
+#     Every other process (a shell in another session such as a login shell
+#     on another TTY, and every process on a backend without an endpoint pid:
+#     cmux, orca, zellij) is spared and reported individually; it never
+#     blocks teardown, which goes on to close the pane. Each kill and each
+#     spare appends one tab-separated line to state/teardown-processes.log:
+#     UTC time, task id, pid, verdict (killed, force-killed, spared, kept),
+#     reason, command. The pid field is "-" for a kept worktree and a negative
+#     process-group id for the lsof-less group fallback. A treehouse worktree
+#     with a spared process still in it is not force-returned: the return
+#     waits until after the pane close, re-scans the worktree, and the
+#     worktree is kept (surviving pids named) only if a spared process with
+#     the same identity still has its cwd there. Without lsof teardown cannot
+#     list the processes in the worktree, so it keeps the worktree the same way
+#     and reports that.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -2358,10 +2376,120 @@ task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
 }
 
+task_reap_endpoint_pid() {
+  local info
+  case "$BACKEND" in
+    tmux) tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null ;;
+    herdr)
+      fm_backend_herdr_parse_target "$T" || return 1
+      info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info \
+        --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+      printf '%s\n' "$info" | jq -er --arg pane "$FM_BACKEND_HERDR_PANE" '
+        select(.result.type == "pane_process_info"
+          and .result.process_info.pane_id == $pane)
+        | .result.process_info.shell_pid | select(type == "number" and . > 1) | floor'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+task_ownership_context() {
+  TASK_SCAN_ROWS=
+  TASK_SCAN_LEADER_SID=
+  TASK_SCAN_OWN_SID=
+  TASK_SCAN_LEADER_LIVE=0
+  [ -n "$TASK_REAP_LEADER" ] || return 0
+  task_process_identity_matches "$TASK_REAP_LEADER" "$TASK_REAP_LEADER_IDENTITY" || return 0
+  TASK_SCAN_ROWS=$(LC_ALL=C ps -axo pid=,ppid= 2>/dev/null) || return 0
+  TASK_SCAN_LEADER_SID=$(task_process_session "$TASK_REAP_LEADER") || TASK_SCAN_LEADER_SID=
+  TASK_SCAN_OWN_SID=$(task_process_session "$$") || TASK_SCAN_OWN_SID=
+  TASK_SCAN_LEADER_LIVE=1
+}
+
+task_process_session() {  # <pid>
+  local pid=$1 proc_root stat_line
+  local -a stat_fields
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 4 ] || return 1
+    printf '%s\n' "${stat_fields[3]}"
+    return 0
+  fi
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c 'import os, sys; print(os.getsid(int(sys.argv[1])))' "$pid" 2>/dev/null
+}
+
+task_process_is_owned() {  # <pid>
+  local pid=$1 identity="" candidate_sid
+  if printf '%s\n' "$TASK_REAP_OWNED" | grep -q "^$pid"$'\t'; then
+    identity=$(task_process_identity "$pid") || return 1
+    printf '%s\n' "$TASK_REAP_OWNED" | grep -Fxq "$pid"$'\t'"$identity" && return 0
+  fi
+  [ "$TASK_SCAN_LEADER_LIVE" = 1 ] || return 1
+  if ! printf '%s\n' "$TASK_SCAN_ROWS" | awk -v candidate="$pid" -v leader="$TASK_REAP_LEADER" '
+    { parent[$1] = $2 }
+    END {
+      if (!(leader in parent) || !(candidate in parent)) exit 1
+      p = candidate
+      while (p > 1 && !seen[p]++) {
+        if (p == leader) exit 0
+        p = parent[p]
+      }
+      exit 1
+    }'; then
+    [ "$TASK_SCAN_LEADER_SID" = "$TASK_REAP_LEADER" ] || return 1
+    [ -n "$TASK_SCAN_OWN_SID" ] && [ "$TASK_SCAN_OWN_SID" != "$TASK_SCAN_LEADER_SID" ] || return 1
+    candidate_sid=$(task_process_session "$pid") || return 1
+    [ "$candidate_sid" = "$TASK_SCAN_LEADER_SID" ] || return 1
+  fi
+  [ -n "$identity" ] || identity=$(task_process_identity "$pid") || return 0
+  TASK_REAP_OWNED="${TASK_REAP_OWNED}${TASK_REAP_OWNED:+$'\n'}$pid"$'\t'"$identity"
+}
+
+teardown_process_log() {  # <pid> <verdict> <reason> [command]
+  local command=${4-}
+  if [ "$#" -lt 4 ]; then
+    command=$(LC_ALL=C ps -p "$1" -o command= 2>/dev/null) || command="<unavailable>"
+  fi
+  command=$(printf '%s' "$command" | tr '\t\n\r' '   ')
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ID" "$1" "$2" "$3" "$command" \
+    >> "$STATE/teardown-processes.log" 2>/dev/null \
+    || echo "warning: could not append to $STATE/teardown-processes.log" >&2
+}
+
+task_spare_reason() {
+  if [ -n "$TASK_REAP_LEADER" ]; then
+    printf 'outside endpoint %s descendants and session\n' "$TASK_REAP_LEADER"
+  else
+    printf 'no endpoint pid on %s\n' "$BACKEND"
+  fi
+}
+
+TEARDOWN_SPARED_PIDS=
+TEARDOWN_RETURN_DEFERRED=0
+TEARDOWN_CWD_UNLISTABLE=0
+
+teardown_spared_pids_in_worktree() {  # [dir]
+  local dir=${1:-$WT} current pid identity
+  [ -n "$TEARDOWN_SPARED_PIDS" ] || return 0
+  current=$(pids_with_cwd_under "$dir") || current=$(printf '%s\n' "$TEARDOWN_SPARED_PIDS" | cut -f1)
+  while IFS=$'\t' read -r pid identity; do
+    [ -n "$pid" ] || continue
+    task_pid_list_contains "$current" "$pid" || continue
+    [ -z "$identity" ] || task_process_identity_matches "$pid" "$identity" || continue
+    printf '%s\n' "$pid"
+  done <<EOF
+$TEARDOWN_SPARED_PIDS
+EOF
+}
+
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
-  local dir dir_pids pids=""
+  local dir dir_pids pid command identity pids=""
+  task_ownership_context
   for dir in "$@"; do
     [ -n "$dir" ] || continue
     if ! dir_pids=$(pids_with_cwd_under "$dir"); then
@@ -2371,7 +2499,27 @@ task_pids_under_roots() {  # <dir>...
     pids="$pids
 $dir_pids"
   done
-  TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  TASK_PIDS=
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    if task_process_is_owned "$pid"; then
+      TASK_PIDS="${TASK_PIDS}${TASK_PIDS:+$'\n'}$pid"
+    else
+      if ! command=$(LC_ALL=C ps -p "$pid" -o command= 2>/dev/null); then
+        kill -0 "$pid" 2>/dev/null || continue
+        command="<unavailable>"
+      fi
+      if ! task_pid_list_contains "$TASK_REAP_REPORTED" "$pid"; then
+        echo "teardown: spared unowned process $pid: $command" >&2
+        teardown_process_log "$pid" spared "$(task_spare_reason)" "$command"
+        identity=$(task_process_identity "$pid") || identity=
+        TEARDOWN_SPARED_PIDS="${TEARDOWN_SPARED_PIDS}${TEARDOWN_SPARED_PIDS:+$'\n'}$pid"$'\t'"$identity"
+        TASK_REAP_REPORTED="${TASK_REAP_REPORTED}${TASK_REAP_REPORTED:+$'\n'}$pid"
+      fi
+    fi
+  done <<EOF
+$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+EOF
 }
 
 reap_task_backend_process_group() {  # <label>
@@ -2399,8 +2547,8 @@ reap_task_backend_process_group() {  # <label>
   esac
   own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null) || own_pgid=""
   own_pgid=$(printf '%s' "$own_pgid" | tr -d '[:space:]')
-  if [ "$pgid" = "$own_pgid" ]; then
-    echo "warning: lsof is unavailable; refusing to signal teardown's own process group for $ID" >&2
+  if [ "$pgid" != "$leader" ] || [ "$pgid" = "$own_pgid" ]; then
+    echo "warning: lsof is unavailable; refusing to signal a process group not dedicated to the task endpoint for $ID" >&2
     return 0
   fi
   task_process_identity_matches "$leader" "$leader_start" || return 0
@@ -2408,27 +2556,37 @@ reap_task_backend_process_group() {  # <label>
   current_pgid=$(printf '%s' "$current_pgid" | tr -d '[:space:]')
   [ "$current_pgid" = "$pgid" ] || return 0
   echo "teardown: reaping leaked $label process group for $ID: $pgid" >&2
+  teardown_process_log "-$pgid" killed "endpoint process group (lsof unavailable)" \
+    "$(LC_ALL=C ps -p "$leader" -o command= 2>/dev/null || echo "<unavailable>")"
   kill -TERM -- "-$pgid" 2>/dev/null || true
   sleep 1
   if task_process_identity_matches "$leader" "$leader_start" \
      && [ "$(ps -o pgid= -p "$leader" 2>/dev/null | tr -d '[:space:]')" = "$pgid" ] \
      && kill -0 -- "-$pgid" 2>/dev/null; then
     echo "teardown: force-killing leaked $label process group for $ID: $pgid" >&2
+    teardown_process_log "-$pgid" force-killed "endpoint process group (lsof unavailable)" \
+      "$(LC_ALL=C ps -p "$leader" -o command= 2>/dev/null || echo "<unavailable>")"
     kill -KILL -- "-$pgid" 2>/dev/null || true
   fi
 }
 
-# Reap every process rooted (by cwd) under this task's own worktree or tasktmp
-# - both unique per task and never shared - before either is removed. TERM
+# Reap proven task-owned processes with cwd under the worktree or tasktmp.
+# Report and spare unowned processes; they never block removal. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
 # the recheck. A missing lsof uses the backend process-group fallback; an lsof
 # scan error refuses before destructive teardown.
 reap_task_worktree_processes() {  # <label> <dir>...
-  local label=$1 pids pid identity current_pids i pass=1 max_passes=3
+  local label=$1 pids pid identity current_pids i pass=1 max_passes=3 leader_identity=
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
   shift
+  local TASK_REAP_LEADER TASK_REAP_LEADER_IDENTITY TASK_REAP_REPORTED="" TASK_REAP_OWNED=""
+  local TASK_SCAN_ROWS TASK_SCAN_LEADER_SID TASK_SCAN_OWN_SID TASK_SCAN_LEADER_LIVE=0
+  TASK_REAP_LEADER=$(task_reap_endpoint_pid) || TASK_REAP_LEADER=
+  case "$TASK_REAP_LEADER" in ''|*[!0-9]*|0|1) TASK_REAP_LEADER= ;; esac
+  TASK_REAP_LEADER_IDENTITY=$(task_process_identity "${TASK_REAP_LEADER:-0}") || TASK_REAP_LEADER=
   if ! command -v lsof >/dev/null 2>&1; then
+    TEARDOWN_CWD_UNLISTABLE=1
     reap_task_backend_process_group "$label"
     return 0
   fi
@@ -2438,7 +2596,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
       return 1
     fi
     pids=$TASK_PIDS
-    [ -n "$pids" ] || return 0
+    if [ -z "$pids" ]; then return 0; fi
     tracked_pids=()
     tracked_identities=()
     while IFS= read -r pid; do
@@ -2454,11 +2612,20 @@ reap_task_worktree_processes() {  # <label> <dir>...
         fi
         continue
       fi
+      if [ "$pid" = "$TASK_REAP_LEADER" ]; then
+        leader_identity=$identity
+        continue
+      fi
       tracked_pids+=("$pid")
       tracked_identities+=("$identity")
     done <<EOF
 $pids
 EOF
+    if [ -n "$leader_identity" ]; then
+      tracked_pids+=("$TASK_REAP_LEADER")
+      tracked_identities+=("$leader_identity")
+      leader_identity=
+    fi
     if [ "${#tracked_pids[@]}" -eq 0 ]; then
       pass=$((pass + 1))
       continue
@@ -2474,6 +2641,7 @@ EOF
       identity=${tracked_identities[$i]}
       if task_pid_list_contains "$current_pids" "$pid" \
          && task_process_identity_matches "$pid" "$identity"; then
+        teardown_process_log "$pid" killed "task-owned via endpoint $TASK_REAP_LEADER"
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
@@ -2506,6 +2674,7 @@ EOF
         identity=${remaining_identities[$i]}
         if task_pid_list_contains "$current_pids" "$pid" \
            && task_process_identity_matches "$pid" "$identity"; then
+          teardown_process_log "$pid" force-killed "task-owned via endpoint $TASK_REAP_LEADER"
           kill -KILL "$pid" 2>/dev/null || true
         fi
       done
@@ -2516,7 +2685,7 @@ EOF
     echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
     return 1
   fi
-  [ -z "$TASK_PIDS" ] && return 0
+  if [ -z "$TASK_PIDS" ]; then return 0; fi
   echo "REFUSED: leaked $label processes for $ID remain after $max_passes reap attempts; preserving the worktree/tasktmp for manual inspection or retry." >&2
   return 1
 }
@@ -2872,7 +3041,13 @@ EOF
 # home is quiet, and the home and its records are kept.
 t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
   t3code_secondmate_lsof_check "$2" "$1" || return 1
-  reap_task_worktree_processes "secondmate home" "$1"
+  reap_task_worktree_processes "secondmate home" "$1" || return 1
+  local survivors
+  survivors=$(teardown_spared_pids_in_worktree "$1" | tr '\n' ' ')
+  [ -z "$survivors" ] && return 0
+  echo "teardown: kept secondmate home $1; spared unowned process(es) still run in it: $survivors" >&2
+  teardown_process_log - kept "spared pid(s) still in secondmate home: $survivors" "$1"
+  return 1
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
@@ -3819,6 +3994,48 @@ else
   fi
 fi
 
+teardown_finish_treehouse_return() {  # early|final
+  local survivors waits=0
+  if [ "$TEARDOWN_CWD_UNLISTABLE" = 1 ]; then
+    echo "teardown: worktree kept: cannot list processes in it (lsof missing)" >&2
+    teardown_process_log - kept "worktree kept: cannot list processes in it (lsof missing)" "$WT"
+    return 0
+  fi
+  survivors=$(teardown_spared_pids_in_worktree)
+  if [ "$1" = final ]; then
+    while [ -n "$survivors" ] && [ "$waits" -lt 20 ]; do
+      sleep 0.25
+      waits=$((waits + 1))
+      survivors=$(teardown_spared_pids_in_worktree)
+    done
+  fi
+  if [ -n "$survivors" ]; then
+    if [ "$1" = early ]; then
+      TEARDOWN_RETURN_DEFERRED=1
+    else
+      echo "teardown: kept worktree $WT; spared unowned process(es) still run in it: $(printf '%s' "$survivors" | tr '\n' ' ')" >&2
+      teardown_process_log - kept "spared pid(s) still in worktree: $(printf '%s' "$survivors" | tr '\n' ' ')" "$WT"
+    fi
+    return 0
+  fi
+  TEARDOWN_RETURN_DEFERRED=0
+  if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
+    teardown_scrub_scratch_copy "$WT" || exit 1
+  fi
+  wt_pool_slot=0
+  fm_treehouse_pool_slot "$PROJ" "$WT" && wt_pool_slot=1
+  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    exit 1
+  }
+  [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
+  # The slot is back in the pool, so this task's claim on it is spent. Dropping
+  # it here - and only after a return that succeeded - keeps a returned slot
+  # unclaimed until its next holder claims it, and leaves the claim in place
+  # whenever the return did not actually happen.
+  fm_treehouse_slot_owner_release "$WT" "$ID"
+}
+
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
@@ -3900,29 +4117,16 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$WT" || exit 1
     git -C "$WT" ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1 || rm -f "$WT/CLAUDE.local.md"
   fi
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
+  # Kills remaining processes in the worktree, resets, returns to pool; kept in
+  # place instead while a spared unowned process still has its cwd there.
+  # treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
-    teardown_scrub_scratch_copy "$WT" || exit 1
-  fi
-  wt_pool_slot=0
-  fm_treehouse_pool_slot "$PROJ" "$WT" && wt_pool_slot=1
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
-  [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
-  # The slot is back in the pool, so this task's claim on it is spent. Dropping
-  # it here - and only after a return that succeeded - keeps a returned slot
-  # unclaimed until its next holder claims it, and leaves the claim in place
-  # whenever the return did not actually happen.
-  fm_treehouse_slot_owner_release "$WT" "$ID"
+  teardown_finish_treehouse_return early
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
@@ -4026,6 +4230,7 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+[ "$TEARDOWN_RETURN_DEFERRED" != 1 ] || teardown_finish_treehouse_return final
 if [ "$KIND" != secondmate ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then
