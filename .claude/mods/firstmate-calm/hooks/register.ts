@@ -464,8 +464,10 @@ export const register: Register = (on) => {
     const packed = packCalmShipRasterCells(sprite.frame(columns), columns, palette);
     sites.set(e.requestId, { columns, rows: packed.rows });
     const { Box, Raster } = $.ui.resolve(e);
+    // One blank row above the boat keeps its sail off the highlighted prompt, since Calm hides the rows between.
     return Box({
       flexDirection: "column",
+      paddingTop: 1,
       children: Raster({ key: CALM_SHIP_RASTER_KEY, columns, rows: packed.rows, cells: packed.cells }),
     });
   });

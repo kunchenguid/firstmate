@@ -43,6 +43,12 @@ describe("the working ship", () => {
     expect(backgrounds.flat().every((color) => color === DEFAULT)).toBe(true);
   });
 
+  test("leaves one blank row above the boat so its sail stays off the highlighted prompt", async ($, on) => {
+    world(on, { preference: "on\n" });
+    const tree = JSON.stringify(await $.ui.render(spinner()));
+    expect(tree).toContain('"paddingTop":1');
+  });
+
   test("animates the water every tick and moves the hull one column every fourth, through blits of the mounted size", async ($, on) => {
     const { clock, journal } = world(on, { preference: "on\n" });
     await $.session.start({ cwd: "/work", surface: "terminal", isInteractive: true });
