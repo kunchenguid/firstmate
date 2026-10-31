@@ -1095,15 +1095,29 @@ test_named_base_branch_starts_from_that_branch() {
   assert_contains "$out" "origin/feature/missing" "the refusal did not name the missing base"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused base-branch spawn published task metadata"
 
+  # A local-only ship takes the same explicit base: the copy starts from
+  # origin/<base>, the record carries it, and the clone's origin/HEAD record -
+  # which the captain may have pointed anywhere - is left exactly as found
+  # instead of being re-resolved from the remote.
   id='pool-named-base-local-only-r1'
   rec=$(make_case named-base-local-only "$id")
   read_case_record "$rec"
+  publish_feature_branch feature/hub
   brief_with_base "$id" feature/hub
+  git -C "$PROJECT_DIR" fetch --quiet origin feature/hub
+  git -C "$PROJECT_DIR" remote set-head origin feature/hub
   out=$(run_spawn "$id" --mode local-only --yolo off --base-branch feature/hub)
   status=$?
-  [ "$status" -ne 0 ] || fail "a base branch on a local-only ship should refuse the spawn"
-  assert_contains "$out" "mode=local-only" "the local-only refusal did not explain itself"
-  pass "--base-branch picks the copy's starting point and is recorded; a missing or local-only base refuses"
+  expect_code 0 "$status" "a local-only spawn with a matching base branch should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
+    || fail "the local-only copy did not start from origin/feature/hub"
+  assert_grep 'base_branch=feature/hub' "$HOME_DIR/state/$id.meta" \
+    "the local-only spawn did not record its base branch"
+  assert_grep 'mode=local-only' "$HOME_DIR/state/$id.meta" \
+    "the local-only spawn did not record its delivery mode"
+  [ "$(git -C "$PROJECT_DIR" symbolic-ref --short refs/remotes/origin/HEAD)" = origin/feature/hub ] \
+    || fail "a spawn with an explicit base re-pointed the clone's origin/HEAD record"
+  pass "--base-branch picks the copy's starting point and is recorded for every ship mode; a missing base refuses"
 }
 
 test_base_branch_must_agree_with_the_brief() {

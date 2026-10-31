@@ -308,7 +308,66 @@ SH
   pass 'two approved tasks with the same tree cannot roll back a successful landing'
 }
 
+# A task with a recorded base lands its accepted done head on that local
+# branch: a checkout on another branch refuses, a ship branch advanced past the
+# done head still refuses there, and the default branch never moves.
+test_recorded_base_lands_the_done_head_on_that_branch() {
+  local main out rc
+  make_case based
+  main=$(git -C "$PROJ" branch --show-current)
+  git -C "$PROJ" branch feature "$BASE"
+  printf 'base_branch=feature\n' >> "$META"
+  record_done || fail 'based done head was not accepted'
+  [ "$(fm_dod_local_done_head "$META")" = "$X" ] || fail 'based readiness did not pin X'
+
+  rc=0
+  out=$(land 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a based task landed while the checkout was on $main: $out"
+  assert_contains "$out" "recorded base branch 'feature'" 'the wrong-branch refusal did not name the recorded base'
+  [ "$(git -C "$PROJ" rev-parse "$main")" = "$BASE" ] || fail 'the wrong-branch refusal moved the default branch'
+  [ "$(git -C "$PROJ" rev-parse feature)" = "$BASE" ] || fail 'the wrong-branch refusal moved the base branch'
+
+  git -C "$PROJ" checkout -q feature || fail 'could not check out the base branch'
+  git -C "$WT" commit -q --allow-empty -m Y
+  assert_refused
+  [ "$(git -C "$PROJ" rev-parse feature)" = "$BASE" ] || fail 'an advanced ship branch moved the base branch'
+
+  git -C "$WT" reset -q --hard "$X"
+  out=$(land 2>&1) || fail "the accepted done head did not land on the recorded base: $out"
+  assert_contains "$out" 'into local feature' 'the landing did not report the base branch'
+  [ "$(git -C "$PROJ" rev-parse feature)" = "$X" ] || fail 'the base branch was not fast-forwarded to X'
+  [ "$(git -C "$PROJ" rev-parse "$main")" = "$BASE" ] || fail 'landing on the base branch moved the default branch'
+  [ "$(cat "$PROJ/approved.txt")" = 'approved X' ] || fail 'landing did not update the checkout'
+  pass 'a recorded base lands exactly the accepted done head there and refuses any other checkout branch'
+}
+
+# A tag that shares the recorded base's name must not stand in for the branch:
+# the fast-forward starts from the branch tip and leaves a clean checkout.
+test_recorded_base_shadowed_by_a_tag_lands_on_the_branch() {
+  local out tip
+  make_case based-tag
+  git -C "$PROJ" checkout -q -b feature
+  printf 'on the base\n' > "$PROJ/base.txt"
+  git -C "$PROJ" add base.txt
+  git -C "$PROJ" commit -q -m B
+  tip=$(git -C "$PROJ" rev-parse HEAD)
+  git -C "$WT" rebase -q "$tip" >/dev/null || fail 'could not rebase the ship onto the base branch'
+  X=$(git -C "$WT" rev-parse HEAD)
+  git -C "$PROJ" tag feature "$BASE"
+  printf 'base_branch=feature\n' >> "$META"
+  record_done || fail 'based done head was not accepted'
+
+  out=$(land 2>&1) || fail "a tag named like the base blocked the landing: $out"
+  assert_contains "$out" "into local feature ($tip -> " 'the landing did not start from the base branch tip'
+  [ "$(git -C "$PROJ" rev-parse refs/heads/feature)" = "$X" ] || fail 'the base branch was not fast-forwarded to X'
+  [ "$(git -C "$PROJ" rev-parse refs/tags/feature)" = "$BASE" ] || fail 'the landing moved the tag'
+  [ -z "$(git -C "$PROJ" status --porcelain)" ] || fail "the landing left a dirty checkout: $(git -C "$PROJ" status --porcelain)"
+  [ "$(cat "$PROJ/base.txt")" = 'on the base' ] || fail 'the landing dropped the base branch content'
+  pass 'a same-named tag does not displace the recorded base branch it lands on'
+}
+
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
-  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
+  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
+  test_recorded_base_lands_the_done_head_on_that_branch test_recorded_base_shadowed_by_a_tag_lands_on_the_branch
