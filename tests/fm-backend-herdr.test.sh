@@ -1055,22 +1055,25 @@ test_launcher_identity_absent_when_herdr_env_alone_is_set() {
 }
 
 test_launcher_identity_resolves_the_exact_pane_tab_and_workspace() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/launcher-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
-  printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/2.out"
-  printf '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/3.out"
-  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/4.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest || exit 1
-      printf "%s|%s|%s" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID"' "$ROOT" )
-  [ "$out" = 'w7:p3|w7:t3|w7' ] \
-    || fail "launcher_identity should resolve the launcher's own pane, tab, and workspace, got '$out'"
-  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w7:p3' "launcher_identity did not read its own pane"
-  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''get'$'\x1f''w7:t3' "launcher_identity did not cross-check the owning tab"
-  pass "fm_backend_herdr_launcher_identity: resolves the launcher's exact workspace even when a same-labeled workspace sorts first"
+  local dir log resp fb out label n=0
+  for label in firstmate project-a $'project-d\n'; do
+    n=$((n + 1))
+    dir="$TMP_ROOT/launcher-ok-$n"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fm-herdr-unit/fmtest.sock"}]}\n' > "$resp/1.out"
+    printf '{"result":{"pane":{"pane_id":"w7:p3","tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/2.out"
+    printf '{"result":{"tab":{"tab_id":"w7:t3","workspace_id":"w7"}}}\n' > "$resp/3.out"
+    jq -cn --arg label "$label" '{result:{workspaces:[{workspace_id:"w1",label:$label,focused:true},{workspace_id:"w7",label:$label,focused:false}]}}' > "$resp/4.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest || exit 1
+        printf "%s|%s|%s|%s|" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_LABEL"' "$ROOT" )
+    [ "$out" = "w7:p3|w7:t3|w7|$label|" ] \
+      || fail "launcher_identity should resolve the launcher's own pane, tab, workspace and label, got '$out'"
+    assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w7:p3' "launcher_identity did not read its own pane"
+    assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''get'$'\x1f''w7:t3' "launcher_identity did not cross-check the owning tab"
+  done
+  pass "fm_backend_herdr_launcher_identity: exact workspace and raw label, trailing line break kept, despite a same-labeled focused workspace sorting first"
 }
 
 test_launcher_identity_refuses_a_pane_from_another_session_name() {
@@ -3271,17 +3274,17 @@ SH
   pass "herdr presentation ordering: exact new workspace appends to the primary block while focus and relative orders stay stable"
 }
 
-# run_group_order_case <name> <group-key> <children-json-array>: one projected
+# run_group_order_case <name> <group-key> <children-json-array> [parent-label]: one projected
 # create under parent w1 with the given existing children, then the new w9
 # last; the mover answers with w9 at the requested index. Prints the mover's
 # requested index, or nothing when no move was attempted.
 run_group_order_case() {
-  local name=$1 key=$2 children=$3 dir log resp fb mover mover_log out status
+  local name=$1 key=$2 children=$3 parent=${4:-firstmate} dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order-group-$name"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
   : > "$log"; : > "$mover_log"
-  jq -cn --argjson children "$children" '
-    {result: {workspaces: ([{workspace_id: "w1", label: "firstmate"}] + $children
+  jq -cn --argjson children "$children" --arg parent "$parent" '
+    {result: {workspaces: ([{workspace_id: "w1", label: $parent}] + $children
       + [{workspace_id: "w9", label: "└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"}])}}' > "$dir/base.json"
   cp "$dir/base.json" "$resp/1.out"
   printf '%s\n' '{"client":{"version":"0.9.3","protocol":22},"server":{"running":true}}' > "$resp/2.out"
@@ -3301,7 +3304,7 @@ SH
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" FM_FAKE_BASE="$dir/base.json" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w9 firstmate w1 "$1"' "$ROOT" "$key" 2>&1)
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w9 "$2" w1 "$1"' "$ROOT" "$key" "$parent" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "group ordering $name must not fail the spawn: $out"
   [ -z "$out" ] || fail "group ordering $name emitted a warning: $out"
@@ -3331,6 +3334,30 @@ test_projection_order_group_key_places_new_task_inside_its_group() {
   at=$(run_group_order_case no-key '' "$tagged")
   [ "$at" = 4 ] || fail "without a group key the block-end placement must be unchanged, got index: $at"
   pass "herdr presentation ordering: a group key places only the new workspace inside its group, untagged children stay ahead"
+}
+
+test_projection_order_arbitrary_parent_blocks() {
+  local at parent
+  for parent in firstmate project-a; do
+    at=$(run_group_order_case "named-$parent" '' '[
+      {"workspace_id":"w2","label":"└ own-old · p:AbCdEfGhIjKlMnOpQrStU1"},
+      {"workspace_id":"w3","label":"project-b","focused":true},
+      {"workspace_id":"w4","label":"└ other-old · p:AbCdEfGhIjKlMnOpQrStU2"}
+    ]' "$parent")
+    [ "$at" = 2 ] || fail "a $parent child must follow its existing block, not project-b: $at"
+    at=$(run_group_order_case "empty-$parent" '' '[
+      {"workspace_id":"w3","label":"project-b","focused":true},
+      {"workspace_id":"w4","label":"└ other-old · p:AbCdEfGhIjKlMnOpQrStU2"}
+    ]' "$parent")
+    [ "$at" = 1 ] || fail "a first $parent child must go immediately after its exact parent: $at"
+    at=$(run_group_order_case "duplicate-$parent" '' "[
+      {\"workspace_id\":\"w2\",\"label\":\"└ own-old · p:AbCdEfGhIjKlMnOpQrStU1\"},
+      {\"workspace_id\":\"w3\",\"label\":\"$parent\",\"focused\":true},
+      {\"workspace_id\":\"w4\",\"label\":\"└ unrelated · p:AbCdEfGhIjKlMnOpQrStU2\"}
+    ]" "$parent")
+    [ "$at" = 2 ] || fail "a duplicate label must not override the exact parent id: $at"
+  done
+  pass "herdr presentation ordering: exact parents with arbitrary or duplicate labels precede their own child blocks"
 }
 
 test_projection_order_secondmate_parent_block() {
@@ -6279,6 +6306,7 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
 test_projection_order_secondmate_parent_block
 test_projection_order_group_key_places_new_task_inside_its_group
+test_projection_order_arbitrary_parent_blocks
 test_projection_order_foreign_legacy_child_is_read_only
 test_projection_order_allows_intervening_parent_child_block
 test_projection_order_human_spaces_never_move_targets
