@@ -109,6 +109,47 @@ test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
   pass "emitted branch prompt routes completed scouts through existing policies and leased cleanup, preserving unfinished work"
 }
 
+# The 2026-10-26 away window: a plain /afk recorded no words, and the prompt
+# called the words the whole mandate, so the away session read empty words as
+# no authority at all. Two queued daily runs whose date gate had passed, which
+# the captain's preferences say start without asking, waited for the return.
+test_branch_prompt_keeps_standing_authority_under_empty_away_words() {
+  local prompt
+  prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
+
+  # The emitted system prompt is the contract, not proof a model obeys it.
+  assert_contains "$prompt" \
+    "Empty or silent words are an empty away mandate, not a hold: they cancel nothing the captain already granted and add nothing to it, so standing authority runs while away exactly as it would attended, and only what needs the captain's new word waits for the return." \
+    "branch prompt still lets empty away words read as no standing authority"
+  assert_contains "$prompt" \
+    "a backlog item already queued whose holds, blockers, and date gates have cleared dispatches within the record's spend cap, as MAIN would dispatch it attended;" \
+    "branch prompt does not dispatch already-queued work without a sentence of the words"
+  assert_contains "$prompt" \
+    "a queued backlog item whose holds, blockers, and date gates cleared is dispatched within the record's spend cap whether or not the words name it" \
+    "the spawn rule still requires the words to name queued work"
+  assert_contains "$prompt" \
+    "what they leave unsaid falls back to standing authority, never to a hold on it, while a merge neither the words nor a task's standing merge permission calls for still holds for the return." \
+    "the never-by-analogy rule still reads unsaid words as a hold, or holds a merge the standing merge permission covers"
+  # The comparer PR of the same window: green, on a project with the captain's
+  # standing merge permission, held because the words were empty.
+  assert_contains "$prompt" \
+    "a project's standing merge permission, recorded as \`yolo=on\` in the task record (\`state/<task>.meta\`), merges that task's green, in-scope pull request as MAIN would merge it attended; \`yolo=off\` or an absent field keeps the merge for the return unless the words call for it." \
+    "branch prompt still holds a green PR the standing merge permission covers under empty words"
+  assert_contains "$prompt" \
+    "a merge the words call for, or a task's standing merge permission covers, proceeds when the pull request is green at its live head" \
+    "the merge rule still requires the words to name a PR the standing merge permission covers"
+  assert_contains "$prompt" \
+    "A red pull request, or one with a required check that has not reported, is never merged while away, whatever the words say" \
+    "the standing merge permission widened past the green gate"
+  assert_contains "$prompt" \
+    "an action taken under standing authority alone names the queued item or the task's \`yolo=on\` record instead and never claims that opener." \
+    "a standing-authority action may claim the away-instructions opener the return brief accounts by"
+  assert_not_contains "$prompt" \
+    "work the words explicitly call for is dispatched" \
+    "the spawn rule still conditions dispatch on the words"
+  pass "emitted branch prompt keeps standing dispatch and merge authority in force under empty away words"
+}
+
 # --- append-only outcome store ------------------------------------------------
 
 test_outcome_store_is_append_only_with_cursor_reads() {
@@ -1613,6 +1654,7 @@ WRAPPER
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_branch_prompt_routes_completed_scouts_through_guarded_cleanup
+test_branch_prompt_keeps_standing_authority_under_empty_away_words
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget

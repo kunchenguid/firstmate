@@ -2086,9 +2086,10 @@ fi
 # the away-posture record exists main is parked and a fresh spawn of queued
 # work relocates to the branch, under the record's spend cap below - the same
 # cap main meets in that posture. Queued means a dispatchable backlog item:
-# one already queued at entry, or one the branch filed itself because the
-# captain's away words explicitly call for that work (its backlog note cites
-# the words); filing the item the captain asked for is not inventing work.
+# one already queued, whether or not the captain's away words name it, or one
+# the branch filed itself because the captain's away words call for that work
+# (its backlog note cites the words); filing the item the captain asked for is
+# not inventing work.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ "$RELAUNCH" -ne 1 ]; then
