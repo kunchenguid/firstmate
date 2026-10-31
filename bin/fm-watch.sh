@@ -1525,18 +1525,21 @@ _wedge_cap_rollback() {
 # declared `until` time that has just passed re-surface at once), while the
 # throttle keeps the cadence between repeats.
 resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age] [status-file] [blocked-line] [overdue-marker]
-  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS} statusf=${7-} blocked_line=${8-} overdue_marker=${9-} append_rc size pre_size
+  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS} statusf=${7-} blocked_line=${8-} overdue_marker=${9-} append_rc size
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
     [ "$age" -ge "$min_age" ] || return 0
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fi
   if [ -n "$blocked_line" ]; then
-    pre_size=$(_fm_status_file_size "$statusf") || exit 1
+    blocked_line=$(status_stamp_line "$blocked_line") || exit 1
     fm_wake_status_append_self_announced "$STATE" "$statusf" "$blocked_line"; append_rc=$?
     [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || exit 1
-    size=$(_fm_status_file_size "$statusf") || exit 1
-    [ "$size" -gt "$pre_size" ] || exit 1
+    size=$(LC_ALL=C awk -v target="$blocked_line" '
+      { end = offset + length($0) + 1; if ($0 == target) found = end; offset = end }
+      END { if (found) print found; else exit 1 }
+    ' "$statusf") || exit 1
+    case "$size" in ''|*[!0-9]*) exit 1 ;; esac
     printf '%s' "$size" > "$overdue_marker"
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
@@ -2661,22 +2664,34 @@ clear_pause_tracking() {  # <window-key>
 }
 
 # Keep the overdue decision open until the worker appends another status event.
-# The marker stores the status-log size after the watcher's own blocked line, so an
-# unchanged paused pane never folds its full log on each poll.
+# The marker stores the byte offset immediately after the watcher's own blocked
+# line, so later checks read only status events written after that decision.
 pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or absent
-  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" expected actual open append_rc
+  local task=$1 statusf=$2 marker="$STATE/.paused-overdue-$1" offset actual added line verb key append_rc resume=0
   [ -f "$marker" ] || return 1
   [ -f "$statusf" ] || { rm -f "$marker"; return 1; }
-  expected=$(cat "$marker" 2>/dev/null || true)
+  offset=$(cat "$marker" 2>/dev/null || true)
   actual=$(_fm_status_file_size "$statusf") || return 0
-  case "$expected:$actual" in *[!0-9:]*) return 0 ;; esac
-  [ "$expected" = "$actual" ] && return 0
-  open=$(status_open_decisions "$statusf") || return 0
-  if printf '%s\n' "$open" | awk -F '\t' -v key="paused-overdue-$task" '$1 == key { found = 1 } END { exit !found }'; then
-    fm_wake_status_append_self_announced "$STATE" "$statusf" "resolved [key=paused-overdue-$task]: worker pause changed"
-    append_rc=$?
-    [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || return 0
-  fi
+  case "$offset:$actual" in *[!0-9:]*) return 0 ;; esac
+  [ "$actual" -gt "$offset" ] || return 0
+  added=$(_fm_status_read_span "$statusf" "$offset" "$((actual - offset))") || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      working|done|failed|paused) resume=1 ;;
+      blocked) resume=1 ;;
+      resolved)
+        key=$(_fm_decision_key "$line" '') || key=''
+        [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker"; return 1; }
+        ;;
+    esac
+  done <<EOF
+$added
+EOF
+  [ "$resume" -eq 1 ] || return 0
+  fm_wake_status_append_self_announced "$STATE" "$statusf" "resolved [key=paused-overdue-$task]: worker pause changed"
+  append_rc=$?
+  [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || return 0
   rm -f "$marker"
   return 1
 }
