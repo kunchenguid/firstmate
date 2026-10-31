@@ -278,7 +278,10 @@ case "${1:-}" in
   --version) echo 0.2.6 ;;
   update) echo 'usage: tasks-axi update <id> --body-file <path> --archive-body' ;;
   mv) echo 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
-  list) printf 'count: 1\ntasks[1]{id}:\n  missing-record\n' ;;
+  list)
+    case " $* " in *' --fields id '*) echo 'unsupported extra field: id' >&2; exit 2 ;; esac
+    printf 'count: 1\ntasks[1]{id}:\n  missing-record\n'
+    ;;
 esac
 SH
   chmod +x "$fakebin/tasks-axi"
