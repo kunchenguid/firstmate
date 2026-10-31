@@ -68,8 +68,9 @@ The spawn refusal explains how to finish cmux setup or opt back into tmux.
 Each task owns one cmux workspace with one surface.
 The caller-facing label remains `fm-<id>`, while the visible workspace title is `fm-<home-label>-<id>`.
 The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the resolved Firstmate root.
-cmux does not enforce title uniqueness, so create, recovery, list, and cleanup paths all validate this scoped title.
+cmux does not enforce title uniqueness, so creation refuses an existing scoped title and recovery, list, and cleanup validate this scoped title.
 Relocating the Firstmate installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
+After cmux acknowledges creation, Firstmate makes up to 20 polling attempts, sleeping 0.1 seconds between attempts, to resolve the exact scoped workspace and its default surface before recording their ids; if either remains unavailable, spawn fails.
 
 ```text
 backend=cmux
