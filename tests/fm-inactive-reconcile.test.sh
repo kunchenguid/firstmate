@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 GRANT="$ROOT/bin/fm-wake-grant.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
@@ -236,6 +237,7 @@ test_main_home_arms_ready_pr_watch() {
 case " $* " in
   *' --json isDraft '*) printf '{"isDraft":false}\n' ;;
   *' --json headRefOid '*) printf '{"headRefOid":"%s"}\n' "$FM_TEST_HEAD" ;;
+  *' --json state '*) printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}" ;;
   *) exit 97 ;;
 esac
 SH
@@ -245,7 +247,27 @@ SH
     || fail 'canonical CI-ready status did not record its PR automatically'
   [ -f "$MAIN/state/child.check.sh" ] && [ ! -L "$MAIN/state/child.check.sh" ] \
     || fail 'canonical CI-ready status did not arm its merge poll'
-  pass 'a main-home ready status automatically records pr= and arms its merge watch'
+  FM_TEST_GH_STATE=MERGED PATH="$WORLD/fakebin:$PATH" bash "$MAIN/state/child.check.sh" \
+    > "$WORLD/poll.out" || fail 'the armed merge watch did not run'
+  grep -qxF merged "$WORLD/poll.out" || fail 'the armed merge watch did not observe the merge'
+  cat > "$WORLD/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$WORLD/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$WORLD/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$WORLD/fakebin/treehouse" "$WORLD/fakebin/tmux" "$WORLD/fakebin/no-mistakes"
+  FM_HOME="$MAIN" FM_ROOT_OVERRIDE="$ROOT" PATH="$WORLD/fakebin:$PATH" \
+    bash "$TEARDOWN" child > "$WORLD/teardown.out" 2> "$WORLD/teardown.err" \
+    || fail "the merged sandbox lane did not clean up safely: $(cat "$WORLD/teardown.err")"
+  [ ! -e "$MAIN/state/child.meta" ] || fail 'cleanup left the sandbox task record'
+  pass 'a main-home ready status auto-arms, detects a merge, and cleans its sandbox lane without a supervisor turn before arming'
 }
 
 # An unpushed CI-ready ship done: is not a parent-facing ready signal. The
