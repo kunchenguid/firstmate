@@ -725,10 +725,47 @@ fm_lock_claim() {
   return 0
 }
 
+# A fatal signal can enter EXIT while an external filesystem command is still
+# running. The acquiring frame exposes its pending child through dynamically
+# scoped locals so cleanup can join it before releasing/sweeping ownership.
+# $! covers the small window between launch and recording the child's pid;
+# the previous value distinguishes a signal that arrived before launch.
+fm_lock_wait_pending_mutation() {
+  [ "${FM_LOCK_PENDING_PREVIOUS_PID+x}" = x ] || return 0
+  local pending=${FM_LOCK_PENDING_PID:-}
+  if [ -z "$pending" ]; then
+    pending=$(set +u; printf '%s' "$!")
+  fi
+  [ -n "$pending" ] || return 0
+  [ "$pending" != "$FM_LOCK_PENDING_PREVIOUS_PID" ] || return 0
+  # During an interrupted read, bash has not yet registered its process
+  # substitution as waitable. It still exposes $!, and reaps it on SIGCHLD.
+  # Join that child by liveness if wait cannot join it yet.
+  if ! wait "$pending" 2>/dev/null; then
+    while kill -0 "$pending" 2>/dev/null; do sleep 0.01; done
+  fi
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local FM_LOCK_PENDING_PREVIOUS_PID FM_LOCK_PENDING_PID=
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    # This bash also applies nounset to ${!:-}; isolate the safe probe.
+    FM_LOCK_PENDING_PREVIOUS_PID=$(set +u; printf '%s' "$!")
+    # Bash 3.2 defers fatal signals until command substitutions finish, and
+    # does not expose a process substitution's pid through $!.
+    ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  else
+    FM_LOCK_PENDING_PREVIOUS_PID=${!:-}
+    # Newer bash can enter EXIT before the child finishes. A process
+    # substitution exposes its pid even before read returns the owner path.
+    IFS= read -r ownerdir < <(fm_lock_owner_dir "$lockdir") || return 1
+    FM_LOCK_PENDING_PID=$!
+    wait "$FM_LOCK_PENDING_PID" 2>/dev/null || return 1
+    FM_LOCK_PENDING_PREVIOUS_PID=$FM_LOCK_PENDING_PID
+    FM_LOCK_PENDING_PID=
+  fi
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -737,7 +774,9 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  ln -s "$ownerdir" "$lockdir" 2>/dev/null &
+  FM_LOCK_PENDING_PID=$!
+  if wait "$FM_LOCK_PENDING_PID" && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0

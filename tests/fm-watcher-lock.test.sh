@@ -1950,6 +1950,65 @@ test_staged_owner_cleanup_preserves_other_acquirers() {
   pass "staged-owner cleanup removes only unpublished empty or self-owned staging"
 }
 
+# The clean-interruption contract includes mutations still running in external
+# children: cleanup must wait for them before releasing published locks and
+# discarding staging. Delaying the real filesystem command after signalling the
+# watcher deterministically rejects a release sweep that runs too early.
+test_startup_cleanup_waits_for_inflight_lock_mutations() {
+  local dir state fakebin tool sig pid status real_tool i
+  for tool in mktemp ln; do
+    real_tool=$(command -v "$tool")
+    for sig in HUP TERM; do
+      dir=$(make_case "inflight-$tool-$sig")
+      state="$dir/state"
+      fakebin="$dir/fakebin"
+      mkdir "$state/.wake-queue.lock.owner.foreign"
+      printf '%s\n' "$$" > "$state/.wake-queue.lock.owner.foreign/pid"
+      cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+# Model an external mutation that outlives the watcher's fatal signal, even
+# on shells that also forward HUP to their command-substitution children.
+trap '' HUP TERM
+case "$*" in
+  *".wake-queue.lock"*)
+    if mkdir "$TEST_MUTATION_ONCE" 2>/dev/null; then
+      pid=$(cat "$FM_STATE_OVERRIDE/.watch.lock/pid")
+      kill -"$TEST_MUTATION_SIGNAL" "$pid"
+      sleep 0.5
+      "$TEST_MUTATION_REAL" "$@"
+      status=$?
+      : > "$TEST_MUTATION_DONE"
+      exit "$status"
+    fi ;;
+esac
+exec "$TEST_MUTATION_REAL" "$@"
+SH
+      chmod +x "$fakebin/$tool"
+      PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+        TEST_MUTATION_ONCE="$dir/once" TEST_MUTATION_DONE="$dir/done" \
+        TEST_MUTATION_SIGNAL="$sig" TEST_MUTATION_REAL="$real_tool" \
+        FM_POLL=5 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+        "$WATCH" > "$dir/watch.out" 2>&1 &
+      pid=$!
+      status=0
+      wait_for_exit "$pid" 100 || status=$?
+      [ "$status" -ne 124 ] || fail "$tool/$sig watcher failed to exit"
+      i=0
+      while [ ! -e "$dir/done" ] && [ "$i" -lt 100 ]; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+      [ -e "$dir/done" ] || fail "$tool/$sig filesystem child did not finish: $(cat "$dir/watch.out")"
+      [ "$(cat "$state/.wake-queue.lock.owner.foreign/pid")" = "$$" ] \
+        || fail "$tool/$sig cleanup removed foreign staging"
+      rm -rf "$state/.wake-queue.lock.owner.foreign"
+      assert_no_startup_lock_evidence "$state" "$tool/$sig interruption"
+      drain_and_ack "$state" || fail "$tool/$sig recovery drain failed"
+    done
+  done
+  pass "startup cleanup waits for in-flight staging and publication, preserving foreign owners"
+}
+
 test_forced_term_before_the_safe_point_stays_clean() {
   local dir state fakebin armout status armpid i
   dir=$(make_case arm-pre-identity-term)
@@ -2315,6 +2374,7 @@ test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_arm_confirms_a_slow_post_claim_startup
 test_arm_relays_a_startup_lock_held_by_live_pid
 test_staged_owner_cleanup_preserves_other_acquirers
+test_startup_cleanup_waits_for_inflight_lock_mutations
 test_forced_term_before_the_safe_point_stays_clean
 test_unpublishable_identity_exits_through_cleanup
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

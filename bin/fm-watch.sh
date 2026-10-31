@@ -3499,6 +3499,9 @@ pr_poll_publish_release() {
 
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock staged lock
+  # Join any interrupted owner creation/publication before the release sweep:
+  # a child must not publish a lock or staging directory after we removed ours.
+  fm_lock_wait_pending_mutation
   pr_poll_publish_release || cleanup_status=1
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
