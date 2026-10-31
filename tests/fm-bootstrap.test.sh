@@ -1567,9 +1567,12 @@ JSON
   cat > "$root/project-leftover/treehouse-state.json" <<'JSON'
 {"worktrees":[]}
 JSON
+  before=$(find "$root" "$registered" "$other_home_clone" -type f -exec shasum -a 256 {} \; | sort)
   out=$(PATH="$fakebin:$BASE_PATH" TREEHOUSE_ROOT="$root" FM_POOL_ORPHAN_DAYS=30 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  after=$(find "$root" "$registered" "$other_home_clone" -type f -exec shasum -a 256 {} \; | sort)
+  [ "$before" = "$after" ] || fail "pool report modified pool or repository files"
   assert_contains "$out" "unregistered pool $root/orphan" "pool with no existing project repository was not reported"
   assert_not_contains "$out" "unregistered pool $root/other-home" "another home's existing project clone was falsely reported orphaned"
   assert_contains "$out" "duplicate-clone pool $root/two" "duplicate clone pool was not reported"
