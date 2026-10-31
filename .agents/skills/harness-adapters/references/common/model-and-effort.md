@@ -27,6 +27,12 @@ Polytoken uses its [model-scoped selectable-reference contract](../harness/polyt
 Harness identity is independent of model provider.
 `harness=pi` with `model=xai/grok-*` is Pi using xAI, not standalone Grok Build, and does not require Grok CLI login.
 `harness=cursor` with `model=cursor-grok-4.5-*` is Cursor routing a Grok model, not `harness=grok`.
+`harness=devin` launches models that `devin models list` offers, and the Devin reference owns which of those ids are Free and which are priced.
+A Claude, GPT, or Grok model prefers its native harness (`claude`, `codex`, `grok`) over harness `devin`.
+A Claude model may launch through harness `devin` only when the native Claude quota is exhausted.
+A GPT model may launch through harness `devin` only when the native Codex quota is exhausted.
+A Grok or Gemini model never falls back through harness `devin`.
+A priced Devin line, including any Claude or GPT model there, can spend Devin `credits`, so it needs the captain's explicit approval before launch.
 
 No script resolves credential provenance for you.
 Establish it from the tool's discovery surface and `quota-axi auth --json` per-provider sources, and show the reasoning rather than inferring it from a name.

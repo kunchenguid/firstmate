@@ -736,7 +736,7 @@ lookup_err=$(bash -c '
   trap "" PIPE
   . "$1/fm-quota-axi-lib.sh"
   for _ in $(seq 200); do
-    for harness in claude codex grok kimi cursor agy muse; do
+    for harness in claude codex grok kimi cursor agy muse devin; do
       fm_quota_single_provider_for_harness "$harness" >/dev/null
     done
   done
@@ -765,5 +765,13 @@ out=$(bash -c 'set -e; . "$1/fm-quota-axi-lib.sh"; fm_quota_single_provider_for_
   || fail "provider-table lookup exited nonzero under set -e"
 [ "$out" = claude ] || fail "provider-table lookup under set -e printed: $out"
 ok "provider-table lookup prints the provider when called directly under set -e"
+
+out=$(bash -c 'set -e; . "$1/fm-quota-axi-lib.sh"; fm_quota_single_provider_for_harness devin' _ "$BIN") \
+  || fail "devin provider-table lookup exited nonzero"
+[ "$out" = devin ] || fail "devin provider-table lookup printed: $out"
+if bash -c 'set -e; . "$1/fm-quota-axi-lib.sh"; fm_quota_provider_for_harness devin' _ "$BIN" >/dev/null 2>&1; then
+  fail "frozen helper map must keep refusing devin"
+fi
+ok "devin maps on the resolver table and stays off the frozen helper map"
 
 printf '# all fm-quota-choose tests passed\n'
