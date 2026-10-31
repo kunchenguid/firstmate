@@ -706,6 +706,67 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_pi_orphan_table_border_above_composer() {
+  # Live shape (pi on herdr, sanitized fixtures): the agent's last message held
+  # a markdown table whose top border scrolled off the viewport, leaving an
+  # orphan `└─┴─┘` bottom rule. That incomplete box sits wholly above the live
+  # separator pair, so it is scrollback: an idle pi still reads empty (it read
+  # unknown, which refused fm-control exit/relaunch), and typed text still
+  # reads pending.
+  local dir idle typed pi_idle pi_working out
+  dir="$ROOT/tests/fixtures/pi-orphan-table"
+  idle=$(<"$dir/idle.txt"); typed=$(<"$dir/typed.txt")
+  pi_idle=$(printf 'pi\tidle'); pi_working=$(printf 'pi\tworking')
+  assert_screen "orphan table border, idle pi" empty "$CAPS_STYLED" "$idle" '' "$pi_idle"
+  assert_screen "orphan table border, done pi" empty "$CAPS_STYLED" "$idle" '' "$(printf 'pi\tdone')"
+  assert_screen "orphan table border, typed text" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  assert_screen "orphan table border, working pi defers" unknown "$CAPS_STYLED" "$idle" '' "$pi_working"
+  # An incomplete box at or below the pair's open rule keeps the safe verdict.
+  assert_screen "incomplete box inside the composer region" unknown "$CAPS_STYLED" \
+    "$(printf '%s\n' "${idle%%$'\n'*}" '────────────────────────' '└────────────┘' '────────────────────────' footer)" '' "$pi_idle"
+  assert_screen "orphan table border, idle pi with cursor" empty "$CAPS_TMUX" "$idle" 13 "$pi_idle"
+  assert_screen "orphan table border, typed pi with cursor" pending "$CAPS_TMUX" "$typed" 13 "$pi_idle"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$idle") \
+    || fail "an orphan border above the live pair must not block empty content extraction"
+  [ -z "$out" ] || fail "idle pi content extraction must be empty, got '$out'"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed") \
+    || fail "an orphan border above the live pair must not block typed content extraction"
+  [ "$out" = 'fix the flaky test' ] || fail "typed pi content extraction lost the draft, got '$out'"
+  pass "matrix: an orphan table border above pi's composer pair does not hide an empty composer"
+}
+
+test_matrix_pi_pasted_separator_draft_refuses() {
+  # The emitted screen contract: the live composer contains a bottom border,
+  # a pasted separator, then a blank row. The last pair alone hides the draft.
+  local screen identity agent status caps border draft out locale
+  screen=$(<"$ROOT/tests/fixtures/pi-orphan-table/pasted-separator.txt")
+  for agent in pi polytoken; do
+    for status in idle 'done' working blocked; do
+      identity=$(printf '%s\t%s' "$agent" "$status")
+      assert_screen "$agent $status pasted-separator draft" unknown "$CAPS_STYLED" "$screen" '' "$identity"
+      assert_screen "$agent $status pasted-separator draft with cursor" unknown "$CAPS_TMUX" "$screen" 6 "$identity"
+    done
+  done
+  for caps in "$CAPS_STYLED_NOID" "$CAPS_PLAIN"; do
+    assert_screen "pasted-separator draft without identity capability" unknown "$caps" "$screen"
+  done
+  # Every unresolved border family must stay ambiguous, including an unclosed
+  # top border. Further pasted separators must not make that border scrollback.
+  identity=$(printf 'pi\tidle')
+  for border in '└────────────┘' '╰────────────╯' '╚════════════╝' '┗━━━━━━━━━━━━┛' '+------------+' '┌────────────┐'; do
+    draft=${screen/$'\n└────────────┘\n'/$'\n'"$border"$'\n'}
+    assert_screen "pasted separator after $border" unknown "$CAPS_STYLED" "$draft" '' "$identity"
+    draft=${draft/$'────────────────────────\n\n────────────────────────'/$'────────────────────────\n────────────────────────\n\n────────────────────────'}
+    assert_screen "multiple pasted separators after $border" unknown "$CAPS_STYLED" "$draft" '' "$identity"
+  done
+  for locale in "${LC_ALL:-${LANG:-C}}" C; do
+    if out=$(LC_ALL=$locale fm_composer_extract_selected_content "$CAPS_STYLED" "$screen"); then
+      fail "pasted-separator content extraction must refuse, got '$out'"
+    fi
+  done
+  pass "matrix: pasted separators cannot hide an unresolved border inside a draft"
+}
+
 test_matrix_pi_dollar_status_footer_is_empty() {
   # Pi's status row `$0.000 (sub) 5.4%/272k (auto)` at column 0 used to read
   # as a dead-shell prompt, so an idle separated composer classified unknown.
@@ -1600,6 +1661,8 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_pi_orphan_table_border_above_composer
+test_matrix_pi_pasted_separator_draft_refuses
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_opencode_leftbar_cwd_furniture
