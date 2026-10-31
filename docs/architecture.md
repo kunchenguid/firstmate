@@ -489,7 +489,7 @@ Pure acknowledgments or mentions with nothing to answer are dismissed through `b
 Concise replies stay single unnumbered messages; genuinely long replies are split by the client into bounded, numbered threads using the target platform's reply budget, with `texts` carrying the ordered chunks for the relay.
 Splitting preserves fenced-code, paragraph, line, and word boundaries when possible.
 If an image is attached to a split reply, the relay puts it on the first/opener message only and leaves later chunks text-only.
-For preview testing, `FMX_DRY_RUN` makes `fm-x-reply.sh` and `fm-x-dismiss.sh` skip the public post or dismiss call and record the would-be payload under `state/x-outbox/`, including `texts` when the reply would be a thread and an `endpoint` marker when the preview is a completion follow-up or dismiss, while the rest of the poll -> compose -> would-post loop still succeeds.
+For preview testing, `FMX_DRY_RUN` skips public transport; the preview contract and public-text refusal boundary are documented in the [Relay configuration reference](configuration.md#relay-env).
 Attached images are recorded as compact `{media_type, bytes, source_path}` metadata in dry-run instead of base64 bytes.
 Relay remains layered on top of the existing check mechanism without changing its request-handling behavior.
 
