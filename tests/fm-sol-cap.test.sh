@@ -1078,6 +1078,31 @@ SH
   pass "proven local stops and unpublished remote recovery release conservative occupancy"
 )
 
+test_unpinned_worker_exempt_from_broad_ceiling() (
+  local case_dir state declaration
+  case_dir=$(make_case unpinned)
+  state=$case_dir/home/state
+  FM_HOME=$case_dir/home
+  . "$ROOT/bin/fm-wake-lib.sh"
+  . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+  . "$ROOT/bin/fm-sol-cap-lib.sh"
+  fm_backend_of_meta() { printf tmux; }
+  fm_backend_target_of_meta() { printf 'firstmate:fm-unpinned'; }
+  fm_backend_agent_state() { printf alive; }
+  for declaration in 'model-pattern=.*' 'models=default|gpt-6.1-sol'; do
+    printf 'max=1\n%s\n' "$declaration" > "$case_dir/home/config/sol-cap"
+    fm_sol_cap_refuse_and_claim unpinned ship codex default "$case_dir/home/config" "$state" || fail "unpinned admission refused"
+    [ -z "$FM_SOL_CLAIM_CREATED" ] || fail "unpinned admission claimed occupancy"
+    fm_write_meta "$state/unpinned.meta" "model=default" "kind=ship"
+    fm_sol_cap_refuse_and_claim pinned ship codex gpt-6.1-sol "$case_dir/home/config" "$state" || fail "$FM_SOL_CAP_REFUSAL"
+    [ -z "$(registry_row_field "$case_dir" unpinned 4)" ] || fail "unpinned worker was adopted"
+    [ "$(registry_row_field "$case_dir" pinned 4)" = "$$" ] || fail "pinned worker did not claim capacity"
+    fm_sol_cap_refuse_and_claim overflow ship codex gpt-6.1-sol "$case_dir/home/config" "$state" && fail "pinned worker bypassed ceiling"
+    fm_sol_cap_promote pinned remove "$state" || fail "pinned claim release failed"
+  done
+  pass "unpinned workers remain exempt during broad-pattern and explicit-list adoption"
+)
+
 test_adopt_preserved_workers() (
   local case_dir state i out rc=0
   case_dir=$(make_case adopt)
@@ -1236,6 +1261,7 @@ test_adopted_worker_exit
 
 test_unregistered_stop_evidence
 test_retained_stop_evidence
+test_unpinned_worker_exempt_from_broad_ceiling
 test_adopt_preserved_workers
 test_stopped_local_and_unpublished_remote_recovery
 test_remote_ownership_and_recovery

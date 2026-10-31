@@ -254,7 +254,7 @@ fm_sol_cap_small_int() {  # <value>
 
 fm_sol_cap_model_capped() {  # <model>
   local model=$1
-  [ -n "$model" ] || return 1
+  case "$model" in '' | default) return 1 ;; esac
   case "|$FM_SOL_CAP_MODELS|" in
     *"|$model|"*) return 0 ;;
   esac
@@ -640,7 +640,7 @@ fm_sol_cap_refuse_and_claim() {  # <id> <kind> <harness> <model> <config-dir> <s
   # model, and the dispatch carries no explicit model pin. None of them
   # claims a slot.
   covered=0
-  if [ "$FM_SOL_CAP_ACTIVE" = 1 ] && [ -n "$model" ] && [ "$model" != default ] &&
+  if [ "$FM_SOL_CAP_ACTIVE" = 1 ] &&
     fm_sol_cap_model_capped "$model"; then
     covered=1
   fi
