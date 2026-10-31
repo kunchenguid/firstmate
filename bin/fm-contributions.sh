@@ -225,7 +225,6 @@ jq_lib() { # jq options/program via final argument
 read_saved() {
   local file dir task
   local -a files=() tasks=()
-  : > "$TMP/saved.jsonl"
   ERRORS=0
   if [ -L "$DATA" ]; then
     ERRORS=1; printf '[]\n' > "$TMP/saved.json"; return 0
@@ -244,29 +243,19 @@ read_saved() {
   # watcher's check timeout once a home holds a few hundred records.
   [ "${#files[@]}" -gt 0 ] || { printf '[]\n' > "$TMP/saved.json"; return 0; }
   printf '%s\0' "${tasks[@]}" | jq -Rs 'split("\u0000")[:-1]' > "$TMP/tasks.json"
-  if jq -L "$SCRIPT_DIR" -n --slurpfile tasks "$TMP/tasks.json" 'include "fm-contributions";
-    reduce inputs as $value ([]; if (.[-1].file // null) == input_filename then .[-1].values += [$value]
-      else . + [{file:input_filename,values:[$value]}] end)
-    | select(length == ($tasks[0] | length)
-      and all(to_entries[]; (.value.values | length) == 1 and (.value.values[0] | valid_record)
-        and .value.values[0].task == $tasks[0][.key]))
-    | map(.values[0])' "${files[@]}" > "$TMP/saved.json" 2>/dev/null && [ -s "$TMP/saved.json" ]; then
-    return 0
-  fi
-  for file in "${files[@]}"; do
-    fm_dirname_to dir "$file"
-    fm_basename_to task "$dir"
-    if ! jq_lib -ne --slurpfile record "$file" '($record | length) == 1 and ($record[0] | valid_record)' >/dev/null 2>&1; then
-      ERRORS=$((ERRORS + 1))
-      continue
-    fi
-    # A file's task identity must match its durable directory, not arbitrary JSON.
-    if ! jq -e --arg task "$task" '.task == $task' "$file" >/dev/null; then
-      ERRORS=$((ERRORS + 1)); continue
-    fi
-    jq -c . "$file" >> "$TMP/saved.jsonl"
-  done
-  jq -s . "$TMP/saved.jsonl" > "$TMP/saved.json"
+  printf '%s\0' "${files[@]}" | jq -Rs 'split("\u0000")[:-1]' > "$TMP/files.json"
+  jq -L "$SCRIPT_DIR" -nR --slurpfile tasks "$TMP/tasks.json" --slurpfile paths "$TMP/files.json" 'include "fm-contributions";
+    (reduce inputs as $line ({}; .[input_filename] += [$line])) as $lines
+    | [range(0; $paths[0] | length) as $i
+      | [try ($lines[$paths[0][$i]] | join("\n") | fromjson) catch empty] as $parsed
+      | if ($parsed | length) == 1
+          and (try ($parsed[0] | valid_record) catch false)
+          and $parsed[0].task == $tasks[0][$i]
+        then $parsed[0] else null end] as $checked
+    | {records: [$checked[] | select(. != null)], errors: ($checked | map(select(. == null)) | length)}' \
+    "${files[@]}" > "$TMP/checked.json"
+  ERRORS=$((ERRORS + $(jq '.errors' "$TMP/checked.json")))
+  jq '.records' "$TMP/checked.json" > "$TMP/saved.json"
 }
 
 get_input() {
