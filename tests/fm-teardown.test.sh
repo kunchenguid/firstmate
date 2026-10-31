@@ -5511,34 +5511,72 @@ test_status_archive_opt_in() {
 }
 
 test_configured_brain_completes_before_cleanup_and_preserves_records_on_failure() {
-  local case_dir mode rc current
-  for mode in success failure; do
+  local case_dir mode rc current generation pointer sha
+  for mode in success failure manifest-missing manifest-malformed log-missing units-invalid source-invalid; do
     case_dir=$(make_case "brain-completion-$mode")
     write_meta "$case_dir" local-only ship
     mkdir -p "$case_dir/config/project-brains"
     printf '%s\n' '- project [local-only] - Fixture (added 2026-10-31)' > "$case_dir/data/projects.md"
     printf '# Evidence\nCompleted fixture unit.\n' > "$case_dir/evidence.md"
-    if [ "$mode" = success ]; then
-      jq -n --arg p "$case_dir/evidence.md" '{schema_version:1,sources:[{id:"evidence",path:$p}]}' > "$case_dir/config/project-brains/project.json"
-    else
+    if [ "$mode" = failure ]; then
       printf 'broken' > "$case_dir/config/project-brains/project.json"
+    else
+      jq -n --arg p "$case_dir/evidence.md" '{schema_version:1,sources:[{id:"evidence",path:$p}]}' > "$case_dir/config/project-brains/project.json"
     fi
+    pointer=''
+    case "$mode" in
+      manifest-*|log-missing|units-invalid|source-invalid)
+        FM_HOME="$case_dir" bash "$ROOT/bin/fm-brain.sh" complete-task project --unit earlier > "$case_dir/brain.json"
+        generation=$(jq -r .generation "$case_dir/brain.json")
+        pointer=$(cat "$case_dir/data/brains/project/CURRENT")
+        cp "$generation/log.md" "$case_dir/history.md"
+        case "$mode" in
+          manifest-missing) rm "$generation/manifest.json" ;;
+          manifest-malformed) printf '{broken' > "$generation/manifest.json" ;;
+          log-missing) rm "$generation/log.md" ;;
+          units-invalid) printf '{"earlier":{"title":"Incomplete"}}' > "$generation/units.json" ;;
+          source-invalid)
+            sha=$(jq -r .sources.evidence.sha256 "$generation/manifest.json")
+            printf 'corrupt' > "$case_dir/data/brains/project/raw/$sha.md"
+            rm "$generation/manifest.json"
+            ;;
+        esac
+        ;;
+    esac
     rc=0
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-    if [ "$mode" = success ]; then
-      expect_code 0 "$rc" "brain completion teardown: $(cat "$case_dir/stderr")"
-      current=$(cat "$case_dir/data/brains/project/CURRENT")
-      assert_present "$case_dir/data/brains/project/generations/$current/pages/units/task-x1.md" 'teardown omitted the completed-unit wiki'
-      assert_present "$case_dir/data/brains/project/generations/$current/graphify-out/graph.json" 'teardown omitted the derived graph'
-      assert_absent "$case_dir/state/task-x1.meta" 'successful completion retained task meta'
-    else
-      [ "$rc" -ne 0 ] || fail 'teardown ignored malformed configured brain'
-      assert_grep 'project brain completion failed' "$case_dir/stderr" 'missing concrete completion failure'
-      assert_present "$case_dir/state/task-x1.meta" 'failed completion erased task meta'
-      assert_present "$case_dir/wt" 'failed completion erased worktree'
-    fi
+    case "$mode" in
+      success|manifest-*|log-missing)
+        expect_code 0 "$rc" "brain completion teardown: $(cat "$case_dir/stderr")"
+        current=$(cat "$case_dir/data/brains/project/CURRENT")
+        generation="$case_dir/data/brains/project/generations/$current"
+        assert_present "$generation/pages/units/task-x1.md" 'teardown omitted the completed-unit wiki'
+        assert_present "$generation/graphify-out/graph.json" 'teardown omitted the derived graph'
+        assert_absent "$case_dir/state/task-x1.meta" 'successful completion retained task meta'
+        FM_HOME="$case_dir" bash "$ROOT/bin/fm-brain.sh" check project > "$case_dir/brain-check.json"
+        case "$mode" in
+          manifest-*)
+            python3 - "$case_dir/history.md" "$generation/log.md" <<'PYLOG'
+import sys
+from pathlib import Path
+assert Path(sys.argv[2]).read_bytes().startswith(Path(sys.argv[1]).read_bytes())
+PYLOG
+            ;;
+          log-missing) assert_grep 'Unrecoverable history' "$generation/log.md" 'repair invented missing history' ;;
+        esac
+        ;;
+      *)
+        [ "$rc" -ne 0 ] || fail 'teardown ignored invalid configured brain evidence'
+        assert_grep 'project brain completion failed' "$case_dir/stderr" 'missing concrete completion failure'
+        assert_present "$case_dir/state/task-x1.meta" 'failed completion erased task meta'
+        assert_present "$case_dir/wt" 'failed completion erased worktree'
+        if [ -n "$pointer" ]; then
+          [ "$(cat "$case_dir/data/brains/project/CURRENT")" = "$pointer" ] || fail 'failed completion replaced generation'
+        fi
+        ;;
+    esac
   done
-  pass 'configured brain publishes before ordinary cleanup and failure retains task records for retry'
+  pass 'configured brain repairs derived metadata before cleanup and invalid evidence retains task records'
 }
 
 test_record_export_config_absent_never_reads_the_exporter() {

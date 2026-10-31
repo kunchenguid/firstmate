@@ -50,5 +50,36 @@ bad=dict(env,FM_TASK_ID='crew');assert 'worker' in run('inspect',str(home/'proje
 run('inspect',str(home/'projects/alpha'),ok=False)
 (home/'config/project-entry.json').write_text(json.dumps({'schema_version':1,'owners':{'alpha':'missing'}}))
 run('inspect',str(home/'projects/alpha'),ok=False)
+# Registry basenames with spaces work through every entry command and owner mapping.
+registry=home/'data/projects.md';baseline=registry.read_text()
+spaced=home/'projects/My Project';spaced.mkdir()
+subprocess.run(['git','init','-q',str(spaced)],check=True)
+registry.write_text(baseline+'- My Project [local-only] - Spaced name (added 2026-10-31)\n')
+entry_config=home/'config/project-entry.json'
+entry_config.unlink()
+assert json.loads(run('inspect',str(spaced)).stdout)['owner']=='main'
+registry.write_text(baseline+'- My Project - Legacy spaced registry entry\n')
+assert json.loads(run('inspect',str(spaced)).stdout)['project']=='My Project'
+registry.write_text(baseline+'- My Project [local-only] - Spaced name (added 2026-10-31)\n')
+entry_config.write_text(json.dumps({'schema_version':1,'owners':{'My Project':'alpha-lead'}}))
+assert json.loads(run('inspect',str(spaced)).stdout)['owner']=='alpha-lead'
+assert 'My Project' in run('context',str(spaced)).stdout
+run('send',str(spaced),'--request-id','spaced-project-request','--','Plan My Project.')
+r=subprocess.run(['bash',str(root/'bin/fm-inbox.sh'),'receipts','--all-pending'],env=env,text=True,capture_output=True)
+assert r.returncode==0 and 'Project entry: My Project' in r.stdout and 'Plan My Project.' in r.stdout
+# Neither registry traversal nor owner-key traversal becomes an alternate route.
+registered=registry.read_text()
+for name in ['../projects/My Project','./My Project','My Project/..','..','.']:
+ registry.write_text(f'- {name} [local-only] - Unsafe alias\n')
+ run('inspect',str(spaced),ok=False)
+ registry.write_text(registered)
+ entry_config.write_text(json.dumps({'schema_version':1,'owners':{name:'alpha-lead'}}))
+ run('inspect',str(spaced),ok=False)
+entry_config.write_text(json.dumps({'schema_version':1,'owners':{'My Project':'alpha-lead'}}))
+registry.write_text(registered+'- My Project [local-only] - Duplicate binding\n')
+assert '2 registered projects' in run('inspect',str(spaced),ok=False).stderr
+registry.write_text(registered)
+entry_config.write_text('{"schema_version":1,"owners":{"My Project":"main","My Project":"alpha-lead"}}')
+run('inspect',str(spaced),ok=False)
 print('ok: single-owner project entry, two clients, idempotent parent relay, isolation and refusal')
 PY

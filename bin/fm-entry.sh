@@ -37,7 +37,7 @@ reg="$DATA/projects.md"
 names=$(awk '/^- / {s=substr($0,3); sub(/ \[.*$/, "", s); sub(/ - .*$/, "", s); print s}' "$reg")
 project=''; project_path=''; count=0
 while IFS= read -r name; do
-  case "$name" in ''|*[!A-Za-z0-9._-]*|.|..) continue ;; esac
+  case "$name" in ''|*[!A-Za-z0-9._\ -]*|.|..) continue ;; esac
   path="$PROJECTS/$name"
   key=$(common_dir "$path" 2>/dev/null || true)
   if [ "$key" = "$actual" ]; then project=$name; project_path=$path; count=$((count+1)); fi
@@ -47,7 +47,7 @@ owner=main; owner_home=$FM_HOME; scope='Primary routing and supervision'
 config="$CONFIG/project-entry.json"
 if [ -e "$config" ] || [ -L "$config" ]; then
   [ -f "$config" ] && [ ! -L "$config" ] && [ "$(wc -c < "$config")" -le 65536 ] || die 'unsafe entry configuration'
-  jq -e 'type=="object" and (keys-["schema_version","owners"]|length)==0 and .schema_version==1 and (.owners|type)=="object" and (.owners|to_entries|all(.[]; (.key|test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and (.value|type)=="string" and (.value|test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))))' "$config" >/dev/null 2>&1 || die 'malformed entry configuration'
+  jq -e 'type=="object" and (keys-["schema_version","owners"]|length)==0 and .schema_version==1 and (.owners|type)=="object" and (.owners|to_entries|all(.[]; (.key|test("^[A-Za-z0-9._ -]+$")) and (.key != "." and .key != "..") and (.value|type)=="string" and (.value|test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))))' "$config" >/dev/null 2>&1 || die 'malformed entry configuration'
   jq --stream -s -e '[.[] | select(length==2) | .[0]] | length == (unique | length)' "$config" >/dev/null 2>&1 || die 'duplicate entry configuration keys'
   owner=$(jq -r --arg p "$project" '.owners[$p] // "main"' "$config")
 fi

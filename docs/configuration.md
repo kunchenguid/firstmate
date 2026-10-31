@@ -3538,7 +3538,8 @@ A mapping selects only an existing secondmate registry id with a parent-owned ch
 {"schema_version":1,"owners":{"example":"example-lead"}}
 ```
 
-Keys and ids use letters, digits, dot, underscore and dash, beginning with a letter or digit.
+Project keys accept registry basenames using letters, digits, spaces, dot, underscore and dash; `.` and `..` are refused.
+Owner ids use letters, digits, dot, underscore and dash, beginning with a letter or digit.
 Unknown configuration fields, malformed JSON and unresolved owners are refused.
 Clone lists do not infer coordinator ownership; this explicit entry preference cannot broaden the registered charter, and the primary revalidates scope at intake.
 The `main` value selects primary routing.
@@ -3584,7 +3585,8 @@ An abandoned `.write-lock` requires checking that its writer is gone before oper
 Add/change/delete or corpus exclusion is reconciled on the next completion/build, including intentional shrink of the derived graph; prior generations and raw evidence remain.
 Unchanged builds are no-ops, and rerunning the same completion id/summary is idempotent.
 A new summary for that id creates a new generation, preserving prior provenance.
-Missing or damaged derived output is detected and rebuilt into a repair generation; prior generations remain untouched.
+Missing or damaged derived output, including the manifest and update log, is detected and rebuilt into a repair generation; prior generations remain untouched.
+Repair requires valid retained unit synthesis and approved source evidence, preserves readable update history, and records an explicit unrecoverable-history entry when the prior log is missing or undecodable.
 
 Load `project-brain` for per-unit capture and retrieval; task teardown also refreshes configured brains before successful ordinary cleanup and refuses cleanup on failure.
 Forced discard and persistent-home retirement are not successful work units.

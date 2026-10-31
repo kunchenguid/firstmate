@@ -133,19 +133,33 @@ def load_current(brain):
     name = read(pointer, 100).strip()
     require(re.fullmatch('[a-f0-9]{64}', name), 'invalid CURRENT generation')
     generation = safe(brain / 'generations' / name)
-    return generation, decode(read(generation / 'manifest.json', 20_000_000)), decode(read(generation / 'units.json'))
+    units = decode(read(generation / 'units.json'))
+    require(isinstance(units, dict), 'unit synthesis must be an object')
+    for uid, value in units.items():
+        slug(uid)
+        validate_summary(value)
+    # The manifest is derived; authoritative synthesis must survive its loss.
+    try:
+        manifest = decode(read(generation / 'manifest.json', 20_000_000))
+        require(isinstance(manifest, dict), 'manifest must be an object')
+    except (ValueError, OSError):
+        manifest = {}
+    return generation, manifest, units
 
 
 def usable(current, manifest):
     if current is None:
         return False
     try:
+        require(all(isinstance(manifest.get(key), dict) for key in ['pages', 'sources', 'units']), 'invalid manifest mappings')
+        require(all(isinstance(value, dict) and value.get('status') in ['current', 'missing', 'stale']
+                    for key in ['sources', 'units'] for value in manifest[key].values()), 'invalid manifest status records')
         require(decode(read(current / 'manifest.json', 20_000_000)) == manifest, 'serialized manifest mismatch')
         decode(read(current / 'units.json'))
         read(current / 'log.md')
         return (digest(read(current / 'graphify-out/graph.json', 20_000_000)) == manifest.get('graph_sha256')
                 and all(digest(read(current / 'pages' / f'{pid}.md', 8_000_000)) == sha for pid, sha in manifest['pages'].items()))
-    except (ValueError, OSError, KeyError):
+    except (ValueError, OSError, KeyError, TypeError):
         return False
 
 
@@ -154,7 +168,10 @@ def fingerprints(sources):
 
 
 def summary_file(path):
-    data = decode(read(path, 65536))
+    return validate_summary(decode(read(path, 65536)))
+
+
+def validate_summary(data):
     require(isinstance(data, dict) and set(data) == {'title', 'body', 'sources', 'connections'}, 'invalid completion summary')
     require(isinstance(data['title'], str) and 0 < len(data['title']) <= 200 and '\n' not in data['title'], 'invalid summary title')
     require(isinstance(data['body'], str) and 0 < len(data['body']) <= 32000, 'invalid summary body')
@@ -220,20 +237,29 @@ def build(home, project, cfg, unit=None, summary=None, task=False):
         # Stable identity excludes observation time: unchanged content is a no-op.
         identity = dict(renderer_version=2, project=project, sources=fingerprints(sources), units=units)
         require(len(encoded(units).encode()) <= 2_000_000, 'unit synthesis exceeds 2 MB; curate before adding more')
+        for source in sources.values():
+            if source['status'] != 'current':
+                continue
+            raw = brain / 'raw' / f'{source["sha256"]}.md'
+            if raw.exists():
+                require(digest(read(raw)) == source['sha256'], 'immutable raw snapshot hash mismatch')
+            else:
+                atomic(raw, source['text'])
         input_sha = digest(encoded(identity))
         generation_id = input_sha
         destination = brain / 'generations' / generation_id
-        if previous and prior_manifest.get('input_sha256') == input_sha and usable(previous, prior_manifest):
+        prior_usable = usable(previous, prior_manifest)
+        if previous and prior_manifest.get('input_sha256') == input_sha and prior_usable:
             destination = previous
             atomic(state, encoded({'status': 'ok', 'generation': str(destination), 'changed': False}))
             return {'status': 'current', 'generation': str(destination), 'changed': False}
         while destination.exists():
             try:
                 manifest = decode(read(destination / 'manifest.json', 20_000_000))
-                valid = manifest.get('input_sha256') == input_sha and usable(destination, manifest)
+                valid = isinstance(manifest, dict) and manifest.get('input_sha256') == input_sha and usable(destination, manifest)
             except (Invalid, OSError, ValueError):
                 valid = False
-            if valid:
+            if valid and (previous is None or prior_usable):
                 break
             generation_id = digest(input_sha + ':repair:' + generation_id)
             destination = brain / 'generations' / generation_id
@@ -242,11 +268,6 @@ def build(home, project, cfg, unit=None, summary=None, task=False):
         for sid, source in sources.items():
             if source['status'] != 'current':
                 continue
-            raw = brain / 'raw' / f'{source["sha256"]}.md'
-            if raw.exists():
-                require(digest(read(raw)) == source['sha256'], 'immutable raw snapshot hash mismatch')
-            else:
-                atomic(raw, source['text'])
             # A source page is an evidence view, not fabricated semantic synthesis.
             # Fence raw content so source examples never create graph edges.
             fence = '`' * max(3, max([len(m[0]) + 1 for m in re.finditer(r'`+', source['text'])] or [3]))
@@ -285,9 +306,19 @@ def build(home, project, cfg, unit=None, summary=None, task=False):
         (stage / 'manifest.json').write_text(encoded(manifest), encoding='utf-8')
         (stage / 'units.json').write_text(encoded(units), encoding='utf-8')
         (stage / 'index.md').write_text(f'# {project} private project brain\n\nEvidence and work synthesis; task, preference and decision owners remain authoritative.\n\n' + ''.join(f'- [{pid}](pages/{pid}.md)\n' for pid in sorted(pages)), encoding='utf-8')
-        old_log = read(previous / 'log.md') if previous else '# Wiki update log\n'
+        old_log = '# Wiki update log\n'
+        if previous:
+            log_path = safe(previous / 'log.md')
+            old_log = None
+            if log_path.exists():
+                try:
+                    old_log = read(log_path)
+                except UnicodeError:
+                    pass
+            if old_log is None:
+                old_log = f'# Wiki update log\n\n- Unrecoverable history: log.md for generation {previous.name} is missing or unreadable; earlier update events cannot be reconstructed.\n'
         now = datetime.now(timezone.utc).isoformat()
-        (stage / 'log.md').write_text(old_log + f'\n- {now}: generation {generation_id}; unit {unit or "source-refresh"}; previous {prior_manifest.get("generation", "none")}.\n', encoding='utf-8')
+        (stage / 'log.md').write_text(old_log + f'\n- {now}: generation {generation_id}; unit {unit or "source-refresh"}; previous {previous.name if previous else "none"}.\n', encoding='utf-8')
         (stage / 'SCHEMA.md').write_text('# Private wiki schema v1\n\nSources are exact content-addressed immutable Markdown snapshots.\nEvidence pages cite original paths, line ranges and hashes.\nUnit pages retain contributor synthesis and explicit source ids; missing/removed sources mark units stale.\nOnly exact path-scoped links in the generated Connections section become EXTRACTED edges.\nThe graph and index are derived; they never close tasks or change decisions/preferences.\n', encoding='utf-8')
         require(usable(stage, manifest), 'staged generation failed validation; previous generation retained')
         # Recheck approved inputs before switching the sole visible pointer.
@@ -346,7 +377,10 @@ def main():
     brain = safe(data_root(home) / 'brains' / project)
     current, manifest, _ = load_current(brain)
     try:
-        fresh = usable(current, manifest) and manifest.get('sources') == fingerprints(snapshot(cfg))
+        intact = usable(current, manifest)
+        if not intact:
+            manifest = {}
+        fresh = intact and manifest.get('sources') == fingerprints(snapshot(cfg))
     except (Invalid, OSError):
         fresh = False
     if args.command == 'query':

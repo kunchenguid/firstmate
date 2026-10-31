@@ -70,6 +70,52 @@ broken=Path(new['generation']);(broken/'graphify-out/graph.json').unlink();run('
 repaired=json.loads(run('build','alpha').stdout)
 assert repaired['generation']!=str(broken) and broken.exists()
 run('check','alpha');assert json.loads(run('build','alpha').stdout)['generation']==repaired['generation']
+# Manifest/log metadata are rebuildable; units and raw snapshots remain authoritative.
+for filename,damage in [('manifest.json',None),('manifest.json',b'{broken'),('manifest.json',b'[]'),('manifest.json',b'{"pages":[],"units":null}'),('log.md',None),('log.md',b'\xff')]:
+ before=Path(json.loads(run('build','alpha').stdout)['generation'])
+ units_before=(before/'units.json').read_bytes()
+ history=(before/'log.md').read_text()
+ if damage is None:(before/filename).unlink()
+ else:(before/filename).write_bytes(damage)
+ run('check','alpha',ok=False)
+ assert json.loads(run('status','alpha').stdout)['status']=='stale'
+ repaired=Path(json.loads(run('build','alpha').stdout)['generation'])
+ assert repaired!=before and before.is_dir()
+ assert (repaired/'units.json').read_bytes()==units_before
+ log=(repaired/'log.md').read_text()
+ assert f'previous {before.name}' in log
+ if filename=='log.md':assert 'unrecoverable history' in log.lower() and before.name in log
+ else:assert log.startswith(history)
+ run('check','alpha');run('query','alpha','Profile unit')
+ assert json.loads(run('complete-task','alpha','--unit','unit-1').stdout)['generation']==str(repaired)
+# Metadata repair must preserve history even when inputs match a valid older generation.
+for filename in ['manifest.json','log.md']:
+ content=a.read_bytes()
+ older=Path(json.loads(run('build','alpha').stdout)['generation'])
+ a.write_text('# Temporary metadata repair input\n'+filename)
+ before=Path(json.loads(run('build','alpha').stdout)['generation'])
+ history=(before/'log.md').read_text();(before/filename).unlink()
+ a.write_bytes(content)
+ repaired=Path(json.loads(run('build','alpha').stdout)['generation'])
+ assert repaired not in [before,older]
+ log=(repaired/'log.md').read_text()
+ assert f'previous {before.name}' in log
+ if filename=='log.md':assert 'Unrecoverable history' in log
+ else:assert log.startswith(history)
+ run('check','alpha')
+# Corrupt synthesis or source evidence must not be disguised as a metadata repair.
+current=Path(json.loads(run('build','alpha').stdout)['generation'])
+pointer=(home/'data/brains/alpha/CURRENT').read_text()
+for damage in ['{broken','[]','{"unit-1":{"title":"Lost body"}}']:
+ saved=(current/'units.json').read_bytes();(current/'units.json').write_text(damage)
+ run('complete-task','alpha','--unit','unit-1',ok=False)
+ assert (home/'data/brains/alpha/CURRENT').read_text()==pointer
+ (current/'units.json').write_bytes(saved)
+evidence=home/'data/brains/alpha/raw'/(json.loads((current/'manifest.json').read_text())['sources']['a']['sha256']+'.md')
+saved=evidence.read_bytes();evidence.write_text('corrupt snapshot')
+run('complete-task','alpha','--unit','unit-1',ok=False)
+assert (home/'data/brains/alpha/CURRENT').read_text()==pointer
+evidence.write_bytes(saved);run('build','alpha');run('check','alpha')
 # Explicit source removal shrinks only derived current state; historical evidence survives.
 cfg['sources']=cfg['sources'][:1];conf.write_text(json.dumps(cfg));run('check','alpha',ok=False)
 new=json.loads(run('build','alpha').stdout);current=Path(new['generation'])
