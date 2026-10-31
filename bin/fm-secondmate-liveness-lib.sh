@@ -122,13 +122,13 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 # whose probe remains ambiguous or unreadable. A remote host that cannot be
 # reached (`unavailable`) is never part of an episode: host loss is not evidence
 # about the endpoint, so it neither counts toward nor clears one. The marker
-# records the state, the consecutive count, and the epoch the episode began;
-# that epoch names the episode in FM_SM_LIVE_UNCERTAIN_EPISODE so each episode
+# records the state, the consecutive count, and a unique token for the episode;
+# that token names the episode in FM_SM_LIVE_UNCERTAIN_EPISODE so each episode
 # queues under its own key and never dedupes against a row an earlier episode
 # left queued. The count is separate from the alert marker so a failed queue
 # append never suppresses a later alert.
 fm_secondmate_liveness_uncertain_record() {  # <id> <ambiguous|unreadable> <threshold>
-  local id=$1 state=$2 threshold=$3 marker tmp previous_state='' previous_count=0 episode=''
+  local id=$1 state=$2 threshold=$3 marker tmp='' previous_state='' previous_count=0 episode=''
   FM_SM_LIVE_UNCERTAIN_COUNT=0
   FM_SM_LIVE_UNCERTAIN_EPISODE=''
   case "$state" in ambiguous|unreadable) ;; *) return 1 ;; esac
@@ -140,16 +140,19 @@ fm_secondmate_liveness_uncertain_record() {  # <id> <ambiguous|unreadable> <thre
   if [ -f "$marker" ]; then
     read -r previous_state previous_count episode < "$marker" || return 2
     case "$previous_state:$previous_count:$episode" in
-      ambiguous:[0-9]*:[0-9]*|unreadable:[0-9]*:[0-9]*) ;;
+      ambiguous:[0-9]*:[A-Za-z0-9._-]*|unreadable:[0-9]*:[A-Za-z0-9._-]*) ;;
       *) return 2 ;;
     esac
   else
-    episode=$(date +%s) || return 2
+    # mktemp supplies a unique episode token even when two episodes begin in
+    # the same second. Keep that temporary file for the atomic marker publish.
+    tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-$id.XXXXXX") || return 2
+    episode=${tmp##*.}
   fi
   # The episode is uncertainty itself, so uncertain probes stay consecutive
   # when the verdict alternates between those states.
   previous_count=$((previous_count + 1))
-  tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-$id.XXXXXX") || return 2
+  [ -n "$tmp" ] || tmp=$(mktemp "$STATE/.secondmate-liveness-uncertain-$id.XXXXXX") || return 2
   if ! printf '%s\t%s\t%s\n' "$state" "$previous_count" "$episode" > "$tmp" || \
      ! mv -f -- "$tmp" "$marker"; then
     rm -f -- "$tmp"

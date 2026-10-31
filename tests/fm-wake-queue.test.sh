@@ -3482,7 +3482,7 @@ test_secondmate_liveness_tick_alerts_persistent_inconclusive_endpoint_once() {
     || fail "persistent inconclusive tracking marker was not written"
   [ -e "$state/.secondmate-liveness-uncertain-alert-sm1" ] \
     || fail "persistent inconclusive alert marker was not written"
-  [ "$(grep -c $'\tcheck\tsecondmate-liveness-uncertain-sm1-[0-9]*\t' "$state/.wake-queue")" -eq 1 ] \
+  [ "$(grep -c $'\tcheck\tsecondmate-liveness-uncertain-sm1-[A-Za-z0-9._-]*\t' "$state/.wake-queue")" -eq 1 ] \
     || fail "persistent inconclusive state did not queue exactly one episode-keyed wake: $(cat "$state/.wake-queue")"
 
   # A restarted watcher must not repeat the alert while the same uncertain
@@ -3528,11 +3528,20 @@ test_secondmate_liveness_tick_new_episode_queues_its_own_row_while_old_row_is_un
 FM_FAKE_TMUX_CURRENT_COMMAND=\$(cat "$dir/current-command") exec "$dir/fakebin/tmux.fixed" "\$@"
 SH
   chmod +x "$dir/fakebin/tmux"
+  cat > "$dir/fakebin/date" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = +%s ]; then
+  printf '1793440000\n'
+else
+  exec /bin/date "$@"
+fi
+SH
+  chmod +x "$dir/fakebin/date"
 
   printf 'node\n' > "$dir/current-command"
   run_liveness_leg "$dir" episode-one FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
   wait_for_exit "$pid" 500 || fail "the first uncertain episode did not wake"
-  key1=$(awk -F '\t' '$3 == "check" && $4 ~ /^secondmate-liveness-uncertain-sm1-[0-9]+$/ { print $4 }' "$state/.wake-queue")
+  key1=$(awk -F '\t' '$3 == "check" && $4 ~ /^secondmate-liveness-uncertain-sm1-[A-Za-z0-9._-]+$/ { print $4 }' "$state/.wake-queue")
   [ "$(printf '%s\n' "$key1" | grep -c .)" -eq 1 ] \
     || fail "the first episode did not queue exactly one episode-keyed row: $(cat "$state/.wake-queue")"
 
@@ -3544,7 +3553,8 @@ SH
     || fail "reading the first episode's row removed it before acknowledgement"
 
   # The endpoint recovers, which closes the first episode, then goes
-  # uncertain again under the same watcher.
+  # uncertain again under the same watcher. The fake date keeps both episode
+  # starts in the same second so timestamp reuse cannot hide the regression.
   printf 'claude\n' > "$dir/current-command"
   rm -f "$state/.secondmate-liveness-tick"
   run_liveness_leg "$dir" episode-two FM_SECONDMATE_LIVENESS_UNCERTAIN_TICKS=3; pid=$LIVENESS_PID
@@ -3562,7 +3572,7 @@ SH
   out="$dir/watch-episode-two.out"
   grep -F 'check: secondmate sm1 liveness remains ambiguous after 3 consecutive probes; endpoint was not changed' "$out" >/dev/null \
     || fail "the second episode did not wake with its evidence: $(cat "$out" "$dir/watch-episode-two.err")"
-  key2=$(awk -F '\t' -v old="$key1" '$3 == "check" && $4 ~ /^secondmate-liveness-uncertain-sm1-[0-9]+$/ && $4 != old { print $4 }' "$state/.wake-queue")
+  key2=$(awk -F '\t' -v old="$key1" '$3 == "check" && $4 ~ /^secondmate-liveness-uncertain-sm1-[A-Za-z0-9._-]+$/ && $4 != old { print $4 }' "$state/.wake-queue")
   [ "$(printf '%s\n' "$key2" | grep -c .)" -eq 1 ] \
     || fail "the second episode did not queue its own row beside the unacked first one: $(cat "$state/.wake-queue")"
   [ -e "$state/.secondmate-liveness-uncertain-alert-sm1" ] \
@@ -3898,7 +3908,7 @@ SH
   out="$dir/watch-$expected.out"
   grep -F "check: secondmate rsm1 liveness remains $expected after 3 consecutive probes; endpoint was not changed" "$out" >/dev/null \
     || fail "a persistent $expected remote probe did not wake with its evidence: $(cat "$out" "$dir/watch-$expected.err")"
-  [ "$(grep -c $'\tcheck\tsecondmate-liveness-uncertain-rsm1-[0-9]*\t' "$state/.wake-queue")" -eq 1 ] \
+  [ "$(grep -c $'\tcheck\tsecondmate-liveness-uncertain-rsm1-[A-Za-z0-9._-]*\t' "$state/.wake-queue")" -eq 1 ] \
     || fail "a persistent $expected remote probe did not queue exactly one episode-keyed wake: $(cat "$state/.wake-queue")"
   cmp -s "$dir/rsm1.meta.before" "$state/rsm1.meta" \
     || fail "a $expected remote probe changed the route metadata"
