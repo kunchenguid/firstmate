@@ -1555,14 +1555,14 @@ test_treehouse_pool_report_is_read_only_and_classifies_pools() {
   for pool in one two; do
     mkdir -p "$root/$pool/slot"
     cat > "$root/$pool/treehouse-state.json" <<JSON
-{"worktrees":[{"path":"$registered","created_at":"2020-01-01T00:00:00Z"}]}
+{"worktrees":[{"path":"$registered","owner_started_at":"2020-01-01T00:00:00Z"}]}
 JSON
   done
   cat > "$root/orphan/treehouse-state.json" <<JSON
-{"worktrees":[{"path":"$unregistered","created_at":"2020-01-01T00:00:00Z"}]}
+{"worktrees":[{"path":"$unregistered","owner_started_at":"2020-01-01T00:00:00Z"}]}
 JSON
   cat > "$root/other-home/treehouse-state.json" <<JSON
-{"worktrees":[{"path":"$other_home_clone","created_at":"2020-01-01T00:00:00Z"}]}
+{"worktrees":[{"path":"$other_home_clone","owner_started_at":"2020-01-01T00:00:00Z"}]}
 JSON
   cat > "$root/project-leftover/treehouse-state.json" <<'JSON'
 {"worktrees":[]}
