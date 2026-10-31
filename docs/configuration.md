@@ -259,8 +259,7 @@ The refusal reports the lock pid and its current process start time and age when
 The command never stops the holder, leaving that decision to the operator.
 A session that owns no lock but sees no proven live holder can still enter away mode.
 The quiet path is settled before that check, and a quiet entry never takes it: quiet mode is presentation only and holds nothing, so a read-only session can still enter it when there is no standing away record.
-Where attended supervision already does what quiet mode asks - the host's ordinary session on a hosted home, or Pi's in-process branch - that entry writes no record and spawns nothing.
-Where that supervision is unavailable, because the home does not run the host or the attended host lacks one of its parts, quiet mode enters through the quiet daemon, which does start one.
+The paths a quiet entry can take are owned by [Quiet mode](supervision-host.md#quiet-mode) and the [quiet skill](../.agents/skills/quiet/SKILL.md).
 
 While the away-posture record `state/.afk-contract` exists:
 

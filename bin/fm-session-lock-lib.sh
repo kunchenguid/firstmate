@@ -6,15 +6,19 @@
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock and its
 # state/.lock-session sidecar; bin/fm-claude-stop-autoarm.sh uses it to prove a
 # Stop hook fires inside the lock-owning primary session before it may arm or
-# rewake. Two signals decide ownership, either one sufficient: the recorded pid
-# is a member of this process's contiguous harness ancestry, or the trusted
-# Claude session id below matches the id recorded beside a live lock. Neither
-# signal ever fails open: no id, no sidecar, an untrusted id, or a different
-# recorded id leaves the ancestry verdict exactly as it was.
+# rewake; bin/fm-afk-contract.sh uses it to tell a read-only session from a
+# foreign live holder before it records an away mandate. Two signals decide
+# ownership, either one sufficient: the recorded pid is a member of this
+# process's contiguous harness ancestry, or the trusted Claude session id below
+# matches the id recorded beside a live lock. Neither signal ever fails open: no
+# id, no sidecar, an untrusted id, or a different recorded id leaves the
+# ancestry verdict exactly as it was.
 # A second decision is owned here too: fm_session_lock_pid_blocks_reclaim
 # answers whether a recorded owner may be reclaimed, so recovery callers
 # delegate that question instead of re-deriving liveness from the fields.
 # This file is sourced by scripts and has no side effects on source.
+# It is also the one owner of the fleet lock's acquisition-boundary path, which
+# a reader holds around a verdict it must act on (the section below).
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
 # deliberately not added to the tables below: Cursor's installed names are
