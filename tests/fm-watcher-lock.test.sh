@@ -493,6 +493,69 @@ test_lock_steals_dead_pid_lock() {
   pass "dead-pid stale lock is reclaimed by a single acquirer"
 }
 
+test_lock_reclaims_reused_pid_but_not_a_live_owner() {
+  local dir state lockdir recorded owner_pid rc newpid
+  dir=$(make_case lock-reused-pid-live-owner)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  mkdir "$lockdir"
+  owner_pid=$$
+  printf '%s\n' "$owner_pid" > "$lockdir/pid"
+  recorded=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start_time "$2"' _ "$LIB" "$owner_pid") \
+    || fail "could not compute the live owner's start token"
+  printf '%s\n' "$recorded" > "$lockdir/pid-start"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2"' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a live owner was evicted"
+  printf '%sX\n' "$recorded" > "$lockdir/pid-start"
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2" || exit 7; cat "$2/pid"; fm_lock_release "$2"' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "a recycled-pid lock was not reclaimed (rc=$rc)"
+  [ "$newpid" != "$owner_pid" ] || fail "reclaimed lock still names the recycled owner"
+  pass "a live owner remains protected while a mismatched start token is reclaimed"
+}
+
+test_mac_ps_start_token_normalizes_whitespace() {
+  local dir token rc
+  dir=$(make_case lock-mac-start-token)
+  token=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    first=$(fm_pid_start_time "$$") || exit 1
+    second=$(fm_pid_start_time "$$") || exit 1
+    [ "$first" = "$second" ] || exit 2
+    printf "%s" "$first"
+  ' _ "$LIB") || {
+    rc=$?
+    [ "$rc" -eq 2 ] && fail "portable start token changed between reads"
+    fail "portable start-token fallback failed"
+  }
+  case "$token" in
+    *=*) fail "portable start token is not a bare ps lstart date: <$token>" ;;
+  esac
+  case "$token" in [[:space:]]*|*[[:space:]]) fail "portable start token retained edge whitespace: <$token>" ;; esac
+  pass "macOS-style ps start tokens normalize leading and trailing whitespace"
+}
+
+# fm_lock_holder_alive compares the recorded pid-start to fm_pid_start_time by
+# string equality, so every record the writer leaves must equal that probe for
+# its live holder, on both the /proc and the ps paths.
+test_lock_start_record_matches_probe() {
+  local dir proc_root out
+  dir=$(make_case lock-start-record-probe)
+  for proc_root in /proc "$dir/no-proc"; do
+    out=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2" || exit 10
+      recorded=$(cat "$2/pid-start")
+      legacy=$(fm_pid_start_time "$(cat "$2/pid")")
+      fm_lock_release "$2"
+      [ -n "$recorded" ] && [ "$recorded" = "$legacy" ] || { printf "<%s> <%s>" "$recorded" "$legacy"; exit 11; }
+    ' _ "$LIB" "$dir/state/.contend.lock") \
+      || fail "proc root $proc_root: recorded pid-start does not equal fm_pid_start_time: $out"
+  done
+  pass "recorded pid-start matches fm_pid_start_time by string equality"
+}
+
 # Start a process that claims each given link lock, then SIGKILL it so every
 # claim is left behind with a dead owner - an acquirer TERMed mid-steal.
 leave_dead_link_locks() {  # <state> <lock>...
@@ -968,7 +1031,7 @@ test_lock_respects_live_holder_matching_its_start_time() {
   [ -s "$dir/holder.ready" ] \
     || { kill "$holder" 2>/dev/null || true; fail "identity fixture holder never acquired its lock"; }
   recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
-  expected=$(start_time_of "$holder" 2>/dev/null || true)
+  expected=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start_time "$2"' _ "$LIB" "$holder" 2>/dev/null || true)
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     if fm_lock_try_acquire "$2"; then rc=0; fm_lock_release "$2"; else rc=1; fi
@@ -2009,6 +2072,9 @@ test_watch_replaced_holder_stands_down_after_successor_exits
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
+test_lock_reclaims_reused_pid_but_not_a_live_owner
+test_mac_ps_start_token_normalizes_whitespace
+test_lock_start_record_matches_probe
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
