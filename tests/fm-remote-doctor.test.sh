@@ -477,7 +477,7 @@ assert_grep "gui/$(id -u)" "$CASE_LAUNCHCTL_LOG" "the launch agent was not boots
 cmp -s "$CASE_STATE/interactive-before.plist" "$CASE_INTERACTIVE_PLIST" \
   || fail "the fm-remote repair rewrote the interactive default launch agent"
 assert_present "$CASE_STATE/interactive-loaded" "the fm-remote repair unloaded the interactive default launch agent"
-assert_no_grep "gui/$(id -u)/$INTERACTIVE_LABEL$" "$CASE_LAUNCHCTL_LOG" \
+assert_no_regex "gui/$(id -u)/${INTERACTIVE_LABEL//./\\.}$" "$CASE_LAUNCHCTL_LOG" \
   "the fm-remote repair inspected or controlled the interactive default launch agent"
 assert_no_dangerous_calls "the repair reached for auto-login, FileVault, or the keychain"
 pass "--fix installs the dedicated fm-remote launch agent without touching default"
