@@ -10,6 +10,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
@@ -717,6 +719,47 @@ EOF
   assert_present "$home/state/$id.meta" "refused completion must preserve investigation metadata"
   assert_grep "REFUSED" "$home/teardown.err" "refusal must be explicit"
   pass "report-only unresolved captain call is reproduced and completion refuses before loss"
+}
+
+# Completion records its reviewed inventory in the origin task's own durable
+# record. A ship task reaches the captain with its pull request already
+# recorded and its merge watch already armed, so that record keeps growing
+# after the pull request was written into it. The armed watch must keep
+# authenticating across such a write: a watch the check sweep rejects is
+# reported as an unauthenticated check at every cycle and never reads the forge
+# again, so the merge it was armed for goes unreported.
+test_completion_keeps_an_armed_merge_watch_authenticating() {
+  local home id pr state poll saved_umask
+  home=$(make_home completion-merge-watch)
+  id=sample-watch-ship
+  pr="https://github.com/sample/sample/pull/23"
+  state="$home/state"
+  poll="$ROOT/bin/fm-pr-poll.sh"
+  tasks_in "$home" add "$id" "Ship the watched change $pr" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the armed-watch fixture"
+  # The record is seeded the way bin/fm-pr-check.sh writes it: pr= appended as
+  # the last line, with the merge watch published from the same pair that
+  # entry point arms through.
+  fm_write_meta "$state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$home/projects/$id" \
+    "project=$home/projects/sample" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "spawn_gen=fixture-$id" "pr=$pr"
+  saved_umask=$(umask)
+  fm_pr_poll_prepare "$state" "$id" github "$pr" github.com sample/sample 23 "$poll" \
+    || fail "could not prepare the merge watch fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish the merge watch fixture"
+  umask "$saved_umask"
+  fm_pr_poll_artifacts_valid "$state" "$id" "$poll" \
+    || fail "the merge watch fixture did not authenticate before completion"
+  printf 'done: PR %s checks green\n' "$pr" > "$state/$id.status"
+
+  complete_through_sibling "$home" "$id" >/dev/null \
+    || fail "completion failed for the armed-watch ship task"
+  assert_grep 'decisions_reviewed=1' "$state/$id.meta" \
+    "completion recorded no reviewed inventory in the task record"
+  fm_pr_poll_artifacts_valid "$state" "$id" "$poll" \
+    || fail "completion disarmed the armed merge watch"
+  pass "completion keeps an armed merge watch authenticating"
 }
 
 # The completion gate on the collapsed primitive: an origin with open keyed
@@ -4997,6 +5040,7 @@ test_complete_refuses_an_entry_held_for_another_origin
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
+test_completion_keeps_an_armed_merge_watch_authenticating
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
