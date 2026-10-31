@@ -355,6 +355,35 @@ test_open_pr_replacing_a_closed_one_on_the_same_branch_is_discovered() {
   pass 'an open PR that replaces a closed one on the same task branch is discovered'
 }
 
+test_many_recorded_contributions_do_not_starve_a_new_branch_pr() {
+  local home wt i real_jq rc=0
+  home=$(new_home many-recorded)
+  for i in $(seq 1 40); do
+    mkdir -p "$home/data/landed-$i"
+    printf '{"schema":"fm-contributions.v1","task":"landed-%s","records":[{"url":"https://github.com/o/r/pull/%s","kind":"pr","checked_at":null,"error":null,"pending":[],"seen":[],"verdict":null,"observation":{"state":"merged","head":"%s","draft":false,"mergeable":"unknown","can_merge":false,"review_decision":"","checks":[],"reviews":[],"events":[]}}]}\n' \
+      "$i" "$((100 + i))" "$HEAD_A" > "$home/data/landed-$i/contributions.json"
+  done
+  wt="$home/copy"
+  git init -q -b feature-12 "$wt"
+  git -C "$wt" remote add origin git@github.com:o/r.git
+  task "$home" zz-late "worktree=$wt"
+  printf '12\n' > "$home/forge/branch-feature-12"
+  pr "$home" 12 "$HEAD_A" "$BASE_1" true false
+  arm "$home"
+  real_jq=$(command -v jq)
+  printf '#!/bin/sh\nsleep 0.05\nexec %s "$@"\n' "$real_jq" > "$home/fakebin/jq"
+  chmod +x "$home/fakebin/jq"
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  with_home "$home" fm_run_timed 20 bash "$home/state/pr-health.check.sh" >/dev/null 2>&1 || rc=$?
+  rm "$home/fakebin/jq"
+  [ "$rc" -eq 0 ] || fail "a pass over 40 recorded contributions outlived the watcher's 20-second check bound (status $rc)"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" owned \
+    | jq -e 'any(.[]; .url == "https://github.com/o/r/pull/12" and (.tasks | index("zz-late")) != null)' >/dev/null \
+    || fail 'the PR on a live task branch was not enrolled in a home with many recorded contributions'
+  pass 'a home with many recorded contributions still enrolls a new task branch PR within the check bound'
+}
+
 test_green_without_reviewer_is_silent() {
   local home
   home=$(new_home no-reviewer)
@@ -616,7 +645,7 @@ for test_name in test_unknown_then_dirty_wakes_once test_dirty_again_at_same_com
   test_nothing_prints_while_nothing_changed test_merged_pr_is_not_read_again test_absent_flag_changes_nothing \
   test_watcher_surfaces_one_wake test_failure_once_per_latest_commit_after_cleanup \
   test_all_owned_pr_reads_start_in_one_wave test_checks_on_later_pages \
-  test_unsupported_provider_has_no_github_reads; do
+  test_unsupported_provider_has_no_github_reads test_many_recorded_contributions_do_not_starve_a_new_branch_pr; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures PR health regressions"

@@ -244,7 +244,12 @@ enroll_new() { # deadline : enroll recorded and branch PRs not yet durably owned
       if any(.[]; .url == $url) then map(if .url == $url then .tasks = (.tasks + [$id] | unique) else . end)
       else . + [{url:$url,tasks:[$id],final:false}] end' "$TMP/owned.json" > "$TMP/next.json" \
       && mv "$TMP/next.json" "$TMP/owned.json"
-  done < <(sort -u "$TMP/enroll.tsv")
+  done < <(sort -u "$TMP/enroll.tsv" | jq -Rr --slurpfile owned "$TMP/owned.json" '
+    # A pair that already holds a durable record needs no enrollment, so a
+    # pass cut short by the check timeout still converges on the next one.
+    split("\t") as [$id, $url]
+    | select(any($owned[0][]; .url == $url and ((.recorded // []) | index($id)) != null) | not)
+    | [$id, $url] | @tsv')
 }
 
 poll() {
