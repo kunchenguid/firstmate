@@ -281,8 +281,10 @@ harness_process_verdict() {  # <pid>
     # this arm only lets a kiro crewmate identify its own harness.
     kiro-cli) echo "comm kiro"; return ;;
     bun)
-      args=$(ps -o args= -p "$pid" 2>/dev/null)
-      if name=$(fm_bun_harness_name "$comm" "$args"); then
+      # The verdict reads the process's real argv, never the flattened ps
+      # string, so a space inside one argument cannot manufacture a harness
+      # path (see fm_bun_harness_name in bin/fm-session-lock-lib.sh).
+      if name=$(fm_bun_harness_name "$comm" "$pid"); then
         case "$name" in
           pi|pi-signed) echo "args pi" ;;
           *) echo "args $name" ;;
