@@ -121,6 +121,7 @@ gh_read() { # deadline args... : one bounded forge read
 
 PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
 headRefOid
+reviewDecision
 statusCheckRollup{contexts(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{__typename
 ... on CheckRun{name status conclusion startedAt isRequired(pullRequestNumber:$number)}
 ... on StatusContext{context state createdAt isRequired(pullRequestNumber:$number)}}}}}}}'
@@ -138,22 +139,34 @@ STEP='
       | ($g.statusCheckRollup // null) as $roll
       | [$roll.contexts.nodes[]? | if .__typename == "CheckRun"
           then {name, started_at:.startedAt, required:(.isRequired == true),
-                failing:(.status == "COMPLETED" and .conclusion != null and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED") | not))}
+                maintainer_gated:(.status == "COMPLETED" and .conclusion == "ACTION_REQUIRED"),
+                failing:(.status == "COMPLETED" and .conclusion != null and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED","ACTION_REQUIRED") | not))}
           else {name:.context, started_at:.createdAt, required:(.isRequired == true),
                 failing:(.state | IN("FAILURE","ERROR"))} end]
         | latest_checks as $ctx
       | any($ctx[]; .required) as $has_required
       | ([$ctx[] | select(.failing and (.required or ($has_required | not))) | .name] | unique) as $failing
       | ($p.conflicts // []) as $conflicts | ($p.checks // []) as $checks
+      | ($p.maintainer_gated // []) as $gated
+      | (($g.reviewDecision == "REVIEW_REQUIRED") or (($r.requested_reviewers // []) | length > 0)) as $needs_approval
+      | (($p.needs_approval // []) | index($head) | not) as $approval_new
       | ($r.mergeable == false and ($conflicts | index($head) | not)) as $conflict_new
+      | [$ctx[] | select(.maintainer_gated)
+          | . as $check | select([$gated[] | select(.head == $head and .name == $check.name)] | length == 0)] as $new_gated
       | [$failing[] | select(. as $name | any($checks[]; .head == $head and .name == $name) | not)] as $new_failing
       | (($new_failing | length) > 0) as $checks_new
       | ("at latest commit " + $head[:7]) as $where
       | {fp:{conflicts:($conflicts + if $conflict_new then [$head] else [] end),
-             checks:($checks + [$new_failing[] | {head:$head,name:.}])},
+             checks:($checks + [$new_failing[] | {head:$head,name:.}]),
+             maintainer_gated:($gated + [$new_gated[] | {head:$head,name:.name}]),
+             needs_approval:($p.needs_approval // [] | if $needs_approval and $approval_new then . + [$head] else . end)},
          lines:([
+           (select($approval_new and $needs_approval)
+            | "pr-health: \($url) needs human approval \($where) (task \($owners))"),
            (select($conflict_new)
             | "pr-health: \($url) conflicts with its base \($where) (task \($owners))"),
+           (select(($new_gated | length) > 0)
+            | "pr-health: \($url) maintainer must approve CI \($where): \($new_gated[:3] | map(.name) | join(", ")) (task \($owners))"),
            (select($checks_new)
             | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))")])}
     end'

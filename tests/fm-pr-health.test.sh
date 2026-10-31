@@ -46,7 +46,7 @@ case "$1 $2" in
     n=
     for arg in "$@"; do case "$arg" in number=*) n=${arg#number=} ;; esac; done
     model "$n" | jq '[{data:{repository:{pullRequest:{
-      headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},
+      headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},reviewDecision:(.reviewDecision // "APPROVED"),
       reviewRequests:{nodes:[range(.requests) | {requestedReviewer:{__typename:"User"}}]},
       latestReviews:{nodes:[range(.reviews) | {author:{__typename:"User",login:"reviewer"}}]},
       statusCheckRollup:(if (.checks | length) == 0 then null else {
@@ -72,7 +72,7 @@ case "$1 $2" in
       *) model "$rest" | jq '{state:(if .state == "open" then "open" else "closed" end),
            merged_at:(if .state == "merged" then "2026-10-21T00:00:00Z" else null end),
            user:{login:"author"},draft,mergeable,head:{sha:.head},
-           base:{sha:"0000000000000000000000000000000000000000"},requested_reviewers:[]}' ;;
+           base:{sha:"0000000000000000000000000000000000000000"},requested_reviewers:(.requested_reviewers // [])}' ;;
     esac ;;
   'api repos/o/r/issues/'*) printf '[[]]\n' ;;
   'api repos/o/r/commits/'*)
@@ -602,8 +602,23 @@ test_all_owned_pr_reads_start_in_one_wave() {
   pass 'all owned PR reads start in one wave without rotating a backlog'
 }
 
+test_action_required_and_review_required_are_distinct() {
+  local home
+  home=$(new_home approval-states)
+  task "$home" ship1 pr=https://github.com/o/r/pull/40
+  pr "$home" 40 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 40 '.checks = [{name:"Actions",conclusion:"ACTION_REQUIRED",required:true}]'
+  arm "$home"
+  expect_one "$home" 'maintainer must approve CI' 'ACTION_REQUIRED must be maintainer-gated'
+  expect_silent "$home" 'a maintainer-gated check must not repeat'
+  set_pr "$home" 40 '.reviewDecision = "REVIEW_REQUIRED" | .checks = []'
+  expect_one "$home" 'needs human approval' 'a required review must be distinct'
+  expect_silent "$home" 'a required review must not repeat'
+  pass 'maintainer-gated CI and required review states notify distinctly once'
+}
+
 failures=0
-for test_name in test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
+for test_name in test_action_required_and_review_required_are_distinct test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \
   test_reported_failure_does_not_hide_a_later_required_failure \
   test_replaced_cancelled_run_is_not_failing test_latest_commit_moving_between_reads_waits \
