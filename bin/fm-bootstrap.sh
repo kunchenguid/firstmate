@@ -1619,7 +1619,7 @@ record_hygiene_report() {
   done
 
   if command -v tasks-axi >/dev/null 2>&1; then
-    output=$(fm_backlog_row_list "$DATA" --state in_flight --fields id 2>/dev/null || true)
+    output=$(fm_backlog_row_list "$DATA" --state in_flight 2>/dev/null || true)
     while IFS= read -r id; do
       [ -n "$id" ] && [ ! -e "$STATE/$id.meta" ] && echo "RECORD_HYGIENE: In-flight backlog row without metadata: $id"
     done < <(printf '%s\n' "$output" | awk '
