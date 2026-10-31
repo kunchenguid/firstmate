@@ -39,7 +39,8 @@ def safe(path):
 def read(path, limit=2_000_000):
     path = safe(path)
     require(path.is_file() and path.stat().st_size <= limit, f'missing, oversized or non-file input: {path}')
-    return path.read_text(encoding='utf-8')
+    with path.open(encoding='utf-8', newline='') as handle:
+        return handle.read()
 
 
 def pairs(entries):
@@ -67,7 +68,7 @@ def atomic(path, text):
     safe(path)
     fd, name = tempfile.mkstemp(prefix='.publish-', dir=path.parent)
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='') as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -140,7 +141,7 @@ def usable(current, manifest):
         return False
     try:
         return (digest(read(current / 'graphify-out/graph.json', 20_000_000)) == manifest.get('graph_sha256')
-                and all(digest(read(current / 'pages' / f'{pid}.md')) == sha for pid, sha in manifest['pages'].items()))
+                and all(digest(read(current / 'pages' / f'{pid}.md', 8_000_000)) == sha for pid, sha in manifest['pages'].items()))
     except (Invalid, OSError, KeyError):
         return False
 
@@ -261,7 +262,7 @@ def build(home, project, cfg, unit=None, summary=None, task=False):
         for pid, text in sorted(pages.items()):
             path = stage / 'pages' / f'{pid}.md'
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding='utf-8')
+            path.write_bytes(text.encode('utf-8'))
             page_hashes[pid] = digest(text)
             node_id = f'{project}/{pid}'
             nodes.append(dict(status=unit_states.get(pid.removeprefix('units/'), {}).get('status', 'current') if pid.startswith('units/') else 'current', id=node_id, label=text.splitlines()[0][2:], source_file=f'pages/{pid}.md', source_location=f'pages/{pid}.md:1', type='wiki-page', confidence='EXTRACTED'))
@@ -285,6 +286,7 @@ def build(home, project, cfg, unit=None, summary=None, task=False):
         now = datetime.now(timezone.utc).isoformat()
         (stage / 'log.md').write_text(old_log + f'\n- {now}: generation {generation_id}; unit {unit or "source-refresh"}; previous {prior_manifest.get("generation", "none")}.\n', encoding='utf-8')
         (stage / 'SCHEMA.md').write_text('# Private wiki schema v1\n\nSources are exact content-addressed immutable Markdown snapshots.\nEvidence pages cite original paths, line ranges and hashes.\nUnit pages retain contributor synthesis and explicit source ids; missing/removed sources mark units stale.\nOnly exact path-scoped links in the generated Connections section become EXTRACTED edges.\nThe graph and index are derived; they never close tasks or change decisions/preferences.\n', encoding='utf-8')
+        require(usable(stage, manifest), 'staged graph or pages failed validation; previous generation retained')
         # Recheck approved inputs before switching the sole visible pointer.
         require(configured(home, project) == cfg, 'approved corpus changed during build; retry')
         require(fingerprints(snapshot(cfg)) == fingerprints(sources), 'sources changed during build; retry')

@@ -6,7 +6,7 @@ set -eu
 TMP_ROOT=$(fm_test_tmproot fm-brain)
 export BRAIN_ROOT="$ROOT" BRAIN_TMP="$TMP_ROOT"
 python3 - <<'PY'
-import json,os,subprocess
+import hashlib,json,os,subprocess
 from pathlib import Path
 root=Path(os.environ['BRAIN_ROOT']);tmp=Path(os.environ['BRAIN_TMP']);home=tmp/'home'
 (home/'config/project-brains').mkdir(parents=True);(home/'data').mkdir();(home/'state').mkdir()
@@ -96,6 +96,26 @@ assert json.loads(run('build','alpha').stdout)['generation']==added['generation'
 # A deleted input cannot be called fresh; the prior raw evidence remains readable.
 c.unlink();run('check','alpha',ok=False);run('build','alpha');run('check','alpha')
 assert json.loads(run('status','alpha').stdout)['status']=='current'  # current missing-source observation, not claim verification
+
+for content in [b'x'*2_000_000,b'`'*2_000_000,'# Evidence\r\nΑκριβές.\r\nMixed.\n'.encode(),b'# Evidence\rBare carriage return.\r']:
+ a.write_bytes(content)
+ built=Path(json.loads(run('build','alpha').stdout)['generation'])
+ run('check','alpha')
+ assert json.loads(run('status','alpha').stdout)['status']=='current'
+ sha=hashlib.sha256(content).hexdigest()
+ manifest=json.loads((built/'manifest.json').read_text())
+ assert manifest['sources']['a']['sha256']==sha
+ assert (home/'data/brains/alpha/raw'/f'{sha}.md').read_bytes()==content
+ page=(built/'pages/sources/a.md').read_bytes()
+ assert content in page and f'SHA-256: {sha}'.encode() in page
+ assert hashlib.sha256(page).hexdigest()==manifest['pages']['sources/a']
+ assert json.loads(run('build','alpha').stdout)['generation']==str(built)
+ run('query','alpha','Evidence: a')
+pointer=(home/'data/brains/alpha/CURRENT').read_text()
+a.write_bytes(b'x'*2_000_001)
+run('build','alpha',ok=False)
+assert (home/'data/brains/alpha/CURRENT').read_text()==pointer
+a.write_text(original);run('build','alpha');run('check','alpha')
 
 # Output must not recursively ingest itself, and source symlinks are refused.
 a.unlink();a.symlink_to(b);run('build','alpha',ok=False)
