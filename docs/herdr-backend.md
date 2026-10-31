@@ -555,11 +555,11 @@ For each ship and scout task recorded in the home with Herdr endpoint metadata, 
 Workspace tokens go only to the task's own projected workspace: an exact version 2 [presentation journal](#presentation-journal) binding the task's recorded session, workspace, and pane, whose live workspace holds that single pane.
 A flat-layout task tab shares its workspace with other tasks, so it gets pane tokens only.
 
-The display status comes from the task's status log through the shared classifier that `bin/fm-classify-lib.sh` owns, in this rank order:
+The display status comes from the task's status log through the shared classifier that `bin/fm-classify-lib.sh` owns, read with the hold-aware readers of `bin/fm-hold-status-lib.sh` so a captain hold on the task leaves the worker's own state in place ([captain-hold-lifecycle.md](captain-hold-lifecycle.md) owns that mirror), in this rank order:
 
 | Rank | `fm_state` | Status log |
 | --- | --- | --- |
-| 1 | `needs-captain` | An open decision, or a captain-held transfer. |
+| 1 | `needs-captain` | An open decision, or a `captain-held` line - a transfer, or the hold's own declaration - that the hold-aware read leaves as the current line. |
 | 2 | `problem` | `blocked` or `failed`. |
 | 3 | `running` | Anything else, including `working`, `paused`, and no status yet. |
 | 4 | `done` | `done`. |
@@ -905,8 +905,8 @@ The watcher maps the pane back to the task and skips these:
 - Secondmate endpoints.
 - Declared `paused:` waits, because the worker's declared wait already accounts for its quiet.
   It is left to the watcher's own bounded pause cadence.
-- Verified `captain-held` transfers.
-  A captain-held transfer remains silent without rechecks while the away-posture record exists.
+- `captain-held` declarations, the hold's own or a verified `complete` transfer.
+  A captain-held declaration remains silent without rechecks while the away-posture record exists.
 
 ### Polling fallback
 

@@ -53,8 +53,9 @@ It works in this order:
 2. It records the task's UTC hold-set timestamp as the leading line of the task body.
 3. It invokes the underlying tasks-axi hold operation.
 4. It verifies the captain-hold annotations and timestamp.
-5. In a secondmate home, it publishes the verified hold to the parent channel.
-6. When `--origin` is supplied, it records the origin on the task, replacing any previous association only after the backend hold succeeds.
+5. When the task has a worker lane, it declares the hold on that lane's status log, as the status-log mirror paragraph below describes.
+6. In a secondmate home, it publishes the verified hold to the parent channel.
+7. When `--origin` is supplied, it records the origin on the task, replacing any previous association only after the backend hold succeeds.
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
@@ -77,6 +78,28 @@ Repeat and edge cases:
   Re-running `hold` completes the move, and re-running the same `answer --release` also normalizes a release interrupted before its stamp was removed.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
+
+Watcher and away-mode classification read the last event line of `state/<id>.status` rather than the backlog, so when the held task has a worker lane (`state/<id>.meta`), `hold` also declares the hold there as a `captain-held [key=captain-hold-<task>-<n>]` event carrying the hold's reason, attributed to the hold command through that keyed operator verb rather than disguised as a worker line.
+The declaration is always one status line: line breaks in the reason are folded to spaces there, because every further line would be read as a status event of its own that the keyed retraction never closes.
+A repeated hold leaves the standing declaration untouched.
+A decision-only hold has no lane and nothing classifies a lane-less log, so it stays in the backlog alone rather than creating a status log that no teardown would retire.
+Every settlement path - close, release, repair, or an evidence-backed reconcile close - retracts the declaration itself with the matching keyed `resolved` line whenever that key has no retraction yet, wherever the declaration sits on the log, so a stopped worker can never leave the lane reading as an answer still owed.
+A worker line written after the declaration still reads as the latest event, and a replayed settlement appends nothing, because a retracted key is no longer standing.
+The same settlement retracts a `complete` transfer - the `captain-held [key=<k>]` event naming the task ids it tracks - that is still some lane's last event and names the settled task or sits on the settled task's own log: it appends `resolved [key=<k>]` once neither a task the transfer names nor the lane's own task is still an open captain call.
+Settlement rechecks the last event before retracting a transfer, avoiding a retraction when the worker has already moved on.
+The decision fold ignores hold-command retractions, which retire bookkeeping rather than answer questions.
+A worker asking `<k>` again keeps that question open even when its append lands between the last-event check and the retraction.
+The transfer already closed `<k>`, so that retraction changes no decision, a lane waiting on several calls keeps reading as held until the last one is answered, and a lane held itself while a transfer was its last line keeps that transfer as its declaration until its own call settles too.
+The keyed pair closes only the hold lifecycle's own key, so a worker's unrelated open status decisions survive both sides, and both mirror lines go through the guarded self-announced append, so the turn recording them does not re-wake its own home, even when the declaration is the first line a lane's log ever holds.
+The watcher's stale path agrees: its re-surface throttle is bound to the log's signature without the hold command's own trailing lines, and a settlement lifts only the pause the hold itself set, so neither a hold nor its settlement re-surfaces a lane the watcher already surfaced.
+A declared wait's next recheck is still measured from the log's latest write, so each of those lines moves it to one full recheck interval after that line.
+While the hold or transfer stands, the watcher and away-mode daemon read it as the lane's last line.
+A standing mirror also stays the lane's declared wait (`status_declared_wait_line`) when answers for other keys land on top of it, while any other later worker event - `working`, `done`, `failed`, `blocked`, `needs-decision`, or `paused` - replaces it, so a hold never hides what the worker reports next.
+A transfer counts as the declared wait only while it is the lane's last event.
+A mirror or transfer is settled once a retraction under its own key follows it, and `last_status_line` in `bin/fm-hold-status-lib.sh` then reads past both lines to the worker's last event, whatever is appended afterwards.
+So a settled lane is done, paused, or failed again, or back on the `needs-decision` its transfer answered, to every reader that routes through that function instead of looking like a quiet worker, and the declared-wait read still finds a pause that sits under the settled pair.
+Readers of the worker's own state - `fm-crew-state.sh`, the terminal-outcome ledger in `bin/fm-inactive-reconcile.sh`, and the failed listing of the return brief in `bin/fm-afk-return.sh` - read past both mirror lines at any time, and past a settled transfer the same way, through `last_worker_status_line`; under a standing mirror, `status_current_line`, which crew state, the Herdr project-groups status ([herdr-backend.md](herdr-backend.md#project-groups)), and the Rex attention marks ([rex-backend.md](rex-backend.md#attention-marks)) read, also reads past `resolved` lines to the worker's standing pause or latest other event, never a `resolved` line or a decision one of those lines answered, so a hold never changes a lane's reported state or re-reports an outcome it already delivered.
+When the event it reaches is such an answered decision, the mirror itself stays the current line: crew state maps a `captain-held` line to no state, exactly as it maps the `resolved` line it would read without the hold, the Herdr project-groups status labels it `needs-captain`, and the Rex attention mark reads `Needs your decision: <hold reason>`.
 
 ### Answering a call (`answer`)
 
@@ -551,6 +574,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
+- The status-log mirror holds: a held lane whose last line was `paused:` gains a self-announced `captain-held` declaration a repeated hold does not duplicate; a multi-line reason folds onto that one declaration line; release, closing answer, and reconcile close each retract it with no worker alive, and release and close still retract it under a later answer for another key; a re-hold starts a new keyed lifecycle; a worker's unrelated open decision survives both sides; a `complete` transfer left as the lane's last line is retracted once under its own key and read past to the answered `needs-decision`, while a transfer naming a still-open call, or sitting on a lane whose own call is still open, stays, and a transfer key the worker asked again stays open after settlement; a decision-only hold creates no status log; a lane with no status log yet gets its declaration without re-waking the home; and the divergence guard stays silent over the mirror's own key.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
 

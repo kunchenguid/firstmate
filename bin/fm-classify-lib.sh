@@ -146,11 +146,20 @@ fm_utc_iso_to_epoch() {  # <timestamp>
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
+# A hold settlement retracts only bookkeeping, never a worker's newer question.
+# Keep this shape shared with the hold-aware readers, including for callers
+# that load only this classifier and for incremental folds across appends.
+FM_HOLD_RETRACTION_ERE='^resolved \[key=[A-Za-z0-9._-]+\]: captain call .+ by fm-captain-hold$'
+
 # How many trailing lines the latest-event read parses before it widens to the
 # whole file. A status record and its continuation prose sit within a few lines
 # of the log's end, so this bounds the watcher's per-poll read on a long-lived
 # log while a log whose tail holds no event still gets a full pass.
 FM_CLASSIFY_EVENT_WINDOW_LINES=200
+
+# Captain-hold settlement reads live in bin/fm-hold-status-lib.sh.
+# Source that file after this one when a caller must read past a settled hold
+# or keep a standing hold mirror visible. Other callers keep the readers below.
 
 # Return the last recognized status event, ignoring continuation prose and blanks
 # (empty if missing/blank), and with <previous-event-var> the event before it.
@@ -158,6 +167,9 @@ FM_CLASSIFY_EVENT_WINDOW_LINES=200
 # was appended, so a consumer can name the head it is superseding; asking for it
 # always reads the whole file, since a bounded window cannot bound two events.
 # This is an event read; status_current_line below reconciles open decisions.
+# A later source of this file must not replace the hold-aware readers once
+# bin/fm-hold-status-lib.sh has defined them.
+if ! declare -F _fm_hold_settled_drop >/dev/null 2>&1; then
 last_status_line() {  # <status-file> [<previous-event-var>]
   local f=$1 scan=''
   [ -f "$f" ] && [ -r "$f" ] || return 0
@@ -169,6 +181,8 @@ last_status_line() {  # <status-file> [<previous-event-var>]
   [ "$#" -lt 2 ] || printf -v "$2" '%s' "${scan%%$'\n'*}"
   printf '%s\n' "${scan##*$'\n'}"
 }
+fi
+
 
 # 0 when <verb> is exactly one recognized status verb, with no leftover token.
 _fm_status_verb_recognized() {  # <verb>
@@ -242,6 +256,7 @@ status_prefix_unrecognized() {  # <status-line>
 # it, so continuation prose that merely mentions one cannot hide a declaration.
 # An unrecognized status prefix is an event too, so that declaration is the
 # latest line instead of disappearing behind an earlier recognized one.
+if ! declare -F _fm_hold_settled_drop >/dev/null 2>&1; then
 _fm_status_event_scan() {
   local line last='' prev='' fallback='' legacy_re
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
@@ -252,6 +267,8 @@ _fm_status_event_scan() {
   printf '%s\n%s\n' "$prev" "${last:-$fallback}"
   [ -n "$last" ]
 }
+fi
+
 
 # 0 when a nonblank <line> is a recognized status event for the scan above.
 _fm_status_line_is_event() {  # <line> <legacy-captain-re>
@@ -330,9 +347,11 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
-# 0 if a status line's leading verb is the verified captain-held transfer verb.
+# 0 if a status line's leading verb is the captain-held verb, in either shape the
+# hold command writes (above): its own declaration of a hold on the held lane's
+# log, or a verified transfer of a still-open decision to the backlog.
 # The same pure verb read as status_is_paused, and the discriminator a supervisor
-# needs once a declared wait has already been recognized: the two declarations get
+# needs once a declared wait has already been recognized: a pause and a hold get
 # the same bounded cadence, but they block on DIFFERENT humans, so a recheck that
 # names an external dependency for a hold points the captain away from the fact
 # that they are the one who can clear it.
@@ -343,8 +362,8 @@ status_is_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
-# 0 if a status line declares either an external-wait pause or a verified
-# captain-held transfer.
+# 0 if a status line declares either an external-wait pause or a captain-held
+# line in either shape above.
 # Both declarations can intentionally leave a crew's endpoint idle, so both
 # supervisors give them one cadence: the away-mode daemon defers the wedge and
 # ages a pause marker instead, and the watcher applies its bounded pause cadence
@@ -365,6 +384,7 @@ status_is_paused_or_captain_held() {  # <status-line>
 # does any other later event. A captain-held line counts only while it is the
 # latest event. Bounded like last_status_line: only a tail window made wholly of
 # resolved events widens the read to the whole file.
+if ! declare -F _fm_hold_settled_drop >/dev/null 2>&1; then
 status_declared_wait_line() {  # <status-file>
   local f=$1 last verb resolve legacy_re
   last=$(last_status_line "$f")
@@ -414,6 +434,8 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
   done
   return 1
 }
+fi
+
 
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to
 # clear with `until <YYYY-MM-DDTHH:MM[:SS]Z>` anywhere in its text (UTC only, so
@@ -843,6 +865,10 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   # decision no later line could close. The stored and surfaced bytes stay the
   # caller's own.
   _fm_status_unstamped "$line" unstamped
+  if [[ $unstamped =~ $FM_HOLD_RETRACTION_ERE ]]; then
+    printf '%s' "$open"
+    return 0
+  fi
   # Declaration guard. A transition's verb ends at a colon, or - in the colonless
   # form _fm_decision_key still accepts below - at a complete "[key=...]" token.
   # A line holding neither is continuation prose, a bare word, or blank, and can
@@ -925,6 +951,7 @@ status_open_decisions() {  # <status-file> [<kind>]
 # fold's most recently opened record supplies it; a standing declared wait, then
 # the latest recognized event, stands when nothing is open.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
+if ! declare -F _fm_hold_settled_drop >/dev/null 2>&1; then
 status_current_line() {  # <status-file> <kind>
   local open key verb note current=''
   open=$(status_open_decisions "$1" "$2")
@@ -937,6 +964,8 @@ EOF
   [ -n "$current" ] || current=$(last_status_line "$1")
   printf '%s\n' "$current"
 }
+fi
+
 
 # The subset of status_open_decisions the task raised about its own work: a
 # reserved-namespace key is raised by a supervisor library about the task (a
@@ -1233,7 +1262,9 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # Version 4 was already spent on the bracketed-tag parser change above, and a
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
-FM_OPEN_DECISIONS_FOLD_VERSION=9
+# 10: hold retractions no longer close worker decisions, so rebuild cursors
+# that could have lost a question appended between a transfer and its retraction.
+FM_OPEN_DECISIONS_FOLD_VERSION=10
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity

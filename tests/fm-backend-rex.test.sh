@@ -1160,6 +1160,21 @@ test_marks_producer_converges_and_notifies_once() {
   pass "rex: the marks producer plans from status, writes once, repairs without re-notifying, clears on resolve, and honors off"
 }
 
+test_marks_keep_the_worker_state_under_a_hold_mirror() {
+  local want
+  mark_case marks-hold
+  printf 'on\n' >"$MARK_DIR/home/config/rex-status-marks"
+  printf '%s\n' "window=$MARK_T" "backend=rex" "kind=ship" >"$MARK_DIR/home/state/t1.meta"
+  want=$'t1\tdone\t\tPR ready: PR https://github.com/o/r/pull/9 checks green'
+  mark_task_status "done [at=1700000300]: PR https://github.com/o/r/pull/9 checks green"
+  assert_equals "$want" "$(marks_run plan t1)" "a delivered task plans a PR-ready done mark"
+  printf '%s\n' "captain-held [at=1700000400] [key=captain-hold-t1-1]: merge approval" >>"$MARK_DIR/home/state/t1.status"
+  assert_equals "$want" "$(marks_run plan t1)" "a standing hold mirror must keep the done mark"
+  printf '%s\n' "resolved [at=1700000500] [key=captain-hold-t1-1]: captain call released by fm-captain-hold" >>"$MARK_DIR/home/state/t1.status"
+  assert_equals "$want" "$(marks_run plan t1)" "a settled hold mirror must keep the done mark"
+  pass "rex: a hold mirror and its retraction never change the planned mark"
+}
+
 test_marks_clear_removes_records_and_caches() {
   mark_case marks-clear
   printf 'on\n' >"$MARK_DIR/home/config/rex-status-marks"
@@ -1224,5 +1239,6 @@ test_mark_read_reports_only_firstmate_records
 test_firstmate_records_never_count_as_worker_state
 test_marks_are_off_by_default
 test_marks_producer_converges_and_notifies_once
+test_marks_keep_the_worker_state_under_a_hold_mirror
 test_marks_clear_removes_records_and_caches
 test_nm_run_progress_reads_captured_status
