@@ -105,6 +105,21 @@
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
 #
+# A URL whose repository owner config/github-owner-accounts names is read as
+# that owner's gh account (docs/configuration.md owns the file's format); other
+# owners, and a home without the file, keep gh's ambient identity. Each
+# observation reads the account's stored token with gh auth token into memory
+# and hands it to each of its own gh reads as GH_TOKEN in that read's
+# environment, never in a command line, file or log, and never through gh auth
+# switch or a GH_CONFIG_DIR. A token read killed at its five-second bound or
+# the deadline is budget refusal; a failed or empty one is a genuine failure
+# named as that account's identity read, and a malformed or unreadable file
+# refuses every URL rather than read it with the ambient identity; either
+# stays unavailable, in rotation and unretired until it is fixed. An
+# observation read as a mapped account records can_merge false whatever that
+# account's push permission is, because firstmate's merge path still acts as
+# the ambient identity.
+#
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
 # contribution author) and issue transitions to ready-for-pr persist as pending
 # before any wake. On a PR, comments, reviews and inline review comments whose
@@ -169,6 +184,11 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 case "$CONFIG" in /*) ;; *) CONFIG="$(pwd -P)/$CONFIG" ;; esac
+OWNER_ACCOUNTS="$CONFIG/github-owner-accounts"
+OWNER_ACCOUNTS_WHY=
+# Unset first so an inherited variable of this name cannot export the token.
+unset OWNER_GH_TOKEN
+OWNER_GH_TOKEN=
 export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -359,8 +379,10 @@ forge() {
       return "$FORGE_BOUND_RC"
     fi
     rc=0
-    fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-      gh "$@" > "$out" 2> "$forge_err" || rc=$?
+    # An owner's token rides only this read's environment, never its argv.
+    ( [ -z "$OWNER_GH_TOKEN" ] || export GH_TOKEN="$OWNER_GH_TOKEN"
+      fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+        gh "$@" ) > "$out" 2> "$forge_err" || rc=$?
     if [ "$rc" -eq 0 ]; then
       cat "$out"
       rm -f -- "$out"
@@ -404,13 +426,61 @@ wait_forges() { # background forge pids from one independent read wave
   return "$rc"
 }
 
+load_owner_accounts() { # validate config/github-owner-accounts once per poll
+  local bad=
+  OWNER_ACCOUNTS_WHY=
+  : > "$TMP/owner-accounts.tsv"
+  [ -e "$OWNER_ACCOUNTS" ] || [ -L "$OWNER_ACCOUNTS" ] || return 0
+  # awk prints the first malformed or repeated-owner line number, else nothing.
+  if [ ! -f "$OWNER_ACCOUNTS" ] || [ ! -r "$OWNER_ACCOUNTS" ] \
+    || ! bad=$(awk -v out="$TMP/owner-accounts.tsv" '
+      /^[[:space:]]*(#|$)/ { next }
+      NF != 2 || $1 !~ /^[A-Za-z0-9][A-Za-z0-9-]*$/ || $2 !~ /^[A-Za-z0-9][A-Za-z0-9_-]*$/ || (tolower($1) in seen) { print NR; exit }
+      { seen[tolower($1)] = 1; print tolower($1) "\t" $2 > out }' "$OWNER_ACCOUNTS"); then
+    OWNER_ACCOUNTS_WHY='owner identity configuration github-owner-accounts is unreadable'
+  elif [ -n "$bad" ]; then
+    OWNER_ACCOUNTS_WHY="owner identity configuration github-owner-accounts line $bad is malformed"
+  fi
+}
+
+owner_identity() { # repository owner: OWNER_GH_TOKEN for a configured owner, else the ambient identity
+  local account remaining rc=0 why
+  OWNER_GH_TOKEN=
+  [ -z "$OWNER_ACCOUNTS_WHY" ] || unobserved "$OWNER_ACCOUNTS_WHY" || return 1
+  account=$(awk -F '\t' -v owner="$1" '$1 == tolower(owner) { print $2; exit }' "$TMP/owner-accounts.tsv")
+  [ -n "$account" ] || return 0
+  remaining=$((DEADLINE - $(date +%s)))
+  [ "$remaining" -le 5 ] || remaining=5
+  if [ "$remaining" -le 0 ]; then
+    BUDGET_EXHAUSTED=1
+    return 1
+  fi
+  # A pipe carries the token into this shell's memory, never a file.
+  OWNER_GH_TOKEN=$(fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+    gh auth token --hostname github.com --user "$account" 2> "$TMP/identity.err") || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    OWNER_GH_TOKEN=
+    BUDGET_EXHAUSTED=1
+    return 1
+  fi
+  [ "$rc" -ne 0 ] || [ -z "$OWNER_GH_TOKEN" ] || return 0
+  OWNER_GH_TOKEN=
+  why=$(sed -n '/[^[:space:]]/{p;q;}' "$TMP/identity.err" | tr -d '\000-\037\177' | cut -c1-160)
+  printf 'identity read for %s exited %s with %ss of budget left: %s\n' "$account" "$rc" \
+    "$((DEADLINE - $(date +%s)))" "${why:-no token returned}" >> "$TMP/why"
+  return 1
+}
+
 observe() { # canonical GitHub URL -> normalized JSON
-  local url=$1 part number kind endpoint head after label
+  local url=$1 part number kind endpoint head after label owner_read
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
   rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/why"
   BUDGET_EXHAUSTED=0
+  owner_identity "${part%%/*}" || return 1
+  # Firstmate merges as the ambient identity, so a mapped account's push permission is not firstmate's.
+  owner_read=false; [ -z "$OWNER_GH_TOKEN" ] || owner_read=true
   FORGE_ERR="$TMP/core.err" forge api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null \
     || unobserved 'core read returned an unexpected shape' || return 1
@@ -449,7 +519,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
       --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" \
-      --argjson track "$TRACK_THREADS" --argjson bots "$(review_bots)" '
+      --argjson track "$TRACK_THREADS" --argjson bots "$(review_bots)" --argjson owner_read "$owner_read" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | ($comments[0] | add // []) as $issue_comments
@@ -462,7 +532,7 @@ observe() { # canonical GitHub URL -> normalized JSON
         + [$reviews[] | select(.user.login == $c.user.login and ((.body // "") != "")) | .submitted_at]) as $replied_at
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
           draft:$c.draft,mergeable:(if $c.mergeable == true then "mergeable" elif $c.mergeable == false then "conflicting" else "unknown" end),
-          can_merge:($repo[0].permissions.push // false),
+          can_merge:(if $owner_read then false else ($repo[0].permissions.push // false) end),
           review_decision:($after[0].reviewDecision // ""),
           reviews:($reviews | map({id,state,submitted_at,commit_id,user:{login:.user.login}})),
           checks:([ $checks[0][] | .check_runs[] | {name,id,status,conclusion,started_at} ]
@@ -588,6 +658,7 @@ poll() {
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
   clear_unsupported_errors
+  load_owner_accounts
   # Only supported URLs enter final settlement and the forge-read rotation.
   # One line per distinct URL: the URL, then every owning task.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '

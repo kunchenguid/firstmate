@@ -120,7 +120,7 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 - `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 
-- [`bin/fm-contributions.sh`](../bin/fm-contributions.sh) owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, the [review-bot setting above](#contribution-review-bots-configcontribution-review-bots), the opt-in `FM_CONTRIBUTIONS_REPLY_AGE` setting (seconds, unset by default) that turns on re-raising unanswered review threads after that age, and the authenticated contribution check.
+- [`bin/fm-contributions.sh`](../bin/fm-contributions.sh) owns durable published-contribution records under each task, observation bounds, repository-owner identity selection, equivalent triage-label configuration, the [review-bot setting above](#contribution-review-bots-configcontribution-review-bots), the opt-in `FM_CONTRIBUTIONS_REPLY_AGE` setting (seconds, unset by default) that turns on re-raising unanswered review threads after that age, and the authenticated contribution check.
 
 - The producing PR and Relay helpers own the fields they append, [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh) owns status-event vocabulary, optional emission-time syntax, and legacy unknown-time handling, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 
@@ -2220,6 +2220,26 @@ A missing, unreadable, or empty adapter stops the scaffold or spawn, as does an 
 A backup remote named `origin`, absent from the project clone, or pointing at one of origin's URLs stops the spawn, as does a backup prefix that is empty, invalid, or equal to or starting with the task branch prefix.
 The files are static, never executed, and local to each home rather than part of secondmate inherited configuration.
 `bin/fm-external-review-lib.sh`'s header owns the readers, and [`docs/external-review-forge.md`](external-review-forge.md) owns the backup rule and its teardown consequence.
+
+## Repository-owner GitHub identity (config/github-owner-accounts)
+
+The optional local, gitignored `config/github-owner-accounts` names the `gh` account that observes each repository owner's published contributions, for a home whose contributions span several GitHub accounts, such as a personal account and a company organization whose private repositories only the company login can read.
+Without it, and for any owner it does not name, the contribution observer keeps `gh`'s ambient identity.
+It holds one line per repository owner, the owner first and the `gh` account second:
+
+```text
+# repository owner, gh account
+example-org example-org-bot
+```
+
+Owners match case-insensitively, a line whose first non-blank character is `#` is a comment, and blank lines are ignored.
+Both fields are GitHub names that start with a letter or digit and otherwise hold letters, digits, and hyphens, and the account name may also contain underscores, as Enterprise Managed User logins such as `jdoe_acme` do.
+Any other line, an owner named twice, or an unreadable file makes every observation unavailable until it is fixed, rather than reading any contribution with the ambient identity.
+Each named account needs a stored `gh auth login` for `github.com`; a missing login makes that owner's contributions unavailable with the failed identity read named, and the observer never retires a contribution on its own.
+The observer never switches the active `gh` account, never points `GH_CONFIG_DIR` anywhere, and never stores the token.
+A contribution observed as a named account records `can_merge: false` whatever that account's push permission is, because firstmate's merge path still acts as the ambient identity; a green contribution read that way is left to its maintainer rather than reported as merge-ready fleet or captain work.
+The file is per home and not inherited by secondmate homes, so a secondmate observing another owner's contributions needs its own copy.
+[`bin/fm-contributions.sh`](../bin/fm-contributions.sh) owns how each read receives the owner's identity.
 
 ## Watched tool updates (config/watched-tools.json)
 
