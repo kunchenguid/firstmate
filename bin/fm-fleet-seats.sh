@@ -1692,7 +1692,26 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
         gen=$(meta_generation "$meta")
         gen_ok "$gen" || unavailable "host supervisor $id has unaccounted occupancy"
         reservation="$ROOT_STATE/parent-route/$id.seat-reservation.$gen"
-        if ! private_file_ok "$reservation" \
+        # A pre-pool supervisor has no reservation at all: fleet seats did not
+        # exist when it launched, so no certificate could have been written.
+        # Adopt it so the first pooled serve can finish, but count it exactly
+        # once - a task record for the same id already contributes a holder to
+        # the certificate, so adopting that one too would spend two seats on a
+        # single worker and refuse valid work. A reservation that exists but
+        # does not validate is still refused.
+        if [ ! -e "$reservation" ] && [ ! -L "$reservation" ]; then
+          [ "$verdict" = pooled ] || unavailable "host supervisor $id has unaccounted occupancy"
+          adopted=1
+          while IFS= read -r home_state; do
+            if [ -e "$home_state/$id.meta" ] || [ -L "$home_state/$id.meta" ]; then
+              adopted=0
+              break
+            fi
+          done < "$TMPD/local-homes"
+          if [ "$adopted" -eq 1 ]; then
+            printf '%s\t%s\t%s\t%s\tconfirmed\n' "$ROOT_STATE/parent-route" "$id" "$gen" "$(record_field "$meta" model)" >> "$TMPD/adopted-hosts"
+          fi
+        elif ! private_file_ok "$reservation" \
           || ! jq -e --arg t "$id" --arg g "$gen" --arg h "$ROOT_HOME" --arg m "$(record_field "$meta" model)" '
             .schema == "fm-fleet-seat-holder.v2" and .task == $t
             and (.incarnations | length == 1)
@@ -1701,13 +1720,7 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
               and .model == $m and .route.placement == "remote"
               and .route.operation == $g and .route.home == $h)
           ' "$reservation" >/dev/null 2>&1; then
-          # The running host has proved this pre-pool supervisor exists. Adopt
-          # its exact generation into the certificate instead of requiring a
-          # reservation that could only have been made after this first serve.
-          if [ "$verdict" != pooled ] || ! gen_ok "$gen"; then
-            unavailable "host supervisor $id has unaccounted occupancy"
-          fi
-          printf '%s\t%s\t%s\t%s\tconfirmed\n' "$ROOT_STATE/parent-route" "$id" "$gen" "$(record_field "$meta" model)" >> "$TMPD/adopted-hosts"
+          unavailable "host supervisor $id has unaccounted occupancy"
         fi
       done
     fi
