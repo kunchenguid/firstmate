@@ -26,9 +26,17 @@
 # the remote pane received. Creating <send-fail-flag> makes every pane write
 # fail, which is how a test simulates an endpoint that cannot be reached.
 
+# The fixture remote's own bin dir also carries the shared fake xcrun so
+# remote-side fm-teardown.sh paths never reach a real Simulator set. The writer
+# comes from tests/simctl-stub-helpers.sh rather than relying on the consuming
+# suite having sourced tests/lib.sh first.
+# shellcheck source=tests/simctl-stub-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/simctl-stub-helpers.sh"
+
 install_remote_herdr_fixture() { # <remote-root> <state> <log> <send-fail> <socket>
   local remote_root=$1 state=$2 log=$3 send_fail=$4 socket=$5 script="$1/bin/herdr"
   mkdir -p "$remote_root/bin"
+  fm_test_fake_simctl "$remote_root/bin"
   cat > "$script" <<SH
 #!/usr/bin/env bash
 set -u
