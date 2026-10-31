@@ -347,6 +347,22 @@ test_drain_dedupes_obvious_duplicates() {
   pass "drain collapses obvious duplicate heartbeat and signal records"
 }
 
+test_drain_presents_every_distinct_check_payload() {
+  local dir state out
+  dir=$(make_case dedupe-check)
+  state="$dir/state"
+  out="$dir/drain.out"
+  append_wake "$state" check "$state/task.check.sh" "check: $state/task.check.sh: first event" || fail "first check append failed"
+  append_wake "$state" check "$state/task.check.sh" "check: $state/task.check.sh: second event" || fail "second check append failed"
+  append_wake "$state" check "$state/task.check.sh" "check: $state/task.check.sh: second event" || fail "repeated check append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "check dedupe drain failed"
+  # The acknowledgement consumes every row through the newest sequence, so an
+  # earlier distinct payload hidden here would be lost unread.
+  grep -F "$state/task.check.sh: first event" "$out" >/dev/null || fail "earlier check payload was not presented"
+  [ "$(grep -cF "$state/task.check.sh: second event" "$out")" -eq 1 ] || fail "repeated identical check row was not collapsed"
+  pass "drain presents every distinct payload from one check and collapses identical repeats"
+}
+
 # Run one watcher leg of the foreign-stall case at fake time <now>. Each leg
 # waits on what the watcher observably did, never on a wall-clock budget: a
 # loaded machine can take seconds to reach the first poll, and a leg cut off
@@ -3796,6 +3812,7 @@ test_check_output_is_queued
 test_multiline_check_output_wakes_as_one_line
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_drain_presents_every_distinct_check_payload
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
