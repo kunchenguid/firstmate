@@ -680,6 +680,7 @@ if [ "$REEMIT" -eq 1 ]; then
   printf 'RE-EMIT CUE: if this output ends with "Output too large ... Full output saved to <path>",\n'
   printf 'read that whole file now, before acting. Otherwise read data/captain.md, data/captain-shared.md,\n'
   printf 'and data/learnings.md under %s now if any of them is missing below.\n' "$DATA"
+  printf 'If the professional profile was omitted, use the fm-profile.sh refresh interface before applying a selection.\n'
   section "SESSION START (CONTEXT RE-EMIT) - $FM_HOME"
   printf 'This session already took the helm at its own startup and has only lost its\n'
   printf 'context. Lock ownership is re-verified and the durable records below are\n'
@@ -884,6 +885,13 @@ fi
   --afk "$AFK_PRESENT" \
   --afk-mode "$AFK_MODE" \
   --x-mode "$X_MODE_PRESENT"
+
+# Profile rendering is read-only and uses this checkout's shipped contracts.
+# Both true starts and context re-emits cross this same point.
+section "PROFESSIONAL PROFILE"
+if ! FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" bash "$SCRIPT_DIR/fm-profile.sh" context 2>&1; then
+  printf '%s\n' 'PROFILE: selection rejected; retain supervisor authority and existing explicit private preferences.'
+fi
 
 # --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is

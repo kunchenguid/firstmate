@@ -86,6 +86,9 @@ while IFS= read -r rel; do
         die "$reason"
       fi
     fi
+    if [ "$rel" = config/profile.json ]; then
+      fm_profile_file_valid "$source" || die "invalid primary profile: $FM_PROFILE_ERROR"
+    fi
     snapshot="$TMP/item.$N.snapshot"
     cp -p -- "$source" "$snapshot" || die "cannot snapshot inherited source: $source"
     [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || die "inherited source snapshot is unsafe: $source"

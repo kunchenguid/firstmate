@@ -111,6 +111,7 @@ The declared `config/supervision-host-off` opt-out follows the same primary-auth
 Account pins are not inherited.
 [`Worker account pin`](../../../docs/configuration.md#worker-account-pin-configclaude-account-configpi-account) owns `config/claude-account` and `config/pi-account` inheritance and backend limits; [`T3 provider instances`](../../../docs/t3code-backend.md#provider-instances-and-models) owns T3 account selection.
 [`docs/configuration.md` "Per-secondmate account pins"](../../../docs/configuration.md#per-secondmate-account-pins) owns the explicit `config/secondmate-accounts/<id>/` override and the independent worker pins inside each mate's home.
+`config/profile.json` follows the [professional-profile contract](../../../docs/configuration.md#professional-profile-configprofilejson); after a changed-profile config reread, refresh that selection through `bin/fm-profile.sh` while retaining the charter and parent channel.
 `data/captain-shared.md` is main-authoritative in the primary home and read-only in secondmate homes.
 Its primary file header must state that the file is main-authoritative, read-only in secondmate homes, must not be edited there, and that new captain-preference discoveries are routed to the main firstmate through marked status or a document pointer.
 Every propagation point converges the secondmate copy to the primary bytes; when the primary file is absent, any existing secondmate copy is quarantined and removed so absence converges too.

@@ -20,6 +20,7 @@ README.md            public overview and development notes
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional Relay pairing token (presence-gates section 14), mail-plane credentials (schema: docs/configuration.md "Mail plane"), and typed dispatch provider, model, and key settings (docs/configuration.md "Typed dispatch resolution"); LOCAL, gitignored
+config/profile.json optional disk professional-contract selection and presentation; LOCAL, gitignored; docs/configuration.md "Professional profile" owns schema, lifecycle and inheritance
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/claude-permission-mode  optional worker permission posture; LOCAL, gitignored; schema and failover: docs/configuration.md "Claude permission mode" and "Persistent managed-policy failover"
 config/codex-approval-mode    optional worker approval posture; LOCAL, gitignored; schema and failover: docs/configuration.md "Codex automatic approval review" and "Persistent managed-policy failover"

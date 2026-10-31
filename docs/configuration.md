@@ -1046,6 +1046,72 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test 
 
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
+## Professional profile (config/profile.json)
+
+A profile selects a disk-owned supervisor profession independently of chat history, presentation theme, model routing and authority.
+It is optional, local and gitignored.
+No profile means the existing firstmate profession and presentation defaults, with explicit private user preferences still authoritative.
+A configured profile owns its chat fields; other private preferences still apply, and a current explicit user instruction retains its existing precedence.
+The primary owns the inherited profile selection; a secondmate retains its local charter, scope and other child-local settings.
+
+The complete version 1 schema accepts only these fields:
+
+| Field | Accepted values and default |
+| --- | --- |
+| `schema_version` | Required number `1`. |
+| `profession` | Required `firstmate-v1` or `director-v1`. |
+| `theme` | `nautical` (default) or `space-fleet`, independently of profession. |
+| `chat` | Optional object with only the three fields below. |
+| `chat.user_address` | One ASCII name/title token, starting with a letter, followed by at most 31 letters, digits, underscores or hyphens; default `pilot`. |
+| `chat.user_marker` | `✈️` (default) or empty string; this marks the user, not the assistant. |
+| `chat.assistant_reply_marker` | `🎬` for director or empty string for firstmate; omission selects the profession's marker. |
+
+A profile is one JSON object in a regular, readable, single-linked file of at most 4096 bytes beneath a non-symlinked config directory.
+Unknown fields, professions, themes, null values, control characters and instruction-like address strings are rejected rather than interpreted as operating instructions.
+A malformed profile emits `PROFILE_INVALID` and applies no selection; the startup digest continues with existing supervisor authority and explicit private preferences.
+An invalid explicit inspect/refresh exits nonzero, so the receiving agent must not claim that selection loaded.
+There is no persisted last-good profile cache: correct or remove the invalid file and refresh before claiming a new selection.
+
+For the director profession with space fleet presentation:
+
+```json
+{
+  "schema_version": 1,
+  "profession": "director-v1",
+  "theme": "space-fleet",
+  "chat": {
+    "user_address": "pilot",
+    "user_marker": "✈️",
+    "assistant_reply_marker": "🎬"
+  }
+}
+```
+
+The shipped [firstmate-v1](professions/firstmate-v1.md) and [director-v1](professions/director-v1.md) files own the professional contracts.
+The director's completion knowledge duty does not install a wiki, graph builder or provider integration.
+Theme labels are presentation: space fleet uses fleet command, mission lead and specialist while internal primary/secondmate/worker identifiers remain unchanged.
+The user's airplane and the director's clapboard remain separate from those labels.
+Profiles grant no merge/publication permission, select no models and change no running worker.
+
+`bin/fm-profile.sh --help` owns the read-only inspect, JSON inspection, context and explicit refresh commands.
+All use the same resolver and the shipped contracts from the executable's checkout, even when `FM_HOME` selects private data elsewhere.
+Refresh renders current disk duties for the receiving supervisor to apply; it does not inject text into another session or prove that another model consumed it.
+The digest renders the selected contract on fresh startup and context re-emission, and a supported resume/reload/fork through the run wrapper refreshes a configured profile when the same session still owns the home.
+A new process still receives the ordinary session-start nudge and must complete startup before acting.
+[Session-start coverage](sessionstart-nudge.md) owns the actual harness transports and uncovered boundaries; interactive Codex TUI has no automatic tracked resume/compaction channel, so use explicit refresh there.
+No profile supplies continuous background conversational attention or an unattended callback.
+
+The existing inherited-config mechanism carries only `config/profile.json`; profession files travel with guarded tracked-code sync, never as editable private instructions.
+Local propagation and remote sender/receiver validation reject a malformed source before publishing it, preserving the previous destination.
+Successful config propagation uses the existing exact-byte generation/reread protocol; the receiving supervisor must refresh its profile before applying the new selection.
+Do not copy primary `data/captain.md`, worker briefs, model pins or child charters as part of profile rollout.
+Removing the primary profile mirrors absence through that same mechanism.
+
+To roll back, restore a previously validated profile or remove it and explicitly refresh, then propagate the same choice through the normal inherited-config path if secondmates exist.
+Retain explicit pilot/user preferences in their private owner when returning to the no-profile path.
+Changing or removing a profile never restores older code, restarts workers or deletes project knowledge.
+Use an isolated home to try a branch's real resolver and contract before choosing to install that branch; inspection and refresh require neither a new supervisor nor a fleet lock.
+
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
 Domain-local preferences for one captain's fleet live locally in each home's `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.

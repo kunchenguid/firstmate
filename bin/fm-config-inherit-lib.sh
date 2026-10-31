@@ -84,6 +84,9 @@
 # shellcheck source=bin/fm-role-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-role-lib.sh"
 
+# shellcheck source=bin/fm-profile-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-profile-lib.sh"
+
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
 FM_SHARED_CAPTAIN_FILE="captain-shared.md"
@@ -93,7 +96,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces herdr-project-groups startup-memory-budget trace-context launch-env-allowlist claude-permission-mode codex-approval-mode lavish-axi-host t3code-instances keep-ai-trailers supervision-host-off firstmate-role}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-profile.json crew-dispatch.json dispatch-never-send crew-harness backlog-backend backend herdr-presentation-spaces herdr-project-groups startup-memory-budget trace-context launch-env-allowlist claude-permission-mode codex-approval-mode lavish-axi-host t3code-instances keep-ai-trailers supervision-host-off firstmate-role}"
 
 # firstmate-role additionally carries a proof-of-state receipt: a scoped role
 # grant (or its recorded absence) authorizes a secondmate home only while
@@ -710,6 +713,24 @@ propagate_inheritable_config() {
       record_inheritable_config_result "$item" error "$reason"
       rc=1
       continue
+    fi
+    # Validate a profile before publishing professional instructions downstream.
+    # A malformed source preserves the last inherited selection and its charter.
+    if [ "$item" = profile.json ] && { [ -L "$src_config" ] || [ -L "$dest_config" ]; }; then
+      reason="profile config directory is symlinked"
+      warn_inheritable_config_error "$item" "$dest_config" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+      continue
+    fi
+    if [ "$item" = profile.json ] && [ "$source_present" = 1 ]; then
+      if ! fm_profile_file_valid "$src"; then
+        reason="invalid primary profile: $FM_PROFILE_ERROR"
+        warn_inheritable_config_error "$item" "$src" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
     fi
     # This one scalar config is consumed as a local safety boundary, so reject
     # every unsafe or malformed source/destination artifact before the generic

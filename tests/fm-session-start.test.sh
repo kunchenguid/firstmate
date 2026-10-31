@@ -3094,6 +3094,30 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_profile_context_survives_lifecycle() {
+  local rec root home fakebin out
+  rec=$(new_world profile-lifecycle)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  printf '%s\n' '{"schema_version":1,"profession":"director-v1","theme":"space-fleet"}' > "$home/config/profile.json"
+  out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  assert_contains "$out" 'Director profession v1' 'fresh startup omitted profile duties'
+  assert_contains "$out" "$home/config/profile.json" 'startup omitted profile provenance'
+  printf '%s\n' '{"schema_version":1,"profession":"firstmate-v1"}' > "$home/config/profile.json"
+  out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$out" 'Firstmate profession v1' 'compaction did not reread profile selection'
+  assert_not_contains "$out" 'thoughtful partner' 'compaction retained previous director contract'
+  printf 'malformed\n' > "$home/config/profile.json"
+  out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source clear 2>&1)
+  assert_contains "$out" 'PROFILE_INVALID' 'clear hid invalid profile'
+  assert_contains "$out" 'NEXT STEP' 'invalid profile prevented the safety digest from completing'
+  pass 'fresh, compact and clear contexts render current profile or reject it explicitly'
+}
+
+test_profile_context_survives_lifecycle
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path

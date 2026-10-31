@@ -1094,6 +1094,28 @@ test_run_reports_a_failed_session_start_as_digest_text() {
   pass "run wrapper: a session start that cannot take the lock still opens the session and says so"
 }
 
+test_owned_resume_reloads_disk_profile() {
+  local root="$TMP_ROOT/profile-resume" out
+  make_primary "$root"
+  mkdir -p "$root/config"
+  printf '%s\n' "$$" > "$root/state/.lock"
+  printf '%s\n' '{"schema_version":1,"profession":"director-v1","theme":"space-fleet"}' > "$root/config/profile.json"
+  out=$(FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$RUN" --source resume)
+  assert_contains "$out" 'Director profession v1' 'owned resume did not reload disk profession'
+  assert_contains "$out" 'thoughtful partner' 'owned resume omitted professional duties'
+  assert_not_contains "$out" 'SESSION START -' 'owned resume repeated fleet bootstrap'
+  printf '%s\n' '{"schema_version":1,"profession":"firstmate-v1"}' > "$root/config/profile.json"
+  out=$(FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$RUN" --source reload)
+  assert_contains "$out" 'Firstmate profession v1' 'reload retained stale director profession'
+  assert_not_contains "$out" 'thoughtful partner' 'reload still rendered previous profession'
+  printf 'malformed\n' > "$root/config/profile.json"
+  out=$(FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$RUN" --source resume 2>/dev/null)
+  assert_contains "$out" 'PROFILE_INVALID' 'resume lost profile diagnostic on a stderr-suppressing transport'
+  assert_not_contains "$out" 'thoughtful partner' 'invalid resume activated director duties'
+  pass 'owned resume and reload render current disk profession without repeating bootstrap'
+}
+
+test_owned_resume_reloads_disk_profile
 test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent

@@ -30,9 +30,9 @@
 #                           so a startup killed mid-sweep is finished first
 #   resume, reload, fork    delegate to the nudge wrapper. Prior context is
 #                           restored on these, so re-running is redundant when
-#                           this process still holds the lock (the nudge stays
-#                           silent) and a plain instruction is enough when a new
-#                           process resumed an old session (the nudge fires).
+#                           this process still holds the lock (only a configured
+#                           professional profile refreshes); a plain instruction
+#                           is enough when a new process resumes an old session.
 #
 # Every ordinary transport path exits 0, exactly like the nudge wrapper: a
 # Claude SessionStart exit 2 blocks session initialization, so a failed session
@@ -139,7 +139,7 @@ fi
 
 case "$SOURCE" in
   resume|reload|fork)
-    exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
+    exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh" --profile-refresh
     ;;
   clear|compact)
     if session_start_completed; then

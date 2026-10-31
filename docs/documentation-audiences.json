@@ -672,6 +672,14 @@
     {
       "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/professions/firstmate-v1.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/professions/director-v1.md",
+      "audience": "agent-runtime"
     }
   ]
 }

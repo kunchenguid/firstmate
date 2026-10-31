@@ -70,7 +70,7 @@ A re-emit (`--reemit`) reprints the digest for a process that already has the he
 | --- | --- | --- |
 | `startup`, `new` | Full digest | This is a true session start that has not taken the helm; Pi CLI continuations are refined to `resume` by the adapter before reaching this boundary. |
 | `clear`, `compact` | `--reemit` after a proven complete startup, otherwise full digest | This process normally has the helm and lost only its context, but an earlier hook may have been truncated after acquiring the lock. |
-| `resume`, `reload`, `fork` | Delegate to the nudge wrapper | Prior context is restored, so re-running is redundant when the lock is still ours and an instruction is enough when a new process resumed an old session. |
+| `resume`, `reload`, `fork` | Delegate to the nudge wrapper with profile refresh | Prior context is restored, so re-running is redundant when the lock is still ours and an instruction is enough when a new process resumed an old session. |
 | unreadable or unrecognized | Full digest | Taking the helm redundantly is cheap and idempotent; not taking it is the bug this tier exists to fix. |
 
 ### Change from the previous nudge matcher
@@ -106,7 +106,7 @@ A lock another live session took meanwhile still produces the ordinary read-only
 ### Nudge wrapper on a run-tier harness
 
 On a run-tier harness, only `resume`, `reload`, and `fork` are routed to the nudge wrapper.
-The nudge wrapper has its own separate ancestry-only check, which normally stays silent when this process already holds the lock.
+The nudge wrapper has its own separate ancestry-only check, with the configured-profile exception described in [Professional profile delivery](#professional-profile-delivery).
 A background Claude helper-chain recycle can break that ancestry.
 The wrapper may then emit a redundant nudge even though the shared same-session verdict still owns the lock.
 The requested session start remains idempotent.
@@ -210,7 +210,7 @@ It does this in its own separate, hard-coded loop, independent of two other owne
 - The shared sixteen-hop ancestry walk in `bin/fm-session-lock-lib.sh` that `bin/fm-lock.sh` uses for anchor selection and ownership.
 - Pi's `lockOwnership()`.
 
-If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
+If the lock names a live pid in that ancestry, session start already ran in this harness session; only the [professional-profile continuation](#professional-profile-delivery) may render new context.
 On Windows/Git Bash, a lock holding a tagged `win:<pid>` identity is outside this process table, so the wrapper instead asks the library's `fm_session_lock_owned_by_self`, whose Windows process-boundary bridge owns that identity.
 
 ### Exit codes
@@ -297,7 +297,7 @@ An eligible native failure or empty result settles before the extension returns 
 So native and manual startup never run concurrently.
 
 An intentional gate or non-primary stand-down returns no message.
-Context-preserving sources retain their existing silent result when the current process already holds the lock.
+Context-preserving sources retain their existing silent result for an owning session without a profile; configured profiles follow [Professional profile delivery](#professional-profile-delivery).
 
 Manual and automatic compaction retain the existing persistent delivery path, because an automatic retry may have no new `before_agent_start`.
 That path still shares the same generation cancellation and exactly-once claim.
@@ -478,3 +478,12 @@ Cursor uses the separate primary live guard named in [Cursor tests](#cursor-test
 ### Transport evidence
 
 [`verification/supervision.md`](verification/supervision.md#native-session-start-delivery) records the active version-scoped transport evidence.
+
+## Professional profile delivery
+
+The profile resolver and profession contracts are owned by [Professional profile](configuration.md#professional-profile-configprofilejson).
+Fresh digests and supported context re-emits render that same disk contract.
+On a context-preserving resume, reload or fork routed through `fm-sessionstart-run.sh`, an already-owning session receives a configured profile refresh without another bootstrap or wake drain.
+A no-profile continuation retains the existing silent behavior.
+This does not add a vendor hook to uncovered surfaces or prove that a rendered contract was consumed by a model.
+Use the explicit refresh interface when the harness has no supported delivery channel.

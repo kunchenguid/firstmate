@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Print the one-line session-start instruction only for a genuine firstmate
 # primary whose current harness session has not already acquired the home lock.
+# With --profile-refresh, an already-owning session renders a configured
+# profile through fm-profile.sh; no-profile continuations stay silent.
+# This read-only mode is used by the run wrapper for resume/reload/fork.
 # Every silence and error path exits 0 because Claude SessionStart exit 2 blocks
 # session initialization.
 set -u
@@ -48,7 +51,15 @@ lock_is_in_ancestry() {
   return 1
 }
 
-lock_is_in_ancestry && exit 0
+if lock_is_in_ancestry; then
+  # A restored conversation may carry an older professional selection.
+  # No-profile resumes retain their historical silence and private preferences.
+  profile_config="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+  if [ "${1:-}" = --profile-refresh ] && { [ -L "$profile_config" ] || [ -e "$profile_config/profile.json" ] || [ -L "$profile_config/profile.json" ]; }; then
+    bash "$SCRIPT_DIR/fm-profile.sh" refresh 2>&1 || true
+  fi
+  exit 0
+fi
 nudge=
 fm_operational_input_encode session-start \
   "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \
