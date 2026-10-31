@@ -1424,6 +1424,82 @@ SH
   pass "fm-teardown: conflicting tmux liveness is read only from the server recorded for that task"
 }
 
+test_missing_conflicting_record_requires_empty_worktree_inventory() {
+  local dir stale=stale-task owner=owner-task holder
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case missing-endpoint-live-worktree-holder)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "tmux_server=$dir/tmux.sock" "endpoint_pid=999999999" \
+    "endpoint_pid_start=proc-starttime=1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  make_tmux_endpoint "$dir" '' ''
+  (cd "$dir/worktree" && sleep 30) &
+  holder=$!
+
+  assert_refused_without_mutation "$dir" "$owner" "missing endpoint with a live worktree holder"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  : > "$dir/stderr"
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "missing endpoint with dead recorded process and no worktree holder did not tear down: $(cat "$dir/stderr")"
+  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" \
+    "missing endpoint after its process evidence cleared"
+  pass "fm-teardown: tmux absence requires both a dead recorded process and an empty worktree process inventory"
+}
+
+test_conflicting_record_moved_window_is_not_missing() {
+  local dir stale=stale-task owner=owner-task socket rc sleep_bin endpoint_pid endpoint_start
+  [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
+  dir=$(make_case moved-tmux-window)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  socket="$dir/moved.sock"
+  sleep_bin=$(command -v sleep) || fail "sleep is required for the moved-window test"
+  cp "$sleep_bin" "$dir/claude"
+
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" -f /dev/null \
+    new-session -d -s firstmate -n "fm-$stale" -c "$dir/worktree" "$dir/claude 30" \
+    || fail "could not start the conflicting tmux worker"
+  endpoint_pid=$(env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" \
+    display-message -p -t "firstmate:fm-$stale" '#{pane_pid}') \
+    || fail "could not read the conflicting worker pid"
+  endpoint_start=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_start_time "$2"' _ "$ROOT" "$endpoint_pid") \
+    || fail "could not record the conflicting worker start time"
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" -f /dev/null \
+    new-session -d -s moved -n control \
+    || fail "could not create the destination tmux session"
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" \
+    move-window -s "firstmate:fm-$stale" -t moved: \
+    || fail "could not move the conflicting worker window"
+  awk -v socket="$socket" -v pid="$endpoint_pid" -v start="$endpoint_start" '
+    /^tmux_server=/ { print "tmux_server=" socket; print "endpoint_pid=" pid; print "endpoint_pid_start=" start; next }
+    { print }
+  ' "$dir/home/state/$stale.meta" > "$dir/home/state/$stale.meta.tmp"
+  mv "$dir/home/state/$stale.meta.tmp" "$dir/home/state/$stale.meta"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+exec '$REAL_TMUX' -S '$socket' "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  set +e
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" kill-server >/dev/null 2>&1 || true
+
+  [ "$rc" -ne 0 ] || fail "a moved conflicting worker was mistaken for a gone endpoint"
+  assert_present "$dir/home/state/$owner.meta" "moved-window liveness removed the owner's record"
+  assert_present "$dir/home/state/$stale.meta" "moved-window liveness removed the conflicting record"
+  assert_present "$dir/worktree/sentinel" "moved-window liveness reset the shared slot"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
+    "the refusal should identify the moved conflicting task"
+  pass "fm-teardown: a window moved on its recorded tmux server remains a live conflicting worker"
+}
+
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
 # When FM_TEST_BLOCK_KILL is set, `kill-window` alone fails without forwarding,
@@ -1815,6 +1891,8 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
 test_two_records_on_one_slot_follow_the_owner_claim
 test_conflicting_record_liveness_uses_its_recorded_tmux_server
+test_missing_conflicting_record_requires_empty_worktree_inventory
+test_conflicting_record_moved_window_is_not_missing
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot

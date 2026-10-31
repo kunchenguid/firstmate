@@ -6903,8 +6903,16 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
 FM_TMUX_TASK_SERVER=
+FM_TMUX_ENDPOINT_PID=
+FM_TMUX_ENDPOINT_PID_START=
 if [ "$BACKEND" = tmux ]; then
   FM_TMUX_TASK_SERVER=$(fm_backend_tmux_server_identity 2>/dev/null || true)
+  FM_TMUX_ENDPOINT_PID=$(tmux display-message -p -t "$WT_TARGET" '#{pane_pid}' 2>/dev/null || true)
+  case "$FM_TMUX_ENDPOINT_PID" in
+    ''|*[!0-9]*) FM_TMUX_ENDPOINT_PID= ;;
+    *) FM_TMUX_ENDPOINT_PID_START=$(fm_pid_start_time "$FM_TMUX_ENDPOINT_PID" 2>/dev/null || true) ;;
+  esac
+  [ -n "$FM_TMUX_ENDPOINT_PID_START" ] || FM_TMUX_ENDPOINT_PID=
 fi
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
@@ -6923,7 +6931,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend tmux_server herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend tmux_server endpoint_pid endpoint_pid_start herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -6933,6 +6941,8 @@ preserve_relaunch_meta() {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   [ -z "$FM_TMUX_TASK_SERVER" ] || echo "tmux_server=$FM_TMUX_TASK_SERVER"
+  [ -z "$FM_TMUX_ENDPOINT_PID" ] || echo "endpoint_pid=$FM_TMUX_ENDPOINT_PID"
+  [ -z "$FM_TMUX_ENDPOINT_PID_START" ] || echo "endpoint_pid_start=$FM_TMUX_ENDPOINT_PID_START"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"

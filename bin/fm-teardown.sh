@@ -2580,6 +2580,26 @@ collect_local_firstmate_states() {
   TREEHOUSE_OWNER_STATES=("${FM_LOCAL_FIRSTMATE_STATES[@]}")
 }
 
+# A missing tmux name proves nothing by itself: a window can be renamed or
+# moved on the same server. Accept that absence only after the process rooted
+# at the recorded pane has died (pid plus start time, so reuse cannot satisfy
+# it) and the ordinary worktree reap inventory finds no process still rooted
+# under the record's worktree or task temp directory.
+other_record_tmux_missing_proven_gone() {  # <meta-file>
+  local meta=$1 pid recorded_start current_start worktree tasktmp
+  pid=$(fm_backend_meta_exact_value "$meta" endpoint_pid) || return 1
+  recorded_start=$(fm_backend_meta_exact_value "$meta" endpoint_pid_start) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$recorded_start" ] || return 1
+  case "$recorded_start" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  current_start=$(fm_pid_start_time "$pid" 2>/dev/null || true)
+  [ "$current_start" != "$recorded_start" ] || return 1
+  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || return 1
+  tasktmp=$(fm_backend_meta_exact_value "$meta" tasktmp 2>/dev/null || true)
+  task_pids_under_roots "$worktree" "$tasktmp" || return 1
+  [ -z "$TASK_PIDS" ]
+}
+
 # Whether another task record's own recorded endpoint is proven not live: its
 # endpoint metadata validates and the recovery-grade classifier reads it dead,
 # or the backend-specific absence authority proves a missing endpoint gone.
@@ -2601,7 +2621,8 @@ other_record_endpoint_proven_gone() {  # <meta-file> <task-id>
     fm_backend_source tmux || return 1
     state=$(fm_backend_tmux_agent_state_on_server "$tmux_server" "$FM_BACKEND_VALIDATED_TARGET")
     case "$state" in
-      dead|missing) return 0 ;;
+      dead) return 0 ;;
+      missing) other_record_tmux_missing_proven_gone "$meta"; return ;;
       *) return 1 ;;
     esac
   fi
