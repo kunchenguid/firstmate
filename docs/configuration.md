@@ -1725,6 +1725,26 @@ A malformed or unreadable file refuses every fresh ship or scout spawn until it 
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
 [`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
 
+## Heavy-phase admission (config/heavy-admission)
+
+The optional local, gitignored `config/heavy-admission` turns on measured admission for heavy phases on this machine: dependency installs, whole-repo test runs, production builds, browser matrices, and the start of a fresh no-mistakes run.
+With the policy on, `bin/fm-heavy-admission.sh` admits a phase only when load, available memory, memory and I/O pressure, free space on the configured disk path, and the journal's hung-task and journald watchdog reports have all stayed inside their admit limits across a sampled window, and only one admission per ramp interval across every local home.
+A reading it cannot take, a journal it cannot see, or a malformed file holds rather than admits, and every decision prints one evidence line that is also appended best effort to the root home's `state/heavy-admission.log`.
+Holding never stops or throttles running work, and callers queue required checks rather than dropping them.
+Generate the file with every default spelled out, then edit only the values you want to change:
+
+```sh
+bin/fm-heavy-admission.sh defaults > config/heavy-admission
+```
+
+The defaults are proposed starting thresholds, not validated boundaries.
+The readings come from Linux `/proc`, including pressure stall information, so on a host without them, such as macOS, every check holds with `unreadable:` once the policy is on; leave the policy off there.
+The root Firstmate home's file sets the machine's policy for every local secondmate home, and a home's own file overrides it; when the root home resolves and neither file is present, the policy is off and every check admits at once.
+An unresolvable root home holds instead of assuming the policy is off, and ship and scout briefs retain the admission rule until the root can be resolved.
+When the policy is on, those briefs tell workers to wait for admission before each heavy phase and to pass the configured Jest and Playwright worker bounds; `bin/fm-heavy-admission.sh check --dry-run` prints a decision without recording an admission.
+The script's header owns the keys, the decision and hysteresis rules, the ramp record, and the evidence line.
+It is separate from [lane capacity](#lane-capacity-configlane-capacity), which reports dispatch headroom, and [project capacity](#project-capacity-configproject-capacity), which bounds whole workers at spawn.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
@@ -3195,7 +3215,7 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
-FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
+FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh and host readings in fm-heavy-admission.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux/paseo/rex/t3code/tern support ship/scout spawns, codex-app is not accepted
 FM_T3CODE_ORIGIN=       # optional T3 Code server origin for bin/fm-t3-mcp.mjs login; the default is read from ~/.t3/userdata/server-runtime.json
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
