@@ -566,7 +566,11 @@ test_e2e_real_tree_with_blocked_ps() {
   # nothing to do with the denied ps. fakebin stays first, so the denied ps
   # still shadows the real one; a caller that wants a fixed base sets
   # FM_TEST_BASE_PATH, the same knob the rest of the suite uses.
-  path_with_shim="$fakebin"
+  #
+  # The base path is set unconditionally, not only on the python3 branch: a
+  # Linux host without python3 has no shim to add, and a PATH left at fakebin
+  # alone would hide the cat and tr that provider needs.
+  path_with_shim="$fakebin:${FM_TEST_BASE_PATH:-$PATH}"
   if command -v python3 >/dev/null 2>&1; then
     local shimdir="$dir/shim"; mkdir -p "$shimdir"
     printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$(command -v python3)" > "$shimdir/python3"
