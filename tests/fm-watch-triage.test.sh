@@ -735,8 +735,8 @@ test_claimed_run_outcomes() {
     git -C "$wt" init -q
     branch=$(git -C "$wt" symbolic-ref --short HEAD)
     printf 'worktree=%s\n' "$wt" > "$state/$task.meta"
-    printf 'working: validation started\n' > "$state/$task.status"
-    { date -v-60S +%s; printf '%s\n%s\n' "$branch" "$(size_of "$state/$task.status")"; } > "$state/.claimed-run-$task"
+    printf 'working: validation started\nworking: checking progress\n' > "$state/$task.status"
+    { printf '%s\n' "$(( $(date +%s) - 60 ))"; printf '%s\n%s\n' "$branch" '1'; } > "$state/.claimed-run-$task"
     printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$state/$task.status")" \
       "$(size_of "$state/$task.status")" "$(_fm_open_decisions_file_ident "$state/$task.status")" \
       > "$state/.seen-claim_status"
@@ -5372,6 +5372,7 @@ fm_test_run \
   test_worktree_write_probe_is_wall_clock_bounded \
   test_signal_crew_provably_working_classifier \
   test_secondmate_status_routine_absorbed_routed_surfaced_classifier \
+  test_claimed_run_outcomes \
   test_provably_working_signal_absorbed \
   test_turn_ended_provably_working_absorbed \
   test_turn_ended_not_working_surfaced \
