@@ -358,11 +358,9 @@ case "$CLEANUP_LOCK_BOUND" in
   *) CLEANUP_LOCK_BOUND=$((10#$CLEANUP_LOCK_BOUND)) ;;
 esac
 [ "$CLEANUP_LOCK_BOUND" -gt 0 ] || CLEANUP_LOCK_BOUND=2
-# Seconds a pre-identity watcher waits on each recovery/queue lock before
-# failing with a typed line. Startup lock acquisition must be bounded even
-# though the arm now waits far longer than one bound: a live foreign holder
-# must not wedge a watcher past the arm's backstop, and a dying holder's locks
-# must not turn one slow start into a cascade of stale-lock reclaims.
+# Bound each startup recovery/queue lock wait, both during singleton steal
+# and after identity publication. This is independent of the arm backstop:
+# expiry of that backstop still waits for cleanup-safe interruption.
 STARTUP_LOCK_BOUND=${FM_WATCHER_STARTUP_LOCK_BOUND:-60}
 case "$STARTUP_LOCK_BOUND" in
   ''|*[!0-9]*) STARTUP_LOCK_BOUND=60 ;;
@@ -3568,7 +3566,7 @@ handling_successor_has_queued_row() {
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$queued"
 }
-# A bounded pre-identity lock failure reports the typed line the arm relays; a
+# A bounded startup recovery-lock failure reports the typed line the arm relays; a
 # transient or dead holder keeps the legacy stderr diagnostic.
 startup_lock_failed() {
   if [ -n "${FM_RECOVERY_HELD_PID:-}" ] && fm_pid_alive "$FM_RECOVERY_HELD_PID"; then

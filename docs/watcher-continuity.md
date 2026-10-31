@@ -428,15 +428,20 @@ A published numeric pid, live or dead, grants no extension to the original wait 
 
 The watcher installs its EXIT cleanup trap immediately after claiming the singleton lock, before any recovery-marker or queue lock is touched, and publishes its home-bound lock identity (`fm-home`, `watcher-path`, `pid-identity`) right after.
 The claim also removes the predecessor's `state/.last-watcher-beat` before that identity exists, so a home-bound identity never pairs with an inherited beacon: health, and with it the arm's confirmation, requires the new watcher's own first poll.
-Everything past that point - marker transitions, queue reads, delivery records - runs inside the trap's coverage, so an interrupted startup can only ever abandon locks recorded against the watcher's own pid, which the cleanup releases outright before it attempts the same bounded downtime publication an ordinary exit performs.
+If the watcher cannot obtain a nonempty process identity or write any required identity record, it exits through that trap instead of entering an unconfirmable poll loop.
+Everything past that point - marker transitions, queue reads, delivery records - runs inside the trap's coverage.
+Cleanup joins any in-flight owner-directory creation or lock publication before releasing its own micro-locks and discarding its scoped unpublished staging directories; foreign staging and ownership are preserved.
+It then attempts the same bounded downtime publication an ordinary exit performs.
 The only window outside cleanup coverage is the singleton claim itself, so the arm never stops a child there.
 The arm treats that published identity as the startup safe point: it forwards a signal or its confirmation-deadline TERM only once the child's identity matches, waiting past the deadline if it must, and otherwise waits for the child to exit on its own; only a removed state directory, which leaves no lock to strand, skips the wait.
-Every pre-identity wait is bounded (below), so an interrupted start always ends through the watcher's own cleanup with no dead lock evidence.
+An interrupted start leaves no self-owned singleton, steal mutex, micro-lock, or staging directory when downtime publication succeeds.
+The foreign marker-lock contention exception described above still retains singleton evidence deliberately.
 
-Every lock the pre-identity watcher takes is bounded by `FM_WATCHER_STARTUP_LOCK_BOUND` (default 60 seconds): the downtime publish inside a `.watch.lock` steal, the recovery reopen and arm-check transitions, and the successor's queued-row check.
-A lock still held by a live foreign pid when its bound expires ends the child with the typed line `watcher: FAILED - startup lock <path> held by live pid <n>`, which the arm relays through its child-output path; a dying or clearing holder retries instead of failing, and the existing stale-holder diagnostics keep their shape.
-`FM_ARM_CONFIRM_TIMEOUT` is therefore a liveness backstop rather than a fork budget: it defaults to `FM_GUARD_GRACE` so host load stretches how long the arm waits, never how soon it kills.
-The successor hand-off wait remains on its own separate bound, `FM_ARM_SUCCESSOR_CONFIRM_TIMEOUT` (default 10 seconds, 30 on Git Bash/MSYS), which `bin/fm-claude-stop-autoarm.sh` also uses for its successor status wait.
+`FM_WATCHER_STARTUP_LOCK_BOUND` bounds the downtime publish inside a `.watch.lock` steal and, after identity publication, the recovery reopen and arm-check transitions and the successor's queued-row check.
+A live foreign holder that outlasts the bound during singleton-steal publication or a recovery transition ends the child with `watcher: FAILED - startup lock <path> held by live pid <n>`; the arm relays the child's final output even when startup exits during the safe-point wait.
+The optional successor queued-row check instead logs the held lock and skips resurfacing.
+`FM_ARM_CONFIRM_TIMEOUT` is a liveness backstop rather than a fork budget, while successor hand-off confirmation uses the separate `FM_ARM_SUCCESSOR_CONFIRM_TIMEOUT`.
+Defaults and overrides, including Claude Stop's outer successor-status wait, are owned by [configuration](configuration.md#environment-variables).
 
 ## Regression coverage
 
@@ -509,7 +514,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Recovery publication before stale-lock removal.
 - The typed self-eviction failure.
 - Bounded and successor-linked lifecycle rows.
-- Startup-stop resilience: a post-claim startup slower than the legacy confirm budget still confirms under the grace-tracked backstop, a live foreign startup-lock holder ends the child with the typed line the arm relays, and a deadline or signal stop forced before the safe point waits for it and ends with no dead lock evidence at all.
+- Startup-stop resilience: slow post-claim confirmation, typed startup-lock and identity-publication failures, safe-point deadline and signal forwarding, and cleanup of published locks and in-flight staging while preserving foreign owners.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 
 ### Claude auto-arm and turn-end guard

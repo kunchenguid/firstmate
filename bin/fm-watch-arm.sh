@@ -43,7 +43,7 @@
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. Once
+# reason; on attached it stays live across identity-matched successors.
 #
 # Confirmation is a liveness backstop, not a fork budget: the arm keeps waiting
 # while its child is alive and unconfirmed up to CONFIRM_TIMEOUT (default the
@@ -56,9 +56,9 @@
 # which the child writes immediately after installing its EXIT cleanup trap, so
 # the stop runs through the same downtime publication and lock release as an
 # ordinary exit. A child still before that point when the deadline expires is
-# waited for, never killed mid-claim: every pre-identity wait is itself bounded
-# by FM_WATCHER_STARTUP_LOCK_BOUND, so the child reaches the safe point or exits.
-# attached, a stale beacon alone does not end the followed cycle: while that
+# waited for, never killed mid-claim. A failed identity publication exits through
+# the child's trap instead of leaving a live child that cannot pass this gate.
+# Once attached, a stale beacon alone does not end the followed cycle: while that
 # holder is alive and the lock still names it under the same identity, the arm
 # keeps following it, as a started arm waits out a slow child, until the lock
 # changes or the beacon reaches fm_watcher_stall_bound (bin/fm-wake-lib.sh), the
@@ -751,8 +751,8 @@ cleanup_child() {
 # steal mutex or a startup lock - so a stop is forwarded only once the
 # identity matches the child (the startup safe point) or once the state
 # directory holding those locks is gone; otherwise this waits for the child to
-# exit on its own. No deadline overrides it: the child's pre-identity waits are
-# all bounded, so it always reaches one of those ends.
+# exit on its own. No deadline overrides it; startup identity-publication
+# failure exits through the child's cleanup rather than stranding this wait.
 term_child_at_safe_point() {
   # The cheap gate reads only files the child itself writes after its trap
   # installs: the claimed pid plus all three identity records. The full
@@ -922,7 +922,6 @@ while :; do
   sleep 0.2
 done
 
-print_watch_output "$child_out"
 # The backstop expired: forward the stop only at the same safe point the
 # signal path waits for, so the child always exits through watcher_cleanup.
 if [ -n "$child" ] && fm_pid_alive "$child"; then
@@ -933,6 +932,9 @@ else
   rc=$?
 fi
 trap - HUP TERM INT
+# Startup can fail while the safe-point wait is still joining the child.
+# Read its final output only after that join, before cleanup removes the file.
+print_watch_output "$child_out"
 cleanup_child
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
 echo "watcher: FAILED - no live watcher with a fresh beacon"

@@ -2059,6 +2059,8 @@ test_forced_term_before_the_safe_point_stays_clean() {
 # startup safe point, so it must exit through its own cleanup with a typed
 # failure instead of polling as a child no arm can confirm or stop. The fake ps
 # fails only the lstart+command probe fm_pid_identity uses on a /proc-less host.
+# Delay the probe past the arm deadline so the typed failure must also survive
+# the safe-point join, not just the arm's ordinary child-exit path.
 test_unpublishable_identity_exits_through_cleanup() {
   local dir state fakebin no_proc armout armpid status
   dir=$(make_case arm-identity-probe-fails)
@@ -2076,7 +2078,7 @@ exec /bin/ps "$@"
 SH
   chmod +x "$fakebin/ps"
   PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" FM_STATE_OVERRIDE="$state" \
-    FM_ARM_CONFIRM_TIMEOUT=2 \
+    FM_ARM_CONFIRM_TIMEOUT=2 FM_TEST_WATCHER_PRE_IDENTITY_DELAY=4 \
     FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH_ARM" > "$armout" 2>&1 &
   armpid=$!
