@@ -74,6 +74,7 @@
 #   (ag) work already reachable                                   -> ALLOW, no fetch
 #   (ah) hung fetch                                               -> bounded, REFUSE
 #   (ai) commits held only by the no-mistakes gate                -> REFUSE, gate not fetched
+#   (aj) file saved during the refresh, work landed                -> REFUSE, file intact
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -923,7 +924,8 @@ land_task_commits_from_other_clone() {
     || fail "fixture: tracking refs already show the task commits"
 }
 
-# Log every git fetch to $case_dir/fetch.log; FM_TEST_FETCH_HANG makes it hang.
+# Log every git fetch to $case_dir/fetch.log; FM_TEST_FETCH_HANG makes it hang,
+# and FM_TEST_FETCH_WRITES names a file it saves first.
 add_fetch_logging_git() {
   local case_dir=$1
   cat > "$case_dir/fakebin/git" <<SH
@@ -931,6 +933,7 @@ add_fetch_logging_git() {
 for arg in "\$@"; do
   if [ "\$arg" = fetch ]; then
     printf '%s\n' "\$*" >> "$case_dir/fetch.log"
+    [ -z "\${FM_TEST_FETCH_WRITES:-}" ] || printf 'saved during fetch\n' > "\$FM_TEST_FETCH_WRITES"
     [ -z "\${FM_TEST_FETCH_HANG:-}" ] || sleep 120
     break
   fi
@@ -1030,6 +1033,27 @@ test_uncommitted_work_refuses_even_when_commits_landed() {
   grep -q REFUSED "$case_dir/stderr" || fail "stale-refs-dirty: no REFUSED line"
   [ -f "$case_dir/wt/unsaved.txt" ] || fail "stale-refs-dirty: uncommitted file was lost"
   pass "uncommitted work refuses even when the commits have landed"
+}
+
+test_edit_saved_during_refresh_refuses() {
+  local mode case_dir rc
+  for mode in local-only direct-PR no-mistakes; do
+    case_dir=$(make_case "edit-during-refresh-$mode")
+    write_meta "$case_dir" "$mode" ship
+    wt_commit_file "$case_dir" feature.txt landed
+    land_task_commits_from_other_clone "$case_dir" release
+    add_fetch_logging_git "$case_dir"
+
+    set +e
+    FM_TEST_FETCH_WRITES="$case_dir/wt/saved-during-fetch.txt" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "edit-during-refresh-$mode: an edit saved during the refresh must refuse"
+    grep -q REFUSED "$case_dir/stderr" || fail "edit-during-refresh-$mode: no REFUSED line"
+    [ -f "$case_dir/wt/saved-during-fetch.txt" ] || fail "edit-during-refresh-$mode: the saved file was lost"
+  done
+  pass "a file saved during the refresh refuses teardown and survives"
 }
 
 test_no_remote_project_refuses_without_fetching() {
@@ -6211,6 +6235,7 @@ test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed
 test_refreshed_refs_still_refuse_unreachable_commits
 test_uncommitted_work_refuses_even_when_commits_landed
+test_edit_saved_during_refresh_refuses
 test_no_remote_project_refuses_without_fetching
 test_refresh_never_prunes_a_dropped_branch
 test_reachable_work_needs_no_fetch
