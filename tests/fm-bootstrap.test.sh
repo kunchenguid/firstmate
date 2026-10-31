@@ -1551,7 +1551,7 @@ test_treehouse_pool_report_is_read_only_and_classifies_pools() {
   other_home_clone="$case_dir/other-home/projects/repo"
   fractional_repo="$home/projects/fractional"
   leased_repo="$home/projects/leased"
-  mkdir -p "$home/projects" "$root/one" "$root/two" "$root/orphan" "$root/other-home" "$root/project-leftover" "$root/timestamp" "$root/leased" "$other_home_clone" "$missing_date" "$fractional_repo" "$leased_repo"
+  mkdir -p "$home/projects" "$root/one" "$root/two" "$root/orphan" "$root/other-home" "$root/project-leftover" "$root/empty-path" "$root/timestamp" "$root/leased" "$other_home_clone" "$missing_date" "$fractional_repo" "$leased_repo"
   fakebin=$(make_fake_toolchain "$case_dir")
   git init -q "$registered"
   git init -q "$other_home_clone"
@@ -1572,6 +1572,9 @@ JSON
   cat > "$root/project-leftover/treehouse-state.json" <<'JSON'
 {"worktrees":[]}
 JSON
+  cat > "$root/empty-path/treehouse-state.json" <<'JSON'
+{"worktrees":[{"created_at":"2020-01-01T00:00:00Z"}]}
+JSON
   cat > "$root/timestamp/treehouse-state.json" <<JSON
 {"worktrees":[{"path":"$fractional_repo","created_at":"2026-07-30T23:29:43.458891-06:00"}]}
 JSON
@@ -1590,6 +1593,8 @@ JSON
   assert_not_contains "$out" "duplicate-clone pool $root/one" "sibling slots in one pool were reported as duplicate pools"
   assert_contains "$out" "test-leftover pool $root/project-leftover" "test leftover pool was not reported"
   assert_not_contains "$out" "unregistered pool $root/project-leftover" "empty worktrees array created a synthetic slot"
+  assert_not_contains "$out" "project path unavailable: " "missing path was treated as a project"
+  assert_not_contains "$out" "duplicate-clone pool $root/empty-path" "missing path was resolved from bootstrap's working directory"
   assert_contains "$out" "unowned slot older than 30d: $registered" "old created_at Z timestamp was not reported"
   assert_contains "$out" "unowned slot older than 30d: $fractional_repo" "fractional timestamp with offset was not reported"
   assert_not_contains "$out" "unowned slot older than 30d: $missing_date" "missing created_at slot was reported stale"
