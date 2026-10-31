@@ -4205,15 +4205,16 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   wait_for_exit "$pid" 100 || fail "the first proactive wake never happened: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain after the first process-event wake failed"
 
-  # An interrupted handler leaves the captured result durable. The successor
-  # must re-surface it through recovery, then its drain must print the same row.
+  # An interrupted handler leaves the captured result durable. The successor's
+  # reconcile re-announces it, so the successor must re-surface it under its
+  # own headline, then its drain must print the same result.
   : > "$out"
   procevent_watch_bg "$dir" "$out"
   pid=$!
   wait_for_exit "$pid" 100 \
     || fail "an unacknowledged process-event result was not re-surfaced on re-arm: $(cat "$out")"
-  grep -F 'check: rearm-resurface' "$out" >/dev/null \
-    || fail "the successor did not report recovery for the unacknowledged result: $(cat "$out")"
+  grep -F 'check: process-event result captured: procevent:delivery-src:1' "$out" >/dev/null \
+    || fail "the successor did not re-surface the unacknowledged result under its own headline: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$replay_err" \
     || fail "the successor could not re-drain the unacknowledged process-event result"
   grep "$(printf '\tcheck\t')" "$replay_out" | grep -F 'procevent lavish delivery-src 1' >/dev/null \
@@ -4239,6 +4240,69 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   after=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
   [ "$after" = "$before" ] || fail "a handled result was announced again ($before -> $after queued records)"
   pass "an unacknowledged process-event result re-drains until handling is acknowledged"
+}
+
+# The live loop (2026-10-20, laptop): reconcile republishes every captured
+# result that has no handled acknowledgement, on a fresh queue row, after main
+# already drained and acknowledged the previous one. The watcher remembered
+# the key as surfaced and skipped it, so the queued row came out only as a
+# bare "check: rearm-resurface" - a wake that names no process-event result,
+# so the handler never acknowledged it - every lap. A re-announced row must
+# surface under its own headline again; only a row already surfaced stays put.
+procevent_drain_and_ack() {  # <state>
+  local state=$1 err sequence generation
+  err="$state/../drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || return 1
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" >/dev/null 2>&1
+}
+
+test_procevent_reannounced_result_surfaces_under_its_own_headline_lap_after_lap() {
+  local dir state out lap
+  dir=$(make_case procevent-reannounce); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:re-src:7" "check: procevent remote-reply re-src 7"
+  surface_once "$dir" "$out" || fail "the first process-event row was not surfaced: $(cat "$out")"
+  grep -F "check: process-event result captured: procevent:re-src:7" "$out" >/dev/null \
+    || fail "fixture: the first row did not surface under its own headline: $(cat "$out")"
+  procevent_drain_and_ack "$state" || fail "the first process-event wake could not be drained and acknowledged"
+  for lap in 1 2; do
+    append_wake "$state" check "procevent:re-src:7" "check: procevent remote-reply re-src 7"
+    : > "$out"
+    surface_once "$dir" "$out" || fail "lap $lap: the re-announced row was not surfaced: $(cat "$out")"
+    ! grep -F "check: rearm-resurface" "$out" >/dev/null \
+      || fail "lap $lap: the re-announced process-event row surfaced as a bare recovery: $(cat "$out")"
+    grep -F "check: process-event result captured: procevent:re-src:7" "$out" >/dev/null \
+      || fail "lap $lap: the re-announced row did not surface under its own headline: $(cat "$out")"
+    procevent_drain_and_ack "$state" || fail "lap $lap: the re-announced wake could not be drained and acknowledged"
+  done
+  pass "a re-announced process-event row surfaces under its own headline, lap after lap"
+}
+
+# A marker written before markers recorded queue sequences is empty. The key it
+# names must surface once more under its own headline, and the marker must then
+# record that row's sequence so the still-queued row is left to the drain.
+test_procevent_legacy_empty_marker_surfaces_once_and_records_sequence() {
+  local dir state out marker seq recorded
+  dir=$(make_case procevent-legacy-marker); state="$dir/state"; out="$dir/watch.out"
+  marker="$state/.seen-procevent-$(printf '%s' "procevent:legacy-src:3" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
+  : > "$marker"
+  append_wake "$state" check "procevent:legacy-src:3" "check: procevent remote-reply legacy-src 3"
+  seq=$(awk -F '\t' '$4 == "procevent:legacy-src:3" { print $2 }' "$state/.wake-queue")
+  [ -n "$seq" ] || fail "fixture: the legacy-marker row was not queued"
+  surface_once "$dir" "$out" || fail "a key with an empty legacy marker was not surfaced: $(cat "$out")"
+  grep -F "check: process-event result captured: procevent:legacy-src:3" "$out" >/dev/null \
+    || fail "a key with an empty legacy marker did not surface under its own headline: $(cat "$out")"
+  recorded=$(head -n 1 "$marker")
+  [ "$recorded" = "$seq" ] || fail "the legacy marker recorded '$recorded', not the surfaced row's sequence $seq"
+
+  : > "$out"
+  surface_once "$dir" "$out" || fail "the still-queued row was not left to the drain: $(cat "$out")"
+  ! grep -F "process-event result captured" "$out" >/dev/null \
+    || fail "an upgraded marker re-announced its still-queued row: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "legacy marker fixture drain failed"
+  pass "an empty legacy marker surfaces its key once and then records the row's sequence"
 }
 
 test_procevent_marker_keys_are_injective() {
@@ -4323,8 +4387,7 @@ test_procevent_launch_failed_episodes_are_each_delivered() {
   # for the next episode: already surfaced, so the process-event surface never
   # delivers it under its headline again. A fresh watcher still recovers the
   # unacknowledged queue row through the generic `check: rearm-resurface`
-  # path (the contract test_procevent_unacknowledged_result_redrains_until_handled
-  # proves), so what this asserts is the headline, not silence.
+  # path, so what this asserts is the headline, not silence.
   append_wake "$state" check "procevent:lf-src:launch-failed:1-2-100-7" \
     "check: process-event source lf-src is registered but its launch did not prove it took the claim"
   : > "$out"
@@ -5007,6 +5070,8 @@ fm_test_run \
   test_triage_log_size_cap_accepts_spaced_wc_counts \
   test_procevent_captured_result_surfaces_proactively \
   test_procevent_unacknowledged_result_redrains_until_handled \
+  test_procevent_reannounced_result_surfaces_under_its_own_headline_lap_after_lap \
+  test_procevent_legacy_empty_marker_surfaces_once_and_records_sequence \
   test_procevent_marker_keys_are_injective \
   test_procevent_headlines_classify_queue_keys \
   test_procevent_launch_failed_episodes_are_each_delivered \

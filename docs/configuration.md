@@ -2850,7 +2850,8 @@ This section is the single owner of the runner's operating contract.
 - By default, results are published as ordinary `check` wakes carrying the source id and committed result sequence through the existing durable wake queue, so the runner adds no second notification control plane.
 - The self-announcing adapter exception and its fail-safe ordering are defined below.
 - The watcher delivers a queued result on its ordinary cycle by reporting it as an actionable `check` wake, so a default or fallback publication reaches firstmate through the same rewake path every other wake uses and never waits for a manual drain.
-- A queued `check` delivery is reported at most once per captured source and sequence while any records for that key remain queued.
+- The watcher headlines each queued `check` row of a captured result at most once, and a row it already surfaced stays with the drain.
+  A newer row that `reconcile` re-announces for the same source and sequence surfaces under its own headline again, so an unhandled result never degrades to a bare recovery wake.
 - A durable handled acknowledgement stops future source re-announcement, while a record already queued remains under the durable queue's authority until the ordinary drain's sequence-bound post-handling acknowledgement consumes it.
 - By default, a runner releases its claim after one poll; an adapter that opts into `relisten` keeps that runner and claim across empty waits and captured results, adopting a replacement registration only when the registered command is unchanged and the claim still belongs to it.
   A failed relisten check releases the claim; the runner never refreshes its own home lease.
@@ -3096,7 +3097,7 @@ A detached launch that never confirms is reported as `failed=` with a non-zero e
 The `failed=` count reaches only the command's caller because `bin/fm-watch.sh` discards `reconcile` output and exit status.
 For that reason, `reconcile` also publishes a durable `check` wake once per failure episode, with key `procevent:<id>:launch-failed:<registration-identity>-<episode-nonce>`.
 Later cycles stay silent for that episode until a launch confirms.
-A later fresh failure gets a fresh key, because the watcher never re-surfaces a key it has already surfaced.
+A later fresh failure gets a fresh key, because the watcher never re-surfaces a `stranded` or `launch-failed` key it has already surfaced.
 
 - The announcement changes nothing about the launch: `reconcile` keeps relaunching the source every cycle exactly as before, and nothing is retried differently, throttled, or recovered from that signal.
 - The wake reports only the observed failure: the launch did not prove that it took the claim within the window.
