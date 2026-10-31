@@ -320,6 +320,12 @@ last_nonempty_line() {  # <file>
 # A local crew-state read is bounded so one slow child cannot extend this
 # snapshot without limit. Remote secondmate endpoint liveness is never read here.
 # A local read that hits the bound folds to state unknown.
+# The FM_CREW_STATE_META_OVERRIDE and FM_CREW_STATE_STATUS_OVERRIDE values ride
+# that `env ...` prefix so they are scoped to this one bounded child process and
+# never persist in the calling shell, whether the snapshot runs as a command or a
+# session shell sources it: a stale captured path left in a session shell poisons
+# every later crew-state read until callers manually prefix empty values.
+# tests/fm-fleet-snapshot-view.test.sh pins this contract.
 crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
   local id=$1 captured_meta=${2:-} captured_status=${3:-} raw rest state source detail sep
   raw=$(
