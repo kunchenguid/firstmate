@@ -3561,13 +3561,13 @@ Configuration lists 1 to 64 exact absolute Markdown source files, with unique sa
 ```
 
 The configuration has no glob, directory crawl, executable hook or arbitrary output path.
-Source files are capped at 2 MB each; symlink paths, duplicate JSON keys and self-ingestion from this home's brain output are refused.
+Source files must be UTF-8 and are capped at 2,000,000 bytes each; symlink paths, duplicate JSON keys and self-ingestion from this home's brain output are refused.
 Changing the approved corpus is an explicit private configuration operation; no other project's sources or external memory tier are discovered automatically.
 Each source is preserved as an immutable SHA-256-addressed snapshot, and its evidence page cites original path, line range and content hash.
 These pages are source views, not fabricated semantic summaries or independent verification of source claims.
 A completion summary is JSON with `title`, `body`, `sources` (approved source ids) and `connections` (exact `units/<id>` references).
 The contributor owns its synthesis and claim/source chronology; the executable retains explicit provenance and marks units stale when an input is removed or missing.
-Do not put another Connections section in the summary body; links outside the generated section and fenced examples do not create graph edges.
+Do not put another Connections section in the summary body, and close every Markdown fence before submitting it; links outside the generated section and fenced examples do not create graph edges.
 Only exact path-scoped wikilinks in `## Connections` become EXTRACTED edges, with page/line provenance; missing source links are reported, and unknown unit links fail publication.
 No fuzzy matching or semantic inference is performed.
 
@@ -3575,6 +3575,8 @@ Storage is private `data/brains/<project>/`: `raw/<sha256>.md`, immutable `gener
 Each generation includes `pages/sources/`, `pages/units/`, `index.md`, `log.md`, `SCHEMA.md`, `units.json`, `manifest.json` and `graphify-out/{graph.json,GRAPH_REPORT.md}`.
 The graph uses node-link JSON with path-scoped ids and `links`; it is derived and rebuildable from approved inputs and retained unit synthesis.
 Index, wiki and graph switch together only after validation and an input-fingerprint reread; a failed update keeps the prior generation usable.
+Serialized unit synthesis and the accumulated update log are each capped at 2,000,000 bytes, rendered pages at 8,000,000 bytes each, and the manifest and graph at 20,000,000 bytes each.
+An update exceeding these limits fails staged validation before replacing `CURRENT`; unit synthesis exceeding its limit is refused before staging.
 A per-project writer lock rejects concurrent writers with an explicit retry, while readers keep their current immutable generation.
 An abandoned `.write-lock` requires checking that its writer is gone before operator removal; it is never stolen automatically.
 `state/project-brains/<project>.json` records the last attempt, not task state.
