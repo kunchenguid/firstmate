@@ -212,7 +212,7 @@ META_LOCK_HELD=1
 if [ -n "${FM_PR_CHECK_EXPECT_INCARNATION:-}" ]; then
   CURRENT_LINE=$(last_status_line "$STATE/$ID.status")
   [ "$(grep '^spawn_gen=' "$META" | tail -1 | cut -d= -f2-)" = "$FM_PR_CHECK_EXPECT_INCARNATION" ] \
-    && [ "$(status_line_verb "$CURRENT_LINE")" = done ] \
+    && [ "$(status_line_verb "$CURRENT_LINE")" = "done" ] \
     && [ "$(status_line_note "$CURRENT_LINE")" = "$(status_line_note "$FM_PR_CHECK_EXPECT_READY_LINE")" ] \
     || { echo "error: ready task outcome changed before PR registration" >&2; exit 1; }
 fi
