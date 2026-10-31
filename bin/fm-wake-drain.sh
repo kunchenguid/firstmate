@@ -534,8 +534,7 @@ print_record_divergence_section() {
   local diverged task origin key title line shown=0 omitted=0 bound
   local output='' used=0 bytes item_bytes=220 global_bytes=2000
 
-  # A non-positive bound is not a bound (bin/fm-timeout-lib.sh), so a bad
-  # override falls back to the default rather than disabling the deadline.
+  # Apply bin/fm-timeout-lib.sh's bound contract, defaulting a bad override.
   bound=${FM_DIVERGENCE_TIMEOUT:-20}
   case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
 

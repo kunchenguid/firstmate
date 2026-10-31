@@ -2701,10 +2701,9 @@ FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
 # heartbeat instead of escalating. Hitting the bound is a negative outcome like
 # every other: it reads as no evidence, so the caller's escalation schedule is
 # untouched and a stall that writes nothing still escalates on the existing
-# schedule. A value that is not a positive integer is not a bound at all (`timeout
-# 0` and the perl fallback's `alarm 0` both disable the deadline), so the default
-# applies instead; the check lives at the point of use so an in-process override
-# gets it too.
+# schedule. The shared runner's bound contract is owned by bin/fm-timeout-lib.sh.
+# Invalid values use the default; the check lives at the point of use so an
+# in-process override gets it too.
 FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 
 # 0 when some regular file under <id>'s recorded worktree is newer than
