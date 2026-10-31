@@ -1158,6 +1158,36 @@ fm_backend_kill() {  # <backend> <target>
   esac
 }
 
+# fm_backend_kill_confirmed: remove the task's session endpoint and prove it
+# is gone. This is a SEPARATE contract from fm_backend_kill: only the
+# capped-session release decision uses it, so a task that holds no capped
+# occupancy keeps fm_backend_kill's documented per-backend behavior and its
+# teardown is unchanged. A nonzero return means the endpoint could not be
+# confirmed absent, so the caller must retain the session's occupancy
+# instead of releasing it.
+fm_backend_kill_confirmed() {  # <backend> <target>
+  local backend=$1
+  shift
+  [ -n "${1:-}" ] || { echo "error: refusing empty backend kill target" >&2; return 1; }
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_kill "$@" ;;
+    herdr)
+      fm_backend_herdr_kill "$@" || return 1
+      fm_backend_herdr_endpoint_confirmed_gone "$1"
+      ;;
+    zellij) fm_backend_zellij_kill_confirmed "$@" ;;
+    orca) fm_backend_orca_kill_confirmed "$@" ;;
+    cmux) fm_backend_cmux_kill_confirmed "$@" ;;
+    paseo) fm_backend_paseo_kill_confirmed "$@" ;;
+    rex) fm_backend_rex_kill "$@" ;;
+    t3code) fm_backend_t3code_kill "$1" ;;
+    tern) fm_backend_tern_kill "$@" ;;
+    hc) fm_backend_hc_kill "$@" ;;
+    *) echo "error: no confirmed kill implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
 fm_backend_remove_worktree() {  # <backend> <worktree-id>
   local backend=$1
   shift

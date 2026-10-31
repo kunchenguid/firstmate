@@ -346,9 +346,10 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that 
 
 ### Endpoint close
 
-A reported close failure costs teardown every durable record of the task, so what each backend's close actually returns was measured before that status was given any authority.
+A falsely successful close can let teardown remove every durable record naming a still-live endpoint, so each backend's close return must reflect what it can prove.
 Verified on 2026-09-14 with tmux 3.7c by driving `fm_backend_kill` against real tmux endpoints, and the Orca arm by driving `fm_backend_orca_kill` under a search path with no `orca` on it.
-Zellij and cmux were not driven with their CLIs absent; the table below states what those arms report today rather than claiming a measurement.
+The table below states the current return contract; the 2026-09-14 measurements cover only the tmux and missing-Orca-CLI paths.
+`tests/fm-backend-close.test.sh` exercises the confirmed close for cmux, Zellij, Paseo, and Orca with controlled command responses and proves the Tern, HC, and T3 Code dispatch preserves each close's arguments and verdict; `tests/fm-backend-rex.test.sh` exercises Rex's confirmed close the same way.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -365,23 +366,43 @@ ok - fm-teardown: an already-exited endpoint, and a server that is already gone,
 ok - fm_backend_orca_kill: a close its missing CLI never attempted reports the failure instead of a success
 ```
 
-An endpoint that is already legitimately gone returns 0 silently on every arm covered by this entry, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited.
-The refusal is reached only through a close that could not do its job, and each arm reports only what it can prove:
+An endpoint that is already legitimately gone returns 0 silently on every arm whose close can run at all, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited, and Orca does the same whenever its CLI is available. An absent Orca binary is the exception: its close cannot run at all, so it refuses even a terminal that is already gone.
+Ordinary close return contracts differ by backend:
 
 | Backend | already gone | a close that failed |
 | --- | --- | --- |
 | tmux | 0, silent | 1, resolved by re-reading the window's exact recorded identity; a read that itself could not run refuses rather than passing for absence |
-| orca | 0, silent | 1 when a missing CLI means no close was attempted; 0 for a close command that failed after the CLI accepted it |
-| zellij | 0, silent | 0, not yet distinguishable |
-| cmux | 0, silent | 0, not yet distinguishable |
+| orca | 0 when the CLI is available | 0 after an attempted close, including a failed command or error JSON response; nonzero when the CLI prerequisite check fails |
+| zellij | 0, silent | Best effort: close-command failures are ignored, and an unresolved tab identity can skip the close without refusing |
+| cmux | 0, silent | Best effort: close-command failures are ignored, and failed target validation skips the close without refusing |
 | tern | 0, silent | 1 when its inventory re-read cannot run, the block moved to another session, its tab no longer carries the task's scoped title, or it is still listed after the close; portable fixtures only (`tests/fm-backend-tern.test.sh`), contract in [tern-backend.md](../tern-backend.md) |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
-The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
-Guessing it is what a refusal must never rest on: a gate that refused an already-exited session would break ordinary cleanup on every task, which is a worse failure than the stranded endpoint it would be trying to prevent.
 tmux's re-read is deliberately exact - `=session` plus a whole-line window-name match - because a prefix match would read a neighboring window as this window's survivor, which is the same exactness the cleanup identity boundary above already requires.
 It is also deliberately conservative about the read itself, sharing `fm_backend_tmux_window_inventory` with `fm_backend_tmux_agent_state` so both mean the same thing by an absent session: only a definitive missing-session, missing-server, or connect-error response proves the window gone.
 Any other read failure - a momentarily unresponsive server, or a teardown PATH without tmux on it - refuses, because a read that could not run is not evidence of absence.
+
+**The confirmed close is a separate contract**
+
+`fm_backend_kill_confirmed` closes the endpoint and then proves it is gone.
+It exists for exactly one purpose: the capped-session release decision, which may only release a session's occupancy after its endpoint is confirmed absent.
+It is deliberately NOT the ordinary teardown path: a task that holds no capped occupancy keeps `fm_backend_kill`'s documented per-backend behavior, so no other task's teardown changes.
+
+| Backend | `fm_backend_kill_confirmed` proves absence by |
+| --- | --- |
+| tmux | the window's exact recorded identity, as the ordinary close already does |
+| herdr | `fm_backend_herdr_endpoint_confirmed_gone`, the same structured not-found the Herdr record gate uses |
+| zellij | the session's terminal pane and tab inventories; a read that cannot run, or an inventory that still names the terminal pane or the recorded tab, is not proof, while a same-numbered plugin pane is a separate ID space and cannot keep the target alive |
+| cmux | the workspace inventory of every window; a failed read, or a surviving workspace or title, is not proof |
+| orca | the close command's own answer: a failed command or an error JSON response is a refused close |
+| paseo | the live terminal inventory; a read that cannot run, or an inventory that still names the terminal, is not proof |
+| rex | the ordinary close's structured not-found proof for the recorded block; a surviving block or unreachable server refuses closure |
+| tern | the ordinary close's successful block-close response or confirmed absence from the session inventory; unreadable or foreign endpoints refuse closure |
+| hc | the ordinary close's structured absence check after removing the terminal; a surviving terminal or unreadable core refuses closure |
+| t3code | the ordinary close's native closed response, missing thread, or archived thread without an active run |
+| any other backend | no confirmed-close implementation exists, so the close is refused rather than assumed |
+
+A refused confirmed close means the endpoint could not be proven absent, so the caller keeps the session's occupancy instead of releasing it.
 
 Two bounds of the refusal are known and deliberately not closed here.
 
@@ -393,7 +414,7 @@ T3 Code uses the [native cleanup path](../t3code-backend.md#current-lifecycle-an
 
 The Orca close refuses under `--force` too.
 The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
-The two child close sites inside forced secondmate cleanup also keep refusing: that path is only ever reached under `--force`, so honoring force there would delete the refusal rather than override it, and would contradict the adjacent Herdr child gate that stops forced cleanup for the same hazard.
+The child close sites inside forced secondmate cleanup also keep refusing: that path is only ever reached under `--force`, so honoring force there would delete the refusal rather than override it, and would contradict the adjacent Herdr child gate that stops forced cleanup for the same hazard.
 
 The retained record is this run's, not a durable guarantee.
 A task carrying a backlog transition writes its pending-close marker before the endpoint close, and the marker survives the refusal; the next `bin/fm-bootstrap.sh` replays it and removes the retained record.
