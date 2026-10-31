@@ -336,10 +336,6 @@ case "$provider" in
               error("invalid merge train list")
             end' 2>/dev/null) || exit 0
           [ "$present" = true ] || exit 0
-          reread=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null \
-            | jq -r 'if type == "object" and (.state | type) == "string" then .state else error("invalid") end' 2>/dev/null) \
-            || exit 0
-          case $reread in opened|locked) ;; *) exit 0 ;; esac
           line="degraded train=dropped url=$url"
           [ -z "$reason" ] || line="$line reason=$reason"
           [ -z "$pipeline" ] || line="$line pipeline_url=https://$host/$path/-/pipelines/$pipeline"

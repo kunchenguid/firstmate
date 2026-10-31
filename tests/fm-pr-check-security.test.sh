@@ -2896,8 +2896,8 @@ EOF
   ! grep -q 'api projects/.*/pipelines/' "$dir/glab.log" \
     || fail "GitLab train drop read pipeline details: $(cat "$dir/glab.log")"
   rm -f "$dir/glab.log.train"
-  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=merged FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
-  [ -z "$out" ] || fail "GitLab poll read a just-merged merge request as a train drop: $out"
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_TRAINS='[]' run_poll "$dir")
+  [ "$out" = merged ] || fail "a merged MR missing from the active train list was not reported as merged: $out"
   rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=fail run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a failed merge-train read"
