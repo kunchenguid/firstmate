@@ -1512,7 +1512,7 @@ test_pi_exclude_tools_reach_ship_and_scout_launches() {
       rec=$(make_spawn_case "excl-${harness}-${kindflag#--}" "$harness" "$id")
       read_case_record "$rec"
       write_exclude_file "$HOME_DIR" '# hide the write tools' '' \
-        '  mcp__tracker__editIssue  ' 'mcp__tracker__createPage' 'mcp__other-srv__tool.v2'
+        '  mcp__tracker__editIssue  ' 'mcp__tracker__createPage' 'mcp__other_srv__tool.v2'
       if [ "$kindflag" = --scout ]; then
         out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
       else
@@ -1521,7 +1521,7 @@ test_pi_exclude_tools_reach_ship_and_scout_launches() {
       status=$?
       expect_code 0 "$status" "$harness $kindflag spawn with exclusions should succeed"$'\n'"$out"
       launch=$(cat "$LAUNCH_LOG")
-      assert_contains "$launch" "--exclude-tools 'mcp__tracker__editIssue,mcp__tracker__createPage,mcp__other-srv__tool.v2' " \
+      assert_contains "$launch" "--exclude-tools 'mcp__tracker__editIssue,mcp__tracker__createPage,mcp__other_srv__tool.v2' " \
         "$harness $kindflag launch must carry the comma-joined, quoted exclusion list"
     done
   done
@@ -1533,17 +1533,13 @@ test_pi_exclude_tools_worker_registry_reports() {
   command -v node >/dev/null 2>&1 || fail "node is required to drive Pi worker exclusion reporting"
   for harness in pi pi-signed; do
     for kindflag in --ship --scout; do
-      for scenario in matched unmatched unverified; do
+      for scenario in absent late present delayed reconnect; do
         id="excl-registry-${harness}-${kindflag#--}-${scenario}"
         case_name=$id
-        [ "$scenario" != unmatched ] || case_name="josé-$id"
+        [ "$scenario" != late ] || case_name="josé-$id"
         rec=$(make_spawn_case "$case_name" "$harness" "$id")
         read_case_record "$rec"
-        case "$scenario" in
-          matched) write_exclude_file "$HOME_DIR" 'mcp__tracker__editIssue' ;;
-          unmatched) write_exclude_file "$HOME_DIR" 'mcp__tracker__editIssu' 'mcp__tracker__createIssu' ;;
-          unverified) write_exclude_file "$HOME_DIR" 'mcp__offline__executeWrite' ;;
-        esac
+        write_exclude_file "$HOME_DIR" 'mcp__tracker__editIssue' 'mcp__tracker__createIssue'
         if [ "$kindflag" = --scout ]; then
           out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
         else
@@ -1553,10 +1549,12 @@ test_pi_exclude_tools_worker_registry_reports() {
         out=$(EXT_PATH="$HOME_DIR/state/$id.pi-ext.ts" STATUS_FILE="$HOME_DIR/state/$id.status" \
           EXCLUDE_FILE="$HOME_DIR/config/crew-exclude-tools" TURNEND="$HOME_DIR/state/$id.turn-ended" \
           TASK_ID="$id" BUSY_EVENT="$ROOT/bin/fm-busy-event.sh" \
+          CLASSIFY_LIB="$ROOT/bin/fm-classify-lib.sh" TASK_KIND="${kindflag#--}" \
           SCENARIO="$scenario" node --input-type=module 2>&1 <<'JS'
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import fs, { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
@@ -1584,35 +1582,65 @@ extension.default({
 });
 assert.equal(status(), before, "registration must not validate against a registry that has not loaded yet");
 assert.deepEqual(busy(), seeded, "registration must not change busy state");
-if (process.env.SCENARIO !== "unverified") {
-  tools = [{ name: "mcp__tracker__editIssue" }, { name: "mcp__tracker__createIssue" }];
-}
+const edit = { name: "mcp__tracker__editIssue" };
+const create = { name: "mcp__tracker__createIssue" };
+const read = { name: "mcp__tracker__readIssue" };
+const warningsFor = (from) => status().slice(from.length);
+assert.deepEqual(handlers.tool_call({ toolName: "mcp__tracker__editIssue" }), {
+  block: true, reason: "mcp__tracker__editIssue is excluded by config/crew-exclude-tools",
+}, "a call to a listed tool must be blocked as a backstop");
+assert.equal(handlers.tool_call({ toolName: "mcp__tracker__readIssue" }), undefined, "an unlisted tool must not be blocked");
+if (process.env.SCENARIO === "present") tools = [edit, read];
+if (process.env.SCENARIO === "reconnect") tools = [read];
 rmSync(process.env.TURNEND, { force: true });
 await handlers.agent_start();
 const started = { gen, seq: "2", state: "busy", source: "pi-ext", event: "agent-start" };
 assert.deepEqual(busy(), started, "agent_start must publish a generation-bound Pi busy event");
-const after = status();
-if (process.env.SCENARIO === "matched") {
-  assert.equal(after, before, "an exact match must produce no report");
-} else {
-  const report = after.slice(before.length);
-  assert.match(report, /^note \[at=\d+\]: warning: /);
+if (process.env.SCENARIO === "present") {
+  const report = warningsFor(before);
+  assert.match(report, /^note \[state=none\] \[at=\d+\]: warning: /);
   assert.ok(report.includes(process.env.EXCLUDE_FILE), "the report must identify the config file");
-  assert.ok(report.includes("unmatched exclusion entries"));
-  assert.ok(report.includes("unverified"), "absence must never imply validity");
-  const missing = process.env.SCENARIO === "unmatched"
-    ? ["mcp__tracker__editIssu", "mcp__tracker__createIssu"]
-    : ["mcp__offline__executeWrite"];
-  for (const name of missing) assert.ok(report.includes(name), "every unmatched entry must be reported: " + name);
-  assert.ok(!report.includes("mcp__tracker__editIssue"), "a loaded tool must not be reported");
+  assert.ok(report.includes("still present"), "only presence is reported");
+  assert.ok(report.includes("mcp__tracker__editIssue"), "a present listed tool must be reported");
+  assert.ok(!report.includes("mcp__tracker__createIssue"), "an absent listed tool must not be reported");
+  assert.ok(!report.includes("mcp__tracker__readIssue"), "an unlisted tool must not be reported");
+} else {
+  assert.equal(status(), before, "absence of a listed tool is the success state and must produce no report");
 }
 await handlers.agent_settled({}, { isIdle: () => false });
 assert.deepEqual(busy(), started, "a continuation must stay busy even when agent_settled fires");
+if (process.env.SCENARIO === "absent" || process.env.SCENARIO === "delayed") {
+  for (let turn = 0; turn < 210; turn++) await handlers.turn_end();
+  assert.equal(status(), before, "repeated rechecks must not report absent tools");
+}
+if (process.env.SCENARIO === "reconnect") {
+  await handlers.turn_end();
+  tools = [];
+  await handlers.turn_end();
+  assert.equal(status(), before, "namespace registration and disconnection must not report absent tools");
+}
+// MCP servers connect in the background after the first agent run starts.
+tools = process.env.SCENARIO === "absent" ? [read] : [edit, create, read];
+const beforeConnect = status();
 await handlers.turn_end();
 for (let attempt = 0; attempt < 100 && !existsSync(process.env.TURNEND); attempt++) {
   await setTimeout(10);
 }
-assert.ok(existsSync(process.env.TURNEND), "reporting must preserve turn-end notification");
+assert.ok(existsSync(process.env.TURNEND), "rechecking must preserve turn-end notification");
+const after = status();
+if (process.env.SCENARIO === "absent") {
+  assert.equal(after, before, "a correctly excluded tool must never be reported");
+} else {
+  const report = warningsFor(beforeConnect);
+  assert.match(report, /^note \[state=none\] \[at=\d+\]: warning: /);
+  assert.ok(report.includes("mcp__tracker__createIssue"), "a tool that appears after servers connect must be reported");
+  assert.ok(!report.includes("mcp__tracker__readIssue"), "an unlisted tool must not be reported");
+  if (process.env.SCENARIO === "present") {
+    assert.ok(!report.includes("mcp__tracker__editIssue"), "a name already reported must not be reported again");
+  } else {
+    assert.ok(report.includes("mcp__tracker__editIssue"), "every late-registered listed tool must be reported");
+  }
+}
 assert.deepEqual(busy(), started, "an inner turn boundary must not mark the worker idle");
 await handlers.agent_settled({}, { isIdle: () => true });
 assert.deepEqual(busy(), { gen, seq: "3", state: "idle", source: "pi-ext", event: "agent-settled" });
@@ -1634,21 +1662,133 @@ await handlers.agent_start();
 assert.deepEqual(busy(), replacement, "a stale extension must not publish into its replacement's generation");
 assert.equal(readFileSync(genFile, "utf8").trim(), replacementGen);
 assert.equal(status(), completed, "stale lifecycle events must not repeat exclusion warnings");
+if (process.env.SCENARIO === "late") {
+  const consume = (command) => execFileSync("bash", ["-c", '. "$1"; ' + command,
+    "_", process.env.CLASSIFY_LIB, process.env.STATUS_FILE, process.env.TASK_KIND,
+  ], { encoding: "utf8" }).trimEnd();
+  const register = () => {
+    const lifecycle = {};
+    tools = [];
+    extension.default({
+      on: (name, handler) => { lifecycle[name] = handler; },
+      events: { on() {} },
+      getAllTools: () => tools,
+    });
+    return lifecycle;
+  };
+  let emittedWarning;
+  for (const state of [
+    "done: completed task",
+    "failed: task failed",
+    "needs-decision [key=choice]: choose an option",
+    "blocked [key=dependency]: waiting for access",
+    "done [at=123] corr=0123456789abcdef: completed correlated task",
+    "failed [at=123] corr=0123456789abcdef: failed correlated task",
+    "working: continuing task",
+    "paused [key=release]: waiting for release",
+    "captain-held [key=choice]: transferred decision",
+    "resolved [key=choice]: answered decision",
+    "note: ordinary state note mentions [state=none] in prose",
+    "parked: unknown declaration",
+  ]) {
+    for (const event of ["agent_start", "turn_end"]) {
+      writeFileSync(process.env.STATUS_FILE, "working: starting task\n");
+      const lifecycle = register();
+      await lifecycle.agent_start();
+      appendFileSync(process.env.STATUS_FILE, state + "\nContinuation prose\n");
+      const queries = [
+        'last_status_line "$2"',
+        'last_status_line "$2" previous >/dev/null; printf "%s" "$previous"',
+        'status_current_line "$2" "$3"',
+        'status_declared_wait_line "$2"',
+        'status_open_decisions "$2" "$3"',
+        'status_open_activities "$2"',
+      ];
+      const declarations = queries.map(consume);
+      tools = [edit];
+      const beforeWarning = status();
+      await lifecycle[event]();
+      const report = warningsFor(beforeWarning);
+      assert.match(report, /^note \[state=none\] \[at=\d+\]: warning: /);
+      assert.equal(report.trimEnd().split("\n").length, 1, "warnings must never replay prior declarations");
+      assert.ok(report.includes(process.env.EXCLUDE_FILE), "late warnings must identify their configuration");
+      assert.ok(report.includes(edit.name), "late warnings must identify the present excluded tool");
+      assert.deepEqual(queries.map(consume), declarations, event + " must preserve every declaration consumer");
+      const unread = consume('scan_unread_surface_lines "$(dirname "$2")"');
+      assert.ok(unread.includes(process.env.EXCLUDE_FILE), event + " warning must remain visible to the supervisor");
+      assert.ok(unread.includes(edit.name), "the supervisor must see the late exclusion failure");
+      const warnedStatus = status();
+      await lifecycle.agent_start();
+      await lifecycle.turn_end();
+      assert.equal(status(), warnedStatus, "non-state warnings must retain per-name warning deduplication");
+      appendFileSync(process.env.STATUS_FILE, report.repeat(210));
+      assert.deepEqual(queries.map(consume), declarations, "non-state notes past the tail window must not hide declarations");
+      emittedWarning = report;
+    }
+  }
+  writeFileSync(process.env.STATUS_FILE, emittedWarning);
+  assert.equal(consume('last_status_line "$2"'), "", "a non-state note must not become the no-event fallback");
+  assert.equal(consume('status_current_line "$2" "$3"'), "", "a warning alone must not declare state");
+  assert.ok(consume('scan_unread_surface_lines "$(dirname "$2")"').includes(edit.name), "a warning alone must remain visible");
+  writeFileSync(process.env.STATUS_FILE, "paused [key=release]: waiting for release\nresolved [key=choice]: answered choice\n" + emittedWarning.repeat(210));
+  assert.equal(consume('status_declared_wait_line "$2"'), "paused [key=release]: waiting for release", "non-state notes must not cancel a pause during reverse scans");
+
+  const originalAppend = fs.appendFileSync;
+  let concurrentResolution = "";
+  fs.appendFileSync = (path, data, ...options) => {
+    if (path === process.env.STATUS_FILE && concurrentResolution && String(data).startsWith("note ")) {
+      originalAppend(path, concurrentResolution + "\n");
+      concurrentResolution = "";
+    }
+    return originalAppend(path, data, ...options);
+  };
+  syncBuiltinESMExports();
+  try {
+    for (const [opener, resolution] of [
+      ["blocked [key=dependency]: waiting for access", "resolved [key=dependency]: access granted"],
+      ["needs-decision [key=choice]: choose an option", "resolved [key=choice]: option chosen"],
+      ["blocked: waiting for access", "resolved: access granted"],
+      ["needs-decision corr=0123456789abcdef [key=choice] [at=123]: choose an option", "resolved corr=0123456789abcdef [key=choice]: option chosen"],
+    ]) {
+      for (const event of ["agent_start", "turn_end"]) {
+        for (const order of ["before-warning", "after-warning"]) {
+          writeFileSync(process.env.STATUS_FILE, "working: starting task\n");
+          const lifecycle = register();
+          await lifecycle.agent_start();
+          appendFileSync(process.env.STATUS_FILE, opener + "\n");
+          assert.notEqual(consume('status_open_decisions "$2" "$3"'), "", "the decision must start open");
+          tools = [edit];
+          if (order === "before-warning") concurrentResolution = resolution;
+          await lifecycle[event]();
+          if (order === "after-warning") appendFileSync(process.env.STATUS_FILE, resolution + "\n");
+          assert.equal(concurrentResolution, "", "the concurrent writer must run at the warning append boundary");
+          assert.equal(consume('status_open_decisions "$2" "$3"'), "", event + " must not reopen an answered decision");
+          assert.equal(consume('last_status_line "$2"'), resolution, "the resolved transition must remain latest");
+          assert.equal(consume('status_current_line "$2" "$3"'), resolution, "the resolved decision must remain closed");
+          assert.ok(consume('scan_unread_surface_lines "$(dirname "$2")"').includes(edit.name), "the interleaved warning must remain visible");
+        }
+      }
+    }
+  } finally {
+    fs.appendFileSync = originalAppend;
+    syncBuiltinESMExports();
+  }
+}
 JS
         )
         status=$?
         expect_code 0 "$status" "$harness $kindflag $scenario worker registry check failed: $out"
-        if [ "$scenario" != matched ]; then
+        if [ "$scenario" != absent ]; then
           report=$(bash -c '. "$1/bin/fm-classify-lib.sh"; scan_unread_surface_lines "$2"' \
             _ "$ROOT" "$HOME_DIR/state")
           expect_code 0 "$?" "the supervisor's unread-status consumer should succeed"
           assert_contains "$report" "$HOME_DIR/config/crew-exclude-tools" "the supervisor must see the exclusion warning even after done"
-          assert_contains "$report" "unverified" "the supervisor must see that exclusions remain unverified"
+          assert_contains "$report" "still present" "the supervisor must see that a listed tool is still present"
         fi
       done
     done
   done
-  pass "Pi worker registries report unmatched and unverified exclusions without reporting exact matches"
+  pass "Pi worker registries report only listed tools that are present, once each, including after servers connect"
 }
 
 test_pi_exclude_tools_absent_and_empty_lists() {
@@ -1727,6 +1867,32 @@ test_pi_exclude_tools_malformed_entry_refuses_before_endpoint() {
     [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a malformed exclusion entry '$bad' still wrote a task record"
   done
   pass "a malformed exclusion entry refuses the spawn before any launch or record"
+}
+
+test_pi_exclude_tools_server_shape_refuses_before_endpoint() {
+  local rec id out status bad n=0
+  for bad in 'mcp__iqx-jira__editJiraIssue' 'mcp__my.srv__tool' 'mcp__a-b'; do
+    n=$((n + 1))
+    id="excl-shape-$n-z9s"
+    rec=$(make_spawn_case "excl-shape-$n" pi "$id")
+    read_case_record "$rec"
+    write_exclude_file "$HOME_DIR" 'mcp__srv__good' "$bad"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "server-shape entry '$bad' must refuse the spawn"
+    assert_contains "$out" "entry '$bad' can never match" "the refusal must name the entry '$bad'"
+    [ ! -s "$LAUNCH_LOG" ] || fail "a server-shape entry '$bad' still launched a worker"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a server-shape entry '$bad' still wrote a task record"
+  done
+  assert_contains "$out" "mcp__a_b__<tool>" "the refusal must suggest the sanitized server part"
+  # A dash or dot in the tool part is not a server-part mistake and stays accepted.
+  id=excl-shape-ok-z9s
+  rec=$(make_spawn_case excl-shape-ok pi "$id")
+  read_case_record "$rec"
+  write_exclude_file "$HOME_DIR" 'mcp__srv__tool-x.v2'
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 "$?" "a dash or dot in the tool part must stay accepted: $out"
+  pass "an mcp__ entry whose server part has - or . refuses the spawn before any launch or record"
 }
 
 test_pi_exclude_tools_read_failure_refuses_before_launch() {
@@ -2775,6 +2941,7 @@ test_pi_exclude_tools_worker_registry_reports
 test_pi_exclude_tools_absent_and_empty_lists
 test_exclude_tools_non_pi_runtime_refuses_non_empty_list
 test_pi_exclude_tools_malformed_entry_refuses_before_endpoint
+test_pi_exclude_tools_server_shape_refuses_before_endpoint
 test_pi_exclude_tools_read_failure_refuses_before_launch
 test_pi_exclude_tools_do_not_leak_across_homes_or_to_secondmates
 test_batch_forwards_shared_profile_flags

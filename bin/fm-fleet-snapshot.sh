@@ -312,11 +312,6 @@ meta_value() {  # <meta-file> <key>
   fm_meta_get "$1" "$2"
 }
 
-last_nonempty_line() {  # <file>
-  [ -f "$1" ] || return 1
-  grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
-}
-
 # A local crew-state read is bounded so one slow child cannot extend this
 # snapshot without limit. Remote secondmate endpoint liveness is never read here.
 # A local read that hits the bound folds to state unknown.
@@ -358,7 +353,7 @@ status_event_json() {  # <observed-status-log> [<contract-path>]
   local log=$1 path=${2:-$1} present=0 raw='' verb='' note='' epoch=null age=null
   if [ -f "$log" ]; then
     present=1
-    raw=$(last_nonempty_line "$log" || true)
+    raw=$(last_status_line "$log")
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
     epoch=$(status_line_at_epoch "$raw") || epoch=null
