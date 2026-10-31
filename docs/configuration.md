@@ -2120,13 +2120,6 @@ FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh models   $FM_HOME/config   # the declared
 FM_HOME=$FM_HOME bin/fm-sol-cap-lib.sh ceiling  $FM_HOME/config   # the effective ceiling, or "inert"
 ```
 
-**One model, one capacity path**
-
-This guard is the narrow, per-home form of a fleet-wide capacity rule.
-When a fleet-wide seat-pool declaration is also in use, a model that both declarations cover is counted once: the fleet-wide ledger is authoritative for it, and this guard defers to it instead of counting the same session a second time.
-A model declared in both is a configuration error and is refused, not counted twice.
-The cross-check itself belongs to the fleet-wide seat accounting, because only that mechanism knows which pool owns a model.
-
 **Boundary**: the no-mistakes daemon's internal gate/review agent spawns decode their own agent surface in the daemon's global config (`agent:`, `agent_config:`, `agent_path_override` in the operating no-mistakes config.yaml), its binary lives outside this repository, and a task may not administer it, so those spawns stay outside this count until whoever owns that daemon instance wires a hook to conform to this contract.
 
 ## Typed dispatch resolution (.env FM_DISPATCH_PROVIDER, FM_DISPATCH_MODEL)
