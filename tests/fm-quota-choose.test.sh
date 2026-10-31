@@ -709,6 +709,31 @@ fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "duplicate schema 6 key returned: $err"
 ok "schema 6 requires accountKey on every row and uniqueness on provider + accountKey"
 
+CURSOR_GROK="$LAB/cursor-grok.json"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability) = [
+  { "scope": "all_models", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" } },
+  { "scope": "grok_bot", "status": "known", "effectivePercentRemaining": 100, "runway": { "status": "through_reset" } } ]' \
+  "$SCHEMA6" > "$CURSOR_GROK"
+for model in grok-4.7-medium cursor-grok-4.6-medium; do
+  out=$(call_choose --snapshot "$CURSOR_GROK" --candidate cursor:composer-2 --candidate "cursor:$model")
+  [ "$out" = "cursor $model" ] || fail "Cursor Grok $model did not use grok_bot: $out"
+done
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability) |= map(select(.scope != "grok_bot"))' \
+  "$CURSOR_GROK" > "$LAB/cursor-no-grok.json"
+out=$(call_choose --snapshot "$LAB/cursor-no-grok.json" --candidate cursor:grok-4.7-medium)
+[ "$out" = "none" ] || fail "Cursor Grok without grok_bot escaped all_models: $out"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability) = [
+  { "scope": "all_models", "status": "known", "effectivePercentRemaining": 100, "runway": { "status": "through_reset" } },
+  { "scope": "grok_bot", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" } } ]' \
+  "$SCHEMA6" > "$LAB/cursor-grok-spent.json"
+for model in grok-4.7-medium cursor-grok-4.6-medium; do
+  out=$(call_choose --snapshot "$LAB/cursor-grok-spent.json" --candidate "cursor:$model")
+  [ "$out" = "none" ] || fail "Cursor Grok $model with exhausted grok_bot fell back to all_models: $out"
+done
+out=$(call_choose --snapshot "$LAB/cursor-grok-spent.json" --candidate cursor:grok-4.7-medium --candidate cursor:composer-2)
+[ "$out" = "cursor composer-2" ] || fail "non-Grok Cursor model did not use available all_models: $out"
+ok "Cursor Grok binds to grok_bot when reported and other Cursor models keep all_models"
+
 cat > "$SCHEMA6_TOON" <<'TOON'
 bin: ~/.local/bin/quota-axi
 description: Report local agent-provider quota windows for routing-aware agents
