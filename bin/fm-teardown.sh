@@ -2111,15 +2111,14 @@ teardown_note_dirty_return() {
 
 # A worker may have pushed from another checkout, so tracking refs that do not
 # show the work prove nothing until they are refreshed. Runs at most once per
-# teardown. Each fetch is bounded and non-interactive, and --no-prune keeps a
-# branch a remote has dropped visible, whatever fetch.prune says. The explicit
+# teardown. Each fetch is bounded to 30 seconds and non-interactive, and
+# --no-prune keeps a branch a remote has dropped visible, whatever fetch.prune
+# says. The explicit
 # refspec covers every branch even when a clone tracks only some of them. A failed
 # fetch only leaves the last-known refs in place, so the unchanged checks below
 # still refuse work those refs do not show; REMOTE_REFRESH_FAILED names it for the
 # refusal. The no-mistakes gate is skipped: it is a local validation copy, and
 # fetching it would count work as landed that no real remote holds.
-FETCH_TIMEOUT=${FM_TEARDOWN_FETCH_TIMEOUT:-30}
-case "$FETCH_TIMEOUT" in ''|0*|*[!0-9]*) FETCH_TIMEOUT=30 ;; esac
 REMOTE_REFS_REFRESHED=0
 REMOTE_REFRESH_FAILED=
 refresh_remote_refs() {
@@ -2128,7 +2127,7 @@ refresh_remote_refs() {
   REMOTE_REFS_REFRESHED=1
   while IFS= read -r remote; do
     case "$remote" in ''|no-mistakes) continue ;; esac
-    GIT_TERMINAL_PROMPT=0 fm_run_timed "$FETCH_TIMEOUT" git -C "$WT" fetch --quiet --no-prune --no-tags --no-recurse-submodules \
+    GIT_TERMINAL_PROMPT=0 fm_run_timed 30 git -C "$WT" fetch --quiet --no-prune --no-tags --no-recurse-submodules \
       "$remote" "+refs/heads/*:refs/remotes/$remote/*" </dev/null >/dev/null 2>&1 \
       || REMOTE_REFRESH_FAILED="$REMOTE_REFRESH_FAILED${REMOTE_REFRESH_FAILED:+, }$remote"
   done <<EOF

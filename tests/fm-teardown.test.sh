@@ -931,7 +931,7 @@ add_fetch_logging_git() {
 for arg in "\$@"; do
   if [ "\$arg" = fetch ]; then
     printf '%s\n' "\$*" >> "$case_dir/fetch.log"
-    [ -z "\${FM_TEST_FETCH_HANG:-}" ] || sleep 30
+    [ -z "\${FM_TEST_FETCH_HANG:-}" ] || sleep 120
     break
   fi
 done
@@ -1101,14 +1101,15 @@ test_hung_fetch_is_bounded_and_refuses() {
 
   started=$(date +%s)
   set +e
-  FM_TEST_FETCH_HANG=1 FM_TEARDOWN_FETCH_TIMEOUT=1 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_TEST_FETCH_HANG=1 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   elapsed=$(( $(date +%s) - started ))
 
   expect_code 1 "$rc" "hung-fetch: a hung refresh must refuse"
   grep -q 'Could not refresh remote: origin' "$case_dir/stderr" || fail "hung-fetch: refusal does not name the remote"
-  [ "$elapsed" -lt 25 ] || fail "hung-fetch: teardown waited ${elapsed}s, past its bound"
+  [ "$elapsed" -ge 29 ] || fail "hung-fetch: teardown gave up after ${elapsed}s, before the 30-second bound"
+  [ "$elapsed" -lt 60 ] || fail "hung-fetch: teardown waited ${elapsed}s, past the 30-second bound"
   pass "a hung refresh is cut off at its bound and refuses"
 }
 
