@@ -3554,18 +3554,6 @@ if [ -z "$FM_WATCH_DELIVERY_IDENTITY" ] \
   exit 1
 fi
 
-handling_successor_has_queued_row() {
-  local queued=1
-  if ! fm_recovery_lock_wait "$FM_WAKE_QUEUE_LOCK" "$STARTUP_LOCK_BOUND"; then
-    if [ -n "${FM_RECOVERY_HELD_PID:-}" ] && fm_pid_alive "$FM_RECOVERY_HELD_PID"; then
-      echo "watcher: startup lock $FM_WAKE_QUEUE_LOCK held by live pid $FM_RECOVERY_HELD_PID; skipping resurface check" >&2
-    fi
-    return 1
-  fi
-  [ ! -s "$FM_WAKE_QUEUE" ] || queued=0
-  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-  return "$queued"
-}
 # A bounded startup recovery-lock failure reports the typed line the arm relays; a
 # transient or dead holder keeps the legacy stderr diagnostic.
 startup_lock_failed() {
@@ -3698,7 +3686,7 @@ resurface_after_downtime() {
       exit 1
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
-    handling_successor_has_queued_row || return 0
+    [ "$FM_RECOVERY_MARKER_QUEUED" = 1 ] || return 0
     wake "check: rearm-resurface"
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then

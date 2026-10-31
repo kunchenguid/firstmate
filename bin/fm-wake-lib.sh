@@ -1120,12 +1120,15 @@ fm_recovery_lock_wait() {  # <lockdir> <bound-seconds>
 _fm_recovery_marker_arm_check() {
   local marker=$1 bound=${2:-} lock line quarantine
   FM_RECOVERY_MARKER_ACTION='none'
+  FM_RECOVERY_MARKER_QUEUED=0
   lock="${marker}.lock"
   fm_recovery_lock_wait "$FM_WAKE_QUEUE_LOCK" "$bound" || return 1
   if ! fm_recovery_lock_wait "$lock" "$bound"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
+  # shellcheck disable=SC2034 # Output read by callers after this function returns.
+  [ ! -s "$FM_WAKE_QUEUE" ] || FM_RECOVERY_MARKER_QUEUED=1
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     if [ -s "$FM_WAKE_QUEUE" ]; then
       if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
