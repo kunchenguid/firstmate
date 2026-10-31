@@ -55,11 +55,16 @@ claim_pool_slot() {  # <case> <task-id> [home]
   printf 'task=%s\nhome=%s\n' "$id" "$home" > "$dir/pool/1/.fm-slot-owner"
 }
 
-run_case() {  # <case> <id>
-  local dir=$1 id=$2
+run_teardown() {  # <case> <id> [teardown args...]
+  local dir=$1
+  shift
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
   FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-    "$TEARDOWN" "$id" --force
+    "$TEARDOWN" "$@"
+}
+
+run_case() {  # <case> <id>
+  run_teardown "$1" "$2" --force
 }
 
 assert_refused_without_mutation() {  # <case> <id> <description>
@@ -1150,6 +1155,351 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+# Two records naming one pool slot - a finished task whose stale record still
+# names the slot, and the task the pool handed it to - follow the slot's owner
+# claim, never the record scan alone.
+write_two_records_on_one_slot() {  # <case> <stale-id> <owner-id>
+  local dir=$1 stale=$2 owner=$3
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "tmux_server=$dir/tmux.sock" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$owner.meta" \
+    "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+    "tmux_server=$dir/tmux.sock" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+}
+
+# A tmux whose inventory optionally lists <task-id>'s window with <command> in
+# the foreground. Read-only queries are answered silently; anything else is
+# logged as a runtime mutation.
+make_tmux_endpoint() {  # <case> <task-id-or-empty> <command-or-empty>
+  local dir=$1 id=$2 command=$3
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -S ]; then
+  [ "\${2:-}" = '$dir/tmux.sock' ] || exit 94
+  shift 2
+fi
+case "\$1" in
+  list-windows)
+    [ -z '$id' ] || printf 'fm-%s\\n' '$id'
+    exit 0
+    ;;
+  display-message)
+    case "\$*" in
+      *pane_current_command*) [ -z '$command' ] || printf '%s\\n' '$command' ;;
+    esac
+    exit 0
+    ;;
+esac
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\\n' >> "\${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+}
+
+LOCK_HOLDER_PID=
+start_lock_holder() {  # <lock-path>
+  local lock=$1 i=0
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 30
+  ) &
+  LOCK_HOLDER_PID=$!
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || {
+    kill "$LOCK_HOLDER_PID" 2>/dev/null || true
+    wait "$LOCK_HOLDER_PID" 2>/dev/null || true
+    fail "could not stage held lock $lock"
+  }
+}
+
+stop_lock_holder() {
+  kill "$LOCK_HOLDER_PID" 2>/dev/null || true
+  wait "$LOCK_HOLDER_PID" 2>/dev/null || true
+  LOCK_HOLDER_PID=
+}
+
+assert_claimed_owner_tore_down_past_stale_record() {  # <case> <stale-id> <owner-id> <label>
+  local dir=$1 stale=$2 owner=$3 label=$4
+  assert_absent "$dir/home/state/$owner.meta" "$label: the owner's record was not removed"
+  assert_present "$dir/home/state/$stale.meta" "$label: the stale task's record was removed by another task's teardown"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "$label: the owner left its spent slot claim behind"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "$label: the owner did not return its own pool slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$stale" "$label: the warning should name the stale record"
+  assert_contains "$(cat "$dir/stderr")" "stale" "$label: the warning should call the other record stale"
+}
+
+test_two_records_on_one_slot_follow_the_owner_claim() {
+  local dir stale=stale-task owner=owner-task rc
+
+  # mine: the claim names the task being torn down and the other record's own
+  # endpoint is present but agent-free, so that record is stale rather than
+  # ambiguous. The owner returns its own slot and drops its claim; the stale
+  # record is left for its own teardown.
+  dir=$(make_case two-records-claim-mine)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  make_tmux_endpoint "$dir" "$stale" bash
+  set +e
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "teardown of the claimed owner refused over a stale record: $(cat "$dir/stderr")"
+  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine"
+
+  dir=$(make_case two-records-claim-mine-control-locked)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  make_tmux_endpoint "$dir" "$stale" bash
+  start_lock_holder "$dir/home/state/.control-$stale.lock"
+  assert_refused_without_mutation "$dir" "$owner" "mine with stale record lifecycle lock held"
+  stop_lock_holder
+  : > "$dir/stderr"
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "owner teardown did not recover after the stale lifecycle action finished: $(cat "$dir/stderr")"
+  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine after lifecycle contention"
+
+  dir=$(make_case two-records-claim-mine-meta-locked)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  make_tmux_endpoint "$dir" "$stale" bash
+  start_lock_holder "$dir/home/state/.meta-$stale.lock"
+  assert_refused_without_mutation "$dir" "$owner" "mine with stale record metadata lock held"
+  stop_lock_holder
+  : > "$dir/stderr"
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "owner teardown did not recover after the stale metadata update finished: $(cat "$dir/stderr")"
+  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine after metadata contention"
+
+  # The same teardown without --force, the path that keeps the unlanded-work
+  # check, also gets past the scan.
+  dir=$(make_case two-records-claim-mine-unforced)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  make_tmux_endpoint "$dir" "$stale" bash
+  mkdir -p "$dir/home/data/$owner"
+  printf 'scout report\n' > "$dir/home/data/$owner/report.md"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/home" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$owner" --none >/dev/null \
+    || fail "could not record the owner's completed captain-call inventory"
+  set +e
+  run_teardown "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "unforced teardown of the claimed owner refused over a stale record: $(cat "$dir/stderr")"
+  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" "mine, unforced"
+
+  # mine, but tmux reports the other record missing without carrying the socket
+  # identity needed to prove that endpoint gone, so the scan refuses.
+  dir=$(make_case two-records-claim-mine-other-missing)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  grep -v '^tmux_server=' "$dir/home/state/$stale.meta" > "$dir/home/state/$stale.meta.tmp"
+  mv "$dir/home/state/$stale.meta.tmp" "$dir/home/state/$stale.meta"
+  make_tmux_endpoint "$dir" '' ''
+  assert_refused_without_mutation "$dir" "$owner" "mine with an unproven missing other record: owner teardown"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
+    "mine with an unproven missing other record: the refusal should name the other record"
+  assert_present "$dir/pool/1/.fm-slot-owner" "mine with an unproven missing other record: the claim was removed"
+  assert_present "$dir/home/state/$stale.meta" "mine with an unproven missing other record: the other record was removed"
+
+  # mine, but the other record's endpoint is live: a home whose allocator wrote
+  # no claim may have taken the slot after this claim, so the claim alone is
+  # not proof and the record scan refuses exactly as before.
+  dir=$(make_case two-records-claim-mine-other-live)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  make_tmux_endpoint "$dir" "$stale" claude
+  assert_refused_without_mutation "$dir" "$owner" "mine with a live other record: owner teardown"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
+    "mine with a live other record: the refusal should name the other record"
+  assert_present "$dir/pool/1/.fm-slot-owner" "mine with a live other record: the claim was removed"
+  assert_present "$dir/home/state/$stale.meta" "mine with a live other record: the other record was removed"
+
+  # other: the claim names a different task, so this teardown is records-only
+  # and every slot step is skipped, whatever the record scan would find.
+  dir=$(make_case two-records-claim-other)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  set +e
+  run_case "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "records-only teardown of the stale record failed: $(cat "$dir/stderr")"
+  assert_reassigned_slot_left_alone "$dir" "$stale" "$owner" "other: stale record beside the owner's record"
+  assert_present "$dir/worktree/sentinel" "other: records-only teardown reset the owner's slot"
+  assert_present "$dir/home/state/$owner.meta" "other: records-only teardown removed the owner's record"
+
+  # absent: no claim proves either record, so the record scan still refuses
+  # both teardowns exactly as before.
+  dir=$(make_case two-records-claim-absent)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  assert_refused_without_mutation "$dir" "$owner" "absent: owner teardown"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
+    "absent: the owner's refusal should name the other record"
+  assert_refused_without_mutation "$dir" "$stale" "absent: stale teardown"
+  assert_contains "$(cat "$dir/stderr")" "is also task $owner's recorded worktree" \
+    "absent: the stale task's refusal should name the other record"
+  assert_present "$dir/home/state/$owner.meta" "absent: a refusal removed the other record"
+
+  # unreadable: a claim with no task= line proves nothing, so the record scan
+  # still refuses.
+  dir=$(make_case two-records-claim-unreadable)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  printf 'home=%s\n' "$dir/home" > "$dir/pool/1/.fm-slot-owner"
+  assert_refused_without_mutation "$dir" "$owner" "unreadable claim: owner teardown"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
+    "unreadable claim: the refusal should name the other record"
+  assert_present "$dir/pool/1/.fm-slot-owner" "unreadable claim: the claim was removed"
+  assert_present "$dir/home/state/$stale.meta" "unreadable claim: the other record was removed"
+
+  # A claim naming this task id but recorded by a different, existing home is
+  # not proof this record owns the slot, so the record scan still refuses.
+  dir=$(make_case two-records-claim-foreign-home)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  mkdir -p "$dir/other-home/state"
+  claim_pool_slot "$dir" "$owner" "$dir/other-home"
+  assert_refused_without_mutation "$dir" "$owner" "foreign-home claim: owner teardown"
+  assert_present "$dir/pool/1/.fm-slot-owner" "foreign-home claim: the claim was removed"
+  assert_present "$dir/home/state/$stale.meta" "foreign-home claim: the other record was removed"
+
+  pass "fm-teardown: two records on one pool slot follow the slot's owner claim"
+}
+
+test_conflicting_record_liveness_uses_its_recorded_tmux_server() {
+  local dir stale=stale-task owner=owner-task idle_socket live_socket rc sleep_bin
+  [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
+  dir=$(make_case two-tmux-servers-same-window)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  idle_socket="$dir/idle.sock"
+  live_socket="$dir/live.sock"
+  sleep_bin=$(command -v sleep) || fail "sleep is required for the tmux server identity test"
+  cp "$sleep_bin" "$dir/claude"
+
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$idle_socket" -f /dev/null \
+    new-session -d -s firstmate -n "fm-$stale" \
+    || fail "could not start the idle tmux server"
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$live_socket" -f /dev/null \
+    new-session -d -s firstmate -n "fm-$stale" "$dir/claude 30" \
+    || fail "could not start the live tmux server"
+  awk -v socket="$live_socket" '
+    /^tmux_server=/ { print "tmux_server=" socket; next }
+    { print }
+  ' "$dir/home/state/$stale.meta" > "$dir/home/state/$stale.meta.tmp"
+  mv "$dir/home/state/$stale.meta.tmp" "$dir/home/state/$stale.meta"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -S ]; then
+  exec '$REAL_TMUX' "\$@"
+fi
+exec '$REAL_TMUX' -S '$idle_socket' "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  set +e
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$idle_socket" kill-server >/dev/null 2>&1 || true
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$live_socket" kill-server >/dev/null 2>&1 || true
+
+  [ "$rc" -ne 0 ] || fail "the idle server authorized teardown over the live conflicting endpoint"
+  assert_present "$dir/home/state/$owner.meta" "wrong-server liveness removed the owner's record"
+  assert_present "$dir/home/state/$stale.meta" "wrong-server liveness removed the conflicting record"
+  assert_present "$dir/worktree/sentinel" "wrong-server liveness reset the shared slot"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
+    "the refusal should identify the live conflicting task"
+  pass "fm-teardown: conflicting tmux liveness is read only from the server recorded for that task"
+}
+
+test_missing_conflicting_record_requires_empty_worktree_inventory() {
+  local dir stale=stale-task owner=owner-task holder
+  command -v lsof >/dev/null 2>&1 || { echo "skip - lsof not installed"; return 0; }
+  dir=$(make_case missing-endpoint-live-worktree-holder)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "tmux_server=$dir/tmux.sock" "endpoint_pid=999999999" \
+    "endpoint_pid_start=proc-starttime=1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  make_tmux_endpoint "$dir" '' ''
+  (cd "$dir/worktree" && sleep 30) &
+  holder=$!
+
+  assert_refused_without_mutation "$dir" "$owner" "missing endpoint with a live worktree holder"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  : > "$dir/stderr"
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "missing endpoint with dead recorded process and no worktree holder did not tear down: $(cat "$dir/stderr")"
+  assert_claimed_owner_tore_down_past_stale_record "$dir" "$stale" "$owner" \
+    "missing endpoint after its process evidence cleared"
+  pass "fm-teardown: tmux absence requires both a dead recorded process and an empty worktree process inventory"
+}
+
+test_conflicting_record_moved_window_is_not_missing() {
+  local dir stale=stale-task owner=owner-task socket rc sleep_bin endpoint_pid endpoint_start
+  [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
+  dir=$(make_case moved-tmux-window)
+  write_two_records_on_one_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  socket="$dir/moved.sock"
+  sleep_bin=$(command -v sleep) || fail "sleep is required for the moved-window test"
+  cp "$sleep_bin" "$dir/claude"
+
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" -f /dev/null \
+    new-session -d -s firstmate -n "fm-$stale" -c "$dir/worktree" "$dir/claude 30" \
+    || fail "could not start the conflicting tmux worker"
+  endpoint_pid=$(env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" \
+    display-message -p -t "firstmate:fm-$stale" '#{pane_pid}') \
+    || fail "could not read the conflicting worker pid"
+  endpoint_start=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_start_time "$2"' _ "$ROOT" "$endpoint_pid") \
+    || fail "could not record the conflicting worker start time"
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" -f /dev/null \
+    new-session -d -s moved -n control \
+    || fail "could not create the destination tmux session"
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" \
+    move-window -s "firstmate:fm-$stale" -t moved: \
+    || fail "could not move the conflicting worker window"
+  awk -v socket="$socket" -v pid="$endpoint_pid" -v start="$endpoint_start" '
+    /^tmux_server=/ { print "tmux_server=" socket; print "endpoint_pid=" pid; print "endpoint_pid_start=" start; next }
+    { print }
+  ' "$dir/home/state/$stale.meta" > "$dir/home/state/$stale.meta.tmp"
+  mv "$dir/home/state/$stale.meta.tmp" "$dir/home/state/$stale.meta"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+exec '$REAL_TMUX' -S '$socket' "\$@"
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  set +e
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" kill-server >/dev/null 2>&1 || true
+
+  [ "$rc" -ne 0 ] || fail "a moved conflicting worker was mistaken for a gone endpoint"
+  assert_present "$dir/home/state/$owner.meta" "moved-window liveness removed the owner's record"
+  assert_present "$dir/home/state/$stale.meta" "moved-window liveness removed the conflicting record"
+  assert_present "$dir/worktree/sentinel" "moved-window liveness reset the shared slot"
+  assert_contains "$(cat "$dir/stderr")" "is also task $stale's recorded worktree" \
+    "the refusal should identify the moved conflicting task"
+  pass "fm-teardown: a window moved on its recorded tmux server remains a live conflicting worker"
+}
+
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
 # When FM_TEST_BLOCK_KILL is set, `kill-window` alone fails without forwarding,
@@ -1539,6 +1889,10 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
+test_two_records_on_one_slot_follow_the_owner_claim
+test_conflicting_record_liveness_uses_its_recorded_tmux_server
+test_missing_conflicting_record_requires_empty_worktree_inventory
+test_conflicting_record_moved_window_is_not_missing
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot

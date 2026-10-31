@@ -1024,7 +1024,10 @@ set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
   display-message)
-    for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
+    for a in "\$@"; do case "\$a" in
+      *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;;
+      *socket_path*) printf '/tmp/fm-backend-test.sock\\n'; exit 0 ;;
+    esac; done
     printf 'firstmate\\n'; exit 0 ;;
   new-window)
     _name=
@@ -1340,6 +1343,8 @@ test_spawn_default_backend_writes_no_meta_field() {
   expect_code 0 $? "explicit --backend tmux should spawn successfully"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux (the default) must not write backend= to meta (P1 compatibility contract)"
+  assert_grep 'tmux_server=/tmp/fm-backend-test.sock' "$state/$id.meta" \
+    "a tmux task record must bind safety-critical liveness reads to its exact server"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
 }

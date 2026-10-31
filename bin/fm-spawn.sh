@@ -78,22 +78,26 @@
 #   model, and effort may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with both a recovery-grade agent-state classifier
-#   and replacement-agent support (tmux or herdr), and clears the previous
+#   and replacement-agent support (tmux, herdr, or rex), and clears the previous
 #   harness's per-task wiring before arming the new incarnation. T3 Code has
 #   the classifier but refuses relaunch because a thread keeps its conversation
 #   across turns and provider changes. Two verdicts are agent-free: a `dead`
 #   endpoint is ADOPTED as-is, while an endpoint PROVEN gone is RE-CREATED in the recorded
 #   worktree and the republished record rebinds the task to it. That proof is
 #   its own step, because a backend's `missing` also covers an endpoint that is
-#   merely unreachable from here - and it is only available on HERDR, which must
-#   still read the recorded pane as gone once that session's server is running
-#   again. A tmux `missing` always refuses: a task record carries no socket
+#   merely unreachable from here - and it is available only on Herdr and Rex.
+#   Herdr must still read the recorded pane as gone once that session's server is
+#   running again; Rex requires an authoritative not-found from the recorded
+#   server. A tmux `missing` always refuses: a task record carries no socket
 #   identity for its endpoint, so no read here can tell a destroyed window from
 #   one on a tmux server this process cannot address. An endpoint that turns out
 #   to have survived refuses too. The worktree is reused untouched either way; a
 #   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
-#   (`--secondmate`, driven by the session-start liveness sweep).
+#   (`--secondmate`, driven by the session-start liveness sweep). Before adopting
+#   a Treehouse pool worktree, relaunch holds the shared project lock and accepts
+#   only an absent legacy claim or this task's claim from this task's own home;
+#   contradictory, unreadable, and unverifiable-home claims refuse before launch.
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
@@ -200,8 +204,9 @@
 #   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
 #   root Firstmate home's state directory before slot allocation and holds it through
 #   task metadata publication. Teardown holds that same lock while proving and
-#   returning a slot, so allocation cannot reuse a slot before its owner record
-#   is published. Under that same lock it writes the slot's owner claim, which is
+#   returning a slot, and a relaunch of an actual pool slot holds it through
+#   recorded-worktree adoption and publication, so none can race another slot
+#   assignment. Under that same lock a fresh spawn writes the slot's owner claim, which is
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
@@ -2369,12 +2374,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #           `unreadable` is rechecked too, because a stopped Rex server
   #           reads as unreachable to a read that never starts it
   #           (fm_control_absence_recheck_applies owns that rule).
-  #   tmux  - REFUSES, always. A task record carries no socket identity for its
-  #           endpoint, and a server-wide inventory describes only the server
-  #           this process addresses, so no read available here can tell "gone"
-  #           from "on a server I cannot see". A tmux `missing` therefore stays
-  #           as deadlocked as it was before this change - deliberately, and
-  #           with the reason stated rather than guessed past.
+  #   tmux  - REFUSES, always. New records may carry tmux_server for teardown's
+  #           narrower slot-collision proof, but legacy records do not; reclaim
+  #           keeps one fail-closed contract for both shapes rather than
+  #           granting only newer tasks a rebind path.
   # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
   # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
   # owns that vocabulary). The proof itself lives in one place for the whole
@@ -2439,7 +2442,38 @@ if [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID has no recorded project; refusing to relaunch" >&2
       exit 1
     }
+    if fm_treehouse_pool_slot "$PROJ" "$RELAUNCH_WT"; then
+      SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") || {
+        echo "error: could not resolve the shared Treehouse project lock for $PROJ" >&2
+        exit 1
+      }
+      if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+        echo "error: another Treehouse slot allocation or return is in progress for $PROJ; refusing to race it" >&2
+        exit 1
+      fi
+      SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+    fi
   fi
+  # Relaunch is the recorded-worktree adoption owner, including fm-control.
+  # An absent claim remains compatible with records predating slot claims.
+  fm_treehouse_slot_owner_state "$RELAUNCH_WT" "$ID"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    absent) ;;
+    mine)
+      if ! fm_treehouse_slot_claim_home_owns_state "$FM_TREEHOUSE_SLOT_OWNER_HOME" "$STATE" "$STATE" "$FM_HOME"; then
+        echo "error: task $ID's recorded worktree has a slot claim from another Firstmate home; refusing to adopt a slot whose owner cannot be verified" >&2
+        exit 1
+      fi
+      ;;
+    other)
+      echo "error: task $ID's recorded worktree is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID; refusing to adopt another task's slot" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: task $ID's recorded worktree has an unreadable slot claim; refusing to adopt a slot whose owner cannot be verified" >&2
+      exit 1
+      ;;
+  esac
   if [ "$BACKEND" = herdr ]; then
     # fm-spawn uses HERDR_PANE_ID for the TASK's pane, while the herdr adapter
     # reads that SAME name as the pane THIS process is itself running in
@@ -6884,6 +6918,18 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 [ "$BACKEND" = t3code ] && META_WINDOW=$W
+FM_TMUX_TASK_SERVER=
+FM_TMUX_ENDPOINT_PID=
+FM_TMUX_ENDPOINT_PID_START=
+if [ "$BACKEND" = tmux ]; then
+  FM_TMUX_TASK_SERVER=$(fm_backend_tmux_server_identity 2>/dev/null || true)
+  FM_TMUX_ENDPOINT_PID=$(tmux display-message -p -t "$WT_TARGET" '#{pane_pid}' 2>/dev/null || true)
+  case "$FM_TMUX_ENDPOINT_PID" in
+    ''|*[!0-9]*) FM_TMUX_ENDPOINT_PID= ;;
+    *) FM_TMUX_ENDPOINT_PID_START=$(fm_pid_start_time "$FM_TMUX_ENDPOINT_PID" 2>/dev/null || true) ;;
+  esac
+  [ -n "$FM_TMUX_ENDPOINT_PID_START" ] || FM_TMUX_ENDPOINT_PID=
+fi
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -6901,7 +6947,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend tmux_server endpoint_pid endpoint_pid_start herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -6910,6 +6956,9 @@ preserve_relaunch_meta() {
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
+  [ -z "$FM_TMUX_TASK_SERVER" ] || echo "tmux_server=$FM_TMUX_TASK_SERVER"
+  [ -z "$FM_TMUX_ENDPOINT_PID" ] || echo "endpoint_pid=$FM_TMUX_ENDPOINT_PID"
+  [ -z "$FM_TMUX_ENDPOINT_PID_START" ] || echo "endpoint_pid_start=$FM_TMUX_ENDPOINT_PID_START"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
