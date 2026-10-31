@@ -590,7 +590,8 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
 # fm_backend_zellij_target_absent: prove that the recorded pane and tab are
 # gone. Every pane and tab of the session is read, and neither the recorded
 # pane nor the recorded tab may still be listed. A read that cannot run, or
-# an inventory that still names the target, is not proof of absence.
+# an inventory that still names the target, is not proof of absence. Plugin
+# panes use a separate ID space and cannot keep a terminal target alive.
 fm_backend_zellij_target_absent() {
   local session=$1 pane=$2 tab=${3:-} label=${4:-} panes tabs scoped=
   [ -z "$label" ] || scoped=$(fm_backend_zellij_scoped_title "$label")
@@ -598,7 +599,7 @@ fm_backend_zellij_target_absent() {
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
   printf '%s' "$panes" | jq -e --argjson pane "$pane" '
     type == "array" and all(.[]; (.id | type == "number"))
-    and all(.[]; .id != $pane)
+    and all(.[]; .is_plugin == true or .id != $pane)
   ' >/dev/null 2>&1 || return 1
   printf '%s' "$tabs" | jq -e --arg tab "$tab" --arg label "$label" --arg scoped "$scoped" '
     type == "array" and all(.[]; (.tab_id | type == "number") and (.name | type == "string"))

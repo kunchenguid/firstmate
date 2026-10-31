@@ -820,6 +820,35 @@ test_kill_skips_recorded_tab_when_label_mismatches() {
   pass "fm_backend_zellij_kill: skips a stale recorded tab id whose label does not match"
 }
 
+test_confirmed_kill_ignores_same_id_plugin_pane() {
+  local dir fb
+  dir="$TMP_ROOT/confirmed-kill-plugin-id"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  printf '[{"id":7,"tab_id":4,"is_plugin":true}]\n' > "$dir/responses/3.out"
+  printf '[]\n' > "$dir/responses/4.out"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill_confirmed firstmate:7' "$ROOT"
+  expect_code 0 $? "confirmed kill should prove terminal absence despite a same-numbered plugin pane"
+  pass "fm_backend_zellij_kill_confirmed: plugin pane IDs do not keep terminal slots claimed"
+}
+
+test_confirmed_kill_rejects_surviving_terminal_pane() {
+  local dir fb status
+  dir="$TMP_ROOT/confirmed-kill-terminal-id"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_pane_response "$dir" 3 7 4
+  printf '[]\n' > "$dir/responses/4.out"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill_confirmed firstmate:7' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "confirmed kill must reject an inventory that still contains terminal pane 7"
+  pass "fm_backend_zellij_kill_confirmed: a surviving terminal pane still prevents release"
+}
+
 test_kill_is_noop_when_session_absent() {
   local dir fb
   dir="$TMP_ROOT/kill-no-session"; mkdir -p "$dir/responses"
@@ -1337,6 +1366,8 @@ test_kill_resolves_tab_and_closes_by_id
 test_kill_falls_back_to_close_pane_when_tab_lookup_empty
 test_kill_closes_recorded_tab_when_pane_already_gone
 test_kill_skips_recorded_tab_when_label_mismatches
+test_confirmed_kill_ignores_same_id_plugin_pane
+test_confirmed_kill_rejects_surviving_terminal_pane
 test_kill_is_noop_when_session_absent
 test_teardown_passes_recorded_tab_id_to_zellij_kill
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
