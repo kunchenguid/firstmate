@@ -182,6 +182,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-classify-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
@@ -1559,7 +1561,9 @@ detect_local_tools() {
 }
 
 record_hygiene_report() {
-  local file id output now cutoff archive dir pr seen_prs prior backend target endpoint_state n file_mtime
+  local file id output now cutoff archive dir pr seen_prs prior backend target endpoint_state n file_mtime read_timeout read_status
+  read_timeout=${FM_RECORD_HYGIENE_READ_TIMEOUT:-10}
+  case "$read_timeout" in ''|*[!0-9]*|0) read_timeout=10 ;; esac
   seen_prs=
   now=$(date +%s)
   cutoff=$((now - 86400))
@@ -1607,11 +1611,27 @@ record_hygiene_report() {
     if [ -z "$backend" ] || [ -z "$target" ]; then
       echo "RECORD_HYGIENE: metadata has no endpoint: $id"
     else
-      if fm_backend_target_exists "$backend" "$target" >/dev/null 2>&1; then
+      # shellcheck disable=SC2016 # The timed child receives the function and arguments as positional parameters.
+      if fm_run_timed "$read_timeout" bash -c 'source "$1"; shift; "$@"' _ "$SCRIPT_DIR/fm-backend.sh" fm_backend_target_exists "$backend" "$target" >/dev/null 2>&1; then
         :
       else
-        endpoint_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
-        [ "$endpoint_state" = missing ] && echo "RECORD_HYGIENE: metadata has no endpoint: $id"
+        read_status=$?
+        if fm_timed_out "$read_status"; then
+          echo "RECORD_HYGIENE: endpoint read timed out after ${read_timeout}s: $id"
+        else
+          # shellcheck disable=SC2016 # The timed child receives the function and arguments as positional parameters.
+          endpoint_state=$(fm_run_timed "$read_timeout" bash -c 'source "$1"; shift; "$@"' _ "$SCRIPT_DIR/fm-backend.sh" fm_backend_agent_state "$backend" "$target" 2>/dev/null)
+          read_status=$?
+          if fm_timed_out "$read_status"; then
+            echo "RECORD_HYGIENE: endpoint read timed out after ${read_timeout}s: $id"
+          elif [ "$endpoint_state" = missing ]; then
+            echo "RECORD_HYGIENE: metadata has no endpoint: $id"
+          elif [ "$endpoint_state" = unreadable ]; then
+            echo "RECORD_HYGIENE: metadata endpoint could not be read: $id"
+          elif [ "$endpoint_state" = unverified ]; then
+            echo "RECORD_HYGIENE: metadata endpoint could not be verified: $id"
+          fi
+        fi
       fi
     fi
     pr=$(sed -n 's/^pr=//p' "$file" | head -1)
@@ -1624,8 +1644,16 @@ record_hygiene_report() {
     fi
   done
 
-  if command -v tasks-axi >/dev/null 2>&1; then
-    output=$(fm_backlog_row_list "$DATA" --state in_flight 2>/dev/null || true)
+  if command -v tasks-axi >/dev/null 2>&1 && [ -d "$DATA" ]; then
+    output=$(FM_TASKS_AXI_TIMEOUT="$read_timeout" fm_backlog_row_list "$DATA" --state in_flight 2>&1)
+    read_status=$?
+    if fm_timed_out "$read_status"; then
+      echo "RECORD_HYGIENE: In-flight backlog read timed out after ${read_timeout}s"
+      return 0
+    elif [ "$read_status" -ne 0 ]; then
+      echo "RECORD_HYGIENE: In-flight backlog read failed (exit=$read_status): $(printf '%s' "$output" | head -1)"
+      return 0
+    fi
     while IFS= read -r id; do
       [ -n "$id" ] && [ ! -e "$STATE/$id.meta" ] && echo "RECORD_HYGIENE: In-flight backlog row without metadata: $id"
     done < <(printf '%s\n' "$output" | awk '

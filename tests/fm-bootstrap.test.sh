@@ -269,7 +269,7 @@ assert_timeout_report() {
 test_record_hygiene_archives_old_orphan_status() {
   local case_dir fakebin out
   case_dir="$TMP_ROOT/record-hygiene"
-  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   cat > "$fakebin/tasks-axi" <<'SH'
@@ -288,6 +288,7 @@ SH
   printf '%s\n' 'failed [at=1]: fixture orphan' > "$case_dir/home/state/orphan.status"
   touch -t 202001010000 "$case_dir/home/state/orphan.status"
   printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/first.meta"
+  printf '%s\n' 'pr=https://example.test/pull/99' > "$case_dir/home/state/middle.meta"
   printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/second.meta"
   printf 'kind=ship\nbackend=tmux\nwindow=missing:window\n' > "$case_dir/home/state/no-tab.meta"
   printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/no-window.meta"
@@ -308,7 +309,70 @@ SH
   assert_not_contains "$out" 'linked' "bootstrap read symlinked metadata"
   [ -f "$case_dir/home/data/orphan/status.log" ] || fail "bootstrap did not archive the orphan status log"
   [ ! -e "$case_dir/home/state/orphan.status" ] || fail "archived orphan status log remained in state"
-  pass "bootstrap archives an old orphan status log"
+  assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
+    "bootstrap lost duplicate PR detection across an intervening metadata record"
+  pass "bootstrap archives an old orphan status log and reports interleaved duplicates"
+}
+
+test_record_hygiene_bounds_backlog_read() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/record-hygiene-timeout"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo 0.2.6 ;;
+  update) echo 'usage: tasks-axi update <id> --body-file <path> --archive-body' ;;
+  mv) echo 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+  list) sleep 5 ;;
+esac
+SH
+  chmod +x "$fakebin/tasks-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_RECORD_HYGIENE_READ_TIMEOUT=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog read timed out after 1s' \
+    "bootstrap did not report a bounded backlog read timeout"
+  pass "bootstrap bounds and reports backlog read timeout"
+}
+
+test_record_hygiene_bounds_endpoint_reads_and_reports_unverified() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/record-hygiene-endpoint-timeout"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+sleep 5
+SH
+  chmod +x "$fakebin/tmux"
+  printf 'kind=ship\nbackend=tmux\nwindow=session:0\n' > "$case_dir/home/state/slow.meta"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_RECORD_HYGIENE_READ_TIMEOUT=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'RECORD_HYGIENE: endpoint read timed out after 1s: slow' \
+    "bootstrap did not report a bounded endpoint read timeout"
+
+  case_dir="$TMP_ROOT/record-hygiene-unverified-endpoint"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' zellij > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/zellij"
+  printf 'kind=ship\nbackend=zellij\nwindow=session:1\n' > "$case_dir/home/state/unverified.meta"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_RECORD_HYGIENE_READ_TIMEOUT=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'RECORD_HYGIENE: metadata endpoint could not be verified: unverified' \
+    "bootstrap hid an unverified backend endpoint"
+  pass "bootstrap bounds endpoint reads and reports unverified endpoints distinctly"
 }
 
 test_bootstrap_reporting() {
@@ -1585,6 +1649,8 @@ SH
 }
 
 test_record_hygiene_archives_old_orphan_status
+test_record_hygiene_bounds_backlog_read
+test_record_hygiene_bounds_endpoint_reads_and_reports_unverified
 test_bootstrap_reporting
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version
