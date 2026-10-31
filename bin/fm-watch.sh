@@ -458,6 +458,7 @@ case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WI
 # invisibly - except an item held for the captain while the away-posture record
 # exists, which is never rechecked (away_record_present below).
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+PAUSE_UNDATED_MAX_SECS=${FM_PAUSE_UNDATED_MAX_SECS:-$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT}
 # A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
 # status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
 # rechecked before that time, and it is rechecked once as soon as that time
@@ -2468,6 +2469,11 @@ handle_paused_stale() {  # <window> <task> <hash>
     if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
       return 0
+    elif [ "$now" -ge "$(( until + PAUSE_RESURFACE_SECS ))" ]; then
+      detail="paused, wait overdue"
+      reason="paused ${age}s, wait overdue - decide or release"
+      declaration="$declaration:overdue"
+      min_age=0
     elif [ "$now" -lt "$until" ]; then
       detail="paused, declared time beyond recheck cadence"
       reason="paused ${age}s, awaiting external - the declared time is beyond the recheck cadence; confirm the wait still holds"
@@ -2480,8 +2486,17 @@ handle_paused_stale() {  # <window> <task> <hash>
       min_age=0
     fi
   else
-    detail="paused, awaiting external"
-    reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
+    local undated_max=$PAUSE_UNDATED_MAX_SECS
+    case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
+    if [ "$age" -ge "$undated_max" ]; then
+      detail="paused, wait overdue"
+      reason="paused ${age}s, wait overdue - decide or release"
+      declaration="$declaration:overdue"
+      min_age=0
+    else
+      detail="paused, awaiting external"
+      reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
+    fi
   fi
   resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
