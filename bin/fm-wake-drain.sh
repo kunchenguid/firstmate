@@ -33,6 +33,15 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
+case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -782,6 +791,31 @@ print_status_sections() {
   rm -f -- "$prepared"
 }
 
+print_ready_work_section() {  # <deduped-raw-rows>
+  local rows=$1 ready gate_status
+  printf '%s\n' "$rows" | awk -F '\t' '$3 == "heartbeat" { found=1 } END { exit !found }' || return 0
+  if fm_backlog_transition_applies "$CONFIG" "$DATA" ship; then
+    :
+  else
+    gate_status=$?
+    [ "$gate_status" -ne 1 ] && printf 'READY WORK unavailable: %s\n' "$FM_BACKLOG_TRANSITION_ERROR"
+    return 0
+  fi
+  fm_backlog_tasks_axi_addressing "$DATA" || return 0
+  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
+    ready=$(cd "$FM_BACKLOG_AXI_ROOT" && fm_tasks_axi ready --file "$FM_BACKLOG_AXI_FILE" 2>&1) || return 0
+  else
+    ready=$(cd "$FM_BACKLOG_AXI_ROOT" && fm_tasks_axi ready 2>&1) || return 0
+  fi
+  printf '%s\n' "$ready" | awk '
+    /^ready\[/ { in_ready=1; next }
+    in_ready && /^[[:space:]]/ { found=1 }
+    END { exit !found }
+  ' || return 0
+  printf 'READY WORK (queued and dispatchable now):\n'
+  fm_backlog_print_ready_queued_bounded "$ready" "$QUEUED_LIMIT"
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
@@ -1089,6 +1123,7 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
+print_ready_work_section "$RAW_ROWS"
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
 assert_watcher_liveness
 exit "$BRANCH_OUTCOMES_RC"
