@@ -2581,6 +2581,13 @@ case "${1:-} ${2:-}" in
         # the history the session inherited.
         if [ -n "${FM_FAKE_TURN_MODEL:-}" ]; then
           resumed=$(printf '%s\n' "$payload" | sed -n "s/.*--session '\([^']*\)'.*/\1/p")
+          if [ -n "$resumed" ] && [ ! -e "$resumed" ] && [ "${FM_FAKE_CREATE_SESSION:-0}" = 1 ]; then
+            (
+              "${FM_FAKE_REAL_SLEEP:-sleep}" 0.3
+              printf '{"type":"message","message":{"role":"assistant","provider":"%s","model":"%s","stopReason":"stop","content":[]}}\n' \
+                "${FM_FAKE_TURN_MODEL%%/*}" "${FM_FAKE_TURN_MODEL#*/}" >> "$resumed"
+            ) </dev/null >/dev/null 2>&1 &
+          fi
           if [ -n "$resumed" ] && [ -f "$resumed" ]; then
             printf '{"type":"message","message":{"role":"assistant","provider":"%s","model":"%s","stopReason":"%s","content":[]}}\n' \
               "${FM_FAKE_TURN_MODEL%%/*}" "${FM_FAKE_TURN_MODEL#*/}" "${FM_FAKE_TURN_STOP_REASON:-stop}" >> "$resumed"
@@ -2815,6 +2822,32 @@ test_herdr_relaunch_records_a_pinned_pi_resume_as_unverified_without_a_new_turn(
   assert_not_contains "$out" "model pin mismatch" \
     "inherited history must never be reported as this launch's model"
   pass "fm-spawn --relaunch: a silent pinned Pi resume is recorded as unverified"
+}
+
+test_herdr_relaunch_reads_a_recreated_pi_session() {
+  local harness id dir session_file out rc
+  for harness in pi pi-signed; do
+    id="resume-recreated-$harness"
+    herdr_case_or_skip "$id" "$id" || return 0
+    dir=$HERDR_CASE_DIR
+    printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/$harness"
+    chmod +x "$dir/fakebin/$harness"
+    rm -f "$dir/fake/herdr-stopped"
+    session_file="$dir/fake/recreated-session.jsonl"
+    printf '{"result":{"agent":{"agent":"pi","agent_status":"idle","agent_session":{"kind":"path","value":"%s"}}}}\n' \
+      "$session_file" > "$dir/fake/herdr-agent-registration"
+    [ ! -e "$session_file" ] || fail "the registered session must initially be absent"
+    rc=0
+    out=$(FM_FAKE_REAL_SLEEP="$(command -v sleep)" FM_FAKE_CREATE_SESSION=1 FM_FAKE_TURN_MODEL=anthropic/claude-opus-5-5 \
+      FM_MODEL_PIN_POLLS=50 FM_MODEL_PIN_POLL_INTERVAL=0.05 \
+      run_spawn "$dir" "$id" --relaunch --harness "$harness" --model anthropic/claude-opus-5-5) || rc=$?
+    expect_code 0 "$rc" "a recreated $harness session must preserve the relaunch"$'\n'"$out"
+    assert_contains "$(cat "$dir/fake/launched-command")" "--session '$session_file'" \
+      "the replacement must retain the registered absolute path"
+    assert_contains "$out" "model pin asserted: pin 'anthropic/claude-opus-5-5' actual 'anthropic/claude-opus-5-5'" \
+      "readback must wait for the recreated session's qualifying response"
+  done
+  pass "Pi and pi-signed relaunches read model evidence from recreated sessions"
 }
 
 test_herdr_relaunch_requires_a_completed_pi_response() {
@@ -3263,4 +3296,5 @@ test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
 
+test_herdr_relaunch_reads_a_recreated_pi_session
 test_herdr_relaunch_requires_a_completed_pi_response
