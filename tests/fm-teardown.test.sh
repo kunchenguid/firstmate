@@ -5510,6 +5510,37 @@ test_status_archive_opt_in() {
   pass "status archival is opt-in and preserves the complete log"
 }
 
+test_configured_brain_completes_before_cleanup_and_preserves_records_on_failure() {
+  local case_dir mode rc current
+  for mode in success failure; do
+    case_dir=$(make_case "brain-completion-$mode")
+    write_meta "$case_dir" local-only ship
+    mkdir -p "$case_dir/config/project-brains"
+    printf '%s\n' '- project [local-only] - Fixture (added 2026-10-31)' > "$case_dir/data/projects.md"
+    printf '# Evidence\nCompleted fixture unit.\n' > "$case_dir/evidence.md"
+    if [ "$mode" = success ]; then
+      jq -n --arg p "$case_dir/evidence.md" '{schema_version:1,sources:[{id:"evidence",path:$p}]}' > "$case_dir/config/project-brains/project.json"
+    else
+      printf 'broken' > "$case_dir/config/project-brains/project.json"
+    fi
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$mode" = success ]; then
+      expect_code 0 "$rc" "brain completion teardown: $(cat "$case_dir/stderr")"
+      current=$(cat "$case_dir/data/brains/project/CURRENT")
+      assert_present "$case_dir/data/brains/project/generations/$current/pages/units/task-x1.md" 'teardown omitted the completed-unit wiki'
+      assert_present "$case_dir/data/brains/project/generations/$current/graphify-out/graph.json" 'teardown omitted the derived graph'
+      assert_absent "$case_dir/state/task-x1.meta" 'successful completion retained task meta'
+    else
+      [ "$rc" -ne 0 ] || fail 'teardown ignored malformed configured brain'
+      assert_grep 'project brain completion failed' "$case_dir/stderr" 'missing concrete completion failure'
+      assert_present "$case_dir/state/task-x1.meta" 'failed completion erased task meta'
+      assert_present "$case_dir/wt" 'failed completion erased worktree'
+    fi
+  done
+  pass 'configured brain publishes before ordinary cleanup and failure retains task records for retry'
+}
+
 test_record_export_config_absent_never_reads_the_exporter() {
   local case_dir rc=0
   case_dir=$(make_case record-export-off)
@@ -5948,6 +5979,7 @@ test_status_archive_nested_secondmate_children() {
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_status_archive_opt_in
+test_configured_brain_completes_before_cleanup_and_preserves_records_on_failure
 test_record_export_config_absent_never_reads_the_exporter
 test_record_export_unopted_symlinked_config_does_not_block_teardown
 test_record_export_archives_before_teardown_or_preserves_sources_on_failure

@@ -3725,6 +3725,20 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# A configured project brain is completion evidence, not a second backlog.
+# Publish its wiki and structural graph before any cleanup can erase the task.
+# Forced discard and persistent-home retirement are not successful work units.
+if [ -z "$FORCE" ] && [ "$KIND" != secondmate ] && [ -n "$PROJ" ]; then
+  BRAIN_PROJECT=$(basename "$PROJ")
+  if [ -e "$CONFIG/project-brains/$BRAIN_PROJECT.json" ] \
+     || [ -L "$CONFIG/project-brains/$BRAIN_PROJECT.json" ]; then
+    if ! FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" bash "$SCRIPT_DIR/fm-brain.sh" complete-task "$BRAIN_PROJECT" --unit "$ID"; then
+      echo "error: project brain completion failed; retaining worktree and task records for retry" >&2
+      exit 1
+    fi
+  fi
+fi
+
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)
 # runs under the named-session presentation lock, acquired BEFORE anything is

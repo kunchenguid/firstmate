@@ -3524,3 +3524,70 @@ A live lock, a missing `lsof`, any failed check, or any other fetch failure keep
 Every wait, retry, and removal is printed to stderr, and a successful recovery also prints one `recovered:` summary line to stdout so a session-start refresh - which discards fleet-sync stderr and relays only stdout - still surfaces it.
 
 The shared staleness proof lives in `bin/fm-lock-lib.sh`, which both `fm-teardown.sh` and `fm-fleet-sync.sh` use.
+
+
+## Project folder entry (`config/project-entry.json`)
+
+`bin/fm-entry.sh` is a folder-entry client for an existing primary home.
+Set `FM_HOME` explicitly to that primary; `inspect` resolves a folder or linked worktree to exactly one Git common directory registered under that home's `projects/`.
+It refuses unknown/ambiguous projects and worker sessions before emitting professional context.
+With no optional entry mapping, the primary owns routing.
+A mapping selects only an existing secondmate registry id with a parent-owned charter, not a new home or new scope:
+
+```json
+{"schema_version":1,"owners":{"example":"example-lead"}}
+```
+
+Keys and ids use letters, digits, dot, underscore and dash, beginning with a letter or digit.
+Unknown configuration fields, malformed JSON and unresolved owners are refused.
+Clone lists do not infer coordinator ownership; this explicit entry preference cannot broaden the registered charter, and the primary revalidates scope at intake.
+The `main` value selects primary routing.
+`context` emits the entry-client boundary plus the primary's actual disk profession; it never makes a project-folder conversation a supervisor.
+`send` relays the request through the existing primary inbox with a caller-supplied stable request id; two direct sessions therefore share one coordinator rather than acquiring competing home locks.
+The primary delegates through its existing secondmate parent channel and records replies through the normal inbox receipt interface.
+There is no universal native harness attachment or automatic project-session launch in this interface.
+A saved note is durable input, not proof of model attention, dispatch or continuous availability.
+Existing home locks, secondmate charters, model/account pins and delivery/merge policy retain their owners.
+
+## Project brains (`config/project-brains/<project>.json`)
+
+A private project brain is opt-in, in its knowledge-owning `FM_HOME` only.
+`bin/fm-brain.sh` uses Python 3.9 or later standard library; it performs no network requests, model extraction, package installation or project writes.
+The project must have exactly one registry entry, with a safe project id matching its clone basename.
+Configuration lists 1 to 64 exact absolute Markdown source files, with unique safe ids:
+
+```json
+{"schema_version":1,"sources":[{"id":"implementation","path":"/absolute/private/report.md"}]}
+```
+
+The configuration has no glob, directory crawl, executable hook or arbitrary output path.
+Source files are capped at 2 MB each; symlink paths, duplicate JSON keys and self-ingestion from this home's brain output are refused.
+Changing the approved corpus is an explicit private configuration operation; no other project's sources or external memory tier are discovered automatically.
+Each source is preserved as an immutable SHA-256-addressed snapshot, and its evidence page cites original path, line range and content hash.
+These pages are source views, not fabricated semantic summaries or independent verification of source claims.
+A completion summary is JSON with `title`, `body`, `sources` (approved source ids) and `connections` (exact `units/<id>` references).
+The contributor owns its synthesis and claim/source chronology; the executable retains explicit provenance and marks units stale when an input is removed or missing.
+Do not put another Connections section in the summary body; links outside the generated section and fenced examples do not create graph edges.
+Only exact path-scoped wikilinks in `## Connections` become EXTRACTED edges, with page/line provenance; missing source links are reported, and unknown unit links fail publication.
+No fuzzy matching or semantic inference is performed.
+
+Storage is private `data/brains/<project>/`: `raw/<sha256>.md`, immutable `generations/<digest>/`, and one atomically replaced `CURRENT` pointer.
+Each generation includes `pages/sources/`, `pages/units/`, `index.md`, `log.md`, `SCHEMA.md`, `units.json`, `manifest.json` and `graphify-out/{graph.json,GRAPH_REPORT.md}`.
+The graph uses node-link JSON with path-scoped ids and `links`; it is derived and rebuildable from approved inputs and retained unit synthesis.
+Index, wiki and graph switch together only after validation and an input-fingerprint reread; a failed update keeps the prior generation usable.
+A per-project writer lock rejects concurrent writers with an explicit retry, while readers keep their current immutable generation.
+An abandoned `.write-lock` requires checking that its writer is gone before operator removal; it is never stolen automatically.
+`state/project-brains/<project>.json` records the last attempt, not task state.
+`check` compares current inputs and graph/page integrity with the manifest and exits nonzero for drift; `status` exposes drift, missing sources, stale units and the last failure; its separate `knowledge_status` prevents a current missing-source observation from claiming current knowledge.
+Add/change/delete or corpus exclusion is reconciled on the next completion/build, including intentional shrink of the derived graph; prior generations and raw evidence remain.
+Unchanged builds are no-ops, and rerunning the same completion id/summary is idempotent.
+A new summary for that id creates a new generation, preserving prior provenance.
+Missing or damaged derived output is detected and rebuilt into a repair generation; prior generations remain untouched.
+
+Load `project-brain` for per-unit capture and retrieval; task teardown also refreshes configured brains before successful ordinary cleanup and refuses cleanup on failure.
+Forced discard and persistent-home retirement are not successful work units.
+No-profile homes can use this optional workflow, and unconfigured projects preserve existing completion behavior.
+Project backlogs, decisions, preferences and shared AGENTS.md remain authoritative in their existing owners; the wiki does not mirror or close them.
+Nothing bulk-loads this private corpus into startup context or publishes it.
+Graphify is optional: this structural writer is Firstmate-owned, not the external Graphify extractor or Vago's unavailable live rebuild script.
+Use `query` for literal labels and cited neighboring edges; an external Graphify command requires independently verified node-link compatibility and an explicit graph path, with no extraction or global merge.

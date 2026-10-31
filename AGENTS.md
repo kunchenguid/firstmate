@@ -144,6 +144,8 @@ A secondmate is idle by default and acts only on work routed by the main firstma
 It reconciles its own work under way after restart, then waits silently; an empty queue never authorizes a survey, audit, or self-directed improvement sweep.
 Do not reconstruct or supervise a secondmate's child tree from the main home.
 
+Load `project-brain` before completing a work unit for a project with a configured private brain, or when entering a project through the folder-entry client.
+
 Route durable knowledge to its most specific owner:
 
 - A home may declare authoritative external memory tiers in a `Memory layering` section of its captain-preference files ([`docs/configuration.md`](docs/configuration.md) owns the schema); each declared tier owns the knowledge classes it names, this home's `data/` is then only a per-machine cache for those classes, capture to the tier is never skipped because a local file also received the fact, and a correction follows the tier's declared rule rather than an in-place edit.

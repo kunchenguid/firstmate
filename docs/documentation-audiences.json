@@ -700,6 +700,10 @@
     {
       "path": "docs/professions/kitchen/chef-sous-chef/profession.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/project-brain/SKILL.md",
+      "audience": "agent-runtime"
     }
   ]
 }
