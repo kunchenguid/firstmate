@@ -1559,7 +1559,7 @@ detect_local_tools() {
 }
 
 treehouse_pool_report() {
-  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool status seen slot repo common lease_at lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} seen_repo seen_pool duplicate duplicate_reported
+  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool status seen slot repo common created_at lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} seen_repo seen_pool duplicate duplicate_reported
   [ -d "$root" ] && command -v jq >/dev/null 2>&1 && command -v treehouse >/dev/null 2>&1 || return 0
   case "$threshold" in ''|*[!0-9]*) threshold=30 ;; esac
   now=$(date +%s)
@@ -1571,7 +1571,7 @@ treehouse_pool_report() {
     pool_has_owner=0
     duplicate_reported=0
     status=$(jq -c '.worktrees // [] | .[]' "$state" 2>/dev/null) || continue
-    while IFS='|' read -r slot lease_at slot_owner; do
+    while IFS='|' read -r slot created_at slot_owner; do
       repo=$(git -C "$slot" rev-parse --show-toplevel 2>/dev/null) || repo=
       common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
       [ -n "$common" ] && repo=${common%/.git}
@@ -1605,15 +1605,15 @@ treehouse_pool_report() {
       fi
       if [ ! -e "${slot%/*}/.fm-slot-owner" ] && [ ! -e "$slot/.fm-slot-owner" ] \
         && [ "$owner_live" -eq 0 ]; then
-        if [ -n "$lease_at" ] && [ "$lease_at" != null ]; then
-          lease_epoch=$(date -j -f '%Y-%m-%dT%H:%M:%S' "${lease_at%%.*}" '+%s' 2>/dev/null || date -d "$lease_at" '+%s' 2>/dev/null || echo "$now")
-        else
-          lease_epoch=$(stat -f '%m' "$slot" 2>/dev/null || stat -c '%Y' "$slot" 2>/dev/null || echo "$now")
+        lease_epoch=
+        if [ -n "$created_at" ] && [ "$created_at" != null ]; then
+          lease_epoch=$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$created_at" '+%s' 2>/dev/null || date -u -d "$created_at" '+%s' 2>/dev/null || true)
         fi
+        case "$lease_epoch" in ''|*[!0-9]*) continue ;; esac
         age_days=$(( (now - lease_epoch) / 86400 ))
         [ "$age_days" -lt "$threshold" ] || echo "TREEHOUSE_POOL_REPORT: unowned slot older than ${threshold}d: $slot (age ${age_days}d)"
       fi
-    done < <(printf '%s\n' "$status" | jq -r '[.path, (.owner_started_at // ""), (.owner_pid // "")] | join("|")')
+    done < <(printf '%s\n' "$status" | jq -r '[.path, (.created_at // ""), (.owner_pid // "")] | join("|")')
     case "${pool##*/}" in
       project-*|scratch-project-*)
         [ "$pool_has_owner" -eq 1 ] || echo "TREEHOUSE_POOL_REPORT: test-leftover pool $pool"

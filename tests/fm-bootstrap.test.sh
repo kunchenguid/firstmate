@@ -1540,26 +1540,27 @@ SH
 }
 
 test_treehouse_pool_report_is_read_only_and_classifies_pools() {
-  local case_dir home root fakebin registered unregistered other_home_clone pool out
+  local case_dir home root fakebin registered unregistered other_home_clone missing_date pool out
   case_dir="$TMP_ROOT/pool-report"
   home="$case_dir/home"
   root="$case_dir/pools"
   fakebin="$case_dir/bin"
   registered="$home/projects/registered"
   unregistered="$case_dir/unregistered"
+  missing_date="$case_dir/missing-date"
   other_home_clone="$case_dir/other-home/projects/repo"
-  mkdir -p "$home/projects" "$root/one" "$root/two" "$root/orphan" "$root/other-home" "$root/project-leftover" "$other_home_clone"
+  mkdir -p "$home/projects" "$root/one" "$root/two" "$root/orphan" "$root/other-home" "$root/project-leftover" "$other_home_clone" "$missing_date"
   fakebin=$(make_fake_toolchain "$case_dir")
   git init -q "$registered"
   git init -q "$other_home_clone"
   for pool in one two; do
     mkdir -p "$root/$pool/slot"
     cat > "$root/$pool/treehouse-state.json" <<JSON
-{"worktrees":[{"path":"$registered","owner_started_at":"2020-01-01T00:00:00Z"},{"path":"$registered","owner_started_at":"2020-01-01T00:00:00Z"}]}
+{"worktrees":[{"path":"$registered","created_at":"2020-01-01T00:00:00Z"},{"path":"$registered","created_at":"2020-01-01T00:00:00Z"},{"path":"$missing_date"}]}
 JSON
   done
   cat > "$root/orphan/treehouse-state.json" <<JSON
-{"worktrees":[{"path":"$unregistered","owner_started_at":"2020-01-01T00:00:00Z"}]}
+{"worktrees":[{"path":"$unregistered","created_at":"2020-01-01T00:00:00Z"}]}
 JSON
   cat > "$root/other-home/treehouse-state.json" <<JSON
 {"worktrees":[{"path":"$other_home_clone","owner_started_at":"2020-01-01T00:00:00Z"}]}
@@ -1578,7 +1579,8 @@ JSON
   assert_contains "$out" "duplicate-clone pool $root/two" "duplicate clone pool was not reported"
   assert_not_contains "$out" "duplicate-clone pool $root/one" "sibling slots in one pool were reported as duplicate pools"
   assert_contains "$out" "test-leftover pool $root/project-leftover" "test leftover pool was not reported"
-  assert_contains "$out" "unowned slot older than 30d: $registered" "old unowned slot was not reported"
+  assert_contains "$out" "unowned slot older than 30d: $registered" "old created_at slot was not reported"
+  assert_not_contains "$out" "unowned slot older than 30d: $missing_date" "missing created_at slot was reported stale"
   pass "bootstrap reports pool orphans, duplicate clones, old unowned slots, and test pools"
 }
 
