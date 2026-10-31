@@ -1680,6 +1680,7 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
     registry_homes || unavailable "${REGISTRY_ERROR:-the secondmate registry cannot be read}"
     { [ ! -s "$TMPD/remote-ids" ] || [ "$(pool_count "$TMPD/delivered")" -eq 0 ]; } \
       || unavailable "remote descendants have unaccounted occupancy; this home cannot serve fleet seats"
+    : > "$TMPD/adopted-hosts"
     if [ "$(pool_count "$TMPD/delivered")" -gt 0 ]; then
       jq -r '.pools[].models[]' "$TMPD/delivered" > "$TMPD/host-models"
       for meta in "$ROOT_STATE/parent-route"/*.meta; do
@@ -1700,7 +1701,12 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
               and .model == $m and .route.placement == "remote"
               and .route.operation == $g and .route.home == $h)
           ' "$reservation" >/dev/null 2>&1; then
-          unavailable "host supervisor $id has unaccounted occupancy"
+          # The running host has proved this pre-pool supervisor exists. Adopt
+          # its exact generation into the certificate instead of requiring a
+          # reservation that could only have been made after this first serve.
+          [ "$verdict" = pooled ] && gen_ok "$gen" \
+            || unavailable "host supervisor $id has unaccounted occupancy"
+          printf '%s\t%s\t%s\t%s\tconfirmed\n' "$ROOT_STATE/parent-route" "$id" "$gen" "$(record_field "$meta" model)" >> "$TMPD/adopted-hosts"
         fi
       done
     fi
@@ -1837,6 +1843,7 @@ EOF_ALLOW
     done < "$TMPD/local-homes"
     {
       awk -F '\t' '$4 == "reserved" || $4 == "confirmed" { print $1 "\t" $2 "\t" $3 "\t" $5 "\t" $4 }' "$TMPD/ledger"
+      cat "$TMPD/adopted-hosts"
       while IFS=$'\t' read -r st task; do
         m=$(record_field "$st/$task.meta" model)
         case "$m" in ''|default|-) m=- ;; esac
