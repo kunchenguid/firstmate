@@ -258,7 +258,7 @@ kill -STOP "$successor_pid" 2>/dev/null || fail "could not freeze the successor 
 thaw() { kill -CONT "$successor_pid" 2>/dev/null || true; }
 i=0
 while [ "$i" -lt 60 ]; do
-  age=$(( $(date +%s) - $(stat -f %m "$PROJECT/state/.last-watcher-beat" 2>/dev/null || stat -c %Y "$PROJECT/state/.last-watcher-beat" 2>/dev/null || date +%s) ))
+  age=$(( $(date +%s) - $(stat -c %Y "$PROJECT/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$PROJECT/state/.last-watcher-beat" 2>/dev/null || date +%s) ))
   [ "$age" -gt "$GUARD_GRACE" ] && break
   sleep 1
   i=$((i + 1))
