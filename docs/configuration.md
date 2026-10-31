@@ -1033,6 +1033,18 @@ The flag is per home and is not inherited by secondmate homes, which keep their 
 Only its presence is read, at each fresh spawn, review, and promotion.
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the exact base rule, and the [`fm-review-diff.sh` header](../bin/fm-review-diff.sh) owns the review anchor.
 
+## Worktree wait (config/worktree-wait)
+
+The optional local, gitignored `config/worktree-wait` sets how many seconds a fresh ship or scout spawn waits for `treehouse get` to enter an isolated worktree, for a large repository whose new pool slot takes longer than the default.
+Without it, the wait is 60 seconds.
+The file holds one positive integer of seconds, at most 9 digits, for example `180`.
+Any other value, including `0`, a negative number, or text, refuses the spawn before any endpoint, worktree, or record exists, with an error naming `config/worktree-wait`.
+The same value bounds the wait and appears in the refusal when the wait runs out.
+A value of `1` still gets the second read that confirms the worktree, so it can succeed.
+It applies only on the backends that discover the worktree from the task pane, so Orca, T3 Code, relaunches, and secondmate launches never read it.
+The file is per home and is not inherited by secondmate homes.
+The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the wait and its isolation screening.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked [`.no-mistakes.yaml`](../.no-mistakes.yaml) sets `test.evidence.store_in_repo: true` and runs the canonical [shell/workflow lint](../bin/fm-lint.sh) followed by the [Pi production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) in the compiler-owning lint phase.
