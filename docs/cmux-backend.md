@@ -70,6 +70,7 @@ The caller-facing label remains `fm-<id>`, while the visible workspace title is 
 The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the resolved Firstmate root.
 cmux does not enforce title uniqueness, so create, recovery, list, and cleanup paths all validate this scoped title.
 Relocating the Firstmate installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
+Right after creation the new workspace's title may not be listed yet, so create resolves it through the `workspace:N` ref cmux prints and falls back to the scoped title only when no ref was printed.
 
 ```text
 backend=cmux
