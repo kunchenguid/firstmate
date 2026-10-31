@@ -94,7 +94,9 @@ While supervision is still needed and away mode remains inactive, an actionable 
 
 The hook handles the session lock as follows:
 
-- A well-formed session-lock owner is a numeric PID, or a tagged `win:<pid>` value on a Cygwin-family Git Bash host, and its liveness is judged by the shared `fm_harness_pid_alive` predicate. `bin/fm-lock.sh` reclaims it only when its death is confirmed or its readable identity is not a verified harness; it also reclaims malformed values and zero-valued numeric records, and recovery stays inert when a live owner's identity cannot be read. The shared ownership decision and process-info fallback are defined by `bin/fm-session-lock-lib.sh`.
+- A well-formed session-lock owner is a numeric PID, or a tagged `win:<pid>` value on a Cygwin-family Git Bash host.
+  The shared `fm_session_lock_pid_blocks_reclaim` verdict in `bin/fm-session-lock-lib.sh` is the one decision every recovery caller applies: a record is reclaimed only when it is malformed, all-zero, proven dead, or readable but not a verified harness, and an owner whose liveness or identity cannot be read keeps recovery inert.
+  That library also owns the process-info fallback used when the `ps` binary cannot execute.
 - A live owner the session does not own, an absent lock, or a malformed or otherwise unusable lock keeps the competing hook inert.
 
 Whether the session owns that lock is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
@@ -530,6 +532,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Supersession of a dead session's orphaned claim by the replacement session's first Stop, including a resumed session that carries the dead one's conversation id, and a claim with no readable session lock.
 - A recycled background bridge keeping its live claim on the trusted session id pinned to the lock holder's recorded session-lock identity.
 - The Windows/Git Bash session-lock readers for the supervision-host key, claim read-back, and mid-turn health, plus untagged-value parity with the numeric helpers, in `tests/fm-session-lock-windows-consumers.test.sh`.
+- The ps-free identity route and its fail-closed refusals when the `ps` binary cannot execute, in `tests/fm-session-lock-ps-denied.test.sh`.
 - Bounded failure retries.
 - Benign live-watcher cycle ends.
 - One-notice failure episodes.

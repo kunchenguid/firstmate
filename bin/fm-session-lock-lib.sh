@@ -690,8 +690,10 @@ fm_session_pid_identity() {  # <value>
 }
 
 # True when session-lock pid $1 must not be reclaimed: a readable harness owner
-# that still matches holds the lock, an unreadable-but-live process is refused
-# rather than guessed at, and only a dead process frees the lock.
+# that still matches holds the lock, and an unreadable-but-live owner is refused
+# rather than guessed at. A dead record, a reused pid whose readable identity is
+# not a verified harness, a malformed or all-zero record, and an owner this
+# session can read but cannot signal are all reclaimable.
 fm_session_lock_pid_blocks_reclaim() {
   fm_session_pid_valid "$1" || return 1
   case "$1" in
@@ -831,9 +833,11 @@ fm_session_lock_owned_by_self() {
   fm_harness_pid_alive "$lock_pid"
 }
 
-# True when state dir $1 records a live verified harness outside this process's
-# contiguous harness ancestry that was not recorded by this same trusted Claude
-# session. Sets FM_SESSION_LOCK_FOREIGN_OWNER_PID for a diagnostic caller.
+# True when state dir $1 records a lock owner outside this process's contiguous
+# harness ancestry that this session must not reclaim and did not record under
+# its own trusted Claude session id - a live verified harness, or a live owner
+# whose identity cannot be read. Sets FM_SESSION_LOCK_FOREIGN_OWNER_PID for a
+# diagnostic caller.
 # Malformed, missing, dead, and ancestry-uncertain locks are not foreign-owner
 # evidence.
 # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
