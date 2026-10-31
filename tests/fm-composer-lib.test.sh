@@ -21,6 +21,9 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-timeout-lib.sh"
+
 # classify <bordered> <content> [idle_re] -> echoes the verdict.
 classify() { fm_composer_classify_content "$@"; }
 
@@ -1956,26 +1959,39 @@ test_dialog_matcher_is_portable_awk() {
   # all of them, and a pattern the host's awk cannot read must not be
   # what the matcher uses. This asserts the BEHAVIOUR under each awk,
   # never the bytes of the matcher's source.
-  local screen out rc awk_bin
+  local screen out rc awk_bin probe_bin dir bound probed=0
   screen=$(pi_model_picker_screen)
-  for awk_bin in $(compgen -c awk 2>/dev/null | sort -u) \
-    $(compgen -c mawk 2>/dev/null | sort -u) \
-    $(compgen -c gawk 2>/dev/null | sort -u) \
-    $(compgen -c nawk 2>/dev/null | sort -u); do
-    command -v "$awk_bin" >/dev/null 2>&1 || continue
-    local dir
+  # A fixed list, never `compgen -c`: compgen -c matches PREFIXES, so
+  # `compgen -c gawk` also yields GNU awk's helper programs such as
+  # gawkbug. Symlinking one of those as `awk` starts a program that is not
+  # an awk at all, and a helper that waits on stdin hangs the shard until
+  # the CI timeout kills the script and leaves it orphaned behind.
+  for awk_bin in awk mawk gawk nawk; do
+    probe_bin=$(command -v "$awk_bin" 2>/dev/null) || continue
+    probed=$((probed + 1))
     dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-awk-probe.XXXXXX")
-    ln -sf "$(command -v "$awk_bin")" "$dir/awk"
-    out=$(PATH="$dir:$PATH" bash -c '
+    ln -sf "$probe_bin" "$dir/awk"
+    # A per-call bound, not just stdin redirection: an installed name that is
+    # not an awk must fail this case loudly and quickly instead of blocking
+    # the shard, and fm_run_timed kills the group so no probe child outlives
+    # the failure. stdin is /dev/null so a program that reads it sees EOF.
+    bound=${FM_AWK_PROBE_TIMEOUT_SECS:-20}
+    # Expansion is intentionally deferred to the child bash passed to -c.
+    # shellcheck disable=SC2016
+    out=$(fm_run_timed "$bound" env PATH="$dir:$PATH" bash -c '
       . "$1"
       fm_composer_blocking_dialog "$2"
-    ' _ "$ROOT/bin/fm-composer-lib.sh" "$screen" 2>/dev/null); rc=$?
-    rm -rf "$dir"
+    ' _ "$ROOT/bin/fm-composer-lib.sh" "$screen" 2>/dev/null </dev/null); rc=$?
+    fm_test_remove_tree "$dir"
+    fm_timed_out "$rc" \
+      && fail "$probe_bin did not finish within ${bound}s as awk; the name is not an awk implementation"
     [ "$rc" -eq 0 ] \
       || fail "the recorded Pi model selector did not match under $awk_bin (rc $rc)"
     [ "$out" = 'Pi model selector' ] \
       || fail "under $awk_bin the dialog name was '$out'"
   done
+  [ "$probed" -gt 0 ] \
+    || fail "no awk implementation on this host: the matcher's portability is unproven"
   pass "the recorded Pi model selector matches under every awk on this host"
 }
 
