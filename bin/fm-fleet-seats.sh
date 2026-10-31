@@ -1691,16 +1691,17 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
         gen=$(meta_generation "$meta")
         gen_ok "$gen" || unavailable "host supervisor $id has unaccounted occupancy"
         reservation="$ROOT_STATE/parent-route/$id.seat-reservation.$gen"
-        private_file_ok "$reservation" \
-          && jq -e --arg t "$id" --arg g "$gen" --arg h "$ROOT_HOME" --arg m "$(record_field "$meta" model)" '
+        if ! private_file_ok "$reservation" \
+          || ! jq -e --arg t "$id" --arg g "$gen" --arg h "$ROOT_HOME" --arg m "$(record_field "$meta" model)" '
             .schema == "fm-fleet-seat-holder.v2" and .task == $t
             and (.incarnations | length == 1)
             and any(.incarnations[]; .generation == $g and .kind == "secondmate"
               and .lifecycle == "reserved" and .launch_phase == "dispatching"
               and .model == $m and .route.placement == "remote"
               and .route.operation == $g and .route.home == $h)
-          ' "$reservation" >/dev/null 2>&1 \
-          || unavailable "host supervisor $id has unaccounted occupancy"
+          ' "$reservation" >/dev/null 2>&1; then
+          unavailable "host supervisor $id has unaccounted occupancy"
+        fi
       done
     fi
     SERVED=$LEDGER/served.json
