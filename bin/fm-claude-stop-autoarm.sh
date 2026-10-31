@@ -624,7 +624,7 @@ if [ "$HEALTHY" -eq 1 ]; then
   autoarm_exit_suppressed 'firstmate watcher auto-arm could not clear the resolved failure episode - a verified healthy watcher is running, but the episode reset was refused'
 fi
 
-# After the synchronous guard has consumed the episode's attended fail-open,
+# After either alarm writer has consumed the episode's attended fail-open,
 # do not create another exit-2 continuation that could defeat it.
 if [ -e "$FAILURE_ALARM" ]; then
   printf 'firstmate watcher auto-arm suppressed - the attended failure alarm is already committed for this episode, so this suppressed continuation emits no further rewake.\n' >&2
@@ -678,11 +678,9 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   exit 0
 fi
 
-# Notify only once for this continuous failure episode; every later invocation
-# still exits 2 so Claude must continue into another Stop-owned retry without
-# creating a repeated operator notice or manual-arm loop. The notice marker
-# commits in the same owned critical section as the winning failed write, so a
-# losing generation can neither consume nor deliver it.
+# The notice marker commits in the same owned critical section as the winning
+# failed write, so a losing generation can neither consume nor deliver it.
+# Later failures use autoarm_exit_suppressed's exhaustion decision below.
 if [ ! -e "$FAILURE_NOTICE" ]; then
   if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
