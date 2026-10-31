@@ -288,13 +288,16 @@ fm_win_harness_ancestry_pids() {
 # require an executable ps; a denied-ps host stays degraded there
 # until they route through a shared provider (follow-up, issue #1).
 
-# One stderr line per process run when the denied-ps route cannot
-# answer. AGENTS.md session-start contract: a lock refusal owes its
-# exact diagnostic - but a 16-hop walk over a dead provider must not
-# print 48 lines, so the first cause wins and the rest stay silent.
-# The provider is read through a command substitution, so a flag it
-# sets dies with that subshell; fm_proc_info spends this guard in the
-# shell that owns the walk, which is the only place it can persist.
+# One stderr line per shell that runs identity reads when the denied-ps
+# route cannot answer. AGENTS.md session-start contract: a lock refusal
+# owes its exact diagnostic - but a 16-hop walk over a dead provider
+# must not print 48 lines, so the first cause wins and the rest stay
+# silent in that shell. The provider is read through a command
+# substitution, so a flag it sets dies with that subshell; fm_proc_info
+# spends this guard in the shell that owns the walk, which is the only
+# place it can persist. A walk that itself runs inside $(...) therefore
+# keeps a private guard, so one run whose reads span several subshells
+# can report the same cause once per such shell.
 FM_OS_PROC_DIAG_SHOWN=''
 fm_os_proc_diag_once() {  # <message>
   if [ -z "$FM_OS_PROC_DIAG_SHOWN" ]; then
@@ -455,10 +458,10 @@ fm_proc_info() {  # <pid>
       _fm_ps_exec_denied || return 1
       local triple f1 f2 f3 rest tab
       tab=$'\t'
-      # Spend the once-per-run diagnostic guard in this shell, not in the
+      # Spend the diagnostic guard for this shell here, not in the
       # command-substitution subshell that prints it: a cause line lives
       # only on the provider's failure routes, so a failed read is exactly
-      # where that budget is used up.
+      # where that budget is used up in the shell the walk runs in.
       triple=$(fm_os_proc_triple "$pid") || {
         FM_OS_PROC_DIAG_SHOWN=1
         return 1
