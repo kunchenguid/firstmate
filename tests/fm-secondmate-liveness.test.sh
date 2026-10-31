@@ -392,6 +392,8 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   add_sm_home "$w" sm1 firstmate:fm-sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
+  printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-liveness-uncertain-sm1"
+  : > "$w/home/state/.secondmate-liveness-uncertain-alert-sm1"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
 
@@ -403,6 +405,10 @@ test_sweep_respawns_confirmed_dead_secondmate() {
     "a confirmed-dead secondmate should actually be relaunched"
   assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
     "the shared library did not leave the durable per-mate relaunch record"
+  [ ! -e "$w/home/state/.secondmate-liveness-uncertain-sm1" ] \
+    || fail "a successful startup recovery did not clear the stale uncertain episode"
+  [ ! -e "$w/home/state/.secondmate-liveness-uncertain-alert-sm1" ] \
+    || fail "a successful startup recovery did not clear the stale uncertain alert"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
 
@@ -576,12 +582,18 @@ test_sweep_leaves_alive_secondmate_untouched() {
   add_sm_home "$w" sm1 firstmate:fm-sm1
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
+  printf 'ambiguous\t3\tstale-episode\n' > "$w/home/state/.secondmate-liveness-uncertain-sm1"
+  : > "$w/home/state/.secondmate-liveness-uncertain-alert-sm1"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
 
   assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: already-live" \
     "an already-live secondmate should be handled silently"
   [ ! -s "$log" ] || fail "an already-live secondmate must never be killed or respawned: $(cat "$log")"
+  [ ! -e "$w/home/state/.secondmate-liveness-uncertain-sm1" ] \
+    || fail "an alive startup probe did not clear the stale uncertain episode"
+  [ ! -e "$w/home/state/.secondmate-liveness-uncertain-alert-sm1" ] \
+    || fail "an alive startup probe did not clear the stale uncertain alert"
 
   out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log" FM_BOOTSTRAP_VERBOSE_FACTS=1)
   assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 already live (backend=tmux)" \
