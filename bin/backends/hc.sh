@@ -32,9 +32,17 @@
 #
 # Visibility in Herdr.app: the app shows a terminal that carries
 # herdr.space=<id> and herdr.tab=<id> labels, and an unknown id becomes a new
-# space or tab. create_task sets herdr.space=FM_HC_SPACE (default
-# fm-<hometag>) and herdr.tab=<scoped label>, so a home's tasks group in one
-# space with one tab each. Naming the space needs the app window and is not done.
+# space or tab. create_task sets herdr.tab=<scoped label>, one tab per task,
+# and herdr.space to FM_HC_SPACE when set, else the space of the hc terminal
+# Firstmate itself runs in, else fm-<hometag>. Naming the space needs the app
+# window and is not done.
+#
+# Placement beside Firstmate: when Firstmate runs inside a live hc terminal of
+# the task's session (fm_backend_hc_caller_terminal), each task terminal is
+# created as that terminal's child, so the app groups the crew under the
+# Firstmate that launched it. --outlive-parent keeps a task running when
+# Firstmate's terminal ends, and --no-notify keeps hc from typing notes into
+# Firstmate's composer. Otherwise the task starts with --no-parent.
 #
 # Measured limits on hc 0.1.13 (docs/hc-backend.md "Limits"):
 #   - `hc send` always presses Enter after pasting. There is no paste without
@@ -160,13 +168,42 @@ fm_backend_hc_container_ensure() {
   printf '%s' "$session"
 }
 
+# fm_backend_hc_caller_terminal: "<address>\t<herdr.space>" of the live hc
+# terminal of <session> this process runs inside, or nothing. HC_TERMINAL_ID
+# reaches every descendant of an hc terminal, including ones in another
+# session's core, so it counts only when that address answers live in
+# <session> AND that terminal's shell pid is an ancestor of this process; a
+# stale or foreign id never adopts an unrelated terminal.
+fm_backend_hc_caller_terminal() {  # <session>
+  local session=$1 id json fields state pid space p i
+  id=${HC_TERMINAL_ID:-}
+  fm_backend_hc_address_valid "$id" || return 0
+  json=$(fm_backend_hc_cli "$session" get --json "$id" 2>/dev/null) || return 0
+  fields=$(printf '%s' "$json" | jq -r '[.state // "", (.pid // "" | tostring), .labels["herdr.space"] // ""] | @tsv' 2>/dev/null) || return 0
+  IFS=$'\t' read -r state pid space <<EOF
+$fields
+EOF
+  [ "$state" = live ] || return 0
+  case "$pid" in ''|*[!0123456789]*) return 0 ;; esac
+  p=$$
+  i=0
+  while [ "$i" -lt 64 ]; do
+    [ "$p" = "$pid" ] && { printf '%s\t%s' "$id" "$space"; return 0; }
+    case "$p" in ''|0|1|*[!0123456789]*) return 0 ;; esac
+    p=$(LC_ALL=C ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    i=$((i + 1))
+  done
+  return 0
+}
+
 # fm_backend_hc_create_task: start a login shell terminal in <cwd> for
 # <window-label>, refusing a live duplicate in this home. Prints the address.
-# --no-parent and --outlive-parent keep the terminal independent of whichever
-# hc terminal firstmate itself runs in; --no-notify keeps hc from typing notes
-# into any parent.
+# Placement follows the header: a child of Firstmate's own hc terminal when
+# fm_backend_hc_caller_terminal finds one, else --no-parent; --outlive-parent
+# and --no-notify apply either way.
 fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
-  local session=$1 label=$2 cwd=$3 home scoped dup out address
+  local session=$1 label=$2 cwd=$3 home scoped dup out address caller caller_space space
+  local -a parent=(--no-parent)
   home=$(fm_backend_hometag)
   scoped=$(fm_backend_hc_scoped_label "$label")
   dup=$(fm_backend_hc_cli "$session" ls --json --label "firstmate.task=$label" --label "firstmate.home=$home" 2>/dev/null) \
@@ -175,10 +212,18 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
     echo "error: hc terminal for $label already exists in session '$session'" >&2
     return 1
   fi
-  out=$(fm_backend_hc_cli "$session" run --bg --json --no-parent --outlive-parent --no-notify \
+  space=${FM_HC_SPACE:-}
+  caller=$(fm_backend_hc_caller_terminal "$session")
+  if [ -n "$caller" ]; then
+    parent=(--parent "${caller%%$'\t'*}")
+    caller_space=${caller#*$'\t'}
+    [ -n "$space" ] || space=$caller_space
+  fi
+  [ -n "$space" ] || space=fm-$home
+  out=$(fm_backend_hc_cli "$session" run --bg --json "${parent[@]}" --outlive-parent --no-notify \
     --cwd "$cwd" \
     --label "firstmate.task=$label" --label "firstmate.home=$home" \
-    --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$scoped" 2>&1) \
+    --label "herdr.space=$space" --label "herdr.tab=$scoped" 2>&1) \
     || { echo "error: hc run failed for $label: $out" >&2; return 1; }
   address=$(printf '%s' "$out" | jq -r '.address // empty' 2>/dev/null)
   fm_backend_hc_address_valid "$address" || { echo "error: hc run did not return a terminal address for $label (got: $out)" >&2; return 1; }
