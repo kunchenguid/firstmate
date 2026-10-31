@@ -6,6 +6,11 @@
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
 # no unique commits (it is an ancestor of origin/<default>) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
+# A linked worktree - the same clean detached HEAD, but <default> checked out in
+# another worktree of the same clone, as in a home whose project dirs are
+# worktrees of one shared clone - can never attach <default> here, so detached at
+# origin/<default> is its healthy steady state: its HEAD is fast-forwarded in
+# place and reported as routine "synced" / "already current", never STUCK.
 # Every other off-default state - a non-default named branch, a detached HEAD with
 # unique commits, a dirty tree, or a diverged default - may hold real work, so it
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
@@ -263,6 +268,38 @@ default_checked_out_elsewhere() {
     | grep -Fxq -- "$DEFAULT"
 }
 
+# Fast-forward a linked worktree's detached HEAD to $BASE in place. Only called
+# once HEAD is known clean, detached, and an ancestor of $BASE, so moving it
+# strands nothing; the local $DEFAULT branch belongs to the worktree that has it
+# checked out and is never touched. Reports like the on-default path: "already
+# current" when nothing moved, "synced a..b" otherwise, so a routine catch-up is
+# not relayed as a self-heal.
+sync_linked_detached_head() {
+  local before after checkout_output reason
+  before=$(git -C "$PROJ" rev-parse --short HEAD) || {
+    echo "$label: skipped: cannot read detached HEAD"
+    return 0
+  }
+  if [ "$(git -C "$PROJ" rev-parse HEAD)" = "$(git -C "$PROJ" rev-parse "$BASE")" ]; then
+    echo "$label: already current (detached at $BASE; $DEFAULT checked out in another worktree)"
+    return 0
+  fi
+  if ! checkout_output=$(git -C "$PROJ" checkout --quiet --detach "$BASE" 2>&1); then
+    reason="fast-forward failed"
+    if [ -n "$checkout_output" ]; then
+      reason="$reason: $(first_line "$checkout_output")"
+    fi
+    echo "$label: skipped: $reason"
+    return 0
+  fi
+  after=$(git -C "$PROJ" rev-parse --short HEAD) || {
+    echo "$label: skipped: fast-forward completed but cannot read detached HEAD"
+    return 0
+  }
+  echo "$label: synced $before..$after (detached at $BASE; $DEFAULT checked out in another worktree)"
+  return 0
+}
+
 local_default_safe_for_recovery() {
   ! git -C "$PROJ" rev-parse --verify --quiet "$DEFAULT^{commit}" >/dev/null \
     || git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE" 2>/dev/null
@@ -279,8 +316,6 @@ stuck_state() {
     s="detached HEAD"
   elif ! git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null; then
     s="detached HEAD with unique commits"
-  elif default_checked_out_elsewhere; then
-    s="detached HEAD ($DEFAULT checked out in another worktree)"
   elif ! local_default_safe_for_recovery; then
     s="detached HEAD (local $DEFAULT diverged from $BASE)"
   else
@@ -369,28 +404,34 @@ sync_project() {
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
-    # Off the default branch. Auto-recover only the one unambiguously safe drift:
-    # a clean, detached HEAD that holds no unique commits (it is an ancestor of
-    # origin/<default>) and whose <default> branch is free to check out here.
-    # Re-attaching to an already-published commit strands nothing, and the
-    # fast-forward path below then catches the clone up. Anything else - a
-    # non-default named branch, a detached HEAD with unique commits, a dirty tree,
-    # or <default> already checked out elsewhere - may hold real work, so it is
-    # reported loudly and left untouched.
-    if [ -z "$cur" ] && [ "$dirty" = no ] \
-        && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
-        && ! default_checked_out_elsewhere \
-        && local_default_safe_for_recovery; then
-      if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
-        report_stuck "$(stuck_state)"
-        return 0
-      fi
-      recovered=yes
-      cur=$DEFAULT
-    else
+    # Off the default branch. Only a clean, detached HEAD that holds no unique
+    # commits (it is an ancestor of origin/<default>) is ever moved: it sits on an
+    # already-published commit, so nothing can be stranded. Anything else - a
+    # non-default named branch, a detached HEAD with unique commits, or a dirty
+    # tree - may hold real work, so it is reported loudly and left untouched.
+    if [ -n "$cur" ] || [ "$dirty" = yes ] \
+        || ! git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null; then
       report_stuck "$(stuck_state)"
       return 0
     fi
+    # <default> checked out in another worktree of this clone: a linked worktree,
+    # which can never attach <default> here. Detached at origin/<default> is its
+    # healthy steady state, so catch its HEAD up in place rather than calling the
+    # one shape it can ever have STUCK.
+    if default_checked_out_elsewhere; then
+      sync_linked_detached_head
+      return 0
+    fi
+    # <default> is free to check out here: re-attach to it, and the fast-forward
+    # path below then catches the clone up ("recovered:"). A local <default> that
+    # diverged from origin/<default> may hold real work, so it is reported instead.
+    if ! local_default_safe_for_recovery \
+        || ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
+      report_stuck "$(stuck_state)"
+      return 0
+    fi
+    recovered=yes
+    cur=$DEFAULT
   elif [ "$dirty" = yes ]; then
     # On the default branch but with uncommitted changes we must not disturb.
     report_stuck "$(stuck_state)"
