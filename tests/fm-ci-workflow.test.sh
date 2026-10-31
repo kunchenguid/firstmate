@@ -32,226 +32,188 @@ set -u
 CI_WORKFLOW="$ROOT/.github/workflows/ci.yml"
 
 assert_present "$CI_WORKFLOW" ".github/workflows/ci.yml is missing"
-command -v ruby >/dev/null 2>&1 \
-  || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
+fm_require_yq "parse .github/workflows/ci.yml as YAML"
+CI_JSON=$(yq -o=json '.' "$CI_WORKFLOW") \
+  || fail "could not parse .github/workflows/ci.yml as YAML"
+
+# jq prelude shared by every workflow read: fetch mirrors a strict mapping
+# lookup that errors on a missing key instead of yielding null, and strip trims
+# surrounding whitespace.
+# shellcheck disable=SC2016 # jq expands these references itself.
+CI_JQ_LIB='
+def fetch($key):
+  if type == "object" and has($key) then .[$key]
+  else error("key not found: \($key)") end;
+def strip: sub("^\\s+"; "") | sub("\\s+$"; "");
+'
 
 # Evaluate the subset of GitHub's expression language that ci.yml uses -
 # string literals, context lookups (including object filters such as
 # labels.*.name, simulated as arrays), the status functions, contains(), !,
-# ==, !=, &&, ||, and parentheses - against a simulated context hash, following the
+# ==, !=, &&, ||, and parentheses - against a simulated context object, following the
 # documented operator precedence, the case-insensitive string comparison, and
 # the `a || b` fallback that returns the first truthy operand rather than a
 # boolean. The status functions read the simulated outcome of the needed jobs
 # from the context key "needs.status" (success, failure, or cancelled), which
-# defaults to success. Each ruby -e below prepends this so every resolver shares one
-# evaluator.
-# shellcheck disable=SC2016  # the ${{ }} below is Ruby text, not a shell expansion
-EXPRESSION_RUBY='
-require "strscan"
-class Expression
-  def self.evaluate(source, context)
-    new(source, context).parse
-  end
+# defaults to success. Each resolver below appends this to CI_JQ_LIB so every
+# resolver shares one evaluator.
+#
+# It also builds the simulated GitHub context from KEY=VALUE overrides on top of
+# an outside contributor's fork PR synchronize event: no labels, no write
+# access, fork variables unset, and needed jobs successful. Short keys: event,
+# action, label (the label an event adds), labels (comma-separated labels on the
+# PR), association, head (head repository), number, run_id, skip_push,
+# skip_macos, needs (success, failure, or cancelled: the needed jobs' results
+# that job conditions and the Full suite verdict read), outcome (how every job
+# that runs concludes, read only by published_checks). A push event clears the
+# PR fields, which GitHub leaves empty there.
+# shellcheck disable=SC2016  # the ${{ }} below is jq text, not a shell expansion
+CI_EXPR_JQ='
+# A result is truthy unless it is false, null, or the empty string.
+def truthy: . != false and . != null and . != "";
+def status_functions: ["always()", "success()", "failure()", "cancelled()"];
 
-  STATUS_FUNCTIONS = %w[always() success() failure() cancelled()].freeze
+def tokens:
+  [scan("\\s+|\u0027[^\u0027]*\u0027|\\|\\||&&|==|!=|[()!,]|[A-Za-z_][\\w.\\-*]*(?:\\(\\))?|.")
+   | select(test("^\\s+$") | not)
+   | if length > 1 and startswith("\u0027") and endswith("\u0027") then ["string", .[1:-1]]
+     elif test("^(\\|\\||&&|==|!=|[()!,])$") then ["operator", .]
+     elif test("^[A-Za-z_]") then ["name", .]
+     else error("unsupported expression syntax at: \(.)") end];
 
-  # A job or step `if` is a bare expression or one wrapped in ${{ }}, an
-  # absent condition means the job runs, and a condition that calls no status
-  # function gets the implicit success() check GitHub documents.
-  def self.condition(raw, context)
-    source = raw.to_s.strip
-    source = Regexp.last_match(1) if source =~ /\A\$\{\{(.*)\}\}\z/m
-    source = "success()" if source.empty?
-    source = "success() && (#{source})" unless new(source, context).status_check?
-    truthy?(evaluate(source, context))
-  end
+def evaluate($context):
+  def peek($operator): .tokens[0] == ["operator", $operator];
+  def drop: .tokens |= .[1:];
+  def expect($operator; $message): if peek($operator) then drop else error($message) end;
+  def parse_or:
+    def primary:
+      if peek("(") then drop | parse_or | expect(")"; "missing closing parenthesis")
+      else
+        .tokens[0] as $token
+        | drop
+        | if $token[0] != "string" and $token[0] != "name" then
+            error("expected an operand, got \($token[0] | tojson)")
+          elif $token[0] == "string" then .value = $token[1]
+          elif any(status_functions[]; . == $token[1]) then
+            .value = ($token[1] == "always()" or $token[1] == "\($context["needs.status"] // "success")()")
+          elif $token[1] == "contains" and peek("(") then
+            drop | parse_or | .value as $haystack
+            | expect(","; "contains() takes two arguments") | parse_or | .value as $needle
+            | expect(")"; "missing closing parenthesis")
+            | ($needle | tostring | ascii_downcase) as $needle
+            | .value = (if ($haystack | type) == "array" then
+                any($haystack[]; tostring | ascii_downcase == $needle)
+              else $haystack | tostring | ascii_downcase | contains($needle) end)
+          elif $context | has($token[1]) then .value = $context[$token[1]]
+          else error("unresolvable context reference: \($token[1])") end
+      end;
+    def unary: if peek("!") then drop | unary | .value |= (truthy | not) else primary end;
+    def comparison:
+      def more:
+        if peek("==") or peek("!=") then
+          .tokens[0][1] as $operator | .value as $left | drop | unary | .value as $right
+          | if ($left | type) != ($right | type) then
+              error("the resolver only compares operands of one type: \($left | tojson) \($operator) \($right | tojson)")
+            else . end
+          | (if ($left | type) == "string" then ($left | ascii_downcase) == ($right | ascii_downcase)
+             else $left == $right end) as $equal
+          | .value = (if $operator == "==" then $equal else ($equal | not) end)
+          | more
+        else . end;
+      unary | more;
+    def conjunction:
+      def more:
+        if peek("&&") then
+          .value as $left | drop | comparison
+          | .value = (if $left | truthy then .value else $left end) | more
+        else . end;
+      comparison | more;
+    def more:
+      if peek("||") then
+        .value as $left | drop | conjunction
+        | .value = (if $left | truthy then $left else .value end) | more
+      else . end;
+    conjunction | more;
+  {tokens: tokens} | parse_or
+  | if .tokens == [] then .value else error("unexpected trailing token: \(.tokens[0] | tojson)") end;
 
-  # A result is truthy unless it is false, nil, or the empty string.
-  def self.truthy?(value)
-    value != false && !value.nil? && value != ""
-  end
+# A job or step `if` is a bare expression or one wrapped in ${{ }}, an absent
+# condition means the job runs, and a condition that calls no status function
+# gets the implicit success() check GitHub documents.
+def condition($context):
+  (if . == null then "" else tostring end | strip) as $raw
+  | ($raw | capture("^\\$\\{\\{(?<expression>.*)\\}\\}$"; "p") | .expression) // $raw
+  | if . == "" then "success()" else . end
+  | if any(tokens[]; .[0] == "name" and (.[1] as $name | any(status_functions[]; . == $name))) then .
+    else "success() && (\(.))" end
+  | evaluate($context) | truthy;
 
-  def initialize(source, context)
-    @context = context
-    @tokens = []
-    scanner = StringScanner.new(source)
-    until scanner.eos?
-      next if scanner.skip(/\s+/)
-      if scanner.scan(/\x27([^\x27]*)\x27/) then @tokens << [:string, scanner[1]]
-      elsif scanner.scan(/\|\||&&|==|!=|[()!,]/) then @tokens << [:operator, scanner.matched]
-      elsif scanner.scan(/[A-Za-z_][\w.\-*]*(?:\(\))?/) then @tokens << [:name, scanner.matched]
-      else raise "unsupported expression syntax at: #{scanner.rest}"
-      end
-    end
-  end
+def interpolate($context):
+  (if . == null then "" else tostring end)
+  | gsub("\\$\\{\\{(?<expression>.+?)\\}\\}"; .expression | evaluate($context) | tostring; "p");
 
-  def status_check?
-    @tokens.any? { |kind, value| kind == :name && STATUS_FUNCTIONS.include?(value) }
-  end
-
-  def parse
-    result = parse_or
-    raise "unexpected trailing token: #{@tokens.first.inspect}" unless @tokens.empty?
-    result
-  end
-
-  private
-
-  def take?(operator)
-    return false unless @tokens.first == [:operator, operator]
-    @tokens.shift
-    true
-  end
-
-  def parse_or
-    left = parse_and
-    while take?("||")
-      right = parse_and
-      left = Expression.truthy?(left) ? left : right
-    end
-    left
-  end
-
-  def parse_and
-    left = parse_comparison
-    while take?("&&")
-      right = parse_comparison
-      left = Expression.truthy?(left) ? right : left
-    end
-    left
-  end
-
-  def parse_comparison
-    left = parse_unary
-    loop do
-      operator = ["==", "!="].find { |candidate| take?(candidate) } or break
-      right = parse_unary
-      unless left.class == right.class
-        raise "the resolver only compares operands of one type: #{left.inspect} #{operator} #{right.inspect}"
-      end
-      equal = left.is_a?(String) ? left.casecmp?(right) : left == right
-      left = operator == "==" ? equal : !equal
-    end
-    left
-  end
-
-  def parse_unary
-    return !Expression.truthy?(parse_unary) if take?("!")
-    parse_primary
-  end
-
-  def parse_primary
-    if take?("(")
-      inner = parse_or
-      raise "missing closing parenthesis" unless take?(")")
-      return inner
-    end
-    kind, value = @tokens.shift
-    raise "expected an operand, got #{kind.inspect}" unless kind == :string || kind == :name
-    return value if kind == :string
-    if STATUS_FUNCTIONS.include?(value)
-      status = @context.fetch("needs.status", "success")
-      return value == "always()" || value == "#{status}()"
-    end
-    if value == "contains" && take?("(")
-      haystack = parse_or
-      raise "contains() takes two arguments" unless take?(",")
-      needle = parse_or
-      raise "missing closing parenthesis" unless take?(")")
-      return Array(haystack).any? { |item| item.to_s.casecmp?(needle.to_s) } if haystack.is_a?(Array)
-      return haystack.to_s.downcase.include?(needle.to_s.downcase)
-    end
-    raise "unresolvable context reference: #{value}" unless @context.key?(value)
-    @context.fetch(value)
-  end
-end
-'
-
-# Build a simulated GitHub context from KEY=VALUE overrides on top of an
-# outside contributor's fork PR synchronize event: no labels, no write access,
-# fork variables unset, and needed jobs successful. Short keys: event, action,
-# label (the label an event adds), labels (comma-separated labels on the PR),
-# association, head (head repository), number, run_id, skip_push, skip_macos,
-# needs (success, failure, or cancelled: the needed jobs' results that job
-# conditions and the Full suite verdict read), outcome (how every job that runs
-# concludes, read only by published_checks). A push event clears the PR fields,
-# which GitHub leaves empty there. Each resolver prepends this.
-# shellcheck disable=SC2016  # Ruby text, not shell expansions
-CONTEXT_RUBY='
-def simulated_context(workflow_name, overrides)
-  o = {
-    "event" => "pull_request", "action" => "synchronize", "label" => "",
-    "labels" => "", "association" => "NONE", "head" => "contributor/firstmate",
-    "number" => "108", "run_id" => "900001", "skip_push" => "", "skip_macos" => "",
-    "needs" => "success", "outcome" => "success",
-  }
-  if overrides.any? { |pair| pair == "event=push" }
-    o.merge!("action" => "", "association" => "", "head" => "", "number" => "")
-  end
-  overrides.each do |pair|
-    key, value = pair.split("=", 2)
-    raise "unknown context key #{key}" unless o.key?(key)
-    o[key] = value.to_s
-  end
+def simulated_context($workflow; $overrides):
   {
-    "github.workflow" => workflow_name,
-    "github.repository" => "kunchenguid/firstmate",
-    "github.event_name" => o["event"],
-    "github.event.action" => o["action"],
-    "github.event.label.name" => o["label"],
-    "github.event.pull_request.labels.*.name" => o["labels"].split(","),
-    "github.event.pull_request.author_association" => o["association"],
-    "github.event.pull_request.head.repo.full_name" => o["head"],
-    "github.event.pull_request.number" => o["number"],
-    "github.run_id" => o["run_id"],
-    "vars.FM_CI_SKIP_PUSH" => o["skip_push"],
-    "vars.FM_CI_SKIP_MACOS" => o["skip_macos"],
-    "needs.status" => o["needs"],
-    "needs.*.result" => [o["needs"]],
-    "simulated.outcome" => o["outcome"],
+    "event": "pull_request", "action": "synchronize", "label": "",
+    "labels": "", "association": "NONE", "head": "contributor/firstmate",
+    "number": "108", "run_id": "900001", "skip_push": "", "skip_macos": "",
+    "needs": "success", "outcome": "success"
   }
-end
+  | if any($overrides[]; . == "event=push") then
+      . + {"action": "", "association": "", "head": "", "number": ""}
+    else . end
+  | reduce ($overrides[] | split("=")) as $pair (.;
+      $pair[0] as $key
+      | if has($key) then .[$key] = ($pair[1:] | join("="))
+        else error("unknown context key \($key)") end)
+  | {
+      "github.workflow": $workflow,
+      "github.repository": "kunchenguid/firstmate",
+      "github.event_name": .event,
+      "github.event.action": .action,
+      "github.event.label.name": .label,
+      "github.event.pull_request.labels.*.name": (.labels | split(",") | until(length == 0 or .[-1] != ""; .[:-1])),
+      "github.event.pull_request.author_association": .association,
+      "github.event.pull_request.head.repo.full_name": .head,
+      "github.event.pull_request.number": .number,
+      "github.run_id": .run_id,
+      "vars.FM_CI_SKIP_PUSH": .skip_push,
+      "vars.FM_CI_SKIP_MACOS": .skip_macos,
+      "needs.status": .needs,
+      "needs.*.result": [.needs],
+      "simulated.outcome": .outcome
+    };
 
 # Whether the workflow triggers start a run for this simulated event at all:
 # a pull_request action outside on.pull_request.types (the GitHub default when
 # absent is opened, synchronize, reopened) starts no run and publishes nothing.
-# Psych reads the bare key `on` as true.
-def triggered?(doc, context)
-  return true unless context["github.event_name"] == "pull_request"
-  triggers = doc[true] || doc["on"]
-  types = triggers.fetch("pull_request", nil).to_h.fetch("types", %w[opened synchronize reopened])
-  types.include?(context["github.event.action"])
-end
-
-def interpolate(raw, context)
-  raw.to_s.gsub(/\$\{\{(.+?)\}\}/m) { Expression.evaluate(Regexp.last_match(1), context).to_s }
-end
+def triggered($context):
+  $context["github.event_name"] != "pull_request"
+  or (fetch("on") | (.pull_request // {}) | (.types // ["opened", "synchronize", "reopened"])
+      | any(.[]; . == $context["github.event.action"]));
 '
 
 # Resolve the workflow's concurrency contract under one simulated event and
 # print "<group><TAB><cancel-in-progress>".
 resolve_concurrency() {  # [KEY=VALUE]...
-  ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
-doc = YAML.load_file(ARGV.shift)
-concurrency = doc.fetch("concurrency")
-context = simulated_context(doc.fetch("name"), ARGV)
-puts [interpolate(concurrency.fetch("group"), context),
-      interpolate(concurrency.fetch("cancel-in-progress"), context)].join("\t")
-' "$CI_WORKFLOW" "$@"
+  jq -r "$CI_JQ_LIB$CI_EXPR_JQ"'
+simulated_context(fetch("name"); $ARGS.positional) as $context
+| fetch("concurrency")
+| [(fetch("group") | interpolate($context)), (fetch("cancel-in-progress") | interpolate($context))]
+| join("\t")
+' --args "$@" <<<"$CI_JSON"
 }
 
 # Print, one per line in workflow order, the jobs whose job-level `if`
 # resolves true under one simulated context; an unset repository variable
 # reads as the empty string, as GitHub documents.
 jobs_running_under() {  # [KEY=VALUE]...
-  ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
-doc = YAML.load_file(ARGV.shift)
-context = simulated_context(doc.fetch("name"), ARGV)
-exit unless triggered?(doc, context)
-doc.fetch("jobs").each do |name, job|
-  puts name if Expression.condition(job["if"], context)
-end
-' "$CI_WORKFLOW" "$@"
+  jq -r "$CI_JQ_LIB$CI_EXPR_JQ"'
+simulated_context(fetch("name"); $ARGS.positional) as $context
+| select(triggered($context))
+| fetch("jobs") | to_entries[]
+| select(.value | .["if"] | condition($context)) | .key
+' --args "$@" <<<"$CI_JSON"
 }
 
 # Run the Full suite job's steps under one simulated context exactly as the
@@ -260,14 +222,13 @@ end
 # is the job's.
 run_full_suite_verdict() {  # [KEY=VALUE]...
   local script
-  script=$(ruby -ryaml -rshellwords -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
-doc = YAML.load_file(ARGV.shift)
-context = simulated_context(doc.fetch("name"), ARGV)
-doc.fetch("jobs").fetch("full-suite").fetch("steps").each do |step|
-  env = step.fetch("env", {}).map { |k, v| "#{k}=#{interpolate(v, context).shellescape}" }.join(" ")
-  puts "#{env} bash -c #{step.fetch("run").shellescape} || exit $?"
-end
-' "$CI_WORKFLOW" "$@") || fail "could not resolve the Full suite steps"
+  script=$(jq -r "$CI_JQ_LIB$CI_EXPR_JQ"'
+simulated_context(fetch("name"); $ARGS.positional) as $context
+| fetch("jobs") | fetch("full-suite") | fetch("steps")[]
+| ([if has("env") then .env else {} end | to_entries[] | "\(.key)=\(.value | interpolate($context) | @sh)"]
+   | join(" ")) as $env
+| "\($env) bash -c \(fetch("run") | @sh) || exit $?"
+' --args "$@" <<<"$CI_JSON") || fail "could not resolve the Full suite steps"
   bash -c "$script" 2>&1
 }
 
@@ -283,21 +244,20 @@ published_checks() {  # [KEY=VALUE]...
   for arg in "$@"; do
     case $arg in outcome=*) outcome=${arg#outcome=} ;; esac
   done
-  rows=$(ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
-doc = YAML.load_file(ARGV.shift)
-context = simulated_context(doc.fetch("name"), ARGV)
-exit unless triggered?(doc, context)
-doc.fetch("jobs").each do |id, job|
-  runs = Expression.condition(job["if"], context)
-  matrix = job.dig("strategy", "matrix") || {}
-  expansions = matrix.empty? ? [{}] : matrix.flat_map { |k, values| values.map { |v| { "matrix.#{k}" => v.to_s } } }
-  expansions.each do |extra|
-    name = interpolate(job.fetch("name", id), context.merge(extra))
-    conclusion = !runs ? "skipped" : id == "full-suite" ? "verdict" : context.fetch("simulated.outcome")
-    puts [name, conclusion].join("\t")
-  end
-end
-' "$CI_WORKFLOW" "$@") || fail "could not resolve the published checks"
+  rows=$(jq -r "$CI_JQ_LIB$CI_EXPR_JQ"'
+simulated_context(fetch("name"); $ARGS.positional) as $context
+| select(triggered($context))
+| fetch("jobs") | to_entries[]
+| .key as $id | .value as $job
+| ($job | .["if"] | condition($context)) as $runs
+| ($job.strategy.matrix // {}) as $matrix
+| (if $matrix == {} then {}
+   else $matrix | to_entries[] | .key as $key | .value[] | {("matrix." + $key): tostring} end) as $extra
+| [($job | if has("name") then .name else $id end | interpolate($context + $extra)),
+   (if ($runs | not) then "skipped" elif $id == "full-suite" then "verdict"
+    else $context["simulated.outcome"] end)]
+| join("\t")
+' --args "$@" <<<"$CI_JSON") || fail "could not resolve the published checks"
   [ -n "$rows" ] || return 0
   while IFS=$'\t' read -r name conclusion; do
     if [ "$conclusion" = verdict ]; then
@@ -322,9 +282,10 @@ checks_after_runs() {  # <run KEY=VALUE list>...
 }
 
 job_timeout() {
-  ruby -ryaml -e '
-puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes", "none")
-' "$CI_WORKFLOW" "$1"
+  jq -r --arg job "$1" "$CI_JQ_LIB"'
+fetch("jobs") | fetch($job)
+| if has("timeout-minutes") then .["timeout-minutes"] // "" else "none" end
+' <<<"$CI_JSON"
 }
 
 # Tier membership is the executable inventory of the timeout policy: a new job
@@ -353,7 +314,7 @@ tier_timeout() {  # <tier> <job>...
 
 # Print every job id in the workflow, one per line.
 workflow_jobs() {
-  ruby -ryaml -e 'puts YAML.load_file(ARGV[0]).fetch("jobs").keys' "$CI_WORKFLOW"
+  jq -r "$CI_JQ_LIB"'fetch("jobs") | keys_unsorted[]' <<<"$CI_JSON"
 }
 
 group_of() { printf '%s\n' "$1" | cut -f1; }
@@ -539,14 +500,15 @@ TABLE
 }
 
 test_every_job_has_a_finite_timeout() {
-  local reported
-  reported=$(ruby -ryaml -e '
-YAML.load_file(ARGV[0]).fetch("jobs").each do |name, job|
-  timeout = job["timeout-minutes"]
-  next if timeout.is_a?(Integer) && timeout > 0
-  puts "#{name}: #{timeout.inspect}"
-end
-' "$CI_WORKFLOW") || fail "could not read job timeouts from ci.yml"
+  local timeouts reported
+  # Annotate each timeout with its YAML tag so an integer-valued float such as
+  # 30.0 is still rejected after the JSON conversion.
+  timeouts=$(yq -o=json '.jobs | map_values(.["timeout-minutes"] | {"tag": tag, "value": .})' "$CI_WORKFLOW") \
+    || fail "could not read job timeouts from ci.yml"
+  reported=$(jq -r 'to_entries[]
+    | select(.value.tag != "!!int" or .value.value <= 0)
+    | "\(.key): \(.value.value | tojson)"' <<<"$timeouts") \
+    || fail "could not read job timeouts from ci.yml"
   [ -z "$reported" ] || fail "these CI jobs have no finite hang tripwire:"$'\n'"$reported"
   pass "every ci.yml job carries a finite timeout"
 }
@@ -606,16 +568,19 @@ test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop() {
     || fail "heavy tier backstop ($heavy) must exceed the normal tier ($normal)"
   [ "$heavy" -ge 60 ] && [ "$heavy" -le 75 ] \
     || fail "heavy tier backstop must stay a 60-75 minute last resort, got $heavy"
-  step=$(ruby -ryaml -e '
-steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("steps")
-index = steps.index { |s| s["id"] == "run-real-herdr-family" }
-raise "no run-real-herdr-family step" unless index
-teardown = steps.index { |s| s["id"] == "cleanup-herdr-lab-sessions" }
-raise "no cleanup-herdr-lab-sessions step" unless teardown
-raise "teardown must follow the family-run step" unless teardown > index
-raise "teardown must run under always()" unless steps[teardown]["if"].to_s.strip == "always()"
-puts steps[index].fetch("timeout-minutes", "none")
-' "$CI_WORKFLOW" tests-herdr) || fail "could not read the Herdr family-run step"
+  step=$(jq -r --arg job tests-herdr "$CI_JQ_LIB"'
+def step_index($id): [to_entries[] | select((.value | objects | .id) == $id) | .key] | first;
+fetch("jobs") | fetch($job) | fetch("steps")
+| step_index("run-real-herdr-family") as $index
+| step_index("cleanup-herdr-lab-sessions") as $teardown
+| if $index == null then error("no run-real-herdr-family step")
+  elif $teardown == null then error("no cleanup-herdr-lab-sessions step")
+  elif $teardown <= $index then error("teardown must follow the family-run step")
+  elif (.[$teardown].if | if . == null then "" else tostring end | strip) != "always()" then
+    error("teardown must run under always()")
+  else .[$index] | if has("timeout-minutes") then .["timeout-minutes"] // "" else "none" end
+  end
+' <<<"$CI_JSON") || fail "could not read the Herdr family-run step"
   case "$step" in ''|*[!0-9]*) fail "the Herdr family-run step needs its own timeout-minutes, got $step" ;; esac
   [ "$step" = 20 ] \
     || fail "the Herdr family-run step must be the 20-minute tripwire, got $step"
@@ -659,12 +624,12 @@ TABLE
 # Print true or false: whether one job's job-level `if` resolves true under
 # one simulated context.
 job_runs_under() {  # <job> [KEY=VALUE]...
-  ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
-doc = YAML.load_file(ARGV.shift)
-job = ARGV.shift
-context = simulated_context(doc.fetch("name"), ARGV)
-puts Expression.condition(doc.fetch("jobs").fetch(job)["if"], context)
-' "$CI_WORKFLOW" "$@"
+  local job=$1
+  shift
+  jq -r --arg job "$job" "$CI_JQ_LIB$CI_EXPR_JQ"'
+simulated_context(fetch("name"); $ARGS.positional) as $context
+| fetch("jobs") | fetch($job) | .["if"] | condition($context)
+' --args "$@" <<<"$CI_JSON"
 }
 
 # The aggregate must keep running after a failed lane so its timing summary
@@ -685,33 +650,45 @@ TABLE
   pass "the timing aggregate still runs after a failed lane unless the push run is skipped"
 }
 
+# Trim surrounding whitespace from every line of a command's listing.
+strip_lines() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+
 test_ci_matrices_match_executable_partitions() {
-  ruby -ryaml -ropen3 - "$CI_WORKFLOW" "$ROOT" <<'RUBY' || fail "CI partition contract"
-jobs = YAML.load_file(ARGV[0]).fetch("jobs")
-root = ARGV[1]
-serial = jobs.fetch("tests-portable-serial").fetch("strategy")
-raise "serial failures must not cancel other shards" unless serial.fetch("fail-fast") == false
-matrix = serial.fetch("matrix")
-raise "unexpected serial dimensions" unless matrix.keys == ["shard"]
-shards = matrix.fetch("shard")
-lanes, status = Open3.capture2(File.join(root, "bin/fm-test-run.sh"), "--list-lanes")
-raise "cannot list runner lanes" unless status.success?
-actual = lanes.lines.map(&:strip).select { |l| l.match?(/\Aportable-serial-\d+of\d+\z/) }
-expected = shards.map { |s| "portable-serial-#{s}of#{shards.length}" }
-raise "CI matrix and runner disagree" unless actual.sort == expected.sort
-lint = jobs.fetch("lint").fetch("strategy")
-raise "lint failures must not cancel another partition" unless lint.fetch("fail-fast") == false
-matrix = lint.fetch("matrix")
-raise "unexpected lint dimensions" unless matrix.keys == ["partition"]
-parts = matrix.fetch("partition")
-roots = parts.flat_map do |p|
-  output, result = Open3.capture2(File.join(root, "bin/fm-lint.sh"), "--partition", "#{p}of#{parts.length}", "--list-files")
-  raise "unsupported lint partition" unless result.success?
-  output.lines.map(&:strip)
-end
-canonical, result = Open3.capture2({"CI" => "true"}, File.join(root, "bin/fm-lint.sh"), "--list-files")
-raise "lint matrix loses or duplicates canonical roots" unless result.success? && roots.sort == canonical.lines.map(&:strip).sort
-RUBY
+  local expected parts lanes actual roots canonical part out
+  expected=$(jq -r "$CI_JQ_LIB"'
+fetch("jobs") | fetch("tests-portable-serial") | fetch("strategy")
+| if fetch("fail-fast") != false then error("serial failures must not cancel other shards") else . end
+| fetch("matrix")
+| if (keys_unsorted) != ["shard"] then error("unexpected serial dimensions") else . end
+| fetch("shard") as $shards
+| $shards[] | "portable-serial-\(.)of\($shards | length)"
+' <<<"$CI_JSON") || fail "CI partition contract"
+  expected=$(printf '%s' "$expected" | LC_ALL=C sort)
+  lanes=$("$ROOT/bin/fm-test-run.sh" --list-lanes) || fail "CI partition contract: cannot list runner lanes"
+  actual=$(printf '%s\n' "$lanes" | strip_lines | grep -E '^portable-serial-[0-9]+of[0-9]+$' | LC_ALL=C sort)
+  [ "$actual" = "$expected" ] || fail "CI partition contract: CI matrix and runner disagree"
+
+  parts=$(jq -r "$CI_JQ_LIB"'
+fetch("jobs") | fetch("lint") | fetch("strategy")
+| if fetch("fail-fast") != false then error("lint failures must not cancel another partition") else . end
+| fetch("matrix")
+| if (keys_unsorted) != ["partition"] then error("unexpected lint dimensions") else . end
+| fetch("partition") as $parts
+| $parts[] | "\(.)of\($parts | length)"
+' <<<"$CI_JSON") || fail "CI partition contract"
+  roots=
+  while IFS= read -r part; do
+    [ -n "$part" ] || continue
+    out=$("$ROOT/bin/fm-lint.sh" --partition "$part" --list-files) \
+      || fail "CI partition contract: unsupported lint partition"
+    [ -z "$out" ] || roots+=$out$'\n'
+  done <<<"$parts"
+  roots=$(printf '%s' "$roots" | strip_lines | LC_ALL=C sort)
+  canonical=$(CI=true "$ROOT/bin/fm-lint.sh" --list-files) \
+    || fail "CI partition contract: lint matrix loses or duplicates canonical roots"
+  canonical=$(printf '%s\n' "$canonical" | strip_lines | LC_ALL=C sort)
+  [ "$roots" = "$canonical" ] \
+    || fail "CI partition contract: lint matrix loses or duplicates canonical roots"
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
