@@ -53,7 +53,9 @@ fail() {
 # as `.type == "assistant"` with a provider named only when it reports one.
 assistant_models() {  # <session-record>
   jq -r 'select((.type == "message" or .type == "assistant")
-      and .message.role == "assistant")
+      and .message.role == "assistant"
+      and (.type == "assistant" or .message.stopReason == "stop"
+        or .message.stopReason == "length" or .message.stopReason == "toolUse"))
     | if (.message.provider | type) == "string" and (.message.provider | length) > 0
       then .message.provider + "/" + (.message.model // "")
       else (.message.model // "")
