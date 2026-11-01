@@ -153,6 +153,9 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
+# Unless bin/fm-heavy-admission.sh reports this home's heavy-phase admission
+# policy known off, ship and scout scaffolds add a "# Heavy phases" section
+# that has the worker wait for admission before each heavy phase.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -505,6 +508,25 @@ if [ -e "$CONFIG/wait-no-turns" ]; then
   WAIT_BLOCK="$WAIT_SECTION"$'\n\n'
 fi
 
+# Ship and scout briefs omit the heavy-phase admission rule only when this
+# home's policy is known off; bin/fm-heavy-admission.sh owns the decision.
+HEAVY_BLOCK=
+HEAVY_POLICY=$(FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-heavy-admission.sh" policy 2>/dev/null) || HEAVY_POLICY=unknown
+if [ "$HEAVY_POLICY" != off ]; then
+  HEAVY_ADMIT="FM_HOME=$(shell_quote "$FM_HOME") $(shell_quote "$FM_ROOT/bin/fm-heavy-admission.sh") wait"
+  IFS= read -r -d '' HEAVY_BLOCK <<EOF || true
+# Heavy phases
+This machine admits heavy phases one at a time against measured host headroom.
+Before each dependency install, whole-repo test run, production build, browser matrix, or the start of a fresh no-mistakes run, run \`$HEAVY_ADMIT\` and start the phase only after it exits 0; reattaching to a run you already started is not a start.
+Add \`--peak-gib <n>\` when you have measured that phase's memory peak.
+Exit 1 means the host is still holding: append \`$PAUSED_VERB [at=<epoch>]: heavy phase queued on host admission\` once, then keep running the same wait until it admits.
+Never skip, shrink, or split required checks to avoid a hold.
+When you run Jest or Playwright yourself, pass the admit line's \`jest_max_workers\` as \`--maxWorkers\` and \`playwright_workers\` as \`--workers\`.
+Reasoning, editing, and targeted checks need no admission.
+EOF
+  HEAVY_BLOCK="$HEAVY_BLOCK"$'\n'
+fi
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -738,7 +760,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
 
-$WAIT_BLOCK$INBOX_SECTION
+$WAIT_BLOCK$HEAVY_BLOCK$INBOX_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -823,7 +845,7 @@ $ASK_USER_BLOCK
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
 
-$WAIT_BLOCK$INBOX_SECTION
+$WAIT_BLOCK$HEAVY_BLOCK$INBOX_SECTION
 
 # Project memory
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
