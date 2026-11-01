@@ -87,9 +87,29 @@ if [ -n "$TERM_REASON" ] && [ "$TERM_REASON" != "NO_TOOL_CALL" ]; then
   allow_stop
 fi
 
+EXEC_NUM=$(printf '%s' "$PAYLOAD" | jq -r 'if (.executionNum | type) == "number" then (.executionNum | floor | tostring) else "" end' 2>/dev/null || true)
+
+if ! fm_session_lock_owned_by_self "$STATE"; then
+  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  fm_session_pid_valid "$LOCK_PID" || allow_stop
+  fm_harness_pid_alive "$LOCK_PID" && allow_stop
+  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || allow_stop
+  fm_session_lock_owned_by_self "$STATE" || allow_stop
+fi
+
+mkdir -p "$STATE" 2>/dev/null || true
+PARK_OWNER_FILE="$STATE/.agy-park-owner"
+PARK_OWNER="$$:$(date +%s):${RANDOM:-0}"
+printf '%s\n' "$PARK_OWNER" > "$PARK_OWNER_FILE"
+
+park_still_ours() {
+  [ "$(cat "$PARK_OWNER_FILE" 2>/dev/null || true)" = "$PARK_OWNER" ]
+}
+
 # Installed turn-end lifecycle hooks (docs/configuration.md "Lifecycle hooks")
-# run on every normal stop, before any park, and a refusal continues the turn
-# with its reason. Antigravity marks no follow-up-driven stop, so
+# run on every normal stop, after this stop has claimed the park so an older
+# park stands down, and before any park of its own. A refusal continues the
+# turn with its reason. Antigravity marks no follow-up-driven stop, so
 # state/.turnend-hook-held records the holding session and only that session's
 # very next normal stop skips the hooks once, so hooks can never hold a turn
 # open twice. A cancelled or failed stop retires the record. Absent
@@ -100,22 +120,13 @@ if fm_hooks_present turn-end; then
   rm -f "$STATE/.turnend-hook-held" 2>/dev/null || true
   if { [ "$HELD" -eq 0 ] || [ "$HELD_SESSION" != "$HOOK_SESSION" ]; } \
     && ! TURN_END_REASON=$(fm_hooks_turn_end "$PAYLOAD"); then
+    park_still_ours || allow_stop
     if ! { mkdir -p "$STATE" 2>/dev/null && printf '%s' "$HOOK_SESSION" > "$STATE/.turnend-hook-held"; }; then
       allow_stop
     fi
     continue_turn "TURN END HELD BY A LIFECYCLE HOOK - handle this before ending the turn:
 $TURN_END_REASON"
   fi
-fi
-
-EXEC_NUM=$(printf '%s' "$PAYLOAD" | jq -r 'if (.executionNum | type) == "number" then (.executionNum | floor | tostring) else "" end' 2>/dev/null || true)
-
-if ! fm_session_lock_owned_by_self "$STATE"; then
-  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  fm_session_pid_valid "$LOCK_PID" || allow_stop
-  fm_harness_pid_alive "$LOCK_PID" && allow_stop
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || allow_stop
-  fm_session_lock_owned_by_self "$STATE" || allow_stop
 fi
 
 # Away mode owns the watcher and its own triage; never park and never wake.
@@ -133,15 +144,6 @@ if ! fm_supervision_needed "$STATE" "$GRACE"; then
   rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
   allow_stop
 fi
-
-mkdir -p "$STATE" 2>/dev/null || true
-PARK_OWNER_FILE="$STATE/.agy-park-owner"
-PARK_OWNER="$$:$(date +%s):${RANDOM:-0}"
-printf '%s\n' "$PARK_OWNER" > "$PARK_OWNER_FILE"
-
-park_still_ours() {
-  [ "$(cat "$PARK_OWNER_FILE" 2>/dev/null || true)" = "$PARK_OWNER" ]
-}
 
 ARM_OUT=
 ARM_PID=

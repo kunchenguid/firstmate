@@ -3847,17 +3847,34 @@ resurface_after_downtime() {
 # Present, the hooks run detached with no tie to this watcher's output, so a
 # slow hook never delays a poll or holds a wake open; each event has at most
 # one run in flight, and a run still going when the next is due is skipped.
-# The in-flight run's pid lives in state/.fm-hook-<event>.pid rather than in
-# this process, so a successor watcher also skips a run its predecessor left
-# going and a stopping watcher never waits on one. Their output and failures go
-# to state/.fm-hooks.log.
+# The in-flight run's pid and process identity live in
+# state/.fm-hook-<event>.pid rather than in this process, so a successor
+# watcher also skips a run its predecessor left going, a reused pid never reads
+# as that run, and a stopping watcher never waits on one. Stop signals are
+# deferred from launch until the pid is published (run_check_capture), so a
+# stop can never leave a run going unrecorded. Their output and failures go to
+# state/.fm-hooks.log.
 # shellcheck source=bin/fm-hooks-lib.sh
 . "$SCRIPT_DIR/fm-hooks-lib.sh"
 WATCH_TICK_CYCLE=0
+WATCH_HOOK_SIGNAL_PENDING=
 watch_hook_idle() {  # <event>
-  local pid=
-  { read -r pid < "$STATE/.fm-hook-$1.pid"; } 2>/dev/null || return 0
-  [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null
+  local pid='' identity=''
+  { read -r pid identity < "$STATE/.fm-hook-$1.pid"; } 2>/dev/null || return 0
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 0
+  [ -n "$identity" ] || return 1
+  [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" != "$identity" ]
+}
+watch_hook_launch() {  # <event> [key=value | key:=json]...
+  local marker="$STATE/.fm-hook-$1.pid" pid
+  WATCH_HOOK_SIGNAL_PENDING=
+  trap 'WATCH_HOOK_SIGNAL_PENDING=1' HUP INT TERM
+  fm_hooks_emit "$@" </dev/null >>"$STATE/.fm-hooks.log" 2>&1 &
+  pid=$!
+  printf '%s\n' "$pid" > "$marker" 2>/dev/null || true
+  watcher_stop_signals
+  [ -z "$WATCH_HOOK_SIGNAL_PENDING" ] || exit 1
+  printf '%s %s\n' "$pid" "$(fm_pid_identity "$pid" 2>/dev/null || true)" > "$marker" 2>/dev/null || true
 }
 
 while :; do
@@ -3913,9 +3930,7 @@ while :; do
   if fm_hooks_present watch-tick; then
     WATCH_TICK_CYCLE=$((WATCH_TICK_CYCLE + 1))
     if watch_hook_idle watch-tick; then
-      fm_hooks_emit watch-tick home="$FM_HOME" cycle:="$WATCH_TICK_CYCLE" watcher_pid:="$WATCHER_PID" \
-        </dev/null >>"$STATE/.fm-hooks.log" 2>&1 &
-      printf '%s\n' "$!" > "$STATE/.fm-hook-watch-tick.pid" 2>/dev/null || true
+      watch_hook_launch watch-tick home="$FM_HOME" cycle:="$WATCH_TICK_CYCLE" watcher_pid:="$WATCHER_PID"
     fi
   fi
   # Opt-in Rex attention marks, validation progress, and tint (docs/rex-backend.md
@@ -4523,8 +4538,7 @@ EOF
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
     if fm_hooks_present heartbeat && watch_hook_idle heartbeat; then
-      fm_hooks_emit heartbeat home="$FM_HOME" </dev/null >>"$STATE/.fm-hooks.log" 2>&1 &
-      printf '%s\n' "$!" > "$STATE/.fm-hook-heartbeat.pid" 2>/dev/null || true
+      watch_hook_launch heartbeat home="$FM_HOME"
     fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the

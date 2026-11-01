@@ -353,6 +353,41 @@ test_turnend_guard_agy_hook_hold_skip_is_scoped() {
   pass "fm-turnend-guard-agy: a hook hold skip is retired by a cancelled stop and bound to its session"
 }
 
+# A newer stop's hook refusal claims the park first, so an older park still
+# running stands down instead of emitting a second continuation.
+test_turnend_guard_agy_hook_refusal_claims_the_park() {
+  local dir out first
+  dir=$(make_primary_dir "$TMP_ROOT/stop-turn-end-hook-claims-park")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" slow
+  mkdir -p "$dir/hooks/turn-end.d"
+  printf '#!/bin/sh
+[ -e "%s/refuse" ] || exit 0
+echo "finish the owed reply first" >&2
+exit 1
+' \
+    "$dir" > "$dir/hooks/turn-end.d/10-owed"
+  chmod +x "$dir/hooks/turn-end.d/10-owed"
+  AGY_CHILD_CMD='
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    p="{\"sessionId\":\"s-1\",\"conversationId\":\"c-1\",\"executionNum\":1,\"terminationReason\":\"NO_TOOL_CALL\"}"
+    printf "%s" "$p" | "$FM_HOME/bin/fm-turnend-guard-agy.sh" > "$FM_HOME/first-out" &
+    first=$!
+    i=0
+    while [ ! -e "$FM_HOME/state/arm-ran" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+    : > "$FM_HOME/refuse"
+    printf "%s" "$p" | "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+    : > "$FM_HOME/state/arm-release"
+    wait "$first"
+  '
+  out=$(run_under_agy FM_HOME="$dir" FM_AGY_PARK_POLL=1 2>/dev/null)
+  first=$(cat "$dir/first-out" 2>/dev/null || true)
+  [ -e "$dir/state/arm-ran" ] || fail "the first stop never parked"
+  assert_equals "continue" "$(printf '%s' "$out" | jq -r '.decision // empty')" "the newer stop's hook refusal must continue the turn"
+  assert_equals "{}" "$first" "the older park must stand down once a newer stop's hook refusal claimed the park"
+  pass "fm-turnend-guard-agy: a hook refusal claims the park so an older park stands down"
+}
+
 test_turnend_guard_agy_actionable_wake_followup() {
   local dir payload out decision reason
   dir=$(make_primary_dir "$TMP_ROOT/stop-wake")
@@ -671,6 +706,7 @@ fm_test_run \
   test_sessionstart_agy_primary_secondmate_and_worktree_scope \
   test_turnend_guard_agy_runs_turn_end_hooks_on_a_normal_stop \
   test_turnend_guard_agy_hook_hold_skip_is_scoped \
+  test_turnend_guard_agy_hook_refusal_claims_the_park \
   test_turnend_guard_agy_actionable_wake_followup \
   test_turnend_guard_agy_supervision_host_park \
   test_turnend_guard_agy_park_timeout_rearms \
