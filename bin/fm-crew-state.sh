@@ -65,6 +65,13 @@
 #      route is deliberately OUTSIDE the daemon rule below: while the pipeline
 #      holds custody its own attribution is the attribution, and second-guessing
 #      it here is a change to a route this fix does not otherwise touch.
+#      A run PARKED at a gate on the PR this task recorded as delivered (meta
+#      pr=) also binds without head equality (fm_nm_run_manages_task_pr in
+#      bin/fm-nm-run-lib.sh): a ci-monitoring rebase moves the run head off the
+#      task's history after the task reported done, and the gate the run then
+#      opens is still this task's, so it outranks a done or paused status line.
+#      It applies only while the newest status is done or a declared paused
+#      wait; a task that reports working keeps the strict head rule.
 #      A parked run head whose commit object the task copy never fetched cannot
 #      be verified locally; that row is recognized only as a provable
 #      pipeline-owned continuation - the branch's ACTIVE newest ledger row,
@@ -979,6 +986,16 @@ nm_run_head_matches_worktree() {
   fm_nm_head_matches_worktree "$WT" "$run_head"
 }
 
+# 0 if the active axi-status run is parked at a gate on the PR this task
+# recorded as delivered. Rule owned by fm_nm_run_manages_task_pr in
+# bin/fm-nm-run-lib.sh.
+nm_run_parked_on_task_pr() {
+  fm_nm_run_is_parked "$RUN_OUT" || return 1
+  [ "$(status_line_verb "$(last_status_line "$LOG")")" = "done" ] \
+    || status_is_paused "$(status_declared_wait_line "$LOG")" || return 1
+  fm_nm_run_manages_task_pr "$RUN_OUT" "$(meta_value pr)"
+}
+
 HAVE_RUN=0
 # RUN_SOURCE distinguishes the two ways HAVE_RUN=1 can happen: "full" means
 # $RUN_OUT is real `axi status` TOON with step/gate detail (including a
@@ -1096,6 +1113,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           emit unknown run-step "selected run status disagrees with inventory; run ids: $candidate_ids"
         fi
         if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
+          || nm_run_parked_on_task_pr \
           || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_answered_down; }; then
           HAVE_RUN=1
         elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
@@ -1127,6 +1145,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # worktree moves off the run head.
       if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
         && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
+          || nm_run_parked_on_task_pr \
           || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_answered_down; }; }; then
         HAVE_RUN=1
         # Without run ids, contradictory liveness cannot prove precedence.

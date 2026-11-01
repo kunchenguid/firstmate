@@ -2300,6 +2300,126 @@ test_stale_terminal_status_overridden_by_active_run() {
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
 
+# An idle ship whose stale pane was already surfaced on its done or paused line.
+make_wait_gate_case() {  # <name> <status-line> -> sets WG_DIR WG_WINDOW
+  local dir state window key
+  dir=$(make_case "$1"); state="$dir/state"
+  window="test:fm-wg"
+  printf 'finished, awaiting review' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wg.meta"
+  printf '%s\n' "$2" > "$state/wg.status"
+  printf '%s' "$(seen_sig "$state/wg.status")" > "$state/.seen-wg_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "finished, awaiting review")" > "$state/.hash-$key"
+  printf '%s' "$(hash_text "finished, awaiting review")" > "$state/.stale-$key"
+  printf '3\n' > "$state/.count-$key"
+  WG_DIR=$dir WG_WINDOW=$window
+}
+
+wait_gate_watch_bg() {  # <dir> <window> <out>
+  watch_bg "$1/state" "$1/fakebin" "$3" env FM_FAKE_TMUX_WINDOW="$2" FM_FAKE_TMUX_CAPTURE="$1/pane.txt" \
+    FM_STALE_ESCALATE_SECS=240 FM_FAKE_CREW_STATE_LOG="$1/crew-state.log"
+}
+
+test_gate_after_done_or_paused_wakes_once_per_gate() {
+  local status wait dir state out pid gate
+  gate='state: parked · source: run-step · parked at test: 1 finding(s) · ask-user: authority decision · run: 01RUN'
+  for status in 'done: PR https://example.test/pr/3 checks green' \
+    'paused: PR https://example.test/pr/3 green, waits on the maintainer until 2099-01-01T00:00Z'; do
+    wait=${status%%:*}
+    make_wait_gate_case "wait-gate-$wait" "$status"
+    dir=$WG_DIR; state="$dir/state"; out="$dir/watch.out"
+    export FM_FAKE_CREW_STATE=$gate
+    wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "$wait: a gate opened after the $wait line did not wake"; }
+    grep -Fx "check: validation gate after $wait: wg parked at test: 1 finding(s) · ask-user: authority decision · run: 01RUN" "$out" >/dev/null \
+      || fail "$wait: the wake does not name the gate: $(cat "$out")"
+    grep "$(printf '\tcheck\t')" "$state/.wake-queue" | grep -F "validation gate after $wait" >/dev/null \
+      || fail "$wait: the gate wake was not queued"
+    ack_stopped_cycle "$state" || fail "$wait: could not acknowledge the gate wake"
+
+    : > "$out"; : > "$dir/crew-state.log"
+    rm -f "$state/.wait-gate-checked-test_fm-wg"
+    wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || fail "$wait: the same gate woke twice: $(cat "$out")"
+    wait_poll_cycle "$state" "$pid" || fail "$wait: the same gate woke on a later poll: $(cat "$out")"
+    reap "$pid"
+    ack_stopped_cycle "$state" || true
+
+    : > "$out"; : > "$dir/crew-state.log"
+    rm -f "$state/.wait-gate-checked-test_fm-wg"
+    export FM_FAKE_CREW_STATE='state: unknown · source: run-step · run inventory unavailable'
+    wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+    pid=$!
+    for _ in $(seq 100); do [ -s "$dir/crew-state.log" ] && break; sleep 0.1; done
+    [ -s "$dir/crew-state.log" ] || fail "$wait: the unknown read never happened"
+    wait_poll_cycle "$state" "$pid" || fail "$wait: an unknown read woke: $(cat "$out")"
+    reap "$pid"
+    ack_stopped_cycle "$state" || true
+    rm -f "$state/.wait-gate-checked-test_fm-wg"; : > "$dir/crew-state.log"
+    export FM_FAKE_CREW_STATE=$gate
+    wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+    pid=$!
+    for _ in $(seq 100); do [ -s "$dir/crew-state.log" ] && break; sleep 0.1; done
+    [ -s "$dir/crew-state.log" ] || fail "$wait: the parked read after the unknown read never happened"
+    wait_poll_cycle "$state" "$pid" || fail "$wait: the same gate woke again after an unknown read: $(cat "$out")"
+    reap "$pid"
+    [ ! -s "$out" ] || fail "$wait: the same gate woke again after an unknown read: $(cat "$out")"
+    [ "$wait" != "done" ] || [ "$(wc -l < "$dir/crew-state.log" | tr -d ' ')" = 1 ] \
+      || fail "done: the recheck spent more than one current-state read inside its interval"
+    unset FM_FAKE_CREW_STATE
+  done
+  pass "a gate that opens after a done or paused line wakes once per gate"
+}
+
+test_gate_reparked_after_answer_wakes_again() {
+  local dir state out pid gate
+  gate='state: parked · source: run-step · parked at test: 1 finding(s) · ask-user: authority decision · run: 01RUN'
+  make_wait_gate_case wait-gate-reparked 'done: PR https://example.test/pr/3 checks green'
+  dir=$WG_DIR; state="$dir/state"; out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE=$gate
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the first gate did not wake"; }
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first gate wake"
+
+  : > "$out"; : > "$dir/crew-state.log"
+  printf 'harness=grok\n' >> "$state/wg.meta"
+  printf 'answering the gate Ctrl+c:cancel' > "$dir/pane.txt"
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "a busy pane woke: $(cat "$out")"
+  wait_poll_cycle "$state" "$pid" || fail "a busy pane woke: $(cat "$out")"
+  reap "$pid"
+  ack_stopped_cycle "$state" || true
+
+  : > "$out"; : > "$dir/crew-state.log"
+  printf 'finished, awaiting review' > "$dir/pane.txt"
+  rm -f "$state/.wait-gate-checked-test_fm-wg"
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the same gate re-parked after an answer did not wake again"; }
+  grep -F "validation gate after done" "$out" >/dev/null || fail "the re-parked gate wake is wrong: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a gate that re-parks after the worker acted on an answer wakes again"
+}
+
+test_no_gate_after_done_stays_silent() {
+  local dir state out pid
+  make_wait_gate_case wait-gate-none 'done: PR https://example.test/pr/3 checks green'
+  dir=$WG_DIR; state="$dir/state"; out="$dir/watch.out"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  wait_gate_watch_bg "$dir" "$WG_WINDOW" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "a done ship with no gate woke: $(cat "$out")"
+  reap "$pid"
+  [ ! -s "$state/.wake-queue" ] || fail "a done ship with no gate queued a wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a done ship whose run is not parked stays silent"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -5371,6 +5491,9 @@ fm_test_run \
   test_permission_recovery_surfaces_preserved_status \
   test_terminal_stale_surfaced \
   test_stale_terminal_status_overridden_by_active_run \
+  test_gate_after_done_or_paused_wakes_once_per_gate \
+  test_gate_reparked_after_answer_wakes_again \
+  test_no_gate_after_done_stays_silent \
   test_nonterminal_stale_provably_working_absorbed_then_escalated \
   test_wedge_escalation_marks_demand_deep_inspection_after_threshold \
   test_wedge_escalation_resets_when_pane_becomes_active \

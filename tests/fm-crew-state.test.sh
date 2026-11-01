@@ -4942,6 +4942,104 @@ runs[1]{id,branch,status,head,pr}:
   pass "an unproven record at a diverged head does not answer on the selected route"
 }
 
+run_parked_test_gate_with_pr() {  # <branch> <pr-url>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "$2"
+  findings[1]{id,severity,file,line,action,description}:
+    test-1,warning,,,ask-user,live validation inconclusive
+gate:
+  step: test
+  status: awaiting_approval
+steps[3]{step,status,findings,duration_ms}:
+  rebase,completed,0,0
+  test,awaiting_approval,1,0
+  ci,pending,0,0
+EOF
+}
+
+# The task reported its PR green, then the pipeline rebased that PR's run onto an
+# advanced base and parked it at a re-run test step. The run head is no longer on
+# this copy's history, but the run still manages the PR the task recorded as
+# delivered, so the gate must answer over the finished or waiting status line.
+make_delivered_pr_gate_case() {  # <name> <run-head: rebased|unfetched> <recorded-pr> -> sets DLV_CASE
+  local name=$1 shape=$2 recorded=$3 d head
+  reset_fakes
+  d=$(new_case "$name")
+  make_repo_on_branch "$d/wt" fm/feat-dlv
+  case "$shape" in
+    rebased) head=$(make_rebased_head "$d/wt") ;;
+    unfetched) head=$(mint_unfetched_fix_head "$d/wt") ;;
+  esac
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/dlv.meta" "window=fm:fm-dlv" "worktree=$d/wt" "kind=ship" "harness=claude" \
+    ${recorded:+"pr=$recorded"}
+  FM_FAKE_RUN_HEAD=$head
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-dlv,running,$head,\"https://github.com/o/r/pull/7\""
+  FM_FAKE_AXI_STATUS="$(run_parked_test_gate_with_pr fm/feat-dlv https://github.com/o/r/pull/7)"
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" dlv
+  DLV_CASE=$d
+}
+
+test_gate_on_delivered_pr_run_reports_parked_over_done_and_paused() {
+  local d shape out
+  for shape in rebased unfetched; do
+    make_delivered_pr_gate_case "dlv-done-$shape" "$shape" https://github.com/o/r/pull/7
+    d=$DLV_CASE
+    printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$d/state/dlv.status"
+    out=$(run_crew_state "$d" dlv)
+    assert_contains "$out" "state: parked" "$shape: a gate on the delivered PR's run outranks done"
+    assert_contains "$out" "source: run-step" "$shape: the run answers, not the done line"
+    assert_contains "$out" "parked at test" "$shape: the gate is named"
+    assert_contains "$out" "$FM_GATE_HUMAN_DECISION" "$shape: who owes the answer is kept"
+    assert_contains "$out" "run: 01RUN" "$shape: the run id is kept"
+
+    make_delivered_pr_gate_case "dlv-paused-$shape" "$shape" https://github.com/o/r/pull/7
+    d=$DLV_CASE
+    printf 'paused: PR https://github.com/o/r/pull/7 green, waits on the maintainer until 2099-01-01T00:00Z\n' \
+      > "$d/state/dlv.status"
+    out=$(run_crew_state "$d" dlv)
+    assert_contains "$out" "state: parked" "$shape: a gate on the delivered PR's run outranks a declared wait"
+    assert_contains "$out" "parked at test" "$shape: the gate is named over the wait"
+  done
+  pass "a gate on the delivered PR's run reports parked over done and paused"
+}
+
+test_gate_on_another_pr_run_keeps_the_strict_head_rule() {
+  local d recorded out
+  for recorded in https://github.com/o/r/pull/8 ''; do
+    make_delivered_pr_gate_case "dlv-other-${recorded##*/}" rebased "$recorded"
+    d=$DLV_CASE
+    printf 'done: PR https://github.com/o/r/pull/8 checks green\n' > "$d/state/dlv.status"
+    out=$(run_crew_state "$d" dlv)
+    assert_not_contains "$out" "source: run-step" "pr='$recorded': a run on another PR does not bind by branch name"
+    assert_not_contains "$out" "state: parked" "pr='$recorded': its gate is not reported as this task's"
+  done
+  make_delivered_pr_gate_case dlv-working rebased https://github.com/o/r/pull/7
+  d=$DLV_CASE
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\nworking: addressing review feedback\n' > "$d/state/dlv.status"
+  out=$(run_crew_state "$d" dlv)
+  assert_not_contains "$out" "source: run-step" "a working task is not answered by a parked run on its delivered PR"
+  assert_not_contains "$out" "state: parked" "a working task is not reported parked"
+  make_delivered_pr_gate_case dlv-terminal rebased https://github.com/o/r/pull/7
+  d=$DLV_CASE
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-dlv | sed 's|pr: ""|pr: "https://github.com/o/r/pull/7"|')"
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/,running,/,completed,/')
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$d/state/dlv.status"
+  out=$(run_crew_state "$d" dlv)
+  assert_not_contains "$out" "source: run-step" "a finished run on the delivered PR at a diverged head is history"
+  pass "a run on another PR, or a finished one, keeps the strict head rule"
+}
+
 # The crew observed the refused socket itself. The ledger anchor BINDS a record
 # here and the dead daemon makes it unverified, so this drives the dead-daemon
 # verdict directly - and the blocker must still outrank it.
@@ -6248,6 +6346,8 @@ test_socket_refused_log_survives_the_dead_daemon_verdict
 test_ordinary_blocked_tip_survives_the_dead_daemon_verdict
 test_parked_gate_survives_a_dead_daemon
 test_selected_run_diverged_head_does_not_bind_an_unproven_record
+test_gate_on_delivered_pr_run_reports_parked_over_done_and_paused
+test_gate_on_another_pr_run_keeps_the_strict_head_rule
 test_live_record_at_diverged_head_binds_while_daemon_answers
 test_anchored_continuation_binds_while_daemon_answers
 test_unverified_coarse_record_makes_no_supersede_claim
