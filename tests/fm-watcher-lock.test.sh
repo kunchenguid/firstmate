@@ -744,12 +744,15 @@ test_lock_steal_reap_cannot_remove_successor() {
   # Two reapers verify the same dead steal owner. The competitor runs to
   # completion exactly when the first one is about to remove the link; at most
   # one of them may end up believing it holds the mutex.
-  local dir state steal fakebin out rc
+  local dir state steal fakebin out real_rm rc
   dir=$(make_case lock-steal-reap-race)
   state="$dir/state"
   steal="$state/.contend.lock.steal"
   fakebin="$dir/fakebin"
   out="$dir/competitor"
+  # The host's own rm path, not a hardcoded /bin/rm: on a host that keeps only
+  # sh in /bin (NixOS) the fixture's shim would exec a path that does not exist.
+  real_rm=$(command -v rm)
   leave_dead_link_locks "$state" "$steal"
   # The killed fixture owner may have its PID reused during a loaded serial
   # shard. Pin a verified-dead PID so the race exercises reaping, not liveness.
@@ -773,14 +776,14 @@ if [ "$last" = "$FM_TEST_RACE_PATH" ] && mkdir "$FM_TEST_RACE_ONCE" 2>/dev/null;
     i=$((i + 1))
   done
 fi
-exec /bin/rm "$@"
+exec "$FM_TEST_REAL_RM" "$@"
 SH
   chmod +x "$fakebin/rm"
 
   rc=0
   PATH="$fakebin:$PATH" FM_TEST_LIB="$LIB" FM_TEST_RACE_PATH="$steal" \
     FM_TEST_RACE_ONCE="$dir/race-once" FM_TEST_RACE_OUT="$out" \
-    FM_STATE_OVERRIDE="$state" bash -c '
+    FM_TEST_REAL_RM="$real_rm" FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       fm_lock_try_acquire_steal_mutex "$2" || exit 1
       [ "$(cat "$2/pid" 2>/dev/null)" = "${BASHPID:-$$}" ] || exit 2
@@ -2102,22 +2105,26 @@ test_forced_term_before_the_safe_point_stays_clean() {
 # Delay the probe past the arm deadline so the typed failure must also survive
 # the safe-point join, not just the arm's ordinary child-exit path.
 test_unpublishable_identity_exits_through_cleanup() {
-  local dir state fakebin no_proc armout armpid status
+  local dir state fakebin no_proc armout armpid real_ps status
   dir=$(make_case arm-identity-probe-fails)
   state="$dir/state"
   fakebin="$dir/fakebin"
   no_proc="$dir/no-proc"
   armout="$dir/arm.out"
+  # The host's own ps path, not a hardcoded /bin/ps: on a host that keeps only
+  # sh in /bin (NixOS) the fixture's shim would exec a path that does not exist.
+  real_ps=$(command -v ps)
   mkdir -p "$no_proc"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
   *" lstart= "*" command= "*) exit 1 ;;
 esac
-exec /bin/ps "$@"
+exec "$FM_TEST_REAL_PS" "$@"
 SH
   chmod +x "$fakebin/ps"
   PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_REAL_PS="$real_ps" \
     FM_ARM_CONFIRM_TIMEOUT=2 FM_TEST_WATCHER_PRE_IDENTITY_DELAY=4 \
     FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH_ARM" > "$armout" 2>&1 &
