@@ -1415,7 +1415,7 @@ test_overdue_marker_survives_reconcile_and_closes_on_working() {
       "$STATE/.paused-overdue-overdue-marker-eof"
     [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
     pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
-    printf "working: resumed\n" >> "$2"
+    printf "needs-decision: captain input required\n" >> "$2"
     pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 1 ] || exit 1
     [ ! -e "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
     grep -Fq "resolved [key=paused-overdue-overdue-marker-eof]" "$2"

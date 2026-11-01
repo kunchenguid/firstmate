@@ -1447,11 +1447,11 @@ test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
   status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
     || fail "unrelated resolution closed the overdue decision"
 
-  printf 'working: dependency cleared, resuming\n' >> "$statusf"
+  printf 'needs-decision: dependency needs captain input\n' >> "$statusf"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_HOME="$dir" FM_STATE_OVERRIDE="$state" housekeeping "$state"
   rc=$?
-  [ "$rc" -eq 0 ] || fail "daemon housekeeping failed to reconcile worker resume (rc=$rc)"
+  [ "$rc" -eq 0 ] || fail "daemon housekeeping failed to reconcile a later worker status event (rc=$rc)"
   [ ! -e "$marker" ] || fail "worker resume retained the overdue marker"
   status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
     && fail "worker resume left the overdue decision open"
