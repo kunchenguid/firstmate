@@ -3756,6 +3756,88 @@ test_answer_ignores_a_merge_fact_for_another_link() {
   pass "answer ignores a merge fact that names another link"
 }
 
+test_answer_keeps_only_the_link_it_verified() {
+  local home id pr other show
+  home=$(make_home answer-verified-drops-other)
+  id=sample-answer-verified-drops-other
+  pr=https://github.com/sample/sample/pull/52
+  other=https://github.com/sample/sample/pull/53
+  tasks_in "$home" add "$id" "Ship the verified change beside an open pull request" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create the verified answer fixture"
+  tasks_in "$home" update "$id" --pr "$other" >/dev/null \
+    || fail "could not attach the unverified pull-request link"
+  tasks_in "$home" update "$id" --pr "$pr" >/dev/null \
+    || fail "could not attach the verified pull-request link"
+  printf 'url=%s\nverified_at=2026-07-14T00:00:00Z\n' "$pr" > "$home/state/$id.pr-merge"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the verified answer fixture"
+
+  printf 'Proceed with the merged change.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer the verified row"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered row is gone"
+  assert_contains "$show" "state: done" "the answer did not close the row"
+  assert_contains "$show" "links: \"pr:$pr\"" "the answer dropped the merge it verified"
+  assert_not_contains "$show" "pr:$other" \
+    "the closed row kept a structured link no run verified"
+  tasks_in "$home" show "$id" | sed -n 's/^  title: *//p' | head -1 \
+    | grep -F "$other" >/dev/null \
+    && fail "the verified answer left the unverified link on the title"
+  assert_contains "$show" "Historical record: $other" \
+    "the verified answer dropped the other link instead of noting it"
+  assert_grep '(merged ' "$home/data/backlog.md" \
+    "the answer did not record the merge it verified"
+  assert_absent "$home/state/$id.pr-merge" \
+    "the answered row kept the merge-verification record after it closed"
+  pass "answer keeps the link it verified and notes any other one"
+}
+
+test_answer_records_an_interrupted_downgrade_note_once() {
+  local home id pr show body
+  home=$(make_home answer-legacy-record-retry)
+  id=sample-answer-legacy-record-retry
+  pr=https://github.com/sample/sample/pull/54
+  tasks_in "$home" add "$id" "Ship the retried legacy recorded link" --kind ship --repo sample >/dev/null \
+    || fail "could not create the retried legacy fixture"
+  tasks_in "$home" update "$id" --pr "$pr" >/dev/null \
+    || fail "could not attach the legacy pull-request link"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the retried legacy fixture"
+  # A record staged before the merge check existed: its link is unverified, so
+  # the answer downgrades it and the close can fail after the body note landed.
+  printf 'id=%s\ndata=%s\nspawn_gen=fixture-%s\ncleanup_incomplete=0\nmode=retain\narg=--pr\narg=%s\n' \
+    "$id" "$home/data" "$id" "$pr" > "$home/state/$id.backlog-close"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = sample-answer-legacy-record-retry ] \
+   && [ ! -e "$FM_HOME/close-failed-once" ]; then
+  : > "$FM_HOME/close-failed-once" || exit 93
+  exit 92
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  printf 'Proceed without merging.\n' > "$home/answer.txt"
+  set +e
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null 2>&1
+  set -e
+  rm -f "$home/fakebin/tasks-axi"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the retried answer to a legacy record failed"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the retried legacy row is gone"
+  assert_contains "$show" "state: done" "the retried answer did not close the legacy row"
+  assert_contains "$show" "$pr" "the retried answer lost the recorded link"
+  assert_not_contains "$show" "pr:$pr" "the retried answer kept a link no run verified"
+  body=$(tasks_in "$home" show "$id" --full | sed -n 's/^  body: //p' | head -1)
+  [ "$(printf '%s' "$body" | grep -o "Historical record: $pr" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the retried answer duplicated its historical-record note: $body"
+  assert_no_grep '(merged ' "$home/data/backlog.md" \
+    "the retried answer recorded a merge nobody read"
+  pass "a retried answer to a legacy record records its note once"
+}
+
 test_answer_records_the_note_a_retained_record_carried() {
   local home id pr show
   home=$(make_home answer-retained-note)
@@ -5492,6 +5574,8 @@ test_answer_keeps_a_merge_the_retention_verified
 test_answer_keeps_a_merge_after_the_retention_landed
 test_answer_survives_a_failed_close_without_losing_the_link
 test_answer_ignores_a_merge_fact_for_another_link
+test_answer_keeps_only_the_link_it_verified
+test_answer_records_an_interrupted_downgrade_note_once
 test_answer_records_the_note_a_retained_record_carried
 test_answer_downgrades_a_recorded_link_no_run_verified
 test_merge_approval_releases_before_zero_done_retention
