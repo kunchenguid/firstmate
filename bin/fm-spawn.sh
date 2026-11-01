@@ -330,6 +330,10 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   The same check refuses a worktree (or home) that another task of this home
+#   still records with a positively alive agent endpoint, naming the owning task;
+#   only a positively alive endpoint vetoes, and the calling task's own record
+#   (relaunch) never counts.
 #   That placement is proven only at launch. Every ship or scout therefore
 #   receives `FM_TASK_ID=<task-id>` before launch, on the same backend-specific
 #   environment channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -4388,8 +4392,42 @@ spawn_endpoint_hint() {
   fi
 }
 
+# A sibling task of this home that is still alive on a worktree owns it. Only a
+# positively alive endpoint vetoes, so a stale record never blocks a fresh slot.
+# The calling task's own record never counts against it (relaunch adopts it).
+spawn_worktree_sibling_owner() { # <wt-real>
+  local wt=$1 meta base raw owner target backend state
+  [ -d "${STATE:-}" ] || return 1
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    base=$(basename "$meta" .meta)
+    [ "$base" = "${ID:-}" ] && continue
+    while IFS= read -r raw || [ -n "$raw" ]; do
+      owner=$(real_path_or_raw "${raw#*=}")
+      [ "$wt" = "$owner" ] || continue
+      target=$(grep '^window=' "$meta" 2>/dev/null | cut -d= -f2- | head -n 1)
+      [ -n "$target" ] || continue
+      backend=$(grep '^backend=' "$meta" 2>/dev/null | cut -d= -f2- | head -n 1)
+      state=$(fm_backend_agent_alive "${backend:-tmux}" "$target" 2>/dev/null || true)
+      if [ "$state" = alive ]; then
+        printf 'task %s (recorded in state/%s.meta)' "$base" "$base"
+        return 0
+      fi
+    done < <(grep -E '^(worktree|home)=.' "$meta" 2>/dev/null || true)
+  done
+  return 1
+}
+
 validate_spawn_worktree() { # <source> <inspect-target>
-  local source=$1 inspect_target=$2
+  local source=$1 inspect_target=$2 wt_real owner
+  wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || wt_real=
+  if [ -n "$wt_real" ] && owner=$(spawn_worktree_sibling_owner "$wt_real"); then
+    # The live sibling owns this worktree and its terminal, so the abort trap
+    # must not close or remove either (Orca removes with --force).
+    ORCA_ABORT_CLEANUP=0
+    echo "error: $source yielded $owner (resolved '$WT'); refusing to launch into a worktree held by a live sibling task; it belongs to that task, so do not return or remove it" >&2
+    exit 1
+  fi
   if ! spawn_worktree_isolated "$WT"; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
