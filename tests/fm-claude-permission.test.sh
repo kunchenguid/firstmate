@@ -73,5 +73,20 @@ test_request_identity_and_generation() {
   pass 'later requests and replacement incarnations remain distinct; stale and malformed events are refused'
 }
 
+test_resume_closes_the_decision() {
+  local dir state gen
+  dir=$(make_case resume); state="$dir/state"
+  . "$ROOT/bin/fm-classify-lib.sh"
+  gen=$("$EV" arm "$state" t1)
+  request "$state" "$gen" || fail 'request failed'
+  [ -n "$(status_own_open_decisions "$state/t1.status")" ] || fail 'request did not open a decision'
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude --event stop || fail 'resume failed'
+  [ -z "$(status_own_open_decisions "$state/t1.status")" ] || fail 'resume left the decision open'
+  "$EV" apply "$state" t1 idle --gen "$gen" --source claude --event stop || fail 'second event failed'
+  [ "$(grep -c '^resolved' "$state/t1.status")" = 1 ] || fail 'decision resolved more than once'
+  pass 'a resume event closes the permission decision exactly once'
+}
+
 test_request_is_durable_and_idempotent
+test_resume_closes_the_decision
 test_request_identity_and_generation
