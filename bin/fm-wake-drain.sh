@@ -589,8 +589,9 @@ EOF
 #     come first and never wait behind routine ones; a line whose collapsed
 #     rows are all verdict main says so, so a main outcome never reads as a
 #     captain call, and a line whose newest row is main but which collapses a
-#     captain row says it includes a captain call, so that call is not
-#     acknowledged as main's alone.
+#     captain row prints that captain row's own question first and the newer
+#     summary after it, so the question survives the line cap and is never
+#     acknowledged unread.
 #     The rest of this paragraph says "captain" for both. Every
 #     unprocessed captain row is presented on every drain until main
 #     acknowledges it, collapsed to one line per task: the task's newest
@@ -647,8 +648,8 @@ print_branch_outcomes_section() {
       map(select(.verdict != "routine")) | sort_by(.seq)
       | reduce .[] as $r ({count: {}, captain: {}, lines: []};
           .count[$r.task] += 1
-          | .captain[$r.task] = (.captain[$r.task] == true or $r.verdict != "main")
-          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago\(if .captain[$r.task] | not then ", main to act, not a captain call" elif $r.verdict == "main" then ", includes a captain call" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
+          | if $r.verdict != "main" then .captain[$r.task] = $r else . end
+          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago\(if .captain[$r.task] == null then ", main to act, not a captain call" else "" end)] \($r.task): \(if $r.verdict == "main" and .captain[$r.task] != null then "captain call (seq \(.captain[$r.task].seq), recorded \(.captain[$r.task].recordedAgo) ago): \(.captain[$r.task].summary | gsub("[\t\n\r]"; " ")) - then, newer: " else "" end)\($r.summary | gsub("[\t\n\r]"; " "))"])
       | .lines[]' 2>/dev/null) \
     || ! routine=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "routine" and .silent != true)) | sort_by(.seq) | reverse | .[]
       | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
