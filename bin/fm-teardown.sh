@@ -5,6 +5,16 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# A captured task Git namespace must prove the recorded refs/heads/ ref absent
+# before declaring branch cleanup complete. If the task namespace is unavailable,
+# cleanup may finish with a named retained ref only after proving that ref exists
+# in the recorded project, without a checkout. This finish reports branch removal
+# as unverified; an unproved ref preserves metadata for retry.
+# A detach, delete, or Git verification failure preserves metadata for retry, even
+# under --force. Task branch and Git identity are saved in state/<id>.teardown-branch,
+# bound to the recorded paths, Git identity and spawn generation until cleanup completes,
+# without changing record export snapshots. Staging, remote-tracking, and recovery refs are
+# left intact; local branch removal does not prove commits unreachable.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of
@@ -18,7 +28,8 @@
 # completion links (the PR, the report path, a local-main note) live only in the
 # record being removed, the intended transition is recorded in
 # state/<id>.backlog-close first, so a process killed between the halves leaves
-# the next session start enough to finish it; a landed close removes that record.
+# the next session start enough to replay it under the library's recovery rules;
+# a landed close removes that record.
 # A close that fails is fatal and loud, preserves its pending-close record, and
 # is retried by the next session start. The transition is skipped on a
 # config/backlog-backend=manual home and in a markdown home that keeps no
@@ -42,7 +53,8 @@
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
+# hard-resets/removes the worktree and kills its processes. The recorded task branch
+# is checked independently when HEAD has moved elsewhere. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
@@ -137,8 +149,9 @@
 # slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
 # owns the claim, its location, and its states. A claim naming another task is
 # proof of reassignment: the slot is no longer this task's, so teardown warns,
-# names the claimant, and then finishes only this task's own cleanup - endpoint,
-# status, records, checks, backlog - while every step that would read or touch
+# names the claimant, and runs only this task's own cleanup - endpoint, status,
+# records, checks, backlog - subject to the branch-cleanup postcondition above.
+# Every step that would read or touch
 # that slot is skipped: no process kill under it, no dirty or landed-work
 # inspection of it, no branch or hook removal in it, no Treehouse return, and
 # never the other task's claim. Skipping the inspection discards nothing of this
@@ -1675,8 +1688,8 @@ patch_id_for_commit() {
 }
 
 unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  local pr_head=$1 work_ref=${2:-HEAD} current base pr_patch_ids commit patch_id unpushed
+  current=$(git -C "$WT" rev-parse --verify "$work_ref" 2>/dev/null) || return 1
   base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
     git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
@@ -1687,7 +1700,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$WT" log --format=%H "$work_ref" --not --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -1707,7 +1720,7 @@ EOF
 # PR head, no PR is found, or any forge read error occurs - the caller then
 # falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
+  local branch=$1 work_ref=${2:-HEAD} target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
@@ -1735,10 +1748,10 @@ pr_is_merged() {
   fi
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  current=$(git -C "$WT" rev-parse --verify "$work_ref" 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
+  elif unpushed_patches_are_in_pr_head "$head" "$work_ref"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1
@@ -1750,7 +1763,8 @@ pr_is_merged() {
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
+# first, then 3-way merges the default branch with the selected ref (HEAD by default):
+# when that ref introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
 # merged tree equals the default branch's tree. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
@@ -1759,7 +1773,7 @@ pr_is_merged() {
 # CONTENT_LANDED_PROOF_ERROR names a merge-tree option or execution failure
 # separately from a conflict or differing tree.
 content_in_default() {
-  local name=${BASE_BRANCH:-} ref default_tree merged_tree merge_status
+  local work_ref=${1:-HEAD} name=${BASE_BRANCH:-} ref default_tree merged_tree merge_status
   CONTENT_LANDED_PROOF_ERROR=
   [ -n "$name" ] || name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
@@ -1772,7 +1786,7 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || {
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" "$work_ref" 2>/dev/null) || {
     merge_status=$?
     case "$merge_status" in
       1) ;; # Git completed the merge and found conflicts.
@@ -1791,9 +1805,9 @@ content_in_default() {
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed.
 work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
+  local branch=$1 work_ref=${2:-HEAD}
+  pr_is_merged "$branch" "$work_ref" && return 0
+  content_in_default "$work_ref"
 }
 
 # The completion links this teardown already holds locally. A scout's
@@ -2108,7 +2122,7 @@ teardown_note_dirty_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local work_ref=${1:-HEAD} dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch recorded_ref rc
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -2125,7 +2139,7 @@ validate_worktree_teardown_safety() {
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+  if ! unpushed_raw=$(git -C "$WT" log --oneline "$work_ref" --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -2137,7 +2151,7 @@ validate_worktree_teardown_safety() {
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+    if ! unmerged_raw=$(git -C "$WT" log --oneline "$work_ref" --not "$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
@@ -2147,7 +2161,7 @@ validate_worktree_teardown_safety() {
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
+      echo "REFUSED: local-only worktree $WT ($work_ref) has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && report_worktree_dirt "$dirty"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
@@ -2159,22 +2173,39 @@ validate_worktree_teardown_safety() {
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then
-    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
-    if [ -z "$branch" ]; then
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
+    if [ "$work_ref" != HEAD ]; then
+      branch=${work_ref#refs/heads/}
+    else
+      branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+      if [ -z "$branch" ]; then
+        branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+        TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
+      fi
     fi
-    if ! work_is_landed "$branch"; then
+    if ! work_is_landed "$branch" "$work_ref"; then
       if [ -n "${CONTENT_LANDED_PROOF_ERROR:-}" ]; then
         echo "REFUSED: content-landed proof unavailable for worktree $WT: $CONTENT_LANDED_PROOF_ERROR." >&2
         echo "Restore or upgrade Git and retry the content check." >&2
       else
-        echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+        echo "REFUSED: worktree $WT ($work_ref) has work not on any remote and not landed." >&2
       fi
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
+  fi
+  [ "$work_ref" = HEAD ] || return 0
+  branch=$(fm_meta_get "$META" branch)
+  [ -n "$branch" ] || return 0
+  recorded_ref="refs/heads/$branch"
+  [ "$recorded_ref" != "$(git -C "$WT" symbolic-ref --quiet HEAD 2>/dev/null)" ] || return 0
+  if git -C "$WT" show-ref --verify --quiet "$recorded_ref"; then
+    validate_worktree_teardown_safety "$recorded_ref"
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] && return 0 # A failed launch may never have created the ref.
+    echo "REFUSED: cannot inspect recorded task ref $recorded_ref; preserving task records." >&2
+    return 1
   fi
 }
 
@@ -3425,10 +3456,9 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # than override it, and would contradict the adjacent Herdr child gate that
 # stops forced cleanup for this same hazard.
 #
-# What is retained is this run's records, not a durable guarantee: a task
-# carrying a backlog transition already wrote its pending-close marker, and the
-# next session start replays that marker and removes the retained record. The
-# message says so rather than promising a retention teardown does not own.
+# bin/fm-backlog-transition-lib.sh's header owns startup replay eligibility and
+# retained-record lifetime. An endpoint-close refusal alone does not establish
+# whether replay may retire the task's records.
 endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   local subject=$1 backend=$2 target=$3 honors_force=$4
   echo "error: the $backend endpoint $target for $subject could not be closed, so it may still be live." >&2
@@ -3437,7 +3467,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
     return 0
   fi
   echo "error: stopping this cleanup without removing the task's records, so the record naming $target is still here to reconcile from." >&2
-  echo "error: that retention is not durable across a session start: if this task carries a backlog transition, the next session replays its pending close and removes the retained record, so reconcile the surviving endpoint yourself rather than trusting the retention." >&2
+  echo "error: a later session start may remove the retained record only if its pending close is eligible for replay; unresolved branch cleanup keeps the record for retry, so reconcile the surviving endpoint yourself rather than relying on retention." >&2
   if [ "$honors_force" = 1 ]; then
     echo "error: rerun teardown once the close can succeed, or rerun with --force to discard this task's records deliberately." >&2
   fi
@@ -3745,21 +3775,50 @@ BACKLOG_CLOSED=0
 BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
 BACKLOG_TRANSITION_FLAGS=()
 [ "$BACKLOG_TRANSITION" = close ] || BACKLOG_TRANSITION_FLAGS=(--retain)
+BACKLOG_BRANCH_FLAGS=()
+[ "$KIND" = secondmate ] || BACKLOG_BRANCH_FLAGS=(--branch-cleanup-pending)
 BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   backlog_done_args || {
     echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
     exit 1
   }
-# Roll the accepted legacy incarnation's stamp back to the record's exact
-# pre-stamp bytes. Uses perl - already in the teardown lifecycle's curated PATH
-# (truncate is not, and is absent on stock macOS) - and verifies the restored
-# size before reporting success, so a rollback that cannot be proven complete
-# is reported as not rolled back.
+fi
+# Backlog-exempt homes historically accept records predating spawn_gen. Give
+# those records an owned incarnation under the existing task lock before branch
+# cleanup, so records-only completion can recover without binding a reused ID.
+TEARDOWN_RECORDS_ONLY_STAMP=0
+if [ "$TEARDOWN_BACKLOG_APPLIES" = 0 ] && [ "$KIND" != secondmate ]; then
+  fm_backlog_meta_spawn_gen_optional "$META" "$STATE" || {
+    echo "error: cannot identify task incarnation for $ID ($FM_BACKLOG_TRANSITION_ERROR); preserving task records" >&2
+    exit 1
+  }
+  if [ -z "$FM_BACKLOG_META_SPAWN_GEN" ]; then
+    TEARDOWN_META_SPAWN_GEN="cleanup-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    TEARDOWN_RECORDS_ONLY_STAMP=1
+  fi
+fi
+# Roll the prepended incarnation back to the exact original bytes, including
+# an unterminated final field. Publish the unstamped copy atomically rather
+# than modifying the live record while copying it.
 teardown_legacy_stamp_rollback() {
+  local tmp
   [ "$TEARDOWN_LEGACY_PRESTAMP_SIZE" -gt 0 ] 2>/dev/null || return 1
-  perl -e 'truncate($ARGV[0], $ARGV[1]) or exit 1' -- \
-    "$META" "$TEARDOWN_LEGACY_PRESTAMP_SIZE" || return 1
+  tmp=$(mktemp "$STATE/.$ID.teardown-unstamp.XXXXXX") || return 1
+  if ! perl -e '
+      open my $in, "<", $ARGV[0] or exit 1;
+      binmode $in; binmode STDOUT;
+      my $prefix = <$in>;
+      defined($prefix) && $prefix eq "spawn_gen=$ARGV[1]\n" or exit 1;
+      my ($n, $buf);
+      while (($n = read($in, $buf, 65536)) > 0) { print $buf or exit 1; }
+      defined($n) && close($in) or exit 1;
+    ' -- "$META" "$TEARDOWN_META_SPAWN_GEN" > "$tmp" \
+     || [ "$(wc -c < "$tmp" | tr -d ' ')" != "$TEARDOWN_LEGACY_PRESTAMP_SIZE" ] \
+     || ! fm_backlog_atomic_transition publish "$tmp" "$META" "unstamped task record" "$STATE"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
   [ "$(wc -c < "$META" | tr -d ' ')" = "$TEARDOWN_LEGACY_PRESTAMP_SIZE" ]
 }
 
@@ -3770,18 +3829,20 @@ teardown_legacy_stamp_rollback() {
   # to the record's pre-stamp bytes, so a retried teardown re-runs the
   # dead-or-agent-less endpoint gate instead of sailing past it on a stamp the
   # abandoned attempt left behind.
-  if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ]; then
+  if { [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] || [ "$TEARDOWN_RECORDS_ONLY_STAMP" = 1 ]; } \
+     && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ]; then
     TEARDOWN_LEGACY_PRESTAMP_SIZE=$(wc -c < "$META" | tr -d ' ')
     TEARDOWN_LEGACY_STAMP_FAILED=
-    if [ -s "$META" ] && [ -n "$(tail -c 1 -- "$META" 2>/dev/null)" ]; then
-      printf '\n' >> "$META" || TEARDOWN_LEGACY_STAMP_FAILED=newline
+    # PR metadata has a terminal pr=/pr_head= block. Prepending the owned
+    # generation preserves that authenticated layout and every original byte.
+    TEARDOWN_LEGACY_STAMP_TMP=$(mktemp "$STATE/.$ID.teardown-stamp.XXXXXX") || exit 1
+    if ! { printf 'spawn_gen=%s\n' "$TEARDOWN_META_SPAWN_GEN" && cat "$META"; } > "$TEARDOWN_LEGACY_STAMP_TMP" \
+       || ! fm_backlog_atomic_transition publish "$TEARDOWN_LEGACY_STAMP_TMP" "$META" "stamped task record" "$STATE"; then
+      rm -f -- "$TEARDOWN_LEGACY_STAMP_TMP"
+      echo "error: could not publish task $ID's incarnation stamp; preserving its record for retry" >&2
+      exit 1
     fi
-    if [ -z "$TEARDOWN_LEGACY_STAMP_FAILED" ]; then
-      printf 'spawn_gen=%s\n' "$TEARDOWN_META_SPAWN_GEN" >> "$META" \
-        || TEARDOWN_LEGACY_STAMP_FAILED=append
-    fi
-    if [ -z "$TEARDOWN_LEGACY_STAMP_FAILED" ] \
-       && ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
+    if ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
       TEARDOWN_LEGACY_STAMP_FAILED=validate
     fi
     if [ -n "$TEARDOWN_LEGACY_STAMP_FAILED" ]; then
@@ -3795,10 +3856,12 @@ teardown_legacy_stamp_rollback() {
       exit 1
     fi
   fi
+if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   BACKLOG_CLOSED=1
   META_SPAWN_GEN=$TEARDOWN_META_SPAWN_GEN
   if ! fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
       "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
+      "${BACKLOG_BRANCH_FLAGS[@]+"${BACKLOG_BRANCH_FLAGS[@]}"}" \
       "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}"; then
     if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ] \
        && teardown_legacy_stamp_rollback; then
@@ -3819,6 +3882,171 @@ else
   fi
 fi
 
+# Both providers use the same local-ref postcondition. The ordinary return's
+# existing lock retry runs before verification; capture only identity before it.
+# The header owns the retained-ref finish and its required existence proof.
+TEARDOWN_TASK_BRANCH=
+TEARDOWN_TASK_GIT_COMMON=
+TEARDOWN_TASK_GIT_WORKTREE=
+TEARDOWN_TASK_SPAWN_GEN=
+TEARDOWN_TASK_RETAINED_REF=
+teardown_task_branch() {
+  local branch current='' ref rc identity="$STATE/$ID.teardown-branch" tmp
+  local common='' captured_wt='' live_common='' spawn_gen recorded_wt recorded_project
+  if [ "${1:-}" = capture ]; then
+    branch=$(fm_meta_get "$META" branch)
+    spawn_gen=$(fm_meta_get "$META" spawn_gen)
+    if [ -e "$identity" ] || [ -L "$identity" ]; then
+      if ! fm_backlog_record_present "$identity" "task branch identity" "$STATE" \
+         || [ "$(fm_meta_get "$identity" spawn_gen)" != "$spawn_gen" ]; then
+        echo "error: cannot verify legacy branch retry identity $identity for $ID; preserving task records" >&2
+        return 1
+      fi
+      if [ -n "$branch" ] && [ "$branch" != "$(fm_meta_get "$identity" branch)" ]; then
+        echo "error: retained ref refs/heads/$branch for $ID: retry identity names a different branch; preserving task records" >&2
+        return 1
+      fi
+      branch=$(fm_meta_get "$identity" branch)
+      common=$(fm_meta_get "$identity" git_common)
+      captured_wt=$(fm_meta_get "$identity" worktree)
+      recorded_wt=$(fm_meta_get "$identity" task_worktree)
+      recorded_project=$(fm_meta_get "$identity" project)
+      if { [ -n "$recorded_wt" ] && [ "$recorded_wt" != "$WT" ]; } \
+         || { [ -n "$recorded_project" ] && [ "$recorded_project" != "$PROJ" ]; }; then
+        echo "error: retained ref refs/heads/$branch for $ID: task paths changed; preserving task records" >&2
+        return 1
+      fi
+      if teardown_owns_worktree && [ -d "$WT" ]; then
+        live_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir) || return 1
+        live_common=$(canonical_existing_dir "$live_common") || return 1
+        if [ "$live_common" != "$common" ] \
+           || [ "$(canonical_existing_dir "$WT")" != "$captured_wt" ]; then
+          echo "error: retained ref refs/heads/$branch for $ID: task Git identity changed; preserving task records" >&2
+          return 1
+        fi
+      elif [ -z "$recorded_wt" ] && [ "$WT" != "$captured_wt" ]; then
+        echo "error: cannot verify legacy task path for refs/heads/$branch; preserving task records" >&2
+        return 1
+      fi
+    fi
+    if [ -z "$common" ]; then
+      if teardown_owns_worktree && [ -d "$WT" ]; then
+        current=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null) || current=
+        [ -n "$branch" ] || branch=$current
+        if [ -z "$branch" ]; then
+          echo "error: cannot identify the task branch for $ID: HEAD is detached or unreadable and metadata has no branch; preserving task records" >&2
+          return 1
+        fi
+        common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir) || return 1
+        common=$(canonical_existing_dir "$common") || return 1
+        captured_wt=$(canonical_existing_dir "$WT") || return 1
+      elif [ -z "$branch" ]; then
+        # Legacy records with no copy and no recorded ref remain records-only.
+        echo "warning: $ID has no recorded task branch or owned copy; no local branch cleanup can be identified" >&2
+        return 0
+      else
+        # Current project/slot state cannot establish the old task's namespace
+        # after its copy is gone or reassigned. Never substitute PROJ's refs.
+        ref="refs/heads/$branch"
+        git check-ref-format "$ref" >/dev/null 2>&1 || {
+          echo "error: invalid task ref $ref for $ID; preserving task records" >&2
+          return 1
+        }
+        if ! git -C "$PROJ" show-ref --verify --quiet "$ref"; then
+          echo "error: cannot prove retained ref $ref exists in the recorded project for $ID; preserving task records for retry" >&2
+          return 1
+        fi
+        TEARDOWN_TASK_RETAINED_REF=$ref
+        echo "warning: retained ref $ref for $ID: task repository identity is unavailable; finishing task cleanup without verifying branch removal" >&2
+        return 0
+      fi
+    fi
+    ref="refs/heads/$branch"
+    git check-ref-format "$ref" >/dev/null 2>&1 || {
+      echo "error: invalid task ref $ref for $ID; preserving task records" >&2
+      return 1
+    }
+    case "$common:$captured_wt" in /*:/*) ;; *) echo "error: invalid task Git identity for $ref; preserving task records" >&2; return 1 ;; esac
+    tmp=$(mktemp "$STATE/.$ID.teardown-branch.XXXXXX") || return 1
+    if ! {
+      printf 'branch=%s\ngit_common=%s\nworktree=%s\ntask_worktree=%s\nproject=%s\n' \
+        "$branch" "$common" "$captured_wt" "$WT" "$PROJ" \
+        && { [ -z "$spawn_gen" ] || printf 'spawn_gen=%s\n' "$spawn_gen"; }
+    } > "$tmp" \
+       || ! fm_backlog_atomic_transition publish "$tmp" "$identity" "task branch identity" "$STATE"; then
+      rm -f -- "$tmp"
+      echo "error: cannot save retry identity for $ref; preserving task records" >&2
+      return 1
+    fi
+    TEARDOWN_TASK_BRANCH=$branch
+    TEARDOWN_TASK_GIT_COMMON=$common
+    TEARDOWN_TASK_GIT_WORKTREE=$captured_wt
+    TEARDOWN_TASK_SPAWN_GEN=$spawn_gen
+    return 0
+  fi
+  [ -n "$TEARDOWN_TASK_BRANCH" ] || return 0
+  branch=$TEARDOWN_TASK_BRANCH
+  common=$TEARDOWN_TASK_GIT_COMMON
+  captured_wt=$TEARDOWN_TASK_GIT_WORKTREE
+  ref="refs/heads/$branch"
+  case "$common" in
+    "$captured_wt"/*)
+      if ! teardown_owns_worktree; then
+        echo "error: retained ref $ref for $ID: task repository is inside a reassigned slot; preserving task records without inspecting that slot" >&2
+        return 1
+      fi
+      ;;
+  esac
+  if [ ! -d "$common" ]; then
+    case "$common" in
+      "$captured_wt"/*)
+        if [ ! -e "$captured_wt" ] && [ ! -L "$captured_wt" ] \
+           && [ -r "$(dirname "$captured_wt")" ] && [ -x "$(dirname "$captured_wt")" ]; then
+          echo "task branch $ref is absent: its standalone repository was removed"
+          return 0
+        fi ;;
+    esac
+    echo "error: cannot verify task ref $ref absent for $ID: captured Git directory is unavailable; preserving task records" >&2
+    return 1
+  fi
+  if git --git-dir "$common" show-ref --verify --quiet "$ref"; then
+    if teardown_owns_worktree && [ -d "$WT" ]; then
+      live_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || live_common=
+      if [ -n "$live_common" ]; then
+        live_common=$(canonical_existing_dir "$live_common") || live_common=
+      fi
+      if [ "$live_common" = "$common" ]; then
+        current=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null) || current=
+      fi
+    fi
+    if [ "$current" = "$branch" ] && ! git -C "$WT" checkout --detach -q; then
+      echo "error: retained ref $ref for $ID: detach failed; preserving task records for retry" >&2
+      return 1
+    fi
+    git --git-dir "$common" branch -D -- "$branch" >/dev/null || {
+      echo "error: retained ref $ref for $ID: branch deletion failed; preserving task records for retry" >&2
+      return 1
+    }
+    if git --git-dir "$common" show-ref --verify --quiet "$ref"; then
+      echo "error: retained ref $ref for $ID after branch deletion; preserving task records for retry" >&2
+      return 1
+    else
+      rc=$?
+    fi
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 1 ]; then
+    echo "error: cannot verify task ref $ref absent for $ID; preserving task records for retry" >&2
+    return 1
+  fi
+  echo "task branch $ref is absent (staging and recovery refs unchanged)"
+}
+
+if [ "$KIND" != secondmate ]; then
+  teardown_task_branch capture || exit 1
+fi
+
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
@@ -3837,7 +4065,6 @@ if [ "$KIND" = ship ] && teardown_owns_worktree && [ -e "$CONFIG/pipeline-spend"
     "$SCRIPT_DIR/fm-pipeline-spend.sh" record "$ID" >/dev/null \
     || echo "warning: could not record $ID's no-mistakes pipeline spend; cleanup continues" >&2
 fi
-
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
@@ -3858,19 +4085,14 @@ if [ "$BACKEND" = t3code ]; then
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
 fi
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
+    teardown_task_branch || exit 1
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
@@ -3884,8 +4106,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  # Preserve the existing best-effort attempt: a transient lock must still
+  # reach teardown_treehouse_return's retry rather than refusing here.
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
+  if [ "$branch" = "$TEARDOWN_TASK_BRANCH" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
       git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
     fi
@@ -3917,12 +4141,29 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  teardown_task_branch || {
+    fm_treehouse_slot_owner_release "$WT" "$ID"
+    exit 1
+  }
   [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
   # whenever the return did not actually happen.
   fm_treehouse_slot_owner_release "$WT" "$ID"
+fi
+
+if [ "$KIND" != secondmate ]; then
+  teardown_task_branch || exit 1
+fi
+if [ "$BACKLOG_CLOSED" = 1 ]; then
+  # Verified removal or explicit retention releases the pending-completion barrier.
+  fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$META_SPAWN_GEN" \
+    "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
+    "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" || {
+      echo "error: cannot record verified branch cleanup for $ID; preserving task records" >&2
+      exit 1
+    }
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
@@ -4135,7 +4376,36 @@ if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ];
     echo "warning: retaining herdr presentation journal for $ID; it still names a projected workspace the session-start sweep owns, not the closed endpoint" >&2
   fi
 fi
-# The record is gone, so the backlog must not still show this task in flight
+# Before removing a records-only task, retain a generation-bound completion
+# intent. Startup can retire its identity even if metadata removal completed
+# just before an interruption. Existing backlog intents retain their exact mode
+# and arguments rather than being replaced by a records-only intent.
+TEARDOWN_RECORDS_ONLY_MARKER=0
+if [ "$BACKLOG_CLOSED" = 0 ] && [ -n "$TEARDOWN_TASK_BRANCH" ]; then
+  BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
+  cleanup_flags=(--cleanup-only)
+  cleanup_args=()
+  if [ -e "$BACKLOG_CLOSE_MARKER" ] || [ -L "$BACKLOG_CLOSE_MARKER" ]; then
+    fm_backlog_close_marker_validate "$BACKLOG_CLOSE_MARKER" "$DATA" "$ID" "$STATE" || exit 1
+    [ "$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN" = "$TEARDOWN_TASK_SPAWN_GEN" ] || {
+      echo "error: completion marker names another incarnation of $ID; preserving task records" >&2
+      exit 1
+    }
+    case "$FM_BACKLOG_CLOSE_VALIDATED_MODE" in
+      close) cleanup_flags=() ;;
+      retain) cleanup_flags=(--retain) ;;
+    esac
+    cleanup_args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
+  fi
+  fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$TEARDOWN_TASK_SPAWN_GEN" \
+    "${cleanup_flags[@]+"${cleanup_flags[@]}"}" "${cleanup_args[@]+"${cleanup_args[@]}"}" || {
+      echo "error: cannot record pending metadata retirement for $ID; preserving task records" >&2
+      exit 1
+    }
+  [ "${cleanup_flags[0]-}" != --cleanup-only ] || TEARDOWN_RECORDS_ONLY_MARKER=1
+fi
+
+# The record is going away, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held
 # row takes the retain transition here instead of the close: same record, same
@@ -4166,6 +4436,18 @@ else
     exit 1
   fi
 fi
+# Retain the legacy branch identity through every retryable cleanup and the
+# atomic metadata/backlog transition, including failures after pool return.
+fm_backlog_teardown_branch_retire "$STATE" "$ID" "$TEARDOWN_TASK_SPAWN_GEN" || {
+  echo "error: cannot retire task branch identity for $ID ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+  exit 1
+}
+if [ "$TEARDOWN_RECORDS_ONLY_MARKER" = 1 ]; then
+  fm_backlog_close_marker_clear "$STATE" "$ID" || {
+    echo "error: cannot retire pending cleanup marker for $ID ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  }
+fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
@@ -4178,6 +4460,8 @@ if [ -d "$STATE" ]; then
 fi
 if [ "$TEARDOWN_POOL_SLOT_LOST" = 1 ]; then
   echo "teardown $ID finished its cleanup and removed its task record, but a returned pool slot did not come back clean (see the warning above); clear those paths so the pool can reuse the slot" >&2
+elif [ -n "$TEARDOWN_TASK_RETAINED_REF" ]; then
+  echo "teardown $ID finished with retained ref $TEARDOWN_TASK_RETAINED_REF (task repository identity unavailable; branch removal unverified)"
 elif [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif teardown_owns_worktree; then
