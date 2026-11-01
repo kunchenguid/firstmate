@@ -427,7 +427,7 @@ ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
 
-test_worker_briefs_include_post_merge_verification_and_decision_context() {
+test_worker_briefs_reserve_pr_merges_for_authority_with_decision_context() {
   local home id brief base_brief
   home="$TMP_ROOT/post-merge-rules-home"
   mkdir -p "$home/data"
@@ -456,8 +456,8 @@ test_worker_briefs_include_post_merge_verification_and_decision_context() {
       "$mode brief must tell workers to report the ready PR and stop"
   done
 
-  # A named PR base must be the branch the mandatory checks validate against, so
-  # a release/x PR is tested against release/x rather than the repository default.
+  # A named PR base must not change the worker merge prohibition or reintroduce
+  # a merge procedure, so a release/x task renders the same restrictions.
   for mode in no-mistakes direct-PR; do
     id="brief-base-branch-$mode"
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" sample --mode "$mode" --base-branch release/x >/dev/null 2>&1 \
@@ -1769,7 +1769,7 @@ test_forge_external_renders_the_review_rail
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
-test_worker_briefs_include_post_merge_verification_and_decision_context
+test_worker_briefs_reserve_pr_merges_for_authority_with_decision_context
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
