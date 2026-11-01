@@ -17,7 +17,10 @@
 #      watcher's re-ring ladder owns delivery from the record on. A
 #      fire-and-forget record whose ring did not land is owed one retry ring.
 #   6. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
-#      "$" to codex, an explicit backend target, and the --key path.
+#      "$" to codex, an explicit backend target, and the --key path. A typed
+#      text send refuses before typing when the composer provably holds stale
+#      pending text (issue #1474), and keeps its behavior on an empty or
+#      unknown composer.
 #   7. A marked secondmate steer carries its marker + corr token in the record
 #      body, and the pending-reply expectation is marked delivered at enqueue.
 #   8. Pending-reply bookkeeping failure after enqueue never reports a
@@ -36,6 +39,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pending-reply-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 
@@ -45,6 +50,11 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 # Stub tmux: logs literal typed text to FM_SEND_LOG and lets the submit and
 # composer paths reach clean verdicts. FM_FAKE_TMUX_COMPOSER=pending renders a
 # composer visibly holding text; FM_FAKE_TMUX_SEND_FAIL=1 fails send-keys.
+# FM_FAKE_TMUX_COMPOSER=stale-until-enter models a parked lane: the composer
+# holds a stale unsubmitted draft until an Enter key lands, after which the
+# harness has accepted whatever the composer held and the composer reads empty.
+# FM_FAKE_TMUX_COMPOSER=unknown-until-enter is the same lifecycle over a screen
+# the classifier cannot read. Non-literal keys are logged to FM_SEND_LOG.keys.
 make_stubs() { # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -65,14 +75,28 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s\n' "${1:-}" >> "$FM_SEND_LOG"
+    else
+      printf '%s\n' "${1:-}" >> "$FM_SEND_LOG.keys"
+      [ "${1:-}" != Enter ] || : > "$FM_SEND_LOG.entered"
     fi
     exit 0 ;;
   display-message)
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
+    composer=${FM_FAKE_TMUX_COMPOSER:-}
+    case "$composer" in
+      *-until-enter) [ ! -e "$FM_SEND_LOG.entered" ] || composer= ;;
+    esac
+    if [ "$composer" = pending ] || [ "$composer" = stale-until-enter ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
+    elif [ "$composer" = failed-read-until-enter ]; then
+      exit 1
+    elif [ "$composer" = unproven-until-enter ]; then
+      # Mismatched border width is structural ambiguity, not proven pending.
+      printf '╭────╮\n│ leftover txt │\n╰────╯\n'
+    elif [ "$composer" = unknown-until-enter ]; then
+      printf 'transcript line\nanother transcript line\n'
     else
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
@@ -99,6 +123,68 @@ setup_case() { # <name> [harness] -> echoes case dir with home/state + t1 meta
   printf '%s\n' "$dir"
 }
 
+make_cursor_herdr_stub() { # <case-dir>
+  local fb="$1/fakebin"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    printf '{"server":{"running":true}}\n' ;;
+  agent)
+    printf '{"result":{"agent":{"agent":"%s","agent_status":"blocked"}}}\n' "${FM_FAKE_HERDR_IDENTITY:-cursor}" ;;
+  pane)
+    case "${2:-}" in
+      get)
+        printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' ;;
+      read)
+        if [ -n "${FM_FAKE_HERDR_SCREEN_DIR:-}" ]; then
+          case " $* " in
+            *" --format ansi "*) cat "$FM_FAKE_HERDR_SCREEN_DIR/ansi" ;;
+            *) cat "$FM_FAKE_HERDR_SCREEN_DIR/plain" ;;
+          esac
+          exit 0
+        fi
+        if [ "${FM_FAKE_HERDR_IDLE:-0}" = 1 ]; then
+          # Deliberately diverge the independent busy-tail read from the
+          # visible composer. The selected placeholder alone cannot authorize.
+          case " $* " in
+            *" --source recent "*) printf 'Cursor idle tail\n'; exit 0 ;;
+          esac
+        fi
+        case " $* " in
+          *" --format ansi "*)
+            if [ "${FM_FAKE_HERDR_COMPOSER:-placeholder}" = draft ]; then
+              printf ' ⠘⠆ Running 59 tokens\n ▄▄▄▄▄▄▄▄▄▄\n  → stale draft                  ctrl+c to stop\n ▀▀▀▀▀▀▀▀▀▀\n  1 task\n  Cursor Grok 4.5 High · 7%%           Run Everything\n'
+            elif [ "${FM_FAKE_HERDR_COMPOSER:-placeholder}" = transcript-hint-draft ]; then
+              printf '%b' ' ⠘⠆ Running 59 tokens\n  → Add a follow-up                  ctrl+c to stop\n \033[0m\033[38;2;21;21;21m▄▄▄▄▄▄▄▄▄▄\033[0m\r\n \033[0m\033[48;2;21;21;21m \033[0m\033[2m\033[48;2;21;21;21m→ \033[0m\033[7m\033[48;2;21;21;21mA\033[0m\033[0m\033[2m\033[48;2;21;21;21m                   ctrl+c to stop\033[0m\r\n \033[0m\033[38;2;21;21;21m▀▀▀▀▀▀▀▀▀▀\033[0m\r\n  1 task\n  Cursor Grok 4.5 High · 7%%           Run Everything\n'
+            else
+              printf '%b' ' \033[0m\033[38;2;21;21;21m▄▄▄▄▄▄▄▄▄▄\033[0m\r\n \033[0m\033[48;2;21;21;21m \033[0m\033[2m\033[48;2;21;21;21m→ \033[0m\033[7m\033[48;2;21;21;21mA\033[0m\033[2m\033[48;2;21;21;21mdd a follow-up\033[0m\033[48;2;21;21;21m                   \033[0m\033[2m\033[48;2;21;21;21mctrl+c to stop\033[0m\033[48;2;21;21;21m \033[0m\r\n \033[0m\033[38;2;21;21;21m▀▀▀▀▀▀▀▀▀▀\033[0m\r\n  \033[0m\033[38;5;4m1 task\033[0m\r\n  \033[0m\033[2mCursor Grok 4.5 High\033[0m \033[0m\033[2m·\033[0m \033[0m\033[2m7%%\033[0m           \033[0m\033[38;5;5mRun Everything\033[0m\r\n'
+            fi
+            ;;
+          *)
+            if [ "${FM_FAKE_HERDR_COMPOSER:-placeholder}" = draft ]; then
+              printf ' ⠘⠆ Running 59 tokens\n ▄▄▄▄▄▄▄▄▄▄\n  → stale draft                  ctrl+c to stop\n ▀▀▀▀▀▀▀▀▀▀\n  1 task\n  Cursor Grok 4.5 High · 7%%           Run Everything\n'
+            elif [ "${FM_FAKE_HERDR_COMPOSER:-placeholder}" = transcript-hint-draft ]; then
+              printf ' ⠘⠆ Running 59 tokens\n  → Add a follow-up                  ctrl+c to stop\n ▄▄▄▄▄▄▄▄▄▄\n  → A                              ctrl+c to stop\n ▀▀▀▀▀▀▀▀▀▀\n  1 task\n  Cursor Grok 4.5 High · 7%%           Run Everything\n'
+            else
+              printf ' ⠘⠆ Running 59 tokens\n ▄▄▄▄▄▄▄▄▄▄\n  → Add a follow-up                  ctrl+c to stop\n ▀▀▀▀▀▀▀▀▀▀\n  1 task\n  Cursor Grok 4.5 High · 7%%           Run Everything\n'
+            fi
+            ;;
+        esac
+        ;;
+      send-text)
+        printf '%s' "${4:-}" >> "$FM_SEND_LOG" ;;
+      send-keys)
+        printf '%s\n' "${4:-}" >> "$FM_SEND_LOG.keys" ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+}
+
 run_send() { # <case-dir> <err-file> [env...] -- <fm-send args...>
   local dir=$1 err=$2
   shift 2
@@ -109,6 +195,8 @@ run_send() { # <case-dir> <err-file> [env...] -- <fm-send args...>
   done
   shift
   : >"$dir/send.log"
+  : >"$dir/send.log.keys"
+  rm -f "$dir/send.log.entered"
   env PATH="$dir/fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" FM_SEND_LOG="$dir/send.log" \
     FM_SEND_SETTLE=0 ${envs[@]+"${envs[@]}"} \
@@ -330,6 +418,204 @@ test_explicit_target_stays_typed() {
   pass "fm-send planes: an explicit backend target keeps the typed plane"
 }
 
+# Issue #1474: a parked lane whose composer holds a stale unsubmitted draft.
+# Typing a typed-plane payload onto it would submit the draft and the payload
+# concatenated, and the composer clearing after that Enter looks exactly like
+# a confirmed submit. The typed plane must refuse before typing anything.
+test_typed_send_refuses_stale_pending_composer() {
+  local dir err rc corr rec marker
+  # A slash command (typed plane on any harness) to a task selector.
+  dir=$(setup_case stale-slash)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=stale-until-enter -- t1 "/status"
+  rc=$?
+  expect_code 1 "$rc" "a typed send onto a provably pending composer must fail with exit 1"
+  [ ! -s "$dir/send.log" ] || fail "a refused typed send still typed text:"$'\n'"$(cat "$dir/send.log")"
+  [ ! -s "$dir/send.log.keys" ] || fail "a refused typed send still pressed keys:"$'\n'"$(cat "$dir/send.log.keys")"
+  assert_contains "$(cat "$err")" "sess:fm-t1" "the refusal should name the target"
+  assert_contains "$(cat "$err")" "pending" "the refusal should name the pending composer as the reason"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a refused typed send must not fall back to the inbox"
+  # An explicit backend target takes the same typed plane and the same refusal.
+  dir=$(setup_case stale-explicit)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=stale-until-enter -- sess:win "hello there"
+  rc=$?
+  expect_code 1 "$rc" "an explicit-target send onto a provably pending composer must fail with exit 1"
+  [ ! -s "$dir/send.log" ] || fail "a refused explicit-target send still typed text:"$'\n'"$(cat "$dir/send.log")"
+  assert_contains "$(cat "$err")" "sess:win" "the explicit-target refusal should name the target"
+  # A marked secondmate typed request is refused the same way and leaves no
+  # pending-reply expectation waiting on a reply to a message never sent.
+  dir=$(setup_case stale-secondmate)
+  err="$dir/send.err"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=stale-until-enter -- fm-domain "/status"
+  rc=$?
+  expect_code 1 "$rc" "a secondmate typed send onto a provably pending composer must fail with exit 1"
+  [ ! -s "$dir/send.log" ] || fail "a refused secondmate typed send still typed text:"$'\n'"$(cat "$dir/send.log")"
+  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] ||
+    fail "a refused typed send should discard the just-created pending-reply expectation"
+  [ ! -s "$dir/send.log.keys" ] || fail "a refused marked request still pressed keys"
+  # Recovery may reuse a previously created but known-undelivered correlation.
+  # Refusal resets its attempt marker, while preserving the original request.
+  corr=$(fm_pending_reply_create "$dir/home" "$dir/home/state" domain "/status") ||
+    fail "could not seed the reusable pending-reply expectation"
+  rec=$(fm_pending_reply_path "$dir/home/state" "$corr")
+  marker=$(fm_pending_reply_delivery_confirmation_path "$dir/home/state" "$corr")
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=stale-until-enter \
+    "FM_PENDING_REPLY_EXISTING_CORR=$corr" -- fm-domain "/status"
+  rc=$?
+  expect_code 1 "$rc" "a reused marked request must be refused before typing"
+  [ -f "$rec" ] || fail "refusal lost the original reusable request"
+  [ ! -e "$marker" ] || fail "refusal retained a false delivery-attempt marker"
+  assert_equals awaiting_report "$(fm_pending_reply_get "$rec" phase)" "reused request phase must remain awaiting_report"
+  assert_equals '' "$(fm_pending_reply_get "$rec" delivered_epoch)" "refusal must not claim delivery"
+  [ ! -s "$dir/send.log" ] && [ ! -s "$dir/send.log.keys" ] || fail "reused refusal still touched the composer"
+  pass "fm-send typed plane: a provably pending composer is refused before anything is typed"
+}
+
+test_typed_send_empty_and_unknown_composer_unchanged() {
+  local dir err rc composer expected got
+  dir=$(setup_case typed-empty)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 "/status"
+  rc=$?
+  expect_code 0 "$rc" "a typed send to an empty composer should still be confirmed"
+  assert_contains "$(cat "$dir/send.log")" "/status" "an empty composer should still receive the typed text"
+  # An unreadable composer verdict is not proof of pending text: the preflight
+  # must not refuse, and the send keeps its prior type-then-verify behavior.
+  for composer in unknown-until-enter unproven-until-enter failed-read-until-enter; do
+    dir=$(setup_case "typed-$composer")
+    err="$dir/send.err"
+    expected=unknown
+    [ "$composer" != unproven-until-enter ] || expected=pending-unproven
+    got=$(env PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$dir/send.log" "FM_FAKE_TMUX_COMPOSER=$composer" \
+      /bin/bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_composer_state sess:fm-t1' _ "$ROOT")
+    assert_equals "$expected" "$got" "the $composer fixture must discriminate its pre-send verdict"
+    run_send "$dir" "$err" "FM_FAKE_TMUX_COMPOSER=$composer" -- t1 "/status"
+    rc=$?
+    expect_code 0 "$rc" "a $composer pre-send verdict should preserve type-then-verify"
+    assert_contains "$(cat "$dir/send.log")" "/status" "$composer should receive typed text"
+    assert_contains "$(cat "$dir/send.log.keys")" "Enter" "$composer should still be submitted"
+  done
+  pass "fm-send typed plane: empty, unknown, unproven, and failed reads preserve type-then-verify"
+}
+
+test_typed_send_allows_busy_cursor_placeholder_but_refuses_busy_draft() {
+  local dir err rc composer
+  dir=$(setup_case cursor-busy-placeholder cursor)
+  make_cursor_herdr_stub "$dir"
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_HERDR_COMPOSER=placeholder FM_SEND_RETRIES=1 \
+    FM_SEND_SLEEP=0.01 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 -- sess:w1:p2 "/status"
+  rc=$?
+  expect_code 3 "$rc" "a busy Cursor placeholder should pass the pre-type check and leave submit certainty to the Herdr submit path"
+  assert_equals "/status" "$(cat "$dir/send.log")" \
+    "a busy Cursor placeholder should receive the typed steer"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "an explicit Herdr target should not fall back to the inbox"
+
+  dir=$(setup_case cursor-busy-draft cursor)
+  make_cursor_herdr_stub "$dir"
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_HERDR_COMPOSER=draft -- sess:w1:p2 "/status"
+  rc=$?
+  expect_code 1 "$rc" "a real draft in a busy Cursor composer must still be refused"
+  [ ! -s "$dir/send.log" ] || fail "a typed steer concatenated onto a real Cursor draft"
+  assert_contains "$(cat "$err")" "sess:w1:p2" "the busy-draft refusal should name the explicit target"
+  assert_contains "$(cat "$err")" "pending" "the busy-draft refusal should preserve the pending-composer reason"
+
+  dir=$(setup_case cursor-transcript-hint-draft cursor)
+  make_cursor_herdr_stub "$dir"
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_HERDR_COMPOSER=transcript-hint-draft -- sess:w1:p2 "/status"
+  rc=$?
+  expect_code 1 "$rc" "a transcript hint outside the current Cursor composer row must not bypass the stale-draft guard"
+  [ ! -s "$dir/send.log" ] || fail "a typed steer was appended to the Cursor draft behind a stale transcript hint"
+  [ ! -s "$dir/send.log.keys" ] || fail "the rejected Cursor draft steer still pressed keys"
+  assert_contains "$(cat "$err")" "sess:w1:p2" "the transcript-hint refusal should name the explicit target"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "the rejected typed steer must not fall back to the inbox"
+
+  for composer in placeholder draft transcript-hint-draft; do
+    dir=$(setup_case "cursor-selector-$composer" cursor)
+    make_cursor_herdr_stub "$dir"
+    fm_write_meta "$dir/home/state/t1.meta" "window=sess:w1:p2" "backend=herdr" "kind=ship" "harness=cursor"
+    err="$dir/send.err"
+    run_send "$dir" "$err" "FM_FAKE_HERDR_COMPOSER=$composer" FM_SEND_RETRIES=1 \
+      FM_SEND_SLEEP=0.01 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 -- t1 "/status"
+    rc=$?
+    if [ "$composer" = placeholder ]; then
+      expect_code 3 "$rc" "a metadata-selected busy Cursor placeholder should reach the Herdr submit path"
+      assert_equals "/status" "$(cat "$dir/send.log")" \
+        "a metadata-selected busy Cursor placeholder should receive the typed steer"
+    else
+      expect_code 1 "$rc" "a metadata-selected Cursor $composer must be refused"
+      [ ! -s "$dir/send.log" ] || fail "a metadata-selected Cursor $composer received typed text"
+      [ ! -s "$dir/send.log.keys" ] || fail "a metadata-selected Cursor $composer received keys"
+      assert_contains "$(cat "$err")" "sess:w1:p2" "the metadata-selected draft refusal should name the target"
+      assert_contains "$(cat "$err")" "pending" "the metadata-selected draft refusal should name the pending composer"
+    fi
+    [ ! -d "$dir/home/state/t1.inbox" ] || fail "a metadata-selected typed steer must not fall back to the inbox"
+  done
+  dir=$(setup_case cursor-identity-mismatch cursor)
+  make_cursor_herdr_stub "$dir"
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_HERDR_IDENTITY=opencode -- sess:w1:p2 "/status"
+  rc=$?
+  expect_code 1 "$rc" "a Cursor-shaped hint with a different native identity must be refused"
+  [ ! -s "$dir/send.log" ] && [ ! -s "$dir/send.log.keys" ] || fail "identity mismatch bypassed the guard"
+  assert_contains "$(cat "$err")" pending "identity mismatch must still refuse for pending input"
+  dir=$(setup_case cursor-idle-hint cursor)
+  make_cursor_herdr_stub "$dir"
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_HERDR_IDLE=1 -- sess:w1:p2 "/status"
+  rc=$?
+  expect_code 1 "$rc" "Cursor identity and a placeholder without busy proof must be refused"
+  [ ! -s "$dir/send.log" ] && [ ! -s "$dir/send.log.keys" ] || fail "an idle hint bypassed the guard"
+  assert_contains "$(cat "$err")" pending "an idle hint must still refuse for pending input"
+  pass "fm-send typed plane: a busy Cursor placeholder is steerable while actual pending text remains guarded"
+}
+
+test_cursor_old_box_hint_cannot_authorize_another_selected_composer() {
+  local dir err shape selected got rc selector
+  for shape in bare rounded block; do
+    for selector in explicit metadata; do
+      dir=$(setup_case "cursor-old-box-$shape-$selector" cursor)
+      make_cursor_herdr_stub "$dir"
+      # Exact old busy placeholder above a newer selected input containing A.
+      # Every supported shape must use the shared owner's selection, not the
+      # last half-block box independently of that selection (OP5592-C01).
+      printf '%b' ' \033[38;2;21;21;21m▄▄▄▄▄▄▄▄▄▄\033[0m\n \033[2m→ \033[0m\033[7mA\033[0m\033[2mdd a follow-up                  ctrl+c to stop\033[0m\n \033[38;2;21;21;21m▀▀▀▀▀▀▀▀▀▀\033[0m\n\n' > "$dir/ansi"
+      printf ' ▄▄▄▄▄▄▄▄▄▄\n  → Add a follow-up                  ctrl+c to stop\n ▀▀▀▀▀▀▀▀▀▀\n\n' > "$dir/plain"
+      case "$shape" in
+        bare) selected='→ A' ;;
+        rounded) selected=$'╭─────╮\n│ → A │\n╰─────╯' ;;
+        block) selected=$'▄▄▄▄▄▄▄▄▄▄\n→ A\n▀▀▀▀▀▀▀▀▀▀' ;;
+      esac
+      printf '%s\n' "$selected" >> "$dir/ansi"
+      printf '%s\n' "$selected" >> "$dir/plain"
+      got=$(env PATH="$dir/fakebin:$PATH" "FM_FAKE_HERDR_SCREEN_DIR=$dir" \
+        /bin/bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_composer_state herdr sess:w1:p2; printf "\\n"; fm_backend_herdr_composer_content sess:w1:p2' _ "$ROOT")
+      assert_equals $'pending\nA' "$got" "$shape must prove pending and select only the newer A input"
+      if [ "$selector" = metadata ]; then
+        fm_write_meta "$dir/home/state/t1.meta" "window=sess:w1:p2" "backend=herdr" "kind=ship" "harness=cursor"
+        selector=t1
+      else
+        selector=sess:w1:p2
+      fi
+      err="$dir/send.err"
+      run_send "$dir" "$err" "FM_FAKE_HERDR_SCREEN_DIR=$dir" -- "$selector" "/status"
+      rc=$?
+      expect_code 1 "$rc" "an old placeholder must not authorize the selected $shape draft"
+      [ ! -s "$dir/send.log" ] && [ ! -s "$dir/send.log.keys" ] || fail "old hint authorized keys on the selected $shape draft"
+      assert_contains "$(cat "$err")" "pending unsubmitted text" "$shape must refuse for the proven pending draft"
+      [ ! -d "$dir/home/state/t1.inbox" ] || fail "$shape refusal fell back to inbox"
+      got=$(env PATH="$dir/fakebin:$PATH" "FM_FAKE_HERDR_SCREEN_DIR=$dir" \
+        /bin/bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_composer_content sess:w1:p2' _ "$ROOT")
+      assert_equals A "$got" "$shape refusal must preserve the selected draft"
+    done
+  done
+  pass "fm-send Cursor: an old boxed hint cannot authorize a newer bare, rounded, or block composer"
+}
+
 test_key_path_never_touches_inbox() {
   local dir err
   dir=$(setup_case keypath)
@@ -337,6 +623,18 @@ test_key_path_never_touches_inbox() {
   run_send "$dir" "$err" -- t1 --key Enter || fail "a --key send should succeed"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "the --key path must never write an inbox record"
   pass "fm-send planes: the --key lifecycle path never touches the inbox"
+}
+
+test_key_enter_intentionally_submits_pending_text() {
+  local dir err
+  dir=$(setup_case key-enter-pending)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=stale-until-enter -- t1 --key Enter ||
+    fail "--key Enter must remain an intentional pending-text submission"
+  [ ! -s "$dir/send.log" ] || fail "--key Enter typed extra text"
+  assert_equals Enter "$(cat "$dir/send.log.keys")" "--key Enter must press exactly Enter"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "--key Enter unexpectedly enqueued a steer"
+  pass "fm-send key path: Enter intentionally submits existing pending text"
 }
 
 test_secondmate_marker_and_enqueue_delivery() {
@@ -514,7 +812,12 @@ test_fire_and_forget_unlanded_ring_owes_one_retry
 test_fire_and_forget_retry_stays_off_without_the_flag
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
+test_typed_send_refuses_stale_pending_composer
+test_typed_send_empty_and_unknown_composer_unchanged
+test_typed_send_allows_busy_cursor_placeholder_but_refuses_busy_draft
+test_cursor_old_box_hint_cannot_authorize_another_selected_composer
 test_key_path_never_touches_inbox
+test_key_enter_intentionally_submits_pending_text
 test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded

@@ -819,6 +819,66 @@ It covers writing once, preserving explicit and concurrent settings, invoking gu
 These behavior tests do not verify an actual vendor-refusal recovery or live relaunch; the prior live automatic-review probe verifies the fallback's capabilities, not that complete recovery path.
 There is no automatic detector or harness-output classifier to verify, and a generic login error does not establish a defeated bypass.
 
+## Typed-plane stale-draft refusal
+
+Verified on 2026-10-29 on macOS arm64 with native tmux 3.6b and the three installed clients below.
+The current behavior contract, including the narrow Herdr Cursor exception and the remaining concurrent-input race, belongs to the [`fm-send.sh` header](../../bin/fm-send.sh).
+Refresh the real-client evidence with:
+
+```sh
+FM_SEND_PENDING_LIVE=1 /bin/bash bin/fm-test-run.sh --jobs 1 --per-script-timeout-secs 180 tests/fm-send-pending-live.test.sh
+```
+
+Exact result lines:
+
+```text
+# network boundary: {"external": 1, "loopback": 61}; private Unix connect=0
+# native backend: tmux 3.6b
+ok - claude (2.1.311 (Claude Code)): pending refused before keys; empty local command and durable inbox preserved
+ok - codex (codex-cli 0.164.0): pending refused before keys; empty local command and durable inbox preserved
+ok - grok (grok 1.0.70 (f50904eaee6c)): pending refused before keys; empty local command and durable inbox preserved
+```
+
+Each client ran with an empty home and configuration roots, synthetic invalid API keys, loopback endpoints and proxies, and an OS sandbox that denied external IP connections before any vendor execution.
+The negative network control required external `EPERM`, loopback `ECONNREFUSED`, and a successful private Unix-domain connection; proxies alone are insufficient for Grok.
+Claude ran in bare mode, Codex used an offline provider with hooks disabled and no shared daemon, and Grok used a private leader socket.
+Only local `/clear` or `/status` commands were submitted; no model response, paid service, or account session was exercised.
+The guard captured a real pending draft, required exit 1 and zero backend key operations for a typed marked request, and checked the entire draft row unchanged, with no inbox fallback or surviving known-undelivered reply expectation.
+It separately checked a command from an empty composer and durable inbox enqueue while the draft stayed pending with zero key operations.
+The refresh guard also requires explicit `--key Enter` to submit a pending local command and leave the composer empty; it records that check separately from the refusal and inbox cases.
+Raw captures are retained because transient furniture outside the input row, such as Grok's clipboard hint, can change independently of the draft.
+
+The other adapter executables were absent from the inspected PATH: opencode, pi, pi-signed, kimi, cursor-agent, gemini, muse, rovo, omp, agy, devin, commandcode, polytoken, and cortex.
+The available `agent` alias identified as Grok rather than Cursor; that tmux run claims no real Cursor result, and the separate Herdr supplement below owns the prior Cursor evidence.
+An installed client without a verified isolated launch recipe fails the guard by name and version instead of being silently omitted, and a run that exercises no client cannot pass.
+The macOS sandbox is a capability requirement; an explicitly forced run fails when that requirement is absent.
+Portable coverage in `tests/fm-send-inbox.test.sh` and `tests/fm-send-remote-delivery.test.sh` covers reused reply bookkeeping, unknown and unproven reads, failed capture, deliberate Enter, and divergent Cursor identity, busy-tail, and selected-composer signals.
+Real transport coverage here is tmux only: Herdr, Zellij, Orca, cmux, Paseo, Rex, and Tern remain `NOT_RUN` for this guard, including the Herdr Cursor exception.
+T3 Code has no terminal composer and its existing adapter returns only empty or unknown; no T3 service was contacted for this result.
+
+### Cursor on Herdr: real-client supplement
+
+Separately verified on 2026-10-29 on Linux with Cursor Agent 2026.10.22-27dcf5f and Herdr 0.9.3, protocol 22.
+The macOS PATH absences and `NOT_RUN` entries above describe that tmux guard's run only; they do not establish Cursor's absence elsewhere.
+This supplement covers tree `415941fb42b77a790e2e87916d8ab8407c749ab1`, committed as `66d1f751070c1d7c42600bceeec7cf4c4ed10ce6`; affected runtime changes require justification or refreshed real-client evidence before carrying these results forward.
+Public-interface invocations, relative to the tested source root:
+
+```sh
+bash bin/fm-send.sh fm-lab-c5592b:w2:p1 OP5592-NO-CONCATENAR-1
+# exit 1
+bash bin/fm-send.sh fm-lab-c5592b:w2:p1 'Finish with the exact marker OP5592-FOLLOWUP-OK.'
+# exit 0; response marker: OP5592-FOLLOWUP-OK
+bash bin/fm-send.sh fm-lab-c5592b:w2:p1 OP5592-NOT-SENT-STALE-3
+# exit 1
+```
+
+The first and third invocations made zero text/key calls and preserved the complete ANSI capture, respectively with a real pending draft and with an old follow-up hint visible outside the selected draft composer.
+The second measured native Cursor identity and busy activity independently, selected `A` after ghost stripping and the exact busy placeholder without stripping, queued the follow-up, and observed the response marker.
+The private verification receipt retains the raw argv, captures, identity checks, isolation proof, and cleanup evidence; this record retains the version-scoped result rather than the task chronology.
+The pending-draft and busy-placeholder cases used a 40-row by 120-column terminal; the visible-old-hint case used 160 rows by 160 columns.
+This is not a geometry matrix, a live wrong-identity counterfactual, independent signal-blinding proof, or a concurrent-input race test.
+The token-free tmux guard above does not refresh this Herdr result; refreshing it requires an isolated real Cursor/Herdr session and the three public-interface cases, including a model response for the queued follow-up.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
@@ -939,7 +999,7 @@ The same panes accepted `fm_backend_send_text_submit` at the same moment because
 `test_composer_footer_demotion_needs_a_proven_pair` pins the three bounds of the demotion - a blank row ends the footer zone, a separator pair that closed over no agent-glyph row demotes nothing, and Cursor's half-block-bounded `→` composer is untouched - plus the strict posture that an unanchored statusLine row alone never proves an empty composer.
 The footer zone is a property of any envelope a glyph row inside it proves, not of the separator pair specifically, so the same statusLine footer under claude's BORDERED composer (the shape a wide pane renders) is demoted identically; `test_composer_footer_zone_is_shape_independent` carries that box shape, asserts the statusLine is never the extracted composer content, and pins both counterweights - typed text inside that same box under that same footer still reads `pending`, and codex's startup banner, which holds no glyph row and therefore proves nothing, still yields to the live bare row drawn contiguously below it.
 
-The demotion is deliberately ASYMMETRIC: `empty` is the only verdict that authorizes `fm-send` to type into a pane, so the rule may move a verdict toward refusing but never toward `empty`.
+The demotion is deliberately ASYMMETRIC: the rule may move a verdict toward refusing but never toward `empty`; the [`fm-send.sh` header](../../bin/fm-send.sh) owns how each delivery plane consumes composer verdicts.
 It therefore counts a footer zone only when every row in it is demonstrably furniture - omp's status row, a braille animation row, claude's permission-mode hint row (`⏵⏵ bypass permissions on`), or a row leading with an agent glyph OTHER than the one that proved the envelope, which is what the `→` statusLine is on a `❯` claude pane.
 A run containing unclaimed activity (`Working on request...`, `→ ran npm test (3 failures)`) is not furniture in either row order and keeps invalidating the envelope above it, and a row leading with the SAME glyph the envelope was proven by (`❯ my typed draft`) is a live composer that keeps winning, so a visible draft is never overwritten.
 `test_composer_footer_zone_refuses_rather_than_allows` pins both directions on the bordered-box and separator-pair shapes.
@@ -2958,8 +3018,9 @@ Other harnesses on Herdr are unaffected by the edge-detector change.
 All seven live panes of the running default session - one Pi, four Claude, two plain shells - classified identically under the pre-fix and current classifiers.
 
 **Typed-submit confirmation is verified on tmux and Herdr only.**
-Zellij, cmux, Orca, and Paseo share a submit core that never consults the busy footer, so a typed-plane Cursor send there lands but `fm-send` reports delivery unconfirmed and exits non-zero; ordinary text steers ride the durable inbox and exit 0 at enqueue.
+Zellij, cmux, Orca, and Paseo share a submit core that never consults the busy footer, so a typed-plane Cursor send that passes the pre-type composer guard in the [`fm-send.sh` header](../../bin/fm-send.sh) lands but `fm-send` reports delivery unconfirmed and exits non-zero; ordinary text steers ride the durable inbox and exit 0 at enqueue.
 Teaching that shared core the same transition is deliberately separate work, because it changes the submit path for every harness on those four backends and needs its own live validation on each.
+Tern also lacks rendered-footer confirmation; its adapter can instead confirm a native idle-to-working transition, but no real Cursor/Tern result is recorded here.
 
 The portable regression is `tests/fm-cursor-harness.test.sh`, the composer captures are pinned in `tests/fm-composer-lib.test.sh`, and the Herdr submit and footer behavior is pinned in `tests/fm-backend-herdr.test.sh`.
 Refresh this harness-dependent proof before accepting a cursor upgrade:

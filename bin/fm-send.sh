@@ -63,7 +63,18 @@
 # target names an endpoint, not a task, so it stays on this plane even when
 # local metadata happens to match it (the same boundary that keeps it unmarked
 # and outside --resolve-key). Pane backends type the literal text ONCE, then
-# retry Enter without retyping; T3 Code starts one native turn. Typed-plane exit
+# retry Enter without retyping; T3 Code starts one native turn. Before typing,
+# the backend composer read refuses exact `pending` with exit 1: nothing is
+# typed, no keys are pressed, no inbox fallback occurs, and a known-undelivered
+# reply expectation is discarded if new or reset if reused. This prevents
+# concatenation onto a stale draft (#1474). The narrow Herdr Cursor exception
+# requires Cursor identity, rendered busy state, and its busy follow-up
+# placeholder on the selected composer row; a transcript hint is insufficient.
+# Other verdicts (`unknown`, `pending-unproven`, or a failed read) keep the
+# existing type-then-verify behavior. This read does not lock the composer;
+# concurrent input between the read and typing can still race. The --key path
+# bypasses this guard: `--key Enter` intentionally submits existing text.
+# Typed-plane exit
 # contract: 0 = submit confirmed; 3 = the text reached the live endpoint and
 # submission was attempted, but the read-back stayed unconfirmed, or an API
 # backend's outcome is unproven: a lost reply or an error that can follow a
@@ -577,6 +588,26 @@ fm_send_known_undelivered_cleanup() {
   else
     fm_pending_reply_reset_known_undelivered "$STATE" "$PENDING_REPLY_CORR"
   fi
+}
+fm_send_herdr_cursor_busy_placeholder() { # <target>
+  local target=$1 identity content capture hint
+  [ "$TARGET_BACKEND" = herdr ] || return 1
+  # The pre-type read runs in a subshell; load this adapter in the parent too.
+  fm_backend_source herdr || return 1
+  identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || return 1
+  [ "${identity%%$'\t'*}" = cursor ] || return 1
+  [ "$(fm_backend_herdr_rendered_busy_state "$target" cursor 2>/dev/null)" = busy ] || return 1
+  # Select through the shared owner twice on ONE capture: ghost stripping
+  # must leave only the caret-over-A cell, while the same selected content
+  # without ghost stripping must contain exactly the busy follow-up hint.
+  # A separate last-box scan could authorize text in a different composer.
+  capture=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) || return 1
+  content=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content \
+    $'styled=1\ncursor=0\nidentity=0' "$capture") || return 1
+  [ "$content" = A ] || return 1
+  hint=$(fm_composer_extract_selected_content \
+    $'styled=0\ncursor=0\nidentity=0' "$capture") || return 1
+  [ "$hint" = 'Add a follow-up ctrl+c to stop' ]
 }
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
@@ -1176,6 +1207,15 @@ else
     *) retries=${FM_SEND_RETRIES:-3} ;;
   esac
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  # The TYPED header owns this guard and its narrow Herdr Cursor exception.
+  pre_state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null) ||
+    pre_state=unknown
+  if [ "$pre_state" = pending ] && ! fm_send_herdr_cursor_busy_placeholder "$T"; then
+    fm_send_known_undelivered_cleanup ||
+      echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+    echo "error: text not sent to $T: its composer already holds pending unsubmitted text, and typing would concatenate onto it; nothing was typed. Inspect with fm-peek.sh, clear or submit that text, then resend (tried $RESOLUTION_TRIED)" >&2
+    exit 1
+  fi
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
   # block: remote text rides the inbox leg above, and remote --key exits
