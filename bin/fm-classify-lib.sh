@@ -122,6 +122,8 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # while the away-posture record exists (bin/fm-watch.sh owns that rule).
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=14400
+# Maximum age for an undated pause before stale handling asks for a decision.
+FM_PAUSE_UNDATED_MAX_SECS_DEFAULT=86400
 
 # fm_utc_iso_to_epoch <YYYY-MM-DDTHH:MM[:SS]Z>: the one portable UTC ISO 8601
 # reader shared by the declared-wait vocabulary and the away-posture record
@@ -422,6 +424,17 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
 # the flat cadence; returns 1 when the line is not a pause or declares no time,
 # or the time is malformed, so a bad token falls back to the cadence rather than
 # silencing the wait.
+status_pause_is_overdue() {  # <status-line> <age-seconds> <now-epoch> -> success iff overdue
+  local until undated_max=${FM_PAUSE_UNDATED_MAX_SECS:-$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT}
+  case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
+  if until=$(status_paused_until "$1"); then
+    [ "$3" -gt "$(( until + ${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT} ))" ]
+  else
+    case "$1" in *[[:space:]][Uu][Nn][Tt][Ii][Ll]*) return 1 ;; esac
+    [ "$2" -gt "$undated_max" ]
+  fi
+}
+
 status_paused_until() {  # <status-line> -> epoch on stdout
   local line=$1 token
   status_is_paused "$line" || return 1
@@ -2453,8 +2466,8 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
   printf '%s' "$origins"
 }
 
-status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
-  local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file result
+status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var] [ignored-blocked-key]
+  local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} ignored_blocked_key=${5-} size ident cur_ident scratch chunk_file result
   local line verb key origins='' folded=0 rc=1 failed=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
@@ -2504,6 +2517,8 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
           rc=0
           continue
         }
+        [ "$verb" = blocked ] && [ -n "$ignored_blocked_key" ] \
+          && [ "$key" = "$ignored_blocked_key" ] && continue
         _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" || {
           [ -n "$events" ] && events="${events} ; "
           events="${events}reconciliation-required: ${line}"

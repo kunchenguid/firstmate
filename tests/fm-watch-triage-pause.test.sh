@@ -1339,24 +1339,171 @@ test_paused_until_wrong_year_is_bounded_by_the_cadence() {
 }
 
 test_paused_until_that_passed_is_rechecked_before_the_cadence() {
-  local dir state
-  dir=$(paused_until_fixture until-passed "$(( $(date +%s) - 30 ))" 60); state="$dir/state"
-  until_watch "$dir" 999
+  local dir state class
+  dir=$(paused_until_fixture until-passed "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: working · source: active run' bash -c '. "$1"; pause_state_class test:fm-until until' _ "$WATCH")
+  [ "$class" = paused ] || fail "overdue dated pause classified as working: $class"
+  until_watch "$dir" 240
   wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a declared wait whose until time passed was not rechecked ahead of the cadence"; }
   grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null || fail "the due recheck did not print a stale wake: $(cat "$dir/watch.out")"
-  grep -F 'declared clearing time has passed' "$dir/watch.out" >/dev/null \
-    || fail "the due recheck did not say the declared time passed: $(cat "$dir/watch.out")"
+  grep -F 'wait overdue - decide or release' "$dir/watch.out" >/dev/null \
+    || fail "the overdue recheck did not request a decision: $(cat "$dir/watch.out")"
   grep -F 'possible wedge' "$dir/watch.out" >/dev/null && fail "a due declared wait was mislabeled a possible wedge"
+  grep -F 'paused-overdue-until' < <(status_open_decisions "$state/until.status") >/dev/null \
+    || fail "the overdue pause did not open a keyed decision"
+  local heartbeat
+  heartbeat=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; STATE="$2"; heartbeat_scan_finds_actionable; printf "%s" "$FM_HEARTBEAT_SURFACE_ENDPOINTS"' _ "$WATCH" "$state") \
+    || fail "heartbeat did not classify the overdue pause as actionable"
+  case "$heartbeat" in *until.status*) ;; *) fail "heartbeat omitted overdue pause status: $heartbeat" ;; esac
   # The due recheck fires once per declaration: a second watcher on the same
   # unchanged declaration absorbs it again.
   ack_stopped_cycle "$state" || fail "could not acknowledge the due recheck"
   : > "$dir/watch.out"
-  until_watch "$dir" 999
+  until_watch "$dir" 240
   if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
     reap "$UNTIL_PID"; fail "the due recheck repeated on every poll instead of once per declaration: $(cat "$dir/watch.out")"
   fi
   reap "$UNTIL_PID"
+  printf 'working: resumed\n' >> "$state/until.status"
+  # A fresh watcher observes the resumed status and closes the keyed decision.
+  : > "$dir/watch.out"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "resumed worker did not clear the overdue decision"; }
+  [ -z "$(status_open_decisions "$state/until.status")" ] \
+    || fail "resuming the worker did not close the overdue pause decision"
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
+}
+
+test_overdue_resume_race_uses_block_line_offset() {
+  local dir state statusf
+  dir=$(paused_until_fixture overdue-resume-race "" 90000); state="$dir/state"; statusf="$state/overdue-resume-race.status"
+  printf 'paused: waiting for an external dependency\n' > "$statusf"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
+    . "$1"
+    fm_wake_append() { :; }
+    wake() { :; }
+    resurface_absorbed test:fm-until "$STATE/.paused-resurfaced-overdue-resume-race" 0 overdue "" 0 "$2" \
+      "blocked [key=paused-overdue-overdue-resume-race]: paused 90000s, wait overdue - decide or release" \
+      "$STATE/.paused-overdue-overdue-resume-race"
+    printf "working: resumed\\n" >> "$2"
+    pause_overdue_reconcile overdue-resume-race "$2"
+    [ "$?" -eq 1 ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-overdue-resume-race" ] || exit 1
+    grep -Fq "resolved [key=paused-overdue-overdue-resume-race]" "$2"
+  ' _ "$WATCH" "$statusf" || fail "a resume appended just after the blocked line was not closed using the recorded byte boundary"
+  pass "a resume racing the overdue marker write closes the decision after the watcher blocked line"
+}
+
+test_overdue_marker_survives_reconcile_and_closes_on_working() {
+  local dir state statusf
+  dir=$(paused_until_fixture overdue-marker-eof "" 90000); state="$dir/state"; statusf="$state/overdue-marker-eof.status"
+  printf 'paused: waiting for an external dependency\n' > "$statusf"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced() { printf "%s\n" "$3" >> "$2"; }
+    fm_wake_append() { :; }
+    wake() { :; }
+    resurface_absorbed test:fm-overdue "$STATE/.paused-resurfaced-overdue-marker-eof" 90000 overdue "" 0 "$2" \
+      "blocked [key=paused-overdue-overdue-marker-eof]: paused 90000s, wait overdue - decide or release" \
+      "$STATE/.paused-overdue-overdue-marker-eof"
+    [ -s "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 0 ] || exit 1
+    printf "needs-decision: captain input required\n" >> "$2"
+    pause_overdue_reconcile overdue-marker-eof "$2"; [ "$?" -eq 1 ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-overdue-marker-eof" ] || exit 1
+    grep -Fq "resolved [key=paused-overdue-overdue-marker-eof]" "$2"
+  ' _ "$WATCH" "$statusf" || fail "a freshly written overdue marker did not survive reconcile and close on working"
+  pass "a fresh overdue marker survives reconciliation and closes when the worker resumes"
+}
+
+test_overdue_terminal_status_ignores_pane_display_churn() {
+  local dir state statusf pid
+  dir=$(paused_until_fixture overdue-display-churn "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"; statusf="$state/until.status"
+  printf 'window=test:fm-until\nkind=ship\n' > "$state/until.meta"
+  set_mtime "$(( $(date +%s) - 90000 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-until_status"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "overdue pause did not open its decision"; }
+  grep -Fq 'paused-overdue-until' < <(status_open_decisions "$statusf") || fail "overdue decision was not opened"
+  ack_stopped_cycle "$state" || fail "could not acknowledge overdue decision"
+
+  printf 'idle, waiting for the reset; display changed\n' > "$dir/pane.txt"
+  until_watch "$dir" 240
+  pid=$UNTIL_PID
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "terminal overdue pause repeated a stale wake after pane display changed: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || fail "pane display churn printed another stale wake"
+  [ ! -s "$state/.wake-queue" ] || fail "pane display churn queued another stale wake"
+  reap "$pid"
+  pass "an open overdue decision suppresses terminal stale wakes caused only by pane display churn"
+}
+
+test_reused_task_id_does_not_inherit_overdue_pause() {
+  local dir state statusf
+  dir=$(paused_until_fixture reused-overdue-task "" 90000); state="$dir/state"; statusf="$state/until.status"
+  printf 'paused: waiting for an external dependency\n' > "$statusf"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_FAKE_CREW_STATE='state: working · source: active run' bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced() { printf "%s\n" "$3" >> "$2"; }
+    fm_wake_append() { :; }
+    wake() { :; }
+    resurface_absorbed test:fm-until "$STATE/.paused-resurfaced-reused" 90000 overdue "" 0 "$2" "blocked [key=paused-overdue-until]: paused 90000s, wait overdue - decide or release" "$STATE/.paused-overdue-until"
+    mv "$2" "$2.retired"
+    printf "working: fresh task\n" > "$2"
+    result=$(pause_state_class test:fm-until until)
+    [ "$result" != paused ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-until" ]
+  ' _ "$WATCH" "$statusf" || fail "a reused task id inherited its prior overdue pause marker"
+  pass "a reused task id with fresh working status does not inherit overdue pause state"
+}
+
+test_malformed_dated_pause_is_not_undated_overdue() {
+  local dir state result class statusf
+  dir=$(paused_until_fixture malformed-until "" 90000); state="$dir/state"; statusf="$state/until.status"
+  printf 'paused: waiting until not-a-time\n' > "$statusf"
+  set_mtime "$(( $(date +%s) - 90000 ))" "$statusf"
+  result=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=60 bash -c '. "$1"; status_pause_is_overdue "paused: waiting until not-a-time" 90000 "$(date +%s)"; printf "%s" "$?"' _ "$WATCH")
+  [ "$result" = 1 ] || fail "malformed dated pause entered the undated overdue path"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=60 FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: working · source: run-step' bash -c '. "$1"; pause_state_class test:fm-until until' _ "$WATCH")
+  [ "$class" = working ] || fail "watcher classification treated a malformed dated pause as overdue: $class"
+  pass "malformed dated pauses remain on bounded recheck"
+}
+
+test_undated_pause_overdue_bound() {
+  local dir state statusf class
+  dir=$(paused_until_fixture undated-overdue "" 30); state="$dir/state"; statusf="$state/until.status"
+  printf 'paused: waiting for an external dependency\n' > "$statusf"
+  set_mtime "$(( $(date +%s) - 30 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-until_status"
+  export FM_PAUSE_UNDATED_MAX_SECS=60 FM_PAUSE_RESURFACE_SECS=240
+  until_watch "$dir" 240
+  wait_poll_cycle "$state" "$UNTIL_PID" || { reap "$UNTIL_PID"; fail "fresh undated pause exited before its ceiling"; }
+  wait_poll_cycle "$state" "$UNTIL_PID" || { reap "$UNTIL_PID"; fail "undated pause exited before its ceiling"; }
+  [ -z "$(status_open_decisions "$statusf")" ] || fail "undated pause opened a decision before its bound"
+
+  set_mtime "$(( $(date +%s) - 61 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-until_status"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=60 FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: working · source: active run' bash -c '. "$1"; pause_state_class test:fm-until until' _ "$WATCH")
+  [ "$class" = paused ] || fail "overdue undated pause classified as working: $class"
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "overdue undated pause did not surface"; }
+  grep -Fq 'paused-overdue-until' < <(status_open_decisions "$statusf") || fail "overdue undated pause did not open a decision"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; status_open_decisions() { printf called > "$3"; return 1; }; pause_state_class test:fm-until until' _ "$WATCH" "$state" "$dir/open-fold-called")
+  [ "$class" = paused ] || fail "unchanged overdue pause did not stay classified as paused: $class"
+  [ ! -e "$dir/open-fold-called" ] || fail "unchanged overdue poll folded the full status log"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the overdue undated wake"
+
+  printf 'resolved [key=unrelated]: another decision closed\n' >> "$statusf"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; pause_overdue_reconcile until "$2"; printf "%s" "$?"' _ "$WATCH" "$statusf")
+  [ "$class" = 0 ] || fail "an unrelated resolved key cleared the overdue pause decision"
+  grep -Fq 'paused-overdue-until' < <(status_open_decisions "$statusf") || fail "the overdue decision closed on an unrelated resolution"
+
+  printf 'working: resumed\n' >> "$statusf"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "undated resume did not close decision"; }
+  [ -z "$(status_open_decisions "$statusf")" ] || fail "undated resume left decision open"
+  unset FM_PAUSE_UNDATED_MAX_SECS FM_PAUSE_RESURFACE_SECS
+  pass "undated pauses stay quiet through the bound and close their overdue decision on resume"
 }
 
 # --- a live worker paused on its own background job --------------------------
@@ -1496,5 +1643,11 @@ fm_test_run \
   test_paused_until_near_future_is_quiet_before_the_cadence \
   test_paused_until_wrong_year_is_bounded_by_the_cadence \
   test_paused_until_that_passed_is_rechecked_before_the_cadence \
+  test_overdue_resume_race_uses_block_line_offset \
+  test_overdue_marker_survives_reconcile_and_closes_on_working \
+  test_overdue_terminal_status_ignores_pane_display_churn \
+  test_reused_task_id_does_not_inherit_overdue_pause \
+  test_malformed_dated_pause_is_not_undated_overdue \
+  test_undated_pause_overdue_bound \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
   test_paused_bg_job_until_timeout_rechecks_after_the_job_ends
