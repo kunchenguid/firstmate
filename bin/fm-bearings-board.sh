@@ -63,6 +63,11 @@
 # keyed-answer intake as a blind close, are owned by
 # docs/captain-hold-lifecycle.md.
 #
+# A Captain's Call item MAY carry `class`, the captain-hold class the snapshot
+# projected for that call; the template renders it as a badge on the card.
+# Anything other than null or a name `bin/fm-captain-hold.sh classes` prints
+# refuses, so a card cannot claim a category the vocabulary does not have.
+#
 # Validation is fail-closed: the payload must be valid JSON with
 # schema=fm-bearings-board.v1 and every renderer-consumed field must satisfy
 # the fm-bearings-board.v1 types and item invariants below. Every fleet row and
@@ -112,7 +117,11 @@ fail() {
 board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
 
 validate_payload() {  # <data.json>
-  jq -e --arg schema "$BOARD_SCHEMA" '
+  local classes
+  # bin/fm-captain-hold.sh owns the closed captain-hold class vocabulary.
+  classes=$("$SCRIPT_DIR/fm-captain-hold.sh" classes | jq -Rsc 'split("\n") | map(select(length > 0))') \
+    || fail "cannot read the captain-hold class vocabulary"
+  jq -e --arg schema "$BOARD_SCHEMA" --argjson classes "$classes" '
     def nonempty_string: type == "string" and length > 0;
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
     def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
@@ -161,6 +170,7 @@ validate_payload() {  # <data.json>
       and optional_subject
       and (if has("subject") then .type == "decision" else true end)
       and (optional_string("freeform_hint"))
+      and ((has("class") | not) or (.class == null) or (.class as $c | $classes | index($c) != null))
       and ((has("close") | not) or (.close == "done" or .close == "release"))
       and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))
       and ((has("recommend_value") | not)
