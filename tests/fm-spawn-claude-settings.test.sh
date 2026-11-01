@@ -7,6 +7,10 @@
 # launch additionally carries the busy-state/turn-end hooks. A stray brace made
 # claude reject the file and skip firstmate's owned hooks entirely, so the whole
 # per-launch policy is asserted structurally, not by string match.
+# A bypass launch must also carry skipDangerousModePermissionPrompt, because a
+# task worker's --setting-sources '' never reads the captain's user-scope
+# acceptance and Claude would park the pane on its Bypass Permissions dialog;
+# a config/claude-permission-mode=auto launch requests no bypass and carries none.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -37,11 +41,12 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-# settings_check <file> <expect-hooks: yes|no> echoes "ok" or the reason it is not.
+# settings_check <file> <expect-hooks: yes|no> [expect-bypass-skip: yes|no]
+# echoes "ok" or the reason it is not.
 settings_check() {
-  python3 - "$1" "$2" <<'PY'
+  python3 - "$1" "$2" "${3:-yes}" <<'PY'
 import json, sys
-path, want_hooks = sys.argv[1], sys.argv[2]
+path, want_hooks, want_skip = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     with open(path) as fh:
         doc = json.load(fh)
@@ -52,6 +57,11 @@ if doc.get("feedbackDrafts") != "off":
     print("feedbackDrafts is %r" % (doc.get("feedbackDrafts"),)); sys.exit(0)
 if doc.get("attribution") != {"commit": "", "pr": "", "sessionUrl": False}:
     print("attribution is %r" % (doc.get("attribution"),)); sys.exit(0)
+if want_skip == "yes":
+    if doc.get("skipDangerousModePermissionPrompt") is not True:
+        print("bypass launch lacks skipDangerousModePermissionPrompt: true, got %r" % (doc.get("skipDangerousModePermissionPrompt"),)); sys.exit(0)
+elif "skipDangerousModePermissionPrompt" in doc:
+    print("non-bypass launch carries skipDangerousModePermissionPrompt %r" % (doc["skipDangerousModePermissionPrompt"],)); sys.exit(0)
 if want_hooks == "yes":
     hooks = doc.get("hooks")
     if not isinstance(hooks, dict) or not hooks:
@@ -126,5 +136,21 @@ SM_SETTINGS="$SM/home/state/$SM_ID.claude-settings.json"
 RESULT=$(settings_check "$SM_SETTINGS" no)
 [ "$RESULT" = ok ] || fail "secondmate settings file rejected: $RESULT"
 
-pass "bin/fm-spawn.sh writes valid claude settings JSON with and without the owned hooks"
+# --- 3. config/claude-permission-mode=auto: no bypass acceptance -------------
+AUTO="$TMP_ROOT/auto"
+new_home "$AUTO/home"
+printf 'auto\n' > "$AUTO/home/config/claude-permission-mode"
+fm_git_worktree "$AUTO/project" "$AUTO/wt" wt-auto
+AUTO_FAKE=$(make_fakebin "$AUTO/fake")
+AUTO_ID=settings-auto
+mkdir -p "$AUTO/home/data/$AUTO_ID"
+cp "$CREW/home/data/$CREW_ID/brief.md" "$AUTO/home/data/$AUTO_ID/brief.md"
+run_spawn "$AUTO/home" "$AUTO_FAKE" "$AUTO/wt" "$AUTO_ID" "$AUTO/project" --mode no-mistakes --yolo off
+
+AUTO_SETTINGS="$AUTO/home/state/$AUTO_ID.claude-settings.json"
+[ -f "$AUTO_SETTINGS" ] || fail "an auto-mode claude launch wrote no settings file at $AUTO_SETTINGS"
+RESULT=$(settings_check "$AUTO_SETTINGS" yes no)
+[ "$RESULT" = ok ] || fail "auto-mode settings file rejected: $RESULT"
+
+pass "bin/fm-spawn.sh writes valid claude settings JSON with and without the owned hooks, accepting bypass only for bypass launches"
 echo "all fm-spawn-claude-settings tests passed"

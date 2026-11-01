@@ -499,6 +499,34 @@ ok - claude 2.1.281 (Claude Code) lean auto worker runs only Firstmate hooks, no
 `fm-teardown.sh` returned both real workers and their slots, and the disposable tmux server and fixture were removed after the measurement.
 The live guard above rechecks that the installed CLI loads Firstmate's explicit hooks but not project hooks under the lean flags; `tests/fm-spawn-claude-lean.test.sh` pins the emitted ship/scout command shape without credentials.
 
+### Claude Bypass Permissions dialog under lean setting sources
+
+Verified 2026-11-01 on Claude Code 2.1.316 and tmux 3.2a, each launch interactive in an isolated tmux server against a scratch `CLAUDE_CONFIG_DIR` with onboarding finished, the workspace trusted, and no credentials.
+Every launch was `claude --dangerously-skip-permissions --settings <file> --setting-sources <list>`, with `skipDangerousModePermissionPrompt: true` placed in one layer at a time.
+
+```text
+user settings.json only, --setting-sources ''            -> Bypass Permissions dialog
+user settings.json only, --setting-sources project,local -> Bypass Permissions dialog
+user settings.json only, --setting-sources user          -> composer
+.claude/settings.local.json, --setting-sources local     -> composer
+.claude/settings.json, --setting-sources project         -> Bypass Permissions dialog
+--settings file, --setting-sources ''                    -> composer
+--settings file, --setting-sources project,local         -> composer
+--settings inline JSON, --setting-sources ''             -> composer
+--settings file with the key false, --setting-sources '' -> Bypass Permissions dialog
+```
+
+The user-scope acceptance therefore never reaches a lean task worker, the project scope is ignored for this key, and the `--settings` layer honors it under every source list, which is why `bin/fm-spawn.sh` writes it into each bypass launch's `state/<id>.claude-settings.json`.
+`tests/fm-claude-bypass-prompt-live-e2e.test.sh` refreshes this record token-free against the installed binary, and `tests/fm-spawn-claude-settings.test.sh` pins that only bypass launches carry the key:
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-bypass-prompt-live-e2e.test.sh
+```
+
+```text
+ok - claude 2.1.316 (Claude Code) skips the Bypass Permissions dialog when --settings carries skipDangerousModePermissionPrompt
+```
+
 ### Claude model families and per-task MCP opt-in
 
 Verified 2026-09-24 with Claude Code 2.1.281 and tmux 3.2a on this same lean branch using one disposable git project, one isolated tmux server, and three fresh Treehouse slots.
@@ -644,8 +672,7 @@ That verification is point-in-time rather than a durable guarantee, because a co
 One limitation belongs beside that result.
 An intermediate arm run against an isolated `CLAUDE_CONFIG_DIR` holding only a copied `.claude.json` cleared the trust dialog but then surfaced the separate machine-scoped Bypass Permissions warning.
 That warning rendered in the same shape as the trust dialog, with the selection cursor on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so a sent Enter would end that worker too.
-That gate is not a production blocker, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
-This change does not address that warning and does not claim to.
+The treatment arm above ran against the real config and saw neither dialog, but a lean task worker loads no user settings and so never sees an operator's acceptance; [Claude Bypass Permissions dialog under lean setting sources](#claude-bypass-permissions-dialog-under-lean-setting-sources) records how a bypass launch now avoids it.
 
 ### Secondmate homes
 

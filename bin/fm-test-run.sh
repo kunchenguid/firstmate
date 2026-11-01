@@ -361,7 +361,7 @@ family_for_basename() {
     fm-composer-codex-idle-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-codex-hook-layer-live-e2e.test.sh|\
     fm-grok-continuity-live-e2e.test.sh|\
-    fm-cursor-primary-live-e2e.test.sh|fm-claude-settings-live-e2e.test.sh|\
+    fm-cursor-primary-live-e2e.test.sh|fm-claude-settings-live-e2e.test.sh|fm-claude-bypass-prompt-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-devin-signals-live-e2e.test.sh|fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|fm-agy-signals-live-e2e.test.sh|\
@@ -730,6 +730,7 @@ tests/fm-ci-workflow.test.sh 5833
 tests/fm-classify-corr-token.test.sh 49294
 tests/fm-classify-decision-key.test.sh 4362
 tests/fm-claude-admission.test.sh 37243
+tests/fm-claude-bypass-prompt-live-e2e.test.sh 60
 tests/fm-claude-settings-live-e2e.test.sh 74
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 73
 tests/fm-claude-stop-autoarm.test.sh 61189

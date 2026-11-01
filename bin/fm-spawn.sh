@@ -426,8 +426,9 @@
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
 #   `--dangerously-skip-permissions`; `auto` launches with `--permission-mode
 #   auto` instead, Claude Code's classifier-reviewed mode, for a captain who
-#   refuses to run workers in bypass mode. Every other part of the claude launch
-#   is unchanged. The token is the file's whitespace-trimmed content; any other
+#   refuses to run workers in bypass mode. Bypass also writes
+#   skipDangerousModePermissionPrompt into the per-task settings file; every
+#   other part of the claude launch is unchanged. The token is the file's whitespace-trimmed content; any other
 #   value, or an unreadable file, refuses the spawn before any endpoint,
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
@@ -5685,7 +5686,7 @@ EOF
 fi
 
 # The single --settings source every claude launch is handed. It carries the
-# per-launch feedback-draft and attribution policy for EVERY kind, including a
+# per-launch feedback-draft, attribution and bypass-acceptance policy for EVERY kind, including a
 # secondmate, which arms no busy contract and so gets those keys with no "hooks";
 # a crewmate or scout additionally gets the semantic busy-state hooks resolved
 # above. One file rather than a second inline --settings argument, because claude
@@ -5705,8 +5706,15 @@ case "$HARNESS" in
       fi
       claude_attribution_json=
       [ "$KEEP_AI_TRAILERS" = 1 ] || claude_attribution_json=',"attribution":{"commit":"","pr":"","sessionUrl":false}'
-      printf '{"feedbackDrafts":"off"%s%s}\n' \
-        "$claude_attribution_json" "$claude_hooks_json" \
+      # A bypass launch would otherwise park on Claude's Bypass Permissions
+      # accept dialog: a task worker's --setting-sources '' never reads the
+      # captain's user-scope acceptance, while this --settings layer is read
+      # under every --setting-sources value. A launch under
+      # config/claude-permission-mode=auto requests no bypass, so it gets no key.
+      claude_bypass_json=
+      [ "$CLAUDE_PERMISSION_MODE" != bypass ] || claude_bypass_json=',"skipDangerousModePermissionPrompt":true'
+      printf '{"feedbackDrafts":"off"%s%s%s}\n' \
+        "$claude_attribution_json" "$claude_bypass_json" "$claude_hooks_json" \
         > "$STATE_REAL/$ID.claude-settings.json"
       # A task worker excludes the user, project and local settings layers, so
       # carry their tool guards (PreToolUse/PostToolUse hooks and deny rules)

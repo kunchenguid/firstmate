@@ -39,9 +39,12 @@ Escape on the external-imports dialog is different: it records a permanent decli
 Leave a pane showing the external-imports dialog alone and have a person answer it interactively instead of interrupting it.
 To recover from an already-recorded decline, remove both flags from the project's entry in `~/.claude.json` and approve the imports dialog once by hand.
 
-The once-per-machine bypass-permissions confirmation is a third, separate dialog, scoped to the machine rather than the path, and pre-registration does not address it.
-Never send Enter to that one either: it was observed rendering in the same shape as the trust dialog, with the selection on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so Enter ends the session rather than accepting.
-Firstmate cannot move a selection with Enter, Escape, and C-c alone, so it cannot accept this dialog at all, and an operator accepts it once per machine instead.
+The Bypass Permissions accept dialog is a third, separate dialog, and pre-registration does not address it.
+Claude skips it only when a settings source it reads carries `skipDangerousModePermissionPrompt: true`, and a task worker's `--setting-sources ''` excludes the user scope where an operator's acceptance is recorded.
+Every bypass launch therefore carries that key in its `state/<id>.claude-settings.json`, the `--settings` layer Claude reads under every `--setting-sources` value, so the dialog does not appear; `../../../tests/fm-claude-bypass-prompt-live-e2e.test.sh` rechecks that against the installed binary.
+A raw launch command never gets that file and can still meet the dialog.
+Never send Enter to it: it renders in the same shape as the trust dialog, with the selection on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so Enter ends the session rather than accepting.
+Firstmate cannot move a selection with Enter, Escape, and C-c alone, so it cannot accept this dialog at all.
 Inspect the pane to identify which dialog is on screen, and report it rather than answering it.
 A launch under `config/claude-permission-mode=auto` never meets the bypass confirmation, because it does not request bypass mode: on 2.1.269 `claude --permission-mode auto` reached the composer directly with the footer `⏵⏵ auto mode on (shift+tab to cycle)`, so a captain who refuses the bypass dialog selects `auto` there instead of accepting it.
 The workspace-trust dialog is unaffected by the permission mode and still needs the pre-registration above.

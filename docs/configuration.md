@@ -861,8 +861,9 @@ The token is the file's whitespace-trimmed content.
 
 An absent file defaults to bypass, so an unconfigured home launches with the bypass permission flag.
 Auto is Claude Code's classifier-reviewed permission mode, for a captain who refuses to run workers in bypass mode.
-Only the permission flag changes between the two modes.
-The environment prefix, generated per-task settings, model, effort flags, and the task-channel `--add-dir` grant below stay the same in both.
+Bypass also adds `skipDangerousModePermissionPrompt: true` to the generated per-task settings, so a worker never parks on Claude Code's Bypass Permissions accept dialog: a task worker loads no user settings, so the captain's own acceptance there never reaches it.
+Otherwise only the permission flag changes between the two modes.
+The environment prefix, the rest of the generated per-task settings, model, effort flags, and the task-channel `--add-dir` grant below stay the same in both.
 
 Every Claude launch, in both modes, also passes `--add-dir` for exactly this task's Firstmate channel directories, resolved to real paths: a secondmate gets the parent home's `state/<id>.inbox` it reads its steers from; a ship or scout worker gets this home's `state/operational-inbox` (its launch record), `state/<id>.inbox` (its steers), `data/<id>` (its brief and report), and the code root's `.agents/skills`.
 The grant exists because Claude Code path-checks the Read/Glob/Grep file tools against cwd plus `--add-dir`, and since 2.1.257 the first outside read in `auto` mode parks the pane on a one-time interactive question, while a "Block" answer there writes `permissions.blockReadsOutsideWorkingDirectories` into user settings and then refuses the same reads under bypass too.
