@@ -18,16 +18,46 @@ Prerequisites:
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
-Select hc with local `config/backend` containing `hc`, `FM_BACKEND=hc` for one launch, or an explicit request to Firstmate.
-It is never runtime auto-detected; see "Selection is explicit" below.
+Select hc explicitly with local `config/backend` containing `hc`, `FM_BACKEND=hc` for one launch, or an explicit request to Firstmate.
+An explicit setting always wins; see "Runtime auto-detection" below for when hc is also selected automatically.
 
 The core a task lands on is the one `HC_SESSION` names when the task is spawned, or hc's `default` session when it is unset.
-Herdr.app shows the `default` session's terminals.
+The Herdr app shows the terminals of the session it bound at launch, `default` unless the app was started with a different `HC_SESSION`.
 
-## Selection is explicit
+## Runtime auto-detection
 
-hc is explicit-only, like zellij, orca, Paseo, and tern.
-hc stamps `HC_TERMINAL_ID` into every process an hc terminal starts, including a tmux server or Herdr 1 client started inside one, so its presence never proves the captain chose hc and `fm_backend_detect` ignores it.
+hc is auto-detected only on the Herdr app's own signals, never on bare `HC_TERMINAL_*` markers: hc stamps them into every process an hc terminal starts, and an app-created terminal's env is deliberately identical to any other hc terminal's - the app sends `TERM_PROGRAM=herdr` in its `terminal.run` call, but the core's `child_env` normalizes that to `ghostty` for every child, app-created or not.
+What marks a terminal as the app's is its core-side record: the app stamps `herdr.space`/`herdr.tab` labels on every terminal it creates, and a non-empty `herdr.space` is the exact condition under which the app projects a terminal into its window.
+`bin/fm-backend.sh` `fm_backend_detect` owns the check order; this section owns what the signals mean.
+
+Two signals select hc, in this order, after every other surface marker has had its say:
+
+1. `app-terminal`: this process's own `HC_TERMINAL_ID` terminal carries a non-empty `herdr.space` label in its core's record.
+   The check is read-only and gated: a unix connect must first prove `HC_TERMINAL_SOCKET` live, because `hc` starts a core on contact with a missing socket and a bare `hc get` could create state; then one `hc get` reads the label through the resolved binary.
+   Missing markers, a dead socket, a missing or unusable `hc`/`jq` toolchain, a `get` failure, or an empty label are all a miss, never a detection.
+2. `app-window`: a live `herdr-app.sock` control socket under the resolved app home (`HERDR_APP_HOME`, else `XDG_CONFIG_HOME/herdr-app`, else `~/.config/herdr-app`).
+   The probe is the app's own liveness rule, a bare unix connect: a stale socket file refuses, an absent one never binds, and no app control command or launch is issued.
+   It is consulted only when no signal named this process's runtime, so a Firstmate on a plain shell on a host where the captain's window is open also opts into app presentation.
+
+Both signals bind the core a spawn would actually reach, the `HC_SESSION` (else `default`) session, and require it to be running already, because the adapter's container ensure starts a missing core and detection must never start one.
+`bin/fm-backend.sh` resolves that core's socket without calling `hc`: an `FM_HC_SOCKET` pin, else `$XDG_RUNTIME_DIR/herdr-core/<session>.sock` when `XDG_RUNTIME_DIR` is set, else `${XDG_STATE_HOME:-~/.local/state}/herdr-core/<session>/<session>.sock`, the layout measured on hc 0.1.14.
+`app-terminal` additionally requires `HC_TERMINAL_SOCKET` to be that same socket, so a labeled terminal on some other core never steers a spawn.
+`app-window` requires that socket to accept a connection; with no running core it does not switch and the notice names the session it would not start.
+The app shows the session it bound at launch, so a captain whose app runs a session other than `default` sets the same `HC_SESSION` for Firstmate or selects hc explicitly.
+
+An explicit `--backend`, `FM_BACKEND`, or `config/backend` always wins over detection.
+Inside the classic Herdr TUI, `HERDR_ENV=1` wins before the app signals are consulted, so the `herdr` backend keeps its behavior.
+A contradictory marker set (for example another surface's marker alongside the app's) keeps the earlier surface's verdict rather than switching - ambiguous input means no automatic switch.
+When a live app window or a live hc terminal is present but no usable hc toolchain resolves (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z` at or above the adapter's verified minimum, plus `jq` - the same version gate the spawn's container check applies), detection does not switch and a notice names the missing piece instead; a bare terminal marker set is still never a detection.
+An auto-detected hc prints a stderr notice naming the winning signal and how to opt out; [Task shape and metadata](#task-shape-and-metadata) owns its task record.
+
+Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an explicit hc spawn does, so workers appear in the captain's window without the app ever being started by Firstmate.
+The app is local GUI presentation only: on a remote or headless home neither signal exists, and nothing here changes the remote `herdr` path.
+
+Two limits apply to auto-detection specifically:
+
+- A `--secondmate` spawn under an auto-detected hc fails the existing refusal rather than silently choosing another backend; set `config/backend` explicitly for a home that spawns secondmates.
+- Away-mode supervisor discovery and hc refusal are owned by [Away-mode supervisor backend](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
 
 ## Task shape and metadata
 
@@ -43,10 +73,13 @@ The terminal carries these labels:
 
 ```text
 backend=hc
+backend_detect=app-terminal
 window=<session>:<address>
 hc_session=<session>
 hc_terminal=<address>
 ```
+
+`backend_detect=` is `app-terminal` or `app-window` only when that signal automatically selected hc; an explicitly selected hc writes no `backend_detect=` line.
 
 `<address>` is hc's terminal address such as `t7`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.
@@ -81,7 +114,8 @@ An input, capture, or close that carries the task label refuses a terminal whose
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.
 - `--secondmate` spawns are refused.
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
-- Naming a Herdr.app space needs the app window and is not done; whether the labels above display as intended in Herdr.app is not verified.
+- Naming a Herdr.app space needs the app window and is not done.
+  The `herdr.space`/`herdr.tab` label contract above is the app's documented bridge (its window projects labeled terminals as spaces/tabs and keeps unlabeled ones hidden); visual confirmation inside a real window remains outstanding.
 - hc has no event stream this adapter consumes; supervision polls like tmux.
 
 ## Tests
@@ -89,6 +123,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 `tests/fm-backend-hc.test.sh` pins the adapter against a fake `hc`.
 `tests/fm-backend-hc-liveness-live-e2e.test.sh` is the default-on live guard: it launches every installed harness bare in a private core and requires `alive`.
 `tests/fm-backend-hc-smoke.test.sh` drives the real binary in an isolated lab; [`bin/fm-hc-lab.sh`](../bin/fm-hc-lab.sh) owns the isolation and metadata-tripwire contract, and [`tests/hc-test-safety.sh`](../tests/hc-test-safety.sh) owns guarded test teardown.
-The smoke skips when no resolved Core binary or `jq` is available; provisioning and teardown failures fail the test.
+`tests/fm-backend-hc-appdetect-smoke.test.sh` runs real `bin/fm-spawn.sh` spawns in the same kind of lab for the app-terminal, app-window, and explicit cases, and checks that a window over a session with no running core starts nothing.
+The smokes skip when no resolved Core binary or `jq` is available; provisioning and teardown failures fail the test.
 For CI coverage, see [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend); the workflow requires `jq` and rejects the `hc not found` skip.
 [`bin/fm-hc-ci-cleanup.sh`](../bin/fm-hc-ci-cleanup.sh) owns job-end cleanup mechanics.
