@@ -15,6 +15,7 @@ These command-line and terminal facts apply to pane-backed sessions; for T3 Code
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 | Permissions | See [`Claude permission mode`](../../../../../docs/configuration.md#claude-permission-mode-configclaude-permission-mode) and [`persistent failover`](../../../../../docs/configuration.md#persistent-managed-policy-failover); the `auto` launch shape was verified on 2.1.269. |
+| Tool exclusions | Ship and scout launches carry [`config/crew-exclude-tools`](../../../../../docs/configuration.md#worker-tool-exclusions-configcrew-exclude-tools) as one comma-joined `--disallowedTools` value, placed before `--settings` because the variadic option would otherwise swallow the launch prompt; verified on 2.1.312. |
 
 ## Workspace trust
 

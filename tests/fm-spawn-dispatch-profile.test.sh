@@ -1528,6 +1528,47 @@ test_pi_exclude_tools_reach_ship_and_scout_launches() {
   pass "Pi and pi-signed ship and scout launches carry the configured tool exclusions"
 }
 
+test_claude_exclude_tools_reach_ship_and_scout_launches() {
+  local rec id out status launch kindflag sm
+  for kindflag in --ship --scout; do
+    id="excl-claude-${kindflag#--}-z9k"
+    rec=$(make_spawn_case "excl-claude-${kindflag#--}" claude "$id")
+    read_case_record "$rec"
+    write_exclude_file "$HOME_DIR" '# hide unused tools and servers' '' \
+      '  Artifact  ' 'AskUserQuestion' 'mcp__firecrawl' 'mcp__claude-in-chrome' 'mcp__tracker__editIssue'
+    if [ "$kindflag" = --scout ]; then
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    else
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    fi
+    status=$?
+    expect_code 0 "$status" "claude $kindflag spawn with exclusions should succeed"$'\n'"$out"
+    launch=$(cat "$LAUNCH_LOG")
+    # Claude's option is variadic, so it must be followed by another option,
+    # never by the trailing launch prompt it would otherwise swallow.
+    assert_contains "$launch" "--disallowedTools 'Artifact,AskUserQuestion,mcp__firecrawl,mcp__claude-in-chrome,mcp__tracker__editIssue' --settings " \
+      "claude $kindflag launch must carry the comma-joined, quoted exclusion list ahead of --settings"
+    assert_not_contains "$launch" "--exclude-tools" "claude $kindflag launch must not receive Pi's flag"
+  done
+
+  # A Claude secondmate's own agent is unaffected even in the home that has the file.
+  id=excl-claude-sm-z9l
+  rec=$(make_spawn_case excl-claude-sm codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' claude > "$HOME_DIR/config/secondmate-harness"
+  write_exclude_file "$HOME_DIR" 'mcp__srv__writeTool'
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "$id.claude-settings.json" "secondmate launch was not the Claude secondmate shape"
+  assert_not_contains "$launch" "--disallowedTools" "a Claude secondmate's own agent must not receive the worker exclusions"
+  pass "Claude ship and scout launches carry the configured tool exclusions; Claude secondmates do not"
+}
+
 test_pi_exclude_tools_worker_registry_reports() {
   local harness kindflag scenario case_name rec id out status report
   command -v node >/dev/null 2>&1 || fail "node is required to drive Pi worker exclusion reporting"
@@ -1678,13 +1719,14 @@ test_pi_exclude_tools_absent_and_empty_lists() {
     status=$?
     expect_code 0 "$status" "$harness spawn with an empty exclusion list should succeed"$'\n'"$out"
     assert_not_contains "$(cat "$LAUNCH_LOG")" "--exclude-tools" "$harness must receive no exclusion flag"
+    assert_not_contains "$(cat "$LAUNCH_LOG")" "--disallowedTools" "$harness must receive no exclusion flag"
   done
   pass "an absent or empty exclusion list leaves every runtime unaffected"
 }
 
 test_exclude_tools_non_pi_runtime_refuses_non_empty_list() {
   local harness rec id out status
-  for harness in claude codex grok; do
+  for harness in codex grok; do
     id="excl-refuse-${harness}-z9i"
     rec=$(make_spawn_case "excl-refuse-${harness}" "$harness" "$id")
     read_case_record "$rec"
@@ -2771,6 +2813,7 @@ test_pi_seeded_secondmate_preapproves_project_trust
 test_pi_worker_launch_omits_seeded_home_approve
 test_pi_approve_probe_omits_unsupported_flag
 test_pi_exclude_tools_reach_ship_and_scout_launches
+test_claude_exclude_tools_reach_ship_and_scout_launches
 test_pi_exclude_tools_worker_registry_reports
 test_pi_exclude_tools_absent_and_empty_lists
 test_exclude_tools_non_pi_runtime_refuses_non_empty_list

@@ -1095,6 +1095,26 @@ test_pi_exclude_tools_follow_the_relaunch() {
   pass "fm-control relaunch: a Pi replacement keeps the home's tool exclusions"
 }
 
+test_claude_exclude_tools_follow_the_relaunch() {
+  local dir out rc id=rl-claude-excl
+  dir=$(new_case claude-exclude "$id")
+  add_ship_task "$dir" "$id" claude
+  mkdir -p "$dir/home/config"
+  printf '%s\n' '# hide unused' 'Artifact' 'mcp__srv' > "$dir/home/config/crew-exclude-tools"
+  out=$(run_control "$dir" "$id" relaunch --note "keep exclusions"); rc=$?
+  expect_code 0 "$rc" "a Claude relaunch with exclusions should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "--disallowedTools 'Artifact,mcp__srv' --settings " \
+    "the relaunched Claude worker must keep the home's tool exclusions"
+  rm "$dir/home/config/crew-exclude-tools"
+  : > "$dir/fake/literal"
+  printf claude > "$dir/fake/command"
+  out=$(run_control "$dir" "$id" relaunch --note "exclusions removed"); rc=$?
+  expect_code 0 "$rc" "a Claude relaunch after the file is removed should succeed"$'\n'"$out"
+  assert_not_contains "$(cat "$dir/fake/literal")" "--disallowedTools" \
+    "a relaunch without the file must launch with no exclusions"
+  pass "fm-control relaunch: a Claude replacement keeps the home's tool exclusions"
+}
+
 test_exclude_tools_refusals_happen_before_the_agent_stops() {
   local dir out rc id=rl-excl-refuse
   dir=$(new_case excl-refuse "$id")
@@ -3038,6 +3058,7 @@ test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
+test_claude_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
