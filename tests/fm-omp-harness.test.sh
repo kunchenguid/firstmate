@@ -71,21 +71,29 @@ test_detection_anchored_name_and_marker_precedence() {
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
-  # The decoy must not identify ON ITS OWN NAME, so the suite's own primary is
-  # blinded here too. Without that, a suite running inside an omp session
-  # resolves its own ancestry to omp, the decoy inherits it, and the assertion
-  # fails on the real parent rather than on the decoy's name - a Bun-hosted omp
-  # primary makes exactly that ancestry resolvable. The stub below blinds only
-  # PPID queries: answering comm/args with `bash` would also hide the decoy's
-  # own real name (ompd/comp), making the assertion below true by construction.
-  # Blinding only the parent link keeps the decoy's own name visible while its
-  # ancestors resolve to nothing, so the walk genuinely tests the decoy's name.
+  # The decoy must not identify ON ITS OWN NAME, so the walk must genuinely
+  # reach it and still reject it - yet the suite's own primary ABOVE the decoy
+  # must stay blinded, or a suite running inside an omp session resolves that
+  # outer session to omp and the assertion fails on the real ancestor rather
+  # than on the decoy's name (a Bun-hosted omp primary makes exactly that
+  # ancestry resolvable). The stub therefore answers the walk's first ppid
+  # query - the harness child asking about itself - with its REAL parent, the
+  # decoy, and answers 1 only once the walk reaches a decoy-named process, so
+  # the decoy's own comm is genuinely judged while everything above it resolves
+  # to nothing.
   mkdir -p "$blind"
-  cat > "$blind/ps" <<'STUB'
+  local real_ps
+  real_ps=$(command -v ps)
+  cat > "$blind/ps" <<STUB
 #!/usr/bin/env bash
-case "$*" in
-  '-o ppid= -p '*) printf '%s\n' 1 ;;
-  *) exec /bin/ps "$@" ;;
+case "\$*" in
+  '-o ppid= -p '*)
+    case "\$("$real_ps" -o comm= -p "\${*##* }" 2>/dev/null)" in
+      ompd|comp) printf '%s\n' 1 ;;
+      *) exec "$real_ps" "\$@" ;;
+    esac
+    ;;
+  *) exec "$real_ps" "\$@" ;;
 esac
 STUB
   chmod +x "$blind/ps"
