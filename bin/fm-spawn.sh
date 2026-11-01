@@ -5713,8 +5713,19 @@ case "$HARNESS" in
       # config/claude-permission-mode=auto requests no bypass, so it gets no key.
       claude_bypass_json=
       [ "$CLAUDE_PERMISSION_MODE" != bypass ] || claude_bypass_json=',"skipDangerousModePermissionPrompt":true'
-      printf '{"feedbackDrafts":"off"%s%s%s}\n' \
-        "$claude_attribution_json" "$claude_bypass_json" "$claude_hooks_json" \
+      # A lean task worker runs without a status bar, so a one-line statusLine
+      # keeps the model and effort visible in a corner of its terminal. The jq
+      # filter prints only model.display_name and effort.level (no effort part
+      # when the level is null or absent); a secondmate keeps its full
+      # primary-session status line and gets no key.
+      claude_status_json=
+      if [ "$CLAUDE_TASK_WORKER" -eq 1 ]; then
+        claude_status_json=$(jq -cn --arg cmd "jq -r '[.model.display_name, .effort.level] | map(select(. != null and . != \"\")) | join(\" · \")'" \
+          '{type: "command", command: $cmd}')
+        claude_status_json=",\"statusLine\":$claude_status_json"
+      fi
+      printf '{"feedbackDrafts":"off"%s%s%s%s}\n' \
+        "$claude_attribution_json" "$claude_bypass_json" "$claude_status_json" "$claude_hooks_json" \
         > "$STATE_REAL/$ID.claude-settings.json"
       # A task worker excludes the user, project and local settings layers, so
       # carry their tool guards (PreToolUse/PostToolUse hooks and deny rules)

@@ -188,4 +188,46 @@ assert_contains "$out" "could not carry Claude guard hooks" "malformed guard lay
 [ ! -s "$LAUNCH_LOG" ] || fail "malformed guard layer still launched"
 pass "malformed Claude settings layer refuses rather than dropping guards"
 
+# The status line is the only model/effort display a lean worker has, because
+# it runs without a status bar. A secondmate keeps its full primary session and
+# so must not receive it.
+make_case statusline lean-status-s9
+out=$(spawn lean-status-s9 "$PROJ_DIR" --mode direct-PR --yolo off)
+expect_code 0 "$?" "Claude ship should launch for the status line check: $out"
+settings="$HOME_DIR/state/lean-status-s9.claude-settings.json"
+[ "$(jq -r '.statusLine.type' "$settings")" = command ] || fail "task worker settings lack a command statusLine: $(cat "$settings")"
+status_cmd=$(jq -r '.statusLine.command' "$settings")
+[ -n "$status_cmd" ] && [ "$status_cmd" != null ] || fail "task worker statusLine has no command: $(cat "$settings")"
+assert_not_contains "$status_cmd" "cost" "status line must stay model and effort only"
+status_line() { printf '%s' "$1" | bash -c "$status_cmd"; }
+[ "$(status_line '{"model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"effort":{"level":"high"},"cost":{"total_cost_usd":1}}')" = "Opus 5.5 · high" ] \
+  || fail "status line did not print model and effort"
+[ "$(status_line '{"model":{"display_name":"Haiku 5.5"},"effort":{"level":null}}')" = "Haiku 5.5" ] \
+  || fail "status line must drop the effort part when the level is null"
+[ "$(status_line '{"model":{"display_name":"Haiku 5.5"}}')" = "Haiku 5.5" ] \
+  || fail "status line must drop the effort part when effort is absent"
+pass "lean task worker settings carry a model and effort statusLine that prints only those"
+
+SM_CASE="$TMP_ROOT/statusline-sm"
+SM_HOME_DIR="$SM_CASE/home"
+SM_ID=lean-status-sm
+SM_WT="$SM_CASE/secondmate"
+SM_FAKEBIN=$(fm_test_make_spawn_fakebin "$SM_CASE/fake" claude)
+fm_test_spawn_home "$SM_HOME_DIR" claude
+mkdir -p "$SM_WT/bin" "$SM_WT/data" "$SM_HOME_DIR/data/$SM_ID"
+printf '# Firstmate\n' > "$SM_WT/AGENTS.md"
+printf '%s\n' "$SM_ID" > "$SM_WT/.fm-secondmate-home"
+printf 'charter\n' > "$SM_WT/data/charter.md"
+printf 'charter brief\n' > "$SM_HOME_DIR/data/$SM_ID/brief.md"
+mkdir -p "$SM_HOME_DIR/user-home"
+out=$(env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$SM_HOME_DIR" HOME="$SM_HOME_DIR/user-home" CLAUDE_CONFIG_DIR='' \
+  FM_STATE_OVERRIDE="$SM_HOME_DIR/state" FM_DATA_OVERRIDE="$SM_HOME_DIR/data" \
+  FM_PROJECTS_OVERRIDE="$SM_HOME_DIR/projects" FM_CONFIG_OVERRIDE="$SM_HOME_DIR/config" \
+  FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$SM_CASE/launch.log" FM_FAKE_PANE_PATH="$SM_WT" TMUX="fake,1,0" \
+  PATH="$SM_FAKEBIN:$PATH" "$ROOT/bin/fm-spawn.sh" "$SM_ID" "$SM_WT" --secondmate 2>&1)
+sm_settings="$SM_HOME_DIR/state/$SM_ID.claude-settings.json"
+[ -f "$sm_settings" ] || fail "secondmate wrote no settings file: $out"
+[ "$(jq -r 'has("statusLine")' "$sm_settings")" = false ] || fail "secondmate must keep its own status line: $(cat "$sm_settings")"
+pass "Claude secondmate settings carry no statusLine"
+
 echo "all fm-spawn-claude-lean tests passed"

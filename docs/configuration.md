@@ -996,7 +996,7 @@ The text is static and never executed or expanded; secondmate charters never tak
 
 ## Lean Claude task workers
 
-Claude ships and scouts load only Firstmate's per-task settings source, which retains turn-end and busy-state hooks while excluding user, project and local settings, plugins, and other hooks.
+Claude ships and scouts load only Firstmate's per-task settings source, which retains turn-end and busy-state hooks and a one-line status line showing only the model and effort (for example `Opus 5.5 · high`) while excluding user, project and local settings, plugins, and other hooks.
 Tool guards survive: at spawn, Firstmate copies the `PreToolUse` and `PostToolUse` hooks and `permissions.deny` rules from the user settings (in the task's Claude store), the worktree's `.claude/settings.json`, and its `.claude/settings.local.json` into that per-task source, and refuses the spawn when one of those files is not valid JSON.
 They start without MCP servers or discovered slash-command skills; task-specific `--skill` files are appended to the worker contract rather than loaded as slash commands.
 A task may opt in through repeatable `fm-spawn.sh` flags: `--mcp-config <file>` loads only the named servers in the supplied Claude MCP JSON (not ambient MCP configurations), `--skill <path>` loads named skill files, `--claude-add-dir <dir>` grants file access to an extra directory (it does not load that directory's CLAUDE.md), and `--claude-plugin-dir <dir>` loads explicit plugins.
