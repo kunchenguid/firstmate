@@ -475,8 +475,9 @@ report_child_ledger_locked() { # <id> <meta>
 # A canonical CI-ready ship outcome arms its merge poll without waiting for a
 # supervisor turn. fm-pr-check owns validation, metadata, and sidecar creation.
 arm_ready_pr_watch() { # <id> <meta>
-  local id=$1 meta=$2 status line note url recorded arm_output incarnation
-  [ "$(meta_field "$meta" kind)" = ship ] || return 0
+  local id=$1 meta=$2 status line note url recorded arm_output incarnation kind
+  kind=$(meta_field "$meta" kind)
+  [ "${kind:-ship}" = ship ] || return 0
   status="$STATE/$id.status"
   line=$(child_terminal_ledger_line "$status") || return 0
   [ "$(status_line_verb "$line")" = 'done' ] || return 0

@@ -266,7 +266,7 @@ test_main_home_arms_ready_pr_watch() {
   make_world main-ready-watch
   write_child "$MAIN" child "done: PR $url checks green"
   head=$(git -C "$MAIN/projects/child" rev-parse HEAD)
-  grep -v '^pr=\|^pr_head=' "$MAIN/state/child.meta" > "$MAIN/state/child.meta.tmp"
+  grep -v '^pr=\|^pr_head=\|^kind=' "$MAIN/state/child.meta" > "$MAIN/state/child.meta.tmp"
   mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
   cat > "$WORLD/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -303,7 +303,7 @@ SH
     bash "$TEARDOWN" child > "$WORLD/teardown.out" 2> "$WORLD/teardown.err" \
     || fail "the merged sandbox lane did not clean up safely: $(cat "$WORLD/teardown.err")"
   [ ! -e "$MAIN/state/child.meta" ] || fail 'cleanup left the sandbox task record'
-  pass 'a main-home ready status auto-arms, detects a merge, and cleans its sandbox lane without a supervisor turn before arming'
+  pass 'a ready status with missing kind defaults to ship, auto-arms, detects a merge, and cleans its sandbox lane'
 }
 
 test_scout_does_not_arm_ready_pr_watch() {
