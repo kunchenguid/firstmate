@@ -3639,7 +3639,7 @@ pr_poll_publish_release() {
 }
 
 watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock staged lock
+  local cleanup_status=0 owns_lock=0 transition=release-lock publish_source=watcher staged lock
   # Join any interrupted owner creation/publication before the release sweep:
   # a child must not publish a lock or staging directory after we removed ours.
   fm_lock_wait_pending_mutation
@@ -3647,6 +3647,10 @@ watcher_cleanup() {
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
+    if fm_watcher_planned_stop_matches "$STATE" "${WATCHER_PID:-}"; then
+      fm_watcher_planned_stop_clear "$STATE"
+      publish_source=close
+    fi
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
       && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
       transition=release-lock-existing
@@ -3675,7 +3679,7 @@ watcher_cleanup() {
   done
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
-      downtime "$CLEANUP_LOCK_BOUND"; then
+      downtime "$CLEANUP_LOCK_BOUND" "$publish_source"; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
   fi
