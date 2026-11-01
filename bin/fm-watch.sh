@@ -3978,6 +3978,18 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
+  claimed_run_has_appended_bytes() {
+    local file=$1 offset=$2 discarded next
+    exec 8< "$file" || return 0
+    if [ "$offset" -gt 0 ]; then
+      IFS= read -rN "$offset" discarded <&8 || { exec 8<&-; return 0; }
+    fi
+    IFS= read -rN 1 next <&8
+    local result=$?
+    exec 8<&-
+    [ "$result" -eq 0 ]
+  }
+
   # A worker's routine validation-started line is not itself an actionable wake.
   # Remember each distinct claim and verify it after a bounded delay on this poll loop.
   claimed_run_tick() {
@@ -3999,7 +4011,8 @@ while :; do
       read -r cursor_dev cursor_ino cursor_size cursor_claim < "$cursor"
       case "$cursor_dev:$cursor_ino:$cursor_size" in *[!0-9:]*|'') cursor_dev= ;; esac
     fi
-    if [ -n "$cursor_dev" ] && [ -f "$identity" ] && [ "$f" -ef "$identity" ] && [ ! "$f" -nt "$cursor" ]; then
+    if [ -n "$cursor_dev" ] && [ -f "$identity" ] && [ "$f" -ef "$identity" ] && [ ! "$f" -nt "$cursor" ] \
+      && ! claimed_run_has_appended_bytes "$f" "$cursor_size"; then
       dev=$cursor_dev; ino=$cursor_ino; size=$cursor_size
       offset=$cursor_size; claim=$cursor_claim; stat_result=
     else
