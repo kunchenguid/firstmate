@@ -117,6 +117,18 @@ const MAX_TIMEOUT_MS = 3600000;
 const TERMINATE_GRACE_MS = 250;
 const CLEANUP_WAIT_MS = 2000;
 const LAUNCH_READY_WAIT_MS = 5000;
+// Host deadlines are wall-clock timers, so they count time the machine spent
+// suspended. A deadline callback that runs SUSPEND_SLACK_MS past its bound
+// cannot be a healthy host: the machine slept across the deadline, the bound
+// itself never got a fair chance, and the invocation must not take the blame.
+// A suspension that ends inside the slack still kills at the bound, because
+// without a second clock the host cannot tell it from a stall; detecting it is
+// its own change.
+const SUSPEND_SLACK_MS = 2000;
+// The one bounded re-arm granted after a suspension-detected deadline. It is
+// never granted twice, so a genuinely stalled invocation still dies at its
+// bound exactly as it did before suspension awareness existed.
+const SUSPEND_GRACE_MS = 5000;
 const INVOCATION_POLL_MS = 20;
 const CONSENT_NAMES = ["network", "credential-store", "task-metadata", "artifact-references"];
 const RESPONSE_ERROR_CODES = new Set(["invalid-request", "incompatible", "conflict", "unavailable", "internal"]);
@@ -139,6 +151,21 @@ class HostError extends Error {
 
 function fail(code, message) {
   throw new HostError(code, message);
+}
+
+// Deadline failures name their bound and lateness so a suspension-driven kill
+// can never be read as a package stall.
+function deadlineMessage(subject, bound, overrunMs, graceUsed) {
+  const grace = graceUsed ? ` after a system suspension (a ${SUSPEND_GRACE_MS} ms bounded grace expired)` : "";
+  return `${subject}; bound ${bound} fired ${overrunMs} ms past its deadline${grace}`;
+}
+
+function failBound(code, message, bound, overrunMs, graceUsed) {
+  const error = new HostError(code, message);
+  error.bound = bound;
+  error.overrunMs = overrunMs;
+  error.graceUsed = graceUsed;
+  throw error;
 }
 
 async function readPinnedDescriptor(fd, limit) {
@@ -1301,18 +1328,37 @@ async function reserveInvocation(home, record, verb, request, statePath) {
 }
 
 async function publishInvocationGroup(invocation, owner) {
-  const deadline = Date.now() + LAUNCH_READY_WAIT_MS;
+  let deadline = Date.now() + LAUNCH_READY_WAIT_MS;
   let ready = null;
-  while (Date.now() < deadline) {
-    const value = await readPrivateJson(invocation.readyFile, "extension invocation readiness");
-    if (value) {
-      ready = validateInvocationReady(value, invocation.token);
-      break;
+  let graceUsed = false;
+  let suspensionOverrun = 0;
+  while (true) {
+    while (Date.now() < deadline) {
+      const value = await readPrivateJson(invocation.readyFile, "extension invocation readiness");
+      if (value) {
+        ready = validateInvocationReady(value, invocation.token);
+        break;
+      }
+      if (!pidAlive(invocation.pid)) fail("entrypoint-missing", "extension launch barrier exited before publishing ownership");
+      await sleep(INVOCATION_POLL_MS);
     }
-    if (!pidAlive(invocation.pid)) fail("entrypoint-missing", "extension launch barrier exited before publishing ownership");
-    await sleep(INVOCATION_POLL_MS);
+    if (ready) break;
+    const overrun = Date.now() - deadline;
+    if (!graceUsed && overrun > SUSPEND_SLACK_MS) {
+      // The wait expired far past its deadline: the machine was suspended
+      // across it. Re-arm once for a bounded grace so a launch interrupted by
+      // sleep can still publish, while a launch that never arrives still
+      // fails at its bound.
+      graceUsed = true;
+      suspensionOverrun = overrun;
+      deadline = Date.now() + SUSPEND_GRACE_MS;
+      continue;
+    }
+    const finalOverrun = graceUsed ? suspensionOverrun : overrun;
+    failBound("timeout",
+      deadlineMessage("extension launch barrier did not publish ownership in time", "launch-ready", finalOverrun, graceUsed),
+      "launch-ready", finalOverrun, graceUsed);
   }
-  if (!ready) fail("timeout", "extension launch barrier did not publish ownership in time");
   if (ready.group_pid !== invocation.pid) fail("process-cleanup-failed", "extension launch barrier published a different process group");
   // The tracked barrier is the exact detached child this host just created.
   // Package code cannot run until after this ready record is accepted and the
@@ -1409,12 +1455,14 @@ async function runExtensionProcess(home, record, verb, request, timeoutMs, state
   const stdout = [];
   let forcedCode = "";
   let forcedMessage = "";
+  let forcedDetail = null;
   let killTimer = null;
 
-  const forceStop = (code, message) => {
+  const forceStop = (code, message, detail = null) => {
     if (forcedCode) return;
     forcedCode = code;
     forcedMessage = message;
+    forcedDetail = detail;
     signalProcessGroup(invocation, "SIGTERM");
     killTimer = setTimeout(() => signalProcessGroup(invocation, "SIGKILL"), TERMINATE_GRACE_MS);
   };
@@ -1442,7 +1490,30 @@ async function runExtensionProcess(home, record, verb, request, timeoutMs, state
     await finalizeInvocation(invocation);
     throw error;
   }
-  const timeout = setTimeout(() => forceStop("timeout", `extension ${verb} exceeded ${timeoutMs} ms`), timeoutMs);
+  const invokeDeadlineAt = Date.now() + timeoutMs;
+  let invokeGraceUsed = false;
+  let invokeSuspensionOverrun = 0;
+  let invokeTimer = null;
+  const armInvokeTimer = (delayMs) => {
+    invokeTimer = setTimeout(() => {
+      const overrun = Math.max(0, Date.now() - invokeDeadlineAt);
+      if (!invokeGraceUsed && overrun > SUSPEND_SLACK_MS) {
+        // This bound fired because the machine slept across it, not because
+        // the invocation stalled. Re-arm exactly once for a bounded grace so
+        // pending child output can drain before anything is killed; the next
+        // firing kills unconditionally.
+        invokeGraceUsed = true;
+        invokeSuspensionOverrun = overrun;
+        armInvokeTimer(SUSPEND_GRACE_MS);
+        return;
+      }
+      const finalOverrun = invokeGraceUsed ? invokeSuspensionOverrun : overrun;
+      forceStop("timeout",
+        deadlineMessage(`extension ${verb} exceeded ${timeoutMs} ms`, verb, finalOverrun, invokeGraceUsed),
+        { bound: verb, overrunMs: finalOverrun, graceUsed: invokeGraceUsed });
+    }, delayMs);
+  };
+  armInvokeTimer(timeoutMs);
   child.stdin.on("error", () => {});
   child.stdin.end(requestBytes);
 
@@ -1450,16 +1521,19 @@ async function runExtensionProcess(home, record, verb, request, timeoutMs, state
   try {
     outcome = await completion;
   } catch (error) {
-    clearTimeout(timeout);
+    clearTimeout(invokeTimer);
     if (killTimer) clearTimeout(killTimer);
     await finalizeInvocation(invocation);
     throw error;
   }
-  clearTimeout(timeout);
+  clearTimeout(invokeTimer);
   if (killTimer) clearTimeout(killTimer);
   const leakedProcessGroup = !forcedCode && groupAlive(invocation.pid);
   await finalizeInvocation(invocation);
-  if (forcedCode) fail(forcedCode, forcedMessage);
+  if (forcedCode) {
+    if (forcedDetail) failBound(forcedCode, forcedMessage, forcedDetail.bound, forcedDetail.overrunMs, forcedDetail.graceUsed);
+    fail(forcedCode, forcedMessage);
+  }
   if (leakedProcessGroup) fail("process-leak", `extension ${verb} left a background process in its invocation group`);
   if (outcome.signal || outcome.code !== 0) fail("process-failed", `extension ${verb} exited nonzero`);
   return parseStrictJson(Buffer.concat(stdout), `extension ${verb} response`);
@@ -1794,12 +1868,28 @@ function errorEvidence(error, extensionId, operation) {
   const safeExtensionId = typeof extensionId === "string"
     && Buffer.byteLength(extensionId, "utf8") <= 128
     && ID_RE.test(extensionId) ? extensionId : "unknown";
-  return `${canonicalJson({
+  const evidence = {
     schema: ERROR_EVIDENCE_SCHEMA,
     extension_id: safeExtensionId,
     operation,
     code: allowedCode,
-  })}\n`;
+  };
+  const bound = typeof error?.bound === "string" && /^[a-z0-9-]{1,32}$/.test(error.bound) ? error.bound : null;
+  if (bound) {
+    evidence.bound = bound;
+    // overrun_ms marks the suspension-driven kill: it exists only when the
+    // deadline fired materially late and a bounded grace was granted, so a
+    // genuine stall keeps the same evidence keys at its bound. The full
+    // envelope, overrun included, is what the capture gate stores; reuse
+    // identity keeps whether overrun_ms is present and ignores only its value,
+    // so a plain timeout and a suspension-driven timeout stay distinct while
+    // suspension kills with different measured overruns coalesce.
+    // isSafeInteger pins emission to the plain-digit range the gate accepts.
+    if (error.graceUsed === true && Number.isSafeInteger(error.overrunMs) && error.overrunMs >= 0) {
+      evidence.overrun_ms = error.overrunMs;
+    }
+  }
+  return `${canonicalJson(evidence)}\n`;
 }
 
 function parseBindArguments(args) {
