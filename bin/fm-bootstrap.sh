@@ -23,7 +23,8 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "TREEHOUSE_POOL_REPORT: <pool finding or scan summary>".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
 #          a purely local fast-forward with no origin fetch; a remote route hands
@@ -1557,7 +1558,92 @@ detect_local_tools() {
   fi
 }
 
+treehouse_pool_report() {
+  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool records slot repo slot_root identity created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} duplicate duplicate_reported seen_pair i now
+  local -a seen_repos=() seen_pools=()
+  [ -d "$root" ] && command -v jq >/dev/null 2>&1 || return 0
+  case "$threshold" in ''|*[!0-9]*) threshold=30 ;; esac
+  now=$(date +%s)
+  records=$(mktemp "${TMPDIR:-/tmp}/fm-pool-records.XXXXXX") || return 0
+  for state in "$root"/*/treehouse-state.json; do
+    [ -f "$state" ] || continue
+    pool_count=$((pool_count + 1))
+    pool=${state%/treehouse-state.json}
+    pool_has_owner=0
+    duplicate_reported=0
+    if ! jq -j '.worktrees[]? | (.path // ""), "\u0000", (.created_at // ""), "\u0000", (((.leased == true) or ((.lease_id // "") != "") or ((.lease_holder // "") != "")) | tostring), "\u0000", (.owner_pid // ""), "\u0000"' "$state" > "$records" 2>/dev/null; then
+      continue
+    fi
+    while IFS= read -r -d '' slot && IFS= read -r -d '' created_at \
+      && IFS= read -r -d '' slot_leased && IFS= read -r -d '' slot_owner; do
+      owner_live=0
+      case "$slot_owner" in ''|*[!0-9]*) ;; *) kill -0 "$slot_owner" 2>/dev/null && owner_live=1 ;; esac
+      if [ -z "$slot" ]; then
+        if [ "$owner_live" -eq 1 ] || [ "$slot_leased" = true ]; then pool_has_owner=1; fi
+        continue
+      fi
+      repo=$(git -C "$slot" rev-parse --show-toplevel 2>/dev/null) || repo=
+      slot_root=$(cd -P -- "$slot" 2>/dev/null && pwd -P) || slot_root=
+      repo=$(cd -P -- "$repo" 2>/dev/null && pwd -P) || repo=
+      [ "$repo" = "$slot_root" ] || repo=
+      if [ -e "${slot%/*}/.fm-slot-owner" ] || [ -e "$slot/.fm-slot-owner" ] || [ "$owner_live" -eq 1 ] || [ "$slot_leased" = true ]; then
+        pool_has_owner=1
+      fi
+      if [ -z "$repo" ]; then
+        if [ ! -e "${slot%/*}/.fm-slot-owner" ] && [ ! -e "$slot/.fm-slot-owner" ] && [ "$owner_live" -eq 0 ] && [ "$slot_leased" != true ]; then
+          echo "TREEHOUSE_POOL_REPORT: unregistered pool $pool (project path unavailable: $slot)"
+        fi
+        continue
+      fi
+      if [ -n "$repo" ]; then
+        identity=$(git -C "$slot" remote get-url origin 2>/dev/null) || identity=$repo
+        [ -n "$identity" ] || identity=$repo
+        duplicate=0
+        seen_pair=0
+        for ((i = 0; i < ${#seen_repos[@]}; i++)); do
+          if [ "${seen_repos[$i]}" = "$identity" ]; then
+            if [ "${seen_pools[$i]}" = "$pool" ]; then
+              seen_pair=1
+            else
+              duplicate=1
+            fi
+          fi
+        done
+        if [ "$duplicate" -eq 1 ]; then
+          if [ "$duplicate_reported" -eq 0 ]; then
+            echo "TREEHOUSE_POOL_REPORT: duplicate-clone pool $pool (project $repo)"
+            duplicate_reported=1
+          fi
+        fi
+        if [ "$seen_pair" -eq 0 ]; then
+          seen_repos+=("$identity")
+          seen_pools+=("$pool")
+        fi
+      fi
+      if [ ! -e "${slot%/*}/.fm-slot-owner" ] && [ ! -e "$slot/.fm-slot-owner" ] \
+        && [ "$owner_live" -eq 0 ] && [ "$slot_leased" != true ]; then
+        lease_epoch=
+        if [ -n "$created_at" ] && [ "$created_at" != null ]; then
+          lease_date=$(printf '%s\n' "$created_at" | sed -E 's/\.[0-9]+([+-][0-9]{2}:[0-9]{2}|Z)$/\1/; s/Z$/+0000/; s/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
+          lease_epoch=$(date -j -u -f '%Y-%m-%dT%H:%M:%S%z' "$lease_date" '+%s' 2>/dev/null || date -u -d "$lease_date" '+%s' 2>/dev/null || true)
+        fi
+        case "$lease_epoch" in ''|*[!0-9]*) continue ;; esac
+        age_days=$(( (now - lease_epoch) / 86400 ))
+        [ "$age_days" -lt "$threshold" ] || echo "TREEHOUSE_POOL_REPORT: unowned slot older than ${threshold}d: $slot (age ${age_days}d)"
+      fi
+    done < "$records"
+    case "${pool##*/}" in
+      project-*|scratch-project-*)
+        [ "$pool_has_owner" -eq 1 ] || echo "TREEHOUSE_POOL_REPORT: test-leftover pool $pool"
+        ;;
+    esac
+  done
+  [ "$pool_count" -eq 0 ] || echo "TREEHOUSE_POOL_REPORT: scanned $pool_count pools under $root"
+  rm -f "$records"
+}
+
 detect_local_config() {
+  treehouse_pool_report
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
   # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
   # primary only; detached-HEAD worktrees and secondmate homes never trip it.
