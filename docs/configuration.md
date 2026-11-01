@@ -1634,8 +1634,7 @@ It retains `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` 
 
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
-Codex `ultra` and catalog-dependent `max` require a known destination Codex home before launch; `gpt-5.6-luna` `max` does not, because its support does not depend on the catalog.
-With this filter, only Orca's configured source below can supply one: an explicitly selected absolute `CODEX_HOME`, or an explicitly selected absolute `HOME` when `CODEX_HOME` is absent or unset.
+For Codex effort restrictions with this filter, see [model, effort, and fallback behavior](#crew-dispatch-profiles-configcrew-dispatchjson).
 
 Unless the Orca environment source below is configured, allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
 Listing a name does not provision it in a daemon's environment or transfer credentials to another machine.
@@ -1846,8 +1845,9 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 - On pane backends, Codex `ultra` requires an explicit model advertising it in the Codex cache, and Pi native `ultra` requires a `codex-native/` model.
   Codex `max` is threaded for `gpt-5.6-luna` or a model the Codex cache advertises it for, and is otherwise omitted with a warning.
   Spawn and relaunch read the cache from the selected Codex home and refuse an unsupported `ultra` before provisioning or stopping a worker.
-  Without [`config/launch-env-allowlist`](#worker-launch-environment-configlaunch-env-allowlist), that home is the caller's own `CODEX_HOME` (default `~/.codex`), and a Codex `max` or `ultra` worker launches with that same `CODEX_HOME`.
-  With the filter, the [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) snapshot supplies the home for both the check and the launch; otherwise catalog-dependent `max` and `ultra` refuse before provisioning or stopping, while `gpt-5.6-luna` `max` launches with the filtered environment unchanged.
+  Without [`config/launch-env-allowlist`](#worker-launch-environment-configlaunch-env-allowlist), that home is the caller's own `CODEX_HOME` (default `~/.codex`), resolved against the caller's working directory if relative, and a Codex `max` or `ultra` worker launches with that same `CODEX_HOME`.
+  With the filter, a fresh Orca spawn can use the [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) snapshot for both the check and the launch: an explicitly selected absolute `CODEX_HOME`, or an explicitly selected absolute `HOME` when `CODEX_HOME` is absent or unset.
+  Otherwise catalog-dependent `max` and `ultra` refuse before provisioning or stopping, while `gpt-5.6-luna` `max` launches with the filtered environment unchanged.
   `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` own validation and launch mapping.
   A missing cache never blocks Luna `max`.
   Dispatch and bootstrap validation only require Codex `max` and `ultra` to name an explicit model; the selected spawn or relaunch checks the cache, so a stale or missing entry never rejects the whole rules file.
