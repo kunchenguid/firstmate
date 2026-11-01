@@ -943,6 +943,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-kimi-trust-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-remote-generation-lib.sh
+. "$SCRIPT_DIR/fm-remote-generation-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -1506,15 +1508,13 @@ spawn_remote_secondmate() {
       echo "error: remote secondmate $id's ledger predecessor is unresolved; no replacement was reserved" >&2
       return 1
     fi
+    # The predecessor is terminal now, so re-read: the launch replaces the
+    # generation the host records, not the one just reclaimed.
+    seat_ledger=$(spawn_seats show "$id" 2>/dev/null) || seat_ledger=
   fi
   seat_prev=-
   if [ -n "$seat_ledger" ]; then
-    if ! seat_prev=$(printf '%s\n' "$seat_ledger" |
-      jq -r --arg host "$host" --arg root "$root" --arg home "$home" '
-        [.incarnations[]? | select(.startup_confirmed == true and .route.placement == "remote"
-          and .route.host == $host and .route.remote_root == $root and .route.home == $home
-          and .route.spawn_gen == .generation and (.route.target | type == "string" and length > 0))]
-        | last | .route.spawn_gen // "-"'); then
+    if ! seat_prev=$(fm_remote_launch_predecessor "$seat_ledger" "$host" "$root" "$home"); then
       fm_lock_release "$remote_lock" || true
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
