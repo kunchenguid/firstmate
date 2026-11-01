@@ -1332,7 +1332,7 @@ fi
 # another home (bin/fm-remote-secondmate-control.sh sets it).
 # Remote publication waits briefly for the meta lock, then uses atomic rename
 # even if contention remains; it must not drop the wake after a successful launch.
-spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [wait|try]
+spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [wait|remote]
   local id=$1 enabled=$2 epoch=${3:-} gen=$4 harness=$5 how=${6:-wait} record lock locked=1 rc=0
   record="$STATE/$id.start-pending"
   [ "${FM_SPAWN_NO_START_CHECK:-0}" != 1 ] || enabled=0

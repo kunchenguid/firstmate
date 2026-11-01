@@ -1846,6 +1846,12 @@ if ! wait "$spawn_retirement_pid"; then
   printf 'serialized respawn output:\n%s\n' "$(cat "$TMP_ROOT/spawn-retirement.out")" >&2
   fail "serialized remote respawn failed"
 fi
+assert_present "$PARENT/state/ios.start-pending" \
+  "remote respawn dropped its start check while retirement held the task lock"
+grep -Eq '^[0-9]+ - codex$' "$PARENT/state/ios.start-pending" || \
+  fail "remote respawn published a malformed start check while retirement held the task lock"
+assert_present "$PARENT/state/.meta-ios.lock" \
+  "remote respawn released the task meta lock before retirement finished"
 # Pin the archive fixture generation only after the respawn has finished
 # publishing metadata, so the exporter sees exactly one spawn_gen.
 awk -F= '$1 != "spawn_gen"' "$PARENT/state/ios.meta" > "$TMP_ROOT/remote-meta.tmp"
