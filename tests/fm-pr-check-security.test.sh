@@ -264,7 +264,7 @@ case " $* " in
     # A hung detail read that ignores SIGALRM the way glab's Go runtime does,
     # so only a real kill can cut it.
     case "${FM_TEST_GLAB_DETAIL_HANG:-0}:$*" in
-      1:*pipelines/*) trap '' ALRM; exec sleep 60 ;;
+      1:*pipelines/*) printf '%s\n' "$$" > "$FM_TEST_GLAB_LOG.hangpid"; trap '' ALRM; exec sleep 60 ;;
     esac
     case "$*" in
       *merge_trains/merge_requests/*)
@@ -2741,7 +2741,7 @@ SH
 }
 
 test_gitlab_merge_watch() {
-  local dir state out rc url value noglab nojq noperl entry bindir name wide train started elapsed
+  local dir state out rc url value noglab nojq noperl entry bindir name wide train started elapsed poll_pid waited hung
   dir=$(make_case gitlab-merge-watch)
   state="$dir/home/state"
   # The poll reads the merge request as JSON, so the fixture's search path
@@ -2842,6 +2842,31 @@ group/subgroup/project
     esac
     [ "$elapsed" -lt 25 ] || fail "a hung GitLab detail read held the poll ${elapsed}s (train=$train)"
   done
+  # A poll stopped mid-read, as the watcher's check timeout stops it with
+  # TERM to the poll's process group, takes the hung read's own process
+  # group down with it rather than leaving glab running after the watcher.
+  rm -f "$dir/glab.log.train" "$dir/glab.log.hangpid"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_DETAIL_HANG=1 \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" FM_TEST_JQ="$REAL_JQ" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    perl -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
+    bash "$dir/home/state/task-a.check.sh" > /dev/null 2>&1 &
+  poll_pid=$!
+  waited=0
+  while [ ! -s "$dir/glab.log.hangpid" ] && [ "$waited" -lt 100 ]; do sleep 0.05; waited=$((waited + 1)); done
+  hung=$(cat "$dir/glab.log.hangpid" 2>/dev/null)
+  if [ -z "$hung" ] || ! kill -0 "$hung" 2>/dev/null; then
+    fail "the hung GitLab detail read never started"
+  fi
+  kill -TERM -- "-$poll_pid" 2>/dev/null
+  wait "$poll_pid" 2>/dev/null || true
+  waited=0
+  while kill -0 "$hung" 2>/dev/null && [ "$waited" -lt 40 ]; do sleep 0.05; waited=$((waited + 1)); done
+  if kill -0 "$hung" 2>/dev/null; then
+    kill -KILL "$hung" 2>/dev/null
+    fail "a stopped GitLab poll left its hung detail read running"
+  fi
+  rm -f "$dir/glab.log.hangpid"
   # Without perl no detail read can be bounded, so none is made: both paths
   # emit the known failure at once, with no job names, even when every detail
   # read would hang.

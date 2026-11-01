@@ -202,10 +202,13 @@ case "$provider" in
         # limit is the same perl fork-and-kill bound the watcher falls back to
         # for its own checks: the read runs in its own process group, which
         # gets TERM then KILL at the deadline. A bare alarm is not enough,
-        # because glab's Go runtime ignores SIGALRM. Without perl no read can
-        # be bounded, so gitlab_failure_detail makes none.
+        # because glab's Go runtime ignores SIGALRM. A TERM, INT, or HUP that
+        # stops the poll mid-read, such as the watcher's own check timeout,
+        # is passed to that group the same way and the read is reaped before
+        # perl exits, so a hung glab never outlives the watcher. Without perl
+        # no read can be bounded, so gitlab_failure_detail makes none.
         # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-        GITLAB_HOST=$host perl -e 'my $t = shift; my $pid = fork; exit 1 unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' 5 glab api "$1"
+        GITLAB_HOST=$host perl -e 'my $t = shift; my $pid = fork; exit 1 unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } sub stop { kill "TERM", -$pid; select undef, undef, undef, 0.1; kill "KILL", -$pid; waitpid $pid, 0; exit $_[0] } local $SIG{ALRM} = sub { stop(124) }; local $SIG{TERM} = sub { stop(143) }; local $SIG{INT} = sub { stop(130) }; local $SIG{HUP} = sub { stop(129) }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' 5 glab api "$1"
     }
     gitlab_failure_detail() {  # <pipeline>; sets detail
         # The degraded line names the failed jobs with their forge failure
