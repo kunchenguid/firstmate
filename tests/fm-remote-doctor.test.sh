@@ -995,7 +995,7 @@ assert_not_contains "$DOCTOR_OUT" 'fix rex-server=' "--fix attempted a repair on
 assert_no_grep 'rex server stop' "$CASE_STATE/rexfake/log" "--fix stopped an answering rex server"
 assert_no_grep 'rex server start' "$CASE_STATE/rexfake/log" "--fix restarted an answering rex server"
 [ ! -e "$CASE_STATE/rexfake/down" ] || fail "--fix left the answering rex server down"
-assert_grep '^true$' "$CASE_STATE/rexfake/exit-empty" "--fix changed the answering rex server's shape"
+[ "$(cat "$CASE_STATE/rexfake/exit-empty")" = true ] || fail "--fix changed the answering rex server's shape"
 pass "--fix never stops an answering exit-empty rex server and reports the operator restart"
 
 # A rex CLI below the verified API floor is a human gap, as is a server one.

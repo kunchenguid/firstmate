@@ -1589,7 +1589,7 @@ mv -f "$TMP_ROOT/parent-ios-rex-good.meta" "$PARENT/state/ios.meta"
 : > "$REX_FAKE/keys"
 remote_env "$ROOT/bin/fm-send.sh" fm-ios --key Escape >"$TMP_ROOT/send-rex-key.out" 2>&1 \
   || fail "a key was not sent to the remote rex secondmate: $(cat "$TMP_ROOT/send-rex-key.out")"
-assert_grep '^escape$' "$REX_FAKE/keys" "the remote rex endpoint never received the Escape key"
+grep -qx escape "$REX_FAKE/keys" || fail "the remote rex endpoint never received the Escape key"
 pass "a key reaches a remote rex secondmate through its recorded endpoint"
 
 # Recovery keeps the recorded backend: once the rex agent exits, the startup
