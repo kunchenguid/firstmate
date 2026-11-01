@@ -65,7 +65,8 @@
 # refused while the away-posture record exists, and neither
 # applies on GitLab, where a merge already requires the head pipeline to have
 # succeeded, or on Forgejo, where a merge already requires the head's combined
-# commit status to have succeeded. After gh returns success, GitHub's live
+# commit status to have succeeded unless the repository has no CI at all.
+# After gh returns success, GitHub's live
 # state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
@@ -108,7 +109,8 @@
 # canceled, or stale pipeline still refuses, every other condition still
 # holds, and a project that requires a pipeline to succeed still refuses
 # through detailed_merge_status. It is refused while the away-posture record
-# exists and on any forge other than GitLab. The verified head is then passed
+# exists and on GitHub; the Forgejo paragraph below owns its Forgejo reading.
+# The verified head is then passed
 # to glab as --sha, so a push that lands between that read and the merge fails
 # the merge instead of landing commits nothing verified. A recorded pr_head that disagrees with the live head is
 # reported rather than trusted, because a rebase moves the head and leaves the
@@ -118,10 +120,25 @@
 # A Forgejo merge is refused unless every pre-merge condition holds, each read
 # live at merge time: the pull request is open, not a draft, mergeable is
 # true, and the combined commit status at the exact current head, read across
-# every status page, is success (an unconfigured status, reported as "none",
-# refuses rather than being treated as nothing to check, the same reading
-# GitLab's null head_pipeline gets above). Every
-# failing condition is reported, not just the first. tea exposes no head-
+# every status page, is success. Any status present that is not success
+# refuses. A head with no status at all, reported as "none", passes only when
+# the repository has no CI: neither the head nor the base branch tip the pull
+# request reports carries an Actions workflow directory (.forgejo/workflows,
+# .gitea/workflows, or .github/workflows), read from each commit's git tree
+# through the trees API. A successful tree listing that names no such entry is
+# positive proof of absence, while a 404, an error body, or a listing shorter
+# than its total_count is unreadable and refuses, so a missing or truncated
+# read never passes as "no CI". Zero statuses with a workflow directory
+# present means CI has not reported yet and refuses, so a project that merges
+# autonomously still waits for its CI (docs/forgejo-tea-integration.md records
+# why neither has_actions nor the contents API is the signal). CI that posts
+# statuses from outside Forgejo Actions, such as Woodpecker, leaves no
+# workflow directory, so such a repository should require its contexts through
+# branch protection, which Forgejo enforces at merge. An attended
+# --allow-no-pipeline, for the case this structural read cannot decide, waives
+# only a head with no status at all, never a status that is present, and is
+# refused while the away-posture record exists like its GitLab reading above.
+# Every failing condition is reported, not just the first. tea exposes no head-
 # binding flag on its own merge subcommand, so the verified head is instead
 # passed as head_commit_id to a direct call against Forgejo/Gitea's REST API
 # (through "tea api"), which rejects a mismatched value with "head out of
@@ -318,16 +335,17 @@ if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
       exit 2
       ;;
     forgejo)
-      echo "error: --allow-red does not apply to Forgejo, where a merge already requires the head's combined commit status to have succeeded" >&2
+      echo "error: --allow-red does not apply to Forgejo, where a merge already requires the head's combined commit status to have succeeded; --allow-no-pipeline waives only a pull request with no commit status at all" >&2
       exit 2
       ;;
   esac
 fi
-# --allow-no-pipeline waives only GitLab's own reading of a merge request that
-# has no head pipeline at all. GitHub's per-check waivers and Forgejo's
-# combined status have no such state to waive, so it is refused there too.
-if [ "$ALLOW_NO_PIPELINE" = true ] && [ "$PROVIDER" != gitlab ]; then
-  echo "error: --allow-no-pipeline applies only to GitLab, where it waives a merge request that has no head pipeline at all" >&2
+# --allow-no-pipeline waives only a forge's own reading of a head with no CI
+# verdict at all: GitLab's null head pipeline, or Forgejo's combined status
+# with no status in it. GitHub's per-check waivers have no such state to
+# waive, so it is refused there.
+if [ "$ALLOW_NO_PIPELINE" = true ] && [ "$PROVIDER" != gitlab ] && [ "$PROVIDER" != forgejo ]; then
+  echo "error: --allow-no-pipeline applies only to GitLab and Forgejo, where it waives a merge request with no head pipeline or a pull request with no commit status at all" >&2
   exit 2
 fi
 if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
@@ -337,7 +355,7 @@ if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
       exit 2
       ;;
     forgejo)
-      echo "error: --allow-missing does not apply to Forgejo, where a merge already requires the head's combined commit status to have succeeded" >&2
+      echo "error: --allow-missing does not apply to Forgejo, where a merge already requires the head's combined commit status to have succeeded; --allow-no-pipeline waives only a pull request with no commit status at all" >&2
       exit 2
       ;;
   esac
@@ -701,10 +719,50 @@ FIELDS
 # Forgejo has no merge-queue or scheduled-merge concept to detect, so unlike
 # GitHub and GitLab this never sets an async/queued signal: every accepted
 # Forgejo merge here is immediate. Shares FM_PR_MERGE_HEAD, declared above.
+
+# forgejo_tree_entries <sha>: one "<path><TAB><type><TAB><sha>" line per entry
+# of the git tree at <sha> (a commit's root tree, or a tree object), read
+# through the trees API. Returns non-zero, printing nothing, unless the whole
+# listing was read: "tea api" exits 0 on an HTTP failure, so an error body, a
+# missing listing, or one shorter than its total_count (the endpoint pages a
+# large tree) is unreadable here, never an empty tree.
+forgejo_tree_entries() {
+  local json
+  json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+    "/repos/{owner}/{repo}/git/trees/$1" 2>/dev/null) || return 1
+  printf '%s' "$json" | jq -r '
+    if type == "object" and ((.tree // []) | type) == "array"
+      and (.total_count | type) == "number"
+      and ((.tree // []) | length) == .total_count
+    then (.tree // [])[] | [.path, .type, .sha] | map(tostring) | @tsv
+    else error("tree payload is not a whole tree listing")
+    end' 2>/dev/null
+}
+
+# forgejo_workflow_dir <commit-sha>: prints the first Actions workflow
+# directory the commit's tree carries (.forgejo/workflows, .gitea/workflows,
+# or .github/workflows), prints nothing when it carries none, and returns
+# non-zero when any tree it needs cannot be read whole.
+forgejo_workflow_dir() {
+  local root dir tree_sha entries
+  root=$(forgejo_tree_entries "$1") || return 1
+  for dir in .forgejo .gitea .github; do
+    tree_sha=$(printf '%s\n' "$root" | awk -F '\t' -v d="$dir" '$1 == d && $2 == "tree" { print $3; exit }')
+    [ -n "$tree_sha" ] || continue
+    fm_pr_head_valid "$tree_sha" || return 1
+    entries=$(forgejo_tree_entries "$tree_sha") || return 1
+    if printf '%s\n' "$entries" | awk -F '\t' '$1 == "workflows" { found = 1 } END { exit !found }'; then
+      printf '%s/workflows' "$dir"
+      return 0
+    fi
+  done
+}
+
 forgejo_verify_mergeable() {
   local pr_json status_json fields line
   local total=0 named=0 refusals=''
-  local state='' mergeable='' draft='' live_head='' ci_state='' page_state='' page_count='' page=1
+  local state='' mergeable='' draft='' live_head='' base_sha='' ci_state='' page_state='' page_count='' page=1
+  local ci_reading='' sha workflow_dir
 
   if ! pr_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
       "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$pr_json" ]; then
@@ -716,7 +774,8 @@ forgejo_verify_mergeable() {
         "state=" + ((.state // "") | tostring),
         "mergeable=" + (.mergeable | tostring),
         "draft=" + (.draft | tostring),
-        "head=" + ((.head.sha // "") | tostring)
+        "head=" + ((.head.sha // "") | tostring),
+        "base=" + ((.base.sha // "") | tostring)
       else
         error("pull request payload is not an object")
       end' 2>/dev/null); then
@@ -730,13 +789,14 @@ forgejo_verify_mergeable() {
       mergeable=*) mergeable=${line#mergeable=} ;;
       draft=*) draft=${line#draft=} ;;
       head=*) live_head=${line#head=} ;;
+      base=*) base_sha=${line#base=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ]; then
+  if [ "$named" -ne 5 ] || [ "$total" -ne 5 ]; then
     echo "error: could not read the Forgejo pull request state before merging" >&2
     return 1
   fi
@@ -750,13 +810,12 @@ FIELDS
       "$RECORDED_HEAD" "$live_head" >&2
   fi
 
-  # An absent combined status (no statuses on any page, as a repo with no
-  # configured Actions reports) is a real "none" here rather than nothing to
-  # check, the same reading GitLab's null head_pipeline gets above. The
-  # endpoint computes its combined state from one page of the latest status
-  # per context, so every page is read until an empty one and the head is
-  # green only when each non-empty page is; the first page that is not
-  # success, or that cannot be read, decides the refusal.
+  # An absent combined status (no statuses on any page) is a real "none" here
+  # rather than nothing to check; the no-CI reading below decides whether it
+  # passes. The endpoint computes its combined state from one page of the
+  # latest status per context, so every page is read until an empty one and
+  # the head is green only when each non-empty page is; the first page that is
+  # not success, or that cannot be read, decides the refusal.
   ci_state=none
   while :; do
     if ! status_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
@@ -806,17 +865,51 @@ FIELDS
   [ "$draft" != true ] \
     || refusals="$refusals  - the pull request is a draft
 "
-  [ "$ci_state" = success ] \
-    || refusals="$refusals  - the combined commit status is \"$ci_state\", not success
+  # Zero statuses pass only for a repository with no CI, read structurally:
+  # neither the head nor the base tip carries an Actions workflow directory.
+  # The attended waiver covers only that same zero-status reading.
+  if [ "$ci_state" = none ] && [ "$ALLOW_NO_PIPELINE" = true ]; then
+    ci_reading=waived
+  elif [ "$ci_state" = none ]; then
+    ci_reading=no-ci
+    for sha in "$live_head" "$base_sha"; do
+      if ! fm_pr_head_valid "$sha" || ! workflow_dir=$(forgejo_workflow_dir "$sha"); then
+        ci_reading=''
+        refusals="$refusals  - the combined commit status is \"none\", not success, and whether the repository has CI could not be read at ${sha:-an unreadable base tip}
 "
+        break
+      fi
+      if [ -n "$workflow_dir" ]; then
+        ci_reading=''
+        refusals="$refusals  - the combined commit status is \"none\", not success, and $sha carries $workflow_dir, so CI has not reported yet
+"
+        break
+      fi
+    done
+  elif [ "$ci_state" != success ]; then
+    refusals="$refusals  - the combined commit status is \"$ci_state\", not success
+"
+  fi
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with a successful combined status at head %s\n' \
-    "$URL" "$live_head" >&2
+  case "$ci_reading" in
+    waived)
+      printf 'verified: %s is open and mergeable at head %s, with no commit status, waived by --allow-no-pipeline\n' \
+        "$URL" "$live_head" >&2
+      ;;
+    no-ci)
+      printf 'verified: %s is open and mergeable at head %s, with no commit status and no Actions workflow at the head or base tip\n' \
+        "$URL" "$live_head" >&2
+      ;;
+    *)
+      printf 'verified: %s is open and mergeable, with a successful combined status at head %s\n' \
+        "$URL" "$live_head" >&2
+      ;;
+  esac
   FM_PR_MERGE_HEAD=$live_head
 }
 
@@ -1455,7 +1548,7 @@ require_current_away_authority() {
     return 2
   fi
   if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "$ALLOW_NO_PIPELINE" = true ]; then
-    echo "error: --allow-no-pipeline is attended-only; while the away-posture record exists a GitLab merge requires a successful head pipeline" >&2
+    echo "error: --allow-no-pipeline is attended-only; while the away-posture record exists a GitLab merge requires a successful head pipeline and a Forgejo merge requires a successful combined status or a repository with no CI" >&2
     return 2
   fi
 }

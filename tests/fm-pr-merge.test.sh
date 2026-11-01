@@ -36,6 +36,8 @@ FJ_LOGIN=fm-fixture
 FJ_URL="https://$FJ_HOST/$FJ_OWNER/$FJ_REPO/pulls/9"
 FJ_HEAD=cccccccccccccccccccccccccccccccccccccccc
 FJ_STALE_HEAD=dddddddddddddddddddddddddddddddddddddddd
+FJ_BASE=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+FJ_DOTDIR_TREE=ffffffffffffffffffffffffffffffffffffffff
 
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
@@ -423,7 +425,10 @@ write_mr_json() {
 # absent, so a case can put a failing context past the first page; a POST to
 # .../pulls/<n>/merge is the one path that can actually record a merge. The
 # repository read /repos/{owner}/{repo} answers from tea-repo.json, or a
-# default_merge_style of merge when that file is absent.
+# default_merge_style of merge when that file is absent. A git tree read
+# /repos/.../git/trees/<sha> answers from tea-tree-<sha>.json, or a one-file
+# tree with no workflow directory when that file is absent, and an error body
+# for every tree once tea-tree-fails exists.
 # Verified against a real Forgejo instance that "tea api" reports an
 # HTTP-level failure with exit status 0 and the error only in the body
 # (docs/forgejo-tea-integration.md), so every branch here exits 0 too - a test
@@ -484,6 +489,16 @@ case "$endpoint" in
       printf '{"default_merge_style":"merge"}\n'
     fi
     ;;
+  */git/trees/*)
+    sha=${endpoint##*/}
+    if [ -e "$log_dir/tea-tree-fails" ]; then
+      printf '{"message":"sha not found [%s]"}\n' "$sha"
+    elif [ -e "$log_dir/tea-tree-$sha.json" ]; then
+      cat "$log_dir/tea-tree-$sha.json"
+    else
+      printf '{"sha":"%s","tree":[{"path":"README.md","type":"blob","sha":"%s"}],"total_count":1}\n' "$sha" "$sha"
+    fi
+    ;;
   */merge)
     if [ -e "$log_dir/tea-merge-fails" ]; then
       printf '{"message":"merge failed"}\n'
@@ -524,7 +539,7 @@ SH
 # with named fields overridden so one case drives exactly one condition.
 write_forgejo_pr_json() {
   local file=$1 kv key value
-  local state=open mergeable=true merged=false draft=false head=$FJ_HEAD
+  local state=open mergeable=true merged=false draft=false head=$FJ_HEAD base=$FJ_BASE
   shift
   for kv in "$@"; do
     key=${kv%%=*}
@@ -535,11 +550,28 @@ write_forgejo_pr_json() {
       merged) merged=$value ;;
       draft) draft=$value ;;
       head) head=$value ;;
+      base) base=$value ;;
       *) fail "write_forgejo_pr_json: unknown field '$key'" ;;
     esac
   done
-  printf '{"state":"%s","mergeable":%s,"merged":%s,"draft":%s,"head":{"sha":"%s"}}\n' \
-    "$state" "$mergeable" "$merged" "$draft" "$head" > "$file"
+  printf '{"state":"%s","mergeable":%s,"merged":%s,"draft":%s,"head":{"sha":"%s"},"base":{"sha":"%s"}}\n' \
+    "$state" "$mergeable" "$merged" "$draft" "$head" "$base" > "$file"
+}
+
+# write_forgejo_tree_json <file> <sha> [<path>:<type> ...]
+# A whole git tree listing for <sha> in the shape the trees API returns, one
+# entry per <path>:<type>. A tree entry points at FJ_DOTDIR_TREE, so a case
+# that lists a dot directory also writes that tree's own listing.
+write_forgejo_tree_json() {
+  local file=$1 sha=$2 entry entries='' count=0 entry_sha
+  shift 2
+  for entry in "$@"; do
+    entry_sha=$sha
+    [ "${entry#*:}" != tree ] || entry_sha=$FJ_DOTDIR_TREE
+    entries="$entries${entries:+,}{\"path\":\"${entry%%:*}\",\"type\":\"${entry#*:}\",\"sha\":\"$entry_sha\"}"
+    count=$((count + 1))
+  done
+  printf '{"sha":"%s","tree":[%s],"total_count":%s}\n' "$sha" "$entries" "$count" > "$file"
 }
 
 # write_forgejo_status_json <file> [state=<value>] [total_count=<n>]
@@ -2357,10 +2389,18 @@ test_forgejo_each_condition_refuses_independently() {
   pass "fm-pr-merge refuses on each Forgejo pre-merge condition independently"
 }
 
-test_forgejo_unconfigured_ci_refuses_as_none() {
-  local case_dir rc
-  case_dir=$(make_forgejo_case forgejo-ci-none)
+# A repository with no CI reports no commit status at all. Neither the head
+# nor the base tip carrying an Actions workflow directory is the structural
+# proof that nothing will ever report, so such a pull request merges with no
+# waiver, bound to the verified head like any other.
+test_forgejo_no_ci_repository_merges() {
+  local case_dir rc merge_line
+  case_dir=$(make_forgejo_case forgejo-no-ci)
   write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  write_forgejo_tree_json "$case_dir/tea-tree-$FJ_HEAD.json" "$FJ_HEAD" \
+    README.md:blob .config:tree
+  write_forgejo_tree_json "$case_dir/tea-tree-$FJ_DOTDIR_TREE.json" "$FJ_DOTDIR_TREE" \
+    workflows:tree
 
   set +e
   run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
@@ -2368,12 +2408,146 @@ test_forgejo_unconfigured_ci_refuses_as_none() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "forgejo-ci-none: an open, mergeable PR with no configured CI should still refuse"
-  assert_grep 'the combined commit status is "none", not success' "$case_dir/stderr" \
-    "forgejo-ci-none: an absent combined status was not reported as none"
+  expect_code 0 "$rc" "forgejo-no-ci: an open, mergeable PR in a repository with no CI should merge: $(cat "$case_dir/stderr")"
+  assert_grep "/repos/{owner}/{repo}/git/trees/$FJ_HEAD" "$case_dir/tea.log" \
+    "forgejo-no-ci: the head's tree was not read"
+  assert_grep "/repos/{owner}/{repo}/git/trees/$FJ_BASE" "$case_dir/tea.log" \
+    "forgejo-no-ci: the base tip's tree was not read"
+  assert_grep "at head $FJ_HEAD, with no commit status and no Actions workflow at the head or base tip" \
+    "$case_dir/stderr" "forgejo-no-ci: the no-CI verification was not reported"
+  merge_line=$(tea_merge_line "$case_dir/tea.log")
+  case "$merge_line" in
+    *"-f head_commit_id=$FJ_HEAD"*) : ;;
+    *) fail "forgejo-no-ci: the merge was not bound to the verified head: '$merge_line'" ;;
+  esac
+  pass "fm-pr-merge merges a Forgejo pull request in a repository with no CI"
+}
+
+# Zero statuses with a workflow directory at the head or the base tip means CI
+# has not reported yet, so the merge waits for it.
+test_forgejo_unreported_ci_refuses() {
+  local case_dir rc spec name dir where sha
+  for spec in head:.forgejo head:.gitea head:.github base:.forgejo; do
+    where=${spec%%:*}
+    dir=${spec#*:}
+    name="forgejo-ci-unreported-$where${dir}"
+    if [ "$where" = head ]; then sha=$FJ_HEAD; else sha=$FJ_BASE; fi
+    case_dir=$(make_forgejo_case "$name")
+    write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+    write_forgejo_tree_json "$case_dir/tea-tree-$sha.json" "$sha" \
+      README.md:blob "$dir:tree"
+    write_forgejo_tree_json "$case_dir/tea-tree-$FJ_DOTDIR_TREE.json" "$FJ_DOTDIR_TREE" \
+      workflows:tree
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "$name: zero statuses with a workflow directory should refuse"
+    assert_grep "the combined commit status is \"none\", not success, and $sha carries $dir/workflows, so CI has not reported yet" \
+      "$case_dir/stderr" "$name: the refusal did not name the workflow directory"
+    [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+      || fail "$name: a merge was attempted before CI reported"
+  done
+  pass "fm-pr-merge refuses a Forgejo pull request with zero statuses while a workflow directory is present"
+}
+
+# Absence is proven only by a whole tree listing: an error body, a truncated
+# listing, or an unreadable dot directory refuses rather than reading as no CI.
+test_forgejo_unreadable_tree_refuses() {
+  local case_dir rc name
+  for name in error-body truncated dotdir-unreadable; do
+    case_dir=$(make_forgejo_case "forgejo-tree-$name")
+    write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+    case "$name" in
+      error-body) : > "$case_dir/tea-tree-fails" ;;
+      truncated)
+        write_forgejo_tree_json "$case_dir/tea-tree-$FJ_HEAD.json" "$FJ_HEAD" README.md:blob
+        "$JQ_BIN" -c '.total_count = 2' "$case_dir/tea-tree-$FJ_HEAD.json" > "$case_dir/tree.new"
+        mv "$case_dir/tree.new" "$case_dir/tea-tree-$FJ_HEAD.json"
+        ;;
+      dotdir-unreadable)
+        write_forgejo_tree_json "$case_dir/tea-tree-$FJ_HEAD.json" "$FJ_HEAD" .forgejo:tree
+        printf '{"message":"sha not found"}\n' > "$case_dir/tea-tree-$FJ_DOTDIR_TREE.json"
+        ;;
+    esac
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "forgejo-tree-$name: an unreadable tree should refuse"
+    assert_grep "whether the repository has CI could not be read at $FJ_HEAD" "$case_dir/stderr" \
+      "forgejo-tree-$name: the refusal did not name the unreadable tree"
+    [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+      || fail "forgejo-tree-$name: a merge was attempted on an unreadable tree"
+  done
+
+  case_dir=$(make_forgejo_case forgejo-tree-no-base base=)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-tree-no-base: an unreadable base tip should refuse"
+  assert_grep "whether the repository has CI could not be read at " "$case_dir/stderr" \
+    "forgejo-tree-no-base: the refusal did not name the unreadable base tip"
   [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
-    || fail "forgejo-ci-none: a merge was attempted with no configured CI"
-  pass "fm-pr-merge treats an unconfigured Forgejo combined status as none, refusing rather than skipping the check"
+    || fail "forgejo-tree-no-base: a merge was attempted with no base tip"
+  pass "fm-pr-merge refuses a zero-status Forgejo pull request when a tree cannot be read whole"
+}
+
+# A status that is present is a verdict, so neither the no-CI reading nor the
+# attended waiver reaches one that is not success.
+test_forgejo_present_status_still_refuses() {
+  local case_dir rc state flag name
+  for state in pending failure error; do
+    for flag in none --allow-no-pipeline; do
+      name="forgejo-status-$state-${flag#--}"
+      case_dir=$(make_forgejo_case "$name")
+      write_forgejo_status_json "$case_dir/tea-status.json" state="$state"
+      set +e
+      if [ "$flag" = none ]; then
+        run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+          > "$case_dir/stdout" 2> "$case_dir/stderr"
+      else
+        run_pr_merge "$case_dir" task-x1 "$FJ_URL" "$flag" \
+          > "$case_dir/stdout" 2> "$case_dir/stderr"
+      fi
+      rc=$?
+      set -e
+      expect_code 1 "$rc" "$name: a $state status should refuse"
+      assert_grep "the combined commit status is \"$state\", not success" "$case_dir/stderr" \
+        "$name: the refusal did not name the status"
+      [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+        || fail "$name: a merge was attempted past a $state status"
+    done
+  done
+  pass "fm-pr-merge refuses any present non-success Forgejo status, with or without --allow-no-pipeline"
+}
+
+# An away record lets green work merge under away authority; a repository with
+# no CI is green in that sense, so a project that merges autonomously needs no
+# attended waiver for it.
+test_forgejo_no_ci_merges_while_away() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-no-ci-away)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  write_away_record "$case_dir" --words 'merge task-x1'
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "forgejo-no-ci-away: a no-CI pull request should merge under away authority: $(cat "$case_dir/stderr")"
+  [ -n "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-no-ci-away: no merge was attempted"
+  pass "fm-pr-merge merges a no-CI Forgejo pull request under away authority"
 }
 
 # The combined status endpoint computes its state from one page of contexts,
@@ -3002,7 +3176,11 @@ test_forgejo_url_resolves_and_merges
 test_forgejo_login_resolves_from_the_host
 test_forgejo_refuses_when_login_is_ambiguous
 test_forgejo_each_condition_refuses_independently
-test_forgejo_unconfigured_ci_refuses_as_none
+test_forgejo_no_ci_repository_merges
+test_forgejo_unreported_ci_refuses
+test_forgejo_unreadable_tree_refuses
+test_forgejo_present_status_still_refuses
+test_forgejo_no_ci_merges_while_away
 test_forgejo_combined_status_reads_every_page
 test_forgejo_stale_recorded_head_is_reported
 test_forgejo_invalid_head_refuses
@@ -4571,17 +4749,52 @@ test_allow_no_pipeline_is_attended_only_and_gitlab_only() {
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "github-no-pipeline: gh pr merge ran despite the waiver"
 
-  case_dir=$(make_forgejo_case forgejo-no-pipeline)
+  case_dir=$(make_forgejo_case forgejo-no-pipeline-away)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  write_away_record "$case_dir" --words 'merge task-x1'
   set +e
   run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-no-pipeline \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 2 "$rc" "forgejo-no-pipeline: the waiver must not apply on Forgejo"
-  assert_grep '--allow-no-pipeline applies only to GitLab' "$case_dir/stderr" \
-    "forgejo-no-pipeline: the refusal did not name GitLab"
-  [ ! -s "$case_dir/tea.log" ] || fail "forgejo-no-pipeline: tea ran despite the waiver"
-  pass "fm-pr-merge --allow-no-pipeline is attended-only, takes no value, and applies only to GitLab"
+  expect_code 2 "$rc" "forgejo-no-pipeline-away: the waiver must be refused while away"
+  assert_grep '--allow-no-pipeline is attended-only' "$case_dir/stderr" \
+    "forgejo-no-pipeline-away: the refusal did not name attended-only"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-no-pipeline-away: tea merged despite an away waiver"
+  pass "fm-pr-merge --allow-no-pipeline is attended-only, takes no value, and applies only to GitLab and Forgejo"
+}
+
+# On Forgejo the attended waiver covers the case the structural no-CI read
+# cannot decide: zero statuses while a workflow directory is present.
+test_allow_no_pipeline_waives_a_zero_status_forgejo_head() {
+  local case_dir merge_line
+  case_dir=$(make_forgejo_case forgejo-no-pipeline-waived)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  write_forgejo_tree_json "$case_dir/tea-tree-$FJ_HEAD.json" "$FJ_HEAD" .forgejo:tree
+  write_forgejo_tree_json "$case_dir/tea-tree-$FJ_DOTDIR_TREE.json" "$FJ_DOTDIR_TREE" workflows:tree
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "forgejo-no-pipeline-waived: a zero-status pull request should merge: $(cat "$case_dir/stderr")"
+  assert_grep "at head $FJ_HEAD, with no commit status, waived by --allow-no-pipeline" "$case_dir/stderr" \
+    "forgejo-no-pipeline-waived: the waived verification was not reported"
+  merge_line=$(tea_merge_line "$case_dir/tea.log")
+  case "$merge_line" in
+    *"-f head_commit_id=$FJ_HEAD"*) : ;;
+    *) fail "forgejo-no-pipeline-waived: the merge was not bound to the verified head: '$merge_line'" ;;
+  esac
+
+  case_dir=$(make_forgejo_case forgejo-no-pipeline-draft draft=true)
+  write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  set -e
+  assert_grep 'the pull request is a draft' "$case_dir/stderr" \
+    "forgejo-no-pipeline-draft: the waiver bypassed another condition"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-no-pipeline-draft: a merge was attempted despite the draft"
+  pass "fm-pr-merge --allow-no-pipeline waives only a zero-status Forgejo head and keeps every other condition"
 }
 
 test_gitlab_head_override_args_refuse_before_recording
@@ -4642,3 +4855,4 @@ test_allow_red_refused_on_forgejo
 test_allow_missing_refused_on_forgejo
 test_allow_no_pipeline_merges_only_a_null_head_pipeline
 test_allow_no_pipeline_is_attended_only_and_gitlab_only
+test_allow_no_pipeline_waives_a_zero_status_forgejo_head
