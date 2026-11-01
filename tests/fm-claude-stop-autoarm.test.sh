@@ -385,6 +385,61 @@ test_stale_lock_recovery_preserves_afk_and_need_gates() {
   pass "auto-arm: stale-owner recovery leaves the AFK and supervision-need gates unchanged"
 }
 
+test_identity_resolution_rechecks_afk_and_need_before_side_effects() {
+  local transition owner dispatch dir fakebin real_ps out status
+  real_ps=$(command -v ps) || fail "test host must provide ps"
+  for transition in afk idle; do
+    for owner in owned stale; do
+      for dispatch in arm host; do
+        dir=$(make_primary_dir "$TMP_ROOT/identity-$transition-$owner-$dispatch")
+        : > "$dir/state/task.meta"
+        printf 'epoch=3 owner_pid=9999999 outcome=rewake updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+        cp "$dir/state/.claude-autoarm-epoch" "$dir/state/epoch-before-transition"
+        printf '9999999\n' > "$dir/state/.lock"
+        write_arm_fixture "$dir" actionable
+        write_host_fixture "$dir" boundary
+        [ "$dispatch" != host ] || rm -f "$dir/config/supervision-host-off"
+        fakebin=$(fm_fakebin "$dir/identity-bin")
+        {
+          printf '#!/usr/bin/env bash\n'
+          cat <<'SH'
+if [ "${1:-}" = -o ] && [ "${2:-}" = comm= ] && [ ! -e "$FM_HOME/state/identity-transition" ]; then
+  cp "$FM_HOME/state/.lock" "$FM_HOME/state/lock-before-transition"
+  for marker in "$FM_HOME"/state/.claude-autoarm-pending.*; do
+    [ ! -f "$marker" ] || : > "$FM_HOME/state/pending-before-transition"
+  done
+  case "$FM_TEST_IDENTITY_TRANSITION" in
+    afk) : > "$FM_HOME/state/.afk" ;;
+    idle) rm -f "$FM_HOME/state/task.meta" ;;
+  esac
+  : > "$FM_HOME/state/identity-transition"
+fi
+SH
+          printf 'exec %q "$@"\n' "$real_ps"
+        } > "$fakebin/ps"
+        chmod +x "$fakebin/ps"
+        out=$(printf '%s\n' '{"session_id":"sess-autoarm"}' \
+          | FM_TEST_IDENTITY_TRANSITION="$transition" PATH="$fakebin:$PATH" FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+              if [ "$1" = owned ]; then
+                printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+              fi
+              "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+            ' _ "$owner" 2>&1); status=$?
+        assert_present "$dir/state/identity-transition" "fixture did not change eligibility during identity resolution"
+        assert_present "$dir/state/pending-before-transition" "eligibility changed before the early gates and pending publication"
+        expect_code 0 "$status" "$transition during identity resolution must suppress $owner $dispatch side effects"
+        [ -z "$out" ] || fail "an ineligible firing produced output: $out"
+        cmp -s "$dir/state/lock-before-transition" "$dir/state/.lock" || fail "an ineligible firing recovered the session lock"
+        cmp -s "$dir/state/epoch-before-transition" "$dir/state/.claude-autoarm-epoch" || fail "an ineligible firing claimed a generation"
+        assert_absent "$dir/state/arm-ran" "an ineligible firing launched an arm"
+        assert_absent "$dir/state/host-ran" "an ineligible firing parked the supervision host"
+        [ "$(pending_markers "$dir")" = 0 ] || fail "an ineligible firing left its pending marker"
+      done
+    done
+  done
+  pass "auto-arm: AFK and need changes during identity resolution prevent session recovery, claims, and parking"
+}
+
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain() {
   local dir out status inner_pid lock_pid
   dir=$(make_primary_dir "$TMP_ROOT/nested-chain")
@@ -820,6 +875,59 @@ test_single_flight_admits_exactly_one_owner() {
   { [ "$rc1" = 2 ] && [ "$rc2" = 0 ]; } || { [ "$rc1" = 0 ] && [ "$rc2" = 2 ]; } \
     || fail "exactly one firing must translate the close (rc 2) and the other must no-op (rc 0), got rc1=$rc1 rc2=$rc2"
   pass "auto-arm: concurrent firings admit one owner and one rewake translation"
+}
+
+# The pending marker tells the concurrently running turn-end guard that this
+# firing is still deciding. It must be gone as soon as the claim is visible (a
+# parked generation must not extend later guards' waits) and on every exit.
+pending_markers() {  # <dir> -> count of pending markers
+  local n=0 marker
+  for marker in "$1"/state/.claude-autoarm-pending.*; do
+    [ -e "$marker" ] && n=$((n + 1))
+  done
+  printf '%s\n' "$n"
+}
+
+test_pending_marker_cleared_at_claim_and_exit() {
+  local dir out i hook_pid status=0
+  dir=$(make_primary_dir "$TMP_ROOT/pending-lifecycle")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" blocking-actionable
+  out="$dir/state/autoarm.out"
+  run_autoarm_bg "$dir" "$out"
+  i=0
+  while [ "$i" -lt 150 ]; do
+    [ "$(epoch_outcome "$dir")" = arming ] && [ -e "$dir/state/arm-ran" ] && break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ "$(epoch_outcome "$dir")" = arming ] || fail "fixture hook never claimed a generation"
+  [ "$(pending_markers "$dir")" = 0 ] || fail "a parked generation kept its pending marker after its claim landed"
+  hook_pid=$(epoch_field "$dir" owner_pid)
+  kill -TERM "$hook_pid" 2>/dev/null || true
+  wait "$RUN_AUTOARM_BG_PID" 2>/dev/null || status=$?
+  [ "$(pending_markers "$dir")" = 0 ] || fail "the hook left a pending marker after exiting (status $status)"
+  pass "auto-arm: the pending marker is gone once the claim lands and after exit"
+}
+
+test_pending_marker_not_left_by_refusing_or_idle_firings() {
+  local dir other status
+  dir=$(make_primary_dir "$TMP_ROOT/pending-refuse")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  other=$!
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' >/dev/null 2>&1; status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "a firing refused by session identity must stay silent"
+  [ "$(pending_markers "$dir")" = 0 ] || fail "a firing refused by session identity left a pending marker"
+  dir=$(make_primary_dir "$TMP_ROOT/pending-idle")
+  write_arm_fixture "$dir" actionable
+  run_autoarm "$dir" >/dev/null 2>&1 || true
+  [ -z "$(find "$dir/state" -name '.claude-autoarm-pending*' -print)" ] || fail "an idle home must never receive a pending marker"
+  pass "auto-arm: refusing and idle firings leave no pending marker"
 }
 
 # Claude terminates the complete async hook process tree when the declared hook
@@ -2005,6 +2113,7 @@ test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
+test_identity_resolution_rechecks_afk_and_need_before_side_effects
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
@@ -2022,6 +2131,8 @@ test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight
 test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
+test_pending_marker_cleared_at_claim_and_exit
+test_pending_marker_not_left_by_refusing_or_idle_firings
 test_term_mid_arm_commits_failure_and_rewakes
 test_abandoned_owner_claim_is_reclaimed_and_rearms
 test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting

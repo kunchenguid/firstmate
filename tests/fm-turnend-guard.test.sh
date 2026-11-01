@@ -2314,6 +2314,160 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# --- concurrent Stop: a slow auto-arm claim is not an absent auto-arm --------
+#
+# Claude starts every matched Stop hook in parallel, and the auto-arm's
+# identity and claim work walks the process table with ps, so on a busy host
+# its generation claim can land after the guard's base wait. These cases make
+# that deterministic with a ps shim that is slow only for the auto-arm firing.
+
+write_slow_ps_shim() {  # <fakebin>
+  local fakebin=$1 real_ps
+  real_ps=$(command -v ps) || fail "test host must provide ps"
+  {
+    printf '#!/usr/bin/env bash\n'
+    # shellcheck disable=SC2016 # the shim expands its own variable at run time.
+    printf '[ -z "${FM_TEST_SLOW_PS:-}" ] || sleep "$FM_TEST_SLOW_PS"\n'
+    printf 'exec %q "$@"\n' "$real_ps"
+  } > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
+}
+
+# Fire the guard and the real auto-arm together from one fake harness, the way
+# Claude delivers one Stop. Prints the guard's output and exits with its status;
+# leaves the ledger as the auto-arm left it when the guard decided.
+run_concurrent_stop() {  # <dir> <auto-arm ps delay>
+  local dir=$1 delay=$2 home fakebin
+  home=$(cd "$dir" && pwd)
+  fakebin=$(fm_fakebin "$dir/slow-ps-bin")
+  write_slow_ps_shim "$fakebin"
+  # shellcheck disable=SC2016 # the fake harness expands its own variables.
+  FM_HOME="$home" PATH="$fakebin:$PATH" FM_TEST_AUTOARM_PS_DELAY="$delay" \
+    FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 "$dir/fake-claude" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      payload="{\"session_id\":\"sess-claude-mode\",\"stop_hook_active\":false}"
+      printf "%s\n" "$payload" | FM_TEST_SLOW_PS="$FM_TEST_AUTOARM_PS_DELAY" \
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/autoarm.out" 2>&1 &
+      auto=$!
+      printf "%s\n" "$payload" | "$FM_HOME/bin/fm-turnend-guard.sh" --claude 2>&1
+      status=$?
+      cp "$FM_HOME/state/.claude-autoarm-epoch" "$FM_HOME/ledger-at-decision" 2>/dev/null || true
+      kill "$auto" 2>/dev/null
+      wait "$auto" 2>/dev/null
+      exit "$status"'
+}
+
+write_parking_arm() {  # <dir>
+  cat > "$1/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+exec sleep 30
+SH
+  chmod +x "$1/bin/fm-watch-arm.sh"
+}
+
+test_hook_claude_mode_concurrent_slow_claim_is_not_blind() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-slow-claim")
+  : > "$dir/state/task1.meta"
+  touch -d '-400 seconds' "$dir/state/.last-watcher-beat"
+  install_integrated_autoarm "$dir"
+  write_parking_arm "$dir"
+  out=$(run_concurrent_stop "$dir" 0.25); status=$?
+  expect_code 0 "$status" "a concurrent auto-arm whose claim outlasts the base wait must not read as absent"
+  assert_not_contains "$out" "TURN WOULD END BLIND" "a slow concurrent claim must not raise the blind-turn alarm"
+  assert_grep "outcome=arming" "$dir/ledger-at-decision" "the guard must have allowed on the auto-arm's own claim"
+  assert_absent "$dir/state/.turnend-claude-blocks" "a slow concurrent claim must not consume the block budget"
+  for marker in "$dir"/state/.claude-autoarm-pending.*; do
+    assert_absent "$marker" "the auto-arm must not leave its pending marker behind"
+  done
+  pass "fm-turnend-guard --claude: a concurrent auto-arm claim slower than the base wait is not a false blind alarm"
+}
+
+# Publish a pending marker from a helper process the way the hook does, then
+# run <action>: "claim-never-exit" (exits after 1s without claiming) or
+# "wedge" (stays alive and never claims). Prints the helper pid.
+start_pending_helper() {  # <dir> <action>
+  local dir=$1 action=$2 home helper marker recorded identity tries=0
+  home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # the helper expands its own variables.
+  FM_HOME="$home" bash -c '
+    . "$FM_HOME/bin/fm-wake-lib.sh"
+    fm_autoarm_pending_publish "$FM_HOME/state" || exit 1
+    trap "rm -f \"\$FM_AUTOARM_PENDING_MARKER\"" EXIT
+    case "$1" in
+      claim-never-exit) sleep 1 ;;
+      wedge) sleep 60 ;;
+    esac' _ "$action" > /dev/null 2>&1 &
+  helper=$!
+  marker="$home/state/.claude-autoarm-pending.$helper"
+  while [ "$tries" -lt 100 ]; do
+    if kill -0 "$helper" 2>/dev/null \
+      && IFS= read -r recorded 2>/dev/null < "$marker" \
+      && identity=$(fm_test_pid_identity "$helper") \
+      && [ -n "$recorded" ] && [ "$recorded" = "$identity" ]; then
+      printf '%s\n' "$helper"
+      return 0
+    fi
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  kill "$helper" 2>/dev/null || true
+  wait "$helper" 2>/dev/null || true
+  fail "pending helper did not publish a live, identity-matched marker"
+}
+
+test_hook_claude_mode_pending_firing_that_exits_unclaimed_blocks_promptly() {
+  local dir helper out status started elapsed
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-pending-exit")
+  : > "$dir/state/task1.meta"
+  helper=$(start_pending_helper "$dir" claim-never-exit) || fail "could not start the unclaimed-exit pending helper"
+  started=$(date +%s)
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 FM_CLAUDE_AUTOARM_PENDING_WAIT_S=20 run_hook_claude "$dir" false); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  wait "$helper" 2>/dev/null || true
+  expect_code 2 "$status" "a pending firing that exits without claiming must still leave the guard to block"
+  assert_contains "$out" "TURN WOULD END BLIND" "the unclaimed stop must carry the blind-turn banner"
+  [ "$elapsed" -lt 8 ] || fail "the guard waited ${elapsed}s for a firing that had already exited"
+  pass "fm-turnend-guard --claude: a pending firing that exits unclaimed releases the guard to block at once"
+}
+
+test_hook_claude_mode_wedged_pending_firing_blocks_at_cap() {
+  local dir helper out status started elapsed
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-pending-wedge")
+  : > "$dir/state/task1.meta"
+  helper=$(start_pending_helper "$dir" wedge) || fail "could not start the wedged pending helper"
+  started=$(date +%s)
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 FM_CLAUDE_AUTOARM_PENDING_WAIT_S=2 run_hook_claude "$dir" false); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  kill "$helper" 2>/dev/null || true
+  wait "$helper" 2>/dev/null || true
+  expect_code 2 "$status" "a pending firing that never claims must not hold the guard past its cap"
+  assert_contains "$out" "TURN WOULD END BLIND" "the capped wait must end in the blind-turn banner"
+  [ "$elapsed" -ge 1 ] || fail "the guard did not wait for the wedged pending firing (${elapsed}s)"
+  [ "$elapsed" -lt 8 ] || fail "the 2s pending cap held the guard for ${elapsed}s"
+  pass "fm-turnend-guard --claude: a wedged pending firing cannot hold the guard past the pending cap"
+}
+
+test_hook_claude_mode_stale_pending_markers_do_not_extend_wait() {
+  local dir live out status started elapsed
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-pending-stale")
+  : > "$dir/state/task1.meta"
+  printf 'linux-starttime=1 cmdline-hex=00\n' > "$dir/state/.claude-autoarm-pending.999999"
+  sleep 60 &
+  live=$!
+  printf 'linux-starttime=1 cmdline-hex=00\n' > "$dir/state/.claude-autoarm-pending.$live"
+  started=$(date +%s)
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 FM_CLAUDE_AUTOARM_PENDING_WAIT_S=20 run_hook_claude "$dir" false); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  expect_code 2 "$status" "dead or identity-mismatched pending markers must not stand in for an auto-arm"
+  assert_contains "$out" "TURN WOULD END BLIND" "a stale-marker stop must carry the blind-turn banner"
+  [ "$elapsed" -lt 8 ] || fail "stale pending markers extended the wait to ${elapsed}s"
+  pass "fm-turnend-guard --claude: dead or reused-pid pending markers never extend the claim wait"
+}
+
 # --- AWAY MODE: the daemon owns supervision ----------------------------------
 #
 # While state/.afk exists, bin/fm-supervise-daemon.sh owns supervision and runs
@@ -2635,6 +2789,10 @@ test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
+test_hook_claude_mode_concurrent_slow_claim_is_not_blind
+test_hook_claude_mode_pending_firing_that_exits_unclaimed_blocks_promptly
+test_hook_claude_mode_wedged_pending_firing_blocks_at_cap
+test_hook_claude_mode_stale_pending_markers_do_not_extend_wait
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_away_daemon_allows_between_watcher_cycles
 test_hook_away_daemon_allows_over_dead_watcher_lock

@@ -77,6 +77,7 @@
 #      record a fresh actionable exit-2 outcome
 #      (state/.claude-autoarm-epoch) for this event epoch - either proof allows
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
+#      pending-decision coordination: docs/turnend-guard.md "Claude cooperative mode";
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
 #   4. only when neither materializes is the auto-arm genuinely absent: re-block
@@ -102,9 +103,11 @@ CLAUDE_MODE=0
 CURSOR_MODE=0
 AGY_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
+PENDING_WAIT_S=${FM_CLAUDE_AUTOARM_PENDING_WAIT_S:-30}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
+case "$PENDING_WAIT_S" in ''|*[!0-9]*) PENDING_WAIT_S=30 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 
@@ -543,23 +546,30 @@ failure_episode_verified() {
   esac
 }
 
-i=0
-while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
-  if autoarm_owns_recovery; then
-    if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      fm_failure_episode_reset "$STATE" || exit 2
-    fi
-    exit 0
-  fi
-  sleep 0.1
-  i=$((i + 1))
-done
-if autoarm_owns_recovery; then
+allow_owned_recovery() {
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     fm_failure_episode_reset "$STATE" || exit 2
   fi
   exit 0
-fi
+}
+
+i=0
+while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
+  autoarm_owns_recovery && allow_owned_recovery
+  sleep 0.1
+  i=$((i + 1))
+done
+# A slow claim is not an absent auto-arm while its publisher is provably
+# still deciding. Pending wait policy: docs/turnend-guard.md "Claude cooperative
+# mode"; marker validation: fm_autoarm_pending_live in bin/fm-wake-lib.sh.
+# Advisory state must never count as recovery ownership.
+pending_started=$(date +%s)
+while fm_autoarm_pending_live "$STATE" "$PENDING_WAIT_S" \
+  && [ $(( $(date +%s) - pending_started )) -lt "$PENDING_WAIT_S" ]; do
+  autoarm_owns_recovery && allow_owned_recovery
+  sleep 0.1
+done
+autoarm_owns_recovery && allow_owned_recovery
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.

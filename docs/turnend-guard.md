@@ -321,8 +321,13 @@ Under the default one-shot behavior, that re-opened the 2026-07-21 blind window.
 
 Before the Claude cooperative budget can re-block a Stop, the guard checks for a live foreign session-lock owner and takes the same safe diagnostic exit described under "Guard predicates" ([foreign session-lock owner](#foreign-session-lock-owner)).
 
-The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds).
-It allows the stop when any of these holds:
+The Claude mode first waits for recovery ownership for the base window configured by `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS`.
+Claude starts matched Stop hooks in parallel, and the auto-arm's identity work walks the process table, so on a busy host its claim can land after that base window.
+The auto-arm publishes an advisory pending marker before that work; `fm_autoarm_pending_publish` in [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) owns its format and lifecycle.
+The guard extends the base wait only while a marker names a live, identity-matched process and is younger than `FM_CLAUDE_AUTOARM_PENDING_WAIT_S` seconds, stopping when no valid marker remains or the additional wait reaches that cap.
+Dead, identity-mismatched, or expired markers cannot extend the wait, and a home with no auto-arm firing retains the blind-turn alarm's base latency.
+[`configuration.md`](configuration.md#environment-variables) owns the wait defaults and validation, including the zero-disable option.
+A pending marker alone never allows the Stop; recovery ownership still requires one of these:
 
 - The watcher is healthy.
 - The auto-arm's generation claim is open.
@@ -587,7 +592,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - Child-worktree exclusion.
 - `FM_HOME` and `FM_STATE_OVERRIDE` precedence.
 - The live-lock and fresh-beacon guard predicate.
-- The cooperative `--claude` open-generation claim wait.
+- The cooperative `--claude` open-generation claim wait, including a concurrent slow claim, an unclaimed publisher exit, a wedged publisher's cap, and dead or identity-mismatched pending markers.
 - Monotonic failed-epoch progression.
 - Bounded attended fail-open.
 - Auto-arm-owned exhaustion alarms while the guard steps aside for open claims, including ordinary failures, pending and announced lost host hand-backs, and interruptions.
