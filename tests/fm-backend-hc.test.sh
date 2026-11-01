@@ -31,7 +31,12 @@ cmd=${1:-}
 last=""
 for a in "$@"; do last=$a; done
 case "$cmd" in
+  --version) printf 'hc %s\n' "${FAKE_HC_VERSION:-0.1.14}" ;;
   server) printf '{"live":0}\n' ;;
+  connect)
+    IFS= read -r _req || true
+    printf '{"jsonrpc":"2.0","id":1,"result":{"generation":%s}}\n' "${FAKE_HC_GENERATION:-1}"
+    ;;
   ls) cat "$D/ls.json" 2>/dev/null || printf '{"terminals":[]}\n' ;;
   run) cat "$D/run.json" ;;
   get)
@@ -41,6 +46,13 @@ case "$cmd" in
     ;;
   rm) [ -e "$D/rm-sticks" ] || rm -f "$D/$last.json"; printf '{}\n' ;;
   read) printf 'screen of %s\n' "$last" ;;
+  send)
+    if [ -f "$D/send.exit" ]; then
+      printf '{"error":{"kind":"%s"}}\n' "$(cat "$D/send.kind" 2>/dev/null || echo blocked)" >&2
+      exit "$(cat "$D/send.exit")"
+    fi
+    cat "$D/send.json" 2>/dev/null || printf '{"started":true,"wait":{"status":"working"}}\n'
+    ;;
   *) printf '{}\n' ;;
 esac
 SH
@@ -58,9 +70,12 @@ setup_case() {  # <name> -> sets D, FB, HOMEDIR
 }
 
 # hc_shell <script>: run <script> in bash with the adapter sourced against the
-# stub. HOMETAG is exported so the script can build matching labels.
+# stub. FM_HC_BIN pins the stub so an inherited FM_HC_BIN or an installed
+# herdr-core never wins; CASE_HC_BIN overrides it for binary-resolution cases.
+# HOMETAG is exported so the script can build matching labels.
 hc_shell() {  # <script>
-  FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
+  FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HC_BIN=${CASE_HC_BIN:-$FB/hc} \
+    FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
     HC_SESSION=fmtest bash -c '
       . "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
       fm_backend_source hc || { echo "source failed" >&2; exit 90; }
@@ -171,11 +186,11 @@ test_control_interrupt_delivers_the_harness_keys() {
   mkdir -p "$HOMEDIR/state" "$HOMEDIR/data"
   printf 'window=fmtest:t2\nendpoint_task_id=%s\nworktree=%s\nproject=%s\nharness=claude\nkind=scout\nbackend=hc\nhc_session=fmtest\nhc_terminal=t2\n' \
     "$id" "$D" "$D" > "$HOMEDIR/state/$id.meta"
-  out=$(FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
+  out=$(FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
     FM_STATE_OVERRIDE="$HOMEDIR/state" FM_DATA_OVERRIDE="$HOMEDIR/data" FM_CONTROL_POLL=0.05 \
     "$FM_TEST_ROOT/bin/fm-control.sh" "$id" interrupt 2>&1) || rc=$?
   expect_code 0 "$rc" "interrupt on an hc task should succeed"$'\n'"$out"
-  assert_contains "$(grep $'\x1fkeys\x1f' "$D/log")" $'keys\x1f--json\x1ft2\x1fesc' "interrupt must press Escape on the recorded terminal"
+  assert_contains "$(grep $'\x1fkeys\x1f' "$D/log")" $'keys\x1f--json\x1ft2\x1f--\x1fesc' "interrupt must press Escape on the recorded terminal"
   pass "hc: fm-control interrupt delivers the harness's interrupt key"
 }
 
@@ -302,8 +317,91 @@ test_endpoint_validation_binds_hc_meta() {
   pass "hc: endpoint validation requires window to equal hc_session:hc_terminal"
 }
 
+test_container_ensure_gates_binary_version_and_generation() {
+  local out
+  setup_case gate
+  out=$(hc_shell 'fm_backend_hc_container_ensure')
+  assert_equals "$out" fmtest "container_ensure prints the session after every gate passes"
+  : > "$D/log"
+  FAKE_HC_VERSION=0.1.9 expect_refused hc_shell 'fm_backend_hc_container_ensure'
+  FAKE_HC_VERSION=bogus expect_refused hc_shell 'fm_backend_hc_container_ensure'
+  FAKE_HC_GENERATION=2 expect_refused hc_shell 'fm_backend_hc_container_ensure'
+  FAKE_HC_GENERATION=1 hc_shell 'fm_backend_hc_container_ensure' >/dev/null \
+    || fail "generation 1 must be accepted"
+  assert_contains "$(cat "$D/log")" $'\x1fconnect\x1f' "container_ensure must run the hello handshake"
+  pass "hc: container_ensure refuses a misnamed, old, or wrong-generation binary"
+}
+
+test_send_text_submit_confirms_through_send_wait() {
+  local tag out log
+  setup_case submit
+  tag=$(hometag_of)
+  write_terminal "$D" t1 live fm-a1 "$tag" zsh /bin/zsh
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1')
+  assert_equals "$out" empty "a started turn confirms the submit"
+  log=$(grep $'\x1fsend\x1f' "$D/log")
+  assert_contains "$log" $'--wait\x1f--timeout\x1f' "submit must confirm through send --wait"
+  assert_contains "$log" $'\x1f--\x1fdeploy now' "the text must arrive after the -- delimiter"
+  printf '9\n' > "$D/send.exit"
+  printf 'blocked\n' > "$D/send.kind"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>&1)
+  assert_contains "$out" unknown "a blocked terminal is unknown, never forced"
+  assert_contains "$out" blocked "the refusal must name the blocked cause"
+  printf '11\n' > "$D/send.exit"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1')
+  assert_equals "$out" send-failed "a finished terminal is send-failed"
+  printf '3\n' > "$D/send.exit"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1')
+  assert_equals "$out" send-failed "a missing terminal is send-failed"
+  rm -f "$D/send.exit" "$D/send.kind"
+  printf '{"started":null,"wait":{"status":"idle","timed_out":true}}\n' > "$D/send.json"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1')
+  assert_equals "$out" unknown "a silent program falls back to the composer screen, which cannot prove empty on a plain pane"
+  pass "hc: send_text_submit proves the turn through send --wait and never forces a blocked terminal"
+}
+
+test_send_delimiters_and_binary_socket_pins() {
+  local tag out
+  setup_case pins
+  tag=$(hometag_of)
+  write_terminal "$D" t1 live fm-a1 "$tag" zsh /bin/zsh
+  hc_shell 'fm_backend_hc_send_text_line fmtest:t1 "-rf / --force" fm-a1' \
+    || fail "send_text_line must accept flag-looking text"
+  assert_contains "$(cat "$D/log")" $'send\x1f--json\x1ft1\x1f--\x1f-rf / --force' \
+    "flag-looking text must arrive after the -- delimiter"
+  out=$(FM_HC_SOCKET=/tmp/pinned.sock hc_shell 'fm_backend_hc_cli fmtest ls'; cat "$D/log")
+  assert_contains "$out" "HC_SOCKET=/tmp/pinned.sock" "FM_HC_SOCKET must pin the socket for the call"
+  CASE_HC_BIN=/nonexistent/hc expect_refused hc_shell 'fm_backend_hc_cli fmtest ls'
+  mkdir -p "$D/pinned"
+  cp "$FB/hc" "$D/pinned/hc"
+  out=$(CASE_HC_BIN="$D/pinned/hc" hc_shell 'fm_backend_hc_bin')
+  assert_equals "$out" "$D/pinned/hc" "FM_HC_BIN must win over an hc on PATH"
+  pass "hc: send text is -- delimited, and FM_HC_BIN/FM_HC_SOCKET pin the call"
+}
+
+test_required_tool_check_uses_the_adapter_resolver() {
+  local out
+  setup_case tools
+  mkdir -p "$D/core-only" "$D/none"
+  cp "$FB/hc" "$D/core-only/herdr-core"
+  out=$(env -u FM_HC_BIN PATH="$D/core-only:/usr/bin:/bin" "$BASH" -c '
+    . "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
+    fm_backend_required_tool_available hc hc && echo core-only-ok' 2>&1)
+  assert_contains "$out" core-only-ok "a herdr-core-only install must satisfy the hc tool check"
+  out=$(FM_HC_BIN="$FB/hc" PATH="$D/none:/usr/bin:/bin" "$BASH" -c '
+    . "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
+    fm_backend_required_tool_available hc hc && echo pinned-ok' 2>&1)
+  assert_contains "$out" pinned-ok "an FM_HC_BIN-only install must satisfy the hc tool check"
+  out=$(FM_HC_BIN=/nonexistent/hc PATH="$FB:/usr/bin:/bin" "$BASH" -c '
+    . "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
+    fm_backend_required_tool_available hc hc && echo found || echo missing' 2>&1)
+  assert_contains "$out" missing "an unusable FM_HC_BIN must report hc missing even with hc on PATH"
+  pass "hc: the bootstrap tool check resolves hc exactly as the adapter does"
+}
+
 fm_test_run \
   test_hc_is_spawn_capable_and_never_autodetected \
+  test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
   test_view_refuses_every_hc_call \
   test_control_interrupt_delivers_the_harness_keys \
@@ -315,4 +413,7 @@ fm_test_run \
   test_kill_proves_the_terminal_is_gone \
   test_kill_refuses_another_tasks_terminal \
   test_capture_and_current_path_read_the_recorded_terminal \
-  test_endpoint_validation_binds_hc_meta
+  test_endpoint_validation_binds_hc_meta \
+  test_container_ensure_gates_binary_version_and_generation \
+  test_send_text_submit_confirms_through_send_wait \
+  test_send_delimiters_and_binary_socket_pins

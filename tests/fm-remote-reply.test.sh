@@ -104,15 +104,27 @@ stop_reply_listener() {
   return 1
 }
 
-# Block until this generation's capture has been applied. A live listener keeps
-# its claim across polls, so start is only launched when nothing owns the source.
+# Block until this generation's capture has been applied. A listener that stays
+# live keeps its claim across polls, so start is launched only when nothing owns
+# the source. Handling a generation re-arms it, which supersedes the live
+# runner's launch floor: that runner exits without a result, and a check that
+# sampled its claim just before release would otherwise wait out the full bound
+# with no owner listening. Re-check the owner on a one-second cadence so a
+# superseded runner is replaced while the same total bound still applies.
 await_reply_result() { # <result-path>
-  local result=$1 handled=${1%.result}.handled _
-  if [ "$(reply_owner)" != live ]; then
-    remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
-  fi
-  for _ in $(seq 1 800); do
+  local result=$1 handled=${1%.result}.handled i owner starter=
+  for i in $(seq 1 800); do
     [ -s "$result" ] && [ -f "$handled" ] && return 0
+    if [ "$((i % 20))" -eq 1 ]; then
+      if [ -z "$starter" ] || ! kill -0 "$starter" 2>/dev/null; then
+        starter=
+        owner=$(reply_owner)
+        if [ "$owner" != live ]; then
+          remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+          starter=$!
+        fi
+      fi
+    fi
     sleep 0.05
   done
   return 1
@@ -334,6 +346,9 @@ pass "a captured delta is applied, acknowledged, and re-armed without a handler"
 
 # Now the handler's own retry path, from the state a crash between applying and
 # acknowledging leaves behind: the acknowledgement is gone and re-arming fails.
+# A handled marker precedes the runner's re-listen transition. Quiesce it before
+# mutating its state here and in the unsafe-acknowledgement fixture below.
+stop_reply_listener || fail "the reply listener did not stop before the failed re-arm fixture"
 rm -f "$PARENT/state/procevent-inbox/$SID.1.handled"
 rm -rf "$PARENT/state/procevent"
 : > "$PARENT/state/procevent"
@@ -378,6 +393,7 @@ RESULT_TWO="$PARENT/state/procevent-inbox/$SID.2.result"
 # The runner already applied and acknowledged this capture. Drop that genuine
 # acknowledgement and put an unsafe one in its place, so the handler's refusal
 # to trust a non-regular marker stays under test.
+stop_reply_listener || fail "the reply listener did not stop before the unsafe acknowledgement fixture"
 rm -f "$PARENT/state/procevent-inbox/$SID.2.handled"
 ln -s "$TMP_ROOT/missing-handled-marker" "$PARENT/state/procevent-inbox/$SID.2.handled"
 set +e
