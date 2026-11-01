@@ -43,7 +43,10 @@ Each adapter:
 - Applies bounded exponential retry after an unexpected or failed close.
 
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
-A failed follow-up never cancels continuity restoration.
+On Pi, successor restoration is serialized independently of delivery settlement.
+A pending main follow-up or accepted supervision-branch turn retains its delivery claim without blocking the next actionable close from restoring a successor.
+A failed follow-up never cancels continuity restoration, and an exhausted restoration reaches main with a typed failure even while an earlier branch delivery remains pending.
+If Pi rejects that failure, it stays unreported until main accepts it; the earlier branch settling does not clear it.
 
 ### Pi session replacement
 
@@ -451,6 +454,8 @@ Defaults and overrides, including Claude Stop's outer successor-status wait, are
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
 - Blocks prompt delivery to prove the successor launches first.
+- Holds main or branch delivery open across a successor's actionable close to prove the next successor starts without waiting for settlement.
+- Holds branch delivery open across a successor failure or exhausted restoration to prove retries proceed and the typed failure reaches main.
 - Verifies single-flight behavior.
 - Changes the session lock before close to prove ownership is rechecked.
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
