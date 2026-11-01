@@ -624,11 +624,11 @@ test_a_main_outcome_reaches_main_without_counting_as_a_captain_call() {
 }
 
 # One line per task keeps the newest summary. When a task's newer main row
-# collapses an older captain row, the captain's own question must stay on the
-# line, ahead of the newer summary: otherwise main would acknowledge the login
-# request through --through without ever reading it, and it would never reach
-# the captain. Only a task whose collapsed rows are all main is labelled
-# firstmate's alone.
+# collapses an older captain row, the captain's own question must stay on
+# screen as its own row, ahead of the newer result: otherwise main would
+# acknowledge the login request through --through without ever reading it, and
+# it would never reach the captain. Only a task whose collapsed rows are all
+# main is labelled firstmate's alone.
 test_a_main_row_collapsing_a_captain_row_keeps_the_captain_question() {
   local home drained
   home="$TMP_ROOT/drain-main-over-captain"
@@ -642,13 +642,45 @@ test_a_main_row_collapsing_a_captain_row_keeps_the_captain_question() {
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict main \
     --summary 'local branch ready to land' >/dev/null || fail "fixture: could not record a main outcome"
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "[seq 3, newest of 2 for this task, recorded 0m ago] login: captain call (seq 1, recorded 0m ago): needs the captain's login - then, newer: PR ready" \
-    "a main row that collapsed a captain row hid the captain's question or put it after the newer summary"
+  assert_contains "$drained" "[seq 1, captain call, recorded 0m ago] login: needs the captain's login
+[seq 3, newest of 2 for this task, recorded 0m ago] login: PR ready" \
+    "a main row that collapsed a captain row hid the captain's question or put it after the newer result"
+  assert_not_contains "$drained" "truncated" "rows that fit their caps were reported as truncated"
   assert_not_contains "$drained" "main to act, not a captain call] login:" \
     "a task carrying a captain row was labelled main's alone"
   assert_contains "$drained" "[seq 4, newest of 2 for this task, recorded 0m ago, main to act, not a captain call] landing: local branch ready to land" \
     "a task whose collapsed rows are all main lost its main label"
-  pass "a main row that collapses a captain row keeps the captain's question first on the line"
+  pass "a main row that collapses a captain row keeps the captain's question as its own row first"
+}
+
+# The out-of-order case: an older captain question long enough to fill a line
+# on its own, then a newer ready-to-land result for the same task. Squeezed
+# onto one capped line, the question would push the result off the screen
+# while the acknowledgement still covered it. As two rows, each under its own
+# 599-byte cap, both survive; the cut row ends in the truncation marker, and
+# the acknowledgement names it by seq with the lookup that reads it in full.
+test_a_long_captain_question_does_not_evict_the_newer_result() {
+  local home drained question
+  home="$TMP_ROOT/drain-long-question"
+  mkdir -p "$home/state" "$home/config"
+  question="needs the captain's login $(printf 'x%.0s' $(seq 1 700))"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task login --verdict captain \
+    --summary "$question" >/dev/null || fail "fixture: could not record a captain outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task login --verdict main \
+    --summary 'PR ready to land' >/dev/null || fail "fixture: could not record a main outcome"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_re "^\[seq 1, captain call, recorded 0m ago\] login: needs the captain's login x+ \[truncated\]\$" <(printf '%s\n' "$drained") \
+    "the long captain question was not shown as its own cut row"
+  assert_contains "$drained" "[seq 2, newest of 2 for this task, recorded 0m ago] login: PR ready to land" \
+    "the newer ready-to-land result was pushed off the screen by the long question"
+  printf '%s\n' "$drained" | LC_ALL=C awk '/^\[seq [0-9]+[^]]*\] login:/ && length($0) > 599 { bad = 1 } END { exit bad }' \
+    || fail "a row exceeded its own 599-byte cap: $drained"
+  assert_contains "$drained" "BRANCH OUTCOMES: 1 row(s) above were truncated (seq 1); read them in full with bin/fm-branch-outcome.sh lookup --seqs 1 before acknowledging" \
+    "the acknowledgement did not name the truncated row"
+  assert_contains "$drained" "mark-processed --through 2;" "the acknowledgement did not cover both rows"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" lookup --seqs 1 | grep -qF "$question" \
+    || fail "the named lookup did not return the full question"
+  pass "a long captain question and a newer result both survive as rows, and the truncated one is named"
 }
 
 fm_test_run \
@@ -657,6 +689,7 @@ fm_test_run \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
   test_branch_outcomes_only_on_a_host_home_off_pi \
   test_a_main_row_collapsing_a_captain_row_keeps_the_captain_question \
+  test_a_long_captain_question_does_not_evict_the_newer_result \
   test_a_main_outcome_reaches_main_without_counting_as_a_captain_call \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_collapse_repeated_captain_outcomes_per_task \

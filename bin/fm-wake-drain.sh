@@ -589,13 +589,16 @@ EOF
 #     come first and never wait behind routine ones; a line whose collapsed
 #     rows are all verdict main says so, so a main outcome never reads as a
 #     captain call, and a line whose newest row is main but which collapses a
-#     captain row prints that captain row's own question first and the newer
-#     summary after it, so the question survives the line cap and is never
+#     captain row prints that captain row's own question as its own row
+#     first and the newer result as a second row, each under its own line
+#     cap, so neither can push the other out. A row cut by its cap ends in
+#     the truncation marker, and the acknowledgement names every truncated
+#     row's seq with the lookup that reads it in full, so no row is
 #     acknowledged unread.
 #     The rest of this paragraph says "captain" for both. Every
 #     unprocessed captain row is presented on every drain until main
-#     acknowledges it, collapsed to one line per task: the task's newest
-#     presented summary, naming how many unprocessed captain outcomes it
+#     acknowledges it, collapsed to one line per task (plus the question row
+#     above): the task's newest presented summary, naming how many unprocessed captain outcomes it
 #     carries, with tasks in order of their oldest unprocessed row. The byte
 #     cap presents only the oldest contiguous run of captain rows and counts
 #     the newer ones it holds back, so the printed bin/fm-branch-outcome.sh
@@ -626,9 +629,10 @@ EOF
 # outcomes a later drain would present again.
 print_branch_outcomes_section() {
   local config rows through captain routine line seq task task_line target i
+  local question_seq question_line entry entry_bytes entry_truncated truncated
   local text='' used=0 shown=0 held=0 bytes item_bytes=600 captain_bytes=4000 routine_bytes=2000
   local routine_lines='' routine_count=0 routine_shown=0
-  local -a captain_tasks=() captain_lines=() captain_line_bytes=()
+  local -a captain_tasks=() captain_lines=() captain_line_bytes=() captain_truncated=()
   [ "$ACTOR" = main ] || return 0
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   fm_supervision_host_outcomes_drained "$config" || return 0
@@ -649,7 +653,8 @@ print_branch_outcomes_section() {
       | reduce .[] as $r ({count: {}, captain: {}, lines: []};
           .count[$r.task] += 1
           | if $r.verdict != "main" then .captain[$r.task] = $r else . end
-          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago\(if .captain[$r.task] == null then ", main to act, not a captain call" else "" end)] \($r.task): \(if $r.verdict == "main" and .captain[$r.task] != null then "captain call (seq \(.captain[$r.task].seq), recorded \(.captain[$r.task].recordedAgo) ago): \(.captain[$r.task].summary | gsub("[\t\n\r]"; " ")) - then, newer: " else "" end)\($r.summary | gsub("[\t\n\r]"; " "))"])
+          | .captain[$r.task] as $c
+          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago\(if $c == null then ", main to act, not a captain call" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))\(if $r.verdict == "main" and $c != null then "\t\($c.seq)\t[seq \($c.seq), captain call, recorded \($c.recordedAgo) ago] \($r.task): \($c.summary | gsub("[\t\n\r]"; " "))" else "" end)"])
       | .lines[]' 2>/dev/null) \
     || ! routine=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "routine" and .silent != true)) | sort_by(.seq) | reverse | .[]
       | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
@@ -659,24 +664,38 @@ print_branch_outcomes_section() {
   fi
 
   target=0
-  while IFS=$(printf '\t') read -r seq task task_line; do
+  while IFS=$(printf '\t') read -r seq task task_line question_seq question_line; do
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     if [ "$held" -gt 0 ]; then
       held=$((held + 1))
       continue
     fi
+    # The captain's question and the newer result are two rows, each under its
+    # own line cap, so neither can push the other off the screen.
+    entry='' entry_bytes=0 entry_truncated=''
+    if [ -n "$question_line" ]; then
+      cap_outcome_line "$question_line" $((item_bytes - 1))
+      entry="$OUTCOME_LINE
+"
+      entry_bytes=$((OUTCOME_LINE_BYTES + 1))
+      [ "$OUTCOME_LINE" = "$question_line" ] || entry_truncated=$question_seq
+    fi
     cap_outcome_line "$task_line" $((item_bytes - 1))
+    entry=$entry$OUTCOME_LINE
+    entry_bytes=$((entry_bytes + OUTCOME_LINE_BYTES + 1))
+    [ "$OUTCOME_LINE" = "$task_line" ] || entry_truncated="${entry_truncated:+$entry_truncated,}$seq"
     i=0
     while [ "$i" -lt "$shown" ] && [ "${captain_tasks[$i]}" != "$task" ]; do i=$((i + 1)); done
-    bytes=$(( used + OUTCOME_LINE_BYTES + 1 ))
-    [ "$i" -eq "$shown" ] || bytes=$(( bytes - captain_line_bytes[i] - 1 ))
+    bytes=$(( used + entry_bytes ))
+    [ "$i" -eq "$shown" ] || bytes=$(( bytes - captain_line_bytes[i] ))
     if [ "$bytes" -gt "$captain_bytes" ]; then
       held=1
       continue
     fi
     captain_tasks[i]=$task
-    captain_lines[i]=$OUTCOME_LINE
-    captain_line_bytes[i]=$OUTCOME_LINE_BYTES
+    captain_lines[i]=$entry
+    captain_line_bytes[i]=$entry_bytes
+    captain_truncated[i]=$entry_truncated
     [ "$i" -lt "$shown" ] || shown=$((shown + 1))
     used=$bytes
     target=$seq
@@ -684,7 +703,7 @@ print_branch_outcomes_section() {
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    text="BRANCH OUTCOMES (outcomes the supervision session recorded for you to act on, one line per task, oldest first; verdict main is firstmate's own to act on and never a question for the captain, while verdict captain names one of the captain's own categories; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
+    text="BRANCH OUTCOMES (outcomes the supervision session recorded for you to act on, one line per task, oldest first, with a task's still-open captain call as its own row above a newer result; verdict main is firstmate's own to act on and never a question for the captain, while verdict captain names one of the captain's own categories; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
 "
     for line in "${captain_lines[@]}"; do
       text="$text$line
@@ -692,6 +711,15 @@ ROWS
     done
     [ "$held" -eq 0 ] || text="${text}BRANCH OUTCOMES: $held newer outcome(s) to act on are held back (byte cap); they follow on the next drain once these are acknowledged
 "
+    truncated=''
+    for line in "${captain_truncated[@]}"; do
+      [ -z "$line" ] || truncated="${truncated:+$truncated,}$line"
+    done
+    if [ -n "$truncated" ]; then
+      line=${truncated//[!,]/}
+      text="${text}BRANCH OUTCOMES: $(( ${#line} + 1 )) row(s) above were truncated (seq $truncated); read them in full with bin/fm-branch-outcome.sh lookup --seqs $truncated before acknowledging, because a truncated row has not been read
+"
+    fi
     text="${text}BRANCH OUTCOMES: after processing them run bin/fm-branch-outcome.sh mark-processed --through $target; until then every drain presents them again
 "
   fi
