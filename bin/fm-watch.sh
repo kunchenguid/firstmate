@@ -210,6 +210,7 @@
 set -u
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -313,9 +314,11 @@ WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
   stat_devino() { /usr/bin/stat -f '%d %i' "$1" 2>/dev/null; }  # device + inode pair
+  stat_devino_size() { /usr/bin/stat -f '%d %i %z' "$1" 2>/dev/null; }
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
   stat_devino() { stat -c '%d %i' "$1" 2>/dev/null; }
+  stat_devino_size() { stat -c '%d %i %s' "$1" 2>/dev/null; }
 fi
 # Record the held state directory's device+inode now that stat_devino exists.
 # The per-poll teardown check re-stats the path instead of comparing /dev/fd/6
@@ -328,6 +331,7 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
+CLAIMED_RUN_DELAY=${FM_CLAIMED_RUN_DELAY:-180}
 # The liveness beacon is touched once per cycle, immediately before the
 # terminal wait below (event_wait_or_sleep) as well as at the top of the next
 # one, so a healthy cycle's beacon can legitimately age up to POLL seconds
@@ -3974,7 +3978,118 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
+  claimed_run_has_appended_bytes() {
+    local file=$1 offset=$2 discarded next
+    exec 8< "$file" || return 0
+    if [ "$offset" -gt 0 ]; then
+      IFS= read -r -d '' -n "$offset" discarded <&8 || { exec 8<&-; return 0; }
+    fi
+    IFS= read -r -d '' -n 1 next <&8
+    local result=$?
+    exec 8<&-
+    [ "$result" -eq 0 ]
+  }
+
+  # A worker's routine validation-started line is not itself an actionable wake.
+  # Remember each distinct claim and verify it after a bounded delay on this poll loop.
+  claimed_run_tick() {
+  local LC_ALL=C f task meta wt branch claim marker seen cursor stamp recorded_branch recorded_claim runs line line_verb line_note
+  local stat_result dev ino size cursor_dev cursor_ino cursor_size cursor_claim offset appended consumed line_end identity
+  case "$CLAIMED_RUN_DELAY" in ''|*[!0-9]*) return 0 ;; esac
+  for f in "$STATE"/*.status; do
+    [ -f "$f" ] || continue
+    task=${f##*/}; task=${task%.status}
+    marker="$STATE/.claimed-run-$task"
+    seen="$STATE/.claimed-run-seen-$task"
+    cursor="$STATE/.claimed-run-cursor-$task"
+    identity="$STATE/.claimed-run-identity-$task"
+    cursor_dev=
+    cursor_ino=
+    cursor_size=
+    cursor_claim=
+    if [ -f "$cursor" ]; then
+      read -r cursor_dev cursor_ino cursor_size cursor_claim < "$cursor"
+      case "$cursor_dev:$cursor_ino:$cursor_size" in *[!0-9:]*) cursor_dev= ;; esac
+    fi
+    if [ -n "$cursor_dev" ] && [ -f "$identity" ] && [ "$f" -ef "$identity" ] && [ ! "$f" -nt "$cursor" ] \
+      && ! claimed_run_has_appended_bytes "$f" "$cursor_size"; then
+      dev=$cursor_dev; ino=$cursor_ino; size=$cursor_size
+      offset=$cursor_size; claim=$cursor_claim; stat_result=
+    else
+      stat_result=$(stat_devino_size "$f") || continue
+      read -r dev ino size <<EOF
+$stat_result
+EOF
+      case "$dev:$ino:$size" in *[!0-9:]*) continue ;; esac
+      offset=0
+      if [ "$cursor_dev:$cursor_ino" = "$dev:$ino" ] && [ -n "$cursor_size" ] && [ "$size" -ge "$cursor_size" ]; then
+        offset=$cursor_size
+      elif [ -n "$cursor_dev" ]; then
+        rm -f "$marker" "$seen"
+        cursor_claim=
+      fi
+      claim=$cursor_claim
+    fi
+    if [ -n "$stat_result" ]; then
+      if [ "$size" -gt "$offset" ]; then
+        appended=$(tail -c +"$((offset + 1))" "$f"; printf '\001') || continue
+        appended=${appended%$'\001'}
+        consumed=0
+        while [[ "$appended" == *$'\n'* ]]; do
+          line=${appended%%$'\n'*}
+          appended=${appended#*$'\n'}
+          consumed=$((consumed + ${#line} + 1))
+          status_line_verb "$line" line_verb
+          status_line_note "$line" line_note
+          if [ "$line_verb" = working ] && [ "$line_note" = 'validation started' ]; then
+            claim=$((offset + consumed))
+          fi
+        done
+        offset=$((offset + consumed))
+      fi
+      cursor_claim=$claim
+      printf '%s %s %s %s\n' "$dev" "$ino" "$offset" "$cursor_claim" > "$cursor"
+      rm -f "$identity"
+      ln "$f" "$identity" 2>/dev/null || :
+    fi
+    [ -n "$claim" ] || [ -f "$marker" ] || continue
+    meta="$STATE/$task.meta"
+    wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    [ -d "$wt" ] || continue
+    branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    [ -n "$branch" ] || continue
+    stamp=$(sed -n '1p' "$marker" 2>/dev/null || true)
+    recorded_branch=$(sed -n '2p' "$marker" 2>/dev/null || true)
+    recorded_claim=$(sed -n '3p' "$marker" 2>/dev/null || true)
+    if [ -n "$claim" ] && { [ "$recorded_branch" != "$branch" ] || [ "$recorded_claim" != "$claim" ]; }; then
+      { date +%s; printf '%s\n%s\n' "$branch" "$claim"; } > "$marker"
+      stamp=$(sed -n '1p' "$marker")
+      recorded_branch=$branch
+      recorded_claim=$claim
+    fi
+    [ -n "$recorded_claim" ] && [ "$recorded_branch" = "$branch" ] || continue
+    if [ "$(sed -n '1p' "$seen" 2>/dev/null || true)" = "$branch:$recorded_claim" ]; then
+      rm -f "$marker"
+      continue
+    fi
+    case "$stamp" in ''|*[!0-9]*) rm -f "$marker"; continue ;; esac
+    [ "$(( $(date +%s) - stamp ))" -ge "$CLAIMED_RUN_DELAY" ] || continue
+    runs=$(fm_nm_run_checked "$wt" 10 runs --limit 2147483647) || continue
+    if ! printf '%s\n' "$runs" | awk -v branch="$branch" '$2 == branch { found=1 } END { exit !found }'; then
+      fm_wake_append check "claimed-run-$task" "check: validation claim has no run for $branch (worker reported validation started)" || return 1
+      printf '%s\n' "$branch:$recorded_claim" > "$seen"
+      rm -f "$marker"
+      wake "check: validation claim has no run for $branch (worker reported validation started)"
+    else
+      printf '%s\n' "$branch:$recorded_claim" > "$seen"
+      rm -f "$marker"
+    fi
+  done
+  }
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
+  claimed_run_tick || { echo 'watcher: claimed-run verification failed' >&2; exit 1; }
+
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
   # after the signal scan would be starved whenever a chatty sibling crewmate
