@@ -287,6 +287,16 @@ SH
 exit 0
 SH
   chmod +x "$CASE_BIN/uname" "$CASE_BIN/launchctl" "$CASE_BIN/dscl" "$CASE_BIN/tasks-axi" "$CASE_BIN/treehouse" "$CASE_BIN/claude"
+  # A ready account has completed Claude Code's first-run onboarding; the
+  # onboarding-gate cases below override or remove this.
+  printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+  # The doctor no longer reads this home's harness config for the onboarding
+  # gate: that gate is driven by the --harness the parent passes and by
+  # config/claude-account. Cases pass --harness explicitly where the gate must
+  # apply; the crew-harness=claude line here lets a case prove the remote file is
+  # ignored.
+  mkdir -p "$CASE_PROJECT_HOME/config"
+  printf 'claude\n' > "$CASE_PROJECT_HOME/config/crew-harness"
   cat > "$CASE_BIN/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -300,6 +310,7 @@ doctor() {
   set +e
   DOCTOR_OUT=$(
     HOME="$CASE_HOME" \
+    CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_HOME="$CASE_PROJECT_HOME" \
     PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH" \
     FM_FAKE_STATE="$CASE_STATE" \
@@ -895,4 +906,381 @@ assert_contains "$DOCTOR_OUT" 'check entrypoint-link=human:' "an operator-owned 
   || fail "--fix overwrote a file it did not create"
 unset FM_ROOT_OVERRIDE
 pass "the entrypoint symlink is recreated when absent and never overwritten when operator-owned"
+
+# --- Claude Code first-run onboarding gates readiness ------------------------
+
+# Parent passes claude, no pin, onboarded: the gate applies (because --harness is
+# claude) and the completed record makes the host ready.
+new_case Darwin with-herdr gui
+doctor --harness claude --fix
+expect_code 0 "$DOCTOR_RC" "a host with completed Claude onboarding was left unready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=ok:' "completed Claude onboarding was not recognized"
+pass "a completed Claude Code onboarding is recognized as ready"
+
+# An incomplete onboarding is a human gap --fix must never answer, even on an
+# otherwise-ready host. --harness claude combined with --fix must give the same
+# human verdict and never answer onboarding, proving the new argument composes
+# with the existing flag.
+new_case Darwin with-herdr gui
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --harness claude --fix
+expect_code 1 "$DOCTOR_RC" "incomplete Claude onboarding was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "incomplete Claude onboarding was not tagged human"
+assert_contains "$DOCTOR_OUT" 'action: claude-onboarding:' "the onboarding gap came with no operator action"
+assert_contains "$DOCTOR_OUT" "run 'claude'" "the onboarding action did not name the interactive step"
+assert_not_contains "$DOCTOR_OUT" 'fix claude-onboarding=applied' "--fix answered Claude onboarding for the operator"
+[ "$(cat "$CASE_HOME/.claude.json")" = '{"hasCompletedOnboarding": false}' ] \
+  || fail "the doctor rewrote the Claude onboarding config"
+assert_no_dangerous_calls "the onboarding gap reached for auto-login, FileVault, or the keychain"
+pass "incomplete Claude onboarding is a human gap --fix never answers"
+
+# A fresh host that never ran claude has no record at all; the doctor reports it
+# and never creates the record on the operator's behalf.
+new_case Darwin with-herdr gui
+rm -f "$CASE_HOME/.claude.json"
+doctor --harness claude
+expect_code 1 "$DOCTOR_RC" "a host with no Claude onboarding record was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a missing onboarding record was not tagged human"
+assert_absent "$CASE_HOME/.claude.json" "the doctor created a Claude onboarding record"
+pass "a missing Claude onboarding record is a human gap the doctor never creates"
+
+# The default flow the current head gets wrong: the parent passes --harness
+# claude for a freshly provisioned remote home whose config/ is empty (no
+# harness file at all) and whose account is not onboarded. The gate must apply
+# from the passed harness alone and report a human gap.
+new_case Darwin with-herdr gui
+rm -f "$CASE_PROJECT_HOME/config/crew-harness" "$CASE_PROJECT_HOME/config/secondmate-harness"
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --harness claude --fix
+expect_code 1 "$DOCTOR_RC" "a fresh empty-config home passed --harness claude was reported ready with onboarding incomplete"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a passed claude harness did not gate a fresh empty-config home"
+assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "a passed claude harness was ignored on a fresh empty-config home"
+pass "a passed claude harness gates onboarding even when the remote home config is empty"
+
+# When claude is not installed at all the onboarding gate does not apply even
+# when the parent passes --harness claude: there is no Claude first run to stall
+# on, so the not-installed short-circuit wins over the passed harness.
+new_case Darwin with-herdr gui
+rm -f "$CASE_BIN/claude" "$CASE_HOME/.claude.json"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE_BIN/codex"
+chmod +x "$CASE_BIN/codex"
+doctor --harness claude --fix
+expect_code 0 "$DOCTOR_RC" "a host with no claude binary was blocked on claude onboarding"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "claude onboarding was checked when claude was not installed"
+pass "claude onboarding does not apply when claude is not installed"
+
+# Parent passes a non-claude harness and no account is pinned: the launch never
+# starts Claude, so incomplete onboarding is a non-blocking note. The remote
+# home's own crew-harness=claude line (from new_case) must be ignored, proving
+# the gate reads the passed harness rather than the remote config.
+new_case Darwin with-herdr gui
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --harness codex --fix
+expect_code 0 "$DOCTOR_RC" "an un-onboarded host whose launch selects codex was blocked on claude onboarding"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "a codex launch was gated on claude onboarding"
+assert_contains "$DOCTOR_OUT" 'this launch selects the codex harness' "the skip reason did not name the passed harness"
+assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a codex launch was reported as a human onboarding gap"
+pass "a passed non-claude harness skips claude onboarding and ignores the remote home crew-harness"
+
+# A host without perl still skips a non-Claude launch when no account is pinned.
+# The account resolver shells out to perl to read config/claude-account, so an
+# absent pin must never reach the resolver; otherwise a missing perl surfaces as
+# an unresolvable-pin error and blocks an otherwise-ready Codex launch. claude is
+# installed and un-onboarded to prove the skip comes from the harness-and-pin
+# decision, not from the not-installed short-circuit. The fake perl exits 127,
+# exactly as a missing command would, so reaching the resolver at all would be a
+# human gap and fail this case.
+new_case Darwin with-herdr gui
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+cat > "$CASE_BIN/perl" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+chmod +x "$CASE_BIN/perl"
+doctor --harness codex --fix
+expect_code 0 "$DOCTOR_RC" "a codex launch on a host without perl and no account pin was blocked"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "a codex launch without perl was gated on claude onboarding"
+assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a missing perl with no account pin was reported as an onboarding gap"
+pass "with no account pin the doctor never calls the perl resolver, so a missing perl cannot block a non-Claude launch"
+
+# No harness is passed at all (a manual or seed run) and no account is pinned:
+# the gate has nothing to key on and falls back to the account pin alone, so it
+# skips. The remote home's crew-harness=claude line must not resurrect the gate.
+new_case Darwin with-herdr gui
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "an un-onboarded host with no passed harness and no pin was blocked on claude onboarding"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "a run with no passed harness was gated on claude onboarding"
+assert_contains "$DOCTOR_OUT" 'no launch harness was passed' "the skip reason did not explain the missing harness"
+assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a run with no passed harness was reported as a human onboarding gap"
+pass "no passed harness and no pin skips claude onboarding and leaves it to the spawn-time check"
+
+# Greptile's example: the parent passes --harness claude while the remote home's
+# own crew-harness names codex. The passed harness wins, so the un-onboarded host
+# is a human gap rather than the skip the old remote-file gate produced.
+new_case Darwin with-herdr gui
+printf 'codex\n' > "$CASE_PROJECT_HOME/config/crew-harness"
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --harness claude --fix
+expect_code 1 "$DOCTOR_RC" "a claude launch against a codex remote home was reported ready with onboarding incomplete"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a passed claude harness did not gate a host whose remote crew-harness is codex"
+assert_not_contains "$DOCTOR_OUT" 'check claude-onboarding=skip:' "the remote crew-harness=codex overrode the passed claude harness"
+pass "the passed claude harness gates onboarding even when the remote home crew-harness is codex"
+
+# --- onboarding is checked against the account config/claude-account selects --
+
+# A home can pin another Claude account; fm-spawn.sh launches that account with
+# CLAUDE_CONFIG_DIR=<root>, so onboarding must be read from <root>/.claude.json,
+# not the default $HOME store. The home pin lives in this home's config dir,
+# which the doctor sees as $FM_HOME/config.
+
+# The selected account is onboarded while the default is not: the host is ready,
+# because the launch reads the selected account's store.
+new_case Darwin with-herdr gui
+SELECTED="$CASE_DIR/selected"
+mkdir -p "$SELECTED" "$CASE_PROJECT_HOME/config"
+printf '%s\n' "$SELECTED" > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": true}\n' > "$SELECTED/.claude.json"
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a selected onboarded account was not reported ready while the default was not onboarded"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=ok:' "the selected account's completed onboarding was not recognized"
+assert_contains "$DOCTOR_OUT" "config/claude-account ($SELECTED)" "the ready line did not name the selected account"
+pass "the doctor checks the account config/claude-account selects, not the default store"
+
+# The selected account is not onboarded while the default is: the host stalls on
+# launch, so this is a human gap naming the selected account and its command. A
+# non-claude --harness is passed to prove an account pin gates the host on its
+# own, independent of the harness the launch selects (the pin-OR-harness rule).
+new_case Darwin with-herdr gui
+SELECTED="$CASE_DIR/selected"
+mkdir -p "$SELECTED" "$CASE_PROJECT_HOME/config"
+printf '%s\n' "$SELECTED" > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": false}\n' > "$SELECTED/.claude.json"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+doctor --harness codex --fix
+expect_code 1 "$DOCTOR_RC" "an un-onboarded selected account was reported ready because the default was onboarded"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the selected account's incomplete onboarding was not tagged human"
+assert_contains "$DOCTOR_OUT" "config/claude-account ($SELECTED)" "the onboarding gap did not name the selected account"
+assert_contains "$DOCTOR_OUT" "action: claude-onboarding:" "the onboarding gap came with no operator action"
+assert_contains "$DOCTOR_OUT" "CLAUDE_CONFIG_DIR='$SELECTED' claude" "the onboarding action did not give the shell-quoted command for the selected account"
+assert_not_contains "$DOCTOR_OUT" 'fix claude-onboarding=applied' "--fix answered onboarding for the selected account"
+pass "an un-onboarded selected account is a human gap even when the default account is onboarded and a non-claude harness is passed"
+
+# No account pinned, parent passes claude: the doctor keeps today's default-store
+# behavior and the plain 'claude' operator step.
+new_case Darwin with-herdr gui
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --harness claude --fix
+expect_code 1 "$DOCTOR_RC" "an un-onboarded default account with no pin was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the default account's incomplete onboarding was not tagged human"
+assert_contains "$DOCTOR_OUT" "run 'claude'" "the default onboarding action changed when no account was pinned"
+assert_not_contains "$DOCTOR_OUT" 'config/claude-account (' "an unpinned host named a pinned account in the onboarding report"
+pass "with no account pinned the doctor keeps the default-store onboarding behavior"
+
+# Resolving and checking the selected account writes to no config.
+new_case Darwin with-herdr gui
+SELECTED="$CASE_DIR/selected"
+mkdir -p "$SELECTED" "$CASE_PROJECT_HOME/config"
+printf '%s\n' "$SELECTED" > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": false}\n' > "$SELECTED/.claude.json"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+PIN_BEFORE=$(cat "$CASE_PROJECT_HOME/config/claude-account")
+SELECTED_BEFORE=$(cat "$SELECTED/.claude.json")
+DEFAULT_BEFORE=$(cat "$CASE_HOME/.claude.json")
+doctor --fix
+[ "$(cat "$CASE_PROJECT_HOME/config/claude-account")" = "$PIN_BEFORE" ] \
+  || fail "the doctor rewrote config/claude-account"
+[ "$(cat "$SELECTED/.claude.json")" = "$SELECTED_BEFORE" ] \
+  || fail "the doctor rewrote the selected account's onboarding config"
+[ "$(cat "$CASE_HOME/.claude.json")" = "$DEFAULT_BEFORE" ] \
+  || fail "the doctor rewrote the default account's onboarding config"
+assert_no_dangerous_calls "the selected-account onboarding check reached for auto-login, FileVault, or the keychain"
+pass "resolving and checking the selected account writes to no config"
+
+# A pin naming a missing directory cannot be resolved; the real launch refuses
+# it, so the doctor reports a human gap rather than silently reading the default.
+new_case Darwin with-herdr gui
+mkdir -p "$CASE_PROJECT_HOME/config"
+printf '%s\n' "$CASE_DIR/does-not-exist" > "$CASE_PROJECT_HOME/config/claude-account"
+doctor
+expect_code 1 "$DOCTOR_RC" "a pin naming a missing directory was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "an unresolvable account pin was not tagged human"
+assert_contains "$DOCTOR_OUT" 'config/claude-account' "the unresolvable-pin gap did not name the pin"
+assert_contains "$DOCTOR_OUT" 'action: claude-onboarding:' "the unresolvable-pin gap came with no operator action"
+pass "a config/claude-account pin that cannot be resolved is a human gap, not a silent default-store check"
+
+# A broken symlink at config/claude-account is a present-but-unresolvable pin:
+# -e is false for it but -L is true, so the doctor must still reach the resolver
+# rather than reporting readiness. fm_worker_account_read lstats the pin, so the
+# real launch sees the link and refuses; the doctor reports the same human gap.
+# The default account is onboarded to prove the gap comes from the pin, not the
+# default store, and --harness claude is passed so the harness alone cannot be
+# what gates the host.
+new_case Darwin with-herdr gui
+mkdir -p "$CASE_PROJECT_HOME/config"
+ln -s "$CASE_DIR/does-not-exist" "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+doctor --harness claude
+expect_code 1 "$DOCTOR_RC" "a broken-symlink account pin was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "a broken-symlink account pin was not tagged human"
+assert_contains "$DOCTOR_OUT" 'config/claude-account' "the broken-symlink-pin gap did not name the pin"
+assert_contains "$DOCTOR_OUT" 'action: claude-onboarding:' "the broken-symlink-pin gap came with no operator action"
+pass "a broken-symlink config/claude-account pin reaches the resolver and is a human gap, not a ready host"
+
+# A pinned account directory with a space in its path still yields an operator
+# command a shell parses as one CLAUDE_CONFIG_DIR assignment: fm-spawn.sh quotes
+# it the same way, so an unquoted path would run the word after the space as a
+# command instead. Parse the command the way the operator would, not by grepping.
+new_case Darwin with-herdr gui
+SELECTED="$CASE_DIR/Claude Accounts/work"
+mkdir -p "$SELECTED" "$CASE_PROJECT_HOME/config"
+printf '%s\n' "$SELECTED" > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": false}\n' > "$SELECTED/.claude.json"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+doctor
+expect_code 1 "$DOCTOR_RC" "an un-onboarded selected account with a space in its path was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the spaced-path account's incomplete onboarding was not tagged human"
+action_line=$(printf '%s\n' "$DOCTOR_OUT" | grep 'action: claude-onboarding:') \
+  || fail "the spaced-path onboarding gap came with no operator action"
+# The command runs between "run " and " once interactively" in the prose.
+suggested_cmd=${action_line#*run }
+suggested_cmd=${suggested_cmd%% once interactively*}
+parsed_config=$(
+  # Shadow the real binary so eval exercises the assignment, not a launch.
+  # shellcheck disable=SC2329 # Invoked indirectly by the eval below.
+  claude() { printf '%s\n' "${CLAUDE_CONFIG_DIR:-}"; }
+  eval "$suggested_cmd"
+) || fail "the suggested command did not parse as a shell command: $suggested_cmd"
+[ "$parsed_config" = "$SELECTED" ] \
+  || fail "the suggested command set CLAUDE_CONFIG_DIR to '$parsed_config', not the full spaced path '$SELECTED'"
+pass "a pinned account path with a space produces a copy-pasteable operator command"
+
+# A pin naming the ordinary account launches with CLAUDE_CONFIG_DIR unset, so the
+# launch reads $HOME/.claude.json even when CLAUDE_CONFIG_DIR is exported to
+# another store. The check must read the same $HOME store: an un-onboarded
+# CLAUDE_CONFIG_DIR store must not make an onboarded $HOME host a gap.
+new_case Darwin with-herdr gui
+OTHER_CONFIG="$CASE_DIR/exported-config"
+mkdir -p "$OTHER_CONFIG" "$CASE_PROJECT_HOME/config"
+printf 'ordinary\n' > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": false}\n' > "$OTHER_CONFIG/.claude.json"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+export FM_TEST_CLAUDE_CONFIG_DIR="$OTHER_CONFIG"
+doctor --fix
+unset FM_TEST_CLAUDE_CONFIG_DIR
+expect_code 0 "$DOCTOR_RC" "a pinned-ordinary host read the exported CLAUDE_CONFIG_DIR store instead of \$HOME"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=ok:' "the pinned-ordinary account's onboarded \$HOME store was not recognized"
+assert_not_contains "$DOCTOR_OUT" 'config/claude-account (' "the ordinary account was reported as a pinned account directory"
+pass "a pin naming the ordinary account reads \$HOME/.claude.json, not an exported CLAUDE_CONFIG_DIR"
+
+# A pin naming the ordinary account whose $HOME store is not onboarded is a human
+# gap, and its action must shed CLAUDE_CONFIG_DIR the same way the launch does
+# (env -u CLAUDE_CONFIG_DIR claude), so an operator whose shell exports
+# CLAUDE_CONFIG_DIR onboards $HOME rather than that other store. It must not
+# suggest a CLAUDE_CONFIG_DIR=<root> form, which belongs to a pinned directory.
+new_case Darwin with-herdr gui
+mkdir -p "$CASE_PROJECT_HOME/config"
+printf 'ordinary\n' > "$CASE_PROJECT_HOME/config/claude-account"
+printf '{"hasCompletedOnboarding": false}\n' > "$CASE_HOME/.claude.json"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "an un-onboarded pinned-ordinary host was reported ready"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the pinned-ordinary account's incomplete onboarding was not tagged human"
+assert_contains "$DOCTOR_OUT" 'action: claude-onboarding:' "the pinned-ordinary onboarding gap came with no operator action"
+assert_contains "$DOCTOR_OUT" 'run env -u CLAUDE_CONFIG_DIR claude once interactively' "the pinned-ordinary action did not shed CLAUDE_CONFIG_DIR the way the launch does"
+assert_not_contains "$DOCTOR_OUT" 'CLAUDE_CONFIG_DIR=' "the pinned-ordinary action suggested a CLAUDE_CONFIG_DIR=<root> assignment"
+assert_not_contains "$DOCTOR_OUT" 'fix claude-onboarding=applied' "--fix answered onboarding for the ordinary account"
+pass "an un-onboarded pinned-ordinary account sheds CLAUDE_CONFIG_DIR in its operator command"
+
+# The unpinned path is unchanged: with no pin but a passed claude harness it still
+# honors CLAUDE_CONFIG_DIR as the default store, so an un-onboarded
+# CLAUDE_CONFIG_DIR store is a gap even when $HOME is onboarded. This is the exact
+# mirror of the pinned-ordinary case above.
+new_case Darwin with-herdr gui
+OTHER_CONFIG="$CASE_DIR/exported-config"
+mkdir -p "$OTHER_CONFIG"
+printf '{"hasCompletedOnboarding": false}\n' > "$OTHER_CONFIG/.claude.json"
+printf '{"hasCompletedOnboarding": true}\n' > "$CASE_HOME/.claude.json"
+export FM_TEST_CLAUDE_CONFIG_DIR="$OTHER_CONFIG"
+doctor --harness claude
+unset FM_TEST_CLAUDE_CONFIG_DIR
+expect_code 1 "$DOCTOR_RC" "an unpinned host stopped honoring the exported CLAUDE_CONFIG_DIR store"
+assert_contains "$DOCTOR_OUT" 'check claude-onboarding=human:' "the unpinned CLAUDE_CONFIG_DIR store's incomplete onboarding was not tagged human"
+assert_contains "$DOCTOR_OUT" "run 'claude'" "the unpinned onboarding action changed"
+assert_not_contains "$DOCTOR_OUT" 'config/claude-account (' "an unpinned host named a pinned account"
+pass "with no pin the default-store path still honors CLAUDE_CONFIG_DIR unchanged"
+
+# --- the argument parser composes --harness with the existing flags ----------
+
+# --harness with no value is a usage error with the same exit code as any other
+# bad argument, and an unknown argument still goes to usage. no-args, --fix, and
+# --worker-tool-probe behavior is pinned by the cases above and the worker probe.
+new_case Darwin with-herdr gui
+doctor --harness
+expect_code 2 "$DOCTOR_RC" "--harness with no value did not fail as a usage error"
+doctor --bogus-flag
+expect_code 2 "$DOCTOR_RC" "an unknown argument did not fail as a usage error"
+doctor --harness claude --bogus-flag
+expect_code 2 "$DOCTOR_RC" "an unknown argument after --harness did not fail as a usage error"
+pass "the argument parser rejects a valueless --harness and unknown arguments with the usage exit code"
+
+# --- the readiness library forwards the harness to the doctor ----------------
+
+# bin/fm-remote-readiness-lib.sh must pass --harness on every doctor invocation
+# so a dropped argument cannot silently reopen the pin-only gating bug. Drive the
+# real library against a fake fm-on.sh that records the argv of each call.
+READINESS_BIN="$TMP_ROOT/readiness-bin"
+mkdir -p "$READINESS_BIN"
+cat > "$READINESS_BIN/fm-on.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FORWARD_LOG"
+exit "${FM_FAKE_ON_RC:-0}"
+SH
+chmod +x "$READINESS_BIN/fm-on.sh"
+# The fake fm-on.sh reads these from its environment; export once and vary the
+# values per scenario in the parent so the subshells below only source and call.
+export FM_FORWARD_LOG FM_FAKE_ON_RC
+
+# Ready on the first read-only run: exactly one doctor call, carrying --harness.
+FM_FORWARD_LOG="$TMP_ROOT/forward-ready.log"
+FM_FAKE_ON_RC=0
+: > "$FM_FORWARD_LOG"
+(
+  . "$ROOT/bin/fm-remote-readiness-lib.sh"
+  fm_remote_readiness_ensure "$READINESS_BIN" rsm1 claude
+) || fail "the readiness library did not report a ready host as ready"
+[ "$(grep -c . "$FM_FORWARD_LOG")" -eq 1 ] \
+  || fail "a ready host should spend exactly one doctor call: $(cat "$FM_FORWARD_LOG")"
+assert_grep 'fm-remote-doctor.sh --harness claude' "$FM_FORWARD_LOG" \
+  "the readiness library dropped --harness on the read-only doctor call"
+assert_no_grep '--fix' "$FM_FORWARD_LOG" "a ready host should not run the doctor with --fix"
+
+# A persistent gap: three doctor calls, all carrying --harness, exactly one --fix.
+FM_FORWARD_LOG="$TMP_ROOT/forward-gap.log"
+FM_FAKE_ON_RC=1
+: > "$FM_FORWARD_LOG"
+readiness_rc=0
+(
+  . "$ROOT/bin/fm-remote-readiness-lib.sh"
+  fm_remote_readiness_ensure "$READINESS_BIN" rsm1 claude
+) || readiness_rc=$?
+[ "$readiness_rc" -eq 1 ] || fail "a persistent gap should return 1, got $readiness_rc"
+[ "$(grep -c . "$FM_FORWARD_LOG")" -eq 3 ] \
+  || fail "a persistent gap should spend three doctor calls: $(cat "$FM_FORWARD_LOG")"
+[ "$(grep -c 'fm-remote-doctor.sh --harness claude' "$FM_FORWARD_LOG")" -eq 3 ] \
+  || fail "the readiness library dropped --harness on one of the gap-path doctor calls: $(cat "$FM_FORWARD_LOG")"
+[ "$(grep -c -- '--fix' "$FM_FORWARD_LOG")" -eq 1 ] \
+  || fail "the repair run should be the only --fix doctor call: $(cat "$FM_FORWARD_LOG")"
+
+# A seed preflight passes no harness: no --harness token reaches the doctor.
+FM_FORWARD_LOG="$TMP_ROOT/forward-seed.log"
+FM_FAKE_ON_RC=0
+: > "$FM_FORWARD_LOG"
+(
+  . "$ROOT/bin/fm-remote-readiness-lib.sh"
+  fm_remote_readiness_ensure "$READINESS_BIN" rsm1
+) || fail "the readiness library did not report a ready seed host as ready"
+assert_no_grep '--harness' "$FM_FORWARD_LOG" \
+  "a seed preflight with no harness must not pass an empty --harness to the doctor"
+pass "the readiness library forwards the passed harness on every doctor call and none when omitted"
 

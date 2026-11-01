@@ -149,7 +149,9 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   if [ -n "$remote_host" ]; then
     if [ "$mode" = full ]; then
       remote_rc=0
-      fm_remote_readiness_ensure "$FM_SM_LIVE_LIB_DIR" "$id" || remote_rc=$?
+      # An older meta may carry no harness; the empty value forwards no --harness
+      # and the doctor then gates Claude onboarding on the account pin alone.
+      fm_remote_readiness_ensure "$FM_SM_LIVE_LIB_DIR" "$id" "$harness" || remote_rc=$?
       if [ "$remote_rc" -eq 255 ]; then
         FM_SM_LIVE_REASON="remote host unavailable or endpoint state unknown; route preserved on $remote_host"
         return 0
