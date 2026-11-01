@@ -2,7 +2,7 @@
 # Who owns a Herdr session socket, and was that process born in the Aqua
 # login session?
 #
-# Source this file; it defines functions only. It is the single owner of the
+# Source this file for its functions and launch-agent label. It is the single owner of the
 # socket-owner discovery and birth classification shared by
 # bin/fm-remote-herdr-guard.sh (the launch agent's exec target) and
 # bin/fm-remote-doctor.sh (the readiness check for that session).
@@ -40,7 +40,11 @@
 #                an ancestor that is sshd or herdr's remote-client-bridge
 #                (matched on argv[0] and whole arguments only)
 #       launchd  XPC_SERVICE_NAME=<label>, with launchctl proving that job is
-#                the owner in gui/<uid> or is loaded only in that domain
+#                the owner in gui/<uid> or is loaded only in that domain; or
+#                a parent pid that launchctl reports as the running
+#                gui/<uid>/$FM_REMOTE_HERDR_AGENT_LABEL job, which is how
+#                bin/fm-remote-herdr-guard.sh starts its session-leader server
+#                (macOS resets XPC_SERVICE_NAME to 0 in that forked child)
 #       worker   FM_REMOTE_JOB_ACTIVE=1, with launchctl proving that
 #                dev.firstmate.remote-job is loaded only in gui/<uid>
 #       unknown  none of the above; XPC_SERVICE_NAME alone, including value 0,
@@ -49,6 +53,9 @@
 #     Succeeds only for launchd and worker. `unknown` is deliberately not
 #     Aqua: a server that cannot prove its birth is treated like a foreign one,
 #     because leaving it in place silently reproduces the keychain failure.
+
+# The Firstmate-owned launch agent that runs bin/fm-remote-herdr-guard.sh.
+FM_REMOTE_HERDR_AGENT_LABEL=dev.firstmate.herdr.fm-remote
 
 fm_remote_herdr_socket_owner() { # <socket-path>
   local socket=$1 real pid='' line candidates='' candidate cmd
@@ -102,16 +109,21 @@ fm_remote_herdr_process_ancestry() { # <pid>
   done
 }
 
-fm_remote_herdr_gui_job_proves_owner() { # <uid> <label> <pid>
+fm_remote_herdr_gui_job_pid_is() { # <uid> <label> <pid>
   local uid=$1 label=$2 pid=$3 job
-  [ -n "$label" ] && [ "$label" != 0 ] || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   job=$(launchctl print "gui/$uid/$label" 2>/dev/null) || return 1
-  if printf '%s\n' "$job" | awk -v expected="$pid" '
+  printf '%s\n' "$job" | awk -v expected="$pid" '
     $1 == "pid" && $2 == "=" && $3 == expected { found = 1 }
     END { exit found ? 0 : 1 }
-  '; then
-    return 0
-  fi
+  '
+}
+
+fm_remote_herdr_gui_job_proves_owner() { # <uid> <label> <pid>
+  local uid=$1 label=$2 pid=$3
+  [ -n "$label" ] && [ "$label" != 0 ] || return 1
+  launchctl print "gui/$uid/$label" >/dev/null 2>&1 || return 1
+  fm_remote_herdr_gui_job_pid_is "$uid" "$label" "$pid" && return 0
   ! launchctl print "user/$uid/$label" >/dev/null 2>&1
 }
 
@@ -122,7 +134,7 @@ fm_remote_herdr_gui_job_is_exclusive() { # <uid> <label>
 }
 
 fm_remote_herdr_owner_birth() { # <pid>
-  local pid=$1 env uid xpc_line label
+  local pid=$1 env uid xpc_line label ppid
   env=$(fm_remote_herdr_process_env "$pid") || { printf 'unknown\n'; return 0; }
   if printf '%s\n' "$env" | grep -q -E '^SSH_(CONNECTION|CLIENT|TTY)='; then
     printf 'ssh\n'
@@ -133,6 +145,11 @@ fm_remote_herdr_owner_birth() { # <pid>
   label=${xpc_line#XPC_SERVICE_NAME=}
   if [ -n "$uid" ] && [ -n "$xpc_line" ] \
     && fm_remote_herdr_gui_job_proves_owner "$uid" "$label" "$pid"; then
+    printf 'launchd\n'
+    return 0
+  fi
+  ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  if [ -n "$uid" ] && fm_remote_herdr_gui_job_pid_is "$uid" "$FM_REMOTE_HERDR_AGENT_LABEL" "$ppid"; then
     printf 'launchd\n'
     return 0
   fi
