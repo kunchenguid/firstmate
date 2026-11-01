@@ -183,8 +183,7 @@
 # could not be established, so a caller that must never close a live call can
 # treat "cannot tell" as its own case instead of as a no. With
 # `--distinguish-absent`, an absent local task returns 3 instead of 1; a home
-# with no data directory or no backlog file counts as absent, because it records
-# no captain calls.
+# with no backlog file counts as absent, because it records no captain calls.
 # It prints nothing on these predicate results and mutates nothing, unless
 # `--identity` asks it to print this call's
 # LIFECYCLE identity, which it does on an exit 0 only. That identity - the
@@ -2213,9 +2212,6 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
       exit 2
       ;;
   esac
-  if [ "$distinguish_absent" = 1 ] && [ ! -e "$DATA" ] && [ ! -L "$DATA" ]; then
-    return 3
-  fi
   data=$(fm_backlog_data_absolute "$DATA") \
     || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
   root=$(fm_backlog_root "$data") \

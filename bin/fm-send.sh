@@ -808,10 +808,11 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # hold is read through bin/fm-captain-hold.sh, which counts a date-expired hold
 # as held until it is answered or released. The one exempt send answers the
 # hold itself through --resolve-key, and never for the supervision branch. A
-# missing backlog (exit 3) sends; an unreadable one (exit 2) may hide a live
-# hold, so it refuses.
+# missing data directory or backlog (exit 3) sends; an unreadable backlog
+# (exit 2) may hide a live hold, so it refuses.
 fm_send_refuse_if_captain_held() { # <task-id>
-  local id=$1 rc=0 show reason
+  local id=$1 rc=0 show reason data=${FM_DATA_OVERRIDE:-$FM_HOME/data}
+  [ -e "$data" ] || [ -L "$data" ] || return 0
   "$SCRIPT_DIR/fm-captain-hold.sh" open "$id" --distinguish-absent >/dev/null 2>&1 || rc=$?
   case "$rc" in
   0) ;;
