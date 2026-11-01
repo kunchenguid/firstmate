@@ -927,6 +927,11 @@ fi
 [ "$(cut -d' ' -f2- "$PARENT/state/ios.start-pending")" = "$expected_gen codex" ] \
   || fail "remote spawn did not arm the parent's start check: $(cat "$PARENT/state/ios.start-pending" 2>&1)"
 assert_absent "$REMOTE_HOME/state/parent-route/ios.start-pending" "the remote host armed its own start check"
+# The start check reads the host's own busy record through observe's
+# start-proof mode; codex seeds no busy generation, so none is reported.
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios --start-proof)" = "idle
+verdict=unknown codex-unverified
+busy_gen=$ios_remote_gen" ] || fail "observe --start-proof did not report the host's busy record through the route"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"

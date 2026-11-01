@@ -344,9 +344,10 @@ arm_remote() {  # <id> [record-gen]
   printf '1000 %s pi\n' "${2:-g900.1.1}" > "$STATE/$1.start-pending"
 }
 
-# The remote control plane's public observe verb returns only this observation.
-remote_proof() {  # <observation>
-  printf '%s\n' "$1"
+# `observe <id> --start-proof` output: the observation line, then the host's
+# busy-contract verdict and the busy generation of the launch it describes.
+remote_proof() {  # <observation> [verdict] [busy-gen]
+  printf '%s\nverdict=%s\nbusy_gen=%s\n' "$1" "${2:-busy fm-spawn}" "${3-g900.1.1}"
 }
 
 remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed route
@@ -355,7 +356,7 @@ remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed rout
     WATCHER_CAPTURE=
     [ "$REMOTE_RC" = 0 ] || return "$REMOTE_RC"
     case "$2" in
-      observe) WATCHER_CAPTURE=$REMOTE_PROOF ;;
+      observe) [ "${3:-}" = --start-proof ] && WATCHER_CAPTURE=$REMOTE_PROOF ;;
       state) WATCHER_CAPTURE=$REMOTE_STATE ;;
       capture) WATCHER_CAPTURE=$REMOTE_CAPTURE ;;
     esac
@@ -371,10 +372,16 @@ test_remote_secondmate_reads_route() {
   # Restore the real route helper after each stubbed tick.
   local real
   real=$(declare -f start_check_remote)
-  # Only busy proves through observe; a parent-mirrored status write also proves.
+  # A busy observation proves; so does the host's own busy record for this
+  # launch, which is all a mate that starts and settles silently leaves (the
+  # stock secondmate charter writes no status line at start); so does a
+  # parent-mirrored status write.
   arm_remote r1
   remote_tick "$(remote_proof busy)" alive '' 0 || fail "tick failed"; eval "$real"
   [ ! -e "$STATE/r1.start-pending" ] || fail "a busy remote observation did not count as proof"
+  arm_remote r8
+  remote_tick "$(remote_proof idle 'idle pi-ext')" alive '' 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/r8.start-pending" ] || fail "a silently settled remote mate's busy record did not count as proof"
   arm_remote r5
   printf 'done: started\n' > "$STATE/r5.status"
   remote_tick "$(remote_proof idle)" alive '' 0 || fail "tick failed"; eval "$real"
@@ -384,6 +391,10 @@ test_remote_secondmate_reads_route() {
   remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
   [ ! -e "$STATE/r6.start-pending" ] || fail "a superseded remote record was kept"
   [ "$(count_wakes)" = 0 ] || fail "a started or superseded remote mate woke"
+  # A started-looking verdict from another launch proves nothing.
+  arm_remote r9
+  remote_tick "$(remote_proof idle 'idle pi-ext' g700.1.1)" alive '' 0 || fail "tick failed"; eval "$real"
+  [ -n "$START_CHECK_WAKE" ] || fail "another launch's busy record counted as proof"
   # The spawn seed, or only the observation line, proves nothing.
   arm_remote r2
   remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
@@ -403,7 +414,7 @@ test_remote_secondmate_reads_route() {
     *"remote worker on remote-mac exited or its endpoint is gone before starting); recover it per secondmate-provisioning after: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-crew-state.sh r4") ;;
     *) fail "a vanished remote endpoint was not sent to recovery: $START_CHECK_WAKE" ;;
   esac
-  [ "$(count_wakes)" = 3 ] || fail "expected one wake per unstarted remote launch"
+  [ "$(count_wakes)" = 4 ] || fail "expected one wake per unstarted remote launch"
   # The real route wrapper bounds observe, state, and capture independently.
   reset_state
   arm_remote r7

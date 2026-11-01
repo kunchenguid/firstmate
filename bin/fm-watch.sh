@@ -2873,19 +2873,24 @@ start_check_verdict_proves() {  # <verdict>
 # 0 when <id> shows positive evidence it began its brief at or after <epoch>: a
 # status line or completed turn written since the launch boundary, or a verdict
 # start_check_verdict_proves accepts. A remote secondmate's evidence comes from
-# its host through the existing observe verb; only an exact `busy` observation
-# proves a start. An unreachable host proves nothing. Codex has no
+# its host through `observe <id> --start-proof`: an exact `busy` observation, or
+# the verdict of its own busy record when that record's generation is the launch
+# this check was armed for. A mate that starts and settles without a status line
+# leaves only that record. An unreachable host proves nothing. Codex has no
 # semantic source, so its rendered busy footer counts unless the same tail shows
 # a launch dialog.
-start_check_started() {  # <id> <meta> <epoch>
-  local id=$1 meta=$2 epoch=$3 f m backend target tail
+start_check_started() {  # <id> <meta> <epoch> [record-gen]
+  local id=$1 meta=$2 epoch=$3 gen=${4:--} f m backend target tail
   for f in "$STATE/$id.status" "$STATE/$id.turn-ended"; do
     m=$(stat_mtime "$f") || continue
     [ "$m" -ge "$epoch" ] && return 0
   done
   if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
-    start_check_remote "$id" observe || return 1
-    [ "$(printf '%s\n' "$WATCHER_CAPTURE" | head -1)" = busy ]
+    start_check_remote "$id" observe --start-proof || return 1
+    [ "$(printf '%s\n' "$WATCHER_CAPTURE" | head -1)" = busy ] && return 0
+    [ "$gen" != - ] \
+      && [ "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^busy_gen=//p' | head -1)" = "$gen" ] \
+      && start_check_verdict_proves "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^verdict=//p' | head -1)"
     return
   fi
   start_check_verdict_proves "$(fm_busy_classify_meta "$meta" "$id" "$STATE")" && return 0
@@ -3036,7 +3041,7 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
       fm_lock_release "$lock"
       continue
     fi
-    if start_check_started "$id" "$meta" "$epoch"; then
+    if start_check_started "$id" "$meta" "$epoch" "$gen"; then
       rm -f -- "$f"
       fm_lock_release "$lock"
       triage_log "start check: $id started"
