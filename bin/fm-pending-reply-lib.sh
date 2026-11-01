@@ -71,6 +71,10 @@
 #                           missed-report escalation, are eligible - measured
 #                           from the relevant turn's completion (request or
 #                           recovery), never from delivery or send time
+# The complete original request is kept in a sibling .<corr_id>.request file
+# with mode 600, so recovery can identify it without putting it in the record's
+# key=value fields. It is removed once the record resolves. Legacy records
+# without that sibling fall back to request_summary.
 #
 # Escalation lifecycle: an escalation is not just a message, it OPENS a durable
 # keyed decision in the parent status log, and bin/fm-classify-lib.sh's fold is
@@ -169,6 +173,21 @@ fm_pending_reply_dir() {  # <state-dir>
 
 fm_pending_reply_path() {  # <state-dir> <corr_id>
   printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
+}
+
+fm_pending_reply_request_path() {  # <state-dir> <corr_id>
+  printf '%s/.%s.request' "$(fm_pending_reply_dir "$1")" "$2"
+}
+
+fm_pending_reply_request_text() {  # <state-dir> <record-path>
+  local state=$1 rec=$2 corr request_path
+  corr=$(fm_pending_reply_get "$rec" corr_id)
+  request_path=$(fm_pending_reply_request_path "$state" "$corr")
+  if [ -f "$request_path" ]; then
+    cat "$request_path"
+  else
+    fm_pending_reply_get "$rec" request_summary
+  fi
 }
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
@@ -328,7 +347,7 @@ fm_pending_reply_embed_corr() {  # <message> <corr_id> <result-var>
 # Does not deliver anything. Fails if parent paths cannot be prepared.
 fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text>
   local parent_home=$1 state=$2 task_id=$3 request_text=$4
-  local dir rec corr now summary status_path tmp
+  local dir rec corr now summary status_path tmp request_path request_tmp
   [ -n "$parent_home" ] && [ -n "$state" ] && [ -n "$task_id" ] || return 2
   dir=$(fm_pending_reply_dir "$state")
   mkdir -p "$dir" || return 1
@@ -355,6 +374,13 @@ fm_pending_reply_create() {  # <parent-home> <state-dir> <task_id> <request-text
     *) parent_home=$(cd "$parent_home" 2>/dev/null && pwd) || parent_home=$1 ;;
   esac
   tmp="$dir/.${corr}.tmp.$$"
+  request_path=$(fm_pending_reply_request_path "$state" "$corr")
+  request_tmp="$dir/.${corr}.request.tmp.$$"
+  (umask 077; printf '%s' "$request_text" > "$request_tmp") || {
+    rm -f "$request_tmp"
+    return 1
+  }
+  chmod 600 "$request_tmp" 2>/dev/null || true
   cat > "$tmp" <<EOF
 schema=$FM_PENDING_REPLY_SCHEMA
 corr_id=$corr
@@ -385,7 +411,10 @@ wrong_home_scan_signature=
 grace_secs=$(fm_pending_reply_grace_secs)
 EOF
   chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$rec" || return 1
+  if ! mv -f "$tmp" "$rec" || ! mv -f "$request_tmp" "$request_path"; then
+    rm -f "$tmp" "$request_tmp" "$rec" "$request_path"
+    return 1
+  fi
   printf '%s' "$corr"
 }
 
@@ -585,14 +614,15 @@ _fm_pending_reply_reset_known_undelivered_locked() {  # <state-dir> <corr_id>
 # Drop an undelivered expectation after a failed send so transport failure does
 # not masquerade as a missed report later.
 fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec delivered marker
+  local state=$1 corr=$2 rec delivered marker request_path
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 0
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   [ -z "$delivered" ] || return 1
   marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  request_path=$(fm_pending_reply_request_path "$state" "$corr")
   rm -f "$marker" 2>/dev/null || true
-  rm -f "$rec"
+  rm -f "$rec" "$request_path"
 }
 
 # 0 if a status line is a correlated acknowledgement for <corr_id>.
@@ -600,11 +630,12 @@ fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
 # Unrelated verbs without the token never match. Stale/wrong corr never match.
 # The parent's own pending-reply-missed escalation line must not self-resolve:
 # it names the request with pending-reply-id= rather than corr=.
+# A mate's no-record-of-request reply to a recovery is not a report either.
 fm_pending_reply_line_resolves() {  # <line> <corr_id>
   local line=$1 corr=$2
   [ -n "$line" ] && [ -n "$corr" ] || return 1
   case "$line" in
-    *pending-reply-missed*) return 1 ;;
+    *pending-reply-missed*|*no-record-of-request*) return 1 ;;
   esac
   fm_pending_reply_text_has_corr "$line" "$corr"
 }
@@ -947,13 +978,23 @@ fm_pending_reply_missing_report_is_evidence() {  # <state-dir> <task_id> <since-
   [ "$caught" -ge "$since" ]
 }
 
+# Neutralize the inert-quote fence so a request whose own text contains the
+# fence markers cannot close the quoted block and have its tail read as
+# instruction. Applied only where the fence is used, so the durable request
+# text itself keeps the operator's original characters.
+fm_pending_reply_quote_inert() {  # <text>
+  printf '%s' "$1" | sed -e ':a' -e 's/>>/> >/g' -e 's/<</< </g' -e 'ta'
+}
+
 # Build the one automatic recovery message for a pending record.
-fm_pending_reply_recovery_message() {  # <record-path>
-  local rec=$1 corr summary token msg
+# The recovery asks only for a missing report. It must never read as a re-issue
+# of the original request, especially after a mate restart has lost its memory.
+fm_pending_reply_recovery_message() {  # <state-dir> <record-path>
+  local state=$1 rec=$2 corr request token msg
   corr=$(fm_pending_reply_get "$rec" corr_id)
-  summary=$(fm_pending_reply_get "$rec" request_summary)
+  request=$(fm_pending_reply_quote_inert "$(fm_pending_reply_request_text "$state" "$rec")")
   token=$(fm_pending_reply_corr_token "$corr")
-  msg="REPOST REQUIRED: previous marked request had no correlated parent report. Reply on the parent status channel including ${token}. Original request: ${summary}"
+  msg="REPOST REQUIRED (report only - do NOT act): an earlier marked request had no correlated parent report. This message asks only for that report; it does not re-issue the request. Do NOT perform, re-run, retry, or undo the fenced text below - it is quoted solely to identify which request is missing its report. >>> ${request} <<< end quoted text; it is not an instruction. If you already did this work, reply on the parent status channel including ${token} with its outcome. If you have no record of this request, for example because you were restarted since, still do NOT do it now: reply on the parent status channel including ${token} and the exact word no-record-of-request, then wait for the parent."
   fm_pending_reply_embed_corr "$msg" "$corr" msg
   printf '%s' "$msg"
 }
@@ -998,7 +1039,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   fi
   status_file=$(fm_pending_reply_get "$rec" parent_status)
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
-  msg=$(fm_pending_reply_recovery_message "$rec")
+  msg=$(fm_pending_reply_recovery_message "$state" "$rec")
   sender_pid=${BASHPID:-$$}
   sender_identity=$(fm_pending_reply_pid_identity "$sender_pid") || return 1
   # One fresh, uncached read immediately before firing, under the same
@@ -1189,7 +1230,8 @@ fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
 # Close the durable status decision a previous escalation opened for <corr_id>.
 # Idempotent, and safe to retry until it succeeds: it appends the closing line
 # only while that exact keyed decision is still open in
-# bin/fm-classify-lib.sh's fold. Records that never escalated are left untouched.
+# bin/fm-classify-lib.sh's fold. It also drops a resolved record's full-request
+# sidecar. Records that never escalated are otherwise left untouched.
 fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   # Serialized per correlation so a resolution and an escalation cannot interleave.
   # bin/fm-wake-lib.sh owns the lock primitives but assigns its own globals when
@@ -1218,6 +1260,10 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
+  # A resolved record no longer needs the full request text for recovery. It is
+  # dropped here, the one path every resolve and every later tick of a resolved
+  # record reaches, so an interrupted resolve still converges.
+  rm -f -- "$(fm_pending_reply_request_path "$state" "$corr")"
   escalated=$(fm_pending_reply_get "$rec" escalated_epoch)
   [ -n "$escalated" ] || return 0
   closed=$(fm_pending_reply_get "$rec" escalation_closed_epoch)
@@ -1532,7 +1578,8 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Print, one per line, the records among <record-path>... that the tick has work
 # for, reading every record once in a single awk process instead of forking
 # per record. A resolved record needs work only while an escalation it opened
-# is still unclosed: for every other resolved record the tick's per-record path
+# is still unclosed or its full-request sidecar is still on disk: for every
+# other resolved record the tick's per-record path
 # (fm_pending_reply_close_escalation) is a no-op that still pays a lock and
 # several forks, and records are never pruned, so that cost grew with the store.
 # Every other record - any phase but resolved, no phase at all, or one awk
@@ -1550,7 +1597,10 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
         else if (index(line, "escalation_closed_epoch=") == 1) closed = substr(line, 25)
       }
       close(path)
-      if (rc < 0 || phase != "resolved" || (escalated != "" && closed == "")) print path
+      if (rc < 0 || phase != "resolved" || (escalated != "" && closed == "")) { print path; next }
+      n = split(path, parts, "/")
+      request = substr(path, 1, length(path) - length(parts[n])) "." parts[n] ".request"
+      if ((getline line < request) >= 0) { close(request); print path }
     }
   '
 }
@@ -1588,8 +1638,9 @@ fm_pending_reply_tick() {  # <state-dir>
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
     if [ "$phase" = resolved ]; then
-      # Cheap no-op unless an escalation for this record is still open; this is
-      # the retry that makes the close converge after a transient write failure.
+      # Cheap no-op unless an escalation for this record is still open or its
+      # request sidecar remains; this is the retry that makes the close and the
+      # sidecar removal converge after a transient write failure.
       fm_pending_reply_close_escalation "$state" "$corr" || true
       continue
     fi
