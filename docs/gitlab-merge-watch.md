@@ -53,6 +53,7 @@ Two things about plain `glab` were established by running it, because assuming e
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
 The merged check therefore reads glab's own field output, which needs no JSON processor; the poll's degraded read (head pipeline, merge-train car) is JSON-only and needs `jq`, and without `jq` the poll falls back to this field read so merged wakes keep working.
+Registration refuses to arm a GitLab watch without `jq`; if the baseline read itself is unreadable, it can still publish the poll with an unknown baseline.
 Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
@@ -206,6 +207,8 @@ $ echo $?
 Neither refusal armed a poll or recorded a `pr=`, so a missing tool leaves no half-prepared merge behind.
 
 The watch poll's merged check reads glab's field output, so it does not need `jq`; only its degraded read does, and `bin/fm-pr-check.sh` refuses to arm a GitLab watch without `jq` for that reason.
+A car-endpoint 404 is confirmed with one bounded read of the project's active merge-train list; only a readable list omitting the merge request reports a train drop, while list errors stay silent.
+The watcher emits that drop only after it has recorded the merge request on the train, and a merged merge request is not reported as a drop.
 The merge path cannot read the field output: `detailed_merge_status`, `has_conflicts`, `blocking_discussions_resolved`, and the head pipeline appear only in glab's JSON.
 The poll's silence on a missing tool is safe because silence means "not merged yet"; a merge cannot be silent about it, so the requirement is reported rather than assumed.
 
