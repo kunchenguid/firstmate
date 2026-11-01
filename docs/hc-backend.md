@@ -48,7 +48,7 @@ The app shows the session it bound at launch, so a captain whose app runs a sess
 An explicit `--backend`, `FM_BACKEND`, or `config/backend` always wins over detection.
 Inside the classic Herdr TUI, `HERDR_ENV=1` wins before the app signals are consulted, so the `herdr` backend keeps its behavior.
 A contradictory marker set (for example another surface's marker alongside the app's) keeps the earlier surface's verdict rather than switching - ambiguous input means no automatic switch.
-When a live app window or a live hc terminal is present but no usable hc toolchain resolves (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z`, plus `jq`), detection does not switch and a notice names the missing piece instead; a bare terminal marker set is still never a detection.
+When a live app window or a live hc terminal is present but no usable hc toolchain resolves (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z` at or above the adapter's verified minimum, plus `jq` - the same version gate the spawn's container check applies), detection does not switch and a notice names the missing piece instead; a bare terminal marker set is still never a detection.
 An auto-detected hc prints a stderr notice naming the winning signal and how to opt out; [Task shape and metadata](#task-shape-and-metadata) owns its task record.
 
 Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an explicit hc spawn does, so workers appear in the captain's window without the app ever being started by Firstmate.
