@@ -614,6 +614,37 @@ t_turn_then_terminal_line() {
   pass "mapping: working while a turn runs, done after it, done as the final record"
 }
 
+# Contract: a standing captain hold waits on the captain even though its
+# keyed decision is closed. Observable OSC records must stay question-blocked
+# for idle and busy activity, then return to activity once the hold is superseded.
+# This rejects treating the closed decision as permission to report idle/working.
+t_captain_hold_stays_question_blocked() {
+  local d=$TMP_ROOT/captainhold act wpid
+  mkhome "$d"
+  for act in idle busy; do
+    : >"$d/cap"
+    busy_rec "$d/state" t26 "$act"
+    printf 'needs-decision [key=choice]: choose\ncaptain-held [key=choice]: captain will decide\n' >"$d/state/t26.status"
+    env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 \
+      bash "$SCRIPT" watch --task t26 --kind ship --state "$d/state" --harness opencode \
+      --parent "$$" &
+    wpid=$!
+    if ! wait_cap 'state=blocked:kind=question:app=firstmate-opencode' "$d/cap" 100; then
+      kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+      fail "captain hold: $act activity did not report question-blocked"
+    fi
+    printf 'working: continuing\n' >>"$d/state/t26.status"
+    local expected=idle
+    [ "$act" != busy ] || expected=working
+    if ! wait_cap "state=$expected:app=firstmate-opencode" "$d/cap" 100; then
+      kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+      fail "captain hold: superseding status did not restore $expected"
+    fi
+    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  done
+  pass "mapping: captain-held stays question-blocked until superseded"
+}
+
 # A paused worker reports from its busy state like any other worker.
 t_paused_reads_from_busy_state() {
   local d=$TMP_ROOT/paused
@@ -708,5 +739,6 @@ fm_test_run \
   t_grok_pane_drives_activity \
   t_turn_then_terminal_line \
   t_paused_reads_from_busy_state \
+  t_captain_hold_stays_question_blocked \
   t_retire_waits_for_slow_reporter \
   t_hc_terminal_with_inherited_herdr_markers
