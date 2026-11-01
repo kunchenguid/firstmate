@@ -256,7 +256,9 @@ Text for a worker to read and commands that drive a worker's process are separat
 ### Task status archives
 
 When [status archival is enabled](configuration.md#task-status-archive-configstatus-archive), teardown preserves the complete status stream in `data/<task>/status.log`, using a separate `status.<N>.log` for reused IDs without overwriting earlier histories.
-Session-start bootstrap and the watcher heartbeat report home-local record inconsistencies; only the mutating, locked session-start bootstrap archives status logs with no matching metadata when they are older than 24 hours.
+Session-start bootstrap and the watcher heartbeat report home-local record inconsistencies: status logs without metadata older than 24 hours, in-flight rows without metadata, metadata without a tab or endpoint, and duplicate `pr=` references across records.
+Only the mutating, locked session-start bootstrap archives orphan status logs to `data/<id>/status.log`; the heartbeat report does not archive them.
+The scan is limited to the current home's records and is a report, not a general cleanup sweep.
 The shared report implementation is [`fm-record-hygiene-lib.sh`](../bin/fm-record-hygiene-lib.sh).
 Forced secondmate retirement stores descendant logs under the surviving parent's `data/<secondmate>/children/<child>/` tree.
 These archives are cold evidence: presentation, wake classification, and fleet snapshots consume live `state/` records and never read archived logs.
