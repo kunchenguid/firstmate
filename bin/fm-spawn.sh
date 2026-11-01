@@ -7414,21 +7414,25 @@ fi
 # Arm the worker-side OSC 7501 status reporter (bin/fm-osc7501.sh) inside the
 # launch before the agent command, so the reporter's parent is the pane shell
 # that runs the agent. The reporter header owns eligibility and native-version
-# gates; pass the binary the launch runs so the native probe reads its
-# version. Its stderr stays on
+# gates; pass the executable the launch runs so the native probe reads its
+# version. A raw launch runs its first word, which names that executable only
+# when no assignment precedes it; otherwise nothing is passed and the reporter
+# treats a natively reporting harness as native. Its stderr stays on
 # the pane so a config warning reaches the user. The `disarm` after the agent
 # command retires the reporter when the agent exits, because the pane shell
 # that sourced the launch outlives it. Newlines, not `;`, delimit the agent
 # command, so a raw launch ending in a separator or a comment stays intact.
-OSC7501_AGENT_BIN=
-case "$HARNESS" in
-  claude | codex | grok) OSC7501_AGENT_BIN=$HARNESS ;;
-  pi | pi-signed) OSC7501_AGENT_BIN=${PI_BIN:-pi} ;;
-  muse) OSC7501_AGENT_BIN=${MUSE_BIN:-muse} ;;
-esac
-OSC7501_ARM_ARGS=
-[ -z "$OSC7501_AGENT_BIN" ] || OSC7501_ARM_ARGS=" --agent-bin $(shell_quote "$OSC7501_AGENT_BIN")"
-LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") arm --task $(shell_quote "$ID") --harness $(shell_quote "$HARNESS") --backend $(shell_quote "$BACKEND") --kind $(shell_quote "$KIND") --state $(shell_quote "$STATE_REAL") --config $(shell_quote "$CONFIG") --target $(shell_quote "$T")$OSC7501_ARM_ARGS >/dev/null || true
+if [ "$RAW_LAUNCH" = 1 ]; then
+  read -r OSC7501_AGENT_BIN _ <<<"$RAW_COMMAND"
+  case "$OSC7501_AGENT_BIN" in [A-Za-z_]*=*) OSC7501_AGENT_BIN= ;; esac
+else
+  case "$HARNESS" in
+    pi | pi-signed) OSC7501_AGENT_BIN=${PI_BIN:-} ;;
+    muse) OSC7501_AGENT_BIN=${MUSE_BIN:-} ;;
+    *) OSC7501_AGENT_BIN=$HARNESS ;;
+  esac
+fi
+LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") arm --task $(shell_quote "$ID") --harness $(shell_quote "$HARNESS") --backend $(shell_quote "$BACKEND") --kind $(shell_quote "$KIND") --state $(shell_quote "$STATE_REAL") --config $(shell_quote "$CONFIG") --target $(shell_quote "$T") --agent-bin $(shell_quote "$OSC7501_AGENT_BIN") >/dev/null || true
 $LAUNCH
 $(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") disarm --state $(shell_quote "$STATE_REAL") >/dev/null 2>/dev/null || true"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then

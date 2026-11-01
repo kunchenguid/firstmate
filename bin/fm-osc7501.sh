@@ -25,8 +25,10 @@
 #      >= 1.4.11 (the lowest versions verified reporting on Rex,
 #      docs/verification/runtime-backends.md) send their own root records;
 #      a terminal keeps one root record per pane, so a firstmate record would
-#      only replace theirs. One of these harnesses whose version cannot be
-#      read counts as native, so no unprobed build shares the root record
+#      only replace theirs. The probe runs the executable the launch runs
+#      (--agent-bin); one of these harnesses with no such executable, or
+#      whose version cannot be read, counts as native, so no unprobed build
+#      shares the root record
 #
 # When all of that holds, arm daemonizes `watch`, which polls firstmate's own
 # durable signals for the task and emits records to /dev/tty. Every record
@@ -74,7 +76,7 @@
 #
 # Subcommands:
 #   arm --task <id> --harness <h> --backend <b> --kind <k> --state <dir>
-#       --config <dir> [--target <t>] [--agent-bin <path>]
+#       --config <dir> [--target <t>] [--agent-bin <exe>]
 #                                            detect + spawn watcher; exit 0
 #   watch --task <id> --kind <k> --state <dir> --harness <h> --parent <pid>
 #       [--backend <b> --target <t>]         the reporter loop (internal)
@@ -99,7 +101,7 @@ FM_OSC7501_UNKNOWN_PREFIX=.osc7501-gate-
 
 usage() {
   {
-    echo "usage: fm-osc7501.sh arm --task <id> --harness <h> --backend <b> --kind <k> --state <dir> --config <dir> [--target <t>] [--agent-bin <path>]"
+    echo "usage: fm-osc7501.sh arm --task <id> --harness <h> --backend <b> --kind <k> --state <dir> --config <dir> [--target <t>] [--agent-bin <exe>]"
     echo "       fm-osc7501.sh watch --task <id> --kind <k> --state <dir> --harness <h> --parent <pid> [--backend <b> --target <t>]"
     echo "       fm-osc7501.sh disarm --state <dir>"
   } >&2
@@ -230,7 +232,8 @@ EOF
 
 # osc_native <harness> <agent-bin>: 0 when the launched agent reports
 # OSC 7501 itself at the probed version (floors: the header's gate 4). A
-# failed probe of a harness with a native floor reads as native.
+# harness with a native floor reads as native when <agent-bin> is empty or its
+# probe fails.
 osc_native() {
   local floor ver
   case "$1" in
@@ -241,7 +244,8 @@ osc_native() {
     muse) floor=1.4.11 ;;
     *) return 1 ;;
   esac
-  ver=$(osc_probe_version "${2:-$1}") || return 0
+  [ -n "${2:-}" ] || return 0
+  ver=$(osc_probe_version "$2") || return 0
   osc_version_ge "$ver" "$floor"
 }
 
@@ -501,7 +505,7 @@ osc_arm() { # --task --harness --backend --kind --state --config [--target] [--a
   case "$backend" in herdr | t3code) exit 0 ;; esac
   osc_env_aware || exit 0
   # a natively reporting agent never sees a competing record
-  osc_native "$harness" "${agent_bin:-$harness}" && exit 0
+  osc_native "$harness" "$agent_bin" && exit 0
   FM_OSC7501_WATCHER=1 nohup bash "$SCRIPT_DIR/fm-osc7501.sh" watch \
     --task "$task" --kind "$kind" --state "$state" --harness "$harness" \
     --backend "$backend" --target "$target" \
