@@ -55,7 +55,7 @@ FM_SUPERVISION_ENGINES_VERIFIED='claude'
 fm_supervision_host_primary() {
   if [ "${FM_TEST_SEAM:-}" = 1 ]; then
     case "${FM_TEST_HARNESS:-}" in
-      claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | unknown)
+      claude | codex | opencode | pi | pi-signed | pig | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | unknown)
         printf '%s\n' "$FM_TEST_HARNESS"
         return
         ;;
@@ -68,12 +68,17 @@ fm_supervision_host_primary() {
 # runs the supervision host. A present supervision-host-off opts out on every
 # primary; otherwise a supervision-host file opts in, and with neither file a
 # Claude primary runs the host at its default engine and every other primary
-# does not. The primary is detected (fm_supervision_host_primary) only when
-# both files are absent and the caller did not name one.
+# does not. Pi, pi-signed, and PiG never run the host: their in-process Pi
+# branch owns that path. The primary is detected (fm_supervision_host_primary)
+# only when the caller did not name one.
 fm_supervision_host_enabled() {
+  local primary
   [ ! -e "$1/supervision-host-off" ] && [ ! -L "$1/supervision-host-off" ] || return 1
+  primary=${2-}
+  [ -n "$primary" ] || primary=$(fm_supervision_host_primary)
+  case "$primary" in pi|pi-signed|pig) return 1 ;; esac
   [ ! -f "$1/supervision-host" ] || return 0
-  [ "${2-$(fm_supervision_host_primary)}" = claude ]
+  [ "$primary" = claude ]
 }
 
 fm_supervision_engine_verified() {  # <engine>
@@ -170,13 +175,13 @@ fm_supervision_host_attended_ready() {
 
 # fm_supervision_host_outcomes_drained <config-dir>: 0 when main processes the
 # supervision session's outcomes through the drain's BRANCH OUTCOMES section
-# (bin/fm-wake-drain.sh): the home runs the host and its primary is not Pi,
-# whose branch extension owns that path. The drain and the return
+# (bin/fm-wake-drain.sh): the home runs the host and its primary is not
+# Pi-compatible, whose branch extension owns that path. The drain and return
 # (bin/fm-afk-return.sh) share this check.
 fm_supervision_host_outcomes_drained() {
   local primary
   primary=$(fm_supervision_host_primary)
-  case "$primary" in pi|pi-signed) return 1 ;; esac
+  case "$primary" in pi|pi-signed|pig) return 1 ;; esac
   fm_supervision_host_enabled "$1" "$primary"
 }
 

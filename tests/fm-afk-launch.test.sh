@@ -129,7 +129,7 @@ unit_retired_two_step_entry_is_refused() {
 
 unit_pi_never_launches_the_daemon() {
   local st harness out rc
-  for harness in pi pi-signed; do
+  for harness in pi pi-signed pig; do
     st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pi.XXXXXX")
     mkdir -p "$st/state"
     out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_TEST_HARNESS="$harness" \

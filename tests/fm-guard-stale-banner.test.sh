@@ -74,6 +74,16 @@ run_guard_case_autoarm() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+run_guard_case_pig() {
+  local dir=$1
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    FM_PIG_HARNESS=pig \
+    FM_SUPERVISION_MODEL=extension \
+    perl -e '$0 = "pig"; system @ARGV; exit($? >> 8)' "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
 # Age the rewake ledger into the past so a passing long-turn case cannot rest on
 # epoch freshness: a handling turn that has already outrun grace still has this
 # shape, which is the false alarm this suite now pins.
@@ -190,6 +200,24 @@ test_branch_actor_is_never_told_to_repair_the_watcher() {
   assert_contains "$out" "full banner already printed this episode" \
     "a branch call must not end main's down-episode"
   pass "fm-guard stale banner: the branch actor is never told to repair the watcher and leaves main's episode alone"
+}
+
+test_pig_supervision_is_not_reported_down_or_repaired() {
+  local dir out repeated
+  dir=$(make_guard_case pig-supervision-unverified)
+  out=$(run_guard_case_pig "$dir")
+  assert_contains "$out" "SUPERVISION UNVERIFIED - availability is not established" \
+    "unverified lifecycle was not reported as unverified: $out"
+  assert_contains "$out" "supervision lifecycle and wake delivery are unverified" \
+    "unverified banner omitted the missing evidence boundary: $out"
+  assert_not_contains "$out" "WATCHER DOWN" \
+    "unverified supervision was mislabeled as a known outage: $out"
+  assert_not_contains "$out" "Trust the emitted supervision protocol" \
+    "unverified supervision received an unsupported repair instruction: $out"
+  repeated=$(run_guard_case_pig "$dir")
+  assert_contains "$repeated" "supervision remains unverified" \
+    "repeated unverified episode was mislabeled as a watcher outage: $repeated"
+  pass "fm-guard stale banner: unverified supervision is not presented as down or repairable"
 }
 
 test_first_stale_call_prints_full_banner() {
@@ -995,6 +1023,7 @@ test_pi_harness_routes_itself_to_the_extension_model() {
   pass "fm-guard stale banner: Pi and pi-signed primaries route themselves to the extension model"
 }
 
+test_pig_supervision_is_not_reported_down_or_repaired
 test_first_stale_call_prints_full_banner
 test_full_banner_names_quiet_mode_when_active
 test_repeated_same_episode_prints_reminder_only

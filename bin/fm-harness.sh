@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|pig|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate [id]  print the harness the PRIMARY uses to launch
@@ -115,6 +115,15 @@ harness_marker() {
   # additionally clears foreign markers at rovo's launch boundary as defense in depth.
   [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
   [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
+  # pig (PiG) publishes no environment identity of its own. FM_PIG_HARNESS=pig
+  # is Firstmate's primary-launch marker and is trusted only when an exact pig
+  # process appears in this process's ancestry. This preserves the same
+  # marker-versus-structure rule as omp while letting a Pig session started
+  # beneath another harness keep its own identity.
+  if [ "${FM_PIG_HARNESS:-}" = pig ] && ancestry_names_pig; then
+    echo pig
+    return
+  fi
   # omp (Oh My Pi) publishes NO harness-identity marker of its own: verified on
   # omp 18.1.11 that PI_CODING_AGENT is absent from the binary and that the
   # default profile sets neither PI_CODING_AGENT_DIR nor OMP_PROFILE in the
@@ -172,6 +181,17 @@ ancestry_names_omp() {
   return 1
 }
 
+ancestry_names_pig() {
+  local pid=$$ comm
+  for _ in 1 2 3 4 5 6 7 8; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    [ "$(basename -- "$comm")" = pig ] && return 0
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+  done
+  return 1
+}
+
 # Print "<strength> <harness>" when one process identifies a harness, or nothing.
 # Strength records how the match was made:
 #   comm - the ancestor's own executable name identifies the harness. This is a
@@ -223,6 +243,8 @@ harness_process_verdict() {  # <pid>
     # is why detect_own keeps a marker that agrees on the family.
     pi-signed) echo "comm pi"; return ;;
     pi) echo "comm pi"; return ;;
+    # PiG is a distinct Go executable and can be named exactly in ancestry.
+    pig) echo "comm pig"; return ;;
     # omp is a Bun-compiled single binary whose process name is exactly `omp`
     # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
     # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
@@ -436,7 +458,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex)
+    claude|codex|opencode|pi|pi-signed|pig|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex)
       printf '%s\n' "$pin"
       ;;
     *)
@@ -487,7 +509,14 @@ detect_own() {
 resolve_crew() {
   local crew=
   [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
-  if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
+  if [ -z "$crew" ] || [ "$crew" = default ]; then
+    crew=$(detect_own) || return
+  fi
+  if [ "$crew" = pig ]; then
+    echo "error: PiG is verified as a primary-only harness; set config/crew-harness to a verified worker harness before dispatch" >&2
+    return 2
+  fi
+  printf '%s\n' "$crew"
 }
 
 # Preserve first-line-wins parsing unless the file declares a mate override.
@@ -635,8 +664,12 @@ secondmate_field() {
 resolve_secondmate() {
   local sm
   sm=$(secondmate_field 1 "${1:-}") || return 1
-  if [ -z "$sm" ] || [ "$sm" = "default" ]; then sm=$(resolve_crew) || exit; fi
-  echo "$sm"
+  if [ -z "$sm" ] || [ "$sm" = default ]; then sm=$(resolve_crew) || return; fi
+  if [ "$sm" = pig ]; then
+    echo "error: PiG is verified as a primary-only harness; set config/secondmate-harness to a verified secondmate harness before dispatch" >&2
+    return 2
+  fi
+  printf '%s\n' "$sm"
 }
 
 # Print the optional model token (2nd field) for a secondmate id, or empty when
