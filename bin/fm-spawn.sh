@@ -7508,6 +7508,9 @@ if [ "$BACKEND" = t3code ]; then
   if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     T3CODE_ENV+=("FM_TASK_ID=$ID")
   fi
+  if [ -n "$TASK_GENERAL_TMP" ]; then
+    T3CODE_ENV+=("TMPDIR=$TASK_GENERAL_TMP" "TMP=$TASK_GENERAL_TMP" "TEMP=$TASK_GENERAL_TMP")
+  fi
   if [ -n "$SPAWN_TRACEPARENT" ] && spawn_record_traceparent; then
     T3CODE_ENV+=("TRACEPARENT=$SPAWN_TRACEPARENT")
   fi
