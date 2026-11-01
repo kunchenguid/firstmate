@@ -227,6 +227,62 @@ EOF
   pass "a Pi turn end refreshes the footer status to the live waiting line, zero included"
 }
 
+# Each turn end starts its own read. When an older read finishes after a newer
+# one (oracle: the newest turn's line is the current truth), the older result
+# must not put its stale count back. The first read blocks until released; the
+# second answers at once; the first is then released and must not win.
+test_pi_an_older_read_finishing_last_does_not_overwrite_the_newer_line() {
+  local fake out
+  command -v node >/dev/null 2>&1 || { echo "skip: node not found (Pi footer status)"; return 0; }
+  fake="$TMP_ROOT/pi-out-of-order"
+  mkdir -p "$fake/.pi" "$fake/bin" "$fake/state" "$fake/gate"
+  cp -R "$ROOT/.pi/extensions" "$fake/.pi/extensions"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake/bin/fm-turnend-guard.sh"
+  cat > "$fake/bin/fm-waiting-on-you.sh" <<'FAKE'
+#!/usr/bin/env bash
+gate=$(dirname "$0")/../gate
+if mkdir "$gate/first" 2>/dev/null; then
+  while [ ! -e "$gate/release" ]; do sleep 0.05; done
+  printf 'Waiting on you: 0\n'
+  : > "$gate/first-done"
+else
+  printf 'Waiting on you: 1 - Spend on the rental [money]\n'
+fi
+FAKE
+  chmod +x "$fake/bin/fm-turnend-guard.sh" "$fake/bin/fm-waiting-on-you.sh"
+  out=$(EXT="$fake/.pi/extensions/fm-primary-turnend-guard.ts" GATE="$fake/gate" FM_ROOT_OVERRIDE="$fake" \
+    FM_HOME="$fake" FM_STATE_OVERRIDE="$fake/state" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  async sendUserMessage() {},
+  sendMessage() {},
+};
+const extension = await import(pathToFileURL(process.env.EXT).href);
+extension.default(pi);
+const statuses = [];
+const ctx = { ui: { setStatus(key, text) { statuses.push(text); } } };
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+for (let i = 0; i < 200 && !existsSync(`${process.env.GATE}/first`); i += 1) await wait(50);
+await handlers.get("agent_settled")({ type: "agent_settled" }, ctx);
+for (let i = 0; i < 200 && statuses.length === 0; i += 1) await wait(50);
+writeFileSync(`${process.env.GATE}/release`, "");
+for (let i = 0; i < 200 && !existsSync(`${process.env.GATE}/first-done`); i += 1) await wait(50);
+await wait(500);
+const newer = "Waiting on you: 1 - Spend on the rental [money]";
+if (statuses.length !== 1 || statuses[0] !== newer) {
+  throw new Error(`an older read overwrote the newer line: ${JSON.stringify(statuses)}`);
+}
+process.stdout.write("ok\n");
+EOF
+  ) || fail "the Pi out-of-order footer check failed: $out"
+  assert_contains "$out" "ok" "the Pi out-of-order footer check did not finish: $out"
+  pass "a Pi read that finishes after a newer one does not put back its stale count"
+}
+
 # The tracked Claude settings run the line at every Stop; executing that exact
 # registered command must yield the hook's systemMessage.
 test_claude_stop_hook_runs_the_line() {
@@ -278,4 +334,5 @@ fm_test_run \
   test_a_task_worktree_prints_nothing \
   test_claude_stop_hook_runs_the_line \
   test_only_the_claude_hook_registry_runs_the_line \
-  test_pi_turn_end_sets_the_footer_status
+  test_pi_turn_end_sets_the_footer_status \
+  test_pi_an_older_read_finishing_last_does_not_overwrite_the_newer_line
