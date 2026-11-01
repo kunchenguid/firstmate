@@ -19,8 +19,8 @@
 #      backend=herdr (old herdr has no protocol support) and backend=t3code
 #      (no task tty) never report
 #   4. the launch must name the executable it runs (--agent-bin); a launch
-#      that names none - fm-spawn's raw launch commands - has no established
-#      agent, so it never reports
+#      that names none - a raw launch command whose agent fm-spawn cannot
+#      establish - never reports
 #   5. the harness must not already report natively: Claude Code >= 2.1.295
 #      and Pi >= 1.1.0 (herdr discussions #5073/#5106, verified 2026-10-30),
 #      codex-cli >= 0.163.0 (openai/codex#52725, first released in
