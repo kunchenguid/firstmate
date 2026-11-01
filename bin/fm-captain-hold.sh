@@ -1346,7 +1346,7 @@ close_answered() {  # <task-id> <release-0-or-1>
   if [ -n "$note" ] && [ -z "$recorded" ]; then
     recorded=$note
   elif [ -n "$note" ] \
-       && ! fm_backlog_text_names_link "$recorded" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
+       && ! fm_backlog_text_names_links "$recorded" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
     # The recorded note keeps a different link, or none, so this close records
     # both - unless it already says this, which is what an interrupted earlier
     # attempt leaves behind.
