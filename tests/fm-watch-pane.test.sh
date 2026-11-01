@@ -81,6 +81,38 @@ test_watched_pane_identity_and_cli() {
   pass "watch CLI validates, atomically upserts, lists and idempotently removes without lifecycle calls"
 }
 
+test_watched_pane_supervision_need() {
+  local state="$TMP_ROOT/supervision/state" mode
+  mkdir -p "$state"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-supervision-lib.sh"
+  for mode in absent empty malformed duplicate valid blocked-only; do
+    rm -f "$state/watched-panes"
+    case "$mode" in
+      empty) : > "$state/watched-panes" ;;
+      malformed) printf 'malformed\n' > "$state/watched-panes" ;;
+      duplicate) printf 'sess\tops\tdesign\tDesign\t1\nsess\tops\tdesign\tDesign\t1\n' > "$state/watched-panes" ;;
+      valid) printf 'sess\tops\tdesign\tDesign\t1\n' > "$state/watched-panes" ;;
+      blocked-only) printf 'sess\tops\tdesign\tDesign\t0\n' > "$state/watched-panes" ;;
+    esac
+    case "$mode" in
+      valid|blocked-only)
+        fm_supervision_needed "$state" || fail "$mode watch-only home must need supervision"
+        [ "$FM_SUP_IN_FLIGHT:$FM_SUP_SOURCES:$FM_SUP_CHECKS" = '0:0:0' ] || fail "watch counted as another kind of work"
+        fm_supervision_unhealthy "$state" || fail "watch-only home without beacon must be unhealthy"
+        touch "$state/.last-watcher-beat"
+        if fm_supervision_unhealthy "$state"; then fail "fresh beacon must satisfy watch-only supervision"; fi
+        rm "$state/.last-watcher-beat"
+        ;;
+      *) if fm_supervision_needed "$state"; then fail "$mode registry must not arm supervision"; fi ;;
+    esac
+  done
+  rm "$state/watched-panes"
+  if fm_supervision_needed "$state"; then fail "removing the last watch must remove supervision need"; fi
+  pass "valid nonempty pane watches need supervision independently of tasks and done policy"
+}
+
+test_watched_pane_supervision_need
 test_watched_pane_identity_and_cli
 
 # Production bounded wait, fake transport: verify the snapshot survives the
