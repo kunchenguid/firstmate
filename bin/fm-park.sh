@@ -663,7 +663,7 @@ land_eligible() {  # <id>
 }
 
 cmd_land() {
-  local id=${1-} eligible=0 detach=0 queue=0 pr out rc=0 why
+  local id=${1-} eligible=0 detach=0 queue=0 pr out rc=0 why tmp
   task_id_ok "$id" || die "usage: fm-park.sh land <task-id> [--if-eligible] [--detach] [--queue]" 2
   shift
   while [ "$#" -gt 0 ]; do
@@ -678,7 +678,12 @@ cmd_land() {
   [ "$eligible" = 0 ] || land_eligible "$id" || return 0
   [ -f "$STATE/$id.meta" ] || return 0
   if [ "$queue" = 1 ] || [ "$detach" = 1 ]; then
-    printf 'pr=%s\n' "$(fm_meta_get "$STATE/$id.meta" pr)" > "$STATE/$id.review-park-land"
+    tmp=$(mktemp "$STATE/.review-park.XXXXXX") || die "cannot create cleanup request"
+    if ! { printf 'pr=%s\n' "$(fm_meta_get "$STATE/$id.meta" pr)" > "$tmp" && chmod 0600 "$tmp" \
+      && mv -f -- "$tmp" "$STATE/$id.review-park-land"; }; then
+      rm -f -- "$tmp"
+      die "cannot publish cleanup request"
+    fi
     [ "$detach" = 1 ] || return 0
     action_start "$id" land
     printf 'automatic cleanup started\n'
