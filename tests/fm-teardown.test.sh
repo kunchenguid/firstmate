@@ -4031,7 +4031,7 @@ SH
 }
 
 # A task's per-task watcher markers (.seen-<id>_status, .seen-<id>_turn-ended,
-# .hb-surfaced-<id>, <id>.start-pending) and an orphaned presentation journal - one whose pane the
+# .hb-surfaced-<id>, <id>.start-pending, a queued start:<id> wake) and an orphaned presentation journal - one whose pane the
 # close path proved gone without retiring it - must not outlive teardown, while
 # another task's markers and a journal bound to a different pane must.
 seed_watcher_markers() {  # <case-dir> <task-id>
@@ -4056,10 +4056,19 @@ test_teardown_retires_task_watcher_markers_and_orphan_journal() {
   seed_watcher_markers "$case_dir" task-x1_extra
   printf '%s\n' 'version=1' 'task_id=task-y2' 'projection_id=ZyXwVuTsRqPoNmLkJiHgFe' \
     > "$case_dir/state/task-y2.herdr-presentation"
+  # A start-check wake that already fired for each task is still queued.
+  for marker in task-x1 task-y2; do
+    FM_STATE_OVERRIDE="$case_dir/state" bash -c '. "$0/bin/fm-wake-lib.sh"; fm_wake_append check "start:$1" "check: start $1: no start signal 120s after spawn (harness=pi)"' \
+      "$ROOT" "$marker" || fail "retire-watcher-markers: could not queue the $marker start wake"
+  done
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "retire-watcher-markers: teardown failed: $(cat "$case_dir/stderr")"
+  grep -F 'start:task-x1' "$case_dir/state/.wake-queue" >/dev/null \
+    && fail "teardown left the torn-down task's queued start-check wake"
+  grep -F 'start:task-y2' "$case_dir/state/.wake-queue" >/dev/null \
+    || fail "teardown removed another task's queued start-check wake"
   for marker in .seen-task-x1_status .seen-task-x1_turn-ended .hb-surfaced-task-x1 task-x1.herdr-presentation \
     task-x1.start-pending; do
     assert_absent "$case_dir/state/$marker" "teardown left the torn-down task's $marker behind"

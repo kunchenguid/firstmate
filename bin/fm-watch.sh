@@ -2837,26 +2837,49 @@ START_CHECK_SECS=${FM_START_CHECK_SECS:-120}
 case "$START_CHECK_SECS" in ''|0*|*[!0-9]*) START_CHECK_SECS=120 ;; esac
 START_CHECK_WAKE=
 
-# 0 when <id> shows positive evidence it began its brief after <epoch>: a status
-# line or completed turn written since spawn, a busy verdict from anything but
-# the spawn's own seed, or an idle verdict that only a running worker can have
+# A remote secondmate's endpoint and busy record live on its host, so its start
+# check reads them through the recorded route (bin/fm-on.sh and the host's
+# bin/fm-remote-secondmate-control.sh verbs), as the secondmate liveness tick
+# does. The call runs through watcher_waited so a stop is never held by it. An
+# unreachable host returns nonzero and is neither proof nor death.
+start_check_remote() {  # <id> <verb> [args...]; output in WATCHER_CAPTURE
+  local id=$1 verb=$2
+  shift 2
+  watcher_waited "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh "$verb" "$id" "$@"
+}
+
+# 0 when a busy-contract verdict proves a started worker: busy from anything but
+# the spawn's own seed, or an idle verdict only a running worker can have
 # produced (a hook-written record, or a settled Muse or Cursor session). Idle
 # from the rendered-text fallbacks proves nothing, since a parked dialog renders
-# no busy footer either. Codex has no semantic source, so its rendered busy
-# footer counts unless the same tail shows a launch dialog.
+# no busy footer either.
+start_check_verdict_proves() {  # <verdict>
+  case "$1" in
+    'busy fm-spawn') return 1 ;;
+    busy\ *) return 0 ;;
+    idle\ fm-spawn | idle\ fm-interrupt | idle\ fm-recovery | idle\ *-regex) return 1 ;;
+    idle\ *) return 0 ;;
+  esac
+  return 1
+}
+
+# 0 when <id> shows positive evidence it began its brief at or after <epoch>: a
+# status line or completed turn written since the launch boundary, or a verdict
+# start_check_verdict_proves accepts, read from the remote host's own record for
+# a remote secondmate. Codex has no semantic source, so its rendered busy footer
+# counts unless the same tail shows a launch dialog.
 start_check_started() {  # <id> <meta> <epoch>
-  local id=$1 meta=$2 epoch=$3 f m verdict backend target tail
+  local id=$1 meta=$2 epoch=$3 f m backend target tail
   for f in "$STATE/$id.status" "$STATE/$id.turn-ended"; do
     m=$(stat_mtime "$f") || continue
     [ "$m" -ge "$epoch" ] && return 0
   done
-  verdict=$(fm_busy_classify_meta "$meta" "$id" "$STATE")
-  case "$verdict" in
-    'busy fm-spawn') ;;
-    busy\ *) return 0 ;;
-    idle\ fm-spawn | idle\ fm-interrupt | idle\ fm-recovery | idle\ *-regex) ;;
-    idle\ *) return 0 ;;
-  esac
+  if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    start_check_remote "$id" start-proof || return 1
+    start_check_verdict_proves "$(printf '%s' "$WATCHER_CAPTURE" | head -1)"
+    return
+  fi
+  start_check_verdict_proves "$(fm_busy_classify_meta "$meta" "$id" "$STATE")" && return 0
   case "$(fm_meta_get "$meta" harness)" in
     codex*)
       backend=$(fm_backend_of_meta "$meta")
@@ -2882,6 +2905,38 @@ start_check_started() {  # <id> <meta> <epoch>
 # marker; both are globals so the caller keeps the capture without a subshell.
 START_CHECK_REASON=
 START_CHECK_TAIL=
+# A remote secondmate is classified the same way through its route: the host's
+# own agent state, then its captured screen. Recovery for it is the secondmate
+# provisioning playbook, never a local relaunch command.
+start_check_remote_reason() {  # <id> <meta> <harness> <head> <home>
+  local id=$1 meta=$2 harness=$3 head=$4 home=$5 host state row name
+  host=$(fm_meta_get "$meta" remote_host)
+  state=
+  if start_check_remote "$id" state; then
+    state=$(printf '%s' "$WATCHER_CAPTURE" | head -1)
+  fi
+  case "$state" in
+    dead | missing)
+      printf -v START_CHECK_REASON '%s; remote worker on %s exited or its endpoint is gone before starting); recover it per secondmate-provisioning after: %s %q %q' \
+        "$head" "$host" "$home" "$SCRIPT_DIR/fm-crew-state.sh" "$id"
+      return 0
+      ;;
+  esac
+  if start_check_remote "$id" capture 40 && [ -n "$WATCHER_CAPTURE" ] \
+    && row=$(printf '%s' "$WATCHER_CAPTURE" | fm_busy_launch_prompt_name "$harness"); then
+    name=${row%%$'\t'*}
+    if [ "${row#*$'\t'}" = enter ]; then
+      printf -v START_CHECK_REASON '%s; on screen on %s: %s); accept: %s %q %q --key Enter' "$head" "$host" "$name" "$home" \
+        "$SCRIPT_DIR/fm-send.sh" "$id"
+    else
+      printf -v START_CHECK_REASON '%s; on screen on %s: %s); no key accepts it: answer it in that endpoint as the harness reference describes' \
+        "$head" "$host" "$name"
+    fi
+    return 0
+  fi
+  printf -v START_CHECK_REASON '%s; remote host %s); inspect: %s %q %q' "$head" "$host" "$home" "$SCRIPT_DIR/fm-crew-state.sh" "$id"
+}
+
 start_check_reason() {  # <id> <meta> <harness> <age>
   local id=$1 meta=$2 harness=$3 age=$4 backend target home row name cstate head note
   backend=$(fm_backend_of_meta "$meta")
@@ -2889,6 +2944,10 @@ start_check_reason() {  # <id> <meta> <harness> <age>
   home="FM_HOME=$(printf '%q' "$FM_HOME")"
   head="check: start $id: no start signal ${age}s after spawn (harness=$harness"
   START_CHECK_TAIL=
+  if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    start_check_remote_reason "$id" "$meta" "$harness" "$head" "$home"
+    return 0
+  fi
   if watcher_capture "$backend" "$target" 40 "$(window_label "$target")"; then
     START_CHECK_TAIL=$WATCHER_CAPTURE
   fi

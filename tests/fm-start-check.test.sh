@@ -313,6 +313,85 @@ test_secondmate_launch_is_checked() {
   pass "a secondmate launch, exempt from the stale path, still gets its start check"
 }
 
+test_held_lock_defers_without_waiting() {
+  local lock start elapsed
+  reset_state
+  open_pane h1 "$PI_DIALOG"
+  arm_task h1 pi 1000
+  lock=$(fm_meta_lock_path "$STATE/h1.meta") || fail "lock path"
+  # A spawn or relaunch publishing this task's record holds its meta lock.
+  ( fm_lock_acquire_wait "$lock"; sleep 20 ) &
+  local holder=$!
+  for _ in $(seq 1 50); do [ -e "$lock" ] && break; sleep 0.1; done
+  start=$(date +%s)
+  start_check_tick 5000 || fail "tick failed"
+  elapsed=$(( $(date +%s) - start ))
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  [ "$elapsed" -lt 5 ] || fail "the tick waited ${elapsed}s on a held task lock"
+  [ "$(count_wakes)" = 0 ] || fail "a record under a held lock was judged: $START_CHECK_WAKE"
+  [ -e "$STATE/h1.start-pending" ] || fail "a record under a held lock was removed"
+  fm_lock_release "$lock" 2>/dev/null || rm -rf -- "$lock"
+  start_check_tick 5000 || fail "tick failed"
+  [ "$(count_wakes)" = 1 ] || fail "the deferred record did not wake once its lock was free"
+  pass "a record whose task lock is held is skipped for that poll without waiting, then judged"
+}
+
+# A remote secondmate's proof and cause are read through its route; the stub
+# stands in for bin/fm-on.sh plus the host's control verbs, whose own suites
+# (fm-remote-secondmate-omp, fm-remote-secondmate-lifecycle-e2e) drive them.
+arm_remote() {  # <id>
+  printf 'window=remote:%s\nharness=pi\nkind=secondmate\nremote_host=remote-mac\n' "$1" > "$STATE/$1.meta"
+  printf '1000 - pi\n' > "$STATE/$1.start-pending"
+}
+
+remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed route
+  REMOTE_PROOF=$1 REMOTE_STATE=$2 REMOTE_CAPTURE=$3 REMOTE_RC=$4
+  start_check_remote() {
+    WATCHER_CAPTURE=
+    [ "$REMOTE_RC" = 0 ] || return "$REMOTE_RC"
+    case "$2" in
+      start-proof) WATCHER_CAPTURE=$REMOTE_PROOF ;;
+      state) WATCHER_CAPTURE=$REMOTE_STATE ;;
+      capture) WATCHER_CAPTURE=$REMOTE_CAPTURE ;;
+    esac
+  }
+  start_check_tick 1200
+  local rc=$?
+  unset -f start_check_remote
+  return "$rc"
+}
+
+test_remote_secondmate_reads_route() {
+  reset_state
+  # Restore the real route helper after each stubbed tick.
+  local real
+  real=$(declare -f start_check_remote)
+  arm_remote r1
+  remote_tick 'idle pi-ext' alive '' 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/r1.start-pending" ] || fail "a remote hook-written record did not count as proof"
+  [ "$(count_wakes)" = 0 ] || fail "a started remote mate woke"
+  arm_remote r2
+  remote_tick 'busy fm-spawn' alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  case "$START_CHECK_WAKE" in
+    "check: start r2: no start signal 200s after spawn (harness=pi; on screen on remote-mac: Pi project-trust dialog \"Trust project folder?\"); accept: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-send.sh r2 --key Enter") ;;
+    *) fail "unexpected remote dialog reason: $START_CHECK_WAKE" ;;
+  esac
+  arm_remote r3
+  remote_tick '' '' '' 255 || fail "tick failed"; eval "$real"
+  case "$START_CHECK_WAKE" in
+    "check: start r3: no start signal 200s after spawn (harness=pi; remote host remote-mac); inspect: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-crew-state.sh r3") ;;
+    *) fail "an unreachable host did not wake generically: $START_CHECK_WAKE" ;;
+  esac
+  arm_remote r4
+  remote_tick 'busy fm-spawn' missing "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  case "$START_CHECK_WAKE" in
+    *"remote worker on remote-mac exited or its endpoint is gone before starting); recover it per secondmate-provisioning after: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-crew-state.sh r4") ;;
+    *) fail "a vanished remote endpoint was not sent to recovery: $START_CHECK_WAKE" ;;
+  esac
+  [ "$(count_wakes)" = 3 ] || fail "expected one wake per unstarted remote launch"
+  pass "a remote secondmate's proof and cause are read through its route; an unreachable host is neither proof nor death"
+}
+
 test_one_wake_per_poll() {
   reset_state
   open_pane a1 "$PI_DIALOG"
@@ -363,5 +442,7 @@ fm_test_run \
   test_codex_dialog_overrides_footer_proof \
   test_stale_records_are_dropped \
   test_secondmate_launch_is_checked \
+  test_held_lock_defers_without_waiting \
+  test_remote_secondmate_reads_route \
   test_one_wake_per_poll \
   test_watcher_loop_single_named_wake

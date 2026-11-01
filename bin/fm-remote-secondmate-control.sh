@@ -11,6 +11,7 @@
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
+#   fm-remote-secondmate-control.sh start-proof <id>
 #   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
@@ -67,6 +68,10 @@ REMOTE_HERDR_SESSION=fm-remote
 # cannot repair while it answers, so nothing this control plane runs may start
 # one: bin/fm-remote-doctor.sh --fix alone starts the persistent server.
 export FM_BACKEND_REX_NO_AUTOSTART=1
+# The parent's watcher owns this mate's spawn start check; nothing on this host
+# scans parent-route state, so every spawn or relaunch driven from here skips
+# arming one (cmd_start_proof below is the parent's read of the proof).
+export FM_SPAWN_NO_START_CHECK=1
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -432,6 +437,22 @@ cmd_capture() {
   fm_backend_capture "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$lines" "fm-$id" | head -c 65536
 }
 
+# The second mate's semantic busy verdict, read from the busy record its own
+# launch armed in this home's parent-route state. Read-only: the PARENT's
+# watcher arms and judges the spawn start check (bin/fm-watch.sh
+# start_check_tick), because this host runs no watcher over parent-route state,
+# and every fm-spawn this script drives skips its own arm (FM_SPAWN_NO_START_CHECK).
+cmd_start_proof() {
+  local id=$1 meta
+  validate_id "$id"
+  validate_home "$id"
+  meta=$(meta_path "$id")
+  # shellcheck source=bin/fm-busy-lib.sh
+  . "$SCRIPT_DIR/fm-busy-lib.sh"
+  fm_busy_classify_meta "$meta" "$id" "$CONTROL_STATE"
+  printf '\n'
+}
+
 cmd_observe() {
   local id=$1 harness
   validate_id "$id"
@@ -549,6 +570,7 @@ case "${1:-}" in
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
+  start-proof) shift; [ "$#" -eq 1 ] || usage; cmd_start_proof "$@" ;;
   sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;

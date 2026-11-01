@@ -1322,11 +1322,40 @@ else
   fi
 fi
 
+# spawn_arm_start_check: publish (or, when disabled, remove) the watcher's
+# one-shot start-check record STATE/<id>.start-pending under the task's meta
+# lock, so the watcher never judges a half-replaced record. bin/fm-watch.sh's
+# start_check_tick owns the `<epoch> <busy-gen or -> <harness>` format. The
+# epoch is the launch boundary taken before delivery; an empty one falls back to
+# now so no path can publish a record the watcher would discard as malformed.
+# FM_SPAWN_NO_START_CHECK=1 disables arming for a spawn whose watcher lives in
+# another home (bin/fm-remote-secondmate-control.sh sets it).
+spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness>
+  local id=$1 enabled=$2 epoch=${3:-} gen=$4 harness=$5 record lock rc=0
+  record="$STATE/$id.start-pending"
+  [ "${FM_SPAWN_NO_START_CHECK:-0}" != 1 ] || enabled=0
+  [ -n "$epoch" ] || epoch=$(date +%s)
+  lock=$(fm_meta_lock_path "$STATE/$id.meta") || return 1
+  fm_lock_acquire_wait "$lock"
+  if [ "$enabled" -eq 1 ]; then
+    if ! { printf '%s %s %s\n' "$epoch" "$gen" "$harness" >"$record.tmp.$$" \
+      && mv -f "$record.tmp.$$" "$record"; }; then
+      rm -f "$record.tmp.$$"
+      echo "warning: could not arm the start check for $id; inspect the worker yourself in about two minutes" >&2
+    fi
+  else
+    rm -f "$record" || rc=1
+  fi
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_rex_session_id remote_rex_server remote_rex_ok
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
+  local remote_start_epoch
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1530,6 +1559,7 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  remote_start_epoch=$(date +%s)
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" </dev/null 2>&1); then
     rc=0
@@ -1652,6 +1682,15 @@ spawn_remote_secondmate() {
   fm_lock_release "$remote_lock" || true
   fm_lock_release "$registry_lock" || true
   fm_lock_release "$SPAWN_TASK_LOCK" || true
+  # The remote host runs no watcher over this mate's route, so the start check
+  # is armed here, where this home's watcher scans; it reads the proof back
+  # through the route (bin/fm-watch.sh start_check_tick). Kimi already proved
+  # its start in its own remote spawn gate. The parent record carries no busy
+  # generation, so it is armed with `-`.
+  case "$harness" in
+  kimi*) spawn_arm_start_check "$id" 0 "$remote_start_epoch" - "$harness" || true ;;
+  *) spawn_arm_start_check "$id" 1 "$remote_start_epoch" - "$harness" || true ;;
+  esac
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
@@ -8177,25 +8216,13 @@ fi
 # carries its own unconfirmed-delivery path, and a raw launch command carries
 # no adapter wiring that could ever post the proof. A relaunch rewrites the
 # record with the replacement's generation, or removes an earlier one.
-START_PENDING="$STATE/$ID.start-pending"
 case "$HARNESS" in
 kimi* | rovo* | agy | polytoken) START_CHECK=0 ;;
 opencode) START_CHECK=1; [ "$OPENCODE_MAJOR" -lt 2 ] || START_CHECK=0 ;;
 *) START_CHECK=1 ;;
 esac
 [ "$BACKEND" != t3code ] && [ "$RAW_LAUNCH" -eq 0 ] || START_CHECK=0
-if [ "$START_CHECK" -eq 1 ]; then
-  START_PENDING_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-  fm_lock_acquire_wait "$START_PENDING_LOCK"
-  if ! { printf '%s %s %s\n' "$START_CHECK_EPOCH" "${BUSY_GEN:--}" "$HARNESS" >"$START_PENDING.tmp.$$" \
-    && mv -f "$START_PENDING.tmp.$$" "$START_PENDING"; }; then
-    rm -f "$START_PENDING.tmp.$$"
-    echo "warning: could not arm the start check for $ID; inspect the worker yourself in about two minutes" >&2
-  fi
-  fm_lock_release "$START_PENDING_LOCK"
-else
-  rm -f "$START_PENDING"
-fi
+spawn_arm_start_check "$ID" "$START_CHECK" "${START_CHECK_EPOCH:-}" "${BUSY_GEN:--}" "$HARNESS" || exit 1
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
