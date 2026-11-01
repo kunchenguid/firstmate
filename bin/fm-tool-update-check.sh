@@ -54,6 +54,12 @@
 # FM_TOOL_UPDATE_PROBE_SECS (default 5, valid 1..30) and a whole sweep by
 # FM_TOOL_UPDATE_BUDGET_SECS (default 20, valid 1..120).
 #
+# Running out of either is never reported as a failed tool. A probe that overruns
+# its own bound is reported as timed out. A probe whose bound the sweep budget
+# had already cut, and a tool the sweep never reached, are reported as not
+# checked, because that is the check's own scheduling and says nothing about the
+# tool.
+#
 # The sweep has to finish inside the watcher's own per check bound, because a run
 # the watcher kills prints nothing and writes no record, so it would repeat that
 # silence on every poll. That coupling is enforced rather than assumed: a budget
@@ -64,9 +70,10 @@
 # refused outright.
 #
 # The report record state/.tool-updates is written only when a sweep runs to its
-# end, and it carries the whole finding set the last report was made from,
-# uncut, so the same pending update is reported once rather than on every poll
-# while a new finding that lands past the one-line cut is still news. A sweep
+# end, and it carries the whole finding set that sweep found, one finding per
+# line. Only findings missing from the recorded set are news and are reported, so
+# the same pending update is reported once, a finding leaving the set announces
+# nothing, and a finding that leaves and later returns is news again. A sweep
 # killed part way through leaves no record and is retried, instead of
 # suppressing its finding.
 set -u
@@ -84,7 +91,10 @@ CHECK_ID=tool-updates
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
-RECORD_SCHEMA=fm-tool-updates-v1
+RECORD_SCHEMA=fm-tool-updates-v2
+# The earlier record carried the whole finding set as one "; " joined line, and
+# is still read so an upgrade does not announce every pending finding again.
+RECORD_SCHEMA_V1=fm-tool-updates-v1
 # Wider than the digest default because one finding names two absolute paths and
 # their two versions, and several tools can report in the same sweep.
 MAX_LINE=1000
@@ -197,37 +207,17 @@ record_epoch_now() {
 
 real_epoch() { date +%s; }
 
-FINDINGS=
+FINDINGS=()
 DEADLINE=0
-INCOMPLETE_REPORTED=0
 
 # Each finding is flattened to a single line here, because the whole report must
-# stay one line for the wake record.
+# stay one line for the wake record and the record holds one finding per line.
 emit() {
-  local text
-  text=$(printf '%s' "$1" | tr '\t\r\n' '   ')
-  if [ -z "$FINDINGS" ]; then
-    FINDINGS=$text
-  else
-    FINDINGS="$FINDINGS; $text"
-  fi
+  FINDINGS+=("$(printf '%s' "$1" | tr '\t\r\n' '   ')")
 }
 
 budget_exhausted() {
   [ "$(real_epoch)" -ge "$DEADLINE" ]
-}
-
-# True while the sweep budget still has room for another probe. When it does not,
-# it records once which tool the sweep did not finish, so a sweep that cannot
-# finish says so rather than being killed by the watcher with nothing printed.
-budget_allows() {
-  local name=$1
-  budget_exhausted || return 0
-  if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
-    INCOMPLETE_REPORTED=1
-    emit "check incomplete: the time budget ran out before $name"
-  fi
-  return 1
 }
 
 # The bound for one probe: the probe bound, cut down to whatever the sweep
@@ -409,18 +399,32 @@ path_hits() {
   done < <(printf '%s\n' "$PATH" | tr ':' '\n')
 }
 
-# Ask one copy for its own version. Combined output, because tools answer on
-# either stream, and no-mistakes announces its update on stderr.
+# Ask one copy for its own version under the given bound. Combined output,
+# because tools answer on either stream, and no-mistakes announces its update on
+# stderr. The caller takes the bound from probe_bound, so it can still tell which
+# of the two budgets a timeout used up.
 probe_output() {
-  local path=$1
-  shift
-  fm_run_timed "$(probe_bound)" "$path" "$@" 2>&1
+  local bound=$1 path=$2
+  shift 2
+  fm_run_timed "$bound" "$path" "$@" 2>&1
+}
+
+# Report a probe that ran out of time. A full probe bound is the tool's own time
+# and is reported as timed out; a bound the sweep budget had cut is the sweep's
+# own time, so the tool is reported as not checked rather than blamed.
+emit_probe_timeout() {
+  local name=$1 bound=$2 path=$3 question=$4
+  if [ "$bound" -lt "$PROBE_SECS" ]; then
+    emit "$name not checked: the sweep time budget ran out while $path was asked $question"
+  else
+    emit "$name timed out: $path did not answer within ${bound}s when asked $question"
+  fi
 }
 
 command_findings() {
   local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5 version_url=${6:-}
-  local hit out version matched announce_out status matched_line announced_version published
-  local resolved_path='' resolved_version='' resolved_out=''
+  local hit out version matched announce_out status matched_line announced_version published bound
+  local resolved_path='' resolved_version='' resolved_out='' resolved_timed_out=''
   local best_path='' best_version='' unreadable='' hits=''
 
   # This tool's announcement source is dead if its pattern cannot be used, which
@@ -439,11 +443,13 @@ command_findings() {
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     if budget_exhausted; then
-      emit "$name check failed: the time budget ran out before every copy answered"
+      emit "$name not checked: the sweep time budget ran out before every copy answered"
       break
     fi
+    bound=$(probe_bound)
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
-    out=$(probe_output "$hit" $args_joined)
+    out=$(probe_output "$bound" "$hit" $args_joined)
+    status=$?
     version=$(parse_version "$out")
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit
@@ -451,7 +457,13 @@ command_findings() {
       resolved_out=$out
     fi
     if [ -z "$version" ]; then
-      [ -n "$unreadable" ] || unreadable=$hit
+      # A copy that ran out of time never had the chance to report a version.
+      if fm_timed_out "$status"; then
+        emit_probe_timeout "$name" "$bound" "$hit" "for its version"
+        [ "$resolved_path" != "$hit" ] || resolved_timed_out=1
+      else
+        [ -n "$unreadable" ] || unreadable=$hit
+      fi
       continue
     fi
     if [ -z "$best_version" ] || version_newer "$version" "$best_version"; then
@@ -472,16 +484,17 @@ EOF
       if budget_exhausted; then
         # The version probe's output cannot carry the announcement, so searching
         # it would present a source that was never asked as a clean result.
-        emit "$name check failed: the time budget ran out before the update announcement was checked"
+        emit "$name not checked: the sweep time budget ran out before the update announcement was checked"
         announce_out=
       else
+        bound=$(probe_bound)
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
-        announce_out=$(probe_output "$resolved_path" $announce_args)
+        announce_out=$(probe_output "$bound" "$resolved_path" $announce_args)
         status=$?
-        if [ "$status" -eq 124 ]; then
+        if fm_timed_out "$status"; then
           # A source that was asked and never answered is not a source that had
           # nothing to say. The one that answers with nothing stays silent below.
-          emit "$name check failed: $resolved_path did not answer when asked for its update announcement"
+          emit_probe_timeout "$name" "$bound" "$resolved_path" "for its update announcement"
           announce_out=
         fi
       fi
@@ -508,8 +521,10 @@ EOF
 
   if [ -z "$resolved_version" ]; then
     # No copy was probed at all when the path is empty, and the budget report
-    # already covers that, so do not blame a copy that was never asked.
-    [ -z "$resolved_path" ] || emit "$name check failed: $resolved_path did not report a version"
+    # already covers that, so do not blame a copy that was never asked. A copy
+    # that ran out of time was already reported as such.
+    [ -z "$resolved_path" ] || [ -n "$resolved_timed_out" ] \
+      || emit "$name check failed: $resolved_path did not report a version"
     return 0
   fi
 
@@ -518,14 +533,18 @@ EOF
     # and compared with the newest installed copy found: a newer install elsewhere
     # on PATH is the "not in effect" finding below, not an available update.
     if budget_exhausted; then
-      emit "$name check failed: the time budget ran out before $version_url was read"
+      emit "$name not checked: the sweep time budget ran out before $version_url was read"
     elif ! command -v curl >/dev/null 2>&1; then
       emit "$name check failed: curl is required to read $version_url"
     else
-      out=$(fm_run_timed "$(probe_bound)" curl -fsS --max-time "$(probe_bound)" -- "$version_url" 2>/dev/null)
+      bound=$(probe_bound)
+      out=$(fm_run_timed "$bound" curl -fsS --max-time "$bound" -- "$version_url" 2>/dev/null)
       status=$?
       published=$(parse_version "$out")
-      if [ "$status" -ne 0 ] || [ -z "$published" ]; then
+      # curl reports its own --max-time with status 28.
+      if fm_timed_out "$status" || [ "$status" -eq 28 ]; then
+        emit_probe_timeout "$name" "$bound" "$version_url" "for its published version"
+      elif [ "$status" -ne 0 ] || [ -z "$published" ]; then
         emit "$name check failed: $version_url did not report a version"
       elif version_newer "$published" "$best_version"; then
         emit "$name update available: $published published at $version_url, PATH resolves $resolved_version"
@@ -546,36 +565,42 @@ EOF
 
 # --- git probes -------------------------------------------------------------
 
-# A probe the sweep budget can no longer afford is never issued, and says so with
-# a status of its own rather than a git status, so no caller can read it as an
-# answer. Neither git nor the bounded runner uses this value.
-GIT_PROBE_NOT_ISSUED=3
+# A probe the sweep budget can no longer afford is never issued, and one whose
+# bound the sweep budget had cut and that then ran out of time is the sweep's
+# doing too. Both say so with a status of their own rather than a git status, so
+# no caller can read it as an answer or blame the repository. Neither git nor the
+# bounded runner uses this value.
+GIT_PROBE_BUDGET_GONE=3
 
 # One bounded read-only git probe. The budget check lives here rather than in the
 # callers, so no probe can be issued past the sweep deadline whatever a caller
 # does, and the budget only has to leave room for the one probe that was already
 # running when the deadline passed.
 git_probe() {
-  local repo=$1
+  local repo=$1 bound status
   shift
-  budget_exhausted && return "$GIT_PROBE_NOT_ISSUED"
-  fm_run_timed "$(probe_bound)" git -C "$repo" "$@"
+  budget_exhausted && return "$GIT_PROBE_BUDGET_GONE"
+  bound=$(probe_bound)
+  fm_run_timed "$bound" git -C "$repo" "$@"
+  status=$?
+  if fm_timed_out "$status" && [ "$bound" -lt "$PROBE_SECS" ]; then
+    return "$GIT_PROBE_BUDGET_GONE"
+  fi
+  return "$status"
 }
 
 # The single place that reads a probe status as no answer at all, so every probe
 # reports an unanswered read the same way instead of taking it for the answer no.
 git_probe_answered() {
   local status=$1 name=$2 subject=$3 question=$4
-  case "$status" in
-    "$GIT_PROBE_NOT_ISSUED")
-      emit "$name check failed: the time budget ran out before $subject was asked $question"
-      return 1
-      ;;
-    124)
-      emit "$name check failed: $subject did not answer $question"
-      return 1
-      ;;
-  esac
+  if [ "$status" = "$GIT_PROBE_BUDGET_GONE" ]; then
+    emit "$name not checked: the sweep time budget ran out before $subject answered $question"
+    return 1
+  fi
+  if fm_timed_out "$status"; then
+    emit "$name timed out: $subject did not answer $question within ${PROBE_SECS}s"
+    return 1
+  fi
   return 0
 }
 
@@ -595,7 +620,6 @@ git_findings() {
     emit "$name check failed: $repo is not a directory"
     return 0
   fi
-  budget_allows "$name" || return 0
   git_probe "$repo" rev-parse --git-dir >/dev/null 2>&1
   status=$?
   git_probe_answered "$status" "$name" "$repo" "whether it is a git repository" || return 0
@@ -688,17 +712,21 @@ git_findings() {
 # --- report record ----------------------------------------------------------
 
 RECORD_EPOCH=0
-RECORD_REPORTED=
+# The recorded finding set, one finding per line.
+RECORD_FOUND=
 
 record_read() {
-  local line first=1
+  local line first=1 schema='' nl=$'\n'
   RECORD_EPOCH=0
-  RECORD_REPORTED=
+  RECORD_FOUND=
   [ -f "$RECORD" ] || return 0
   while IFS= read -r line; do
     if [ "$first" = 1 ]; then
       first=0
-      [ "$line" = "$RECORD_SCHEMA" ] || return 0
+      case "$line" in
+        "$RECORD_SCHEMA"|"$RECORD_SCHEMA_V1") schema=$line ;;
+        *) return 0 ;;
+      esac
       continue
     fi
     case "$line" in
@@ -709,20 +737,38 @@ record_read() {
           *) RECORD_EPOCH=$line ;;
         esac
         ;;
-      reported=*) RECORD_REPORTED=${line#reported=} ;;
+      found=*)
+        [ "$schema" = "$RECORD_SCHEMA" ] || continue
+        RECORD_FOUND="$RECORD_FOUND${line#found=}$nl"
+        ;;
+      reported=*)
+        [ "$schema" = "$RECORD_SCHEMA_V1" ] || continue
+        line=${line#reported=}
+        [ -z "$line" ] || RECORD_FOUND="${line//; /$nl}$nl"
+        ;;
     esac
   done < "$RECORD"
   return 0
 }
 
+# True when the finding is in the recorded set.
+record_has() {
+  case $'\n'"$RECORD_FOUND" in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
+
 record_write() {
-  local reported=$1 tmp
+  local tmp finding
   tmp=$(mktemp "$RECORD.XXXXXX" 2>/dev/null) || return 1
   chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
   {
     printf '%s\n' "$RECORD_SCHEMA"
     printf 'epoch=%s\n' "$(record_epoch_now)"
-    printf 'reported=%s\n' "$reported"
+    for finding in ${FINDINGS[@]+"${FINDINGS[@]}"}; do
+      printf 'found=%s\n' "$finding"
+    done
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$RECORD" || { rm -f -- "$tmp"; return 1; }
   return 0
@@ -732,7 +778,7 @@ record_write() {
 
 action_check() {
   local name command_name args_joined announce announce_args repo remote branch version_url
-  local line now
+  local line now finding news=''
 
   [ -f "$CONFIG" ] || return 0
 
@@ -754,31 +800,35 @@ action_check() {
   else
     while IFS=$FIELD_SEP read -r name command_name args_joined announce announce_args repo remote branch version_url; do
       [ -n "$name" ] || continue
-      budget_allows "$name" || break
+      # A tool the sweep never reached was not asked anything, so it is named as
+      # not checked rather than reported as failing or read as current.
+      if budget_exhausted; then
+        emit "$name not checked: the sweep time budget ran out before it was reached"
+        continue
+      fi
       [ -z "$command_name" ] || command_findings "$name" "$command_name" "$args_joined" "$announce" "$announce_args" "$version_url"
       [ -z "$repo" ] || git_findings "$name" "$repo" "$remote" "$branch"
     done < <(config_records)
   fi
 
-  line=
-  if [ -n "$FINDINGS" ]; then
-    # Capped through the shared cut so an over-long report carries the same
-    # visible truncation marker the digests use, instead of ending mid-finding
-    # as if that were all of it.
-    fm_cap_line_var "tool updates: $FINDINGS" "$MAX_LINE"
-    line=$FM_LINE_CAP_LINE
-  fi
+  # Only a finding the recorded set does not hold is news. Comparing the sets
+  # rather than the whole report keeps a finding that leaves the set from
+  # announcing the ones that remain again.
+  for finding in ${FINDINGS[@]+"${FINDINGS[@]}"}; do
+    record_has "$finding" && continue
+    news="${news:+$news; }$finding"
+  done
 
-  # The cut line is what gets printed, but the whole finding set is what decides
-  # whether this is news, because a finding that lands past the cut leaves the
-  # printed line unchanged and would otherwise be suppressed for good.
-  #
   # Report before recording, so a record that cannot be written costs a repeated
-  # report rather than a lost one.
-  if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
+  # report rather than a lost one. Capped through the shared cut so an over-long
+  # report carries the same visible truncation marker the digests use, instead
+  # of ending mid-finding as if that were all of it.
+  if [ -n "$news" ]; then
+    fm_cap_line_var "tool updates: $news" "$MAX_LINE"
+    line=$FM_LINE_CAP_LINE
     printf '%s\n' "$line"
   fi
-  record_write "$FINDINGS" || true
+  record_write || true
   return 0
 }
 
