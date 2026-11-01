@@ -116,19 +116,21 @@
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
 #   config/backend, then runtime auto-detection from the runtime firstmate's
-#   environment: $TMUX, HERDR_ENV=1, TERM_PROGRAM=rex with REX_BLOCK, or cmux
-#   runtime signals (via
+#   environment: $TMUX, HERDR_ENV=1, TERM_PROGRAM=rex with REX_BLOCK, cmux
+#   runtime signals, or the Herdr app signals (via
 #   bin/fm-backend.sh's fm_backend_detect, with cmux fallback details in
-#   docs/cmux-backend.md),
+#   docs/cmux-backend.md and the app signals in docs/hc-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
 #   adapter, and experimental zellij, orca, cmux, paseo, rex, t3code, tern,
 #   and hc adapters. Orca owns both the task worktree and terminal, so ship/scout Orca
 #   spawns do not run treehouse get; cmux, paseo, rex, tern, and hc are session
 #   providers only, exactly like herdr/zellij, so they do. Auto-detected herdr
-#   and rex stay silent like tmux; auto-detected cmux prints a loud stderr
-#   notice; zellij, orca, paseo, t3code, tern, and hc are never auto-detected
-#   (the paseo, tern, and hc markers leak into every descendant process).
+#   and rex stay silent like tmux; auto-detected cmux and Herdr-app-driven hc
+#   print a loud stderr notice; zellij, orca, paseo, t3code, and tern are never
+#   auto-detected (the paseo and tern markers, like bare hc markers, leak into
+#   every descendant process). A detected non-default backend also records its
+#   signal in meta's backend_detect= line.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
@@ -2233,6 +2235,14 @@ if [ "$RELAUNCH" -eq 0 ]; then
     BACKEND=$BACKEND_ARG
   else
     BACKEND=$(fm_backend_name)
+    # fm_backend_name already ran detection in a command substitution; rerun
+    # it directly here only so FM_BACKEND_DETECTED/FM_BACKEND_DETECT_SIGNAL
+    # survive into this process for the meta's backend_detect= provenance
+    # line below. An explicit setting skips detection entirely - same as
+    # fm_backend_name - so it leaves the globals empty.
+    FM_BACKEND_DETECTED=""
+    FM_BACKEND_DETECT_SIGNAL=""
+    fm_backend_explicit_name >/dev/null 2>&1 || fm_backend_detect >/dev/null 2>&1 || true
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
@@ -7019,6 +7029,13 @@ preserve_relaunch_meta() {
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  # backend_detect= records the auto-detection signal behind a non-default,
+  # non-explicit backend selection, so the task record carries the reason
+  # (e.g. HERDR_ENV, app-terminal, app-window), not just the result. Skipped
+  # for explicit selections and for the default path, and when the
+  # provenance rerun above did not reproduce the resolved backend.
+  [ "$BACKEND" = tmux ] || [ -z "${FM_BACKEND_DETECTED:-}" ] || [ "$FM_BACKEND_DETECTED" != "$BACKEND" ] \
+    || echo "backend_detect=${FM_BACKEND_DETECT_SIGNAL:-}"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"

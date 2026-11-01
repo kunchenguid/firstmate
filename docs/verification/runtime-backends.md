@@ -3577,9 +3577,30 @@ ok - hc liveness: grok grok 1.0.41 (4220f3b224a6) [stable] classifies alive in h
 
 Teardown swept the session's serve/hold daemons plus the harness processes they held, and the fleet-state tripwire confirmed the recorded real-core file metadata inventory unchanged.
 
+### Runtime auto-detection (Herdr app signals)
+
+Measured on 2026-11-01 inside a `bin/fm-hc-lab.sh` session (`fm-hclab-s3det-*`, hc 0.1.14) and against herdr-app 0.1.11 source plus its release binary, never against a running user app or core:
+
+| Probe | Result |
+| --- | --- |
+| `TERM_PROGRAM=herdr hc run` (CLI path) | The child env showed `TERM_PROGRAM=ghostty`: the core's `child_env` rewrites absent-or-`herdr` `TERM_PROGRAM` to `ghostty` for every terminal. |
+| `terminal.run` over `hc connect` with `env={"TERM","COLORTERM","TERM_PROGRAM":"herdr"}` and `herdr.space`/`herdr.tab` labels - the app's exact call (herdr-app 0.1.11 `src/hc.rs`) | Same child env: `TERM_PROGRAM=ghostty`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, `HC_SESSION`, `HC_SCOPE` present. An app terminal's process env is identical to any other hc terminal's; the `herdr` claim is consumed core-side. |
+| `hc get` against a missing socket path | **Spawned a new `herdr-core serve` bound to that path** (autostart confirmed): the detection's `hc get` runs only behind a live unix-connect probe. |
+| `hc get` against a stale socket file with another core recorded | Refused `unavailable` naming the listening core's socket; no autostart on a refused connect. |
+| `fm_backend_detect` inside the labeled terminal (`env -i` claims and a real `hc send` run inside it) | `hc` / `app-terminal`; `fm_backend_name` resolved `hc` with the loud opt-out notice. |
+| Same inside an unlabeled `hc run` terminal | Undetected. |
+| `HERDR_ENV=1` alongside the app-terminal markers | `herdr` wins - the earlier surface marker keeps its verdict. A lab core provisioned from a herdr pane does inherit `HERDR_*` into every terminal it spawns. |
+| Dead `HC_TERMINAL_SOCKET` | Undetected, and no socket file or core was created. |
+| Live unix listener at the resolved `herdr-app.sock` path, no other markers | `hc` / `app-window`; a stale socket file and an absent one both undetected. |
+| App signal plus no self-identifying hc binary on `PATH` | Undetected (`app-window-unusable`); `fm_backend_name` still resolves `tmux` and prints the missing-toolchain notice. |
+| `FM_BACKEND=herdr` with app-terminal markers | `herdr` resolves silently - explicit selection always wins. |
+
+`bin/fm-supervisor-target-lib.sh` now resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc`; `bin/fm-supervise-daemon.sh` still supports only `tmux herdr rex t3code` and refuses the resolved backend loudly.
+
 ### Not verified
 
 - A ship spawn, and a spawn with a real harness rather than the stand-in.
 - `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
+- The `app-window` probe against a real running Herdr.app window (verified against a plain unix listener; a real app's socket behavior was not exercised).
 - How the `herdr.space` and `herdr.tab` labels display in Herdr.app.

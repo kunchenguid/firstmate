@@ -45,9 +45,12 @@
 # it spawns (a tmux server or Herdr client started inside a block inherits
 # them), so an inherited marker is not a selection; see docs/tern-backend.md.
 # bin/backends/hc.sh adds herdr-core (`hc`, the core under Herdr.app), also
-# EXPERIMENTAL, spawn-capable, session-provider-only, and EXPLICIT-ONLY:
-# hc stamps HC_TERMINAL_ID into every descendant process, so an inherited
-# marker is not a selection; see docs/hc-backend.md.
+# EXPERIMENTAL, spawn-capable, and session-provider-only. Its bare
+# HC_TERMINAL_* markers are not a selection (hc stamps HC_TERMINAL_ID into
+# every descendant process), but the Herdr app's own signals are: firstmate
+# running inside a terminal the app projects selects hc, and a live Herdr
+# app window selects hc when no other surface marker claims the runtime; see
+# docs/hc-backend.md "Runtime auto-detection".
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -175,9 +178,42 @@ fm_backend_is_known() {  # <name>
 #      scrubbed entirely (no bundle id to inherit); NOT usable from inside
 #      tmux, where the tmux server reparents to launchd and the chain never
 #      reaches cmux - which is fine, because $TMUX already won there.
+# The Herdr app (herdr-app, the native window over herdr-core) is checked
+# LAST, after every marker a layer of this process's own runtime could set:
+# herdr-core strips everything but terminal-identity vars when it starts a
+# terminal, so an app-created terminal can never legitimately carry $TMUX,
+# HERDR_ENV, Rex's pair, or a cmux marker - and a marker set that IS
+# contradictory (e.g. cmux markers inherited by the whole core through an app
+# launched from a cmux tab) keeps the earlier check's verdict instead of
+# forcing a new switch. Two app signals select hc (docs/hc-backend.md
+# "Runtime auto-detection" owns the contract):
+#   1. app-terminal: this process's own terminal carries a non-empty
+#      herdr.space label in its core's record - the exact condition the app
+#      projects a terminal into its window (herdr-app 0.1.11 window.rs
+#      groups by non-empty herdr.space and stamps it, with herdr.tab, on
+#      every terminal it creates). The claim is verified from the record,
+#      not from env: an app terminal's own env is deliberately identical to
+#      any other hc terminal's (the app asks for TERM_PROGRAM=herdr in
+#      terminal.run's env, and the core's child_env normalizes it to
+#      "ghostty" for every terminal, app-created or not). The read-only
+#      `hc get` runs only behind a live unix-connect probe of
+#      HC_TERMINAL_SOCKET, because `hc` STARTS a core on contact with a
+#      missing socket - a bare call could create state.
+#   2. app-window: a live herdr-app.sock control socket under the resolved
+#      app home, probed by an actual unix connect (the app's own liveness
+#      rule; a stale file refuses, an absent one never binds). Reached only
+#      when no signal claimed this process's runtime, so a firstmate on a
+#      plain tmux-free shell still opts into app presentation while the
+#      captain's window is open. The probe never launches the app.
+# Both signals require a usable hc toolchain: an executable FM_HC_BIN, or
+# herdr-core/hc on PATH reporting `hc x.y.z` (other tools ship an `hc`
+# name), plus jq. An app-window signal without one is NOT a detection: the
+# probe records app-window-unusable in FM_BACKEND_DETECT_SIGNAL so
+# fm_backend_name can say why it did not switch.
 # Callers needing the winning signal read FM_BACKEND_DETECT_SIGNAL (set to
-# TMUX, HERDR_ENV, TERM_PROGRAM, CMUX_WORKSPACE_ID, bundle-id, or ancestry) and
-# FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
+# TMUX, HERDR_ENV, TERM_PROGRAM, CMUX_WORKSPACE_ID, bundle-id, ancestry,
+# app-terminal, or app-window) and FM_BACKEND_DETECTED after a direct
+# (non-command-substitution) call.
 FM_BACKEND_CMUX_BUNDLE_ID="com.cmuxterm.app"
 
 fm_backend_detect() {
@@ -212,6 +248,11 @@ fm_backend_detect() {
     printf 'cmux'
     return 0
   fi
+  if fm_backend_detect_herdr_app; then
+    FM_BACKEND_DETECTED=hc
+    printf 'hc'
+    return 0
+  fi
   # Paseo is deliberately NOT detected here. Its PASEO_* markers and the
   # sh.paseo.desktop bundle id reach every descendant process, including a
   # tmux server started from a Paseo tab, so their presence never proves the
@@ -220,8 +261,123 @@ fm_backend_detect() {
   # every descendant process of a Tern block, including a tmux server or Herdr
   # client started inside it, so their presence never proves the captain chose
   # Tern (docs/tern-backend.md "Selection is explicit").
-  # hc is not detected either: HC_TERMINAL_ID reaches every process an hc
-  # terminal starts (docs/hc-backend.md "Selection is explicit").
+  # Bare hc markers without the Herdr app claim above are not a selection
+  # either: HC_TERMINAL_ID reaches every process an hc terminal starts
+  # (docs/hc-backend.md "Runtime auto-detection").
+  return 1
+}
+
+# fm_backend_herdr_app_sock: the Herdr app's control-socket path under the
+# resolved app home, mirroring the app's own app_dir resolution (herdr-app
+# 0.1.11 src/mods.rs): HERDR_APP_HOME wins, else XDG_CONFIG_HOME/herdr-app,
+# else ~/.config/herdr-app.
+fm_backend_herdr_app_sock() {
+  if [ -n "${HERDR_APP_HOME:-}" ]; then
+    printf '%s/herdr-app.sock' "$HERDR_APP_HOME"
+  else
+    printf '%s/herdr-app/herdr-app.sock' "${XDG_CONFIG_HOME:-$HOME/.config}"
+  fi
+}
+
+# fm_backend_unix_sock_live: a process is accepting unix-socket connections
+# at <path> right now - a real connect, not liveness by file shape: a stale
+# socket file refuses, an absent one never binds. python3 is required
+# (firstmate's toolchain already relies on it); nc's -U/-z flags are
+# unreliable for this on macOS.
+fm_backend_unix_sock_live() {  # <path>
+  command -v python3 >/dev/null 2>&1 || return 1
+  [ -S "$1" ] || return 1
+  python3 - "$1" <<'PY' >/dev/null 2>&1
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(0.75)
+try:
+    s.connect(sys.argv[1])
+except OSError:
+    sys.exit(1)
+PY
+}
+
+# fm_backend_herdr_app_window_live: a Herdr app window is serving its control
+# socket right now - the app's own liveness rule applied read-only; it never
+# launches the app and never talks to the core. Records the probed path in
+# FM_BACKEND_HERDR_APP_SOCK for notices.
+fm_backend_herdr_app_window_live() {
+  local sock
+  sock=$(fm_backend_herdr_app_sock)
+  FM_BACKEND_HERDR_APP_SOCK=$sock
+  fm_backend_unix_sock_live "$sock"
+}
+
+# fm_backend_detect_hc_bin: the herdr-core binary the adapter would resolve
+# (bin/backends/hc.sh fm_backend_hc_bin): executable FM_HC_BIN wins, else
+# `herdr-core` on PATH, else the `hc` alias.
+fm_backend_detect_hc_bin() {
+  local bin
+  if [ -n "${FM_HC_BIN:-}" ]; then
+    [ -x "$FM_HC_BIN" ] || return 1
+    printf '%s' "$FM_HC_BIN"
+    return 0
+  fi
+  bin=$(command -v herdr-core 2>/dev/null || command -v hc 2>/dev/null) || return 1
+  [ -n "$bin" ] || return 1
+  printf '%s' "$bin"
+}
+
+# fm_backend_detect_hc_usable: an hc selection can only succeed when a
+# self-identifying herdr-core binary resolves (`<bin> --version` reports
+# `hc x.y.z` - unrelated tools ship an `hc` name) and jq is present, since
+# every adapter surface parses hc's JSON. Checking here keeps a detected app
+# signal from silently steering a spawn that the adapter's own gates would
+# only refuse later.
+fm_backend_detect_hc_usable() {
+  local bin
+  command -v jq >/dev/null 2>&1 || return 1
+  bin=$(fm_backend_detect_hc_bin) || return 1
+  case "$("$bin" --version 2>/dev/null)" in
+    'hc '[0-9]*.[0-9]*.[0-9]*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_backend_detect_herdr_app_terminal: this process runs inside an
+# app-projected terminal - its own core record carries a non-empty
+# herdr.space label, the exact condition the app uses to show a terminal in
+# the window. Verified read-only: `hc get` runs only behind a live
+# connect-probe of HC_TERMINAL_SOCKET because `hc` starts a core on contact
+# with a missing socket. Any uncertainty (dead socket, unusable hc, absent
+# jq, get failure, empty label) is a miss, never a detection.
+fm_backend_detect_herdr_app_terminal() {
+  [ -n "${HC_TERMINAL_ID:-}" ] && [ -n "${HC_TERMINAL_SOCKET:-}" ] || return 1
+  fm_backend_unix_sock_live "$HC_TERMINAL_SOCKET" || return 1
+  fm_backend_detect_hc_usable || return 1
+  local bin space
+  bin=$(fm_backend_detect_hc_bin) || return 1
+  # `env -u HC_SESSION` lets the pinned socket alone name the endpoint; an
+  # inherited session could point at another core.
+  space=$(env -u HC_SESSION HC_SOCKET="$HC_TERMINAL_SOCKET" "$bin" get "$HC_TERMINAL_ID" --json 2>/dev/null \
+    | jq -r '.labels["herdr.space"] // ""' 2>/dev/null) || return 1
+  [ -n "$space" ]
+}
+
+# fm_backend_detect_herdr_app: the two Herdr app signals documented on
+# fm_backend_detect. On a detection sets FM_BACKEND_DETECT_SIGNAL to
+# app-terminal or app-window and returns 0; on a live app window with no
+# usable hc toolchain sets app-window-unusable and returns 1; with no
+# established app signal at all leaves the globals alone and returns 1.
+fm_backend_detect_herdr_app() {
+  if fm_backend_detect_herdr_app_terminal; then
+    FM_BACKEND_DETECT_SIGNAL=app-terminal
+    return 0
+  fi
+  if fm_backend_herdr_app_window_live; then
+    if fm_backend_detect_hc_usable; then
+      FM_BACKEND_DETECT_SIGNAL=app-window
+      return 0
+    fi
+    FM_BACKEND_DETECT_SIGNAL=app-window-unusable
+    return 1
+  fi
   return 1
 }
 
@@ -317,8 +473,11 @@ fm_backend_explicit_name() {
 # cmux prints a loud stderr notice because it remains experimental. The cmux
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
-# distinct from the primary-marker case.
-# Paseo, tern, and hc are never auto-detected, so they only ever come out of this
+# distinct from the primary-marker case. An hc selection from a Herdr app
+# signal prints the same class of notice; an app signal with no usable
+# herdr-core binary is not a detection, and a notice names the missing piece
+# instead of switching.
+# Paseo and tern are never auto-detected, so they only ever come out of this
 # function from FM_BACKEND or config/backend.
 fm_backend_name() {
   local detected marker
@@ -327,17 +486,32 @@ fm_backend_name() {
   # globals survive into the notice below.
   if fm_backend_detect >/dev/null; then
     detected=$FM_BACKEND_DETECTED
-    if [ "$detected" = cmux ]; then
-      case "$FM_BACKEND_DETECT_SIGNAL" in
-        bundle-id) marker="FALLBACK signal __CFBundleIdentifier=$FM_BACKEND_CMUX_BUNDLE_ID; CMUX_WORKSPACE_ID absent, stripped by cmux's bundled claude wrapper" ;;
-        ancestry) marker="FALLBACK signal process-ancestry reaching the running cmux app; CMUX_WORKSPACE_ID absent, stripped by cmux's bundled claude wrapper" ;;
-        *) marker="CMUX_WORKSPACE_ID" ;;
-      esac
-      echo "NOTICE: auto-detected cmux runtime ($marker) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
-    fi
+    case "$detected" in
+      cmux)
+        case "$FM_BACKEND_DETECT_SIGNAL" in
+          bundle-id) marker="FALLBACK signal __CFBundleIdentifier=$FM_BACKEND_CMUX_BUNDLE_ID; CMUX_WORKSPACE_ID absent, stripped by cmux's bundled claude wrapper" ;;
+          ancestry) marker="FALLBACK signal process-ancestry reaching the running cmux app; CMUX_WORKSPACE_ID absent, stripped by cmux's bundled claude wrapper" ;;
+          *) marker="CMUX_WORKSPACE_ID" ;;
+        esac
+        echo "NOTICE: auto-detected cmux runtime ($marker) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
+        ;;
+      hc)
+        case "$FM_BACKEND_DETECT_SIGNAL" in
+          app-terminal) marker="a Herdr-app-projected terminal (${HC_SESSION:-default}:${HC_TERMINAL_ID:-?} carries a herdr.space label)" ;;
+          app-window) marker="a live Herdr app window (${FM_BACKEND_HERDR_APP_SOCK:-herdr-app.sock})" ;;
+          *) marker="$FM_BACKEND_DETECT_SIGNAL" ;;
+        esac
+        echo "NOTICE: auto-detected $marker - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out." >&2
+        ;;
+    esac
     printf '%s' "$detected"
     return 0
   fi
+  case "$FM_BACKEND_DETECT_SIGNAL" in
+    app-window-unusable)
+      echo "NOTICE: detected a live Herdr app window (${FM_BACKEND_HERDR_APP_SOCK:-herdr-app.sock}) but no usable hc toolchain (an executable FM_HC_BIN, or herdr-core/hc on PATH reporting 'hc x.y.z', and jq); staying on the default backend. See docs/hc-backend.md." >&2
+      ;;
+  esac
   printf 'tmux'
 }
 

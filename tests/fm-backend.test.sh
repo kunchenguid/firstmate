@@ -45,6 +45,15 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
 SPAWN_HOME="$TMP_ROOT/user-home"
 mkdir -p "$SPAWN_HOME"
 
+# Ambient Herdr-app/hc markers are scrubbed for the whole suite: a developer
+# running these tests inside a real hc terminal, or beside a live Herdr.app
+# window on this host, would otherwise leak an app detection into the many
+# "undetected" expectations below (mirrors FAKE_NONDARWIN_BIN's cmux role).
+# Per-case fixtures set their own HERDR_APP_HOME / HC_TERMINAL_* claims.
+unset HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE HC_SESSION HERDR_APP_HOME
+export XDG_CONFIG_HOME="$TMP_ROOT/xdg-config-null"
+mkdir -p "$XDG_CONFIG_HOME"
+
 write_spawn_brief() {  # <file> <id>
   cat > "$1" <<EOF
 # Task
@@ -553,6 +562,185 @@ test_backend_rex_autodetect() {
   fm_backend_validate_spawn rex 2>/dev/null || fail "rex must be a known spawn-capable backend"
 
   pass "fm_backend_detect/fm_backend_name: TERM_PROGRAM=rex + REX_BLOCK -> rex (silent); nested tmux/herdr win; REX_BLOCK alone never selects rex; explicit config wins"
+}
+
+# Herdr app auto-detection (docs/hc-backend.md "Runtime auto-detection"):
+# the app-terminal signal is the terminal's own herdr.space label read from a
+# live core socket (never a bare HC_TERMINAL_* marker set), and app-window is
+# a live herdr-app.sock connect; each needs a usable hc toolchain, and a live
+# window without one is not a detection.
+test_backend_detect_herdr_app() {
+  local dir fb cfg cfg_tmux out errfile sockdir sock apphome lpid
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the herdr-app probes need its unix connect"; return; }
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc toolchain check needs it"; return; }
+
+  dir="$TMP_ROOT/herdr-app-detect"; fb="$dir/fakebin"; cfg="$dir/config-empty"; cfg_tmux="$dir/config-tmux"
+  mkdir -p "$dir" "$fb" "$cfg" "$cfg_tmux"; printf 'tmux\n' > "$cfg_tmux/backend"
+  errfile="$dir/err.txt"
+  # AF_UNIX paths cap near 104 bytes; deep tmp roots overflow them, so every
+  # bound socket lives under a short /tmp dir.
+  sockdir=$(mktemp -d /tmp/fm-be.XXXXXX) || fail "mktemp for the socket dir failed"
+  # A fake herdr-core: --version self-identifies as hc; `get` echoes the record
+  # in $FM_FAKE_HC_GET. Every other call fails, so detection plumbing is all
+  # this stub can ever answer.
+  cat > "$fb/herdr-core" <<'SH'
+#!/bin/sh
+case "${1:-}" in
+  --version) printf 'hc 9.9.9\n' ;;
+  get) printf '%s\n' "${FM_FAKE_HC_GET:-{\}}" ;;
+  *) exit 3 ;;
+esac
+SH
+  chmod +x "$fb/herdr-core"
+
+  # live_sock <path>: park a real listening unix socket for the probes.
+  live_sock() {
+    python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(5); time.sleep(300)' "$1" >/dev/null 2>&1 &
+    echo $!
+  }
+
+  # --- app-terminal: the terminal's own core record carries herdr.space ----
+  sock="$sockdir/term.sock"
+  lpid=$(live_sock "$sock"); sleep 0.2
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$fb:$PATH" \
+    FM_FAKE_HC_GET='{"labels":{"herdr.space":"fm-app","herdr.tab":"x"}}' \
+    HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" fm_backend_detect \
+    && [ "$FM_BACKEND_DETECT_SIGNAL" = app-terminal ]) \
+    || fail "fm_backend_detect should detect an app-projected terminal with signal app-terminal"
+  [ "$out" = hc ] || fail "an app-projected terminal must detect hc, got '$out'"
+  kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
+
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$fb:$PATH" \
+    HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" fm_backend_detect) \
+    && fail "the app-terminal check must skip a dead socket (and must not autostart a core), got '$out'"
+  # A dead socket is never probed further: nothing may have replaced the file
+  # and no core may have been spawned for it.
+  [ ! -e "$sock" ] || [ -S "$sock" ] || fail "the app-terminal probe created state at the dead socket path"
+  rm -f "$sock"
+
+  lpid=$(live_sock "$sock"); sleep 0.2
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$fb:$PATH" \
+    FM_FAKE_HC_GET='{"labels":{"herdr.space":"","herdr.tab":"x"}}' \
+    HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" fm_backend_detect) \
+    && fail "an empty herdr.space label is not an app-terminal claim, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$fb:$PATH" \
+    FM_FAKE_HC_GET='{"labels":{"probe":"cli"}}' \
+    HC_TERMINAL_ID=t1 HC_TERMINAL_SOCKET="$sock" fm_backend_detect) \
+    && fail "an unlabeled hc terminal is not an app-terminal claim, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$fb:$PATH" \
+    FM_FAKE_HC_GET='{"labels":{"herdr.space":"fm-app"}}' \
+    HC_TERMINAL_ID=t2 fm_backend_detect) \
+    && fail "HC_TERMINAL_ID without a socket never reaches the record check, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="/usr/bin:/bin" \
+    HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" FM_HC_BIN=/nonexistent/hc fm_backend_detect) \
+    && fail "an app-terminal claim with no usable hc must not detect, got '$out'"
+  kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
+
+  # --- earlier surface markers still win over the app signals --------------
+  lpid=$(live_sock "$sock"); sleep 0.2
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$fb:$PATH" \
+    FM_FAKE_HC_GET='{"labels":{"herdr.space":"fm-app"}}' \
+    TMUX='fake,1,0' HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" fm_backend_detect)
+  [ "$out" = tmux ] || fail "tmux nested inside an app terminal must keep tmux, got '$out'"
+  out=$(unset TMUX CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$fb:$PATH" \
+    FM_FAKE_HC_GET='{"labels":{"herdr.space":"fm-app"}}' \
+    HERDR_ENV=1 HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" fm_backend_detect)
+  [ "$out" = herdr ] || fail "a herdr marker inside an app terminal must keep herdr, got '$out'"
+  kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
+
+  # --- app-window: a live herdr-app.sock when nothing else claimed ---------
+  apphome="$sockdir/apphome"; mkdir -p "$apphome"
+  lpid=$(live_sock "$apphome/herdr-app.sock"); sleep 0.2
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="$fb:$PATH" \
+    HERDR_APP_HOME="$apphome" fm_backend_detect \
+    && [ "$FM_BACKEND_DETECT_SIGNAL" = app-window ]) \
+    || fail "fm_backend_detect should detect a live app window with signal app-window"
+  [ "$out" = hc ] || fail "a live app window must detect hc, got '$out'"
+
+  # The same window under XDG_CONFIG_HOME resolution.
+  mkdir -p "$sockdir/xdg/herdr-app"; ln -sf "$apphome/herdr-app.sock" "$sockdir/xdg/herdr-app/herdr-app.sock" 2>/dev/null || :
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="$fb:$PATH" \
+    XDG_CONFIG_HOME="$sockdir/xdg" fm_backend_detect) \
+    || fail "fm_backend_detect should resolve the window under XDG_CONFIG_HOME"
+  [ "$out" = hc ] || fail "a live app window under XDG resolution must detect hc, got '$out'"
+
+  # A stale socket file is not a window.
+  kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="$fb:$PATH" \
+    HERDR_APP_HOME="$apphome" fm_backend_detect) \
+    && fail "a stale herdr-app.sock must not detect a window, got '$out'"
+  rm -f "$apphome/herdr-app.sock" "$sockdir/xdg/herdr-app/herdr-app.sock"
+
+
+  # A live window with no usable hc toolchain is a non-switch with a signal.
+  lpid=$(live_sock "$apphome/herdr-app.sock"); sleep 0.2
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="/usr/bin:/bin" \
+    HERDR_APP_HOME="$apphome" FM_HC_BIN=/nonexistent/hc fm_backend_detect \
+    || [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-window-unusable ]) \
+    || fail "a live window with no usable hc must stay undetected with signal app-window-unusable, got '$out'"
+  kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
+  rm -rf "$sockdir"
+
+  pass "fm_backend_detect: app-terminal (live core + herdr.space label) and app-window (live herdr-app.sock) select hc; dead/stale/missing evidence and unusable toolchains never switch"
+}
+
+# fm_backend_name notices and explicit precedence for the Herdr app signals:
+# an auto-selected hc names its signal and the opt-out; an app-window with an
+# unusable toolchain prints the missing piece instead of switching.
+test_backend_name_herdr_app() {
+  local dir fb cfg cfg_tmux out errfile apphome lpid sockdir
+  command -v python3 >/dev/null 2>&1 || { pass "skip: python3 absent; the herdr-app probes need its unix connect"; return; }
+  command -v jq >/dev/null 2>&1 || { pass "skip: jq absent; the hc toolchain check needs it"; return; }
+
+  dir="$TMP_ROOT/herdr-app-name"; fb="$dir/fakebin"; cfg="$dir/config-empty"; cfg_tmux="$dir/config-tmux"
+  mkdir -p "$dir" "$fb" "$cfg" "$cfg_tmux"; printf 'tmux\n' > "$cfg_tmux/backend"
+  errfile="$dir/err.txt"; : > "$errfile"
+  sockdir=$(mktemp -d /tmp/fm-bn.XXXXXX) || fail "mktemp for the socket dir failed"
+  cat > "$fb/herdr-core" <<'SH'
+#!/bin/sh
+case "${1:-}" in
+  --version) printf 'hc 9.9.9\n' ;;
+  get) printf '%s\n' "${FM_FAKE_HC_GET:-{\}}" ;;
+  *) exit 3 ;;
+esac
+SH
+  chmod +x "$fb/herdr-core"
+  live_sock() {
+    python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(5); time.sleep(300)' "$1" >/dev/null 2>&1 &
+    echo $!
+  }
+
+  apphome="$sockdir/apphome"; mkdir -p "$apphome"
+  lpid=$(live_sock "$apphome/herdr-app.sock"); sleep 0.2
+  : > "$errfile"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="$fb:$PATH" \
+    HERDR_APP_HOME="$apphome" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = hc ] || fail "fm_backend_name should auto-detect hc for a live window, got '$out'"
+  grep -q 'NOTICE: auto-detected a live Herdr app window' "$errfile" \
+    || fail "the hc auto-detect notice must name the app window"$'\n'"$(cat "$errfile")"
+  grep -q 'opt out' "$errfile" \
+    || fail "the hc auto-detect notice must name the explicit opt-out"$'\n'"$(cat "$errfile")"
+
+  # Explicit settings win without detection or a notice.
+  : > "$errfile"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="$fb:$PATH" \
+    HERDR_APP_HOME="$apphome" FM_BACKEND=herdr FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = herdr ] || fail "FM_BACKEND must win over app detection, got '$out'"
+  [ -s "$errfile" ] && fail "an explicit FM_BACKEND must not print the auto-detect notice"$'\n'"$(cat "$errfile")"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="$fb:$PATH" \
+    HERDR_APP_HOME="$apphome" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg_tmux" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "config/backend must win over app detection, got '$out'"
+
+  # A live window with no usable toolchain: no switch, notice names the gap.
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="/usr/bin:/bin" \
+    HERDR_APP_HOME="$apphome" FM_HC_BIN=/nonexistent/hc FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "an unusable hc toolchain must keep the default backend, got '$out'"
+  grep -q 'no usable hc toolchain' "$errfile" \
+    || fail "the unusable notice must name the missing toolchain"$'\n'"$(cat "$errfile")"
+  kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
+  rm -rf "$sockdir"
+
+  pass "fm_backend_name: a live app window resolves hc with a loud signal-named notice; explicit settings win silently; an unusable toolchain keeps the default and says why"
 }
 
 # Tern is explicit-only (docs/tern-backend.md "Selection is explicit"): the
@@ -1427,6 +1615,8 @@ test_backend_name_cmux_fallback_notice
 test_backend_name_autodetect_notice
 test_backend_paseo_is_never_autodetected
 test_backend_rex_autodetect
+test_backend_detect_herdr_app
+test_backend_name_herdr_app
 test_backend_tern_is_never_autodetected
 test_backend_dispatch_tables_include_tern
 test_backend_name_explicit_beats_detection
