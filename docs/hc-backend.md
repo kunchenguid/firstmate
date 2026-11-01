@@ -36,7 +36,7 @@ Two signals select hc, in this order, after every other surface marker has had i
    The check is read-only and gated: a unix connect must first prove `HC_TERMINAL_SOCKET` live, because `hc` starts a core on contact with a missing socket and a bare `hc get` could create state; then one `hc get` reads the label through the resolved binary.
    Missing markers, a dead socket, a missing or unusable `hc`/`jq` toolchain, a `get` failure, or an empty label are all a miss, never a detection.
 2. `app-window`: a live `herdr-app.sock` control socket under the resolved app home (`HERDR_APP_HOME`, else `XDG_CONFIG_HOME/herdr-app`, else `~/.config/herdr-app`).
-   The probe is the app's own liveness rule, a bare unix connect: a stale socket file refuses, an absent one never binds, and the app is never launched or talked to.
+   The probe is the app's own liveness rule, a bare unix connect: a stale socket file refuses, an absent one never binds, and no app control command or launch is issued.
    It is consulted only when no signal named this process's runtime, so a Firstmate on a plain shell on a host where the captain's window is open also opts into app presentation.
 
 Both signals bind the core a spawn would actually reach, the `HC_SESSION` (else `default`) session, and require it to be running already, because the adapter's container ensure starts a missing core and detection must never start one.
@@ -49,7 +49,7 @@ An explicit `--backend`, `FM_BACKEND`, or `config/backend` always wins over dete
 Inside the classic Herdr TUI, `HERDR_ENV=1` wins before the app signals are consulted, so the `herdr` backend keeps its behavior.
 A contradictory marker set (for example another surface's marker alongside the app's) keeps the earlier surface's verdict rather than switching - ambiguous input means no automatic switch.
 When a live app window or a live hc terminal is present but no usable hc toolchain resolves (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z`, plus `jq`), detection does not switch and a notice names the missing piece instead; a bare terminal marker set is still never a detection.
-An auto-detected hc prints a stderr notice naming the winning signal and records `backend_detect=app-terminal` or `backend_detect=app-window` in the task meta, so the spawn output and task record carry the reason for the choice.
+An auto-detected hc prints a stderr notice naming the winning signal and how to opt out; [Task shape and metadata](#task-shape-and-metadata) owns its task record.
 
 Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an explicit hc spawn does, so workers appear in the captain's window without the app ever being started by Firstmate.
 The app is local GUI presentation only: on a remote or headless home neither signal exists, and nothing here changes the remote `herdr` path.
@@ -57,7 +57,7 @@ The app is local GUI presentation only: on a remote or headless home neither sig
 Two limits apply to auto-detection specifically:
 
 - A `--secondmate` spawn under an auto-detected hc fails the existing refusal rather than silently choosing another backend; set `config/backend` explicitly for a home that spawns secondmates.
-- Supervisor-endpoint discovery (`bin/fm-supervisor-target-lib.sh`) resolves an hc terminal running Firstmate to its `<session>:<address>` target, but `bin/fm-supervise-daemon.sh` does not support hc endpoints yet and refuses the resolved backend loudly instead of steering the wrong pane.
+- Away-mode supervisor discovery and hc refusal are owned by [Away-mode supervisor backend](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
 
 ## Task shape and metadata
 
@@ -79,7 +79,7 @@ hc_session=<session>
 hc_terminal=<address>
 ```
 
-`backend_detect=` is the auto-detection signal only when one selected the backend; an explicitly selected hc writes no `backend_detect=` line.
+`backend_detect=` is `app-terminal` or `app-window` only when that signal automatically selected hc; an explicitly selected hc writes no `backend_detect=` line.
 
 `<address>` is hc's terminal address such as `t7`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.
