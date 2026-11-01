@@ -40,7 +40,7 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 
 The tier names say what the pass does with an entry:
 
-- `pinned` - no clock is ever read for it: exempt from decay and from budget eviction, changed only through inspect-then-update when the captain or reality changes it, except that firstmate may relocate it under the pinned offload flow below when its content survives intact at a findable destination the record names.
+- `pinned` - no clock is ever read for it: exempt from decay and from budget eviction, changed only through inspect-then-update when the captain or reality changes it, except that firstmate may relocate it under the pinned offload flow below when its content survives intact at a destination that every home reading it today can reach, as the flow's reach check shows, and the record names.
 - `aging` - it must re-prove itself: an entry whose age is greater than or equal to 30 days since its last-reinforced date is stale, and a stale entry is re-validated (date refreshed) or archived, never kept by inertia alone.
 - `perishable` - it is stored expecting disposal: an entry whose age is greater than or equal to 7 days since its last-reinforced date is stale, and its prose must name a checkable expiry condition, such as a backlog id, a version floor, or a dated expectation.
   An admitted durable entry that cannot name a checkable expiry condition is not `perishable` and must be stored as `aging`.
@@ -124,14 +124,17 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Budget eviction considers only editable `aging` entries that carry a last-reinforced date and are not pending offload or pending capture; a `<!--g-->` legacy-grace entry is ineligible until its grace cycle resolves, so eviction can neither cancel a promised grace cycle nor prefer just-validated entries over unvalidated ones.
    Convergence precondition: before evicting anything, total the eligible pool and check that archiving all of it would reach the budget; when even that cannot, skip the eviction rung entirely, archive nothing for budget reasons, and carry the concrete inability to the final step, naming the exempt pinned and pending-capture floor that crowds out the budget.
    Automatic processes never move a `pinned` entry: decay clocks, legacy grace cycles, oldest-first budget eviction, immediate budget archiving, and autonomous offload do not apply to it.
-   The sole exception is firstmate's own relocation of an intact pinned entry to a JIT owner under the offload flow below, and that entry remains in memory until its destination is live.
+   The sole exception is firstmate's own relocation of an intact pinned entry to a JIT owner that the offload flow's reach check shows every reader can reach, and that entry remains in memory until its destination is live.
 8. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
    Finish at or below the effective budget, or hold a concrete captain call under the rules below before ending the pass.
    A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
-   Route that constraint to the primary owner, whose firstmate relocates intact shared-file entries under the pinned offload flow below as its own call; only trimming that would drop words carrying meaning, or changing what a preference means, is held for the captain at the primary owning level, under the classes the flow below names.
+   Route that constraint to the primary owner.
+   A shared-file entry is read by every inheriting home, so the primary's firstmate may move one as its own call only when the reach check shows the destination on the shared, inherited surface every inheriting home already loads; a destination only the primary can see - a home-local skill, a local archive, anything under its own data - makes the move a removal for the other homes.
+   Hold that at the primary owning level through `bin/fm-captain-hold.sh hold <task-id> --class permanent-removal --reason "<reason>"`, naming the shortfall, each named shared-file entry, and which homes would stop seeing it, with exactly these options in this order: raise the affected home's effective budget, which loses nothing, or remove the named entries from those homes.
+   Trimming that would drop words carrying meaning is held the same way, and changing what a preference means is held as `--class design-pick`.
    When the convergence precondition skipped eviction, report the exempt pinned and pending-capture floor and the remaining shortfall as that concrete inability rather than archiving eligible knowledge that could not close the gap.
    Only after every safe non-pinned archival, consolidation, offload, and eligible eviction action is exhausted may a remaining excess be attributed to pinned safety, authority, or genuine captain-preference entries.
-   In that last-resort case, first relocate every intact pinned entry that has a findable JIT destination under the pinned offload flow below; if the excess remains, hold one captain call through `bin/fm-captain-hold.sh hold <task-id> --class permanent-removal --reason "<reason>"` that names the shortfall and each relevant pinned entry, with exactly these options: raise the effective budget, or permanently trim or remove a named pinned entry.
+   In that last-resort case, first relocate every intact pinned entry whose JIT destination the reach check shows every reader can reach; if the excess remains, hold one captain call through `bin/fm-captain-hold.sh hold <task-id> --class permanent-removal --reason "<reason>"` that names the shortfall and each relevant pinned entry, with exactly these options: raise the effective budget, or permanently trim or remove a named pinned entry.
    Route a read-only ownership constraint to its primary owner, and hold every other unresolved excess as a captain call only when a captain-hold class fits it; otherwise it is firstmate's to decide, so decide it and name the decision in the receipt.
    Never end a pass over budget as an accepted exception.
 
@@ -194,27 +197,32 @@ Project-level destinations are not produced by stow: they ship normally through 
   A project's committed `AGENTS.md` is never an offload destination: crewmates correct it but only humans extend it (AGENTS.md section 6).
 
 Forbidden destinations: any firstmate-repo-tracked skill per the hard rule; firstmate's own `AGENTS.md`, which is always-loaded for every fleet session; `docs/` alone, which is never agent-loaded on demand, though a skill body may point into docs for depth; and any committed surface for private content.
-A local skill exists only in this home, so offloading an entry out of `data/captain-shared.md` removes it from every inheriting home's always-injected memory: the proposal must say so, and the default for shared entries is keep.
+A local skill exists only in this home, so offloading an entry out of `data/captain-shared.md` to it removes the entry from every inheriting home's always-injected memory: the reach check reports that as a removal, which is held for the captain as step 8 describes, and the default for shared entries is keep.
 
-### Flow: reduce, propose, migrate, remove
+### Flow: check reach, reduce, propose, migrate, remove
 
-1. Reduce non-pinned material now.
+1. Check reach before any relocation.
+   Run `bin/fm-stow-cascade.sh --reach <memory-file> <destination>` for the candidate's source file and its proposed destination; it names every home that reads the source today and whether each can reach the destination.
+   Record its reader lines in the completion receipt.
+   Only `reach=reversible` (exit 0) lets the move count as reversible, firstmate's own call.
+   `reach=removal` (exit 4) means the move deletes the entry for each reader marked `reachable=no`: it is never firstmate's call, so either pick a destination every reader reaches or hold it as the removal step 8 describes, naming those homes in the reason and offering a budget raise first.
+2. Reduce non-pinned material now.
    For each eligible non-pinned candidate, record its first line, source file, estimated tokens, one-line trigger, live destination, privacy and visibility verdict, and actual budget relief in the completion receipt.
    Autonomously relocate it only by adding it to an already-existing allowed JIT note, or by routing it through a project's established delivery path to an already-existing allowed project-level destination, then confirming that destination holds the quoted entry before removing the memory entry.
    A destination that needs creation, uncompleted project delivery, or any other future work is not live and cannot count as relief, so continue with the next archival or eviction rung instead of leaving an over-budget proposal pending.
-2. Propose pinned relocation only.
+3. Propose pinned relocation only.
    For a pinned candidate, append a `proposed-offload` section with the same fields to the completion receipt, and create or refresh one durable backlog item with `bin/fm-tasks-axi.sh add`, `bin/fm-tasks-axi.sh show <id> --full`, and `bin/fm-tasks-axi.sh update <id> --body-file <path>` as appropriate.
-   Relocating a pinned entry whose content survives intact at a findable destination is reversible, so it is firstmate's call and needs no captain approval; the item and the receipt must name exactly where the content goes, because a relocation the captain cannot find is indistinguishable from a deletion.
+   Relocating a pinned entry whose content survives intact at a destination the reach check shows every reader can reach is reversible, so it is firstmate's call and needs no captain approval; the item and the receipt must name exactly where the content goes, because a relocation the captain cannot find is indistinguishable from a deletion.
    Two things are not reversible relocations and stay captain calls, held at once: permanently removing content he owns, including a trim that would drop words carrying meaning, through `bin/fm-captain-hold.sh hold <task-id> --class permanent-removal --reason "<reason>"`, and changing what one of his preferences means, through `--class design-pick`, because his preferences are his to reinterpret.
    A proposed relocation is never budget relief until its destination is live.
-3. Migrate a proposed pinned candidate outside this pass.
+4. Migrate a proposed pinned candidate outside this pass.
    Resolve `home_root` to `$FM_HOME` when it is set and otherwise to the Firstmate code root, then re-validate the proposed local-skill destination under that root for both index absence with `git -C "$home_root"` and filesystem collision absence.
    Before creating the destination or writing any private content, resolve the exclude file with `git -C "$home_root" rev-parse --git-path info/exclude`, append the destination directory path to it, and verify the future `SKILL.md` path is ignored with `git -C "$home_root" check-ignore`.
    Only after that verification succeeds, create the destination and write the `SKILL.md` with its precise description trigger, then confirm the skill appears in a fresh session's skill index.
    If any migration step fails, remove the destination content and the exclude rule written by this attempt, leaving neither partial private content nor a partial rule behind.
    A project destination ships as a normal task through that project's registered delivery mode.
    The migration's source of truth is the entry as quoted in the proposal.
-4. Remove only once live.
+5. Remove only once live.
    The memory entry leaves its always-injected file only after the destination is live: the local skill exists with its verified line in the active home's resolved repository-local exclude file, or the project change has landed.
    Until then the entry stays, so knowledge is never in limbo between owners.
    Leave no pointer behind by default, and at most one line only when the destination's discoverability is genuinely doubtful.
@@ -225,11 +233,12 @@ Any ask this skill puts to the captain in chat is filed as a hold at the same mo
 If no class fits, it is not a captain call: decide it as firstmate's call and name the decision in the receipt.
 This list is the check every change to this skill must keep true: each instruction here that asks the captain something appears below with its class, and every other choice in this skill is firstmate's.
 
-- Permanently removing pinned content he owns, or trimming it in a way that drops words carrying meaning, including the last-resort over-budget call in step 8 and a shared-file trim held at the primary owning level: `permanent-removal`.
+- Permanently removing pinned content he owns, or trimming it in a way that drops words carrying meaning, including the last-resort over-budget call in step 8: `permanent-removal`.
+- Relocating content to a destination that a home reading it today cannot reach, which the reach check reports as `reach=removal`, including a shared-file entry moved anywhere only the primary can see; held at the primary owning level with the homes that would stop seeing it named, and a budget raise offered first: `permanent-removal`.
 - Truncating a grown `data/memory-archive.md`: `permanent-removal`.
 - Changing what one of his preferences means: `design-pick`.
 
-Firstmate's own calls, needing no captain approval: archiving, consolidation, eviction of eligible `aging` entries, offload of non-pinned entries, and relocation of an intact pinned entry to a destination the record names.
+Firstmate's own calls, needing no captain approval: archiving, consolidation, eviction of eligible `aging` entries, offload of non-pinned entries, and relocation of an intact pinned entry to a destination the record names and the reach check reports `reach=reversible`.
 
 ## Knowledge sweep and routing
 
