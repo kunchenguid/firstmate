@@ -1267,6 +1267,7 @@ fi
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local remote_rex_session_id remote_rex_server remote_rex_ok
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
   local -a launch_args
   id=${POS[0]:-}
@@ -1344,19 +1345,6 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
-  # A remote second mate always runs on Herdr: its server belongs to the host's
-  # own GUI login session, so the endpoint outlives every SSH connection that
-  # supervises it. bin/fm-remote-doctor.sh gates that host on the same
-  # requirement, and the remote home's config/backend never overrides it.
-  case "${BACKEND_ARG:--}" in
-  - | herdr) backend=herdr ;;
-  *)
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: a remote secondmate runs only on the herdr backend, not '$BACKEND_ARG'" >&2
-    return 1
-    ;;
-  esac
   case "$effort" in
   - | low | medium | high | xhigh | max | ultra) ;;
   *)
@@ -1384,12 +1372,34 @@ spawn_remote_secondmate() {
       return 1
     fi
   fi
+  # A remote second mate runs only on a backend whose session-provider server
+  # outlives every SSH connection that supervises it: herdr (its server belongs
+  # to the host's GUI login session) is the default; rex runs on the host's
+  # persistent personal rex server. Without an explicit selection a relaunch
+  # keeps the backend its record names, and a record written before rex
+  # existed names none, so it is herdr. bin/fm-remote-doctor.sh gates that host
+  # on the selected backend, and the remote home's config/backend never
+  # overrides the selection.
+  backend=${BACKEND_ARG:-}
+  if [ -z "$backend" ] && [ -f "$meta" ]; then
+    backend=$(fm_meta_get "$meta" remote_backend)
+  fi
+  case "${backend:--}" in
+  -) backend=herdr ;;
+  herdr | rex) ;;
+  *)
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: a remote secondmate runs only on the herdr or rex backend, not '$backend'" >&2
+    return 1
+    ;;
+  esac
   # Gate the host before anything is published or transferred, so a host that
-  # cannot hold a durable Herdr endpoint refuses here rather than half-way
+  # cannot hold a durable endpoint refuses here rather than half-way
   # through a launch. This is also the readiness gate every liveness relaunch
   # passes through, because recovery respawns through this same route.
   rc=0
-  fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || rc=$?
+  fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" "$backend" || rc=$?
   if [ "$rc" -ne 0 ]; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1481,12 +1491,11 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
-  remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
-  if [ "$remote_backend" != herdr ]; then
+  if [ "$remote_backend" != "$backend" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
+    echo "error: remote launch returned backend '${remote_backend:-missing}', expected $backend; preserving the remote route for reconciliation" >&2
     return 1
   fi
   [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
@@ -1496,13 +1505,41 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
     return 1
   }
-  if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
-    return 1
-  fi
+  remote_herdr_session=
+  remote_rex_session_id=
+  remote_rex_server=
+  case "$remote_backend" in
+    herdr)
+      remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+      if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
+        fm_lock_release "$remote_lock" || true
+        fm_lock_release "$registry_lock" || true
+        fm_lock_release "$SPAWN_TASK_LOCK" || true
+        echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
+        return 1
+      fi
+      ;;
+    rex)
+      remote_rex_session_id=$(printf '%s\n' "$out" | sed -n 's/^rex_session_id=//p' | tail -1)
+      remote_rex_server=$(printf '%s\n' "$out" | sed -n 's/^rex_server=//p' | tail -1)
+      # The route must pin a host-local unix:// server and a
+      # <session-uuid>:<block-uuid> target whose session half is the reported
+      # session id; anything else is not an endpoint this contract launched.
+      remote_rex_ok=1
+      case "$remote_rex_server" in unix://*) ;; *) remote_rex_ok=0 ;; esac
+      case "$remote_rex_session_id" in session:?*) ;; *) remote_rex_ok=0 ;; esac
+      case "$remote_target" in "${remote_rex_session_id#session:}":?*) ;; *) remote_rex_ok=0 ;; esac
+      case "${remote_target%%:*}" in '' | *[!0-9a-f-]*) remote_rex_ok=0 ;; esac
+      case "${remote_target#*:}" in '' | *:* | *[!0-9a-f-]*) remote_rex_ok=0 ;; esac
+      if [ "$remote_rex_ok" -ne 1 ]; then
+        fm_lock_release "$remote_lock" || true
+        fm_lock_release "$registry_lock" || true
+        fm_lock_release "$SPAWN_TASK_LOCK" || true
+        echo "error: remote launch returned malformed Rex route metadata (session '${remote_rex_session_id:-missing}', server '${remote_rex_server:-missing}', target '${remote_target:-missing}'); preserving the remote route for reconciliation" >&2
+        return 1
+      fi
+      ;;
+  esac
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
@@ -1529,7 +1566,13 @@ spawn_remote_secondmate() {
     echo "remote_host=$host"
     echo "remote_root=$root"
     echo "remote_backend=$remote_backend"
-    echo "remote_herdr_session=$remote_herdr_session"
+    case "$remote_backend" in
+      herdr) echo "remote_herdr_session=$remote_herdr_session" ;;
+      rex)
+        echo "remote_rex_session_id=$remote_rex_session_id"
+        echo "remote_rex_server=$remote_rex_server"
+        ;;
+    esac
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } >"$tmp"
