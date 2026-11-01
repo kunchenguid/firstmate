@@ -80,7 +80,8 @@ test_detection_anchored_name_and_marker_precedence() {
   # query - the harness child asking about itself - with its REAL parent, the
   # decoy, and answers 1 only once the walk reaches a decoy-named process, so
   # the decoy's own comm is genuinely judged while everything above it resolves
-  # to nothing.
+  # to nothing. macOS reports comm as the FULL executable path and Linux as the
+  # bare name, so the decoy is recognized by basename.
   mkdir -p "$blind"
   local real_ps
   real_ps=$(command -v ps)
@@ -88,7 +89,8 @@ test_detection_anchored_name_and_marker_precedence() {
 #!/usr/bin/env bash
 case "\$*" in
   '-o ppid= -p '*)
-    case "\$("$real_ps" -o comm= -p "\${*##* }" 2>/dev/null)" in
+    for pid; do :; done
+    case "\$(basename -- "\$("$real_ps" -o comm= -p "\$pid" 2>/dev/null)")" in
       ompd|comp) printf '%s\n' 1 ;;
       *) exec "$real_ps" "\$@" ;;
     esac
