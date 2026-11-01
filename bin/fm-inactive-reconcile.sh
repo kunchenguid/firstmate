@@ -476,7 +476,7 @@ report_child_ledger_locked() { # <id> <meta>
 # supervisor turn. fm-pr-check owns validation, metadata, and sidecar creation.
 arm_ready_pr_watch() { # <id> <meta>
   local id=$1 meta=$2 status line note url recorded arm_output incarnation
-  [ "$(meta_field "$meta" kind)" != secondmate ] || return 0
+  [ "$(meta_field "$meta" kind)" = ship ] || return 0
   status="$STATE/$id.status"
   line=$(child_terminal_ledger_line "$status") || return 0
   [ "$(status_line_verb "$line")" = 'done' ] || return 0

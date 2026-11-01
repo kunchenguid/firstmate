@@ -302,6 +302,18 @@ SH
   pass 'a main-home ready status auto-arms, detects a merge, and cleans its sandbox lane without a supervisor turn before arming'
 }
 
+test_scout_does_not_arm_ready_pr_watch() {
+  local url='https://github.com/owner/repo/pull/1'
+  make_world scout-ready-watch
+  write_child "$MAIN" scout "done: PR $url checks green"
+  sed -i.bak 's/^kind=ship$/kind=scout/; /^pr=/d; /^pr_head=/d' "$MAIN/state/scout.meta"
+  rm -f "$MAIN/state/scout.meta.bak"
+  run_reconcile "$MAIN"
+  ! grep -q '^pr=' "$MAIN/state/scout.meta" || fail 'scout metadata gained a PR registration'
+  [ ! -e "$MAIN/state/scout.check.sh" ] || fail 'scout gained a merge poll sidecar'
+  pass 'scout CI-ready outcomes do not arm merge watches'
+}
+
 # An unpushed CI-ready ship done: is not a parent-facing ready signal. The
 # ledger pass reads the child's line before any PR is recorded for it, so the
 # gate tests the worker copy's HEAD.
@@ -1152,6 +1164,7 @@ SH
 test_main_direct_terminal_presentation_receipt
 test_slow_pr_watch_does_not_starve_ledger_or_later_children
 test_main_home_arms_ready_pr_watch
+test_scout_does_not_arm_ready_pr_watch
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_local_done_head_is_pinned_before_parent_delivery
