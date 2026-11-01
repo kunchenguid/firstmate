@@ -34,6 +34,11 @@
 #                   exit, duration, whether it gate-skipped, and the reason it
 #                   gave (empty when it ran), so a lane can say which harness or
 #                   tool this host could not exercise.
+#                   Every record also carries failed_invocation,
+#                   skipped_after_failure and unexecuted_invocations from the
+#                   tests/lib.sh FM_TEST_ABORT marker. Without that marker,
+#                   these are "", 0 and [], including for unregistered suites;
+#                   empty values alone do not prove suite completion.
 #   --list          print selected script paths (one per line) and exit 0
 #   --list-scheduled
 #                   print selected paths longest-hint-first and exit 0.
@@ -88,6 +93,8 @@
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
+#     On a registered-suite abort, appends failed_invocation=<name>,
+#     skipped_after_failure=<n> and unexecuted=<comma-separated-names>.
 #
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
@@ -2025,7 +2032,8 @@ with open(records_file, encoding="utf-8") as fh:
         line = line.rstrip("\n")
         if not line:
             continue
-        path, family, expected, exit_s, dur_s, gate, reason = line.split("\t")
+        path, family, expected, exit_s, dur_s, gate, reason, failed_invocation, unexecuted = line.split("\t")
+        unexecuted = unexecuted.split(",") if unexecuted else []
         scripts.append({
             "path": path,
             "family": family,
@@ -2034,6 +2042,9 @@ with open(records_file, encoding="utf-8") as fh:
             "exit": int(exit_s),
             "gate_skip": gate == "true",
             "gate_skip_reason": reason,
+            "failed_invocation": failed_invocation,
+            "skipped_after_failure": len(unexecuted),
+            "unexecuted_invocations": unexecuted,
         })
 
 families = []
@@ -2564,6 +2575,7 @@ family_bump() {
 record_script_result() {
   local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5
   local base family expected gate_skip gate_reason fail_delta
+  local abort failed_invocation='' unexecuted='' skipped_after_failure=0
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
@@ -2584,8 +2596,21 @@ record_script_result() {
     log "gate skip: $script: ${gate_reason:-<no reason given>}"
   fi
 
-  printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s\n' \
+  abort=$(grep '^FM_TEST_ABORT failed=' "$out" | tail -1 || true)
+  if [ -n "$abort" ]; then
+    failed_invocation=${abort#FM_TEST_ABORT failed=}
+    failed_invocation=${failed_invocation%% skipped_after_failure=*}
+    skipped_after_failure=${abort#* skipped_after_failure=}
+    skipped_after_failure=${skipped_after_failure%% unexecuted=*}
+    unexecuted=${abort#* unexecuted=}
+  fi
+  printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s' \
     "$end_iso" "$script" "$rc" "$duration" "$gate_skip"
+  if [ -n "$abort" ]; then
+    printf ' failed_invocation=%s skipped_after_failure=%s unexecuted=%s' \
+      "$failed_invocation" "$skipped_after_failure" "$unexecuted"
+  fi
+  printf '\n'
 
   fail_delta=0
   if [ "$rc" -ne 0 ]; then
@@ -2594,8 +2619,9 @@ record_script_result() {
     AGG_RC=1
   fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$script" "$family" "$expected" "$rc" "$duration" "$gate_skip" "$gate_reason" >>"$RECORDS"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$script" "$family" "$expected" "$rc" "$duration" "$gate_skip" "$gate_reason" \
+    "$failed_invocation" "$unexecuted" >>"$RECORDS"
   family_bump "$family" "$duration" "$fail_delta"
   TOTAL=$((TOTAL + 1))
 }

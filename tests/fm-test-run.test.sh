@@ -1853,6 +1853,135 @@ puts JSON.generate(
   pass "Herdr CI family-run step times out at 20 min under a 75 min job backstop"
 }
 
+test_aborted_invocations_are_named() {
+  local tmp repo runner suite mode jobs cleanup out rc expected_count expected_names failed_name markers
+  tmp=$(fm_test_tmproot fm-test-run-aborted)
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  suite=tests/fm-brief.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/$suite" <<EOF
+#!/usr/bin/env bash
+set -eu
+# shellcheck disable=SC1091
+. "$ROOT/tests/lib.sh"
+cleanup_root=\$(fm_test_tmproot fm-test-run-cleanup)
+printf '%s\n' "\$cleanup_root" >"\$FM_ABORT_TEST_EVIDENCE/cleanup-root"
+case \$FM_ABORT_TEST_CLEANUP in
+  direct) trap fm_test_cleanup EXIT ;;
+  delegated)
+    suite_cleanup() {
+      printf '%s\n' "\$?" >"\$FM_ABORT_TEST_EVIDENCE/cleanup-status"
+      touch "\$FM_ABORT_TEST_EVIDENCE/custom-cleanup"
+      fm_test_cleanup
+    }
+    trap suite_cleanup EXIT
+    ;;
+  exiting)
+    suite_cleanup() {
+      local rc=\$?
+      printf '%s\n' "\$rc" >"\$FM_ABORT_TEST_EVIDENCE/cleanup-status"
+      touch "\$FM_ABORT_TEST_EVIDENCE/custom-cleanup"
+      fm_test_cleanup
+      exit "\$rc"
+    }
+    trap suite_cleanup EXIT
+    ;;
+esac
+test_A() { touch "\$FM_ABORT_TEST_EVIDENCE/A"; pass A; }
+test_B() {
+  case \$FM_ABORT_TEST_MODE in
+    fail) fail B ;;
+    errexit) false ;;
+    exit) exit 7 ;;
+    cleanup) fm_test_cleanup ;;
+  esac
+  touch "\$FM_ABORT_TEST_EVIDENCE/B"
+  pass B
+}
+test_C() { touch "\$FM_ABORT_TEST_EVIDENCE/C"; pass C; }
+test_D() {
+  [ "\$FM_ABORT_TEST_MODE" != last ] || fail D
+  touch "\$FM_ABORT_TEST_EVIDENCE/D"
+  pass D
+}
+fm_test_run test_A test_B test_C test_D
+EOF
+  for cleanup in exiting direct delegated default; do
+  for jobs in 1 2; do
+  for mode in exit fail errexit last green cleanup; do
+    out="$tmp/$cleanup-$jobs-$mode.out"
+    markers="$tmp/markers-$cleanup-$jobs-$mode"
+    mkdir -p "$markers"
+    FM_ABORT_TEST_MODE=$mode FM_ABORT_TEST_EVIDENCE=$markers FM_ABORT_TEST_CLEANUP=$cleanup \
+      "$runner" --jobs "$jobs" --json "$tmp/$cleanup-$jobs-$mode.json" "$suite" >"$out" 2>&1 && rc=0 || rc=$?
+    assert_absent "$(cat "$markers/cleanup-root")" "registered fixture cleanup did not run"
+    if [ "$cleanup" = delegated ] || [ "$cleanup" = exiting ]; then
+      assert_present "$markers/custom-cleanup" "suite-owned cleanup did not run"
+    fi
+    assert_present "$markers/A" "A did not execute"
+    failed_name=
+    if [ "$mode" = green ] || [ "$mode" = cleanup ]; then
+      [ "$rc" -eq 0 ] || fail "green registered suite failed: $(cat "$out")"
+      assert_not_contains "$(cat "$out")" 'FM_TEST_ABORT' "green suite reported an abort"
+      expected_count=0
+      expected_names=
+      assert_present "$markers/C" "green C did not execute"
+      assert_present "$markers/D" "green D did not execute"
+      assert_present "$markers/B" "green B did not execute"
+    elif [ "$mode" = last ]; then
+      [ "$rc" -ne 0 ] || fail "failure in the final invocation must remain nonzero"
+      assert_contains "$(cat "$out")" 'FM_TEST_ABORT failed=test_D skipped_after_failure=0 unexecuted=' \
+        "failure in D must report an empty pending list"
+      expected_count=0
+      expected_names=
+      failed_name=test_D
+    else
+      [ "$rc" -ne 0 ] || fail "$mode suite must preserve its nonzero exit"
+      assert_contains "$(cat "$out")" 'ok - A' "A did not complete before $mode"
+      assert_not_contains "$(cat "$out")" 'ok - C' "C ran after $mode"
+      assert_not_contains "$(cat "$out")" 'ok - D' "D ran after $mode"
+      assert_contains "$(cat "$out")" 'FM_TEST_ABORT failed=test_B skipped_after_failure=2 unexecuted=test_C,test_D' \
+        "the suite must name B as failed and C and D as unexecuted"
+      [ "$mode" != fail ] || assert_contains "$(cat "$out")" 'not ok - B' "B failure was hidden"
+      expected_count=2
+      expected_names=test_C,test_D
+      failed_name=test_B
+      assert_absent "$markers/C" "C executed after B failed"
+      assert_absent "$markers/D" "D executed after B failed"
+    fi
+    python3 - "$out" "$tmp/$cleanup-$jobs-$mode.json" "$expected_count" "$expected_names" "$failed_name" "$mode" "$cleanup" "$markers" <<'PY' \
+      || fail "$mode invocation accounting differs between console and timing JSON"
+import json, sys
+from pathlib import Path
+output, artifact, count, names, failed, mode, cleanup, markers = sys.argv[1:]
+count = int(count)
+record, = json.loads(Path(artifact).read_text())["scripts"]
+expected_exit = 7 if mode == "exit" else (1 if failed else 0)
+assert record["exit"] == expected_exit, record
+if cleanup in ("delegated", "exiting"):
+    assert int((Path(markers) / "cleanup-status").read_text()) == expected_exit
+assert sum(line.startswith("FM_TEST_ABORT ") for line in Path(output).read_text().splitlines()) == bool(failed)
+assert record["skipped_after_failure"] == count, record
+assert record["unexecuted_invocations"] == (names.split(",") if names else []), record
+end, = [line for line in Path(output).read_text().splitlines() if line.startswith("FM_TEST_END ")]
+assert record["failed_invocation"] == failed, record
+if failed:
+    assert record["exit"] != 0, record
+    assert f"failed_invocation={failed} skipped_after_failure={count} unexecuted={names}" in end, end
+else:
+    assert record["exit"] == 0, record
+    assert record["failed_invocation"] == "", record
+    assert "unexecuted=" not in end, end
+PY
+  done
+  done
+  done
+  pass "aborted registered invocations are named in console, FM_TEST_END and JSON; green suites name none"
+}
+
 test_aggregate_json() {
   local tmp a b
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
@@ -1895,6 +2024,7 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+test_aborted_invocations_are_named
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
