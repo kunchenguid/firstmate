@@ -1508,7 +1508,7 @@ housekeeping() {  # <state>
     fi
     status_mtime=$(_stat_file_mtime "$state/$task.status" 2>/dev/null || echo "$now")
     status_age=$(( now - status_mtime ))
-    if fm_afk_contract_away_present "$state" && status_is_paused "$last" && status_pause_is_overdue "$last" "$status_age" "$now"; then
+    if fm_afk_contract_present "$state" && status_is_paused "$last" && status_pause_is_overdue "$last" "$status_age" "$now"; then
       overdue_marker="$state/.paused-overdue-$task"
       if [ ! -e "$overdue_marker" ]; then
         blocked_line="blocked [key=paused-overdue-$task]: paused ${status_age}s, wait overdue - decide or release"
