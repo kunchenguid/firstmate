@@ -333,6 +333,22 @@ SH
   pass "bootstrap archives an old orphan status log and reports interleaved duplicates"
 }
 
+test_record_hygiene_reclaims_stale_running_marker() {
+  local case_dir status marker
+  case_dir="$TMP_ROOT/record-hygiene-stale-marker"
+  mkdir -p "$case_dir/home"/{state,data,config}
+  printf '99999999 nonexistent-process-start-time\n' > "$case_dir/home/state/.record-hygiene-running"
+  status=0
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
+    FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
+    timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+  { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
+    || fail "watcher failed while reclaiming stale hygiene marker (exit=$status)"
+  marker=$(cat "$case_dir/home/state/.record-hygiene-running" 2>/dev/null || true)
+  case "$marker" in ''|"99999999 "*) fail "stale hygiene marker was not replaced" ;; esac
+  pass "watcher reclaims a stale hygiene marker and starts a worker"
+}
+
 test_record_hygiene_watcher_data_is_defined() {
   local case_dir status
   case_dir="$TMP_ROOT/record-hygiene-watcher-data"
@@ -1684,6 +1700,7 @@ SH
 
 test_record_hygiene_archives_old_orphan_status
 test_record_hygiene_watcher_data_is_defined
+test_record_hygiene_reclaims_stale_running_marker
 test_record_hygiene_bounds_backlog_read
 test_record_hygiene_bounds_endpoint_reads_and_reports_unverified
 test_bootstrap_reporting

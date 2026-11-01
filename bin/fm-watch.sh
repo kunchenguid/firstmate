@@ -4514,8 +4514,22 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    if [ -e "$hygiene_running" ]; then
+      hygiene_owner=$(cat "$hygiene_running" 2>/dev/null || true)
+      hygiene_pid=${hygiene_owner%% *}
+      hygiene_started=${hygiene_owner#* }
+      hygiene_live_start=''
+      case "$hygiene_pid" in ''|*[!0-9]*) ;; *)
+        kill -0 "$hygiene_pid" 2>/dev/null && hygiene_live_start=$(ps -o lstart= -p "$hygiene_pid" 2>/dev/null | sed 's/^[[:space:]]*//') ;;
+      esac
+      hygiene_age=$(age_of "$hygiene_running")
+      report_timeout=${FM_RECORD_HYGIENE_TIMEOUT:-60}
+      case "$report_timeout" in ''|*[!0-9]*|0) report_timeout=60 ;; esac
+      if [ -z "$hygiene_live_start" ] || [ "$hygiene_live_start" != "$hygiene_started" ] || [ "$hygiene_age" -gt $(( report_timeout * 3 )) ]; then
+        rm -f "$hygiene_running"
+      fi
+    fi
     if [ ! -e "$hygiene_running" ] && [ ! -e "$hygiene_result" ]; then
-      : > "$hygiene_running"
       (
         report_timeout=${FM_RECORD_HYGIENE_TIMEOUT:-60}
         case "$report_timeout" in ''|*[!0-9]*|0) report_timeout=60 ;; esac
@@ -4536,6 +4550,9 @@ EOF
         fi
         mv -f "$hygiene_result.tmp" "$hygiene_result"
       ) >/dev/null 2>&1 &
+      hygiene_worker=$!
+      hygiene_started=$(ps -o lstart= -p "$hygiene_worker" 2>/dev/null | sed 's/^[[:space:]]*//')
+      printf '%s %s\n' "$hygiene_worker" "$hygiene_started" > "$hygiene_running"
     fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
