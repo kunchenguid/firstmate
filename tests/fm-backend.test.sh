@@ -657,16 +657,18 @@ SH
     HC_TERMINAL_ID=t2 fm_backend_detect) \
     && fail "HC_TERMINAL_ID without a socket never reaches the record check, got '$out'"
   out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="/usr/bin:/bin" XDG_RUNTIME_DIR="$run" \
-    HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" FM_HC_BIN=/nonexistent/hc fm_backend_detect \
-    || [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-terminal-unusable ]) \
+    HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" FM_HC_BIN=/nonexistent/hc fm_backend_detect && exit 9; \
+    [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-terminal-unusable ]) \
     || fail "a live terminal with no usable hc must stay undetected with signal app-terminal-unusable, got '$out'"
+  [ -z "$out" ] || fail "a live terminal with no usable hc must print no backend, got '$out'"
   # A self-identifying binary BELOW the adapter's verified minimum is equally
   # unusable: the spawn's container gate would only refuse it later.
   out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$fb:$PATH" XDG_RUNTIME_DIR="$run" \
     FM_FAKE_HC_VERSION=0.1.13 FM_FAKE_HC_GET='{"labels":{"herdr.space":"fm-app"}}' \
-    HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" fm_backend_detect \
-    || [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-terminal-unusable ]) \
+    HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" fm_backend_detect && exit 9; \
+    [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-terminal-unusable ]) \
     || fail "a live terminal with a below-minimum hc must stay undetected with signal app-terminal-unusable, got '$out'"
+  [ -z "$out" ] || fail "a live terminal with a below-minimum hc must print no backend, got '$out'"
   kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
 
   # --- earlier surface markers still win over the app signals --------------
@@ -704,9 +706,10 @@ SH
   # would start that core. Neither the session's runtime-dir socket nor its
   # state-dir socket (hc's layout without XDG_RUNTIME_DIR) is live here.
   out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="$fb:$PATH" \
-    XDG_RUNTIME_DIR="$run" HC_SESSION=app1 HERDR_APP_HOME="$apphome" fm_backend_detect \
-    || [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-window-no-core ]) \
+    XDG_RUNTIME_DIR="$run" HC_SESSION=app1 HERDR_APP_HOME="$apphome" fm_backend_detect && exit 9; \
+    [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-window-no-core ]) \
     || fail "a live window with no running spawn core must stay undetected with signal app-window-no-core, got '$out'"
+  [ -z "$out" ] || fail "a live window with no running spawn core must print no backend, got '$out'"
   out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET XDG_RUNTIME_DIR; PATH="$fb:$PATH" \
     XDG_STATE_HOME="$sockdir/state" HERDR_APP_HOME="$apphome" fm_backend_detect) \
     && fail "a live window with no running state-dir core must not select hc, got '$out'"
@@ -732,13 +735,15 @@ SH
   # A live window with no usable hc toolchain is a non-switch with a signal.
   lpid=$(live_sock "$apphome/herdr-app.sock"); sleep 0.2
   out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="/usr/bin:/bin" \
-    HERDR_APP_HOME="$apphome" FM_HC_BIN=/nonexistent/hc fm_backend_detect \
-    || [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-window-unusable ]) \
+    HERDR_APP_HOME="$apphome" FM_HC_BIN=/nonexistent/hc fm_backend_detect && exit 9; \
+    [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-window-unusable ]) \
     || fail "a live window with no usable hc must stay undetected with signal app-window-unusable, got '$out'"
+  [ -z "$out" ] || fail "a live window with no usable hc must print no backend, got '$out'"
   out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="$fb:$PATH" \
-    FM_FAKE_HC_VERSION=0.1.13 HERDR_APP_HOME="$apphome" fm_backend_detect \
-    || [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-window-unusable ]) \
+    FM_FAKE_HC_VERSION=0.1.13 HERDR_APP_HOME="$apphome" fm_backend_detect && exit 9; \
+    [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-window-unusable ]) \
     || fail "a live window with a below-minimum hc must stay undetected with signal app-window-unusable, got '$out'"
+  [ -z "$out" ] || fail "a live window with a below-minimum hc must print no backend, got '$out'"
   kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
   rm -rf "$sockdir"
 
