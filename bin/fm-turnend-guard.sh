@@ -571,6 +571,18 @@ while fm_autoarm_pending_live "$STATE" "$PENDING_WAIT_S" \
 done
 autoarm_owns_recovery && allow_owned_recovery
 
+# Need and away ownership can change while the auto-arm is deciding. Apply the
+# same allow predicates as at entry before charging a continuation.
+fm_supervision_status "$STATE" "$GRACE"
+if [ "$FM_SUP_NEEDED" = false ]; then
+  [ -e "$FAILURE_NOTICE" ] || budget_reset
+  allow_exit
+fi
+if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
+  && fm_afk_daemon_owns_supervision "$STATE"; then
+  allow_supervised_stop
+fi
+
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
 budget_account_current_epoch block || block_stop

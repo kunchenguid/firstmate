@@ -2432,6 +2432,99 @@ test_hook_claude_mode_pending_firing_that_exits_unclaimed_blocks_promptly() {
   pass "fm-turnend-guard --claude: a pending firing that exits unclaimed releases the guard to block at once"
 }
 
+# With the base wait disabled, the guard's first sleep is inside the pending
+# wait. Change the fixture there, then clear the deciding marker as an auto-arm
+# does when it exits without claiming. The helper stays alive until teardown.
+write_pending_transition_sleep() {  # <fakebin>
+  local fakebin=$1 real_sleep
+  real_sleep=$(command -v sleep) || fail "test host must provide sleep"
+  {
+    printf '#!/usr/bin/env bash\n'
+    cat <<'SH'
+if [ "${1:-}" = 0.1 ] && [ ! -e "$FM_HOME/state/pending-transition-ran" ]; then
+  bash "$FM_HOME/pending-transition.sh" || exit 1
+  rm -f "$FM_HOME/state/.claude-autoarm-pending.$FM_TEST_PENDING_HELPER"
+  : > "$FM_HOME/state/pending-transition-ran"
+fi
+SH
+    printf 'exec %q "$@"\n' "$real_sleep"
+  } > "$fakebin/sleep"
+  chmod +x "$fakebin/sleep"
+}
+
+test_hook_claude_mode_pending_need_removed_allows() {
+  local need dir input fakebin helper out status
+  for need in check task source relay; do
+    dir=$(make_primary_dir "$TMP_ROOT/hook-claude-pending-idle-$need")
+    case "$need" in
+      check)
+        register_custom_check "$dir/state" issue-comments
+        input="$dir/state/issue-comments.check-trust"
+        ;;
+      task) input="$dir/state/task1.meta"; : > "$input" ;;
+      source)
+        mkdir -p "$dir/state/procevent"
+        input="$dir/state/procevent/events.source"; : > "$input"
+        ;;
+      relay) input="$dir/state/x-watch.check.sh"; : > "$input" ;;
+    esac
+    seed_claude_budget "$dir" 2
+    printf 'rm -f %q\n' "$input" > "$dir/pending-transition.sh"
+    helper=$(start_pending_helper "$dir" wedge) || fail "could not start the pending helper"
+    fakebin=$(fm_fakebin "$dir/pending-bin")
+    write_pending_transition_sleep "$fakebin"
+    out=$(PATH="$fakebin:$PATH" FM_TEST_PENDING_HELPER="$helper" \
+      FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=0 FM_CLAUDE_AUTOARM_PENDING_WAIT_S=20 \
+      run_hook_claude "$dir" false); status=$?
+    kill "$helper" 2>/dev/null || true
+    wait "$helper" 2>/dev/null || true
+    assert_present "$dir/state/pending-transition-ran" "the $need removal did not occur during the pending wait"
+    expect_code 0 "$status" "removing the last $need during the pending wait must allow the Stop"
+    [ -z "$out" ] || fail "an idle home produced output after its last $need was removed: $out"
+    assert_absent "$dir/state/.turnend-claude-blocks" "an idle home must reset, not charge, the block budget"
+  done
+  pass "fm-turnend-guard --claude: removing the last supervision need during the pending wait allows the Stop"
+}
+
+test_hook_claude_mode_pending_away_handoff_rechecks_ownership() {
+  local health dir pid fakebin helper out status expected
+  for health in healthy stale-beacon wrong-identity no-away-flag; do
+    dir=$(make_primary_dir "$TMP_ROOT/hook-claude-pending-away-$health")
+    : > "$dir/state/task1.meta"
+    seed_claude_budget "$dir" 2
+    sleep 60 &
+    pid=$!
+    record_daemon_lock "$dir" "$pid" || fail "could not record the daemon identity"
+    [ "$health" != wrong-identity ] || printf 'wrong identity\n' > "$dir/state/.supervise-daemon.lock/pid-identity"
+    printf ': > "$FM_HOME/state/.afk"\ntouch "$FM_HOME/state/.last-watcher-beat"\n' > "$dir/pending-transition.sh"
+    case "$health" in
+      stale-beacon) printf 'touch -t 202001010000 "$FM_HOME/state/.last-watcher-beat"\n' >> "$dir/pending-transition.sh" ;;
+      no-away-flag) printf 'rm -f "$FM_HOME/state/.afk"\n' >> "$dir/pending-transition.sh" ;;
+    esac
+    helper=$(start_pending_helper "$dir" wedge) || fail "could not start the pending helper"
+    fakebin=$(fm_fakebin "$dir/pending-bin")
+    write_pending_transition_sleep "$fakebin"
+    out=$(PATH="$fakebin:$PATH" FM_TEST_PENDING_HELPER="$helper" \
+      FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=0 FM_CLAUDE_AUTOARM_PENDING_WAIT_S=20 \
+      run_hook_claude "$dir" false); status=$?
+    kill "$helper" "$pid" 2>/dev/null || true
+    wait "$helper" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    assert_present "$dir/state/pending-transition-ran" "the away handoff did not occur during the pending wait"
+    expected=2
+    [ "$health" != healthy ] || expected=0
+    expect_code "$expected" "$status" "the post-wait away ownership check must respect $health"
+    if [ "$health" = healthy ]; then
+      [ -z "$out" ] || fail "a healthy away handoff produced output: $out"
+      assert_absent "$dir/state/.turnend-claude-blocks" "a healthy away handoff must reset the block budget"
+    else
+      assert_contains "$out" 'TURN WOULD END BLIND' "an invalid away owner must still block"
+      grep -qx 'count=3' "$dir/state/.turnend-claude-blocks" || fail "an invalid away owner must still charge the block budget"
+    fi
+  done
+  pass "fm-turnend-guard --claude: away ownership established during the pending wait needs a matching live daemon and fresh beacon"
+}
+
 test_hook_claude_mode_wedged_pending_firing_blocks_at_cap() {
   local dir helper out status started elapsed
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-pending-wedge")
@@ -2791,6 +2884,8 @@ test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_concurrent_slow_claim_is_not_blind
 test_hook_claude_mode_pending_firing_that_exits_unclaimed_blocks_promptly
+test_hook_claude_mode_pending_need_removed_allows
+test_hook_claude_mode_pending_away_handoff_rechecks_ownership
 test_hook_claude_mode_wedged_pending_firing_blocks_at_cap
 test_hook_claude_mode_stale_pending_markers_do_not_extend_wait
 test_hook_claude_mode_secondmate_reblocks_like_primary
