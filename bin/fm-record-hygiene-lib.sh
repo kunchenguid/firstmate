@@ -47,6 +47,9 @@ record_hygiene_report() {
     id=${id%.meta}
     [ "$(fm_meta_get "$file" kind)" = secondmate ] && continue
     [ -n "$(fm_meta_get "$file" remote_host)" ] && continue
+    if [ -z "$(fm_meta_get "$file" window)" ]; then
+      echo "RECORD_HYGIENE: metadata has no tab: $id"
+    fi
     backend=$(fm_backend_of_meta "$file")
     target=$(fm_backend_target_of_meta "$file")
     if [ -z "$backend" ] || [ -z "$target" ]; then
@@ -101,8 +104,16 @@ record_hygiene_report() {
       /^tasks\[[0-9][0-9]*\]\{/ { rows=1; next }
       rows && /^[[:space:]]/ {
         sub(/^[[:space:]]+/, "")
-        split($0, fields, ",")
-        if (fields[1] != "") print fields[1]
+        if (substr($0, 1, 1) == "\"") {
+          value = substr($0, 2)
+          gsub(/""/, "\034", value)
+          sub(/".*/, "", value)
+          gsub(/\034/, "\"", value)
+        } else {
+          sub(/,.*/, "")
+          value = $0
+        }
+        if (value != "") print value
         next
       }
       { rows=0 }
