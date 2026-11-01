@@ -1070,6 +1070,119 @@ run_watcher_bounded() {
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
+# Run the watcher for a few cycles without waiting for a wake, then stop it.
+run_watcher_cycles() {  # <home> <fakebin> <seconds>
+  local home=$1 fakebin=$2 seconds=$3 pid i
+  env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=0 FM_POLL=0.02 \
+    FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" \
+    >/dev/null 2>&1 &
+  pid=$!
+  # Wait for a completed check sweep (it touches .last-check), then let a few
+  # more cycles run so a repeat wake would have time to land.
+  i=0
+  while [ ! -e "$home/state/.last-check" ] && [ "$i" -lt 400 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  sleep "$seconds"
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+count_rejected_wakes() {  # <state>
+  local n
+  n=$(grep -c 'rejected unauthenticated state checks' "$1/.wake-queue" 2>/dev/null || true)
+  printf '%s\n' "${n:-0}"
+}
+
+test_rejected_set_wakes_once_per_distinct_set() {
+  local dir state rc
+  dir=$(make_case rejected-dedupe)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf ran\n' > "$state/bad-a.check.sh"
+  chmod 0640 "$state/bad-a.check.sh"
+
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "first rejected-set watcher failed: $(cat "$dir/watch-1.err")"
+  case "$(cat "$dir/watch-1.out")" in
+    "check: rejected unauthenticated state checks:"*bad-a.check.sh*) ;;
+    *) fail "first cycle did not raise the rejected set: $(cat "$dir/watch-1.out")" ;;
+  esac
+  [ "$(count_rejected_wakes "$state")" -eq 1 ] || fail "first rejected set did not queue exactly one wake"
+  ack_watcher_cycle "$state" || fail "rejected-set wake handling acknowledgement failed"
+
+  rm -f "$state/.last-check"
+  run_watcher_cycles "$dir/home" "$dir/fakebin" 1
+  [ -e "$state/.last-check" ] || fail "repeat watcher never completed a check sweep, so the dedupe proof is vacuous"
+  [ "$(count_rejected_wakes "$state")" -eq 0 ] || fail "unchanged rejected set woke again"
+  grep -q 'bad-a.check.sh' "$state/.rejected-checks" || fail "rejected file is not kept in the durable record"
+  [ ! -x "$state/bad-a.check.sh" ] || fail "rejected check became executable"
+
+  # Stopping the watcher mid-cycle leaves a downtime marker, so the next start
+  # announces one recovery wake; consume it so the next wake is the rejected set.
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-recover.out" 2>/dev/null
+  set -e
+  ack_watcher_cycle "$state" || fail "recovery wake handling acknowledgement failed"
+  printf '#!/usr/bin/env bash\nprintf ran\n' > "$state/bad-b.check.sh"
+  chmod 0640 "$state/bad-b.check.sh"
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-3.out" 2> "$dir/watch-3.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "changed rejected-set watcher failed: $(cat "$dir/watch-3.err")"
+  case "$(cat "$dir/watch-3.out")" in
+    "check: rejected unauthenticated state checks:"*bad-b.check.sh*) ;;
+    *) fail "changed rejected set did not raise a new wake: $(cat "$dir/watch-3.out")" ;;
+  esac
+  [ "$(count_rejected_wakes "$state")" -eq 1 ] || fail "changed rejected set did not queue a second wake"
+  ack_watcher_cycle "$state" || fail "changed-set wake handling acknowledgement failed"
+
+  rm -f "$state/bad-a.check.sh" "$state/bad-b.check.sh" "$state/.last-check"
+  run_watcher_cycles "$dir/home" "$dir/fakebin" 1
+  [ ! -e "$state/.rejected-checks" ] || fail "durable rejected record outlived the rejected files"
+  pass "rejected state checks wake once per distinct set and stay recorded"
+}
+
+test_rejected_path_with_space_is_tracked_and_shown() {
+  local dir state rc sig digest
+  dir=$(make_case rejected-space)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf ran\n' > "$state/bad one.check.sh"
+  chmod 0640 "$state/bad one.check.sh"
+
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "space-path watcher failed: $(cat "$dir/watch.err")"
+  sig=$(grep -F "$state/bad one.check.sh mode=" "$state/.rejected-checks" || true)
+  case "$sig" in
+    *" mode="?*" mtime="?*) ;;
+    *) fail "record did not hold the whole spaced path with its mode and mtime: $(cat "$state/.rejected-checks")" ;;
+  esac
+
+  digest=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-session-start.sh" 2>&1 || true)
+  case "$digest" in
+    *"REJECTED STATE CHECKS"*"bad one.check.sh"*) ;;
+    *) fail "digest did not list the rejected check: $digest" ;;
+  esac
+
+  rm -f "$state/.rejected-checks"
+  digest=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-session-start.sh" 2>&1 || true)
+  case "$digest" in
+    *"REJECTED STATE CHECKS"*) fail "digest showed the section with no record" ;;
+  esac
+  pass "rejected path with a space is tracked and the digest shows it only while recorded"
+}
+
 test_rejected_metacharacter_bytes_are_inert() {
   local dir family rc before after
   dir=$(make_case rejected-metacharacters)
@@ -3796,6 +3909,8 @@ test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
+test_rejected_set_wakes_once_per_distinct_set
+test_rejected_path_with_space_is_tracked_and_shown
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication

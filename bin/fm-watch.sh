@@ -149,7 +149,9 @@
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
 #   check: rejected unauthenticated state checks: <paths>
-#                          unsafe state checks were refused without execution
+#                          unsafe state checks were refused without execution;
+#                          raised once per distinct rejected set (paths, mode,
+#                          mtime), then kept in state/.rejected-checks
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
@@ -3982,7 +3984,7 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
-    rejected_checks=
+    rejected_checks=()
     contribution_check_output=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
@@ -3993,7 +3995,7 @@ while :; do
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
           out=$FM_CHECK_RESULT
         else
-          rejected_checks="$rejected_checks $c"
+          rejected_checks+=("$c")
           continue
         fi
       else
@@ -4024,7 +4026,7 @@ while :; do
           fm_custom_check_snapshot_cleanup
         else
           fm_custom_check_snapshot_cleanup
-          rejected_checks="$rejected_checks $c"
+          rejected_checks+=("$c")
           continue
         fi
       fi
@@ -4097,11 +4099,32 @@ EOF
       fi
       pr_poll_control_release || exit 1
     done
-    if [ -n "$rejected_checks" ]; then
-      reason="check: rejected unauthenticated state checks:$rejected_checks"
-      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-      touch "$STATE/.last-check"
-      wake "$reason"
+    # Raised once per distinct set (paths plus each file's mode and mtime)
+    # and again only when that set changes. The durable record stays quiet
+    # but visible in the session-start digest. The trust check is unchanged:
+    # a rejected file still never runs.
+    rejected_record="$STATE/.rejected-checks"
+    if [ "${#rejected_checks[@]}" -gt 0 ]; then
+      rejected_sig=
+      rejected_list=
+      for c in "${rejected_checks[@]}"; do
+        rejected_list="$rejected_list $c"
+        rejected_sig="${rejected_sig}${c} mode=$(fm_pr_file_mode "$c") mtime=$(stat_mtime "$c")"$'\n'
+      done
+      rejected_sig=$(printf '%s' "$rejected_sig" | LC_ALL=C sort)
+      if [ "$(cat "$rejected_record" 2>/dev/null)" != "$rejected_sig" ]; then
+        reason="check: rejected unauthenticated state checks:$rejected_list"
+        fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+        if printf '%s\n' "$rejected_sig" > "$rejected_record.tmp.$$"; then
+          mv -f "$rejected_record.tmp.$$" "$rejected_record"
+        else
+          rm -f "$rejected_record.tmp.$$"
+        fi
+        touch "$STATE/.last-check"
+        wake "$reason"
+      fi
+    else
+      rm -f "$rejected_record"
     fi
     touch "$STATE/.last-check"
     if [ -n "$contribution_check_output" ]; then
