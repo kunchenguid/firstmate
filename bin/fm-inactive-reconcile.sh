@@ -515,17 +515,27 @@ arm_ready_pr_watch() { # <id> <meta>
 
 # Every ready status is eligible for arming on each scan, in every home.
 arm_ready_pr_watches() {
-  local meta id cursor seen=0
+  local meta id cursor seen=0 pass
   local marker="$STATE/.pr-watch-cursor"
   cursor=$(cat "$marker" 2>/dev/null || true)
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    valid_id "$id" || continue
-    [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue
-    arm_ready_pr_watch "$id" "$meta" || true
-    printf '%s\n' "$id" > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
-    seen=1
+  for pass in after wrap; do
+    for meta in "$STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      id=$(basename "$meta" .meta)
+      valid_id "$id" || continue
+      if [ -n "$cursor" ]; then
+        if [ "$pass" = after ]; then
+          [[ "$id" > "$cursor" ]] || continue
+        else
+          [[ "$id" > "$cursor" ]] && continue
+        fi
+      elif [ "$pass" = wrap ]; then
+        continue
+      fi
+      arm_ready_pr_watch "$id" "$meta" || true
+      printf '%s\n' "$id" > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
+      seen=1
+    done
   done
   if [ "$seen" -eq 0 ] && [ -n "$cursor" ]; then
     printf '\n' > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
