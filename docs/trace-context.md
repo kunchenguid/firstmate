@@ -26,7 +26,9 @@ Because the injected carrier and the recorded carrier are the same string, an ob
 The delivery sits at the unconditional pre-launch environment site, so it covers ship and scout spawns across `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, `cursor`, `gemini`, `muse`, `rovo`, `agy`, `devin`, `commandcode`, `polytoken`, `cortex`, and `kiro`, plus Secondmate spawns across that same set except the deliberately crewmate-only `gemini`, `muse`, `rovo`, `devin`, `commandcode`, `polytoken`, `cortex`, and `kiro` adapters.
 This is the same coverage `GOTMPDIR` already has and requires no trace-specific `launch_template()` behavior.
 Ship and scout spawns reach that site on every pane-typed spawn backend (`tmux`, `herdr`, `zellij`, `orca`, `cmux`, `paseo`, `rex`); a Secondmate reaches it on every pane backend that accepts a Secondmate spawn (`tmux`, `herdr`, `zellij`, `rex`), because `bin/fm-spawn.sh` rejects a Secondmate on `orca`, `cmux`, and `paseo`.
-`t3code` has no pane, so its `claude` and `codex` ship, scout, and Secondmate spawns receive the same `TRACEPARENT` value under the same conditions through the backend's [per-directory harness environment](t3code-backend.md#per-directory-harness-environment) instead.
+An off decision takes the opposite defense: the launch command itself is prefixed with `unset TRACEPARENT;`, so an ambient value the pane or daemon inherited at its own launch can never reach the worker.
+`t3code` has no pane, so its `claude` and trusted `codex` ship, scout, and Secondmate spawns receive the same `TRACEPARENT` value under the same conditions through the backend's [per-directory harness environment](t3code-backend.md#per-directory-harness-environment) instead, with an explicit empty override when no carrier is recorded.
+Untrusted T3 Codex projects ignore that configuration and remain outside the carrier-delivery and inherited-carrier suppression guarantees; spawn warns and still launches.
 
 ### Remote Secondmate routes
 
@@ -34,7 +36,7 @@ A Secondmate on a [remote route](remote-secondmates.md) never reaches that expor
 The identity is still the parent's, because the parent home holds the task metadata an observer reads.
 The parent therefore resolves the carrier against that task's own metadata under its own frozen decision - reused verbatim on relaunch, freshly rooted otherwise, never adopting the parent process's ambient `TRACEPARENT` - and passes it to the remote host, which exports it at the same unconditional pre-launch site and returns the carrier its endpoint actually holds.
 The parent records that returned value, so an already-alive remote endpoint that was not relaunched reports the identity its agent really received rather than one the parent merely intended.
-The remote host validates the delivered carrier as a strict W3C value before it can reach any pane, and a disabled parent passes nothing, leaving the remote launch identical to the untraced one.
+The remote host validates the delivered carrier as a strict W3C value before it can reach any pane, and a disabled parent passes nothing, so the remote launch receives no carrier and scrubs any ambient `TRACEPARENT` exactly as a local off launch does.
 If the endpoint is already alive, no new launch or injection occurs; the parent still records any carrier that endpoint reports, even when the parent's current decision is `off`, so its metadata does not deny the running agent's actual identity.
 The enablement decision travels with it exactly as on the local path: the remote home inherits `config/trace-context` as declared inherited material and the new Secondmate process receives the parent's frozen `FM_TRACE_CONTEXT=on|off` snapshot.
 
@@ -89,9 +91,9 @@ This is a deliberate, source-owned choice:
 ## Safety
 
 - **Default-off.**
-  With no `config/trace-context` and no `FM_TRACE_CONTEXT`, a fresh spawn or actual relaunch injects nothing and writes no `traceparent=` line, so the generated meta and the launch environment are unchanged.
+  With no `config/trace-context` and no `FM_TRACE_CONTEXT`, a fresh spawn or actual relaunch writes no `traceparent=` line and uses the [backend-specific handling described above](#what-it-does), subject to its Codex trust limitation, to suppress an inherited carrier.
   Reusing an already-alive remote endpoint records any carrier that endpoint reports without injecting a new one.
-  A locked session start makes the one config-file check, and each spawn sources one extra library and reads the frozen effective-state file, so the process is not literally byte-for-byte identical, but nothing an agent, an observer, or the task meta can see differs.
+  A locked session start makes one config-file check, and each spawn sources one extra library and reads the frozen effective-state file.
 - **What is and is not exposed.**
   A Firstmate-*minted* root uses a random id and reads no prompt, path, task prose, credential, or arbitrary environment key, so Firstmate never *originates* sensitive data in the carrier.
   Every carrier Firstmate injects is either such a mint or the same task's previously recorded carrier reused verbatim; ambient `TRACEPARENT` is never read, so no caller-controlled bytes enter a new carrier.
