@@ -398,10 +398,16 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_HOME/stop" ] && [ -e "$0" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_PI_WATCH_HEALTH_CHECK_MS=20 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const intervals=[];
+const realSetInterval=globalThis.setInterval;
+globalThis.setInterval=(callback,ms,...args)=>{
+  intervals.push(ms);
+  return realSetInterval(callback,20,...args);
+};
 const handlers=new Map();
 const pi={on(event,handler){handlers.set(event,handler);},registerCommand(){},registerTool(){},sendUserMessage:async()=>{}};
 const state=`${process.env.FM_HOME}/state`;
@@ -410,6 +416,7 @@ const mod=await import(pathToFileURL(process.env.PLUGIN).href);mod.default(pi);
 try {
   await handlers.get("session_start")({});
   for(let i=0;i<200 && !existsSync(`${state}/.last-watcher-beat`);i++) await new Promise(r=>setTimeout(r,10));
+  assert.deepEqual(intervals,[30_000],"health monitor must check every 30 seconds");
   const oldPid=readFileSync(`${state}/.watch.lock/pid`,"utf8").trim();
   const stale=new Date(Date.now()-1200_000);
   utimesSync(`${state}/.last-watcher-beat`,stale,stale);
