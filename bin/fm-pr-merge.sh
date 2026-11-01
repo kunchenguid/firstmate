@@ -11,6 +11,10 @@
 # plus a "tea login" resolved fresh from the parsed host on every run. A Gerrit
 # change is refused outright: that adapter is read-only, and the refusal at the
 # parse below owns why.
+# A repository the home lists in config/merge-script-only is refused after the
+# role, task-binding, and captain-hold refusals but before anything is recorded,
+# and the refusal names the command that repository merges through instead,
+# with the URL and directory it runs with.
 #
 # Usage:
 #   fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check>]
@@ -1515,6 +1519,43 @@ require_recorded_pr_identity() {
   return 1
 }
 
+# config/merge-script-only names repositories whose own merge script is the only
+# sanctioned merge path, so a merge through this script would bypass checks that
+# script owns. A listed repository is refused before anything is recorded or any
+# forge is called, and only after the role, task-binding, and captain-hold
+# refusals, so the refusal names the exact invocation - that command with the
+# task's recorded pull request URL appended, run from the home - only to a
+# caller that could merge this task now. Forges treat owner and repository paths
+# case-insensitively, so the match does too. docs/configuration.md owns the
+# file format.
+refuse_merge_script_only_repo() {
+  local list msr_path msr_line msr_repo msr_cmd
+  list="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/merge-script-only"
+  [ -e "$list" ] || return 0
+  if [ ! -f "$list" ] || [ ! -r "$list" ]; then
+    echo "error: config/merge-script-only must be a readable regular file; firstmate will not merge $PR_PATH" >&2
+    return 2
+  fi
+  msr_path=$(printf '%s' "$PR_PATH" | tr '[:upper:]' '[:lower:]')
+  while IFS= read -r msr_line || [ -n "$msr_line" ]; do
+    msr_line=${msr_line%$'\r'}
+    read -r msr_repo msr_cmd <<<"$msr_line"
+    case "${msr_repo:-}" in '' | '#'*) continue ;; esac
+    [ "$(printf '%s' "$msr_repo" | tr '[:upper:]' '[:lower:]')" = "$msr_path" ] || continue
+    require_released_captain_hold || return 1
+    if [ -z "${msr_cmd:-}" ]; then
+      echo "error: $PR_PATH merges only through its own merge script, which config/merge-script-only does not name; firstmate will not merge it" >&2
+      return 2
+    fi
+    if [ "$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)" != "$URL" ]; then
+      echo "error: $PR_PATH merges only through its own merge script, run with the task's recorded pr=, and task $ID has not recorded $URL; record it with bin/fm-pr-check.sh first (config/merge-script-only)" >&2
+      return 2
+    fi
+    echo "error: $PR_PATH merges only through its own merge script: run '$msr_cmd $URL' from $FM_HOME; firstmate will not merge it (config/merge-script-only)" >&2
+    return 2
+  done <"$list"
+}
+
 FM_PR_GITHUB_MERGE_ACCEPTED=false
 FM_PR_GITHUB_CALLER_METHOD=
 
@@ -1670,6 +1711,9 @@ away_status=0
 require_current_away_authority || away_status=$?
 [ "$away_status" -eq 0 ] || exit "$away_status"
 require_recorded_pr_identity || exit 1
+script_only_status=0
+refuse_merge_script_only_repo || script_only_status=$?
+[ "$script_only_status" -eq 0 ] || exit "$script_only_status"
 record_pr_metadata || exit 1
 require_released_captain_hold || exit 1
 

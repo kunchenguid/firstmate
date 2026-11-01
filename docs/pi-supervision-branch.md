@@ -602,7 +602,7 @@ The captain's away words are the whole mandate:
 
 - The branch reads them at the tail.
 - It decides by its own judgment whether the event in front of it is the moment they name.
-- It acts on them only through the guarded scripts, never by analogy.
+- It acts on them only through the guarded scripts, or a merge-script-only repository's own named command (below), never by analogy.
 - It holds with verdict captain on doubt.
 
 `bin/fm-branch-prompt.sh` "Postures" owns those execution rules.
@@ -617,6 +617,7 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
 | `bin/fm-merge-local.sh` | Never relocated. |
 
+A repository the home lists in [`config/merge-script-only`](configuration.md#merge-script-only-repositories-configmerge-script-only) is the one unguarded exception: `bin/fm-pr-merge.sh` refuses it, and the branch runs that repository's named command itself under limits no script enforces, which the Postures section owns; such a merge records no merge authority, so its summary alone is the audit trail.
 The merge-authority record and the outcome row's summary are the audit trail.
 The return brief renders the words verbatim beside that account.
 

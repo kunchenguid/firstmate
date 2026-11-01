@@ -855,6 +855,18 @@ The `direct-PR` and `local-only` modes and Gerrit changes are unaffected.
 The child's own `done` line still reaches the parent through `bin/fm-inactive-reconcile.sh`.
 The flag is a home-local preference and is not inherited by secondmate homes; [`bin/fm-pr-check.sh`](../bin/fm-pr-check.sh) owns the mechanics.
 
+## Merge-script-only repositories (config/merge-script-only)
+
+The optional local, gitignored `config/merge-script-only` lists repositories whose own merge script is the only sanctioned way to merge, such as a script that serializes merges behind a lock or tests the merge result before landing it.
+Each line is `<path> <merge command>`, where `<path>` is the forge path from the pull request URL (`owner/repo` on GitHub or Forgejo, the full `group/subgroup/project` on GitLab) and the rest of the line is the command that merges instead; blank lines and `#` comments are ignored.
+The path matches case-insensitively, as forges treat owner and repository paths.
+`bin/fm-pr-merge.sh` refuses a listed repository before it records the pull request or calls any forge, and the refusal names that command only after its role, task-binding, and captain-hold refusals have passed.
+It is absent by default, so every repository merges through `bin/fm-pr-merge.sh` as before; a path that exists but is not a readable regular file refuses every merge rather than being skipped.
+The named command must be self-contained, an absolute path or a path relative to the firstmate home that handles its own checkout: it runs from the firstmate home directory with the pull request's full URL, copied from the task's recorded `pr=` value, appended as its final argument, and the refusal shows that exact invocation only once the task has recorded that URL as its `pr=`, otherwise it says to record it with `bin/fm-pr-check.sh` first.
+While away, the away supervision session runs the named command itself under `bin/fm-pr-merge.sh`'s own limits, which no script enforces for that command, as the Postures section of [`bin/fm-branch-prompt.sh`](../bin/fm-branch-prompt.sh) states.
+A merge made through the named command is recorded as an external merge, because only `bin/fm-pr-merge.sh` persists merge authority, so the away session's summary line is the record of away authority.
+The file is home-local and is not inherited by secondmate homes; [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh) owns the mechanics.
+
 ## Task status archive (config/status-archive)
 
 The optional local, gitignored `config/status-archive` presence flag opts this home into retaining task status history during teardown.
