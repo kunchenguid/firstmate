@@ -143,11 +143,11 @@ gh_read() { # deadline args... : one bounded forge read
   fm_run_timed "$left" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
 }
 
-PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
+PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String,$suiteCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
 headRefOid
 reviewDecision
 reviewRequests(first:100){nodes{requestedReviewer{__typename}}}
-commits(last:1){nodes{commit{oid checkSuites(first:100){pageInfo{hasNextPage} nodes{conclusion app{slug} workflowRun{workflow{name}}}}}}}
+commits(last:1){nodes{commit{oid checkSuites(first:100,after:$suiteCursor){pageInfo{hasNextPage endCursor} nodes{conclusion app{slug} workflowRun{workflow{name}}}}}}}
 statusCheckRollup{contexts(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{__typename
 ... on CheckRun{name status conclusion startedAt isRequired(pullRequestNumber:$number)}
 ... on StatusContext{context state createdAt isRequired(pullRequestNumber:$number)}}}}}}}'
@@ -203,13 +203,13 @@ STEP='
     end'
 
 read_pr() { # url deadline output-directory -> rest.json gql.json
-  local url=$1 deadline=$2 out=$3 number owner repo rest_rc=0 gql_rc=0
+  local url=$1 deadline=$2 out=$3 number owner repo rest_rc=0 gql_rc=0 suite_cursor= pages=1
   fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 1
   number=$FM_PR_NUMBER
   owner=${FM_PR_PATH%%/*}; repo=${FM_PR_PATH#*/}
   gh_read "$deadline" api "repos/$owner/$repo/pulls/$number" > "$out/rest.json" 2>/dev/null &
   local rest_pid=$!
-  gh_read "$deadline" api graphql --paginate --slurp -F "owner=$owner" -F "repo=$repo" -F "number=$number" \
+  gh_read "$deadline" api graphql --paginate --slurp -F "owner=$owner" -F "repo=$repo" -F "number=$number" -F "suiteCursor=" \
     -f "query=$PR_QUERY" > "$out/pages.json" 2>/dev/null &
   local gql_pid=$!
   wait "$rest_pid" || rest_rc=$?
@@ -218,7 +218,6 @@ read_pr() { # url deadline output-directory -> rest.json gql.json
   jq -e '
     select(type == "array" and length > 0)
     | select(all(.[]; .errors == null and .data.repository.pullRequest != null))
-    | select(all(.[]; (.data.repository.pullRequest.commits.nodes[0].commit.checkSuites.pageInfo.hasNextPage // false) == false))
     | map(.data.repository.pullRequest) as $pages
     | select(all($pages[]; .headRefOid == $pages[0].headRefOid))
     | select(($pages[-1].statusCheckRollup.contexts.pageInfo.hasNextPage // false) == false)
@@ -413,7 +412,7 @@ poll() {
     step=$(cat "$TMP/step.json")
     [ "$step" != null ] || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
     jq -r '.lines[]' "$TMP/step.json"
-    [ "$(jq -r '.mergeable // "null"' "$read_dir/rest.json")" != null ] || printf '%s\n' "$url" >> "$TMP/unsettled"
+    [ "$(jq -r '.mergeable == null' "$read_dir/rest.json")" != true ] || printf '%s\n' "$url" >> "$TMP/unsettled"
     jq --arg url "$url" --slurpfile step "$TMP/step.json" '.prs[$url] = $step[0].fp' "$TMP/health.json" > "$TMP/next.json"
     if ! cmp -s "$TMP/next.json" "$TMP/health.json"; then
       save_health "$TMP/next.json"
