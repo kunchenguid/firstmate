@@ -560,7 +560,7 @@ accounting_generation() {
   [ "$(record_field "$meta" remote_host)" = "$host" ] \
     && [ "$(record_field "$meta" remote_root)" = "$root" ] \
     && [ "$(record_field "$meta" home)" = "$home" ] || return 0
-  remote_confirmed "$id" || return 0
+  remote_certificate "$id" || return 0
   jq -r --arg s "$home/state/parent-route" --arg t "$id" \
     --arg m "$(normalize_model "$(record_field "$meta" model)")" '
     [.holders[] | select(.state_dir == $s and .task == $t
@@ -638,15 +638,24 @@ remote_route_is() {
 # (with CONFLICT set) when a record's generation is otherwise unknown to its
 # ledger holder.
 pooled_records() {
-  local home_state=$1 models=$2 gens=${3:-} exclude=${4:-} meta id verdict gen
+  local home_state=$1 models=$2 gens=${3:-} exclude=${4:-} meta id verdict gen derived
   [ -r "$home_state" ] && [ -x "$home_state" ] || return 1
   for meta in "$home_state"/*.meta; do
     [ -e "$meta" ] || continue
     id=${meta##*/}
     id=${id%.meta}
     id_ok "$id" || continue
-    gen=$(accounting_generation "$meta")
-    if [ -n "$gen" ] && awk -F '\t' -v s="$home_state" -v t="$id" '$1 == s && $2 == t { found = 1 } END { exit !found }' "$TMPD/ledger"; then
+    gen=$(meta_generation "$meta")
+    derived=0
+    if [ -z "$gen" ]; then
+      # A generation borrowed from the remote's certificate is not a
+      # ledger-issued identity, so ledger history cannot contradict it: a
+      # failed first spawn can leave a released candidate as the only row and
+      # never issue the generation the running supervisor reports.
+      gen=$(accounting_generation "$meta")
+      derived=1
+    fi
+    if [ "$derived" -eq 0 ] && [ -n "$gen" ] && awk -F '\t' -v s="$home_state" -v t="$id" '$1 == s && $2 == t { found = 1 } END { exit !found }' "$TMPD/ledger"; then
       if awk -F '\t' -v s="$home_state" -v t="$id" -v g="$gen" \
           '$1 == s && $2 == t && $3 == g { found = 1 } END { exit !found }' "$TMPD/ledger"; then
         continue
@@ -746,15 +755,24 @@ remote_owner() {
   fi
 }
 
+# remote_certificate <id>: the remote's last complete certificate, whatever its
+# digest or pending state. Sets CERT_FILE. A serve whose reply was lost leaves
+# this as the only verified binding, and losing a reply must not make a counted
+# supervisor unidentifiable.
+remote_certificate() {
+  CERT_FILE="$LEDGER/remote-$1.cert"
+  [ -f "$CERT_FILE" ] && [ ! -L "$CERT_FILE" ] || return 1
+  jq -e --arg schema "$SERVE_SCHEMA" \
+    '.schema == $schema and .complete == true and (.holders | type == "array")' \
+    "$CERT_FILE" >/dev/null 2>&1
+}
+
 # remote_confirmed <id>: the remote's latest certificate is complete, matches
 # the current digest, and no newer serve is pending. Sets CERT_FILE.
 remote_confirmed() {
-  CERT_FILE="$LEDGER/remote-$1.cert"
   [ ! -e "$LEDGER/remote-$1.pending" ] && [ ! -L "$LEDGER/remote-$1.pending" ] || return 1
-  [ -f "$CERT_FILE" ] && [ ! -L "$CERT_FILE" ] || return 1
-  jq -e --arg d "$DIGEST" --arg schema "$SERVE_SCHEMA" \
-    '.schema == $schema and .policy_digest == $d and .complete == true and (.holders | type == "array")' \
-    "$CERT_FILE" >/dev/null 2>&1
+  remote_certificate "$1" || return 1
+  jq -e --arg d "$DIGEST" '.policy_digest == $d' "$CERT_FILE" >/dev/null 2>&1
 }
 
 # root_holders <models-file> [excluded-remote-id]: every holder the root

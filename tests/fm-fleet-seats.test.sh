@@ -830,6 +830,34 @@ test_unreachable_remote_is_never_free() {
   pass "an unreachable remote keeps its counted seats and an unanswered remote request refuses"
 }
 
+# A serve whose reply was lost leaves its pending marker behind. The
+# certificate it already published is still the only verified binding for a
+# generationless parent record, so the next serve must not charge that
+# supervisor to the remote's allowance a second time.
+test_lost_serve_reply_does_not_double_charge() {
+  local out dir="$TMP_ROOT/remote-lost-reply-out"
+  make_remote_fleet remote-lost-reply 2
+  mkdir -p "$dir"
+  mkdir -p "$R_REMOTE/state/parent-route"
+  printf 'kind=secondmate\nmodel=pool-model-a\nspawn_gen=host.1\n' \
+    > "$R_REMOTE/state/parent-route/theshop.meta"
+  task_record "$R_ROOT" theshop pool-model-a secondmate \
+    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s' "$ROOT" "$R_REMOTE")"
+  serve_remotes >/dev/null 2>&1 || fail "initial serve of a pre-pool supervisor failed"
+  [ -f "$R_ROOT/state/fleet-seats/remote-theshop.cert" ] || fail "the initial serve published no certificate"
+  : > "$R_SSH_DOWN"
+  out=$(serve_remotes 2>&1) || true
+  assert_contains "$out" "unreachable theshop" "a dropped link was not reported"
+  [ -f "$R_ROOT/state/fleet-seats/remote-theshop.pending" ] || fail "the failed serve left no pending marker"
+  rm -f "$R_SSH_DOWN"
+  remote_reserve_bg lost-reply-worker pool-model-a "$dir/lost-reply-worker"
+  serve_remotes >/dev/null 2>&1 || fail "the retry serve after a lost reply failed"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/lost-reply-worker.rc")" \
+    "a lost serve reply spent the adopted supervisor's seat twice: $(cat "$dir/lost-reply-worker.out")"
+  pass "a lost serve reply keeps the published certificate as the supervisor's binding"
+}
+
 test_delivered_policy_governs_the_remote_home() {
   local out
   make_remote_fleet remote-deliver 2
@@ -1696,6 +1724,16 @@ test_remote_host_supervisor_adoption_and_accounting() {
   out=$(serve_remotes 2>&1)
   assert_contains "$out" "served theshop" "a parent-recorded supervisor blocked serving"
   assert_equals 1 "$(used_seats "$R_ROOT")" "the parent record and the certificate counted one supervisor twice"
+  # A failed first spawn can leave a released candidate as the ledger's only
+  # row. The generation the certificate proves is not a ledger-issued identity,
+  # so it must not be judged as one the holder never issued.
+  new_holder
+  seats "$R_ROOT" reserve theshop --generation g-abandoned --harness pi \
+    --model pool-model-a --holder-pid "$LAST_HOLDER" >/dev/null || fail "reserving an abandoned candidate"
+  seats "$R_ROOT" release theshop --generation g-abandoned --reason prelaunch >/dev/null \
+    || fail "releasing an abandoned candidate"
+  assert_equals 1 "$(used_seats "$R_ROOT")" \
+    "a released candidate contradicted the generation the certificate proves"
   new_holder
   out=$(reserve "$R_ROOT" local-spare pool-model-a 2>&1) || fail "generationless parent blocked a free local seat: $out"
   seats "$R_ROOT" release local-spare --generation g-local-spare --reason prelaunch >/dev/null || fail "release local spare"
@@ -2272,6 +2310,7 @@ if [ "$#" -gt 0 ]; then
       test_remote_host_supervisor_adoption_and_accounting) "$focused_test" ;;
       test_policy_requires_one_object) "$focused_test" ;;
       test_reservation_uses_one_policy_snapshot) "$focused_test" ;;
+      test_lost_serve_reply_does_not_double_charge) "$focused_test" ;;
       test_remote_descendants_prevent_incomplete_certificates|test_generationless_predecessor_stays_counted|test_remote_without_pools_confirms_unpooled_models|test_managed_records|test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
@@ -2297,6 +2336,7 @@ test_unreachable_or_malformed_authority_refuses
 test_remote_policy_must_be_confirmed_before_any_grant
 test_remote_home_shares_the_fleet_capacity
 test_unreachable_remote_is_never_free
+test_lost_serve_reply_does_not_double_charge
 test_delivered_policy_governs_the_remote_home
 test_stale_remote_requests_refuse_before_launch
 test_inflight_remote_seat_follows_model_between_pools
