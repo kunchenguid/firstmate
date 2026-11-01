@@ -64,15 +64,20 @@ assert_equals uncapped "$FM_REMOTE_GENERATION" 'an absent seat ledger resolved n
 assert_equals session:p3 "$(fm_meta_get "$META" remote_target)" 'an absent seat ledger lost the host target'
 rm -f "$FM_ROUTE_FIXTURE"
 
-# The launch predecessor is the newest generation the host still records. A
-# launch that reached an endpoint and was then cancelled counts even though it
-# never confirmed a startup; a prelaunch refusal and a stopped predecessor
-# never became the host's record.
 bound_route() { printf '{"placement":"remote","host":"remote","remote_root":"/srv/fm","home":"/srv/home","spawn_gen":%s,"target":%s}' "$1" "$2"; }
 LEDGER_A="{\"generation\":\"A\",\"lifecycle\":\"confirmed\",\"startup_confirmed\":true,\"route\":$(bound_route '"A"' '"session:p1"')}"
 LEDGER_B="{\"generation\":\"B\",\"lifecycle\":\"released\",\"startup_confirmed\":false,\"disposition\":{\"reason\":\"cancelled\",\"source\":\"reconcile-remote\"},\"route\":$(bound_route null '"session:p1"')}"
 assert_equals B "$(fm_remote_launch_predecessor "{\"incarnations\":[$LEDGER_A,$LEDGER_B]}" remote /srv/fm /srv/home)" \
   'a cancelled unconfirmed launch did not become the predecessor'
+STOPPED_A=$(printf '%s' "$LEDGER_A" | jq '.lifecycle = "released" | .disposition = {reason:"old-stopped"}')
+UNSUBMITTED_B=$(printf '%s' "$LEDGER_B" | jq '.route.target = null')
+assert_equals A "$(fm_remote_launch_predecessor "{\"incarnations\":[$STOPPED_A,$UNSUBMITTED_B]}" remote /srv/fm /srv/home)" \
+  'an unsubmitted cancellation displaced the host-recorded stopped predecessor'
+assert_equals B "$(fm_remote_launch_predecessor "{\"incarnations\":[$STOPPED_A,$LEDGER_B]}" remote /srv/fm /srv/home)" \
+  'a submitted cancellation failed to replace the stopped predecessor'
+STOPPED_B=$(printf '%s' "$LEDGER_B" | jq '.disposition.reason = "old-stopped"')
+assert_equals B "$(fm_remote_launch_predecessor "{\"incarnations\":[$STOPPED_A,$STOPPED_B,$UNSUBMITTED_B]}" remote /srv/fm /srv/home)" \
+  'a stopped unconfirmed host generation was lost after an unsubmitted cancellation'
 assert_equals B "$(fm_remote_launch_predecessor \
   "{\"incarnations\":[$LEDGER_A,{\"generation\":\"B\",\"lifecycle\":\"reclaimed\",\"startup_confirmed\":true,\"disposition\":{\"reason\":\"dead-after-start\"},\"route\":$(bound_route '"B"' '"session:p1"')}]}" \
   remote /srv/fm /srv/home)" 'a started generation that died did not become the predecessor'

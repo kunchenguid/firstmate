@@ -57,20 +57,14 @@ fm_remote_generation_resolve() {
   return 1
 }
 
-# fm_remote_launch_predecessor <ledger-json> <host> <root> <home>: the
-# generation the host records as the incarnation a new launch replaces. A
-# launch that reached an endpoint and was then cancelled, or that started and
-# died, is the newest generation the host still records even though it never
-# confirmed a startup; a prelaunch refusal and a stopped predecessor never
-# became that record. Prints "-" when this home holds no such generation.
 fm_remote_launch_predecessor() {
   printf '%s\n' "$1" | jq -r --arg host "$2" --arg root "$3" --arg home "$4" '
     [.incarnations[]?
       | select(.route.placement == "remote" and .route.host == $host
           and .route.remote_root == $root and .route.home == $home)
       | select(.lifecycle == "confirmed"
-          or (.disposition.reason // "") == "cancelled"
-          or (.disposition.reason // "") == "dead-after-start")
+          or ((.disposition.reason // "") | IN("cancelled", "dead-after-start", "old-stopped"))
+            and (.route.target | type == "string" and length > 0))
       | if ((.route.spawn_gen // "") | length) > 0 then .route.spawn_gen else .generation end]
     | last // "-"'
 }
