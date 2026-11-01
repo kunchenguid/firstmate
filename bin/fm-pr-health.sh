@@ -211,7 +211,7 @@ STEP='
     end'
 
 read_pr() { # url deadline output-directory -> rest.json gql.json
-  local url=$1 deadline=$2 out=$3 number owner repo rest_rc=0 gql_rc=0 suite_rc=0 cursor= page
+  local url=$1 deadline=$2 out=$3 number owner repo rest_rc=0 gql_rc=0 suite_rc=0 cursor="" page
   fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 1
   number=$FM_PR_NUMBER
   owner=${FM_PR_PATH%%/*}; repo=${FM_PR_PATH#*/}
