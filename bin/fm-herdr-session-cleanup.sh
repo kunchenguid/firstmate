@@ -15,6 +15,14 @@
 # one pane, absent task metadata, no registered agent, and a process proof that
 # the pane contains only one idle recognized shell with no child process. A
 # version 2 journal must also bind the exact workspace, tab, and pane.
+# Every home-local journal is parsed once per cleanup pass into a title-keyed
+# index; the mutation guards re-read live state by digesting once per check
+# exactly the ordinary journal files, plus one deliberately unparseable line
+# while the state directory is missing or a symlink, and re-parsing exactly
+# any journal whose digest changed since the index, so no guard rescans every
+# journal;
+# fm_herdr_cleanup_index_refresh documents its one deliberate exception, the
+# full rebuild on an unparseable digest line.
 # Topology is first checked from one locked API snapshot, then every mutation
 # prerequisite is immediately rechecked before the existing exact-pane
 # focus-preserving close helper is called.
@@ -62,29 +70,140 @@ fm_herdr_cleanup_home_identity() {
   (cd "$FM_HOME" 2>/dev/null && pwd -P)
 }
 
-fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
-  local title=$1 session=$2 home_real=$3 journal id expected journal_home
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+# One journal parse per cleanup pass: every candidate journal is snapshotted
+# once into a title-keyed in-memory index, and each candidate workspace
+# matches against that index instead of rescanning every journal per workspace.
+# A matched record's journal stays existence-tested at lookup time, and the
+# mutation guards reconcile the index with the live journal directory instead
+# of rescanning: the digest checksums only ordinary journal files and gains a
+# deliberately unparseable line whenever the state directory stops being an
+# ordinary directory, so every file-type or directory transition either
+# changes a digest line or forces the full index rebuild on that line. A
+# matching digest therefore proves every row still mirrors its journal byte
+# for byte, while any divergence names exactly the journals that must be
+# re-read, and only those are re-parsed. Anything stale or contested
+# degrades to conservative preservation, never to a silently stale row.
+fm_herdr_cleanup_fingerprint() {
+  local journal
+  set --
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || {
+    printf '%s\n' 'fm-herdr-session-cleanup: state directory is missing or a symlink'
+    return 0
+  }
+  for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
+    [ -f "$journal" ] && [ ! -L "$journal" ] || continue
+    set -- "$@" "$journal"
+  done
+  [ "$#" -eq 0 ] || cksum "$@" 2>/dev/null
+}
+
+fm_herdr_cleanup_journal_validate() { # <journal> <id> <session> <home-real>
+  local journal=$1 id=$2 session=$3 home_real=$4 journal_home
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+    journal_home=$(fm_backend_herdr_projection_home_identity \
+      "$FM_BACKEND_HERDR_JOURNAL_HOME" 2>/dev/null) || return 1
+    [ "$journal_home" = "$home_real" ] \
+      && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || return 1
+  fi
+}
+
+# Guard-grade unique match: reconcile the index against the live journal
+# directory first (one digest pass, re-parsing only journals whose bytes
+# changed so the rows are provably current), then resolve the one journal
+# still matching the title from that reconciled index.
+fm_herdr_cleanup_unique_match() { # <title> <session> <home-real>
+  local title=$1 session=$2 home_real=$3
+  fm_herdr_cleanup_index_refresh "$session" "$home_real"
+  fm_herdr_cleanup_index_match "$title" "$session" "$home_real"
+}
+
+fm_herdr_cleanup_index_build() { # <session> <home-real>
+  local session=$1 home_real=$2 journal id
+  FM_HERDR_CLEANUP_INDEX=
+  FM_HERDR_CLEANUP_FINGERPRINT=$(fm_herdr_cleanup_fingerprint)
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
   for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
     [ -f "$journal" ] && [ ! -L "$journal" ] || continue
     id=$(basename "$journal" "$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX")
     fm_task_id_creation_valid "$id" || continue
-    fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || continue
-    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
-      journal_home=$(fm_backend_herdr_projection_home_identity \
-        "$FM_BACKEND_HERDR_JOURNAL_HOME" 2>/dev/null) || continue
-      [ "$journal_home" = "$home_real" ] \
-        && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || continue
-    fi
-    expected=$(fm_backend_herdr_projection_workspace_label \
-      "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
-    [ "$expected" = "$title" ] || continue
-    printf '%s\t%s\t%s\n' "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
+    fm_herdr_cleanup_index_row_append "$journal" "$id" "$session" "$home_real" || continue
   done
 }
 
-fm_herdr_cleanup_unique_match() { # <title> <session> <home-real>
-  local title=$1 session=$2 home_real=$3 matches count record
+# Parse one journal once into a fresh index row. Shared by the index build and
+# the digest-driven reconciliation so both produce byte-identical rows.
+fm_herdr_cleanup_index_row_append() { # <journal> <id> <session> <home-real>
+  local journal=$1 id=$2 session=$3 home_real=$4 label
+  fm_herdr_cleanup_journal_validate "$journal" "$id" "$session" "$home_real" || return 1
+  label=$(fm_backend_herdr_projection_workspace_label \
+    "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+  FM_HERDR_CLEANUP_INDEX+="$label"$'\t'"$journal"$'\t'"$id"$'\t'
+  FM_HERDR_CLEANUP_INDEX+="${FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID}"$'\t'
+  FM_HERDR_CLEANUP_INDEX+="${FM_BACKEND_HERDR_JOURNAL_VERSION}"$'\t'
+  FM_HERDR_CLEANUP_INDEX+="${FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID}"$'\t'
+  FM_HERDR_CLEANUP_INDEX+="${FM_BACKEND_HERDR_JOURNAL_TAB_ID}"$'\t'
+  FM_HERDR_CLEANUP_INDEX+="${FM_BACKEND_HERDR_JOURNAL_PANE_ID}"$'\n'
+}
+
+# Refresh exactly one journal path from live bytes: its previous rows are
+# dropped, then the journal is re-parsed into fresh rows only while it is
+# still an ordinary readable file with a valid task id and payload. A removed
+# or invalid journal ends with no rows at all.
+fm_herdr_cleanup_index_row_replace() { # <journal> <session> <home-real>
+  local journal=$1 session=$2 home_real=$3 id
+  local r_label r_journal r_id r_token r_version r_workspace r_tab r_pane
+  local index=
+  while IFS=$'\t' read -r r_label r_journal r_id r_token r_version r_workspace r_tab r_pane; do
+    [ -n "$r_journal" ] || continue
+    [ "$r_journal" = "$journal" ] && continue
+    index+="$r_label"$'\t'"$r_journal"$'\t'"$r_id"$'\t'"$r_token"$'\t'
+    index+="$r_version"$'\t'"$r_workspace"$'\t'"$r_tab"$'\t'"$r_pane"$'\n'
+  done <<< "$FM_HERDR_CLEANUP_INDEX"
+  FM_HERDR_CLEANUP_INDEX=$index
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 0
+  id=$(basename "$journal" "$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX")
+  fm_task_id_creation_valid "$id" || return 0
+  fm_herdr_cleanup_index_row_append "$journal" "$id" "$session" "$home_real" || return 0
+  return 0
+}
+
+# Reconcile the index with the live directory before a guard relies on it.
+# A matching digest proves every row still mirrors the live bytes; otherwise
+# exactly the digest lines that differ name their journals, and each one is
+# re-read. An unparseable digest line falls back to a full index rebuild so a
+# change can never be silently missed.
+fm_herdr_cleanup_index_refresh() { # <session> <home-real>
+  local session=$1 home_real=$2 next changed line journal seen
+  local recorded=${FM_HERDR_CLEANUP_FINGERPRINT:-}
+  local cksum_re='^([0-9]+)[[:space:]]([0-9]+)[[:space:]]+(.*)$'
+  local NLPAD=$'\n'
+  next=$(fm_herdr_cleanup_fingerprint)
+  [ "$next" = "$recorded" ] && return 0
+  changed=$(
+    {
+      printf '%s\n' "$recorded"
+      printf '%s\n' "$next"
+    } | LC_ALL=C sort | LC_ALL=C uniq -u
+  )
+  FM_HERDR_CLEANUP_FINGERPRINT=$next
+  seen=$NLPAD
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if ! [[ "$line" =~ $cksum_re ]]; then
+      fm_herdr_cleanup_index_build "$session" "$home_real"
+      return 0
+    fi
+    journal=${BASH_REMATCH[3]}
+    case "$seen" in *"$NLPAD$journal$NLPAD"*) continue ;; esac
+    seen+="$journal$NLPAD"
+    fm_herdr_cleanup_index_row_replace "$journal" "$session" "$home_real"
+  done <<< "$changed"
+}
+
+fm_herdr_cleanup_index_match() { # <title> <session> <home-real>
+  local title=$1 session=$2 home_real=$3
+  local label journal id token version bound_workspace bound_tab bound_pane matches=0
   FM_HERDR_CLEANUP_JOURNAL=
   FM_HERDR_CLEANUP_ID=
   FM_HERDR_CLEANUP_TOKEN=
@@ -92,26 +211,26 @@ fm_herdr_cleanup_unique_match() { # <title> <session> <home-real>
   FM_HERDR_CLEANUP_BOUND_WORKSPACE=
   FM_HERDR_CLEANUP_BOUND_TAB=
   FM_HERDR_CLEANUP_BOUND_PANE=
-  matches=$(fm_herdr_cleanup_journal_matches "$title" "$session" "$home_real") || return 1
-  count=$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n+0 }')
-  [ "$count" -eq 1 ] || return 1
-  record=$(printf '%s\n' "$matches" | awk 'NF { print; exit }')
-  FM_HERDR_CLEANUP_JOURNAL=${record%%$'\t'*}
-  record=${record#*$'\t'}
-  FM_HERDR_CLEANUP_ID=${record%%$'\t'*}
-  FM_HERDR_CLEANUP_TOKEN=${record#*$'\t'}
+  if [ "${FM_HERDR_CLEANUP_INDEX_READY:-0}" != 1 ]; then
+    fm_herdr_cleanup_index_build "$session" "$home_real"
+    FM_HERDR_CLEANUP_INDEX_READY=1
+  fi
+  while IFS=$'\t' read -r label journal id token version bound_workspace bound_tab bound_pane; do
+    [ "$label" = "$title" ] || continue
+    [ -f "$journal" ] && [ ! -L "$journal" ] || continue
+    matches=$((matches + 1))
+    FM_HERDR_CLEANUP_JOURNAL=$journal
+    FM_HERDR_CLEANUP_ID=$id
+    FM_HERDR_CLEANUP_TOKEN=$token
+    FM_HERDR_CLEANUP_VERSION=$version
+    FM_HERDR_CLEANUP_BOUND_WORKSPACE=$bound_workspace
+    FM_HERDR_CLEANUP_BOUND_TAB=$bound_tab
+    FM_HERDR_CLEANUP_BOUND_PANE=$bound_pane
+  done <<< "$FM_HERDR_CLEANUP_INDEX"
+  [ "$matches" -eq 1 ] || return 1
   [ -n "$FM_HERDR_CLEANUP_JOURNAL" ] \
     && [ -n "$FM_HERDR_CLEANUP_ID" ] \
     && [ -n "$FM_HERDR_CLEANUP_TOKEN" ] || return 1
-  fm_backend_herdr_projection_journal_snapshot \
-    "$FM_HERDR_CLEANUP_JOURNAL" "$FM_HERDR_CLEANUP_ID" || return 1
-  [ "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" = "$FM_HERDR_CLEANUP_TOKEN" ] || return 1
-  FM_HERDR_CLEANUP_VERSION=$FM_BACKEND_HERDR_JOURNAL_VERSION
-  if [ "$FM_HERDR_CLEANUP_VERSION" = 2 ]; then
-    FM_HERDR_CLEANUP_BOUND_WORKSPACE=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
-    FM_HERDR_CLEANUP_BOUND_TAB=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
-    FM_HERDR_CLEANUP_BOUND_PANE=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
-  fi
 }
 
 fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token> <bound-workspace> <bound-tab> <bound-pane>
@@ -204,7 +323,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
   local tab pane state close_status=0
   token=$(fm_herdr_cleanup_title_token "$title") || return 0
-  if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
+  if ! fm_herdr_cleanup_index_match "$title" "$session" "$home_real"; then
     return 0
   fi
   journal=$FM_HERDR_CLEANUP_JOURNAL
@@ -294,6 +413,9 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
 
 fm_herdr_session_cleanup() {
   local session home_real list candidates workspace title journal found=0
+  FM_HERDR_CLEANUP_INDEX=
+  FM_HERDR_CLEANUP_INDEX_READY=0
+  FM_HERDR_CLEANUP_FINGERPRINT=
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
   for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
     if [ -f "$journal" ] && [ ! -L "$journal" ]; then

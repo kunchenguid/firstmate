@@ -62,6 +62,7 @@ TAB=w2:t1
 PANE=w2:p1
 TITLE="└ task · p:$TOKEN"
 FIXTURE_DIR="$TMP_ROOT/fixture"
+OUTSIDE_HOME_STATE="$TMP_ROOT/outside-home-state"
 LOCK_LOG="$TMP_ROOT/locks.log"
 CLOSE_LOG="$TMP_ROOT/closes.log"
 mkdir -p "$FIXTURE_DIR"
@@ -128,6 +129,7 @@ fixture_panes() {
   printf ']'
 }
 
+# shellcheck disable=SC2329 # Invoked indirectly by the sourced cleanup script; the parse-budget scenario below redefines it.
 fm_backend_herdr_cli() {
   local _session=$1 first=${2:-} second=${3:-} title tabs panes
   shift
@@ -170,6 +172,24 @@ fm_backend_herdr_cli() {
       ;;
     "api snapshot")
       : > "$FIXTURE_DIR/snapshotted"
+      if [ -e "$FIXTURE_DIR/late-duplicate" ]; then
+        rm -f "$FIXTURE_DIR/late-duplicate"
+        write_v1 fm-task
+      fi
+      if [ -e "$FIXTURE_DIR/late-extra" ]; then
+        rm -f "$FIXTURE_DIR/late-extra"
+        write_v1 probe-extra QyQyQyQyQyQyQyQyQyQyQy0
+      fi
+      if [ -e "$FIXTURE_DIR/late-materialized-journal" ]; then
+        rm -f "$FIXTURE_DIR/late-materialized-journal"
+        rm -f "$FM_STATE_OVERRIDE/fm-task.herdr-presentation"
+        cp "$FIXTURE_DIR/mirror-journal" "$FM_STATE_OVERRIDE/fm-task.herdr-presentation"
+      fi
+      if [ -e "$FIXTURE_DIR/late-state-symlink" ]; then
+        rm -f "$FIXTURE_DIR/late-state-symlink"
+        mv "$FM_STATE_OVERRIDE" "$FM_STATE_OVERRIDE.preserved"
+        ln -s "$OUTSIDE_HOME_STATE" "$FM_STATE_OVERRIDE"
+      fi
       printf '{"result":{"snapshot":{"focused_workspace_id":"w1","focused_tab_id":"%s","focused_pane_id":"w1:p1","workspaces":' "$(cat "$FIXTURE_DIR/active-tab")"
       fixture_workspaces
       printf ',"tabs":'; fixture_tabs
@@ -281,6 +301,135 @@ reset_fixture; : > "$FIXTURE_DIR/error-workspace-get"; assert_preserved "unreada
 reset_fixture; : > "$FIXTURE_DIR/race"; assert_preserved "revalidation race"
 reset_fixture; printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"; assert_preserved "active target"
 reset_fixture; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "focus refusal"
+
+# Wrapping the journal snapshot backend function counts parses through the
+# public data path without touching its validated semantics; installed once
+# for the mutation-guard and discovery parse budgets below.
+eval "$(declare -f fm_backend_herdr_projection_journal_snapshot \
+  | sed '1s/^fm_backend_herdr_projection_journal_snapshot/_cleanup_journal_parse_real/')"
+_parse_calls=0
+fm_backend_herdr_projection_journal_snapshot() {
+  _parse_calls=$((_parse_calls + 1))
+  _cleanup_journal_parse_real "$@"
+}
+
+# A completed close keeps its whole-pass parse budget at one parse per
+# present journal: the index build parses both journals, and the immediate
+# revalidation plus post-closure journal recheck re-read live state by
+# digesting the journal directory once per check and re-parsing only the
+# journals whose bytes changed since the index.
+reset_fixture
+write_v1 probe-idle XyXyXyXyXyXyXyXyXyXyX0
+_parse_calls=0
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] \
+  || fail "closed candidate's journal was not retired"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] \
+  || fail "guard-budget close did not close exactly once"
+[ -f "$FM_STATE_OVERRIDE/probe-idle.herdr-presentation" ] \
+  || fail "guard-budget close removed an unmatched journal"
+[ "$_parse_calls" = 2 ] \
+  || fail "closing one candidate parsed journals $_parse_calls times instead of once per journal per pass"
+pass "closing one candidate guards via digest without a per-mutation rescan"
+
+# A journal that appears after discovery must still be caught the same way a
+# fresh rescan would: the revalidation guard reconciles the index with the live
+# directory, so a duplicate title appearing mid-pass preserves the candidate.
+reset_fixture
+: > "$FIXTURE_DIR/late-duplicate"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] \
+  || fail "mid-pass duplicate journal retired the candidate"
+[ -f "$FM_STATE_OVERRIDE/fm-task.herdr-presentation" ] \
+  || fail "mid-pass duplicate journal was itself retired"
+[ ! -s "$CLOSE_LOG" ] \
+  || fail "mid-pass duplicate journal closed the pane"
+pass "guards catch a journal that appears after discovery"
+
+# An unrelated journal that appears after discovery is re-parsed by the guards
+# alone, and a still-unique candidate completes its exact close anyway.
+reset_fixture
+write_v1 probe-idle XyXyXyXyXyXyXyXyXyXyX0
+: > "$FIXTURE_DIR/late-extra"
+_parse_calls=0
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] \
+  || fail "mid-pass unrelated journal change preserved a closable candidate"
+[ -f "$FM_STATE_OVERRIDE/probe-extra.herdr-presentation" ] \
+  || fail "mid-pass unrelated journal change retired the wrong journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] \
+  || fail "mid-pass unrelated journal change did not close exactly once"
+[ "$_parse_calls" = 3 ] \
+  || fail "mid-pass change parsed journals $_parse_calls times instead of exactly the changed journal"
+pass "guards re-parse only the changed journal and still close"
+
+# A journal parked as a symlink at pass start has no row, but the digest must
+# make its byte-identical materialization a visible change the same way a
+# rewrite is visible, so the guards preserve the pane while two same-titled
+# journals exist instead of closing on the one indexed row.
+reset_fixture
+write_v1 fm-task
+cp "$FM_STATE_OVERRIDE/fm-task.herdr-presentation" "$FIXTURE_DIR/mirror-journal"
+rm -f "$FM_STATE_OVERRIDE/fm-task.herdr-presentation"
+ln -s "$FIXTURE_DIR/mirror-journal" "$FM_STATE_OVERRIDE/fm-task.herdr-presentation"
+: > "$FIXTURE_DIR/late-materialized-journal"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] \
+  || fail "byte-identical materialized journal retired the candidate"
+[ -f "$FM_STATE_OVERRIDE/fm-task.herdr-presentation" ] \
+  || fail "byte-identical materialized journal was itself retired"
+[ ! -s "$CLOSE_LOG" ] \
+  || fail "byte-identical materialized journal closed the pane"
+pass "guards catch a byte-identical journal materializing from a symlink"
+
+# The state directory itself swapping mid-pass for a symlink to byte-identical
+# journal copies outside the effective FM_HOME invalidates the reconciled
+# index: the guards must preserve the candidate and leave both journal stores
+# untouched, the same way the base per-guard live rescan skipped a symlinked
+# state directory.
+reset_fixture
+mkdir -p "$OUTSIDE_HOME_STATE"
+cp "$FM_STATE_OVERRIDE/$ID.herdr-presentation" "$OUTSIDE_HOME_STATE/$ID.herdr-presentation"
+: > "$FIXTURE_DIR/late-state-symlink"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ -f "$FM_STATE_OVERRIDE.preserved/$ID.herdr-presentation" ] \
+  || fail "symlinked state directory retired the home journal"
+[ -f "$OUTSIDE_HOME_STATE/$ID.herdr-presentation" ] \
+  || fail "symlinked state directory acted on a journal outside the effective FM_HOME"
+[ ! -s "$CLOSE_LOG" ] \
+  || fail "symlinked state directory closed the pane"
+rm -f "$FM_STATE_OVERRIDE"
+mv "$FM_STATE_OVERRIDE.preserved" "$FM_STATE_OVERRIDE"
+pass "guards preserve both stores when the state directory becomes a symlink"
+
+# Candidate discovery must parse each home-local journal exactly once per
+# cleanup pass however many grammar-matching candidate workspaces exist.
+rm -f "${FM_STATE_OVERRIDE:?}"/*herdr-presentation
+write_v1 probe-a ZzZzZzZzZzZzZzZzZzZzA0
+write_v1 probe-b ZzZzZzZzZzZzZzZzZzZzB0
+write_v1 probe-c ZzZzZzZzZzZzZzZzZzZzC0
+write_v1 probe-d ZzZzZzZzZzZzZzZzZzZzD0
+fm_backend_herdr_cli() {
+  local _session=$1; shift
+  [ "${1:-} ${2:-}" = "workspace list" ] || return 1
+  printf '%s\n' '{"result":{"workspaces":['
+  printf '%s\n' '{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1","tab_count":1,"pane_count":1},'
+  printf '%s\n' '{"workspace_id":"wx1","label":"└ sonar-1 · p:Sonar0000000000000000A","focused":false,"active_tab_id":"wx1:t1","tab_count":1,"pane_count":1},'
+  printf '%s\n' '{"workspace_id":"wx2","label":"└ sonar-2 · p:Sonar0000000000000000B","focused":false,"active_tab_id":"wx2:t1","tab_count":1,"pane_count":1},'
+  printf '%s\n' '{"workspace_id":"wx3","label":"└ sonar-3 · p:Sonar0000000000000000C","focused":false,"active_tab_id":"wx3:t1","tab_count":1,"pane_count":1},'
+  printf '%s\n' '{"workspace_id":"wx4","label":"└ sonar-4 · p:Sonar0000000000000000D","focused":false,"active_tab_id":"wx4:t1","tab_count":1,"pane_count":1}]}}'
+}
+_parse_calls=0
+fm_herdr_session_cleanup >/dev/null 2>&1
+_journals_left=0
+for _journal in "${FM_STATE_OVERRIDE:?}"/*herdr-presentation; do
+  [ -f "$_journal" ] && _journals_left=$((_journals_left + 1))
+done
+[ "$_journals_left" = 4 ] \
+  || fail "parse-count probe pass removed journals"
+[ "$_parse_calls" = 4 ] \
+  || fail "candidate discovery parsed journals per candidate ($_parse_calls) instead of once per pass"
+pass "four grammar candidates parse four journals exactly once per pass"
 
 INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"
