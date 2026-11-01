@@ -317,7 +317,7 @@ read_notifications() { # deadline
   sed '1,/^$/d' "$TMP/notify.txt" > "$TMP/notify.json"
   jq -e 'type == "array"' "$TMP/notify.json" >/dev/null 2>&1 || return 0
   next_since=$(jq -r --arg since "$since" '[.[].updated_at | strings] + [$since] | max' "$TMP/notify.json")
-  jq -r --arg since "$since" '.[] | select(.subject.type == "PullRequest" and (.updated_at // "") > $since)
+  jq -r --arg since "$since" '.[] | select(.subject.type == "PullRequest" and (.updated_at // "") >= $since)
     | .subject.url // "" | capture("^https://api[.]github[.]com/repos/(?<path>[^/]+/[^/]+)/pulls/(?<n>[1-9][0-9]*)$")
     | "https://github.com/\(.path)/pull/\(.n)"' "$TMP/notify.json" | sort -u > "$TMP/events"
   jq --arg lm "$next_lm" --arg since "$next_since" '.notifications = ((.notifications // {}) + {last_modified:$lm,since:$since})' \

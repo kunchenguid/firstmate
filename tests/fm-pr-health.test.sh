@@ -693,6 +693,26 @@ test_notifications_drive_reads_with_the_poll_as_fallback() {
   pass 'notifications trigger reads of owned PRs, unchanged feeds read nothing, the poll stays the fallback'
 }
 
+test_notifications_keep_events_at_the_saved_timestamp() {
+  local home
+  home=$(new_home same-timestamp-events)
+  task "$home" ship1 pr=https://github.com/o/r/pull/43
+  task "$home" ship2 pr=https://github.com/o/r/pull/44
+  pr "$home" 43 "$HEAD_A" "$BASE_1" true false
+  pr "$home" 44 "$HEAD_A" "$BASE_1" true false
+  feed "$home"
+  arm "$home"
+  expect_silent "$home" 'the first pass reads both owned PRs'
+  notify "$home" o/r 43 2026-11-01T00:04:00Z author
+  expect_silent "$home" 'a notification without an author disposition stays quiet'
+  notify "$home" o/r 44 2026-11-01T00:04:00Z author
+  set_pr "$home" 44 '.reviewDecision = "CHANGES_REQUESTED"'
+  expect_one "$home" 'pull/44 author must act' \
+    'a different notification at the saved timestamp must still be processed'
+  [ "$(reads "$home" 44)" = 2 ] || fail 'the same-timestamp notification did not read its owned PR'
+  pass 'notifications at the saved timestamp remain eligible'
+}
+
 test_failed_event_read_is_retried() {
   local home
   home=$(new_home notification-retry)
@@ -711,7 +731,8 @@ test_failed_event_read_is_retried() {
 
 failures=0
 for test_name in test_maintainer_author_and_approval_states_are_distinct \
-  test_notifications_drive_reads_with_the_poll_as_fallback test_failed_event_read_is_retried \
+  test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
+  test_failed_event_read_is_retried \
   test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \
   test_reported_failure_does_not_hide_a_later_required_failure \
