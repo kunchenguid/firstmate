@@ -7,7 +7,7 @@ This document is the design for that rail; `bin/fm-project-mode.sh`'s header own
 ## Why it is a forge value
 
 [gerrit-forge-integration.md](gerrit-forge-integration.md) section 3 defines the forge as what the publication artifact is, and therefore which tool makes it.
-Here the artifact is a review that an external tool creates from a snapshot of local commits, so the rail is a fourth value of the existing closed `forge=` binding rather than a separate axis.
+Here the artifact is a review that an external tool creates from a snapshot of local commits, so the rail is another value of the existing closed `forge=` binding rather than a separate axis.
 The composition test holds: `local-only` is refused because it publishes nothing, `direct-PR` validates and then uploads with the tool, and `no-mistakes` is refused for now because the pipeline's push, pr, and ci steps would push to the shared origin.
 The binding is never detected, because no protocol fact identifies a snapshot-uploading review tool; the captain's registry entry `[direct-PR forge=external]` is the whole binding.
 The tool itself is private home configuration: `config/external-review.md` holds the worker instructions for validating, uploading, reading review state, and the stopping point, and `bin/fm-dod-lib.sh` renders it verbatim into the Definition of done.
