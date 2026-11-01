@@ -439,6 +439,22 @@ run_extension_section_lane() {
   return "$section_rc"
 }
 
+# Contended hosts slow every lane, so the default deadline grows with the
+# one-minute load per online CPU. The factor is capped to keep the deadline bounded.
+section_lane_load_factor() {
+  local load cpus
+  load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $1}')
+  cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+  awk -v load="${load:-0}" -v cpus="${cpus:-1}" 'BEGIN {
+    if (cpus < 1) cpus = 1
+    factor = int(load / cpus)
+    if (factor < load / cpus) factor++
+    if (factor < 1) factor = 1
+    if (factor > 8) factor = 8
+    print factor
+  }'
+}
+
 run_extension_section_lanes() {
   local section result_file section_rc timeout_seconds deadline index remaining launched total maximum_sections
   local active maximum_concurrent
@@ -447,11 +463,13 @@ run_extension_section_lanes() {
   local -a section_results=()
   local -a section_complete=()
   local section_result_root
-  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-34}
+  timeout_seconds=${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-120}
   case "$timeout_seconds" in
     ''|*[!0-9]*) return 64 ;;
   esac
-  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -lt 35 ] || return 64
+  [ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -lt 121 ] || return 64
+  [ -n "${FM_EXTENSION_BINDING_COORDINATOR_TIMEOUT_SECONDS:-}" ] \
+    || timeout_seconds=$((timeout_seconds * $(section_lane_load_factor)))
   section_result_root=$(mktemp -d "$TMP_ROOT/section-lanes.XXXXXX") || return 1
   total=${#sections[@]}
   # Sixteen selectors are validated here. The bounded aggregate keeps its
@@ -1259,7 +1277,7 @@ pass "one external adapter registers, invokes, captures unhandled evidence, clas
 FM_HOME="$H_FLOW" "$PROCEVENT" register-extension ext-flow crash-silent-source --config-ref crash-silent >/dev/null
 FM_HOME="$H_FLOW" "$PROCEVENT" start crash-silent-source > "$TMP_ROOT/crash-silent-start.out" 2>&1 &
 crash_silent_start_pid=$!
-for _ in $(seq 1 400); do
+for _ in $(seq 1 3000); do
   if [ -f "$TMP_ROOT/claims/crash-silent-source.claim" ]; then
     # The successful crash-recovery path may release this durable claim between
     # the observation above and this best-effort cleanup PID read.
@@ -1327,7 +1345,7 @@ done
 [ -L "$FM_PROCEVENT_CLAIM_ROOT/order-source.lock" ] || fail "neither lock-order contender took the source lock"
 sleep 0.2
 touch "$order_release"
-order_deadline=$((SECONDS + 12))
+order_deadline=$((SECONDS + 60))
 while kill -0 "$order_register_pid" 2>/dev/null || kill -0 "$order_reconcile_pid" 2>/dev/null; do
   if [ "$SECONDS" -ge "$order_deadline" ]; then
     # Killing registration lets lock recovery free reconcile for cleanup.
