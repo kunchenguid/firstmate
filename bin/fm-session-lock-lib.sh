@@ -25,9 +25,10 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp and
-# agy are anchored exactly like pi: their process names are the bare words `omp`
-# (verified, omp 18.1.11) and `agy`, and a substring match would claim ompd or
-# comp.
+# agy are anchored exactly like pi: their native process names are the bare
+# words `omp` (verified, omp 18.1.11) and `agy`, and a substring match would
+# claim ompd or comp. A Bun-hosted omp carries the process name `bun` instead;
+# fm_bun_harness_argv_name below owns that shape.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$'
 
 # The same harnesses as exact executable names. Keep in sync with
