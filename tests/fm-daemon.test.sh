@@ -1463,7 +1463,7 @@ test_housekeeping_overdue_queue_failure_retries() {
   dir=$(make_supercase overdue-queue-retry)
   state="$dir/state"; fakebin="$dir/fakebin"
   task=overdue-retry; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
-  printf 'paused: waiting for dependency\\n' > "$statusf"
+  printf 'paused: waiting for dependency\n' > "$statusf"
   printf 'idle prompt $\\n' > "$pane"
   fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 || fail "fixture: could not record away posture"
@@ -1471,13 +1471,14 @@ test_housekeeping_overdue_queue_failure_retries() {
   sleep 2
   FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
   real_escalate_add=$(declare -f escalate_add)
-  eval "${real_escalate_add/ escalate_add()/ real_escalate_add_impl()}"
+  eval "${real_escalate_add/escalate_add ()/real_escalate_add_impl ()}"
   escalate_add() { return 1; }
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 housekeeping "$state"
   [ ! -e "$state/.paused-overdue-$task" ] || fail "failed queue was marked reported"
   escalate_add() { real_escalate_add_impl "$@"; }
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 housekeeping "$state"
   [ -e "$state/.paused-overdue-$task" ] || fail "retry did not mark the queued overdue event"
+  eval "$real_escalate_add"
   [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] || fail "retry did not queue exactly one stale escalation"
   pass "failed overdue queue retries after recovery"
 }
