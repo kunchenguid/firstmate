@@ -14,3 +14,6 @@ config/
 .claude/settings.local.json
 
 .tools/
+# Local lint tooling installs (bin/fm-install-actionlint.sh) live outside the
+# repo or in this untracked scratch dir; never commit a downloaded binary.
+.lint-tools/

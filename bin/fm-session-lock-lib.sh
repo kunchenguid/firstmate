@@ -25,9 +25,10 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp and
-# agy are anchored exactly like pi: their process names are the bare words `omp`
-# (verified, omp 18.1.11) and `agy`, and a substring match would claim ompd or
-# comp.
+# agy are anchored exactly like pi: their native process names are the bare
+# words `omp` (verified, omp 18.1.11) and `agy`, and a substring match would
+# claim ompd or comp. A Bun-hosted omp carries the process name `bun` instead;
+# fm_bun_harness_argv_name below owns that shape.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$'
 
 # The same harnesses as exact executable names. Keep in sync with
@@ -91,6 +92,117 @@ fm_ps_ppid() {  # <pid> -> parent pid
   printf '%s' "$out"
 }
 
+# Print the harness named by the script Bun is executing, from a real argv
+# ($1 = argv[0], the bun executable; the rest are its arguments), or return 1.
+# Only the script position is evidence: an unknown option, an option value, or
+# a later argument must never turn an ordinary Bun process into a harness.
+# Every parameter is one whole argv slot, so a space inside a single argument
+# ("/tmp/omp tools/task.js") stays inside one token and cannot manufacture a
+# harness path, while a real harness at "/opt/My Tools/omp" keeps its basename.
+fm_bun_harness_argv_name() {  # <argv0> [args...]
+  local token name i
+  [ "$#" -ge 2 ] || return 1
+  for ((i = 2; i <= $#; i++)); do
+    token=${!i}
+    case "$token" in
+      --smol) continue ;;
+      -*) return 1 ;;
+      */*)
+        for name in "${FM_HARNESS_NAMES[@]}"; do
+          [ "${token##*/}" = "$name" ] || continue
+          printf '%s\n' "$name"
+          return 0
+        done
+        return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
+
+# Print the real argv of process $1 as a NUL-separated stream, or return 1 when
+# the platform cannot report argv with its element boundaries intact. ps
+# flattens argv into one space-joined string whose original boundaries are
+# unrecoverable, so ps is never a source here: Linux and Cygwin read the
+# kernel's NUL-separated /proc/<pid>/cmdline, and macOS reads KERN_PROCARGS2
+# (argc, then the exec path, padding, and the NUL-separated argv strings,
+# followed by the environment, which is never read) through python3 ctypes -
+# the sysctl(8) CLI has no formatter registered for that oid, so the command
+# cannot print it. Any unreadable, empty, or short table fails closed. Size is
+# never the test: procfs reports st_size 0 for cmdline even when it holds
+# arguments, so a -s check would reject every live Linux process. The stream is
+# NUL-delimited end to end because NUL is the one byte an argv element can
+# never contain; any text separator, a newline included, also occurs INSIDE a
+# legal element and would let one argument re-split into a harness path on the
+# way to the parser.
+fm_process_argv() {  # <pid>
+  local pid=$1
+  if [ -e "/proc/$pid/cmdline" ]; then
+    # An empty read is a zombie or kernel thread (no argv); a failed read is a
+    # dead or inaccessible process. Both are unreadable, so both fail closed.
+    [ -n "$(head -c 1 "/proc/$pid/cmdline" 2>/dev/null)" ] || return 1
+    cat "/proc/$pid/cmdline" 2>/dev/null
+    return 0
+  fi
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) ;;
+    *) return 1 ;;
+  esac
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$pid" <<'FM_PROCARGV_EOF'
+import ctypes, errno, sys
+lib = ctypes.CDLL(None, use_errno=True)
+mib = (ctypes.c_int * 3)(1, 49, int(sys.argv[1]))  # CTL_KERN, KERN_PROCARGS2
+# The region is sized at probe time and can grow before the read (the target
+# may rewrite its argv), so the read requests slack and an ENOMEM pair retries
+# with a fresh probe. Exhausted retries still fail closed.
+data = None
+for _ in range(3):
+    size = ctypes.c_size_t(0)
+    if lib.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        sys.exit(1)
+    size.value += 4096
+    buf = ctypes.create_string_buffer(size.value)
+    if lib.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0:
+        data = buf.raw[:size.value]
+        break
+    if ctypes.get_errno() != errno.ENOMEM:
+        sys.exit(1)
+if data is None:
+    sys.exit(1)
+argc = int.from_bytes(data[:4], sys.byteorder)
+parts = data[4:].split(b'\0')
+if not parts or parts[0] == b'':
+    sys.exit(1)  # the exec path heads the payload and is never empty
+i = 1
+while i < len(parts) and parts[i] == b'':
+    i += 1  # alignment padding between the exec path and argv[0]
+argv = parts[i:i + argc]
+if len(argv) != argc:
+    sys.exit(1)
+for element in argv:
+    sys.stdout.buffer.write(element + b'\0')
+FM_PROCARGV_EOF
+}
+
+# Print the harness named by the script Bun is executing in live process $2,
+# or return 1. The decision reads the process's REAL argv (fm_process_argv),
+# never a flattened ps string: re-splitting "bun /tmp/omp tools/task.js" at
+# spaces would manufacture an /tmp/omp harness path out of one argument, and
+# would reject a genuine harness at "/opt/My Tools/omp". When the real argv
+# cannot be read with its boundaries intact the verdict fails closed.
+fm_bun_harness_name() {  # <comm> <pid>
+  local comm=$1 pid=$2 token
+  local -a argv=()
+  case "$(basename -- "$comm")" in bun) ;; *) return 1 ;; esac
+  while IFS= read -r -d '' token; do
+    argv+=("$token")
+  done < <(fm_process_argv "$pid")
+  [ "${#argv[@]}" -ge 1 ] || return 1
+  fm_bun_harness_argv_name "${argv[@]}"
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -102,9 +214,12 @@ fm_ps_ppid() {  # <pid> -> parent pid
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python) running a harness script path.
-#   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#   4. Bun running an exact harness script path, decided by the helper above
+#      from the process's real argv, so this arm needs $3 and a pid-less
+#      caller never gets this verdict.
+#   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
+fm_harness_process_matches() {  # <comm> <args> [<pid>]
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
@@ -126,6 +241,10 @@ fm_harness_process_matches() {  # <comm> <args>
       fi
       ;;
   esac
+  if [ -n "${3:-}" ] && name=$(fm_bun_harness_name "$comm" "$3"); then
+    case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    return 0
+  fi
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the
@@ -295,7 +414,7 @@ fm_harness_ancestry_pids() {
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(fm_ps_comm "$pid") || break
     args=$(fm_ps_args "$pid")
-    if fm_harness_process_matches "$comm" "$args"; then
+    if fm_harness_process_matches "$comm" "$args" "$pid"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -370,7 +489,7 @@ fm_harness_pid_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   comm=$(fm_ps_comm "$pid") || return 1
   args=$(fm_ps_args "$pid")
-  fm_harness_process_matches "$comm" "$args"
+  fm_harness_process_matches "$comm" "$args" "$pid"
 }
 
 # Liveness and identity of a session-lock pid for readers outside this file:
@@ -444,7 +563,7 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
       "$claude_pid")
         comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
         args=$(ps -o args= -p "$pid" 2>/dev/null)
-        fm_harness_process_matches "$comm" "$args" || return 1
+        fm_harness_process_matches "$comm" "$args" "$pid" || return 1
         ;;
       "$FM_WIN_PID_PREFIX$claude_pid")
         fm_harness_pid_alive "$pid" || return 1
