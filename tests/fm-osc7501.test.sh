@@ -359,11 +359,14 @@ t_unknown_activity_leaves_native_root() {
   pass "shared root: unknown activity never overwrites a native record, live or at exit"
 }
 
-# Once activity turns unknown the bridge stops writing: no heartbeat, no
-# retirement record over whatever now owns the root, and no final record at
-# TERM. Known activity resumes reporting.
-t_unknown_activity_stops_writing() {
-  local d=$TMP_ROOT/unknownstop n
+# Once activity turns unknown the bridge never holds or heartbeats its last
+# record, but while that last write is still its own the durable signals keep
+# it honest: a still-open decision stays blocked without rewriting, a
+# resolved one retires to idle exactly once, a running-turn record parks at
+# idle, and TERM still lands the final record. Known activity resumes
+# reporting.
+t_unknown_activity_keeps_record_honest() {
+  local d=$TMP_ROOT/unknownhonest n
   mkhome "$d"
   : >"$d/cap"
   sleep 300 &
@@ -376,22 +379,160 @@ t_unknown_activity_stops_writing() {
   local wpid=$!
   wait_cap 'state=blocked:kind=question' "$d/cap" 60 || fail "unknown: no blocked record while activity was known"
   rm -f "$d/state/t28.busy-state" "$d/state/t28.busy-gen"
-  sleep 2
-  n=$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')
-  printf 'resolved [at=2] [key=k1]: yes\n' >>"$d/state/t28.status"
   sleep 3
-  assert_equals "$n" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" "unknown activity: no heartbeat or retirement record"
-  busy_rec "$d/state" t28 idle
-  wait_cap 'state=idle' "$d/cap" 60 || fail "unknown: known activity did not resume reporting"
-  rm -f "$d/state/t28.busy-state" "$d/state/t28.busy-gen"
-  sleep 2
   n=$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')
+  sleep 2
+  assert_equals "$n" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" \
+    "unknown: a still-justified blocked record is never rewritten"
+  : >"$d/cap"
+  printf 'resolved [at=2] [key=k1]: yes\n' >>"$d/state/t28.status"
+  wait_cap 'state=idle' "$d/cap" 60 || fail "unknown: the resolved decision did not retire to idle"
+  sleep 2
+  assert_equals "1" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" \
+    "unknown: the retirement write happens once - no heartbeat while unknown"
+  : >"$d/cap"
+  busy_rec "$d/state" t28 busy
+  wait_cap 'state=working' "$d/cap" 60 || fail "unknown: known activity did not resume reporting"
+  : >"$d/cap"
+  rm -f "$d/state/t28.busy-state" "$d/state/t28.busy-gen"
+  wait_cap 'state=idle' "$d/cap" 60 || fail "unknown: a running-turn record did not retire to idle"
   kill "$wpid" 2>/dev/null
   wait_gone "$wpid" || fail "unknown: the watcher did not exit on TERM"
   wait "$wpid" 2>/dev/null || true
-  assert_equals "$n" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" "unknown activity: no final record at TERM"
+  assert_equals "2" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" \
+    "unknown: TERM lands the final record on top of the retirement"
+  assert_equals "state=idle" "$(tail -c 4000 "$d/cap" | grep -o 'state=[a-z]*' | tail -1)" \
+    "unknown: the final record parks at idle"
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
-  pass "unknown activity: the bridge writes nothing until activity is known again"
+  pass "unknown activity: no hold or heartbeat; signals retire the record once; TERM still finals"
+}
+
+# The exit write is exactly where unknown activity must not matter: the
+# final record still lands on the agent's death, and a done result survives
+# - the pane keeps its outcome instead of a stale working ghost.
+t_final_record_with_unknown_activity() {
+  local d=$TMP_ROOT/unknownfinal
+  mkhome "$d"
+  : >"$d/cap"
+  sleep 300 &
+  local holder=$!
+  busy_rec "$d/state" t30 busy
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t30 --kind ship --state "$d/state" --harness opencode \
+    --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=working' "$d/cap" 60 || fail "final: no working record"
+  rm -f "$d/state/t30.busy-state" "$d/state/t30.busy-gen"
+  wait_cap 'state=idle' "$d/cap" 60 || fail "final: working outlived its turn once activity read unknown"
+  printf 'done [at=9]: PR https://example.test/pr/9\n' >"$d/state/t30.status"
+  wait_cap 'state=done' "$d/cap" 60 || fail "final: done did not report while activity was unknown"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  wait_gone "$wpid" || fail "final: the watcher did not exit on parent death"
+  wait "$wpid" 2>/dev/null || true
+  local tail
+  tail=$(tail -c 4000 "$d/cap" | grep -o 'state=[a-z]*' | tail -1)
+  assert_equals "state=done" "$tail" "final: the last record keeps done across an unknown-activity exit"
+  pass "unknown activity: the exit write still lands and keeps done"
+}
+
+# Rovo's rendered marker is its only activity source and resolves busy or
+# unknown, never idle: a long turn can scroll the marker out of the captured
+# tail. The durable signals still retire working when the marker leaves and
+# still report a decision and a done while it is gone.
+t_rovo_reports_through_unknown() {
+  local d=$TMP_ROOT/rovo
+  mkhome "$d"
+  mkdir -p "$d/bin"
+  : >"$d/cap"
+  : >"$d/pane"
+  # shellcheck disable=SC2016
+  printf '#!/usr/bin/env bash\n[ "$1" = capture-pane ] && cat %q\n' "$d/pane" >"$d/bin/tmux"
+  chmod +x "$d/bin/tmux"
+  sleep 300 &
+  local holder=$!
+  printf 'Rovo is thinking...\n' >"$d/pane"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 PATH="$d/bin:$PATH" \
+    bash "$SCRIPT" watch --task t31 --kind ship --state "$d/state" --harness rovo \
+    --backend tmux --target '%9' --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=working:app=firstmate-rovo' "$d/cap" 60 \
+    || fail "rovo: the busy marker did not read as working"
+  : >"$d/pane"
+  wait_cap 'state=idle' "$d/cap" 60 || fail "rovo: working outlived the marker while activity read unknown"
+  printf 'needs-decision [at=1] [key=k1]: pick one\n' >"$d/state/t31.status"
+  wait_cap 'state=blocked:kind=question' "$d/cap" 60 || fail "rovo: an open decision did not report while unknown"
+  printf 'resolved [at=2] [key=k1]: go\ndone [at=3]: PR https://example.test/pr/31\n' >>"$d/state/t31.status"
+  wait_cap 'state=done' "$d/cap" 60 || fail "rovo: done did not report while activity was unknown"
+  kill "$wpid" 2>/dev/null
+  wait_gone "$wpid" || fail "rovo: the watcher did not exit on TERM"
+  wait "$wpid" 2>/dev/null || true
+  local tail
+  tail=$(tail -c 4000 "$d/cap" | grep -o 'state=[a-z]*' | tail -1)
+  assert_equals "state=done" "$tail" "rovo: the final record keeps done"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  pass "rovo: the busy marker drives working; unknown activity still retires it and reports decisions and done"
+}
+
+# Antigravity is the same shape as Rovo - its `esc to cancel` status row is
+# the only activity source and only proves busy - so the signal fold carries
+# it through idle, blocked, and done once the marker leaves the pane.
+t_agy_reports_through_unknown() {
+  local d=$TMP_ROOT/agy
+  mkhome "$d"
+  mkdir -p "$d/bin"
+  : >"$d/cap"
+  : >"$d/pane"
+  # shellcheck disable=SC2016
+  printf '#!/usr/bin/env bash\n[ "$1" = capture-pane ] && cat %q\n' "$d/pane" >"$d/bin/tmux"
+  chmod +x "$d/bin/tmux"
+  sleep 300 &
+  local holder=$!
+  printf 'working\n  esc to cancel\n' >"$d/pane"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 PATH="$d/bin:$PATH" \
+    bash "$SCRIPT" watch --task t33 --kind ship --state "$d/state" --harness agy \
+    --backend tmux --target '%9' --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=working:app=firstmate-agy' "$d/cap" 60 \
+    || fail "agy: the busy status row did not read as working"
+  : >"$d/pane"
+  wait_cap 'state=idle' "$d/cap" 60 || fail "agy: working outlived the status row while activity read unknown"
+  printf 'done [at=4]: PR https://example.test/pr/33\n' >"$d/state/t33.status"
+  wait_cap 'state=done' "$d/cap" 60 || fail "agy: done did not report while activity was unknown"
+  kill "$wpid" 2>/dev/null
+  wait_gone "$wpid" || fail "agy: the watcher did not exit on TERM"
+  wait "$wpid" 2>/dev/null || true
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  pass "agy: the busy status row drives working; unknown activity still retires it and reports done"
+}
+
+# A watcher killed without its final write leaves its last record on the
+# pane. The next arm writes one idle record once every gate has passed -
+# proven while the fresh watcher, activity unknown and never having written,
+# still produces nothing of its own.
+t_arm_clears_stale_record() {
+  local d=$TMP_ROOT/armclear
+  mkhome "$d"
+  start_term "$d"
+  busy_rec "$d/state" t32 busy
+  env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" arm --task t32 --harness opencode --agent-bin opencode --backend tmux \
+    --kind ship --state "$d/state" --config "$d/config"
+  local wpid
+  wpid=$(watcher_pid "$d/state") || fail "clear: no first watcher"
+  wait_cap 'state=working' "$d/cap" 60 || fail "clear: the first watcher never reported working"
+  kill -KILL "$wpid" 2>/dev/null
+  wait_gone "$wpid" || true
+  : >"$d/cap"
+  rm -f "$d/state/t32.busy-state" "$d/state/t32.busy-gen"
+  env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" arm --task t32 --harness opencode --agent-bin opencode --backend tmux \
+    --kind ship --state "$d/state" --config "$d/config"
+  wait_cap 'state=idle:app=firstmate-opencode' "$d/cap" 60 || fail "clear: arm left the stale record on the pane"
+  sleep 2
+  assert_equals "1" "$(grep -o 'state=' "$d/cap" | wc -l | tr -d ' ')" \
+    "clear: only the arm-time write lands - the fresh watcher stays silent while unknown"
+  stop_term
+  pass "lifecycle: arm clears a dead watcher's stale record once the gates pass"
 }
 
 # --- config gate ---------------------------------------------------------------
@@ -425,9 +566,8 @@ t_hc_marker_arms_watcher() {
     --state "$d/state" --config "$d/config"
   sleep 0.3
   assert_present "$(echo "$d/state"/.osc7501watch-* | head -1)" "hc env: watcher armed without a query"
-  local cap
-  cap=$(cat "$d/cap" 2>/dev/null)
-  assert_equals "" "$cap" "hc env: no capability probe sent to a known-aware terminal"
+  assert_equals "state=idle " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
+    "hc env: the only bytes are the arm-time idle clear - no capability probe"
   stop_term
   pass "known-aware: HC_TERMINAL_ID arms with no capability probe"
 }
@@ -711,7 +851,8 @@ t_hc_terminal_with_inherited_herdr_markers() {
     --state "$d/state" --config "$d/config"
   local wpid
   wpid=$(watcher_pid "$d/state") || fail "hc inside herdr: no watcher armed"
-  assert_equals "" "$(cat "$d/cap" 2>/dev/null)" "hc inside herdr: no capability probe"
+  assert_equals "state=idle " "$(grep -o 'state=[a-z]*' "$d/cap" | sort -u | tr '\n' ' ')" \
+    "hc inside herdr: the only bytes are the arm-time idle clear - no capability probe"
   kill "$wpid" 2>/dev/null
   wait_gone "$wpid" || true
   stop_term
@@ -729,7 +870,11 @@ fm_test_run \
   t_inplace_upgrade_reprobes_native \
   t_native_codex_threshold \
   t_unknown_activity_leaves_native_root \
-  t_unknown_activity_stops_writing \
+  t_unknown_activity_keeps_record_honest \
+  t_final_record_with_unknown_activity \
+  t_rovo_reports_through_unknown \
+  t_agy_reports_through_unknown \
+  t_arm_clears_stale_record \
   t_config_off_disables \
   t_hc_marker_arms_watcher \
   t_concurrent_panes_keep_their_reporters \

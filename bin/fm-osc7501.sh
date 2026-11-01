@@ -50,9 +50,17 @@
 #     done                -> done ("PR ready" when the note has a URL)
 #   otherwise idle
 #   A paused declaration has no separate mapping; activity decides as above.
-#   Unknown activity writes nothing at all - no record, no heartbeat, no
-#   retirement, no final record - because only known activity proves the
-#   root record is the bridge's to write.
+#   Unknown activity proves nothing about the worker and nothing about who
+#   owns the root record, so the bridge never holds or heartbeats a record
+#   there. While the bridge's own last write stands, though, the durable
+#   signals alone keep it honest: they fold the same way with idle activity
+#   and the result is written once per change - an open decision still
+#   reads blocked, done/failed still report, anything else parks at idle -
+#   so a working/blocked record cannot outlive the signals that produced
+#   it. A watcher that never wrote stays silent instead: the root record
+#   may belong to a native writer. Harnesses whose activity only resolves
+#   busy or unknown (Rovo, Antigravity) thereby still reach idle, blocked,
+#   done, and error through the signals.
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
@@ -64,11 +72,14 @@
 # that dropped one is repaired). Its lifetime is the agent incarnation: the
 # launch runs `disarm` right after the agent command returns, and the watcher
 # also exits when its recorded parent - the shell running the launch - dies.
-# Either way, when activity is still known, a final emit keeps done/error and
-# otherwise parks the record at idle; a TERM/HUP retires it the same way. One watcher per controlling
-# terminal (<state>/.osc7501watch-<tty>): every arm retires the pane's
-# previous watcher before any gate, so a relaunch rebinds to the new agent and
-# a natively reporting agent never shares the pane with a stale writer.
+# Either way a final emit keeps done/error and otherwise parks the record at
+# idle - including when activity is unknown, as long as the bridge's last
+# write still stands; a TERM/HUP retires it the same way. One watcher per
+# controlling terminal (<state>/.osc7501watch-<tty>): every arm retires the
+# pane's previous watcher before any gate, so a relaunch rebinds to the new
+# agent and a natively reporting agent never shares the pane with a stale
+# writer. Once every gate has passed, arm writes one idle record of its own
+# to clear whatever a watcher that died without its final write left.
 #
 # Safety: the reporter never reads terminal input or changes terminal modes.
 # Eligibility uses passive environment markers only. Every record write is
@@ -334,11 +345,14 @@ osc_plan() { # <task> <kind> <state> <busy|idle>
 
 # --- watcher ------------------------------------------------------------------
 
-# final record before exit, written only while activity is known: the agent
-# is gone, so a running turn no longer counts; keep a result worth finding
-# (done/error) and park everything else at idle.
+# final record before exit: the agent is gone, so a running turn no longer
+# counts; keep a result worth finding (done/error) and park everything else
+# at idle. Unknown activity does not silence it - its own working/blocked
+# must never outlive the agent - but a watcher that never wrote stays
+# silent, leaving a possible native owner of the root record untouched.
 osc_final() {
-  osc_activity "$WATCH_HARNESS" "$WATCH_TASK" "$WATCH_STATE" "$WATCH_BACKEND" "$WATCH_TARGET" >/dev/null || return 0
+  osc_activity "$WATCH_HARNESS" "$WATCH_TASK" "$WATCH_STATE" "$WATCH_BACKEND" "$WATCH_TARGET" >/dev/null \
+    || [ -n "${last:-}" ] || return 0
   osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" idle
   case "$W_STATE" in
     done | error) ;;
@@ -405,7 +419,20 @@ osc_watch() { # --task --kind --state --harness --parent
         fi
       fi
     else
-      last=''
+      hb=0
+      # Unknown activity cannot prove the root record is still the bridge's,
+      # so there is no hold and no heartbeat. While the bridge's own last
+      # write stands, keep it honest: fold the durable signals alone (idle
+      # activity - no unproven working claim) and write the result once per
+      # change, retiring whatever they no longer justify.
+      if [ -n "$last" ]; then
+        osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" idle
+        seq=$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")
+        if [ "$seq" != "$last" ]; then
+          printf '%s' "$seq" >&3 2>/dev/null
+          last=$seq
+        fi
+      fi
     fi
     sleep "$FM_OSC7501_INTERVAL" 2>/dev/null &
     wait $! 2>/dev/null
@@ -513,6 +540,11 @@ osc_arm() { # --task --harness --backend --kind --state --config [--target] [--a
   # a natively reporting agent never sees a competing record
   [ -n "$agent_bin" ] || exit 0
   osc_native "$harness" "$agent_bin" && exit 0
+  # every gate passed, so this pane's reporting belongs to the bridge: clear
+  # a record a watcher that died without its final write may have left
+  FM_OSC_APP="firstmate-$harness"
+  FM_OSC_APP="${FM_OSC_APP:0:$FM_OSC7501_APP_MAX}"
+  printf '%s' "$(osc_seq idle '' '' '' "fm-$task" '')" >>"$dev" 2>/dev/null || true
   FM_OSC7501_WATCHER=1 nohup bash "$SCRIPT_DIR/fm-osc7501.sh" watch \
     --task "$task" --kind "$kind" --state "$state" --harness "$harness" \
     --backend "$backend" --target "$target" \
