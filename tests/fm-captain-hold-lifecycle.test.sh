@@ -3833,6 +3833,69 @@ test_answer_keeps_only_the_link_it_verified() {
   pass "answer keeps the link it verified and notes any other one"
 }
 
+# External review P1 "Retries lose confirmed merges": the verified close used to
+# take every link off the title, including the one it had verified, so a close
+# that failed afterwards left a retry unable to match the saved merge fact - it
+# closed as a plain completion and deleted the fact. The verified link now stays
+# on the title, so the retry closes as the merge the run read.
+test_answer_retry_keeps_the_verified_link_it_stripped_beside_another() {
+  local home id pr other show rc
+  home=$(make_home answer-verified-retry-sibling)
+  id=sample-answer-verified-retry
+  pr=https://github.com/sample/sample/pull/54
+  other=https://github.com/sample/sample/pull/55
+  tasks_in "$home" add "$id" "Ship the verified change a failed close retries" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create the verified retry fixture"
+  tasks_in "$home" update "$id" --pr "$other" >/dev/null \
+    || fail "could not attach the unverified sibling link"
+  tasks_in "$home" update "$id" --pr "$pr" >/dev/null \
+    || fail "could not attach the verified pull-request link"
+  printf 'url=%s\nverified_at=2026-07-14T00:00:00Z\n' "$pr" > "$home/state/$id.pr-merge"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the verified retry fixture"
+  # The first close fails the way a lock or a backend error does, after the answer
+  # has recorded its note and taken the other link off the title.
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = sample-answer-verified-retry ] \
+   && [ ! -e "$FM_HOME/close-failed-once" ]; then
+  : > "$FM_HOME/close-failed-once" || exit 93
+  exit 92
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  printf 'Proceed with the merged change.\n' > "$home/answer.txt"
+  set +e
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the injected close failure reported success"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the interrupted row is gone"
+  tasks_in "$home" show "$id" --full | sed -n 's/^  title: *//p' | head -1 \
+    | grep -F "$pr" >/dev/null \
+    || fail "the interrupted verified close stripped the link it verified"
+
+  rm -f "$home/fakebin/tasks-axi"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the retried answer failed after an interrupted verified close"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the retried row is gone"
+  assert_contains "$show" "state: done" "the retried answer did not close the row"
+  assert_contains "$show" "links: \"pr:$pr\"" \
+    "the retried answer downgraded a verified merge to a plain completion"
+  assert_not_contains "$show" "pr:$other" \
+    "the retried answer kept a structured link no run verified"
+  assert_contains "$show" "Historical record: $other" \
+    "the retried answer dropped the unverified link instead of noting it"
+  assert_grep '(merged ' "$home/data/backlog.md" \
+    "the retried answer did not record the merge it verified"
+  assert_absent "$home/state/$id.pr-merge" \
+    "the retried answer kept the merge-verification record after it closed"
+  pass "answer retries as the merge it verified after an interrupted close"
+}
+
 test_answer_records_an_interrupted_downgrade_note_once() {
   local home id pr show body
   home=$(make_home answer-legacy-record-retry)
@@ -5699,6 +5762,7 @@ test_answer_keeps_a_merge_after_the_retention_landed
 test_answer_survives_a_failed_close_without_losing_the_link
 test_answer_ignores_a_merge_fact_for_another_link
 test_answer_keeps_only_the_link_it_verified
+test_answer_retry_keeps_the_verified_link_it_stripped_beside_another
 test_answer_keeps_every_link_it_downgrades
 test_answer_records_an_interrupted_downgrade_note_once
 test_answer_records_a_composed_note_once

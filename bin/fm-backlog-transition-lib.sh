@@ -667,7 +667,15 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
     fi
     [ -z "$body_line" ] || fm_backlog_body_append_line "$data" "$id" "$body_line" || return 1
     drop_note=1
-    fm_backlog_pr_title_strip "$data" "$id" || return 1
+    # A verified close keeps its own link on the title: it is the link tasks-axi
+    # renders as merged, and a close that fails after this point must still find
+    # it there, or a retry reads no merge and downgrades a verified fact.
+    [ "$pr_close" = 0 ] || FM_BACKLOG_PR_LINK_EXCLUDE=$pr_url
+    fm_backlog_pr_title_strip "$data" "$id" || {
+      FM_BACKLOG_PR_LINK_EXCLUDE=
+      return 1
+    }
+    FM_BACKLOG_PR_LINK_EXCLUDE=
   elif [ -n "$note_text" ]; then
     # A retry finds the note an interrupted attempt already wrote; passing it
     # again would duplicate the line, so this close owes nothing for it.
@@ -841,17 +849,31 @@ EOF
 }
 
 # Take every canonical pull request link off this row's title, leaving the prose
-# and any canonical tags intact. No flag or configuration overrides tasks-axi's
-# renderer, which writes "merged" for any closed row whose title carries such a
-# link, so this is how a row that records no verified merge stops claiming one.
+# and any canonical tags intact. The link named by FM_BACKLOG_PR_LINK_EXCLUDE
+# stays, so a close that verified that merge keeps it while the links no run
+# verified leave. No flag or configuration overrides tasks-axi's renderer, which
+# writes "merged" for any closed row whose title carries such a link, so this is
+# how a row that records no verified merge stops claiming one.
 fm_backlog_pr_title_strip() {  # <data-dir> <id>
-  local data=$1 id=$2 prose
+  local data=$1 id=$2 prose url kept='' removed=0
   data=$(fm_backlog_data_absolute "$data") || return 1
   fm_backlog_row_title_body "$data" "$id" || return 1
   [ -n "$FM_BACKLOG_ROW_TITLE" ] || return 0
   fm_backlog_title_split_pr_links "$FM_BACKLOG_ROW_TITLE"
   [ -n "$FM_BACKLOG_TITLE_PR_LINKS" ] || return 0
+  while IFS= read -r url; do
+    [ -z "$url" ] && continue
+    if [ -n "$FM_BACKLOG_PR_LINK_EXCLUDE" ] && [ "$url" = "$FM_BACKLOG_PR_LINK_EXCLUDE" ]; then
+      kept=${kept:+$kept }$url
+    else
+      removed=1
+    fi
+  done <<EOF
+$FM_BACKLOG_TITLE_PR_LINKS
+EOF
+  [ "$removed" = 1 ] || return 0
   prose=$FM_BACKLOG_TITLE_PROSE
+  [ -z "$kept" ] || prose=${prose:+$prose }$kept
   # A title made of nothing but that link would normalize to an empty title,
   # which tasks-axi refuses, so the task's own id stands in.
   [ -n "$prose" ] || prose=$id
@@ -891,15 +913,20 @@ fm_backlog_body_append_line() {  # <data-dir> <id> <line>
   rm -f -- "$tmp"
 }
 
-# Take this row's unverified pull request links off the title and set the note
-# that keeps them in the body: the shape every close that records no verified
-# merge uses. Callers that must survive an interruption record the note first and
-# call fm_backlog_pr_title_strip after it.
+# Take this row's unverified pull request links off the title and record the
+# note that keeps them in the body: the shape every close that records no
+# verified merge uses. The note names every link the title carried at this
+# moment, so it is written to the body BEFORE the title loses any of them: a
+# failed or interrupted write then leaves the title untouched and a retry
+# rebuilds exactly the same note, instead of one naming only the link a pending
+# record happened to carry. Callers therefore owe no second copy of that sentence.
 fm_backlog_pr_link_downgrade() {  # <data-dir> <id> <reason> [url...]
   local data=$1 id=$2 reason=$3
   shift 3
   data=$(fm_backlog_data_absolute "$data") || return 1
   fm_backlog_pr_link_note "$data" "$id" "$reason" "$@" || return 1
+  [ -z "$FM_BACKLOG_DOWNGRADE_NOTE" ] \
+    || fm_backlog_body_append_line "$data" "$id" "$FM_BACKLOG_DOWNGRADE_NOTE" || return 1
   fm_backlog_pr_title_strip "$data" "$id"
 }
 
