@@ -156,6 +156,7 @@ t_status_transitions_and_final_done() {
   local holder
   sleep 300 &
   holder=$!
+  busy_rec "$d/state" t3 idle
   env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 \
     bash "$SCRIPT" watch --task t3 --kind ship --state "$d/state" --harness opencode \
     --parent "$holder" &
@@ -268,6 +269,89 @@ t_inplace_upgrade_reprobes_native() {
     || fail "upgrade: a native pi after an in-place upgrade still got a generic reporter"
   stop_term
   pass "native gate: an in-place harness upgrade is re-probed at the next launch"
+}
+
+# codex-cli first shipped native OSC 7501 records in 0.163.0
+# (openai/codex#52725, absent from rust-v0.162.1): 0.163.0 arms nothing and
+# 0.162.1 still gets the generic reporter.
+t_native_codex_threshold() {
+  local d=$TMP_ROOT/nativecodex
+  mkhome "$d"; mkfake "$d" codex 'codex-cli 0.163.0'
+  start_term "$d"
+  env "${CLEAN_UNSET[@]}" REX_BLOCK=b1 FM_OSC7501_TTY="$TERM_SLAVE" \
+    PATH="$d/bin:$PATH" bash "$SCRIPT" arm \
+    --task t26 --harness codex --backend rex --kind ship \
+    --state "$d/state" --config "$d/config" --agent-bin codex
+  sleep 0.3
+  assert_equals "" "$(cat "$d/cap" 2>/dev/null)" "native codex: terminal sees zero bytes"
+  [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] || fail "native codex 0.163.0 armed a watcher"
+  mkfake "$d" codex 'codex-cli 0.162.1'
+  env "${CLEAN_UNSET[@]}" REX_BLOCK=b1 FM_OSC7501_TTY="$TERM_SLAVE" \
+    PATH="$d/bin:$PATH" bash "$SCRIPT" arm \
+    --task t26 --harness codex --backend rex --kind ship \
+    --state "$d/state" --config "$d/config" --agent-bin codex
+  local wpid
+  wpid=$(watcher_pid "$d/state") || fail "codex 0.162.1 armed no generic watcher"
+  kill "$wpid" 2>/dev/null
+  wait_gone "$wpid" || true
+  stop_term
+  pass "native gate: codex >= 0.163.0 arms nothing, older codex keeps the generic reporter"
+}
+
+# --- shared root record --------------------------------------------------------
+
+# A native writer and the bridge share one root record. Codex's own working
+# record must stay the root record: with codex activity unknown, an open
+# decision and an old done line give the bridge no grounds to write, and the
+# heartbeat must never replace the native record either.
+t_unknown_activity_leaves_native_root() {
+  local d=$TMP_ROOT/sharedroot native
+  mkhome "$d"
+  : >"$d/cap"
+  sleep 300 &
+  local holder=$!
+  native=$(printf '\033]7501;state=working:app=codex\033\134')
+  printf 'done [at=1]: PR https://example.test/pr/7\nneeds-decision [at=2]: ship it?\n' >"$d/state/t27.status"
+  printf '%s' "$native" >>"$d/cap"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 FM_OSC7501_HEARTBEAT=1 \
+    bash "$SCRIPT" watch --task t27 --kind ship --state "$d/state" --harness codex \
+    --parent "$holder" &
+  local wpid=$!
+  sleep 4
+  printf '%s' "$native" >>"$d/cap"
+  sleep 3
+  assert_equals "app=codex " "$(grep -o 'app=[a-z-]*' "$d/cap" | sort -u | tr '\n' ' ')" \
+    "the bridge wrote no record over the native root record"
+  kill -KILL "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  pass "shared root: unknown activity never overwrites or heartbeats over a native record"
+}
+
+# A record the bridge is showing is retired once its activity turns unknown:
+# blocked parks at idle once, a decision resolved meanwhile changes nothing,
+# and no heartbeat follows.
+t_unknown_activity_retires_shown_record() {
+  local d=$TMP_ROOT/retire
+  mkhome "$d"
+  : >"$d/cap"
+  sleep 300 &
+  local holder=$!
+  busy_rec "$d/state" t28 idle
+  printf 'needs-decision [at=1] [key=k1]: ship it?\n' >"$d/state/t28.status"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 FM_OSC7501_HEARTBEAT=1 \
+    bash "$SCRIPT" watch --task t28 --kind ship --state "$d/state" --harness opencode \
+    --parent "$holder" &
+  local wpid=$!
+  wait_cap 'state=blocked:kind=question' "$d/cap" 60 || fail "retire: no blocked record while activity was known"
+  rm -f "$d/state/t28.busy-state" "$d/state/t28.busy-gen"
+  wait_cap 'state=idle' "$d/cap" 60 || fail "retire: the shown blocked record was not parked at idle"
+  printf 'resolved [at=2] [key=k1]: yes\n' >>"$d/state/t28.status"
+  sleep 4
+  assert_equals "state=idle" "$(grep -o 'state=[a-z]*' "$d/cap" | tail -1)" "the parked idle is the last record"
+  assert_equals 1 "$(grep -o 'state=idle' "$d/cap" | wc -l | tr -d ' ')" "no heartbeat follows the parked record"
+  kill -KILL "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  pass "unknown activity: the shown record is parked at idle once, then silence"
 }
 
 # --- config gate ---------------------------------------------------------------
@@ -571,6 +655,9 @@ fm_test_run \
   t_native_claude_skips_everything \
   t_old_claude_uses_generic \
   t_inplace_upgrade_reprobes_native \
+  t_native_codex_threshold \
+  t_unknown_activity_leaves_native_root \
+  t_unknown_activity_retires_shown_record \
   t_config_off_disables \
   t_hc_marker_arms_watcher \
   t_concurrent_panes_keep_their_reporters \
