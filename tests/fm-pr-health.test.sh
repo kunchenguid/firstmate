@@ -57,7 +57,8 @@ case "$1 $2" in
     esac
     model "$n" | jq '[{data:{repository:{pullRequest:{
       headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},reviewDecision:(if has("reviewDecision") then .reviewDecision else "APPROVED" end),
-      reviewRequests:{nodes:[range(.requests) | {requestedReviewer:{__typename:"User"}}]},
+      reviewRequests:{pageInfo:{hasNextPage:(.requests > 100)},
+        nodes:[range([.requests, 100] | min) | {requestedReviewer:{__typename:"User"}}]},
       latestReviews:{nodes:[range(.reviews) | {author:{__typename:"User",login:"reviewer"}}]},
       statusCheckRollup:(if (.checks | length) == 0 then null else {
         contexts:{pageInfo:{hasNextPage:false},nodes:[.checks[] | {__typename:"CheckRun",name,
@@ -78,13 +79,15 @@ case "$1 $2" in
   'api repos/o/r/pulls/'*)
     rest=${2#repos/o/r/pulls/}
     if [ -f "$FORGE/interrupt-$rest" ]; then
-      # Stop the whole pass mid-read, as a check timeout would.
+      # Stop the whole pass mid-read, as a check timeout would. The read runs
+      # in background copies of the poll shell, so the outermost one is the pass.
       rm -f "$FORGE/interrupt-$rest"
-      jq -e --arg url "https://github.com/o/r/pull/$rest" \
-        '.notifications.last_modified != "Sun, 01 Nov 2026 00:00:00 GMT" and (.notifications.pending | index($url) != null)' \
-        "$FM_STATE_OVERRIDE/pr-health.json" >/dev/null || exit 1
-      poll_pid=$(cat "$FORGE/main-poll-pid")
-      kill -TERM "$poll_pid"
+      p=$$ main=
+      while p=$(ps -o ppid= -p "$p" | tr -d ' ') && [ -n "$p" ] && [ "$p" -gt 1 ]; do
+        if ps -o command= -p "$p" | grep -q 'fm-pr-health[.]sh poll$'; then main=$p
+        elif [ -n "$main" ]; then break; fi
+      done
+      [ -z "$main" ] || { printf '%s\n' "$main" > "$FORGE/interrupted"; kill -TERM "$main"; }
       exit 1
     fi
     case "$rest" in
@@ -697,6 +700,20 @@ test_pending_reviewer_without_review_decision_is_recorded() {
   pass 'pending review requests imply recorded human approval'
 }
 
+test_more_than_a_page_of_review_requests_is_recorded() {
+  local home
+  home=$(new_home many-review-requests)
+  task "$home" ship1 pr=https://github.com/o/r/pull/51
+  pr "$home" 51 "$HEAD_A" "$BASE_1" true false
+  # Like GitHub, the connection returns its first 100 requests and reports more.
+  set_pr "$home" 51 '.reviewDecision = null | .requests = 150'
+  arm "$home"
+  expect_silent "$home" 'a PR awaiting review must not wake the task'
+  jq -e --arg head "$HEAD_A" '.prs["https://github.com/o/r/pull/51"].needs_approval | index($head) != null' \
+    "$home/state/pr-health.json" >/dev/null || fail 'more than one page of pending review requests was not recorded'
+  pass 'a PR with more than a page of pending review requests is recorded as awaiting review'
+}
+
 test_check_suites_beyond_the_first_page_are_read() {
   local home
   home=$(new_home paged-check-suites)
@@ -836,13 +853,15 @@ test_interrupted_pass_keeps_events_pending() {
   set_pr "$home" 44 '.reviewDecision = "CHANGES_REQUESTED"'
   notify "$home" o/r 44 2026-11-01T00:04:00Z comment
   : > "$home/forge/interrupt-44"
-  with_home "$home" "$ROOT/bin/fm-pr-health.sh" poll > "$home/poll.out" 2>&1 &
-  poll_pid=$!
-  printf '%s\n' "$poll_pid" > "$home/forge/main-poll-pid"
-  poll_rc=0
-  wait "$poll_pid" || poll_rc=$?
-  [ "$poll_rc" -ne 0 ] || fail 'the main poll completed normally after the fake read interrupted it'
-  [ ! -e "$home/forge/interrupt-44" ] || fail 'the interrupting read never ran'
+  if with_home "$home" bash "$home/state/pr-health.check.sh" >/dev/null 2>&1; then
+    fail 'the interrupted pass ran to completion'
+  fi
+  [ -s "$home/forge/interrupted" ] || fail 'the interrupting read never stopped the pass'
+  # The pass stopped mid-read: the advanced cursor and the event it selected
+  # were saved together before any read, so a 304 next pass cannot lose it.
+  jq -e --arg lm "$(cat "$home/forge/notifications-lm")" --arg url https://github.com/o/r/pull/44 \
+    '.notifications.last_modified == $lm and (.notifications.pending | index($url) != null)' \
+    "$home/state/pr-health.json" >/dev/null || fail 'the selected event was not saved with the cursor before the reads'
   expect_one "$home" 'pull/44 author must act' 'an event cut off by an interrupted pass must be read on the next pass'
   pass 'an interrupted pass leaves its notified PRs pending'
 }
@@ -886,7 +905,7 @@ test_failed_event_read_is_retried() {
 
 failures=0
 for test_name in test_maintainer_author_and_approval_states_are_distinct \
-  test_pending_reviewer_without_review_decision_is_recorded test_check_suites_beyond_the_first_page_are_read test_endless_check_suite_pages_stay_unsettled test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
+  test_pending_reviewer_without_review_decision_is_recorded test_more_than_a_page_of_review_requests_is_recorded test_check_suites_beyond_the_first_page_are_read test_endless_check_suite_pages_stay_unsettled test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
   test_failed_event_read_is_retried test_busy_feed_still_reads_only_events test_unknown_mergeability_is_reread_but_a_conflict_is_not test_interrupted_pass_keeps_events_pending test_full_notification_page_forces_a_sweep_and_advances \
   test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \

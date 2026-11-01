@@ -190,6 +190,7 @@ STEP='
       | ([if $g.reviewDecision == "CHANGES_REQUESTED" then "changes requested" else empty end]
           + [$author_labels[] | "maintainer marked it \(.)"]) as $author_reasons
       | (($author_reasons | length) > 0 and (($p.author_action // []) | index($head) | not)) as $author_new
+      # Only whether any review request is pending matters, so the first page decides it.
       | (($g.reviewDecision == "REVIEW_REQUIRED" or (($g.reviewRequests.nodes // []) | length) > 0)
           and $r.draft != true and (($p.needs_approval // []) | index($head) | not)) as $approval_new
       | ($r.mergeable == false and ($conflicts | index($head) | not)) as $conflict_new
