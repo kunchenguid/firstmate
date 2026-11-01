@@ -1368,11 +1368,12 @@ reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after o
   while IFS= read -r line || [ -n "$line" ]; do
     verb=$(status_line_verb "$line")
     case "$verb" in
-      working|done|failed|paused|blocked) resume=1 ;;
+      '') ;;
       resolved)
         key=$(_fm_decision_key "$line" '') || key=
         [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker"; return 0; }
         ;;
+      *) resume=1 ;;
     esac
   done <<EOF
 $added
