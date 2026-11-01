@@ -3220,6 +3220,30 @@ ok - under the away-posture record the wake carries the verbatim read-back tail,
 
 The merge suite and the security suite dominate the wall time.
 
+### 2026-10-31 away posture keeps standing authority
+
+The away-record owner, local landing, branch-supervision, PR merge, launch, return, captain-hold, Pi branch extension, and supervision-host drain suites were run serially on macOS 27.2 arm64 (Darwin 27.2.0), Node v26.13.0, after local-only landing relocated under the away record for a task recorded yolo=on, any other local landing became main-only through `--attended-override` for an explicit captain instruction, and the spend cap began counting only lanes doing work, failed lanes included.
+No model was selected or prompted, no provider call was made, and the captain's own Pi session was not changed.
+The 2026-09-18 entry above records local landing as never relocated and the cap as counting every ordinary task record; the lines below supersede it for both.
+The cap regressions replay each lane's current state through a stub of `bin/fm-crew-state.sh` rather than live endpoints, plus one real-reader case for a lane whose worker copy is gone.
+
+```sh
+bin/fm-test-run.sh tests/fm-afk-contract.test.sh tests/fm-merge-local.test.sh tests/fm-branch-supervision.test.sh tests/fm-pr-merge.test.sh tests/fm-afk-launch.test.sh tests/fm-afk-return.test.sh tests/fm-captain-hold-lifecycle.test.sh tests/fm-pi-branch-extension.test.sh tests/fm-supervision-host-drain.test.sh
+```
+
+```text
+ok - while away a yolo-on local-only task lands for main and the branch, and a task whose posture needs the captain waits
+ok - while away main lands a captain-named yolo-off task with --attended-override, the branch never may, and no override still waits
+ok - branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor
+ok - the away-posture record relocates the PR merge, local landing, and a spawn under the spend cap to the branch, and only while confirmed, valid, and away
+ok - the away spend cap is rechecked under the task-set lock so concurrent spawns cannot both publish
+ok - a quiet-mode record never caps a present captain's spawn, while the away record's cap still binds
+ok - the away spend cap admits a spawn over eight parked records and still refuses eight working lanes, naming its count
+ok - under the away-posture record the wake carries the verbatim read-back tail, claims every row, opens no processing turn, cancels a pending request, and presents the accumulated rows after archive
+ok - live-workers counts only lanes doing work: eight parked records count zero, eight working lanes count eight, and unverified lanes still count
+ok - live-workers counts a failed lane as work, so a failed run cannot admit an extra spawn
+```
+
 ## Pi worker model-stream observation
 
 Verified on 2026-10-13 with the installed Pi 1.2.0 SDK and Node v24.13.0.

@@ -257,8 +257,8 @@ The guards are wired into these scripts:
 | `fm-pr-merge.sh`, `fm-merge-local.sh`, `fm-spawn.sh`, `fm-send.sh --resolve-key` for a decision key, and `fm-teardown.sh` for a second mate | Main-owned while attended; branch refused. |
 
 A relaunch through `fm-control` stays branch-legal recovery in both postures.
-Under the away-posture record, the PR merge, a fresh spawn, and a decision answer relocate to the branch behind each script's own gate.
-Local-only landing and second-mate retirement never do ("Postures" below).
+Under the away-posture record, the PR merge, local-only landing, a fresh spawn, and a decision answer relocate to the branch behind each script's own gate.
+Second-mate retirement never does ("Postures" below).
 
 ### Autonomy
 
@@ -613,9 +613,9 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 | Script | Gate while away |
 | --- | --- |
 | `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
-| `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt). |
+| `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once as many of the home's ordinary task lanes are doing work as the record's spend cap, and names the lanes it counted (relaunches and secondmates exempt; `bin/fm-afk-contract.sh` "SPEND CAP" owns which lanes count). |
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
-| `bin/fm-merge-local.sh` | Never relocated. |
+| `bin/fm-merge-local.sh` | Lands, for either actor, a local-only task whose recorded merge posture is yolo=on, through the same guarded fast-forward as attended; any other task lands only for main with `--attended-override`, passed for an explicit captain instruction naming that landing, and with no such word it waits for the return; the branch is refused the override because it cannot hear the captain, so where it takes the away wakes such a landing waits for the return even when the words name it, and the branch reports it with verdict captain. |
 
 The merge-authority record and the outcome row's summary are the audit trail.
 The return brief renders the words verbatim beside that account.
@@ -663,7 +663,9 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 - The emitted completed-scout cleanup instructions and verbatim completion policies, including incomplete-work boundaries and refusal reporting; these assertions verify prompt delivery, not a model's adherence.
 - Store append-only behavior, the captain cursor barrier, processed-marker sequence bounds and absent-marker safety, and captain-only recorded ages.
 - Leases, guards, and non-branch-home invariance.
-- The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
+- The away relocation: only under a valid live record, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors counting only lanes doing work and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
+
+`tests/fm-merge-local.test.sh` covers away local landing: a yolo-on task lands for either actor, any other task lands only for main with `--attended-override`, and without it waits for the captain.
 
 `tests/fm-afk-return.test.sh` covers the ordered cleanup-due section, its durable merge-marker requirement, and exclusion of both a done task without durable merge evidence and a persistent secondmate carrying that evidence.
 

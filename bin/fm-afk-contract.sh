@@ -52,8 +52,8 @@
 #   expected_return: <UTC ISO 8601> | -
 #   reach_channels: none
 #   reach_announced: <the one-sentence reach announcement>
-#   spend_max_concurrent_workers: <n>   without --spend, the ordinary worker
-#                                  records this home already holds at entry,
+#   spend_max_concurrent_workers: <n>   without --spend, the ordinary task
+#                                  lanes doing work in this home at entry,
 #                                  and never fewer than the default
 #                                  (SPEND CAP below)
 #   confirmed: <UTC ISO 8601>       when this mandate was recorded; /afk itself
@@ -102,10 +102,12 @@
 #   fm-afk-contract.sh field <name> [--path <record>]
 #   fm-afk-contract.sh words [--path <record>]
 #   fm-afk-contract.sh validate [--path <record>]  exit 0 when the record is readable and complete
-#   fm-afk-contract.sh live-workers
-#     Print the ordinary worker count this home holds right now (SPEND CAP
-#     below). Reads no record, so it answers before an entry as well as during
-#     one.
+#   fm-afk-contract.sh live-workers [--explain]
+#     Print how many ordinary task lanes in this home are doing work right now
+#     (SPEND CAP below). Reads no record, so it answers before an entry as well
+#     as during one. --explain first prints one line per ordinary task record,
+#     `<id>: counted - <why>` or `<id>: not counted - <why>`, then the count as
+#     the last line, so a refusal built on the count can show what it counted.
 #   fm-afk-contract.sh archive              move the record aside; print its path
 #   fm-afk-contract.sh archived <entered_epoch>   print that archived record's path
 #
@@ -130,11 +132,24 @@
 # both the number written at entry and the counting rule behind it).
 # The cap bounds how many ordinary workers this home runs concurrently while an
 # away record stands; bin/fm-spawn.sh enforces it by refusing a fresh ordinary
-# spawn once the home already holds that many. An ordinary worker record is
-# every state/*.meta whose kind is not secondmate, counted by
-# fm_afk_contract_live_ordinary_workers and exposed as `live-workers`, which is
-# the one implementation both the entry default and that refusal read, so the
-# two can never count differently.
+# spawn once that many lanes are doing work. The count is of lanes doing work,
+# not of records: each state/*.meta whose kind is not secondmate is one lane,
+# and it counts unless it is proven parked - held for the captain (its declared
+# wait is a captain-held line), or read by bin/fm-crew-state.sh, the
+# current-state owner, as paused (a declared external wait such as an upstream
+# merge), parked (awaiting a decision), done (finished, awaiting landing or
+# cleanup), blocked (awaiting firstmate), or unknown with no live endpoint (its
+# worker copy or endpoint is gone). Working lanes count, failed lanes count
+# (a failed run's worker may be fixing it before a new run starts), and so
+# does every lane the reader could not settle - one still starting, an
+# unreadable endpoint, a read that timed out - so an unverified lane can never
+# let the cap overshoot. A parked lane that resumes can briefly put the home
+# one or more over the cap; the cap only refuses fresh spawns, it never stops
+# a running lane. fm_afk_contract_live_ordinary_workers implements this and is
+# exposed as `live-workers`, the one implementation both the entry default and
+# that refusal read, so the two can never count differently.
+# FM_AFK_CONTRACT_CREW_STATE_BIN replaces the current-state reader for tests
+# only; it is not an operating setting.
 # Without --spend, entry records the count standing at that moment, so away mode
 # never narrows work already under way; it never records less than
 # FM_AFK_CONTRACT_SPEND_DEFAULT, so an idle home still enters with the ordinary
@@ -155,6 +170,8 @@ FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_AFK_CONTRACT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_AFK_CONTRACT_DIR/fm-timeout-lib.sh"
 
 FM_AFK_CONTRACT_VERSION=2
 # Older record versions this script still reads (never writes).
@@ -185,16 +202,63 @@ fm_afk_contract_present() {  # [state-dir]
   [ -f "$(fm_afk_contract_path "${1:-$FM_AFK_CONTRACT_STATE}")" ]
 }
 
-# The ordinary worker records this home holds right now (the header's SPEND
-# CAP): every state/*.meta whose kind is not secondmate, because a secondmate is
-# a persistent home rather than spend. This is the one implementation of that
-# count, read by the entry default here and by bin/fm-spawn.sh's refusal.
-fm_afk_contract_live_ordinary_workers() {  # [state-dir]
-  local state=${1:-$FM_AFK_CONTRACT_STATE} meta live=0
+# Seconds one lane's current-state read may take before the lane is counted
+# unverified rather than waited on.
+_FM_AFK_CONTRACT_LANE_READ_TIMEOUT=20
+
+# Why one ordinary task lane counts toward the spend cap or not (the header's
+# SPEND CAP): prints `counted - <why>` or `not counted - <why>`.
+fm_afk_contract_lane_verdict() {  # <state-dir> <task-id>
+  local state=$1 id=$2 reader wait_line line word rest source detail rc=0
+  wait_line=$(status_declared_wait_line "$state/$id.status")
+  if status_is_captain_held "$wait_line"; then
+    printf 'not counted - held for the captain\n'
+    return 0
+  fi
+  reader=${FM_AFK_CONTRACT_CREW_STATE_BIN:-$FM_AFK_CONTRACT_DIR/fm-crew-state.sh}
+  line=$(fm_run_timed "$_FM_AFK_CONTRACT_LANE_READ_TIMEOUT" env FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_NO_FORGE=1 "$reader" "$id" 2>/dev/null </dev/null) || rc=$?
+  line=$(printf '%s\n' "$line" | grep '^state: ' | tail -1)
+  if [ -z "$line" ]; then
+    printf 'counted - current state unreadable (exit %s), so not proven parked\n' "$rc"
+    return 0
+  fi
+  rest=${line#state: }
+  word=${rest%% *}
+  case "$rest" in *" · source: "*) source=${rest#*" · source: "} ;; *) source= ;; esac
+  case "$source" in *" · "*) detail=${source#*" · "}; source=${source%%" · "*} ;; *) detail= ;; esac
+  case "$word" in
+    working) printf 'counted - working (%s)\n' "${source:-unknown source}" ;;
+    paused) printf 'not counted - paused, a declared external wait\n' ;;
+    parked) printf 'not counted - parked, awaiting a decision\n' ;;
+    done) printf 'not counted - done, awaiting landing or cleanup\n' ;;
+    failed) printf 'counted - failed run, its worker may be fixing it (%s)\n' "${source:-unknown source}" ;;
+    blocked) printf 'not counted - blocked, awaiting firstmate\n' ;;
+    *)
+      case "$source:$detail" in
+        none:"worktree gone"*|none:"backend target gone"*|none:"no metadata"*)
+          printf 'not counted - no live endpoint (%s)\n' "$detail" ;;
+        *) printf 'counted - %s, not proven parked (%s%s)\n' "${word:-unreadable}" "${source:-no source}" "${detail:+: $detail}" ;;
+      esac
+      ;;
+  esac
+}
+
+# The ordinary task lanes doing work in this home right now (the header's SPEND
+# CAP). A secondmate is a persistent home rather than spend and is skipped.
+# This is the one implementation of that count, read by the entry default here
+# and by bin/fm-spawn.sh's refusal; --explain adds one verdict line per lane
+# before the count.
+fm_afk_contract_live_ordinary_workers() {  # [state-dir] [--explain]
+  local state=${1:-$FM_AFK_CONTRACT_STATE} explain=${2:-} meta id verdict live=0
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
     [ "$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" != secondmate ] || continue
-    live=$((live + 1))
+    id=${meta##*/}
+    id=${id%.meta}
+    verdict=$(fm_afk_contract_lane_verdict "$state" "$id")
+    case "$verdict" in counted*) live=$((live + 1)) ;; esac
+    [ "$explain" != --explain ] || printf '%s: %s\n' "$id" "$verdict"
   done
   printf '%s\n' "$live"
 }
@@ -686,8 +750,11 @@ fm_afk_contract_main() {
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       fm_afk_contract_validate "$path" ;;
     live-workers)
-      [ "$#" -eq 0 ] || { fm_afk_contract_usage >&2; return 2; }
-      fm_afk_contract_live_ordinary_workers ;;
+      case "$*" in
+        '') fm_afk_contract_live_ordinary_workers ;;
+        --explain) fm_afk_contract_live_ordinary_workers "$FM_AFK_CONTRACT_STATE" --explain ;;
+        *) fm_afk_contract_usage >&2; return 2 ;;
+      esac ;;
     clauses|flags|refused|grants)
       fm_afk_contract_log "'$cmd' was retired with the clause and merge-grant apparatus: the record is the captain's words (read them with 'words' or 'readback')"
       return 2 ;;

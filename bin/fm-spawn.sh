@@ -2095,7 +2095,7 @@ if [ "$RELAUNCH" -ne 1 ]; then
   fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
 fi
 spawn_refuse_if_away_spend_cap() {
-  local cap live
+  local cap live explain lanes
   [ "$RELAUNCH" -ne 1 ] || return 0
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
@@ -2105,26 +2105,29 @@ spawn_refuse_if_away_spend_cap() {
   case "$cap" in
   '' | *[!0-9]* | 0) return 0 ;;
   esac
-  live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
+  explain=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers --explain 2>/dev/null || true)
+  live=$(printf '%s\n' "$explain" | tail -1)
   case "$live" in
   '' | *[!0-9]*)
-    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and this home's live ordinary task count could not be read; task $ID stays queued (spend cap: bin/fm-afk-contract.sh)" >&2
+    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and the count of this home's lanes doing work could not be read; task $ID stays queued (spend cap: bin/fm-afk-contract.sh live-workers --explain)" >&2
     exit 1
     ;;
   esac
   if [ "$live" -ge "$cap" ]; then
-    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
+    lanes=$(printf '%s\n' "$explain" | sed '$d' | awk 'NR > 1 { printf "; " } { printf "%s", $0 }')
+    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are doing work in this home [$lanes]; task $ID stays queued for the captain's return or for a lane to finish or park (spend cap: bin/fm-afk-contract.sh live-workers --explain)" >&2
     exit 1
   fi
 }
 # Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while an
 # away record exists (never a quiet-mode one, whose captain is present and
 # spends as attended: bin/fm-afk-contract.sh mode), a fresh ordinary spawn
-# refuses for BOTH actors once this home already holds that many ordinary task
-# records, counted by that script's own `live-workers`, which is also the count
-# its entry records as the cap. A relaunch replaces a worker that already
-# counts, and a secondmate is a persistent home rather than spend, so both are
-# exempt. Checked before any endpoint, worktree, or record
+# refuses for BOTH actors once that many of this home's ordinary task lanes are
+# doing work, counted by that script's own `live-workers` (which owns what a
+# lane doing work is), the same count its entry records as the cap; the
+# refusal carries that count's per-lane reasons. A relaunch replaces a worker
+# that already counts, and a secondmate is a persistent home rather than spend,
+# so both are exempt. Checked before any endpoint, worktree, or record
 # exists, so a refusal costs nothing to unwind; rechecked after the task-set
 # lock so two fresh spawns cannot both publish from a stale count.
 spawn_refuse_if_away_spend_cap
