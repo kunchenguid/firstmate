@@ -338,6 +338,10 @@ enroll_new() { # deadline : enroll recorded and branch PRs not yet durably owned
 FALLBACK_SECONDS=900 # ponytail: fixed fallback sweep; make it a config value if a home needs a faster unattended sweep
 read_notifications() { # deadline
   local lm since status next_lm next_since
+  # The account notification feed belongs to the public GitHub host whatever
+  # pull request hosts this home owns, so it pins that host explicitly.
+  local GH_HOST=github.com
+  export GH_HOST
   local args=(api -i)
   NOTIFY_OK=0
   : > "$TMP/events"
