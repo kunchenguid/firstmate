@@ -56,7 +56,7 @@ The guard remains a backstop.
 ## Guard predicates
 
 The turn-end guard checks primary scope first, then supervision need, then watcher health.
-Between primary scope and supervision need it runs any installed `turn-end` lifecycle hooks, which can block one stop through the same exit-2 path; the Cursor and Antigravity stop adapters run them on every normal stop instead, before parking, and render a refusal through their own follow-up channel, so `--cursor` and `--agy` skip them; [`configuration.md`](configuration.md#lifecycle-hooks-hooks) owns that contract.
+Installed `turn-end` lifecycle hooks also participate at the boundaries defined in [`configuration.md`](configuration.md#lifecycle-hooks-hooks).
 The mid-turn pull warning in `bin/fm-guard.sh` judges watcher health differently, as described under [pull-warning verdict by supervision model](#pull-warning-verdict-by-supervision-model).
 
 ### Primary scope
@@ -257,7 +257,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 
 | Harness | Turn-end hook | How it enforces the guard |
 | --- | --- | --- |
-| Claude | Two `Stop` hooks in `.claude/settings.json` | Blocks with exit status 2, cooperating with the Stop auto-arm |
+| Claude | Supervision `Stop` hooks in `.claude/settings.json` | Blocks with exit status 2, cooperating with the Stop auto-arm |
 | Codex | `Stop` hook in `.codex/hooks.json` | Blocks with exit status 2 |
 | OpenCode | `session.execution.succeeded`/`failed`/`interrupted` (OpenCode 2) or `session.idle` (OpenCode 1) in `.opencode/plugins/fm-primary-turnend-guard.js` | Passive callback that schedules one follow-up |
 | Pi | `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts` | Passive callback that schedules one follow-up |
@@ -268,7 +268,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 
 The registrations in detail:
 
-- Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
+- Claude's supervision `Stop` hooks in `.claude/settings.json` are anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
   In a Claude secondmate home, `bin/fm-spawn.sh` writes a `.fm-busy-stop` pointer and gives the mate no `Stop` busy hook, so `--claude` is the only Stop writer of the parent home's busy record for that generation.
   It records idle when it allows the Stop and busy when its exit 2 blocks it into a continuation, because Claude runs Stop hooks in parallel and that continuation fires no `UserPromptSubmit`.
   A home whose guard predates `.fm-busy-stop` cannot close the turn, so that launch keeps the ordinary `Stop` idle hook instead.
