@@ -1,0 +1,67 @@
+lab core session fm-hclab-s3 ready (server pid 67709)
+
+TASK METADATA (appdets1)
+window=fm-hclab-s3:t2
+endpoint_task_id=appdets1
+worktree=~/.treehouse/scratch-project-91352c/1/scratch-project
+project={run-worktree}/.test-tools/tmp/fm-backend-hc-appdetect.1dCOh8/scratch-project
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=fm/appdets1
+tasktmp=/tmp/fm-appdets1
+model=default
+effort=default
+spawn_gen=s1793537604.68029.3173
+backend=hc
+backend_detect=app-terminal
+hc_session=fm-hclab-s3
+hc_terminal=t2
+SPAWN OUTPUT
+spawned appdets1 harness=sh kind=ship mode=no-mistakes yolo=off window=fm-hclab-s3:t2 worktree=~/.treehouse/scratch-project-91352c/1/scratch-project
+NOTICE: auto-detected a Herdr-app-projected terminal (fm-hclab-s3:t1 carries a herdr.space label) - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.
+warning: {run-worktree}/.test-tools/tmp/fm-backend-hc-appdetect.1dCOh8/data/appdets1/launch-brief.md records no ship branch; defaulting to legacy branch fm/appdets1
+warning: {run-worktree}/.test-tools/tmp/fm-backend-hc-appdetect.1dCOh8/data/appdets1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+CORE LABELS
+fm-firstmate-5c8a4e23
+firstmate-5c8a4e23-fm-appdets1
+fm-appdets1
+firstmate-5c8a4e23
+ok - app-terminal: spawn env claiming a herdr.space-labeled terminal auto-selects hc, notices, records backend_detect=app-terminal, and labels the worker
+
+TASK METADATA (appdetw1)
+window=fm-hclab-s3:t3
+endpoint_task_id=appdetw1
+worktree=~/.treehouse/scratch-project-91352c/1/scratch-project
+project={run-worktree}/.test-tools/tmp/fm-backend-hc-appdetect.1dCOh8/scratch-project
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=fm/appdetw1
+tasktmp=/tmp/fm-appdetw1
+model=default
+effort=default
+spawn_gen=s1793537623.84375.6791
+backend=hc
+backend_detect=app-window
+hc_session=fm-hclab-s3
+hc_terminal=t3
+SPAWN OUTPUT
+spawned appdetw1 harness=sh kind=ship mode=no-mistakes yolo=off window=fm-hclab-s3:t3 worktree=~/.treehouse/scratch-project-91352c/1/scratch-project
+NOTICE: auto-detected a Herdr-app-projected terminal (fm-hclab-s3:t1 carries a herdr.space label) - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.
+warning: {run-worktree}/.test-tools/tmp/fm-backend-hc-appdetect.1dCOh8/data/appdets1/launch-brief.md records no ship branch; defaulting to legacy branch fm/appdets1
+warning: {run-worktree}/.test-tools/tmp/fm-backend-hc-appdetect.1dCOh8/data/appdets1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+NOTICE: auto-detected a live Herdr app window (~/.no-mistakes/evidence/01M6BJAH05EHPA0HFEHDG4N4WY/a/herdr-app.sock) over the running hc session 'fm-hclab-s3' - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.
+warning: {run-worktree}/.test-tools/tmp/fm-backend-hc-appdetect.1dCOh8/data/appdetw1/launch-brief.md records no ship branch; defaulting to legacy branch fm/appdetw1
+warning: {run-worktree}/.test-tools/tmp/fm-backend-hc-appdetect.1dCOh8/data/appdetw1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+CORE LABELS
+fm-firstmate-5c8a4e23
+firstmate-5c8a4e23-fm-appdetw1
+fm-appdetw1
+firstmate-5c8a4e23
+ok - app-window: a live herdr-app.sock under the resolved app home auto-selects hc with backend_detect=app-window
+ok - app-window: a live window over a session with no running core keeps the default and starts nothing
+ok - explicit: config/backend=hc wins over the app signals and records no detection provenance
+FM_TEST_COMPLETE

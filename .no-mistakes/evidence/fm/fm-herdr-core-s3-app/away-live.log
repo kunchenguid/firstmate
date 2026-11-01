@@ -1,0 +1,5 @@
+HC_SESSION=fm-hclab-g HC_TERMINAL_ID=t3 HC_TERMINAL_SOCKET=~/.no-mistakes/evidence/01M6BJAH05EHPA0HFEHDG4N4WY/s/fm-hclab-g.sock
+target=fm-hclab-g:t3
+backend=hc
+error: away-mode daemon does not support supervisor backend 'hc' yet (supported: tmux herdr rex t3code); set FM_SUPERVISOR_BACKEND=tmux|herdr|rex|t3code and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend
+daemon_exit=1

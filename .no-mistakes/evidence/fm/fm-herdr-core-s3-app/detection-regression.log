@@ -1,0 +1,1 @@
+ok - fm_backend_detect: app-terminal (live spawn core + herdr.space label) and app-window (live herdr-app.sock over a running spawn core) select hc; another core, a stopped core, dead/stale/missing evidence, and unusable toolchains never switch

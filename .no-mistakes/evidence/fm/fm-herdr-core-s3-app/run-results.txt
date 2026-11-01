@@ -1,0 +1,7 @@
+Focused regression selectors: exit 0 each
+Initial real-core spawn smoke: exit 0
+Extended real-core/private-tmux spawn driver: exit 0
+Final live guard matrix including actual hc 0.1.13 and missing jq: exit 0
+Away daemon: expected refusal exit 1, asserted by driver
+All owned lab teardown commands returned successfully.
+Setup corrections: pass config via FM_CONFIG_OVERRIDE; clear prior disposable config; retain tr in no-jq PATH. No product fixes needed.

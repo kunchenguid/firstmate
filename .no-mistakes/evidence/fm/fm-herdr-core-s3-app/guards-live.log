@@ -1,0 +1,57 @@
+lab core session fm-hclab-g ready (server pid 26370)
+
+LABELED REAL CORE TERMINAL
+NOTICE: auto-detected a Herdr-app-projected terminal (fm-hclab-g:t1 carries a herdr.space label) - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.
+backend=hc signal=app-terminal
+
+UNLABELED REAL CORE TERMINAL
+backend=tmux signal=
+
+WRONG SPAWN SOCKET / DEAD SOCKET / BARE ID
+backend=tmux signal=
+backend=tmux signal=
+backend=tmux signal=
+
+TERMINAL TOOLCHAIN: ACTUAL HC 0.1.13 AND MISSING BINARY
+hc 0.1.13
+NOTICE: running in a live hc terminal (fm-hclab-g:t1) but no usable hc toolchain (an executable FM_HC_BIN, or herdr-core/hc on PATH reporting 'hc x.y.z' at or above the verified minimum 0.1.14, and jq) can verify a Herdr app projection; staying on the default backend. See docs/hc-backend.md.
+backend=tmux signal=app-terminal-unusable
+NOTICE: running in a live hc terminal (fm-hclab-g:t1) but no usable hc toolchain (an executable FM_HC_BIN, or herdr-core/hc on PATH reporting 'hc x.y.z' at or above the verified minimum 0.1.14, and jq) can verify a Herdr app projection; staying on the default backend. See docs/hc-backend.md.
+backend=tmux signal=app-terminal-unusable
+
+MISSING JQ WITH REAL CORE TERMINAL
+NOTICE: running in a live hc terminal (fm-hclab-g:t1) but no usable hc toolchain (an executable FM_HC_BIN, or herdr-core/hc on PATH reporting 'hc x.y.z' at or above the verified minimum version, and jq) can verify a Herdr app projection; staying on the default backend. See docs/hc-backend.md.
+backend=tmux signal=app-terminal-unusable
+
+EARLIER SURFACES AND EXPLICIT OVERRIDES
+backend=tmux signal=TMUX
+backend=herdr signal=HERDR_ENV
+NOTICE: auto-detected cmux runtime (CMUX_WORKSPACE_ID) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out.
+backend=cmux signal=CMUX_WORKSPACE_ID
+backend=tmux signal=
+backend=tmux signal=
+
+WINDOW SYNTHETIC SOCKET: REAL CORE, OLD BINARY, AND ABSENT CORE
+NOTICE: auto-detected a live Herdr app window (~/.no-mistakes/evidence/01M6BJAH05EHPA0HFEHDG4N4WY/a/herdr-app.sock) over the running hc session 'fm-hclab-g' - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.
+backend=hc signal=app-window
+NOTICE: detected a live Herdr app window (~/.no-mistakes/evidence/01M6BJAH05EHPA0HFEHDG4N4WY/a/herdr-app.sock) but no usable hc toolchain (an executable FM_HC_BIN, or herdr-core/hc on PATH reporting 'hc x.y.z' at or above the verified minimum version, and jq); staying on the default backend. See docs/hc-backend.md.
+backend=tmux signal=app-window-unusable
+NOTICE: detected a live Herdr app window (~/.no-mistakes/evidence/01M6BJAH05EHPA0HFEHDG4N4WY/a/herdr-app.sock) but no usable hc toolchain (an executable FM_HC_BIN, or herdr-core/hc on PATH reporting 'hc x.y.z' at or above the verified minimum 0.1.14, and jq); staying on the default backend. See docs/hc-backend.md.
+backend=tmux signal=app-window-unusable
+NOTICE: detected a live Herdr app window (~/.no-mistakes/evidence/01M6BJAH05EHPA0HFEHDG4N4WY/a/herdr-app.sock) but hc session 'fm-hclab-g' has no running core at ~/.no-mistakes/evidence/01M6BJAH05EHPA0HFEHDG4N4WY/s/absent.sock; staying on the default backend rather than starting one. Set HC_SESSION to the app's session or set config/backend. See docs/hc-backend.md.
+backend=tmux signal=app-window-no-core
+
+STALE WINDOW AND HEADLESS DEFAULT
+backend=tmux signal=
+backend=tmux signal=
+
+AWAY DAEMON FROM ACTUAL CORE TERMINAL
+{run-worktree}/.test-tools/away-home
+{"address":"t3","agent":"bash","cwd":"{run-worktree}","state":"live","turn":0}
+HC_SESSION=fm-hclab-g HC_TERMINAL_ID=t3 HC_TERMINAL_SOCKET=~/.no-mistakes/evidence/01M6BJAH05EHPA0HFEHDG4N4WY/s/fm-hclab-g.sock
+target=fm-hclab-g:t3
+backend=hc
+error: away-mode daemon does not support supervisor backend 'hc' yet (supported: tmux herdr rex t3code); set FM_SUPERVISOR_BACKEND=tmux|herdr|rex|t3code and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend
+daemon_exit=1
+
+All focused live CLI guards completed.
