@@ -21,7 +21,7 @@ Firstmate does not support placing an individual worker remotely or failing a re
 
 ## Where the remote agent runs
 
-The remote second-mate agent itself always runs on the [Herdr backend](herdr-backend.md) in the shared `fm-remote` session.
+The remote second-mate agent itself runs on the [Herdr backend](herdr-backend.md) in the shared `fm-remote` session.
 Every path that provisions or launches one refuses a host that is not ready for it.
 
 - `fm-remote` is reserved for remote fleet work and must not be used for personal work.
@@ -431,7 +431,7 @@ The primary then takes these steps:
 3. It transfers the inherited-material allowlist.
 4. It asks the remote host to launch on Herdr in `fm-remote`.
 
-All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
+Remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
 
 ### Refused and unsupported launches
 
@@ -444,14 +444,10 @@ All remote secondmates on one host share `fm-remote` and retain separate `2ndmat
 
 ### Liveness recovery
 
-Startup liveness recovery relaunches a dead or missing remote second mate through this same command.
+Startup liveness recovery uses this same command when the shared recovery owner authorizes replacement.
 So recovery passes the same readiness gate rather than a weaker one.
 
-The watcher's liveness tick applies the identical rule during ordinary supervision through the shared `bin/fm-secondmate-liveness-lib.sh`:
-
-- The remote endpoint is probed read-only once per cadence.
-- Only a positive `dead` or `missing` reply relaunches through that command.
-- An unreachable transport or inconclusive state is left untouched rather than replaced locally.
+The watcher's liveness tick uses the same [`bin/fm-secondmate-liveness-lib.sh`](../bin/fm-secondmate-liveness-lib.sh), whose header owns generation-bound authorization, read-only remote probes, and refusal to replace an uncertain remote locally.
 
 ### Inventory reconcile for markerless routes
 
@@ -652,7 +648,12 @@ The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, 
 It passes them explicitly because `config/secondmate-harness` is not inherited into a second mate's home, and the file on that host belongs to a different home.
 Letting the far side re-resolve it would silently move the mate onto another runtime.
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
-Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the host-local relaunch it drives can only rewrite the host's own endpoint record, so this wrapper reads the confirmed identity back from that record afterward and republishes the primary's own route metadata to match, the same way launch already records a fresh route.
+Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the wrapper reads the confirmed identity back from the host's endpoint record and republishes the registering parent's route metadata to match.
+The [fleet seat contract](configuration.md#fleet-seat-pools-configfleet-seats) owns the parent-accounting prerequisite, including nested remote routes.
+[`bin/fm-secondmate-restart.sh`](../bin/fm-secondmate-restart.sh)'s header owns persistence-gated restart and the re-read fallback when the original incarnation cannot safely be replaced.
+A remote mate provisioned before `remote_spawn_gen` was recorded stays nudge-only during updates until one manual relaunch through `bin/fm-remote-secondmate-relaunch.sh` writes that generation into the primary's record.
+A relaunch replaces the generation the host's own record names, so a replacement that reached the host but was cancelled before it confirmed a startup still becomes the predecessor, while a launch that never reached the host leaves the older generation in place.
+The wrapper's header and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh)'s header own the operation token and host outcome mechanics.
 
 ### Firstmate code convergence
 
@@ -682,11 +683,17 @@ It refuses while any of these holds:
 It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`.
 It never stops the shared session or removes a sibling secondmate's workspace or panes.
 SSH exit 255 preserves both the route and local records because completion is unknown.
+The [fleet seat contract](configuration.md#fleet-seat-pools-configfleet-seats) owns counted-generation retention during retirement.
+If accounting fails after host retirement, the primary retains its route and local records for reconciliation; the remote home may already be removed.
+A retry for the same generation replays the host's retained destruction result, including a lost-slot exit, without touching a successor at the reused home path.
+Before the host removes anything it publishes a durable pending record for that exact generation and route; a record that cannot be published refuses the retirement, so no home is deleted behind evidence that could never be produced.
+A retirement interrupted after the home is gone republishes its evidence from that pending record on the same generation's retry, after proving the recorded endpoint absent again.
+The primary retains matching evidence before local cleanup so cleanup or accounting failures can resume without another host retirement.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 
 No generic remote delete or write surface exists:
 
-- Remote writes are confined to inherited allowlist files and backlog handoff scratch files.
+- Remote file transfers are confined to inherited allowlist files and backlog handoff scratch files; lifecycle commands own their operational records.
 - Remote home removal is reachable only through guarded secondmate retirement.
 
 ## Verification

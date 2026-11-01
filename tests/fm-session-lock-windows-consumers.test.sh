@@ -203,6 +203,29 @@ test_untagged_values_reach_the_numeric_helpers_unchanged() {
   pass "untagged lock values: the session-pid helpers answer exactly as fm_pid_identity and fm_pid_alive do"
 }
 
+test_handoff_accepts_only_the_live_tagged_session() {
+  local home rc table
+  home=$(make_home handoff win:7204)
+  mkdir -p "$home/config"
+  printf 'handoff-test\n' > "$home/state/.supervision-handoff-pending"
+  for table in "$WIN_TABLE" "$GONE_TABLE" "$REUSED_TABLE"; do
+    rc=0
+    FM_TEST_WIN_TABLE="$table" lib_eval windows "$home" '
+      self_proc
+      exec bash "$FM_ROOT_OVERRIDE/bin/fm-supervision-handoff.sh" handoff-test 1
+    ' || rc=$?
+    if [ "$table" = "$WIN_TABLE" ]; then
+      expect_code 0 "$rc" "hand-back rejected a live tagged session"
+    else
+      [ "$rc" -ne 0 ] || fail "hand-back accepted an absent or reused Windows session"
+    fi
+  done
+  assert_present "$home/state/.supervision-handoff-pending" "hand-back consumed an unacknowledged wake"
+  pass "hand-back accepts a live tagged session and refuses absent or reused holders"
+}
+
+test_handoff_accepts_only_the_live_tagged_session
+
 test_untagged_values_reach_the_numeric_helpers_unchanged
 test_supervision_main_key_reads_a_windows_session_lock
 test_autoarm_claim_pins_a_windows_lock_holder_and_reads_it_back

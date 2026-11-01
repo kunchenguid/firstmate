@@ -89,6 +89,7 @@ The primary then appends one keyed `check` wake naming the mate, row sequence, a
 Endpointless registered mates remain outside this queue scan because its preconditions can never be met for them.
 Dead-or-missing endpoint recovery is instead shared by two drivers over one library, `bin/fm-secondmate-liveness-lib.sh`: the session-start sweep in `bin/fm-bootstrap.sh`, and the watcher's own `FM_SECONDMATE_LIVENESS_SECS`-cadence tick during ordinary supervision.
 Both use the library's [recovery contract](../bin/fm-secondmate-liveness-lib.sh), including its close-proof barrier; [T3 recovery](t3code-backend.md#restart-and-liveness-behavior) owns continuation on an existing thread.
+That library's header owns generation-bound recovery authorization and the supervisor lifecycle episode shared by probes, launches, control, and teardown; [fleet seat pools](configuration.md#fleet-seat-pools-configfleet-seats) owns the operator retention contract.
 A remote route is probed read-only across its host-local boundary and is never replaced by a local endpoint, and the per-mate liveness lock keeps a concurrent sweep and tick from killing or re-probing an endpoint the other is mid-recovery on.
 [`bin/fm-secondmate-liveness-lib.sh`'s header](../bin/fm-secondmate-liveness-lib.sh) owns the additional per-home serialization across different mates and its bounded wait; `tests/fm-secondmate-liveness.test.sh` covers concurrent recovery and lock-wait expiry without endpoint mutation or an attempt entry.
 Each automatic relaunch surfaces as exactly one `check` wake plus a durable line in `state/.secondmate-relaunch-<id>`, and a mate that exceeds `FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS` ledgered attempts inside `FM_SECONDMATE_LIVENESS_WINDOW_SECS` is parked behind a bound marker and escalated once until a live probe rearms it with a full attempt budget.
@@ -550,7 +551,7 @@ The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill]
 
 Fleet state lives in each task's session-provider backend (tmux by hard default, herdr, rex, or cmux when selected or auto-detected, zellij/orca/paseo/t3code/tern/hc when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
-Secondmate recovery follows the [shared liveness contract](../bin/fm-secondmate-liveness-lib.sh) at session start and during ordinary supervision.
+Secondmate recovery follows the shared authorization contract in [`bin/fm-secondmate-liveness-lib.sh`](../bin/fm-secondmate-liveness-lib.sh), described under [event-driven supervision](#event-driven-supervision), at session start and during ordinary supervision.
 Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.
 
 ## Development notes

@@ -1127,6 +1127,38 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+test_legacy_t3_record_refuses_cleanup_without_creation_server() {
+  local dir id=legacy-t3-task rc=0 thread=mcp:8c9d0e1f-2a3b-4c5d-8e6f-7a8b9c0d1e2f
+  command -v node >/dev/null 2>&1 || { printf 'note: %s skipped: node absent\n' "${FUNCNAME[0]}"; return 0; }
+  dir=$(make_case legacy-t3-server)
+  t3_fake_start "$dir/t3-server"
+  t3_fake_case "$dir/t3-case" '{}'
+  t3_fake_credential "$dir/home/config/t3code-token"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    backend=t3code "t3_thread_id=$thread" t3_project_id=proj-1 harness=codex
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "teardown adopted the selected T3 credential for a legacy record"
+  assert_present "$dir/home/state/$id.meta" "legacy T3 refusal removed the task record"
+  assert_present "$dir/worktree/sentinel" "legacy T3 refusal removed the worktree"
+  [ ! -s "$dir/runtime.log" ] || fail "legacy T3 refusal invoked a runtime command"
+  assert_contains "$(cat "$dir/stderr")" 'creation server identity is missing' \
+    "legacy T3 refusal did not explain the missing server evidence"
+  rc=0
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  t3_fake_stop
+  [ "$rc" -eq 0 ] || fail "forced legacy T3 cleanup refused: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "forced legacy T3 cleanup retained the task record"
+  assert_contains "$(cat "$dir/runtime.log")" treehouse "forced legacy T3 cleanup did not return its worktree"
+  assert_contains "$(cat "$dir/stderr")" '--force authorizes cleanup' "forced cleanup omitted the origin-risk diagnostic"
+  pass "fm-teardown: legacy T3 origin refuses ordinary cleanup and permits explicit force"
+}
+
 # A T3 task whose pool slot was reassigned still archives its own thread, but
 # T3's slot cleanup undoes a tracked Codex overlay, so only the slot's
 # ownership keeps it off the claimant's overlay.
@@ -1150,7 +1182,7 @@ test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3() {
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
-    backend=t3code "t3_thread_id=$thread" t3_project_id=proj-1 harness=codex
+    backend=t3code "t3_server=$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(JSON.stringify([c.origin,c.environment_id]))' "$dir/home/config/t3code-token")" "t3_thread_id=$thread" t3_project_id=proj-1 harness=codex
   claim_pool_slot "$dir" "$other" "$dir/other-home"
 
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
@@ -1603,6 +1635,284 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+test_retirement_reuses_only_empty_staging() {
+  local shape dir mate stage rc force
+  for shape in ordinary forced nonempty linked evidence; do
+    dir=$(make_case "retire-stage-$shape")
+    mate="$dir/mate"
+    stage="$mate.retiring.g1"
+    mkdir -p "$mate/state" "$mate/data" "$mate/config"
+    printf 'mate\n' >"$mate/.fm-secondmate-home"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$dir/home" >"$mate/.fm-secondmate-parent"
+    printf 'manual\n' >"$dir/home/config/backlog-backend"
+    fm_write_meta "$dir/home/state/mate.meta" \
+      "window=isolated:fm-mate" "endpoint_task_id=mate" "backend=tmux" \
+      "kind=secondmate" "home=$mate" "worktree=$mate" "project=$dir/project" "spawn_gen=g1"
+    cat >"$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+SH
+    mkdir "$stage"
+    case "$shape" in
+      nonempty) printf keep >"$stage/sentinel" ;;
+      linked) rmdir "$stage"; mkdir "$dir/outside"; ln -s "$dir/outside" "$stage" ;;
+    esac
+    mkdir -p "$mate/state/procevent" "$mate/bin"
+    printf 'registration\n' >"$mate/state/procevent/wait.source"
+    cat >"$mate/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  sweep-home) [ "${2:-}" = --preflight ] || rm -f "$FM_HOME/state/procevent/"*.source ;;
+  reconcile) exit 0 ;;
+esac
+SH
+    chmod +x "$mate/bin/fm-procevent.sh"
+    if [ "$shape" = evidence ]; then
+      cat >"$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in *.home-removal) exit 1 ;; esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+      chmod +x "$dir/fakebin/mv"
+    fi
+    force=''
+    [ "$shape" != forced ] || force=--force
+    rc=0
+    env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_RETIRE_STAGE="$( [ "$shape" = evidence ] || printf '%s' "$stage" )" FM_TEST_REAL_MV="$(command -v mv)" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" mate ${force:+"$force"} >"$dir/out" 2>"$dir/err" || rc=$?
+    case "$shape" in
+      ordinary|forced)
+        expect_code 0 "$rc" "empty retirement staging retry: $(cat "$dir/err")"
+        assert_absent "$mate" "staging retry retained the home"
+        assert_absent "$stage" "staging retry retained the staging directory" ;;
+      *)
+        [ "$rc" -ne 0 ] || fail "unsafe staging was accepted: $shape"
+        assert_present "$mate" "unsafe staging refusal removed the home"
+        assert_grep registration "$mate/state/procevent/wait.source" "staging failure swept registrations"
+        assert_present "$stage" "unsafe staging refusal removed the stage" ;;
+    esac
+  done
+  pass "retirement adopts empty staging after normal checks and refuses nonempty or linked staging"
+}
+
+test_local_retirement_resumes_recorded_staging() {
+  local shape dir mate child stage meta rc real_rm
+  real_rm=$(command -v rm)
+  for shape in top descendant successor; do
+    dir=$(make_case "local-retire-resume-$shape")
+    mate="$dir/mate"
+    child="$mate/child"
+    mkdir -p "$mate/state" "$mate/data" "$mate/config"
+    printf 'mate\n' >"$mate/.fm-secondmate-home"
+    printf 'manual\n' >"$dir/home/config/backlog-backend"
+    fm_write_meta "$dir/home/state/mate.meta" \
+      "window=isolated:fm-mate" "endpoint_task_id=mate" "backend=tmux" \
+      "kind=secondmate" "home=$mate" "worktree=$mate" "project=$dir/project" "spawn_gen=g1"
+    meta="$dir/home/state/mate.meta"
+    if [ "$shape" = descendant ]; then
+      mkdir -p "$child/state" "$child/data" "$child/config"
+      printf 'child\n' >"$child/.fm-secondmate-home"
+      printf 'manual\n' >"$mate/config/backlog-backend"
+      fm_write_meta "$mate/state/child.meta" \
+        "window=isolated:fm-child" "endpoint_task_id=child" "backend=tmux" \
+        "kind=secondmate" "home=$child" "worktree=$child" "project=$dir/project" "spawn_gen=g1"
+      meta="$mate/state/child.meta"
+    fi
+    cat >"$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+SH
+    local event_home="$mate"
+    [ "$shape" != descendant ] || event_home="$child"
+    mkdir -p "$event_home/state/procevent" "$event_home/bin"
+    printf 'registration\n' >"$event_home/state/procevent/wait.source"
+    cat >"$event_home/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  sweep-home) [ "${2:-}" = --preflight ] || rm -f "$FM_HOME/state/procevent/"*.source ;;
+  reconcile) exit 0 ;;
+esac
+SH
+    chmod +x "$event_home/bin/fm-procevent.sh"
+    jq -n --arg h "$mate" '{schema:"fm-remote-retirement-pending.v1",task:"mate",home:$h,generation:"g1",target:"isolated:fm-mate",backend:"herdr",phase:"pending",destroyed:false,exit_code:null}' >"$dir/pending.json"
+    cat >"$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+case "$last" in
+  *.retiring.*/*) ;;
+  *.retiring.*)
+    if [ -e "$FM_TEST_DELETE_FAIL" ]; then
+      "$FM_TEST_REAL_RM" -f "$last/home/.fm-secondmate-home"
+      exit 1
+    fi ;;
+esac
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+    chmod +x "$dir/fakebin/rm"
+    touch "$dir/delete-fail"
+    rc=0
+    FM_REMOTE_RETIRE_PENDING="$dir/pending.json" FM_TEST_REAL_RM="$real_rm" FM_TEST_DELETE_FAIL="$dir/delete-fail" \
+      run_case "$dir" mate >"$dir/first.out" 2>"$dir/first.err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "injected staging deletion failure was ignored"
+    if [ "$shape" != descendant ]; then
+      jq -e '.exit_code == 0' "$dir/pending.json" >/dev/null || fail "home removal did not retain outcome before interruption"
+    fi
+    stage=$(sed -n 's/^home_removal_stage=//p' "${meta%.meta}.home-removal")
+    [ -n "$stage" ] && [ -d "$stage/home" ] || fail "failed deletion lost its recorded staging: $(cat "$dir/first.err")"
+    local backup
+    for backup in "$event_home"/../.fm-procevent-restore.* "$stage/home"/.fm-procevent-restore.*; do
+      assert_absent "$backup" "committed rename leaked registration backup"
+    done
+    rm "$dir/delete-fail"
+    if [ "$shape" = successor ]; then
+      sed 's/^spawn_gen=.*/spawn_gen=g2/' "$meta" >"$dir/replacement.meta"
+      mv "$dir/replacement.meta" "$meta"
+    fi
+    rc=0
+    FM_REMOTE_RETIRE_PENDING="$dir/pending.json" FM_TEST_REAL_RM="$real_rm" FM_TEST_DELETE_FAIL="$dir/delete-fail" \
+      run_case "$dir" mate >"$dir/retry.out" 2>"$dir/retry.err" || rc=$?
+    if [ "$shape" = successor ]; then
+      [ "$rc" -ne 0 ] || fail "successor consumed predecessor staging"
+      assert_present "$stage/home" "generation mismatch destroyed staged private data"
+    else
+      expect_code 0 "$rc" "staged deletion retry: $(cat "$dir/retry.err")"
+      assert_absent "$stage" "successful retry orphaned staged private data"
+      assert_absent "${meta%.meta}.home-removal" "successful retry retained removal evidence"
+      assert_absent "$mate" "successful retry retained the home"
+      assert_absent "$dir/home/state/mate.meta" "successful retry retained metadata"
+    fi
+  done
+  pass "local retirement resumes top-level and descendant staged deletion and fences successors"
+}
+
+test_retirement_rollback_rearms_on_failure() {
+  local mode dir mate stage rc
+  for mode in rename sweep signal; do
+    dir=$(make_case "retire-rollback-$mode")
+    mate="$dir/mate"
+    stage="$mate.retiring.g1"
+    mkdir -p "$mate/state/procevent" "$mate/data" "$mate/config" "$mate/bin"
+    printf 'mate\n' >"$mate/.fm-secondmate-home"
+    printf 'manual\n' >"$dir/home/config/backlog-backend"
+    printf 'registration\n' >"$mate/state/procevent/wait.source"
+    fm_write_meta "$dir/home/state/mate.meta" \
+      window=isolated:fm-mate endpoint_task_id=mate backend=tmux kind=secondmate \
+      "home=$mate" "worktree=$mate" "project=$dir/project" spawn_gen=g1
+    cat >"$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+SH
+    cat >"$mate/bin/fm-procevent.sh" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  sweep-home)
+    [ "${2:-}" != --preflight ] || exit 0
+    rm -f "$FM_HOME/state/procevent/wait.source"
+    case "$FM_TEST_ROLLBACK" in
+      sweep) exit 1 ;;
+      signal) kill -TERM "$PPID"; exit 1 ;;
+    esac ;;
+  reconcile) touch "$FM_TEST_REARMED" ;;
+esac
+SH
+    cat >"$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+[ "${!#}" != "$FM_TEST_STAGE/home" ] || exit 1
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+    chmod +x "$mate/bin/fm-procevent.sh" "$dir/fakebin/mv"
+    rc=0
+    FM_TEST_REAL_MV="$(command -v mv)" FM_TEST_STAGE="$stage" FM_REMOTE_RETIRE_STAGE="$stage" \
+      FM_TEST_ROLLBACK="$mode" FM_TEST_REARMED="$dir/rearmed" \
+      run_case "$dir" mate >"$dir/out" 2>"$dir/err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "rollback injection succeeded: $mode"
+    assert_grep registration "$mate/state/procevent/wait.source" "rollback lost registrations: $mode"
+    assert_present "$dir/rearmed" "rollback did not rearm: $mode"
+    assert_absent "$stage" "rollback retained empty stage: $mode"
+  done
+  pass "retirement restores registrations and rearms after sweep, rename, and signal failures"
+}
+
+test_retirement_retains_child_loss_before_metadata_removal() {
+  local depth dir mate owner nested child_meta rc real_rm
+  real_rm=$(command -v rm)
+  for depth in direct recursive; do
+    dir=$(make_case "retire-child-loss-$depth")
+    mark_case_as_treehouse_pool "$dir"
+    mate="$dir/mate"
+    owner="$mate"
+    mkdir -p "$mate/state" "$mate/data" "$mate/config"
+    printf 'mate\n' >"$mate/.fm-secondmate-home"
+    printf 'manual\n' >"$dir/home/config/backlog-backend"
+    fm_write_meta "$dir/home/state/mate.meta" \
+      window=isolated:fm-mate endpoint_task_id=mate backend=tmux kind=secondmate \
+      "home=$mate" "worktree=$mate" "project=$dir/project" spawn_gen=g1
+    if [ "$depth" = recursive ]; then
+      nested="$mate/nested"
+      mkdir -p "$nested/state" "$nested/data" "$nested/config"
+      printf 'nested\n' >"$nested/.fm-secondmate-home"
+      fm_write_meta "$mate/state/nested.meta" \
+        window=isolated:fm-nested endpoint_task_id=nested backend=tmux kind=secondmate \
+        "home=$nested" "worktree=$nested" "project=$dir/project" spawn_gen=g-nested
+      owner="$nested"
+    fi
+    child_meta="$owner/state/scout.meta"
+    fm_write_meta "$child_meta" \
+      window=isolated:fm-scout endpoint_task_id=scout backend=tmux kind=scout \
+      "worktree=$dir/pool/1/project" "project=$dir/project" spawn_gen=g-child
+    jq -n --arg h "$mate" '{schema:"fm-remote-retirement-pending.v1",task:"mate",home:$h,generation:"g1",target:"isolated:fm-mate",backend:"herdr",phase:"pending",destroyed:false,exit_code:null}' >"$dir/pending.json"
+    cat >"$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *has-session*) exit 1 ;; esac
+exit 0
+SH
+    cat >"$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+for wt in "$@"; do :; done
+printf 'lost residue\n' >"$wt/residue"
+exit 0
+SH
+    cat >"$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "$FM_TEST_CHILD_META" ] && [ -e "$FM_TEST_INTERRUPT" ]; then
+    "$FM_TEST_REAL_RM" "$@" || exit 1
+    exit 1
+  fi
+done
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+    chmod +x "$dir/fakebin/rm"
+    touch "$dir/interrupt"
+    rc=0
+    FM_REMOTE_RETIRE_PENDING="$dir/pending.json" FM_TEST_REAL_RM="$real_rm" \
+      FM_TEST_CHILD_META="$child_meta" FM_TEST_INTERRUPT="$dir/interrupt" \
+      run_case "$dir" mate >"$dir/first.out" 2>"$dir/first.err" || rc=$?
+    [ "$rc" -ne 0 ] || fail "child-removal interruption was ignored: $depth"
+    assert_absent "$child_meta" "interruption did not reach child removal: $(cat "$dir/first.err")"
+    assert_present "$mate" "interruption removed parent home"
+    jq -e '.exit_code == 4' "$dir/pending.json" >/dev/null || fail "child removal lost known outcome: $depth"
+    rm "$dir/interrupt"
+    rc=0
+    FM_REMOTE_RETIRE_PENDING="$dir/pending.json" FM_TEST_REAL_RM="$real_rm" \
+      FM_TEST_CHILD_META="$child_meta" FM_TEST_INTERRUPT="$dir/interrupt" \
+      run_case "$dir" mate >"$dir/retry.out" 2>"$dir/retry.err" || rc=$?
+    expect_code 0 "$rc" "retained child outcome retry: $(cat "$dir/retry.err")"
+    assert_absent "$mate" "retry retained home"
+    jq -e '.exit_code == 4' "$dir/pending.json" >/dev/null || fail "retry lowered known outcome: $depth"
+  done
+  pass "direct and recursive retirement retain lost-slot outcomes before child evidence disappears"
+}
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_worktree_identity_refusal_names_the_repair_path
 test_control_lock_contention_refuses_before_mutation
@@ -1624,6 +1934,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_legacy_t3_record_refuses_cleanup_without_creation_server
 test_reassigned_pool_slot_keeps_claimant_codex_overlay_on_t3
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
@@ -1632,3 +1943,10 @@ test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
+
+test_retirement_reuses_only_empty_staging
+
+test_local_retirement_resumes_recorded_staging
+
+test_retirement_rollback_rearms_on_failure
+test_retirement_retains_child_loss_before_metadata_removal

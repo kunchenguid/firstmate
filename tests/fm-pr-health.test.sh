@@ -28,6 +28,7 @@ new_home() { # name -> home with the monitor flag on
   cat > "$home/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
+[ "${GH_HOST:-}" = github.com ] || { echo "wrong GitHub host" >&2; exit 1; }
 printf '%s\n' "$*" >> "$FORGE/calls.log"
 model() {
   local n=$1 attempt
@@ -930,6 +931,11 @@ SH
     || fail "final PRs were enrolled again: $(grep '^enroll' "$home/forge/contributions.log")"
   pass 'final contributions are not enrolled on a poll'
 }
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit
+fi
 
 failures=0
 for test_name in test_maintainer_author_and_approval_states_are_distinct \

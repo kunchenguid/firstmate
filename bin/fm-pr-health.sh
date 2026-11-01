@@ -141,7 +141,7 @@ gh_read() { # deadline args... : one bounded forge read
   shift
   [ "$left" -gt 0 ] || return 124
   [ "$left" -le 5 ] || left=5
-  fm_run_timed "$left" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
+  fm_run_timed "$left" env GH_HOST="$GH_HOST" GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
 }
 
 PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
@@ -214,6 +214,8 @@ STEP='
 read_pr() { # url deadline output-directory -> rest.json gql.json
   local url=$1 deadline=$2 out=$3 number owner repo rest_rc=0 gql_rc=0 suite_rc=0 cursor="" page
   fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 1
+  local GH_HOST=$FM_PR_HOST
+  export GH_HOST
   number=$FM_PR_NUMBER
   owner=${FM_PR_PATH%%/*}; repo=${FM_PR_PATH#*/}
   gh_read "$deadline" api "repos/$owner/$repo/pulls/$number" > "$out/rest.json" 2>/dev/null &
@@ -267,6 +269,8 @@ lookup_branch_pr() { # worktree branch deadline -> url
     ssh://git@github.com/*) remote="https://github.com/${remote#ssh://git@github.com/}" ;;
   esac
   fm_pr_url_parse "${remote%.git}/pull/1" && [ "$FM_PR_PROVIDER" = github ] || return 1
+  local GH_HOST=$FM_PR_HOST
+  export GH_HOST
   left=$((deadline - $(date +%s)))
   [ "$left" -gt 0 ] || return 1
   [ "$left" -le 5 ] || left=5
@@ -334,6 +338,10 @@ enroll_new() { # deadline : enroll recorded and branch PRs not yet durably owned
 FALLBACK_SECONDS=900 # ponytail: fixed fallback sweep; make it a config value if a home needs a faster unattended sweep
 read_notifications() { # deadline
   local lm since status next_lm next_since
+  # The account notification feed belongs to the public GitHub host whatever
+  # pull request hosts this home owns, so it pins that host explicitly.
+  local GH_HOST=github.com
+  export GH_HOST
   local args=(api -i)
   NOTIFY_OK=0
   : > "$TMP/events"
