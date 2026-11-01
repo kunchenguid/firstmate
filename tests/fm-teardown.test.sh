@@ -5491,6 +5491,7 @@ test_status_archive_opt_in() {
     case_dir=$(make_case "status-archive-$mode")
     write_meta "$case_dir" local-only ship
     printf 'working: started\nneeds-decision [key=choice]: choose\nresolved [key=choice]: chosen\ndone: complete\n' > "$case_dir/state/task-x1.status"
+    printf 'marker\n' > "$case_dir/state/.paused-overdue-task-x1"
     cp "$case_dir/state/task-x1.status" "$case_dir/expected"
     mkdir -p "$case_dir/data/old"
     printf 'old archive\n' > "$case_dir/data/old/status.log"
@@ -5500,6 +5501,7 @@ test_status_archive_opt_in() {
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
     expect_code 0 "$rc" "status archive $mode teardown"
     assert_absent "$case_dir/state/task-x1.status" "live status survived teardown"
+    assert_absent "$case_dir/state/.paused-overdue-task-x1" "overdue marker survived task teardown"
     if [ "$mode" = on ]; then
       cmp -s "$case_dir/expected" "$case_dir/data/task-x1/status.log" || fail "opt-in archive lost history"
     else
@@ -5924,6 +5926,9 @@ test_status_archive_nested_secondmate_children() {
     printf 'done: parent history\n' > "$case_dir/state/task-x1.status"
     printf 'done: child history\n' > "$home/state/nested-sm.status"
     printf 'done: grandchild history\n' > "$nested_home/state/grandchild.status"
+    printf 'marker\n' > "$case_dir/state/.paused-overdue-task-x1"
+    printf 'marker\n' > "$home/state/.paused-overdue-nested-sm"
+    printf 'marker\n' > "$nested_home/state/.paused-overdue-grandchild"
     if [ "$unsafe" = children ]; then
       mkdir -p "$case_dir/data/task-x1" "$case_dir/outside"
       ln -s "$case_dir/outside" "$case_dir/data/task-x1/children"
@@ -5939,6 +5944,9 @@ test_status_archive_nested_secondmate_children() {
       assert_grep 'parent history' "$case_dir/data/task-x1/status.log" "parent history missing"
       assert_grep 'child history' "$case_dir/data/task-x1/children/nested-sm/status.log" "child history missing"
       assert_grep 'grandchild history' "$case_dir/data/task-x1/children/nested-sm/children/grandchild/status.log" "grandchild history missing"
+      assert_absent "$case_dir/state/.paused-overdue-task-x1" "parent overdue marker survived teardown"
+      assert_absent "$home/state/.paused-overdue-nested-sm" "child overdue marker survived teardown"
+      assert_absent "$nested_home/state/.paused-overdue-grandchild" "grandchild overdue marker survived teardown"
       assert_absent "$home" "forced retirement retained secondmate home"
     fi
   done

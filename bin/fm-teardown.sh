@@ -460,13 +460,15 @@ teardown_prune_status_archives() {  # <task-directory>
 teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
   local state=$1 task=$2 relative=${3:-$2} dir part archive n=0 entry
   if [ ! -e "$CONFIG/status-archive" ]; then
-    status_retire_presentation_task "$state" "$task"
-    return $?
+    status_retire_presentation_task "$state" "$task" || return $?
+    rm -f -- "$state/.paused-overdue-$task" || return 1
+    return 0
   fi
   # Preserve the remote-home no-op, including its lock-free fast path.
   if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ]; then
-    status_retire_presentation_task "$state" "$task"
-    return $?
+    status_retire_presentation_task "$state" "$task" || return $?
+    rm -f -- "$state/.paused-overdue-$task" || return 1
+    return 0
   fi
   if [ -L "$state/$task.status" ] || [ ! -f "$state/$task.status" ]; then
     echo "error: unsafe status archive source: $state/$task.status" >&2
@@ -495,6 +497,7 @@ teardown_retire_status() {  # <state> <task-id> [<archive-relative-directory>]
     echo "error: status archival failed for $task; retaining live status for retry" >&2
     return 1
   }
+  rm -f -- "$state/.paused-overdue-$task" || return 1
   for entry in "$DATA"/*; do
     teardown_prune_status_archives "$entry"
   done
