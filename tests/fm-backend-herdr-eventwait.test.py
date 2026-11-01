@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import io
+import json
 import socket
 import time
 import unittest
@@ -48,6 +49,20 @@ class RejectedSubscriptionSocket(ClosingStreamSocket):
 
 
 class EventWaitReadLineTest(unittest.TestCase):
+    def test_subscribes_only_to_the_explicit_pane_list(self):
+        sock = ClosingStreamSocket()
+        sock.sendall = mock.Mock()
+        with mock.patch.object(READER.socket, "socket", return_value=sock):
+            with mock.patch.object(READER.sys, "stdout", io.StringIO()):
+                READER.main(["herdr-eventwait.py", "socket", "1", "task", "operator"])
+
+        request = json.loads(sock.sendall.call_args.args[0])
+        self.assertEqual(request["method"], "events.subscribe")
+        self.assertEqual(request["params"]["subscriptions"], [
+            {"type": "pane.agent_status_changed", "pane_id": "task"},
+            {"type": "pane.agent_status_changed", "pane_id": "operator"},
+        ])
+
     def test_deadline_is_clean_timeout(self):
         left, right = socket.socketpair()
         self.addCleanup(left.close)

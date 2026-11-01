@@ -15,6 +15,8 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_PUSH_TRANSITION_LIB_DIR/fm-transition-lib.sh"
+# shellcheck source=bin/fm-watch-pane-lib.sh
+. "$FM_PUSH_TRANSITION_LIB_DIR/fm-watch-pane-lib.sh"
 
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
@@ -146,13 +148,23 @@ mark_surface_reported() {  # <status-file> <reported-signature>
 
 # Act on a fresh actionable transition from a push-capable backend.
 handle_push_transition() {  # <backend> <session> <record>
-  local backend=$1 session=$2 record=$3 pane_id to detail window task reason span_record rest surface_end='' surface_ident='' note
+  local backend=$1 session=$2 record=$3 pane_id to detail window task reason span_record rest surface_end='' surface_ident='' note watched
   pane_id=$(fm_transition_pane_id "$record")
   to=$(fm_transition_to_status "$record")
   detail=$(fm_transition_detail "$record")
   [ -n "$pane_id" ] || { sleep 1; return; }
   window=$(fm_backend_transition_target "$backend" "$session" "$pane_id")
   task=$(window_to_task "$window" "$STATE")
+  watched=$(fm_watch_pane_lookup "$window")
+  if [ "$backend" = herdr ] && [ -n "$watched" ] \
+    && [ -z "$(fm_backend_meta_for_window "$window" "$STATE" 2>/dev/null)" ]; then
+    reason="stale: watched pane ${watched%$'\t'*} ($window, herdr: agent $to${detail:+ ($detail)})"
+    fm_wake_append stale "$window" "$reason" || exit 1
+    fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
+    wake "$reason"
+    # shellcheck disable=SC2317 # Tests override the production exiting callback.
+    return
+  fi
   # A declared wait already names the human this transition would report: an
   # external dependency, or the captain a verified hold transferred the work to.
   # Either way the wait is durably recorded, so absorb the immediate escalation

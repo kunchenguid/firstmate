@@ -49,6 +49,26 @@ These variables override individual operational directories for tests and specia
 | `FM_PROJECTS_OVERRIDE` | Local project clones |
 | `FM_CONFIG_OVERRIDE` | Local configuration |
 
+### Operator-owned Herdr pane watches (state/watched-panes)
+
+Operator sessions without task metadata can join this home's existing supervision cycle through `bin/fm-watch-pane.sh`.
+Set `FM_HOME` explicitly; the CLI's `--help` owns command syntax.
+Registration validates a live Herdr session, an exact workspace label, an exact tab label, and exactly one pane in that tab.
+The registry stores one tab-separated row per watch: `session`, `workspace-label`, `tab-label`, `label`, `notify-done` (`0` or `1`).
+Session names use letters, digits, `_`, `.`, and `-`; all fields are nonempty and contain no control characters.
+Labels and session/workspace/tab identities must be unique within the registry.
+Adding a label replaces its entry atomically; removing an absent label succeeds, and listing reads only the registry.
+
+Firstmate resolves those labels to current pane IDs before each bounded wait, so replacing a server or pane does not require saving a new ID.
+Missing or ambiguous identities are reported to stderr and skipped rather than guessed; renamed labels require registration again.
+Any endpoint already recorded in task metadata retains its task policy, including secondmate exclusions, even if explicitly registered.
+Only Herdr watches are supported; other backends keep their existing behavior.
+The existing single connection watches one backend/session group at a time, while registered panes in every group receive level polling on the ordinary poll cadence, including when push is unavailable.
+Blocked states produce a durable wake naming the watch label and status; `--notify-done` also enables immediate finish notification for that watch alone.
+Repeated states are deduplicated across reconnects, a working state rearms notification, and an opted-in blocked-to-done transition can notify once for each status.
+Transient finish states may therefore notify for an opted-in watch; ordinary tasks continue to defer `done` to their existing completion handling.
+No command creates or closes a pane, and the operator should unregister a watch when its session ends.
+
 ### Relative paths and lifecycle safety
 
 Before `fm-brief.sh`, `fm-spawn.sh`, or `fm-afk-launch.sh` saves a path or passes it to another process, it handles each applicable `FM_HOME`, `FM_STATE_OVERRIDE`, or `FM_DATA_OVERRIDE` directory as follows:

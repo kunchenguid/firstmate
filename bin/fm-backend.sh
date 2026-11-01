@@ -874,7 +874,7 @@ fm_backend_source() {  # <name>
       set -- fm-tmux-lib.sh fm-composer-lib.sh fm-cursor-lib.sh fm-session-lock-lib.sh fm-agent-process-lib.sh fm-gemini-lib.sh
       ;;
     herdr)
-      set -- fm-composer-lib.sh fm-transition-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh
+      set -- fm-composer-lib.sh fm-transition-lib.sh fm-watch-pane-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh
       ;;
     zellij)
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh
