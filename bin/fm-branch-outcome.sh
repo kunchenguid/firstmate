@@ -5,11 +5,18 @@
 # CONTRACT (this header is the one owner of the store's format).
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
-#     "verdict":"routine"|"captain","summary":"...","silent":true|false,
+#     "verdict":"routine"|"main"|"captain","summary":"...","silent":true|false,
 #     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
 #     or status provenance remain valid and are treated as visible. A silent
 #     row must have verdict `routine`; the branch prompt and delivery consumers
 #     own the additional no-change eligibility rule.
+#     An ACTED-ON row is a `main` or `captain` row. Both are delivered,
+#     presented, and acknowledged by exactly the same rules below; they differ
+#     only in who must act. `main` asks MAIN to act and is never a captain
+#     call, while `captain` is reserved for the captain's own categories
+#     (bin/fm-branch-prompt.sh owns the verdict criteria, and
+#     bin/fm-captain-hold.sh classes the category list). Consumers that count
+#     captain calls count `captain` rows only.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
@@ -18,31 +25,31 @@
 #     the log. Retention: the log is small (one line per handled fleet event)
 #     and truncation, if ever needed, is a captain-approved manual act.
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq presented
-#     by Pi as a routine merge note or sequence-keyed visible captain entry,
+#     by Pi as a routine merge note or sequence-keyed visible acted-on entry,
 #     emitted by Pi's locked session-start replay, silently consumed there
 #     because `silent` is true, or presented by the supervision-host drain.
-#     Records above the cursor are unread. A captain row advances only after
+#     Records above the cursor are unread. An acted-on row advances only after
 #     Pi persists its matching visible entry or the host prints its drain
 #     section, so interrupted presentation can be retried.
 #     A cursor beyond the validated store tail fails closed.
 #   - Processed marker: $STATE/.branch-outcomes-processed holds the highest
-#     seq whose captain rows main has ACKNOWLEDGED as processed, separately
+#     seq whose acted-on rows main has ACKNOWLEDGED as processed, separately
 #     from the read cursor: reading (the visible entry) is the branch's act,
 #     processing (main acting on the outcome and calling its acknowledgement
-#     tool) is main's. A captain row between the two markers is "unprocessed":
+#     tool) is main's. An acted-on row between the two markers is "unprocessed":
 #     delivered and shown, not yet acted on. Routine rows never wait on this
 #     marker. It only advances through an explicit sequence-bound
-#     acknowledgement naming a currently unprocessed captain row at or below
+#     acknowledgement naming a currently unprocessed acted-on row at or below
 #     the read cursor; a routine, unread, or already-processed target is
 #     refused. It never moves past the read cursor or backwards, so an
 #     unrelated or empty model answer cannot move it. An absent marker reads as
-#     0 (every delivered captain row is unprocessed, the safe direction), and
+#     0 (every delivered acted-on row is unprocessed, the safe direction), and
 #     nothing ever creates it from the read cursor: the Pi branch's visible
 #     entries and a supervision-host drain's presentation both advance that
 #     cursor without main acknowledging anything, and no stored state tells
 #     which one did. So a home without a marker, including one upgraded from
 #     before the marker existed or switched between Pi and the host, presents
-#     its delivered captain rows again, dated and check-first, until main
+#     its delivered acted-on rows again, dated and check-first, until main
 #     acknowledges them. A marker ahead of the read cursor fails closed.
 #   - Outcome index: $STATE/.<task>.branch-outcome-index stores one bounded
 #     cache of the latest outcome's status provenance. The authoritative copy
@@ -76,7 +83,7 @@
 #     conversation memory.
 #
 # Usage:
-#   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
+#   fm-branch-outcome.sh append --task <id> --verdict routine|main|captain \
 #       --summary <text> [--wake <text>] [--silent true|false]
 #     Append one outcome record; prints the assigned seq.
 #   fm-branch-outcome.sh unread
@@ -85,19 +92,19 @@
 #     Advance the cursor (never backwards) after Pi delivers the records or
 #     the host presents them in its drain.
 #   fm-branch-outcome.sh unprocessed
-#     Print read but unprocessed captain records as JSONL in ascending seq, up to 32 per call, each with "recordedAgo".
+#     Print read but unprocessed acted-on records as JSONL in ascending seq, up to 32 per call, each with "recordedAgo".
 #     Summaries over 1024 characters are abbreviated within that bound and point to lookup --seqs <n> for the full outcome.
 #     Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-processed --through <seq>
-#     Advance the processed marker after main acknowledged the captain rows
-#     through <seq>; the target itself must be a currently unprocessed captain
+#     Advance the processed marker after main acknowledged the acted-on rows
+#     through <seq>; the target itself must be a currently unprocessed acted-on
 #     row at or below the read cursor.
 #   fm-branch-outcome.sh present
 #     A supervision-host drain's presentation off Pi (bin/fm-wake-drain.sh
 #     "BRANCH OUTCOMES", docs/supervision-host.md "Captain outcomes"): under
-#     the lock, print every unread record and every unprocessed captain record
+#     the lock, print every unread record and every unprocessed acted-on record
 #     (JSONL, ascending seq, each with an added "unread" boolean, and each
-#     captain record also with "recordedAgo"). It moves nothing: off Pi that
+#     acted-on record also with "recordedAgo"). It moves nothing: off Pi that
 #     drain presentation is what the visible entry is, so the drain runs
 #     mark-read once it has presented the rows; it is the only reader that
 #     advances the cursor there. Prints nothing when nothing is unread or
@@ -124,7 +131,7 @@
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
 #     field is true, and mark those leading routine rows read. Stop before the
-#     first captain row because only Pi's sequence-keyed visible entry may
+#     first acted-on row because only Pi's sequence-keyed visible entry may
 #     acknowledge that row. Prints nothing when nothing replayable is unread.
 #     Run it only when the session holds the lock (fm-session-start.sh owns the
 #     call site).
@@ -153,7 +160,7 @@ OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 OUTCOME_TAIL="$STATE/.branch-outcomes-tail.jsonl"
 OUTCOME_TAIL_ROWS=200
 OUTCOME_TAIL_MAX_BYTES=1048576
-# The "recordedAgo" field present and unprocessed add to captain rows (see the
+# The "recordedAgo" field present and unprocessed add to acted-on rows (see the
 # usage above).
 # Callers pass --argjson now "$(date +%s)".
 # shellcheck disable=SC2016  # jq program text: $now and $s are jq variables.
@@ -163,7 +170,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|main|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -249,7 +256,7 @@ last_seq() { # [<file> [<first expected seq, or null for a bounded suffix>]]
       and ((.seq | type) == "number" and .seq >= 1 and .seq <= 9007199254740991 and .seq == (.seq | floor))
       and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
       and ((.task | type) == "string" and (.wake | type) == "string")
-      and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
+      and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "main" or .verdict == "captain"))
       and (.silent != true or .verdict == "routine");
     if endswith("\n") then split("\n")[:-1]
     else error("unterminated outcome store")
@@ -427,7 +434,7 @@ print_unprocessed() {
   [ -s "$STORE" ] || return 0
   jq -cn --argjson processed "$processed" --argjson cursor "$cursor" --argjson now "$(date +%s)" \
     "$RECORDED_AGO_JQ"'(reduce inputs as $row ([];
-        if length < 32 and $row.verdict == "captain" and $row.seq > $processed and $row.seq <= $cursor
+        if length < 32 and $row.verdict != "routine" and $row.seq > $processed and $row.seq <= $cursor
         then . + [$row] else . end))[]
       | ("… [summary abbreviated; read the full outcome with bin/fm-branch-outcome.sh lookup --seqs \(.seq)]") as $note
       | .summary |= (if length > 1024 then .[:(1024 - ($note | length))] + $note else . end)
@@ -516,7 +523,7 @@ case "$CMD" in
     [ -n "$TASK" ] || usage
     outcome_index_path "$TASK" >/dev/null || usage
     [ -n "$SUMMARY" ] || usage
-    case "$VERDICT" in routine|captain) ;; *) usage ;; esac
+    case "$VERDICT" in routine|main|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
     if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
       echo "error: silent outcomes must have the routine verdict" >&2
@@ -615,9 +622,9 @@ case "$CMD" in
     fi
     if [ -s "$STORE" ] && ! jq -c --argjson cursor "$CURSOR_SEQ" --argjson processed "$PROCESSED_SEQ" \
         --argjson now "$(date +%s)" "$RECORDED_AGO_JQ"'
-        select(.seq > $cursor or (.verdict == "captain" and .seq > $processed))
+        select(.seq > $cursor or (.verdict != "routine" and .seq > $processed))
         | . + {unread: (.seq > $cursor)}
-        | if .verdict == "captain" then . + {recordedAgo: recorded_ago} else . end' "$STORE"; then
+        | if .verdict != "routine" then . + {recordedAgo: recorded_ago} else . end' "$STORE"; then
       fm_lock_release "$LOCK"
       exit 1
     fi
@@ -667,9 +674,9 @@ case "$CMD" in
       exit 1
     fi
     VERDICT=$(jq -r --argjson through "$THROUGH" 'select(.seq == $through) | .verdict' "$STORE")
-    if [ "$VERDICT" != captain ]; then
+    if [ "$VERDICT" != captain ] && [ "$VERDICT" != main ]; then
       fm_lock_release "$LOCK"
-      echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed captain outcome" >&2
+      echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed acted-on outcome" >&2
       exit 1
     fi
     write_processed "$THROUGH"
@@ -756,8 +763,8 @@ case "$CMD" in
     if [ -n "$UNREAD" ]; then
       REPLAYABLE=$(printf '%s\n' "$UNREAD" | jq -sc '
         map(.verdict) as $verdicts
-        | ($verdicts | index("captain")) as $captain
-        | .[0:($captain // length)][]
+        | ([$verdicts | to_entries[] | select(.value != "routine") | .key][0]) as $acted
+        | .[0:($acted // length)][]
       ')
       VISIBLE=$(printf '%s\n' "$REPLAYABLE" | jq -c 'select(.silent != true)')
       if [ -n "$VISIBLE" ]; then

@@ -416,6 +416,11 @@ test_return_brief_composes_from_record_store_and_held_set() {
   outcome_in "$dir" append --task still-building --verdict routine --silent true \
     --summary 'per your away instructions: the check 1 worker is still building. Nothing new has happened; no action was taken.' >/dev/null \
     || fail "could not seed the silent no-change outcome row"
+  # A main outcome asks firstmate to act; it is never a captain call, so it is
+  # counted but never listed among the outcomes escalated to the captain.
+  outcome_in "$dir" append --task landing --verdict main \
+    --summary 'the landing branch is ready for firstmate to land' --wake 'signal: landing.status' >/dev/null \
+    || fail "could not seed the main outcome row"
   touch "$dir/home/state/.last-watcher-beat"
   : > "$dir/home/state/.fake-drain"
 
@@ -424,6 +429,8 @@ test_return_brief_composes_from_record_store_and_held_set() {
   rc=$?
   set -e
   [ "$rc" -eq 3 ] || fail "the unreached blocker should still gate the return (rc=$rc): $out"
+  assert_not_contains "$(printf '%s\n' "$out" | sed -n '/^Waiting on you:/,/^Tried and failed/p')" 'landing branch is ready' \
+    "a main outcome was listed as waiting on the captain"
   gate="$dir/home/state/.afk-return-catchup"
   [ -e "$dir/home/state/afk-contracts" ] || fail "the return did not archive the away-posture record"
   [ ! -e "$dir/home/state/.afk-contract" ] || fail "the live away-posture record survived the return"
@@ -453,7 +460,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
   assert_contains "$out" 'dead: failed: the reproduction never compiled' "the failed task was not listed"
   assert_contains "$out" '4 routine outcome(s) recorded' "the routine outcome count was not reported"
   assert_contains "$out" 'other: resent the steer; worker resumed' "the routine outcome was not listed"
-  assert_contains "$out" 'Cost: 6 supervision outcome(s) recorded (4 routine, 2 captain); 3 task(s) live at return.' "the cost line is wrong"
+  assert_contains "$out" 'Cost: 7 supervision outcome(s) recorded (4 routine, 1 main, 2 captain); 3 task(s) live at return.' "the cost line is wrong"
   assert_contains "$out" 'firstmate-actionable blocker: other [key=dep]' "the unreached blocker did not gate"
   assert_contains "$out" 'firstmate-actionable blocker: fix-windows [key=token]' "a captain outcome incorrectly exempted an open blocker"
   grep -F "$(printf 'contract\t')" "$gate" >/dev/null || fail "the gate did not retain the posture-record window"
@@ -501,7 +508,7 @@ test_return_brief_points_at_the_drain_on_a_host_home_only() {
     # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
     out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
       "$fakebin/$harness" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "$harness: the return did not clear: $out"
-    assert_contains "$out" '7 outcome(s) handled by the away session (6 routine, 1 escalated above)' "$harness: the brief must count the window's outcomes"
+    assert_contains "$out" '7 outcome(s) handled by the away session (6 routine, 0 for firstmate to act on, 1 escalated above)' "$harness: the brief must count the window's outcomes"
     if [ "$harness" = claude ]; then
       assert_contains "$out" "  1 captain outcome(s) escalated by the away session, presented in the drain's BRANCH OUTCOMES section" \
         "a host home's brief must point at the drain for its captain outcomes"
@@ -536,7 +543,7 @@ test_return_brief_all_silent_window_does_not_point_at_drain() {
   # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
   out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
     "$fakebin/claude" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "the all-silent return did not clear: $out"
-  assert_contains "$out" '1 outcome(s) handled by the away session (1 routine, 0 escalated above)' \
+  assert_contains "$out" '1 outcome(s) handled by the away session (1 routine, 0 for firstmate to act on, 0 escalated above)' \
     "the all-silent window's stored outcome count was lost"
   assert_contains "$out" '1 routine outcome(s) recorded; none were visible.' \
     "the all-silent window should report no visible routine notes"

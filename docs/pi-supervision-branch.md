@@ -458,7 +458,7 @@ A home with no processed marker, including an upgrade or switch from the supervi
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty.
 Deterministic entry delivery owns captain visibility.
 
-The branch prompt's "Verdict: routine or captain" section owns the classification criteria, including task-level silence eligibility and the rule to escalate doubt.
+The branch prompt's "Verdict: routine, main, or captain" section owns the classification criteria, including task-level silence eligibility and the rule to send doubt to main.
 
 Its "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from:
 
@@ -500,7 +500,7 @@ The branch runs its normal operating procedure for the wake (`bin/fm-branch-prom
 | Found literally nothing worth reporting | Verdict `routine`, `task=fleet`, and `silent=true`, so it is stored without a rendered note. |
 | A fleet-wide routine action | Omits `silent` and keeps its rendered sailboat note. |
 
-Only a captain-worthy finding reports verdict `captain` and appends a visible captain outcome entry.
+Only a finding main must act on reports verdict `main`, or verdict `captain` when it is one of the captain-hold classes, and appends a visible outcome entry.
 
 Every other fleet-wide or unresolvable wake keeps today's wake-to-main path in both postures.
 That includes watcher-failure alarms, which are never offered to the branch.
