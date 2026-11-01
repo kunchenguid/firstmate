@@ -48,9 +48,11 @@
 # reach <destination>, before stow relocates an entry. A relocation some reader
 # cannot reach is a deletion for that reader. This home reads all three files;
 # in a primary home every registered secondmate also reads its inherited copy
-# of data/captain-shared.md. A destination is reachable from a reader only when
-# it lies inside that reader's home, so a remote home, or a local one that
-# fails validation, never counts as reaching it. It prints source=,
+# of data/captain-shared.md. A destination is reachable from a reader when it
+# lies inside that reader's home, or, for a secondmate reading the shared file,
+# when it is this home's data/captain-shared.md itself, the shared surface every
+# inheriting home (local or remote) loads as its copy. A local home that fails
+# validation never counts as reaching anything. It prints source=,
 # destination=, one "reader=<id> placement=<p> home=<path> reachable=yes|no"
 # line per reader, and reach=reversible or reach=removal. In a secondmate home
 # data/captain-shared.md is primary-owned, so --reach refuses it there.
@@ -190,17 +192,18 @@ reach_path() { # <path>
 }
 
 REACH_UNREACHABLE=0
-reach_reader() { # <reader> <placement> <home> <destination-or-empty>
+reach_reader() { # <reader> <placement> <home> <destination-or-empty> [shared-surface]
   local reachable=no
   if [ -n "$4" ]; then
     case "$4/" in "${3%/}"/*) reachable=yes ;; esac
+    [ -z "${5:-}" ] || [ "$4" != "$5" ] || reachable=yes
   fi
   emit "reader=$1 placement=$2 home=$3 reachable=$reachable"
   [ "$reachable" = yes ] || REACH_UNREACHABLE=$((REACH_UNREACHABLE + 1))
 }
 
 reach_main() { # <memory-file> <destination>
-  local source=${1##*/} dest self line
+  local source=${1##*/} dest self shared line
   case "$source" in captain.md|captain-shared.md|learnings.md) ;; *) usage >&2; exit 2 ;; esac
   case "/$2/" in
     */../*|*/./*) printf 'error: destination must not contain . or .. segments: %s\n' "$2" >&2; exit 2 ;;
@@ -215,6 +218,7 @@ reach_main() { # <memory-file> <destination>
   emit "destination=$dest"
   reach_reader this-home local "$self" "$dest"
   if [ "$source" = captain-shared.md ] && { [ -e "$REGISTRY" ] || [ -L "$REGISTRY" ]; }; then
+    shared=$(reach_path "$DATA/captain-shared.md") || die "shared memory file cannot be resolved: $DATA/captain-shared.md"
     secondmate_registry_validate_bindings "$REGISTRY" secondmate_registry_path_key \
       || die "$SECONDMATE_REGISTRY_ERROR"
     grep '^- ' "$REGISTRY" > "$TMP/records" 2>/dev/null || : > "$TMP/records"
@@ -222,9 +226,9 @@ reach_main() { # <memory-file> <destination>
       [ -n "$line" ] || continue
       secondmate_registry_parse_line "$line" || die "malformed secondmate registry entry: $line"
       if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
-        reach_reader "$SECONDMATE_REGISTRY_ID" remote "$SECONDMATE_REGISTRY_HOST:$SECONDMATE_REGISTRY_HOME" ''
+        reach_reader "$SECONDMATE_REGISTRY_ID" remote "$SECONDMATE_REGISTRY_HOST:$SECONDMATE_REGISTRY_HOME" "$dest" "$shared"
       elif validate_secondmate_home "$SECONDMATE_REGISTRY_ID" "$SECONDMATE_REGISTRY_HOME"; then
-        reach_reader "$SECONDMATE_REGISTRY_ID" local "$VALIDATED_HOME" "$dest"
+        reach_reader "$SECONDMATE_REGISTRY_ID" local "$VALIDATED_HOME" "$dest" "$shared"
       else
         reach_reader "$SECONDMATE_REGISTRY_ID" local "$SECONDMATE_REGISTRY_HOME" ''
       fi
