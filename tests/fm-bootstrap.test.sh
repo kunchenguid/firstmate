@@ -331,6 +331,21 @@ SH
   pass "bootstrap archives an old orphan status log and reports interleaved duplicates"
 }
 
+test_record_hygiene_watcher_data_is_defined() {
+  local case_dir status
+  case_dir="$TMP_ROOT/record-hygiene-watcher-data"
+  mkdir -p "$case_dir/home"/{state,data,config}
+  status=0
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
+    FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
+    timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+  { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
+    || fail "watcher failed during hygiene check (exit=$status)"
+  assert_not_contains "$(cat "$case_dir/err")" 'DATA: unbound variable' \
+    "watcher heartbeat called record hygiene without its data directory"
+  pass "watcher heartbeat supplies the home data directory to record hygiene"
+}
+
 test_record_hygiene_bounds_backlog_read() {
   local case_dir fakebin out
   case_dir="$TMP_ROOT/record-hygiene-timeout"
@@ -1666,6 +1681,7 @@ SH
 }
 
 test_record_hygiene_archives_old_orphan_status
+test_record_hygiene_watcher_data_is_defined
 test_record_hygiene_bounds_backlog_read
 test_record_hygiene_bounds_endpoint_reads_and_reports_unverified
 test_bootstrap_reporting
