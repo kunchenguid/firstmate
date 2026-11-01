@@ -4,6 +4,9 @@ Codex App is not a selectable Firstmate runtime backend.
 Codex Desktop host tools can create and supervise visible threads and those threads can write Firstmate status files when given an authorized path, but Firstmate has no supported shell-callable bridge to those host tools.
 A manual thread ledger is not a backend.
 
+T3 Code MCP orchestration inside an active T3 main thread is a separate, opt-in captain workflow ([`t3-main-thread-lead.md`](t3-main-thread-lead.md)).
+It does not satisfy this backend contract and does not add `codex-app` to the spawn-capable backend registry.
+
 ## Acceptance contract
 
 A future Codex App backend must satisfy the same lifecycle contract as terminal-backed adapters:
