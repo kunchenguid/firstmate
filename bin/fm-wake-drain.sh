@@ -791,6 +791,7 @@ print_status_sections() {
   rm -f -- "$prepared"
 }
 
+# shellcheck disable=SC2329 # Called through declare -f/eval in the timed child.
 print_ready_work_section() {  # <deduped-raw-rows>
   local rows=$1 ready gate_status ready_status FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
   case "$FM_TASKS_AXI_TIMEOUT" in ''|*[!0-9]*|0) FM_TASKS_AXI_TIMEOUT=10 ;; esac
@@ -799,10 +800,15 @@ print_ready_work_section() {  # <deduped-raw-rows>
     :
   else
     gate_status=$?
-    [ "$gate_status" -ne 1 ] && printf 'READY WORK unavailable: %s\n' "$FM_BACKLOG_TRANSITION_ERROR"
+    [ "$gate_status" -ne 1 ] && [[ "$FM_BACKLOG_TRANSITION_ERROR" != *'data directory cannot be resolved'* ]] \
+      && printf 'READY WORK unavailable: %s\n' "$FM_BACKLOG_TRANSITION_ERROR"
     return 0
   fi
-  fm_backlog_tasks_axi_addressing "$DATA" || return 0
+  FM_BACKLOG_TRANSITION_ERROR=
+  if ! fm_backlog_tasks_axi_addressing "$DATA"; then
+    [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] && printf 'READY WORK unavailable: %s\n' "$FM_BACKLOG_TRANSITION_ERROR"
+    return 0
+  fi
   if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
     ready=$(cd "$FM_BACKLOG_AXI_ROOT" && fm_tasks_axi ready --file "$FM_BACKLOG_AXI_FILE" 2>&1)
   else

@@ -97,6 +97,18 @@ test_ready_work_only_on_heartbeat() {
   grep -F 'heartbeat' "$out" >/dev/null \
     || fail "a ready lookup failure prevented heartbeat presentation"
 
+  dir=$(make_case ready-work-no-data-dir)
+  state="$dir/state"
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/.tasks.toml"
+  make_fake_tasks_axi_ready "$dir/fakebin"
+  append_wake "$state" heartbeat '' 'scheduled review' || fail "queueing heartbeat failed"
+  out="$dir/no-data-dir.out"
+  run_drain_with_backlog "$dir" "$state" "$out" || fail "heartbeat drain failed without a data directory"
+  if grep -F 'READY WORK' "$out" >/dev/null; then
+    fail "home without a data directory printed READY WORK"
+  fi
+
   dir=$(make_case ready-work-non-heartbeat)
   state="$dir/state"
   mkdir -p "$dir/home/config" "$dir/home/data"
