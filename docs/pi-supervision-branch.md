@@ -598,12 +598,14 @@ A leftover `state/.afk` flag declines nothing.
 It does so only while `bin/fm-afk-contract.sh validate` succeeds on a complete, readable, live away record (`mode` is not quiet).
 An archived, incomplete, invalid, or quiet record restores the attended refusal byte for byte.
 
-The captain's away words are the whole mandate:
+The captain's away words are the whole away mandate, added on top of main's standing authority, which the posture leaves unchanged:
 
 - The branch reads them at the tail.
 - It decides by its own judgment whether the event in front of it is the moment they name.
 - It acts on them only through the guarded scripts, never by analogy.
 - It holds with verdict captain on doubt.
+- Empty or silent words cancel no standing grant and add none: a queued item whose holds, blockers, and date gates cleared and a task's standing merge permission (`yolo=on` in its task record) proceed while away as they would attended.
+  `tests/fm-branch-supervision.test.sh` and `tests/fm-supervision-host.test.sh` pin that the branch prompt and the wake tail say so.
 
 `bin/fm-branch-prompt.sh` "Postures" owns those execution rules.
 It requires every action taken under the words to open its outcome summary with "per your away instructions:".
@@ -612,8 +614,8 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 
 | Script | Gate while away |
 | --- | --- |
-| `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
-| `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt). |
+| `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading, and a task's standing merge permission covers its own whether or not the words name it. |
+| `bin/fm-spawn.sh` | Dispatches only queued work whose holds, blockers, and date gates cleared - already queued, whether or not the words name it, or filed by the branch because the words call for it; refuses a fresh ordinary spawn for either actor once the home holds as many ordinary task records as the record's spend cap (relaunches and secondmates exempt). |
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
 | `bin/fm-merge-local.sh` | Never relocated. |
 
