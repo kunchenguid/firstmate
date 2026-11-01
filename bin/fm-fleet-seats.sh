@@ -655,15 +655,35 @@ meta_state() {
   echo pooled
 }
 
-# pooled_records <state-dir> <models-file> [gens-file]: "<state>\t<id>" per
-# unmanaged pooled active record. When <gens-file> is given, each emitted
-# record's "<id>\t<generation>" is appended to it, identifying the same agent
-# on another accounting surface. A record whose generation is a predecessor
-# some incarnation names, but which the ledger never held, is still an
-# unmanaged agent and counts by its record. Returns 4 (with CONFLICT
-# set) when a record's generation is otherwise unknown to its ledger holder.
+# remote_route_is <remote-id> <meta>: the task record names the registered
+# route of that remote secondmate exactly, so the agent it records runs in that
+# remote's own home and that home's serve certificate is the surface that counts
+# it. A record with no resolvable generation never matches: it is the only
+# evidence of that agent, so it stays counted here.
+remote_route_is() {
+  local id=$1 meta=$2 route host root home
+  [ -n "$(meta_generation "$meta")" ] || return 1
+  route=$(awk -F '\t' -v id="$id" '$1 == id { print; exit }' "$TMPD/remote-routes" 2>/dev/null) || return 1
+  [ -n "$route" ] || return 1
+  IFS=$'\t' read -r _ host root home <<<"$route"
+  [ -n "$home" ] || return 1
+  [ "$(record_field "$meta" remote_host)" = "$host" ] || return 1
+  [ "$(record_field "$meta" remote_root)" = "$root" ] || return 1
+  [ "$(record_field "$meta" home)" = "$home" ]
+}
+
+# pooled_records <state-dir> <models-file> [gens-file] [excluded-remote-id]:
+# "<state>\t<id>" per unmanaged pooled active record. When <gens-file> is given,
+# each emitted record's "<id>\t<generation>" is appended to it, identifying the
+# same agent on another accounting surface. When <excluded-remote-id> is given,
+# a record whose route names that remote is left out: the excluded remote counts
+# that agent itself, and charging both sides would spend one seat twice. A record
+# whose generation is a predecessor some incarnation names, but which the ledger
+# never held, is still an unmanaged agent and counts by its record. Returns 4
+# (with CONFLICT set) when a record's generation is otherwise unknown to its
+# ledger holder.
 pooled_records() {
-  local home_state=$1 models=$2 gens=${3:-} meta id verdict gen
+  local home_state=$1 models=$2 gens=${3:-} exclude=${4:-} meta id verdict gen
   [ -r "$home_state" ] && [ -x "$home_state" ] || return 1
   for meta in "$home_state"/*.meta; do
     [ -e "$meta" ] || continue
@@ -685,6 +705,9 @@ pooled_records() {
     verdict=$(meta_state "$meta" "$models")
     case "$verdict" in
       pooled|unreadable)
+        if [ -n "$exclude" ] && remote_route_is "$exclude" "$meta"; then
+          continue
+        fi
         printf '%s\t%s\n' "$home_state" "$id"
         [ -z "$gens" ] || printf '%s\t%s\n' "$id" "$gen" >> "$gens"
         ;;
@@ -734,6 +757,8 @@ registry_homes_walk() {
       fi
       printf '%s\n' "$SECONDMATE_REGISTRY_ID" >> "$TMPD/remote-ids"
       printf '%s\t%s\n' "$SECONDMATE_REGISTRY_ID" "$home" >> "$TMPD/remote-owners"
+      printf '%s\t%s\t%s\t%s\n' "$SECONDMATE_REGISTRY_ID" "$SECONDMATE_REGISTRY_HOST" \
+        "$SECONDMATE_REGISTRY_ROOT" "$SECONDMATE_REGISTRY_HOME" >> "$TMPD/remote-routes"
       continue
     fi
     child=$(canon_dir "$SECONDMATE_REGISTRY_HOME") || return 1
@@ -748,6 +773,7 @@ registry_homes() {
   : > "$TMPD/local-homes" || return 1
   : > "$TMPD/remote-ids" || return 1
   : > "$TMPD/remote-owners" || return 1
+  : > "$TMPD/remote-routes" || return 1
   : > "$TMPD/seen-homes" || return 1
   root_state=$(canon_dir "$ROOT_STATE") || return 1
   registry_homes_walk "$ROOT_HOME" "$root_state" 0
@@ -777,9 +803,11 @@ remote_confirmed() {
 }
 
 # root_holders <models-file> [excluded-remote-id]: every holder the root
-# counts for one pool, one "<key>\t<id>" per line, sorted unique. Returns 3
-# (with UNCONFIRMED set) when a registered remote is unconfirmed, and 4 (with
-# CONFLICT set) on a task record the ledger contradicts.
+# counts for one pool, one "<key>\t<id>" per line, sorted unique. A task record
+# whose route names the excluded remote is charged to that remote's own
+# certificate, so one adopted supervisor cannot spend a seat on both sides of
+# the allowance. Returns 3 (with UNCONFIRMED set) when a registered remote is
+# unconfirmed, and 4 (with CONFLICT set) on a task record the ledger contradicts.
 root_holders() {
   local models=$1 exclude=${2:-} home_state id primary rc
   UNCONFIRMED=
@@ -793,7 +821,8 @@ root_holders() {
     awk -F '\t' '($4 == "reserved" || $4 == "confirmed") { print $2 "\t" $3 }' \
       "$TMPD/ledger" > "$TMPD/counted-gens" || return 1
     while IFS= read -r home_state; do
-      pooled_records "$home_state" "$models" "$TMPD/counted-gens" || { rc=$?; [ "$rc" -ne 4 ] || return 4; return 1; }
+      pooled_records "$home_state" "$models" "$TMPD/counted-gens" "$exclude" \
+        || { rc=$?; [ "$rc" -ne 4 ] || return 4; return 1; }
     done < "$TMPD/local-homes"
     primary=$(jq -r '.primary_model // empty' "$POOLS")
     if [ -n "$primary" ] && grep -Fxq -- "$primary" "$models" && primary_counts "$ROOT_STATE"; then
