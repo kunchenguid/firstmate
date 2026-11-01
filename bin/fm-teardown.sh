@@ -1897,15 +1897,28 @@ backlog_done_args() {
 }
 
 # The completion link for a ship whose record carries a PR, on either transition
-# that replaces this task's record. Only a canonical pull request URL is a link
-# tasks-axi renders as "merged", so only that shape is gated on the merge fact
-# read in this run. Two other shapes keep the link as a `pr` argument and make no
-# claim here: a GitLab merge request or Gerrit change is what the backlog
-# transition turns into a note anyway, and a value that is not a forge URL at all
-# must stay unrecordable so the close is refused instead of silently losing the
-# link (the pending-close validator owns that refusal).
+# that replaces this task's record. A transition carrying `pr` is read back by
+# tasks-axi as the verdict "merged", and tasks-axi's own classifier is the one
+# that prints it: it accepts pull-request links this script's stricter parser
+# refuses (a repeated hyphen in the owner, for instance) and renders those as
+# merged too. So the `pr` shape is reserved for a merge this run read from the
+# forge, plus the change shapes the transition itself turns into a note (a GitLab
+# merge request or Gerrit change). Any other pull-request-shaped link is recorded
+# as a note, which keeps the URL and claims no merge; a value that is not
+# pull-request shaped at all keeps the `pr` shape so the close is refused instead
+# of silently losing the link (the pending-close validator owns that refusal).
 backlog_pr_completion_args() {  # <pr-url>
-  if ! fm_pr_url_parse "$1" || ! fm_backlog_row_artifact_supported "$ID" --pr "$1"; then
+  if fm_backlog_pr_note_label "$1" >/dev/null; then
+    # A GitLab merge request or Gerrit change is what the backlog transition
+    # itself turns into a note, so it makes no merge claim here.
+    BACKLOG_DONE_ARGS=(--pr "$1")
+    return 0
+  fi
+  if ! fm_pr_url_parse "$1"; then
+    if fm_pr_url_renders_as_merge "$1"; then
+      BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because its pull request state could not be read: $1. The link is a historical record whose merge was not verified in this run")
+      return 0
+    fi
     BACKLOG_DONE_ARGS=(--pr "$1")
     return 0
   fi
@@ -1923,6 +1936,16 @@ backlog_pr_completion_args() {  # <pr-url>
   else
     BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because $FM_TEARDOWN_PR_MERGE_DETAIL: $1. The link is a historical record whose merge was not verified in this run")
   fi
+}
+
+# True for a pull-request-shaped link tasks-axi's renderer accepts even though
+# this script's parser refuses it, which is exactly the shape that would print
+# "(merged ...)" for a link no run verified.
+fm_pr_url_renders_as_merge() {  # <value>
+  case "$1" in
+    https://*/pull/[0-9]*) return 0 ;;
+  esac
+  return 1
 }
 
 # Closing the backlog item is this script's own last act on the record, not a
