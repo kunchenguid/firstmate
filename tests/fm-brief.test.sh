@@ -781,6 +781,8 @@ test_secondmate_no_projects_charter() {
     "secondmate charter no longer says the chat is unread"
   assert_grep 'in this home it IS the captain' "$brief" \
     "secondmate charter no longer names the parent channel as the captain"
+  assert_grep 'Never hold your own turn in a long foreground wait (a CI run watch, a sleep loop, a release watch); hand the wait to the PR poll or a process-event source, declare it, and return to supervision, because instructions and worker events reach you only between turns.' "$brief" \
+    "secondmate charter did not direct supervisors to return to supervision during long waits"
   assert_grep 'working [key=<work-slug>]' "$brief" \
     "secondmate charter did not key material routed-work phases"
   assert_grep 'resolved [key=<work-slug>]' "$brief" \

@@ -1,7 +1,7 @@
 ---
 name: diagnostic-reasoning
 description: >-
-  Load before scoping a reported bug and before acting on a diagnostic report.
+  Load before scoping a reported bug, acting on a diagnostic report, or relaying a blocker, permission, credential, or merge-consequence claim upward.
 user-invocable: false
 metadata:
   internal: true
@@ -9,7 +9,7 @@ metadata:
 
 # diagnostic-reasoning
 
-Use this procedure before scoping a reported bug and before acting on a diagnostic report.
+Use this procedure before scoping a reported bug, acting on a diagnostic report, or relaying a blocker, permission, credential, or merge-consequence claim upward.
 This skill is the single owner of Firstmate's bug-diagnosis reasoning procedure.
 Firstmate applies it when briefing delegated investigation and evaluating the resulting evidence, without taking over project-specific investigation itself.
 

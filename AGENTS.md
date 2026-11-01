@@ -188,7 +188,7 @@ Classify the deliverable:
 - If established evidence already answers an informational question, relay it without a design-only scout; when implementation intent is unclear, answer and ask one concise implementation question when useful rather than dispatching speculative design work.
 - Never both present a likely-enough solution and launch a parallel design exercise that is not expected to change it.
 - A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
-- Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
+- Load `diagnostic-reasoning` before scoping a reported bug, acting on a diagnostic report, or relaying a blocker, permission, credential, or merge-consequence claim upward.
 
 Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
