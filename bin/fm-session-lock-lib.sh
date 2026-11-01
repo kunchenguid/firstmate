@@ -120,7 +120,7 @@ fm_bun_harness_argv_name() {  # <argv0> [args...]
   return 1
 }
 
-# Print the real argv of process $1, one element per line, or return 1 when
+# Print the real argv of process $1 as a NUL-separated stream, or return 1 when
 # the platform cannot report argv with its element boundaries intact. ps
 # flattens argv into one space-joined string whose original boundaries are
 # unrecoverable, so ps is never a source here: Linux and Cygwin read the
@@ -130,14 +130,18 @@ fm_bun_harness_argv_name() {  # <argv0> [args...]
 # the sysctl(8) CLI has no formatter registered for that oid, so the command
 # cannot print it. Any unreadable, empty, or short table fails closed. Size is
 # never the test: procfs reports st_size 0 for cmdline even when it holds
-# arguments, so a -s check would reject every live Linux process.
+# arguments, so a -s check would reject every live Linux process. The stream is
+# NUL-delimited end to end because NUL is the one byte an argv element can
+# never contain; any text separator, a newline included, also occurs INSIDE a
+# legal element and would let one argument re-split into a harness path on the
+# way to the parser.
 fm_process_argv() {  # <pid>
-  local pid=$1 cmdline
+  local pid=$1
   if [ -e "/proc/$pid/cmdline" ]; then
     # An empty read is a zombie or kernel thread (no argv); a failed read is a
     # dead or inaccessible process. Both are unreadable, so both fail closed.
-    cmdline=$(tr '\0' '\n' 2>/dev/null < "/proc/$pid/cmdline") && [ -n "$cmdline" ] || return 1
-    printf '%s\n' "$cmdline"
+    [ -n "$(head -c 1 "/proc/$pid/cmdline" 2>/dev/null)" ] || return 1
+    cat "/proc/$pid/cmdline" 2>/dev/null
     return 0
   fi
   case "$(uname -s 2>/dev/null)" in
@@ -167,7 +171,7 @@ argv = parts[i:i + argc]
 if len(argv) != argc:
     sys.exit(1)
 for element in argv:
-    sys.stdout.buffer.write(element + b'\n')
+    sys.stdout.buffer.write(element + b'\0')
 FM_PROCARGV_EOF
 }
 
@@ -181,7 +185,7 @@ fm_bun_harness_name() {  # <comm> <pid>
   local comm=$1 pid=$2 token
   local -a argv=()
   case "$(basename -- "$comm")" in bun) ;; *) return 1 ;; esac
-  while IFS= read -r token; do
+  while IFS= read -r -d '' token; do
     argv+=("$token")
   done < <(fm_process_argv "$pid")
   [ "${#argv[@]}" -ge 1 ] || return 1

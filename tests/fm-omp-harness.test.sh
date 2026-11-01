@@ -145,6 +145,17 @@ bun_argv_must_reject() {  # <argv0> [args...]
   fi
 }
 
+# Print argv[1] of live process $1 - the script position a Bun harness verdict
+# is decided from - read through the same NUL-delimited stream the verdict
+# itself consumes, so an element carrying a space or newline stays whole.
+bun_probe_script_path() {  # <pid>
+  local a0 a1
+  fm_process_argv "$1" 2>/dev/null | {
+    IFS= read -r -d '' a0 && IFS= read -r -d '' a1 || return 1
+    printf '%s' "$a1"
+  }
+}
+
 test_bun_hosted_omp_detection_and_lock() {
   local bin="$TMP_ROOT/bun-hosted/bin" home="$TMP_ROOT/bun-hosted/home"
   local out owner
@@ -168,6 +179,11 @@ test_bun_hosted_omp_detection_and_lock() {
   bun_argv_must_reject bun '/tmp/omp tools/task.js'
   [ "$(fm_bun_harness_argv_name bun '/opt/My Tools/omp')" = omp ] \
     || fail "a real omp under a spaced directory must identify as omp"
+  # A newline inside one argument is the same class: it must stay inside its
+  # token and must not cost a real harness its basename.
+  bun_argv_must_reject bun $'/tmp/omp\nfoo.js'
+  [ "$(fm_bun_harness_argv_name bun "/opt/My"$'\n'"Tools/omp")" = omp ] \
+    || fail "a real omp under a newline-carrying directory must identify as omp"
   # Without a live pid there is no boundary-preserving argv source at all, so
   # the flattened-string entry point fails closed.
   if fm_harness_process_matches bun 'bun /Users/u/.bun/bin/omp --resume session'; then
@@ -215,7 +231,7 @@ SH
   # Wait out the fork/exec window: mid-exec the child still carries the
   # suite's own argv, and probing then would test the wrong command line.
   while [ "$tries" -lt 100 ]; do
-    probe_argv=$(fm_process_argv "$probe" 2>/dev/null | sed -n 2p)
+    probe_argv=$(bun_probe_script_path "$probe")
     [ "$probe_argv" = "$TMP_ROOT/omp tools/task.js" ] && break
     sleep 0.05
     tries=$((tries + 1))
@@ -246,6 +262,61 @@ SH
     "$bin/bun" "$TMP_ROOT/My Tools/omp" "$HARNESS")
   [ "$out" = omp ] \
     || fail "a Bun-hosted omp under a spaced directory must outrank an inherited Claude marker, got '$out'"
+
+  # The newline direction, live through the real argv readers: only a
+  # NUL-delimited stream keeps one newline-carrying argument whole on the way
+  # to the parser. Both directions are probed directly, like the spaced
+  # rejection above, so an outer omp session cannot satisfy either assertion.
+  local nl_script="$TMP_ROOT/"$'omp\nfoo.js' nl_dir="$TMP_ROOT/"$'My\nTools'
+  cat > "$nl_script" <<'SH'
+#!/usr/bin/env bash
+"$@"
+:
+SH
+  chmod +x "$nl_script"
+  "$bin/bun" "$nl_script" sleep 30 &
+  probe=$! probe_argv='' tries=0
+  while [ "$tries" -lt 100 ]; do
+    probe_argv=$(bun_probe_script_path "$probe")
+    [ "$probe_argv" = "$nl_script" ] && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ "$probe_argv" = "$nl_script" ] || {
+    kill "$probe" 2>/dev/null; wait "$probe" 2>/dev/null
+    fail "fixture: the fake Bun process did not publish its newline script path as one argv element"
+  }
+  if fm_bun_harness_name "$bin/bun" "$probe" >/dev/null; then
+    kill "$probe" 2>/dev/null; wait "$probe" 2>/dev/null
+    fail "a newline inside one Bun script argument must not manufacture an omp path"
+  fi
+  kill "$probe" 2>/dev/null || true
+  wait "$probe" 2>/dev/null || true
+  mkdir -p "$nl_dir"
+  cat > "$nl_dir/omp" <<'SH'
+#!/usr/bin/env bash
+"$@"
+:
+SH
+  chmod +x "$nl_dir/omp"
+  "$bin/bun" "$nl_dir/omp" sleep 30 &
+  probe=$! probe_argv='' tries=0
+  while [ "$tries" -lt 100 ]; do
+    probe_argv=$(bun_probe_script_path "$probe")
+    [ "$probe_argv" = "$nl_dir/omp" ] && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ "$probe_argv" = "$nl_dir/omp" ] || {
+    kill "$probe" 2>/dev/null; wait "$probe" 2>/dev/null
+    fail "fixture: the fake Bun process did not publish its newline harness path as one argv element"
+  }
+  [ "$(fm_bun_harness_name "$bin/bun" "$probe")" = omp ] || {
+    kill "$probe" 2>/dev/null; wait "$probe" 2>/dev/null
+    fail "a real omp under a newline-carrying directory must identify as omp"
+  }
+  kill "$probe" 2>/dev/null || true
+  wait "$probe" 2>/dev/null || true
   pass "fm-harness and session lock: Bun-hosted omp is identified from real argv boundaries without admitting ordinary Bun commands"
 }
 
