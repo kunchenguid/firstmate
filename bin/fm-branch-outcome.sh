@@ -676,7 +676,7 @@ case "$CMD" in
     VERDICT=$(jq -r --argjson through "$THROUGH" 'select(.seq == $through) | .verdict' "$STORE")
     if [ "$VERDICT" != captain ] && [ "$VERDICT" != main ]; then
       fm_lock_release "$LOCK"
-      echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed acted-on outcome" >&2
+      echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed captain outcome or main outcome" >&2
       exit 1
     fi
     write_processed "$THROUGH"
