@@ -32,9 +32,10 @@
 # control that reaches an interactive pane. The same reasoning covers Claude
 # Code's separate "Allow external CLAUDE.md file imports?" dialog, which
 # `--setting-sources project,local` (passed only by bin/fm-live-lab.sh; an
-# fm-spawn.sh worker loads the user settings too) stopped suppressing: it renders whenever a loaded CLAUDE.md chain
-# reaches outside the project tree - which every crewmate's does, through the
-# captain's own `~/.claude/CLAUDE.md` importing `~/.claude/RTK.md` - and it is
+# fm-spawn.sh worker loads the user settings too) stopped suppressing: it
+# renders whenever a loaded CLAUDE.md chain reaches outside the project
+# tree - which every crewmate's does, through the captain's own
+# `~/.claude/CLAUDE.md` importing `~/.claude/RTK.md` - and it is
 # gated the same fail-closed way as trust: cursor on "No, disable", no arrow
 # navigation from firstmate's steering plane. Only worktree mode reaches this
 # second dialog's flags: a secondmate home has no separate "project" entry to
