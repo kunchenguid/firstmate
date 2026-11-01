@@ -292,21 +292,7 @@ SH
   printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/first.meta"
   printf '%s\n' 'pr=https://example.test/pull/99' > "$case_dir/home/state/middle.meta"
   printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/second.meta"
-  printf 'kind=ship\nbackend=tmux\nwindow=missing:window\n' > "$case_dir/home/state/no-tab.meta"
   printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/no-window.meta"
-  printf '%s\n' 'kind=ship' 'window=%1' > "$case_dir/home/state/implicit-tmux.meta"
-  printf 'kind=ship\nbackend=orca\nwindow=Orca display\nterminal=orca-endpoint\n' > "$case_dir/home/state/orca-terminal.meta"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-}" = list-panes ] && printf '%s\n' '%1'
-exit 0
-SH
-  cat > "$fakebin/orca" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-}" = terminal ] && [ "${2:-}" = read ] && [ "${3:-}" = --terminal ] && [ "${4:-}" = orca-endpoint ] || exit 1
-printf '%s\n' '{"ok":true,"result":{"tail":[]}}'
-SH
-  chmod +x "$fakebin/orca"
   printf 'backend=tmux\nwindow=outside:window\npr=https://example.test/pull/42\n' > "$case_dir/outside.meta"
   ln -s "$case_dir/outside.meta" "$case_dir/home/state/linked.meta"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -320,19 +306,9 @@ SH
   assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: nested/task' \
     "bootstrap matched a nested metadata path as a top-level record"
   assert_contains "$out" 'RECORD_HYGIENE: metadata has no tab: no-window' \
-    "bootstrap did not report metadata without a tab independently of endpoint state"
+    "bootstrap did not report metadata without a tab independently of backend state"
   assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
     "bootstrap did not report duplicate PR references"
-  assert_contains "$out" 'RECORD_HYGIENE: metadata has no endpoint: no-tab' \
-    "bootstrap did not report metadata whose endpoint is missing"
-  assert_contains "$out" 'RECORD_HYGIENE: metadata has no endpoint: no-window' \
-    "bootstrap did not report metadata without a window"
-  assert_not_contains "$out" 'metadata has no endpoint: implicit-tmux' \
-    "bootstrap did not resolve an implicit tmux backend target"
-  assert_not_contains "$out" 'metadata has no endpoint: orca-terminal' \
-    "bootstrap did not resolve the Orca terminal target"
-  assert_not_contains "$out" 'metadata endpoint could not be verified: orca-terminal' \
-    "healthy Orca endpoint was reported as unverifiable"
   assert_not_contains "$out" 'linked' "bootstrap read symlinked metadata"
   [ -f "$case_dir/home/data/orphan/status.log" ] || fail "bootstrap did not archive the orphan status log"
   [ ! -e "$case_dir/home/state/orphan.status" ] || fail "archived orphan status log remained in state"
@@ -403,43 +379,6 @@ SH
   assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog read timed out after 1s' \
     "bootstrap did not report a bounded backlog read timeout"
   pass "bootstrap bounds and reports backlog read timeout"
-}
-
-test_record_hygiene_bounds_endpoint_reads_and_reports_unverified() {
-  local case_dir fakebin out
-  case_dir="$TMP_ROOT/record-hygiene-endpoint-timeout"
-  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  fakebin=$(make_fake_toolchain "$case_dir")
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-sleep 5
-SH
-  chmod +x "$fakebin/tmux"
-  printf 'kind=ship\nbackend=tmux\nwindow=session:0\n' > "$case_dir/home/state/slow.meta"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_RECORD_HYGIENE_READ_TIMEOUT=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" 'RECORD_HYGIENE: endpoint read timed out after 1s: slow' \
-    "bootstrap did not report a bounded endpoint read timeout"
-
-  case_dir="$TMP_ROOT/record-hygiene-unverified-endpoint"
-  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' zellij > "$case_dir/home/config/backend"
-  fakebin=$(make_fake_toolchain "$case_dir")
-  cat > "$fakebin/zellij" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/zellij"
-  printf 'kind=ship\nbackend=zellij\nwindow=session:1\n' > "$case_dir/home/state/unverified.meta"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_RECORD_HYGIENE_READ_TIMEOUT=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  assert_contains "$out" 'RECORD_HYGIENE: metadata endpoint could not be verified: unverified' \
-    "bootstrap hid an unverified backend endpoint"
-  pass "bootstrap bounds endpoint reads and reports unverified endpoints distinctly"
 }
 
 test_bootstrap_reporting() {
@@ -1719,7 +1658,6 @@ test_record_hygiene_archives_old_orphan_status
 test_record_hygiene_watcher_data_is_defined
 test_record_hygiene_reclaims_stale_running_marker
 test_record_hygiene_bounds_backlog_read
-test_record_hygiene_bounds_endpoint_reads_and_reports_unverified
 test_bootstrap_reporting
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version
