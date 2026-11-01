@@ -417,6 +417,7 @@ An arm whose own script path sits under a disposable no-mistakes validation chec
 Once per poll the watcher checks that its home, its state directory, and its own code root still exist, and exits with a logged reason when one is gone, scoped to itself alone, so a torn-down temporary home or a discarded checkout never leaves an orphan watcher behind.
 The arm applies the same rule to its own ground: when its script, its state directory, or an `FM_HOME` that existed at start disappears, it fails with `watcher: FAILED - arm ground removed: <path> no longer exists` instead of polling on; the `bin/fm-watch-arm.sh` header owns the timing bound.
 The watcher uses bash's native fatal handling for HUP and TERM, including during a blocked check, a blocked `fm_backend_capture` pane read, or a backend event wait, so both run its EXIT cleanup and stop that read or wait.
+The brief launch-and-publication window for a detached [lifecycle hook run](configuration.md#lifecycle-hooks-hooks) defers stop signals until its complete process identity is recorded for the successor watcher.
 `watcher_stop_signals` in `bin/fm-watch.sh` owns the signal-handling rationale.
 The EXIT cleanup bounds its wait for `state/.watcher-down.lock` while persisting recovery state with `FM_WATCHER_CLEANUP_LOCK_BOUND` (default 2 seconds).
 Only positive decimal integers are accepted, including leading-zero forms such as `08`; empty, non-numeric, and zero values (including `00`) fall back to 2 seconds.

@@ -316,7 +316,8 @@ In the default Codex mode, a true value lets the second stop finish after one fo
 
 ### Claude cooperative mode
 
-Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
+Claude runs the guard with `--claude`, whose supervision checks ignore `stop_hook_active` and cooperate with the Stop-owned auto-arm.
+Lifecycle hooks retain their separate [continuation bound](configuration.md#lifecycle-hooks-hooks).
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes.
 Under the default one-shot behavior, that re-opened the 2026-07-21 blind window.
 
