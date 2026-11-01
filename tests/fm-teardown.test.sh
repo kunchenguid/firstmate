@@ -1200,6 +1200,29 @@ SH
     && fail "the unconfirmed close passed the link as a pr argument that renders as merged"
   assert_grep '(done ' "$case_dir/data/backlog.md" \
     "the completed item did not record its completion"
+
+  # A Forgejo-style `pulls` path on a host this script refuses to read (its
+  # repository segment ends in .git) is the live shape the reviewer reproduced:
+  # tasks-axi accepts it and renders "(merged ...)", so no run may pass it as a
+  # pr argument.
+  case_dir=$(make_case tasks-axi-renderer-accepted-pulls-path)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://forge.example.com/team/api.git/pulls/5' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a pulls-path link failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left the pulls-path item at $(backlog_row_state "$case_dir"): $out"
+  assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
+    "a pulls-path link the gate could not classify was recorded as a merge nobody read"
+  assert_grep 'api.git/pulls/5' "$case_dir/data/backlog.md" \
+    "the unread pulls-path link was dropped instead of kept in the note"
   pass "teardown keeps a renderer-accepted but unparseable link as an unconfirmed note"
 }
 

@@ -1915,11 +1915,15 @@ backlog_pr_completion_args() {  # <pr-url>
     return 0
   fi
   if ! fm_pr_url_parse "$1"; then
-    if fm_pr_url_renders_as_merge "$1"; then
-      BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because its pull request state could not be read: $1. The link is a historical record whose merge was not verified in this run")
-      return 0
-    fi
-    BACKLOG_DONE_ARGS=(--pr "$1")
+    # No second definition of "a link the renderer would print as merged" is
+    # written here: anything this script cannot positively read as a pull request
+    # is treated as unverified, so an unfamiliar URL shape can only cost a merge
+    # claim, never invent one. A value that is not a URL at all keeps the `pr`
+    # shape so the transition refuses the close instead of losing the link.
+    case "$1" in
+      https://*) BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because its pull request state could not be read: $1. The link is a historical record whose merge was not verified in this run") ;;
+      *) BACKLOG_DONE_ARGS=(--pr "$1") ;;
+    esac
     return 0
   fi
   pr_merge_fact "$1"
@@ -1936,16 +1940,6 @@ backlog_pr_completion_args() {  # <pr-url>
   else
     BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because $FM_TEARDOWN_PR_MERGE_DETAIL: $1. The link is a historical record whose merge was not verified in this run")
   fi
-}
-
-# True for a pull-request-shaped link tasks-axi's renderer accepts even though
-# this script's parser refuses it, which is exactly the shape that would print
-# "(merged ...)" for a link no run verified.
-fm_pr_url_renders_as_merge() {  # <value>
-  case "$1" in
-    https://*/pull/[0-9]*) return 0 ;;
-  esac
-  return 1
 }
 
 # Closing the backlog item is this script's own last act on the record, not a

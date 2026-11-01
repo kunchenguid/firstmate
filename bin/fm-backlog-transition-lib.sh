@@ -560,14 +560,18 @@ fm_backlog_note_encode() {  # <text>
   local LC_ALL=C
   [ -n "$text" ] || return 1
   [ "${#text}" -le "$FM_BACKLOG_NOTE_MAX" ] || return 1
-  case "$text" in -*) return 1 ;; esac
   while [ "$i" -lt "${#text}" ]; do
     ch=${text:$i:1}
+    # A note is one `arg=` value, so a leading dash is data, not a flag, and any
+    # byte the line can hold is carried. Only what would end the line or corrupt
+    # the record is refused: a control byte or the delete byte.
     case "$ch" in
       ' ') encoded=%20 ;;
       '%') encoded=%25 ;;
-      [[:print:]]) encoded=$ch ;;
-      *) return 1 ;;
+      *)
+        [[ "$ch" == [[:cntrl:]] ]] && return 1
+        encoded=$ch
+        ;;
     esac
     out=$out$encoded
     i=$((i + 1))

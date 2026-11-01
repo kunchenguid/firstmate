@@ -2111,11 +2111,15 @@ test_note_codec_carries_punctuation_and_refuses_line_breaks() {
     export FM_HOME FM_ROOT_OVERRIDE
     . "$ROOT/bin/fm-tasks-axi-lib.sh"
     . "$ROOT/bin/fm-backlog-transition-lib.sh"
-    fm_backlog_note_encode "$text" || exit 1
+    # Every byte the record can hold is carried: a leading dash is a value, not a
+    # flag, and a non-ASCII byte is data rather than a control byte.
+    for text in "$text" "-a note that starts with a dash" "含中文的 note — still one line"; do
+      encoded_one=$(fm_backlog_note_encode "$text") || exit 1
+      [ "$(fm_backlog_note_decode "$encoded_one")" = "$text" ] || exit 2
+      [ "$(fm_backlog_note_encode "$(fm_backlog_note_decode "$encoded_one")")" = "$encoded_one" ] || exit 3
+    done
+    fm_backlog_note_encode "$text" || exit 4
     printf '\n'
-    [ "$(fm_backlog_note_decode "$(fm_backlog_note_encode "$text")")" = "$text" ] || exit 2
-    [ "$(fm_backlog_note_encode "$(fm_backlog_note_decode "$(fm_backlog_note_encode "$text")")")" \
-      = "$(fm_backlog_note_encode "$text")" ] || exit 3
   ) || fail "a note holding ordinary punctuation did not round-trip byte for byte"
 
   (
@@ -2139,6 +2143,10 @@ test_note_codec_carries_punctuation_and_refuses_line_breaks() {
     fm_backlog_note_encode "$(printf 'line one\nline two')" >/dev/null 2>&1 && exit 1
     fm_backlog_close_marker_write "$home/state" "$id" "$home/data" spawn-codec --note "$(printf 'line one\nline two')" \
       >/dev/null 2>&1 && exit 2
+    # A control byte would corrupt the line just as a line break does.
+    fm_backlog_note_encode "$(printf 'line one\ttwo')" >/dev/null 2>&1 && exit 3
+    fm_backlog_close_marker_write "$home/state" "$id" "$home/data" spawn-codec --note "$(printf 'line one\ttwo')" \
+      >/dev/null 2>&1 && exit 4
     exit 0
   ) || fail "a note holding a line break is still accepted by the pending-close record"
   pass "the pending-close record carries punctuation and still refuses a line break"
