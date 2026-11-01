@@ -386,6 +386,10 @@ poll() {
     ($events | split("\n")) as $events | ($health[0].notifications.pending // []) as $pending
     | select($full or $health[0].prs[.] == null or IN($events[]) or IN($pending[]))' "$TMP/owned-urls" > "$TMP/urls"
   : > "$TMP/unsettled"
+  # Persist all selected URLs with the advanced notification cursor before reads;
+  # interruption leaves every unprocessed event eligible for retry.
+  jq --rawfile urls "$TMP/urls" '.notifications.pending = ($urls | split("\n") | map(select(length > 0)))' \
+    "$TMP/health.json" > "$TMP/next.json" && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
   while IFS= read -r url; do
     index=$((index + 1))
     read_dir="$TMP/read-$index"
@@ -409,6 +413,7 @@ poll() {
     step=$(cat "$TMP/step.json")
     [ "$step" != null ] || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
     jq -r '.lines[]' "$TMP/step.json"
+    [ "$(jq -r '.mergeable // "null"' "$read_dir/rest.json")" != null ] || printf '%s\n' "$url" >> "$TMP/unsettled"
     jq --arg url "$url" --slurpfile step "$TMP/step.json" '.prs[$url] = $step[0].fp' "$TMP/health.json" > "$TMP/next.json"
     if ! cmp -s "$TMP/next.json" "$TMP/health.json"; then
       save_health "$TMP/next.json"
