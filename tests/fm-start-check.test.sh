@@ -162,9 +162,13 @@ test_claude_dialog_has_no_key() {
 
 test_dead_agent_names_relaunch() {
   reset_state
-  open_pane keep "idle"
+  # The pane outlives its agent and returns to a shell: the endpoint is there,
+  # the agent is not, which is the one state relaunch accepts.
+  open_pane d1 "pi exited"
+  tmux respawn-pane -k -t "$SESSION:d1" "exec sh" || fail "fixture: respawn shell pane"
+  sleep 0.3
   arm_task d1 pi 1000
-  [ "$(fm_backend_agent_alive tmux "$SESSION:d1")" = dead ] || fail "fixture: missing window is not dead"
+  [ "$(fm_backend_agent_state tmux "$SESSION:d1")" = dead ] || fail "fixture: a shell-only pane is not dead"
   start_check_tick 1200 || fail "tick failed"
   case "$START_CHECK_WAKE" in
     *"harness=pi; worker exited before starting); relaunch: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-control.sh d1 relaunch --note '"*"'") ;;
@@ -172,7 +176,9 @@ test_dead_agent_names_relaunch() {
   esac
   # A secondmate relaunch takes no note.
   reset_state
-  open_pane keep "idle"
+  open_pane d2 "pi exited"
+  tmux respawn-pane -k -t "$SESSION:d2" "exec sh" || fail "fixture: respawn shell pane"
+  sleep 0.3
   arm_task d2 pi 1000
   printf 'kind=secondmate\n' >> "$STATE/d2.meta"
   start_check_tick 1200 || fail "tick failed"
@@ -181,6 +187,20 @@ test_dead_agent_names_relaunch() {
     *) fail "unexpected secondmate dead-agent reason: $START_CHECK_WAKE" ;;
   esac
   pass "an exited worker is named with a relaunch command that relaunch accepts for its kind"
+}
+
+test_missing_endpoint_names_recovery() {
+  reset_state
+  open_pane keep "idle"
+  arm_task g2 pi 1000
+  [ "$(fm_backend_agent_state tmux "$SESSION:g2")" = missing ] || fail "fixture: an absent window is not missing"
+  start_check_tick 1200 || fail "tick failed"
+  case "$START_CHECK_WAKE" in
+    *"worker endpoint gone before starting); recover it per stuck-crewmate-recovery after: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-crew-state.sh g2") ;;
+    *) fail "unexpected missing-endpoint reason: $START_CHECK_WAKE" ;;
+  esac
+  case "$START_CHECK_WAKE" in *relaunch*) fail "a vanished endpoint was offered a relaunch relaunch refuses" ;; esac
+  pass "a vanished endpoint points at recovery, not at a relaunch that would refuse"
 }
 
 test_pending_composer_names_submit() {
@@ -304,6 +324,7 @@ fm_test_run \
   test_pi_dialog_named_once \
   test_claude_dialog_has_no_key \
   test_dead_agent_names_relaunch \
+  test_missing_endpoint_names_recovery \
   test_pending_composer_names_submit \
   test_no_signal_names_inspect \
   test_codex_footer_and_status_are_proof \

@@ -2894,18 +2894,27 @@ start_check_reason() {  # <id> <meta> <harness> <age>
     fi
     return 0
   fi
-  if [ "$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null)" = dead ]; then
-    # A ship or scout relaunch must tell the replacement what happened; a
-    # secondmate's relaunch takes no note (bin/fm-control.sh owns both rules).
-    note=
-    case "$(fm_meta_get "$meta" kind)" in
-      secondmate) ;;
-      *) note=" --note 'The previous launch exited before it started the brief; start the brief from the beginning.'" ;;
-    esac
-    printf -v START_CHECK_REASON '%s; worker exited before starting); relaunch: %s %q %q relaunch%s' "$head" "$home" \
-      "$SCRIPT_DIR/fm-control.sh" "$id" "$note"
-    return 0
-  fi
+  case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null)" in
+    dead)
+      # A ship or scout relaunch must tell the replacement what happened; a
+      # secondmate's relaunch takes no note (bin/fm-control.sh owns both rules).
+      note=
+      case "$(fm_meta_get "$meta" kind)" in
+        secondmate) ;;
+        *) note=" --note 'The previous launch exited before it started the brief; start the brief from the beginning.'" ;;
+      esac
+      printf -v START_CHECK_REASON '%s; worker exited before starting); relaunch: %s %q %q relaunch%s' "$head" "$home" \
+        "$SCRIPT_DIR/fm-control.sh" "$id" "$note"
+      return 0
+      ;;
+    missing)
+      # Relaunch refuses an endpoint it cannot prove stopped, so a vanished
+      # endpoint goes to the stuck-worker recovery playbook instead.
+      printf -v START_CHECK_REASON '%s; worker endpoint gone before starting); recover it per stuck-crewmate-recovery after: %s %q %q' \
+        "$head" "$home" "$SCRIPT_DIR/fm-crew-state.sh" "$id"
+      return 0
+      ;;
+  esac
   cstate=$(fm_backend_composer_state "$backend" "$target" "$(window_label "$target")" 2>/dev/null) || cstate=unknown
   if [ "$cstate" = pending ]; then
     printf -v START_CHECK_REASON '%s; instructions typed but not submitted); submit: %s %q %q --key Enter' "$head" "$home" \
