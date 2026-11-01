@@ -1729,11 +1729,26 @@ test_remote_host_supervisor_adoption_and_accounting() {
       launch_phase:"dispatching", model:null,
       route:{placement:"remote", operation:"host.7", home:$h}}]}' > "$reservation3"
   chmod 600 "$reservation3"
+  # A launch that asked for another model still recognizes the supervisor it
+  # found: the immutable reservation keeps the requested model, and the
+  # observing receipt is the proof of the generation and model that run.
+  meta4=$R_REMOTE/state/parent-route/theshop4.meta
+  printf 'kind=secondmate\nmodel=pool-model-a\nspawn_gen=host.4\n' > "$meta4"
+  receipt4=$R_REMOTE/state/parent-route/theshop4.seat-operation.op4
+  printf 'schema=fm-remote-seat-receipt.v1\noperation=op4\nverb=launch\nactual_generation=host.4\nactual_model=pool-model-a\n' > "$receipt4"
+  chmod 600 "$receipt4"
+  reservation4=$R_REMOTE/state/parent-route/theshop4.seat-reservation.op4
+  jq -n --arg h "$R_REMOTE" '{schema:"fm-fleet-seat-holder.v2", task:"theshop4",
+    incarnations:[{generation:"op4", kind:"secondmate", lifecycle:"reserved",
+      launch_phase:"dispatching", model:"pool-model-b",
+      route:{placement:"remote", operation:"op4", home:$h}}]}' > "$reservation4"
+  chmod 600 "$reservation4"
   out=$(serve_remotes 2>&1)
   assert_contains "$out" "served theshop" "bound or default-model reservations blocked serving"
-  assert_equals false "$(jq '.holders | any(.task == "theshop2" or .task == "theshop3")' \
+  assert_equals false "$(jq '.holders | any(.task == "theshop2" or .task == "theshop3" or .task == "theshop4")' \
     "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "parent-accounted supervisors were adopted anyway"
-  rm -f "$receipt" "$reservation" "$reservation3" "$meta2" "$meta3" "$meta"
+  rm -f "$receipt" "$reservation" "$reservation3" "$meta2" "$meta3" "$meta" \
+    "$receipt4" "$reservation4" "$meta4"
   rm -f "$R_ROOT/config/fleet-seats" "$R_ROOT/state/theshop.meta"
   out=$(serve_remotes 2>&1)
   assert_contains "$out" "served theshop" "untracked host supervisor prevented policy clearing"
