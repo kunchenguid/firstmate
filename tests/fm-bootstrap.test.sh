@@ -266,6 +266,121 @@ assert_timeout_report() {
 #   mode=empty -> output must be empty (expect/notcontains ignored)
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
+test_record_hygiene_archives_old_orphan_status() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/record-hygiene"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo 0.2.6 ;;
+  update) echo 'usage: tasks-axi update <id> --body-file <path> --archive-body' ;;
+  mv) echo 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+  list)
+    case " $* " in *' --fields id '*) echo 'unsupported extra field: id' >&2; exit 2 ;; esac
+    printf 'count: 3\ntasks[1]{id}:\n  missing-record\ntasks[2]{id}:\n  "missing,record",extra\ntasks[3]{id}:\n  nested/task\n'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/tasks-axi"
+  mkdir -p "$case_dir/home/state/nested"
+  printf '%s\n' 'kind=ship' > "$case_dir/home/state/nested/task.meta"
+  printf '%s\n' 'failed [at=1]: fixture orphan' > "$case_dir/home/state/orphan.status"
+  touch -t 202001010000 "$case_dir/home/state/orphan.status"
+  printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/first.meta"
+  printf '%s\n' 'pr=https://example.test/pull/99' > "$case_dir/home/state/middle.meta"
+  printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/second.meta"
+  printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/no-window.meta"
+  printf 'backend=tmux\nwindow=outside:window\npr=https://example.test/pull/42\n' > "$case_dir/outside.meta"
+  ln -s "$case_dir/outside.meta" "$case_dir/home/state/linked.meta"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'RECORD_HYGIENE: status log without metadata older than 24 hours: orphan' \
+    "bootstrap did not report an old orphan status log"
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: missing-record' \
+    "bootstrap did not report an In-flight row without a task record"
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: missing,record' \
+    "bootstrap truncated a comma-containing in-flight ID"
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: nested/task' \
+    "bootstrap matched a nested metadata path as a top-level record"
+  assert_contains "$out" 'RECORD_HYGIENE: metadata has no tab: no-window' \
+    "bootstrap did not report metadata without a tab independently of backend state"
+  assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
+    "bootstrap did not report duplicate PR references"
+  assert_not_contains "$out" 'linked' "bootstrap read symlinked metadata"
+  [ -f "$case_dir/home/data/orphan/status.log" ] || fail "bootstrap did not archive the orphan status log"
+  [ ! -e "$case_dir/home/state/orphan.status" ] || fail "archived orphan status log remained in state"
+  assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
+    "bootstrap lost duplicate PR detection across an intervening metadata record"
+  pass "bootstrap archives an old orphan status log and reports interleaved duplicates"
+}
+
+test_record_hygiene_reclaims_stale_running_marker() {
+  local case_dir status tries
+  case_dir="$TMP_ROOT/record-hygiene-stale-marker"
+  mkdir -p "$case_dir/home"/{state,data,config}
+  printf '99999999 nonexistent-process-start-time\n' > "$case_dir/home/state/.record-hygiene-running"
+  printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/hygiene.meta"
+  status=0
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
+    FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
+    FM_RECORD_HYGIENE_TIMEOUT=1 timeout 30 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+  { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
+    || fail "watcher failed while reclaiming stale hygiene marker (exit=$status)"
+  tries=0
+  while [ ! -s "$case_dir/home/state/.record-hygiene-last" ] \
+      && ! grep -q $'\tcheck\trecord-hygiene\t' "$case_dir/home/state/.wake-queue" 2>/dev/null \
+      && [ "$tries" -lt 30 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  [ -s "$case_dir/home/state/.record-hygiene-last" ] \
+    || grep -q $'\tcheck\trecord-hygiene\t' "$case_dir/home/state/.wake-queue" 2>/dev/null \
+    || fail "replacement hygiene worker did not complete within 3s"
+  pass "watcher reclaims a stale hygiene marker and starts a worker"
+}
+
+test_record_hygiene_watcher_data_is_defined() {
+  local case_dir status
+  case_dir="$TMP_ROOT/record-hygiene-watcher-data"
+  mkdir -p "$case_dir/home"/{state,data,config}
+  status=0
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
+    FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
+    timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+  { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
+    || fail "watcher failed during hygiene check (exit=$status)"
+  assert_not_contains "$(cat "$case_dir/err")" 'DATA: unbound variable' \
+    "watcher heartbeat called record hygiene without its data directory"
+  pass "watcher heartbeat supplies the home data directory to record hygiene"
+}
+
+test_record_hygiene_bounds_backlog_read() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/record-hygiene-timeout"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) echo 0.2.6 ;;
+  update) echo 'usage: tasks-axi update <id> --body-file <path> --archive-body' ;;
+  mv) echo 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+  list) sleep 5 ;;
+esac
+SH
+  chmod +x "$fakebin/tasks-axi"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_RECORD_HYGIENE_READ_TIMEOUT=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog read timed out after 1s' \
+    "bootstrap did not report a bounded backlog read timeout"
+  pass "bootstrap bounds and reports backlog read timeout"
+}
+
 test_bootstrap_reporting() {
   local label lease tasks quota backend mode expect notcontains case_dir fakebin base out n archive_body multi_id quota_version
   n=0
@@ -1539,6 +1654,10 @@ SH
   pass "bootstrap gates resolver fields and additive harnesses on the typed key or a declared typesafe source"
 }
 
+test_record_hygiene_archives_old_orphan_status
+test_record_hygiene_watcher_data_is_defined
+test_record_hygiene_reclaims_stale_running_marker
+test_record_hygiene_bounds_backlog_read
 test_bootstrap_reporting
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version

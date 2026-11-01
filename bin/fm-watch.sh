@@ -214,6 +214,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 # Hold this state directory open for the main loop's teardown check: a
 # directory recreated at the same path is then a different directory, and the
@@ -241,6 +242,7 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+. "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
 # Only for the arm-time check on FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS below;
 # the per-cycle reconcile itself runs as a separate process.
 # shellcheck source=bin/fm-procevent-lib.sh
@@ -4487,6 +4489,25 @@ EOF
     fi
   done < <(recorded_windows)
 
+  # Collect a completed hygiene scan before launching another one. The report
+  # child keeps endpoint/backlog reads out of the polling path.
+  hygiene_result="$STATE/.record-hygiene-result"
+  hygiene_running="$STATE/.record-hygiene-running"
+  if [ -f "$hygiene_result" ]; then
+    hygiene_report=$(cat "$hygiene_result")
+    if [ -n "$hygiene_report" ]; then
+      if ! cmp -s <(printf '%s\n' "$hygiene_report") "$STATE/.record-hygiene-last"; then
+        hygiene_reason="check: record hygiene: $hygiene_report"
+        fm_wake_append check record-hygiene "$hygiene_reason" || exit 1
+        printf '%s\n' "$hygiene_report" > "$STATE/.record-hygiene-last"
+        wake "$hygiene_reason"
+      fi
+    else
+      rm -f "$STATE/.record-hygiene-last"
+    fi
+    rm -f "$hygiene_result" "$hygiene_running"
+  fi
+
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
@@ -4496,6 +4517,45 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    if [ -e "$hygiene_running" ]; then
+      hygiene_owner=$(cat "$hygiene_running" 2>/dev/null || true)
+      IFS=$'\t' read -r hygiene_pid hygiene_started <<< "$hygiene_owner"
+      hygiene_live_start=''
+      case "$hygiene_pid" in ''|*[!0-9]*) ;; *)
+        kill -0 "$hygiene_pid" 2>/dev/null && hygiene_live_start=$(ps -o lstart= -p "$hygiene_pid" 2>/dev/null | sed 's/^[[:space:]]*//') ;;
+      esac
+      hygiene_age=$(age_of "$hygiene_running")
+      report_timeout=${FM_RECORD_HYGIENE_TIMEOUT:-60}
+      case "$report_timeout" in ''|*[!0-9]*|0) report_timeout=60 ;; esac
+      if [ -z "$hygiene_live_start" ] || [ "$hygiene_live_start" != "$hygiene_started" ] || [ "$hygiene_age" -gt $(( report_timeout * 3 )) ]; then
+        rm -f "$hygiene_running"
+      fi
+    fi
+    if [ ! -e "$hygiene_running" ] && [ ! -e "$hygiene_result" ]; then
+      (
+        report_timeout=${FM_RECORD_HYGIENE_TIMEOUT:-60}
+        case "$report_timeout" in ''|*[!0-9]*|0) report_timeout=60 ;; esac
+        FM_BOOTSTRAP_DETECT_ONLY=1 record_hygiene_report > "$hygiene_result.tmp" &
+        report_pid=$!
+        (
+          sleep "$report_timeout"
+          : > "$hygiene_result.timeout"
+          kill "$report_pid" 2>/dev/null || true
+        ) &
+        watchdog_pid=$!
+        wait "$report_pid" || true
+        kill "$watchdog_pid" 2>/dev/null || true
+        wait "$watchdog_pid" 2>/dev/null || true
+        if [ -e "$hygiene_result.timeout" ]; then
+          printf 'RECORD_HYGIENE: report timed out after %ss\n' "$report_timeout" > "$hygiene_result.tmp"
+          rm -f "$hygiene_result.timeout"
+        fi
+        mv -f "$hygiene_result.tmp" "$hygiene_result"
+      ) >/dev/null 2>&1 &
+      hygiene_worker=$!
+      hygiene_started=$(ps -o lstart= -p "$hygiene_worker" 2>/dev/null | sed 's/^[[:space:]]*//')
+      printf '%s\t%s\n' "$hygiene_worker" "$hygiene_started" > "$hygiene_running"
+    fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
