@@ -332,22 +332,14 @@ meta_incarnation() { # <meta>
 # delivery.
 # A scout never delivers a PR, so it never carries one.
 pr_for_task() { # <meta> [preferred-line]
-  local meta=$1 preferred=${2:-} value
+  local meta=$1 preferred=${2:-} value ready_pr
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
   value=$(meta_field "$meta" pr)
   if [ -n "$preferred" ]; then
-    case "$preferred" in
-      done\ *' PR https://'*' checks green'|done:*'PR https://'*' checks green')
-        local ready_url=${preferred#* PR }
-        ready_url=${ready_url% checks green}
-        case "$ready_url" in *[[:space:]]*|'') ;; *) value=$ready_url ;; esac
-        ;;
-    esac
-  fi
-  if [ -z "$value" ] && [ -n "$preferred" ]; then
-    value=$(printf '%s\n' "$preferred" \
+    ready_pr=$(printf '%s\n' "$preferred" \
       | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
       | head -1 || true)
+    [ -z "$ready_pr" ] || value=$ready_pr
   fi
   clean_field "$value"
 }
