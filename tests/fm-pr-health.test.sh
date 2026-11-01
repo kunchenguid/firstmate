@@ -79,15 +79,11 @@ case "$1 $2" in
   'api repos/o/r/pulls/'*)
     rest=${2#repos/o/r/pulls/}
     if [ -f "$FORGE/interrupt-$rest" ]; then
-      # Stop the whole pass mid-read, as a check timeout would. The read runs
-      # in background copies of the poll shell, so the outermost one is the pass.
+      # Stop the whole pass mid-read, as a check timeout would. The case
+      # records the pass's PID once it has started it.
       rm -f "$FORGE/interrupt-$rest"
-      p=$$ main=
-      while p=$(ps -o ppid= -p "$p" | tr -d ' ') && [ -n "$p" ] && [ "$p" -gt 1 ]; do
-        if ps -o command= -p "$p" | grep -q 'fm-pr-health[.]sh poll$'; then main=$p
-        elif [ -n "$main" ]; then break; fi
-      done
-      [ -z "$main" ] || { printf '%s\n' "$main" > "$FORGE/interrupted"; kill -TERM "$main"; }
+      for attempt in $(seq 1 100); do [ -s "$FORGE/poll-pid" ] && break; sleep 0.05; done
+      [ -s "$FORGE/poll-pid" ] && kill -TERM "$(cat "$FORGE/poll-pid")" && : > "$FORGE/interrupted"
       exit 1
     fi
     case "$rest" in
@@ -853,10 +849,13 @@ test_interrupted_pass_keeps_events_pending() {
   set_pr "$home" 44 '.reviewDecision = "CHANGES_REQUESTED"'
   notify "$home" o/r 44 2026-11-01T00:04:00Z comment
   : > "$home/forge/interrupt-44"
-  if with_home "$home" bash "$home/state/pr-health.check.sh" >/dev/null 2>&1; then
-    fail 'the interrupted pass ran to completion'
-  fi
-  [ -s "$home/forge/interrupted" ] || fail 'the interrupting read never stopped the pass'
+  # The check execs the poll, so this background job's PID is the pass itself.
+  PATH="$home/fakebin:$PATH" FORGE="$home/forge" FM_HOME="$home" FM_ROOT_OVERRIDE="$home/root" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    bash "$home/state/pr-health.check.sh" >/dev/null 2>&1 &
+  printf '%s\n' "$!" > "$home/forge/poll-pid"
+  if wait "$!"; then fail 'the interrupted pass ran to completion'; fi
+  [ -e "$home/forge/interrupted" ] || fail 'the interrupting read never stopped the pass'
   # The pass stopped mid-read: the advanced cursor and the event it selected
   # were saved together before any read, so a 304 next pass cannot lose it.
   jq -e --arg lm "$(cat "$home/forge/notifications-lm")" --arg url https://github.com/o/r/pull/44 \
