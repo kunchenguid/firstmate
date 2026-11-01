@@ -1356,6 +1356,34 @@ test_watcher_self_evicts_on_lock_takeover() {
   pass "watcher self-evicts when the lock pid no longer names it"
 }
 
+# A stopping watcher joins its backgrounded watch-tick hook run before it gives
+# up its lock, so no hook run overlaps the next watcher's
+# (docs/configuration.md "Lifecycle hooks").
+test_watcher_joins_hook_runs_before_exit() {
+  local dir state fakebin out pid i
+  dir=$(make_case hook-join)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  mkdir -p "$dir/hooks/watch-tick.d"
+  printf '#!/bin/sh\n[ -e "%s/hook-started" ] && exit 0\n: > "%s/hook-started"\nsleep 2\n: > "%s/hook-done"\n' \
+    "$dir" "$dir" "$dir" > "$dir/hooks/watch-tick.d/10-slow"
+  chmod +x "$dir/hooks/watch-tick.d/10-slow"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$dir/hook-started" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/hook-started" ] || { kill -TERM "$pid" 2>/dev/null; wait_for_exit "$pid" 60 || true; fail "the watch-tick hook never ran"; }
+  kill -TERM "$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 60 || true
+  [ -e "$dir/hook-done" ] || fail "the watcher exited while its watch-tick hook run was still in flight"
+  pass "watcher joins an in-flight watch-tick hook run before it exits"
+}
+
 test_watcher_exits_on_state_teardown_during_startup() {
   # A state directory torn down and recreated at the same path just after the
   # watcher claimed its lock - before the main loop - is still a teardown: the
@@ -2390,6 +2418,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
+test_watcher_joins_hook_runs_before_exit
 test_watcher_exits_on_state_teardown_during_startup
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher

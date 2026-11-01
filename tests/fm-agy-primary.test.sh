@@ -57,7 +57,7 @@ install_scripts() {
   for f in fm-sessionstart-agy.sh fm-turnend-guard-agy.sh \
            fm-turnend-guard.sh fm-sessionstart-run.sh fm-sessionstart-nudge.sh \
            fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-subagent-pretool-check.sh \
-           fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
+           fm-claude-stop-autoarm.sh fm-hook-host-lib.sh fm-hooks-lib.sh fm-hooks.sh \
            fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh fm-path-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-gemini-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
@@ -299,6 +299,35 @@ run_agy_stop() {
     "$FM_HOME/bin/fm-turnend-guard-agy.sh"
   '
   printf '%s' "$payload" | run_under_agy FM_HOME="$dir" FM_AGY_PARK_POLL=1 2>/dev/null
+}
+
+# Installed turn-end lifecycle hooks run on a normal Antigravity stop, not only
+# when the park fails; a refusal continues the turn with its reason (the exit-2
+# path Antigravity would drop), and the very next stop is never held again.
+test_turnend_guard_agy_runs_turn_end_hooks_on_a_normal_stop() {
+  local dir payload out decision reason
+  dir=$(make_primary_dir "$TMP_ROOT/stop-turn-end-hook")
+  write_arm_fixture "$dir" actionable
+  mkdir -p "$dir/hooks/turn-end.d"
+  printf '#!/bin/sh\ncat > "%s/payload.json"\necho "finish the owed reply first" >&2\nexit 1\n' \
+    "$dir" > "$dir/hooks/turn-end.d/10-owed"
+  chmod +x "$dir/hooks/turn-end.d/10-owed"
+  payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":1,"terminationReason":"NO_TOOL_CALL"}'
+  out=$(run_agy_stop "$dir" "$payload")
+  decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
+  reason=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null)
+  assert_equals "continue" "$decision" "a refusing turn-end hook must continue the turn"
+  assert_contains "$reason" "finish the owed reply first" "the hook's reason must reach the session"
+  jq -e '.session == "s-1"' "$dir/payload.json" >/dev/null \
+    || fail "turn-end payload is wrong: $(cat "$dir/payload.json")"
+  rm -f "$dir/payload.json"
+  out=$(run_agy_stop "$dir" "$payload")
+  assert_equals "{}" "$out" "the stop right after a hook hold must not be held again"
+  [ ! -e "$dir/payload.json" ] || fail "turn-end hooks ran on the stop right after a hold"
+  printf '#!/bin/sh\nexit 0\n' > "$dir/hooks/turn-end.d/10-owed"
+  out=$(run_agy_stop "$dir" "$payload")
+  assert_equals "{}" "$out" "a passing turn-end hook must let the stop end"
+  pass "fm-turnend-guard-agy: turn-end hooks run on a normal stop, a refusal continues the turn once"
 }
 
 test_turnend_guard_agy_actionable_wake_followup() {
@@ -617,6 +646,7 @@ test_session_lock_agy_ancestry_and_supervision_model() {
 fm_test_run \
   test_agents_hooks_json_registration_and_cwd_contract \
   test_sessionstart_agy_primary_secondmate_and_worktree_scope \
+  test_turnend_guard_agy_runs_turn_end_hooks_on_a_normal_stop \
   test_turnend_guard_agy_actionable_wake_followup \
   test_turnend_guard_agy_supervision_host_park \
   test_turnend_guard_agy_park_timeout_rearms \

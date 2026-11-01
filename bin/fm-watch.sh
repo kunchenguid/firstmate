@@ -3643,6 +3643,11 @@ watcher_cleanup() {
   # Join any interrupted owner creation/publication before the release sweep:
   # a child must not publish a lock or staging directory after we removed ours.
   fm_lock_wait_pending_mutation
+  # Join backgrounded watch-tick and heartbeat hook runs before this watcher
+  # gives up its lock, so no run overlaps the next watcher's. bin/fm-hooks.sh
+  # bounds each hook by FM_HOOK_TIMEOUT, so this wait is bounded too.
+  [ -z "${WATCH_TICK_HOOK_PID:-}" ] || wait "$WATCH_TICK_HOOK_PID" 2>/dev/null || true
+  [ -z "${HEARTBEAT_HOOK_PID:-}" ] || wait "$HEARTBEAT_HOOK_PID" 2>/dev/null || true
   pr_poll_publish_release || cleanup_status=1
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then

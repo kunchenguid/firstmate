@@ -72,6 +72,8 @@ continue_turn() {  # <reason>
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
 
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || allow_stop
@@ -82,6 +84,24 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || allow_stop
 TERM_REASON=$(printf '%s' "$PAYLOAD" | jq -r '.terminationReason // empty' 2>/dev/null || true)
 if [ -n "$TERM_REASON" ] && [ "$TERM_REASON" != "NO_TOOL_CALL" ]; then
   allow_stop
+fi
+
+# Installed turn-end lifecycle hooks (docs/configuration.md "Lifecycle hooks")
+# run on every normal stop, before any park, and a refusal continues the turn
+# with its reason. Antigravity marks no follow-up-driven stop, so
+# state/.turnend-hook-held records the hold and the very next stop skips the
+# hooks once, so hooks can never hold a turn open twice. Absent
+# hooks/turn-end.d this is one directory test.
+if fm_hooks_present turn-end; then
+  if [ -e "$STATE/.turnend-hook-held" ]; then
+    rm -f "$STATE/.turnend-hook-held" 2>/dev/null || true
+  elif ! TURN_END_REASON=$(fm_hooks_turn_end "$PAYLOAD"); then
+    if ! { mkdir -p "$STATE" 2>/dev/null && : > "$STATE/.turnend-hook-held"; }; then
+      allow_stop
+    fi
+    continue_turn "TURN END HELD BY A LIFECYCLE HOOK - handle this before ending the turn:
+$TURN_END_REASON"
+  fi
 fi
 
 EXEC_NUM=$(printf '%s' "$PAYLOAD" | jq -r 'if (.executionNum | type) == "number" then (.executionNum | floor | tostring) else "" end' 2>/dev/null || true)

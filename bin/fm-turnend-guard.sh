@@ -209,20 +209,15 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || allow_exit
 # that already follows a stop-hook continuation (stopHookActive or
 # stop_hook_active true, on every harness including --claude) never runs them,
 # so hooks can never hold a turn open twice. The supervision predicate below
-# runs on the next stop exactly as before.
+# runs on the next stop exactly as before. Cursor and Antigravity run these
+# hooks in their own stop adapters on every stop, so --cursor and --agy skip
+# them here rather than running them twice.
 # shellcheck source=bin/fm-hooks-lib.sh
 . "$SCRIPT_DIR/fm-hooks-lib.sh"
-if [ "$STOP_HOOK_ACTIVE" != "true" ] && fm_hooks_present turn-end; then
-  TURN_END_TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // .transcriptPath // ""' 2>/dev/null || true)
-  TURN_END_SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // .sessionId // ""' 2>/dev/null || true)
-  turn_end_rc=0
-  TURN_END_REASON=$(fm_hooks_emit turn-end session="$TURN_END_SESSION" \
-    transcript_path="$TURN_END_TRANSCRIPT" home="$FM_HOME" 2>&1 >/dev/null) || turn_end_rc=$?
-  if [ "$turn_end_rc" -ne 0 ]; then
-    [ -n "$TURN_END_REASON" ] || TURN_END_REASON="turn-end hooks could not run (exit $turn_end_rc)"
-    printf 'TURN END HELD BY A LIFECYCLE HOOK - handle this before ending the turn:\n%s\n' "$TURN_END_REASON" >&2
-    exit 2
-  fi
+if [ "$CURSOR_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" != "true" ] \
+  && ! TURN_END_REASON=$(fm_hooks_turn_end "$PAYLOAD"); then
+  printf 'TURN END HELD BY A LIFECYCLE HOOK - handle this before ending the turn:\n%s\n' "$TURN_END_REASON" >&2
+  exit 2
 fi
 
 # --- the actual predicate ----------------------------------------------------

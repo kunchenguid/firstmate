@@ -44,6 +44,12 @@
 #       fm_hooks_emit with a payload the caller already built as one JSON
 #       object (for text a key=value argument cannot carry exactly, such as a
 #       trailing newline).
+#
+#   fm_hooks_turn_end <stop-payload-json>
+#       Runs the turn-end hooks for one harness stop payload (session id and
+#       transcript path read from either spelling). Returns 0 when the stop may
+#       proceed; otherwise prints the refusal reason on stdout and returns 1.
+#       The caller owns the once-per-stop bound and how its harness renders it.
 
 FM_HOOKS_LIB_DIR=${FM_HOOKS_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}
 
@@ -113,4 +119,15 @@ fm_hooks_emit() {  # <event> [key=value | key:=json]...
 fm_hooks_emit_json() {  # <event> <json>
   fm_hooks_present "$1" || return 0
   printf '%s\n' "$2" | FM_HOME="$FM_HOME" "$FM_HOOKS_LIB_DIR/fm-hooks.sh" run "$1"
+}
+
+fm_hooks_turn_end() {  # <stop-payload-json>
+  fm_hooks_present turn-end || return 0
+  local transcript session reason rc=0
+  transcript=$(printf '%s' "$1" | jq -r '.transcript_path // .transcriptPath // ""' 2>/dev/null || true)
+  session=$(printf '%s' "$1" | jq -r '.session_id // .sessionId // ""' 2>/dev/null || true)
+  reason=$(fm_hooks_emit turn-end session="$session" transcript_path="$transcript" home="$FM_HOME" 2>&1 >/dev/null) || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  printf '%s\n' "${reason:-turn-end hooks could not run (exit $rc)}"
+  return 1
 }

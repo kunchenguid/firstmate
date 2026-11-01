@@ -292,6 +292,33 @@ test_park_delivers_actionable_wake_as_followup() {
   pass "cursor park: an actionable close is delivered as one watcher-kind follow-up"
 }
 
+# Installed turn-end lifecycle hooks run on a normal Cursor stop, not only when
+# the park fails, and a refusal is that stop's one follow-up.
+test_park_runs_turn_end_hooks_on_a_normal_stop() {
+  local dir out body
+  dir=$(make_primary_dir "$TMP_ROOT/park-turn-end-hook")
+  write_arm_fixture "$dir" actionable
+  mkdir -p "$dir/hooks/turn-end.d"
+  printf '#!/bin/sh\ncat > "%s/payload.json"\necho "finish the owed reply first" >&2\nexit 1\n' \
+    "$dir" > "$dir/hooks/turn-end.d/10-owed"
+  chmod +x "$dir/hooks/turn-end.d/10-owed"
+  out=$(run_park "$dir")
+  [ "$(kind_of_followup "$out")" = turn-end-guard ] \
+    || fail "a refusing turn-end hook must arrive as one follow-up on a normal stop, got: $out"
+  body=$(followup_of "$out")
+  case "$body" in *'finish the owed reply first'*) ;; *) fail "the hook's reason is missing: $body" ;; esac
+  jq -e '.session == "sess-cursor"' "$dir/payload.json" >/dev/null \
+    || fail "turn-end payload is wrong: $(cat "$dir/payload.json")"
+  rm -f "$dir/payload.json"
+  out=$(run_park "$dir" 1)
+  [ -z "$out" ] || fail "a follow-up-driven stop must not be held by hooks again: $out"
+  [ ! -e "$dir/payload.json" ] || fail "turn-end hooks ran on a follow-up-driven stop"
+  printf '#!/bin/sh\nexit 0\n' > "$dir/hooks/turn-end.d/10-owed"
+  out=$(run_park "$dir")
+  [ -z "$out" ] || fail "a passing turn-end hook must let the stop end quietly: $out"
+  pass "cursor park: turn-end hooks run on a normal stop and hold it at most once"
+}
+
 test_park_never_exits_two() {
   local dir status
   dir=$(make_primary_dir "$TMP_ROOT/park-exit")
@@ -901,6 +928,7 @@ test_pretool_guards_deduplicate_and_render_cursor_deny
 test_cd_guard_renders_cursor_deny
 test_park_silent_when_nothing_in_flight
 test_park_delivers_actionable_wake_as_followup
+test_park_runs_turn_end_hooks_on_a_normal_stop
 test_park_never_exits_two
 test_park_repair_nag_is_bounded
 test_park_repair_nag_requires_a_persisted_budget

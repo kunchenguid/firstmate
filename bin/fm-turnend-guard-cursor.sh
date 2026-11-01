@@ -102,6 +102,8 @@ case "$LOCK_ATTEMPTS" in ''|*[!0-9]*|0) LOCK_ATTEMPTS=50 ;; esac
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
 
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0
@@ -127,6 +129,18 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 if [ "${PI_CODING_AGENT:-}" = "true" ] \
   && [ -z "${CURSOR_AGENT:-}" ] \
   && [ -z "${CURSOR_INVOKED_AS:-}" ]; then
+  exit 0
+fi
+
+# Installed turn-end lifecycle hooks (docs/configuration.md "Lifecycle hooks")
+# run on every normal stop, before any park. A refusal becomes this stop's one
+# follow-up; a follow-up-driven stop (loop_count > 0) never runs them, so hooks
+# can never hold a turn open twice. Absent hooks/turn-end.d this is one
+# directory test.
+if [ "$LOOP_COUNT" -eq 0 ] && ! TURN_END_REASON=$(fm_hooks_turn_end "$PAYLOAD"); then
+  fm_operational_input_encode turn-end-guard "TURN END HELD BY A LIFECYCLE HOOK - handle this before ending the turn:
+$TURN_END_REASON" TURN_END_MSG || exit 0
+  jq -n --arg m "$TURN_END_MSG" '{followup_message:$m}' 2>/dev/null || true
   exit 0
 fi
 
