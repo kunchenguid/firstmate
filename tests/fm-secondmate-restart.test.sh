@@ -489,6 +489,12 @@ case "${rargs[1]:-}" in
         /bin/sleep 2
         : > "$FM_FAKE_DIR/remote-relaunch-end"
         ;;
+      model-mismatch)
+        # The host-local relaunch writes its model pin verdict to its own stderr,
+        # exactly as bin/fm-spawn.sh does; the transport relays it unchanged.
+        printf "model pin mismatch: pin '%s' but pinned Claude session remote-session reports 'claude-opus-5[1m]'\n" \
+          "${rargs[4]}" >&2
+        ;;
     esac
     printf 'relaunched %s harness=%s from=claude model=%s effort=%s backend=herdr endpoint=fm-remote:2ndmate-%s worktree=/srv/fm\n' \
       "${rargs[2]}" "${rargs[3]}" "${rargs[4]}" "${rargs[5]}" "${rargs[2]}"
@@ -613,6 +619,28 @@ test_remote_restart_refuses_an_unreadable_per_mate_pin() {
   [ -z "$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" || true)" ] \
     || fail "a mate with an unreadable pin must not be restarted over the transport hop"
   pass "T6c an unreadable per-mate pin falls back to the re-read path with its agent left running"
+}
+
+# --- T6e: a successful restart carries the model verdict its relaunch saw ----
+# The verdict is written to the launch's own stderr and nowhere else, so a copy
+# this pass drops is the only copy that ever existed: a mismatch at a pinned
+# relaunch must not disappear behind its success line.
+test_restart_forwards_the_relaunch_model_verdict() {
+  local dir out rc
+  dir=$(new_case restart-model-verdict)
+  setup_remote_case "$dir" sm2 model-mismatch
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  printf 'claude pinned-model high\n' > "$dir/home/config/secondmate-harness"
+
+  out=$(run_restart "$dir" fm-sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "a relaunch that reported a mismatch is still a successful restart"$'\n'"$out"
+  assert_contains "$out" "restarted: sm2 on remote-mac (claude)" \
+    "the restart must still report the runtime that came up"
+  assert_contains "$out" "model pin mismatch: pin 'pinned-model' but pinned Claude session remote-session reports 'claude-opus-5[1m]'" \
+    "a successful restart must forward the model verdict its relaunch observed"
+  pass "T6e a successful restart reports the model verdict its relaunch observed"
 }
 
 # --- T7: an unreachable host is unknown, never a claimed reload --------------
@@ -1001,6 +1029,7 @@ test_remote_restart_lands_on_the_per_mate_pin
 test_remote_restart_uses_the_default_for_an_unpinned_mate
 test_remote_restart_with_a_legacy_pin_file_uses_the_first_line
 test_remote_restart_refuses_an_unreadable_per_mate_pin
+test_restart_forwards_the_relaunch_model_verdict
 test_unreachable_host_is_reported_unknown
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together

@@ -107,6 +107,15 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
+#   A pinned launch is also asserted after delivery: the started session is asked
+#   which model it runs on, and pin-versus-actual goes to stderr. A canonical
+#   Claude launch with a concrete pin gets a fresh, collision-checked --session-id
+#   so its transcript is readable by address; a Herdr-bound Pi relaunch is read
+#   from the session identity it resumed. A raw command and a T3 launch execute no
+#   line this script composes, so neither carries an address of its own: their pin
+#   is reported unverified immediately rather than polled for. A harness with no
+#   readable session model is recorded as unverified, never guessed at, and a
+#   mismatch is reported rather than turned into a launch failure.
 #   OpenCode 2 has no interactive model or effort flag, so its selected model
 #   and effort are written as the build agent's model and variant inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
@@ -509,6 +518,12 @@
 #     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
 #                  JSON object for a crewmate or scout, or a quoted path to
 #                  state/<task-id>.claude-settings.json for a secondmate
+#     __CLAUDESESSION__ optional `--session-id <uuid> ` on a claude launch carrying
+#                  a concrete pin, minted collision-checked so the pinned-model
+#                  assertion can read that session's own transcript by address;
+#                  only a launch this script actually executes gets one, so a raw
+#                  command and a T3 launch leave it empty (supplies its own
+#                  trailing space, empty otherwise)
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
@@ -519,9 +534,9 @@
 #                  launches (supplies its own leading space, empty otherwise)
 #     __PIRESUME__ optional relaunch-only `--session <reference>` that keeps a
 #                  Pi replacement on the session the endpoint's runtime already
-#                  reports (relaunch_resume_args below owns it; it supplies its
-#                  own leading space, and is empty on every fresh spawn and for
-#                  every other harness)
+#                  reports (the reference comes from relaunch_resume_ref below;
+#                  the substituted value carries its own leading space, and is
+#                  empty on every fresh spawn and for every other harness)
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi busy-state extension,
@@ -1478,6 +1493,9 @@ spawn_remote_secondmate() {
     fi
     return "$rc"
   fi
+  # `sed -E`: `\|` alternation in a basic expression is a GNU extension, so stock
+  # BSD/macOS sed would match nothing and silently drop the verdict it relays.
+  printf '%s\n' "$out" | sed -nE '/^model pin (asserted|mismatch|unverified):/p' >&2 || true
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
@@ -2725,7 +2743,7 @@ launch_template() {
   # project and fetched content. A persistent secondmate receives its own
   # supervisor contract instead, so this task-worker statement does not apply.
   claude)
-    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
+    printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDESESSION____CLAUDEPERMFLAG__ __CLAUDEADDDIRS__--settings __CLAUDESETTINGS__ '
     if [ "$kind" != secondmate ]; then
       printf '%s' "--append-system-prompt '$(spawn_claude_task_channel_statement)' "
     fi
@@ -3431,37 +3449,318 @@ muse_credential_present() {
   [ -s "$auth" ] || muse_worker_meta_api_key_present
 }
 
-# relaunch_resume_args: the launch arguments that keep a RELAUNCH bound to the
-# agent session this endpoint's runtime already reports, so the runtime's own
-# status authority survives the replacement.
+# --- pinned-model assertion -------------------------------------------------
+# `--model` is a request, never proof. A started session can come up on a
+# different model than the pin for reasons the launch line cannot rule out: a
+# resumed session whose own stored model wins over the flag, an account-level
+# model policy, or a vendor alias that resolves elsewhere (issue #7735: a
+# relaunch reported `model=<pin>` while its session ran `claude-opus-5[1m]`).
+# So a pinned launch reads back the model the started session itself reports and
+# emits pin-versus-actual on stderr for supervision and the captain, without
+# writing to the task status file.
 #
-# Why this exists, and why it is relaunch-only: some runtimes bind a pane's
-# agent status to one session identity and ignore reports carrying another (the
-# defect fixed 2026-09-21 for Herdr-backed Pi workers - docs/herdr-backend.md
-# "Agent status authority and relaunch"). A fresh replacement session is
-# exactly such a report, so the pane freezes at the previous agent's last
-# reported state. Passing the SAME session back to the replacement keeps that
-# identity, and the authority with it; no fresh spawn needs this because nothing
-# is bound yet.
+# Four rules keep that record honest:
+#   - The read binds to a signal the harness itself emits, its own session
+#     record. A harness that emits nothing, or whose session has not stated a
+#     model yet, is recorded as unverified: never as a match, and never by
+#     guessing at whichever session file looks recent.
+#   - A resumed session's inherited history is not evidence about the replacement
+#     that resumed it. The assertion therefore reads a turn the launched session
+#     produced, not the model the previous session last ran on (measured
+#     2026-10-31 on pi 1.4.0: `--model` supersedes the stored model on resume, so
+#     the inherited records legitimately disagree with a changed pin; docs/
+#     verification/runtime-backends.md "Pinned model readback after a launch").
+#   - The assertion never decides the launch. By the time a session can state its
+#     model the worker is already running, so a mismatch is reported, not turned
+#     into a launch failure or a blocked:/failed: decision event that could drive
+#     supervision into replacing a live worker. The pin remains what the launch
+#     line carries; this records whether the harness honored it.
+#   - Only a turn that ran is evidence. A request the vendor could not complete
+#     still persists an assistant record naming the model it was asked for (Pi
+#     0.84.4 wrote one with stopReason error, recorded 2026-09-02 in docs/
+#     verification/runtime-backends.md "historical post-construction
+#     provider-error fallback"), so an error or aborted attempt states nothing
+#     about the pin, and an error-only session stays unverified.
 #
-# The reference is read from the endpoint's own runtime record, never guessed
-# from what looks recent, and only for an adapter with a verified resume form
-# whose own agent label reported it
-# (bin/fm-control-lib.sh's fm_control_relaunch_resume_flag owns both rules, and
-# bin/backends/herdr.sh's fm_backend_herdr_pane_agent_session_ref owns the
-# read). Every other combination prints nothing, so the launch stays exactly
-# what it was before this existed: a fresh session.
+# The probe is bounded so a slow first turn costs the spawn a bounded wait and an
+# unresolved read becomes "unverified" rather than a hang: FM_MODEL_PIN_POLLS
+# polls (20) at FM_MODEL_PIN_POLL_INTERVAL seconds (0.5).
+spawn_model_pin_polls() {  # -> poll count
+  local polls=${FM_MODEL_PIN_POLLS:-20}
+  case "$polls" in '' | *[!0-9]*) polls=20 ;; esac
+  [ "$polls" -gt 0 ] || polls=20
+  printf '%s' "$polls"
+}
+
+spawn_model_pin_interval() {  # -> seconds between polls
+  local interval=${FM_MODEL_PIN_POLL_INTERVAL:-0.5}
+  case "$interval" in '' | *[!0-9.]*) interval=0.5 ;; esac
+  printf '%s' "$interval"
+}
+
+# Compare the pin with the model a session reports. Exact, or a provider-qualified
+# pin against the bare id a record carries, or Claude's short family alias against
+# that family's concrete id.
+# Claude also documents each of its version aliases, and its `-latest` names, as
+# the same model as the dated snapshot that alias resolves to (claude-haiku-4-5 is
+# claude-haiku-4-5-20251001 and so on; the vendor's model-id page owns the pairs),
+# so the two spellings compare equal in either direction - a launch pinned to the
+# alias is not a downgrade when the API reports the snapshot it resolved to.
+# Anything else stays a DIFFERENT model: another version, a suffix that is not
+# that alias's own snapshot date, and a decorated id such as `claude-opus-5[1m]`
+# against a `claude-opus-5-5` pin, which is exactly the drift this assertion
+# exists to surface.
+spawn_model_pin_matches() {  # <harness> <pin> <actual>
+  local harness=$1 pin=$2 actual=$3
+  [ -n "$pin" ] && [ -n "$actual" ] || return 1
+  [ "$pin" = "$actual" ] && return 0
+  [ "${pin##*/}" = "$actual" ] && return 0
+  [ "$pin" = "${actual##*/}" ] && return 0
+  if [ "$harness" = claude ]; then
+    local normalized_pin=$pin normalized_actual=$actual model snapshot
+    for model in pin actual; do
+      if [ "$model" = pin ]; then snapshot=$pin; else snapshot=$actual; fi
+      case "$snapshot" in
+        claude-haiku-4-5) snapshot=claude-haiku-4-5-20251001 ;;
+        claude-sonnet-4-5) snapshot=claude-sonnet-4-5-20250929 ;;
+        claude-opus-4-5) snapshot=claude-opus-4-5-20251101 ;;
+        claude-opus-4-1) snapshot=claude-opus-4-1-20250805 ;;
+        claude-opus-4-0) snapshot=claude-opus-4-20250514 ;;
+        claude-sonnet-4-0) snapshot=claude-sonnet-4-20250514 ;;
+        claude-3-7-sonnet-latest) snapshot=claude-3-7-sonnet-20250219 ;;
+        claude-3-5-haiku-latest) snapshot=claude-3-5-haiku-20241022 ;;
+        claude-3-5-sonnet-latest) snapshot=claude-3-5-sonnet-20241022 ;;
+      esac
+      if [ "$model" = pin ]; then normalized_pin=$snapshot; else normalized_actual=$snapshot; fi
+    done
+    [ "$normalized_pin" = "$normalized_actual" ] && return 0
+    case "$pin:$actual" in
+    opus:claude-opus-[0-9]* | sonnet:claude-sonnet-[0-9]* | haiku:claude-haiku-[0-9]*) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+spawn_model_pin_note() {  # "<asserted|mismatch|unverified>: <tail>"
+  printf 'model pin %s\n' "$1" >&2
+  return 0
+}
+
+spawn_model_pin_verdict() {  # <harness> <pin> <actual> <subject>
+  local harness=$1 pin=$2 actual=$3 subject=$4
+  if [ -z "$actual" ]; then
+    spawn_model_pin_note "unverified: pin '$pin' was not confirmed by $subject (no session-reported model)"
+    return 0
+  fi
+  if spawn_model_pin_matches "$harness" "$pin" "$actual"; then
+    spawn_model_pin_note "asserted: pin '$pin' actual '$actual' ($subject)"
+    return 0
+  fi
+  spawn_model_pin_note "mismatch: pin '$pin' but $subject reports '$actual'"
+}
+
+# Pi's session record is JSONL: a `session` header, then one event per turn, and
+# its assistant records name the provider and model that turn ran on. That is the
+# only model statement Pi emits, and a Herdr-bound relaunch hands the replacement
+# this exact identity through `--session <path|id>`, which is what makes the
+# resumed session readable here. A registered absolute path that does not exist
+# yet is that same identity rather than a missing one: Pi recreates the session at
+# exactly that path (docs/herdr-backend.md "Agent status authority and relaunch"),
+# so it is returned as-is and the caller's probe waits for the replacement's own
+# turn in the file Pi then writes. A fresh Pi launch addresses no session this
+# launcher knows, so it is reported unverified rather than guessed at.
+spawn_pi_session_file() {  # <ref> [agent-dir] -> path
+  local ref=${1-} root=${2:-${PI_CODING_AGENT_DIR:-${HOME:-$PWD}/.pi/agent}} candidate
+  [ -n "$ref" ] || return 1
+  if [ -f "$ref" ]; then
+    printf '%s' "$ref"
+    return 0
+  fi
+  if [ ! -e "$ref" ]; then
+    case "$ref" in
+    /*) printf '%s' "$ref"; return 0 ;;
+    esac
+  fi
+  [ -d "$root/sessions" ] || return 1
+  while IFS= read -r -d '' candidate; do
+    if jq -e --arg id "$ref" 'select(.type == "session" and .id == $id)' "$candidate" >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done < <(find "$root/sessions" -type f -name '*.jsonl' -print0 2>/dev/null)
+  return 1
+}
+
+spawn_pi_session_line_count() {  # <file> -> complete lines
+  local file=${1-} lines=0
+  [ -r "$file" ] || {
+    printf 0
+    return 0
+  }
+  lines=$(wc -l <"$file" 2>/dev/null | tr -d ' ')
+  case "$lines" in '' | *[!0-9]*) lines=0 ;; esac
+  printf '%s' "$lines"
+}
+
+# The last COMPLETED assistant turn at or after <first-line>, as provider/model
+# when the record names a provider and the bare model otherwise. Reading from an
+# offset is what separates the replacement's own turn from the history it
+# inherited; requiring a completed-turn stopReason (stop, length, or toolUse) is
+# what keeps a failed attempt out of the evidence (rules above).
+spawn_pi_session_reported_model() {  # <file> [first-line]
+  local file=${1-} first=${2:-1} model
+  [ -r "$file" ] || return 1
+  model=$(tail -n "+$first" "$file" 2>/dev/null | jq -r '
+    select(.type == "message" and .message.role == "assistant"
+      and (.message.stopReason == "stop" or .message.stopReason == "length" or .message.stopReason == "toolUse")
+      and (.message.model | type) == "string" and (.message.model | length) > 0)
+    | if (.message.provider | type) == "string" and (.message.provider | length) > 0
+      then .message.provider + "/" + .message.model
+      else .message.model
+      end
+  ' 2>/dev/null | tail -n 1)
+  [ -n "$model" ] && [ "$model" != null ] || return 1
+  printf '%s' "$model"
+}
+
+# Claude Code writes each session to <config-dir>/projects/<slug>/<session-id>.jsonl
+# and stamps every assistant record with the model the API reported for that
+# response. A pinned launch passing its own collision-checked --session-id is what
+# makes that file addressable without guessing which session in the project is
+# recent. An unauthenticated Claude reports `<synthetic>` instead of a model, which
+# this reads as no statement at all rather than as a model that ran.
+spawn_claude_fresh_session_id() {  # <config-dir> -> session id
+  local config_dir=${1-} projects="${1-}/projects" id attempt collision candidate
+  [ -n "$config_dir" ] || return 1
+  command -v uuidgen >/dev/null 2>&1 || return 1
+  for attempt in 1 2 3 4 5; do
+    id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]') || return 1
+    case "$id" in
+    ????????-????-????-????-????????????) ;;
+    *) return 1 ;;
+    esac
+    case "$id" in *[!0123456789abcdef-]*) return 1 ;; esac
+    collision=0
+    if [ -d "$projects" ]; then
+      while IFS= read -r -d '' candidate; do collision=1; break; done \
+        < <(find "$projects" -type f -name "$id.jsonl" -print0 2>/dev/null)
+    fi
+    [ "$collision" -eq 0 ] || continue
+    printf '%s' "$id"
+    return 0
+  done
+  return 1
+}
+
+spawn_claude_session_file() {  # <config-dir> <session-id> -> path
+  local config_dir=${1-} session_id=${2-} file
+  [ -n "$config_dir" ] && [ -n "$session_id" ] || return 1
+  [ -d "$config_dir/projects" ] || return 1
+  file=$(find "$config_dir/projects" -type f -name "$session_id.jsonl" -print -quit 2>/dev/null)
+  [ -n "$file" ] && [ -r "$file" ] || return 1
+  printf '%s' "$file"
+}
+
+spawn_claude_session_reported_model() {  # <file>
+  local file=${1-} model
+  [ -r "$file" ] || return 1
+  model=$(jq -r '
+    select(.type == "assistant" and .message.role == "assistant" and (.message.model | type) == "string" and (.message.model | length) > 0 and (.message.model | test("^<.*>$") | not))
+    | .message.model
+  ' "$file" 2>/dev/null | tail -n 1)
+  [ -n "$model" ] && [ "$model" != null ] || return 1
+  printf '%s' "$model"
+}
+
+spawn_assert_claude_model_pin() {  # <config-dir> <session-id> <pin>
+  local config_dir=$1 session_id=$2 pin=$3 actual='' file i=0 max interval
+  max=$(spawn_model_pin_polls)
+  interval=$(spawn_model_pin_interval)
+  while :; do
+    if file=$(spawn_claude_session_file "$config_dir" "$session_id") &&
+      actual=$(spawn_claude_session_reported_model "$file"); then
+      break
+    fi
+    actual=''
+    i=$((i + 1))
+    [ "$i" -lt "$max" ] || break
+    sleep "$interval"
+  done
+  spawn_model_pin_verdict claude "$pin" "$actual" "pinned Claude session $session_id"
+}
+
+spawn_assert_pi_resume_model_pin() {  # <session-file> <line-baseline> <pin>
+  local file=$1 baseline=$2 pin=$3 actual='' i=0 max interval
+  max=$(spawn_model_pin_polls)
+  interval=$(spawn_model_pin_interval)
+  while :; do
+    if [ "$(spawn_pi_session_line_count "$file")" -gt "$baseline" ] &&
+      actual=$(spawn_pi_session_reported_model "$file" "$((baseline + 1))"); then
+      break
+    fi
+    actual=''
+    i=$((i + 1))
+    [ "$i" -lt "$max" ] || break
+    sleep "$interval"
+  done
+  spawn_model_pin_verdict "$HARNESS" "$pin" "$actual" "the resumed $HARNESS session"
+}
+
+# Which pinned launches have anything to assert at all. Only a concrete pin gets a
+# note, so an unconfigured launch keeps its record exactly as it was.
+spawn_assert_model_pin() {
+  [ -n "$MODEL" ] && [ "$MODEL" != default ] || return 0
+  case "$HARNESS" in
+  claude)
+    if [ -n "$CLAUDE_SESSION_ID" ]; then
+      spawn_assert_claude_model_pin "$CLAUDE_SESSION_CONFIG_DIR" "$CLAUDE_SESSION_ID" "$MODEL"
+    elif [ "$BACKEND" = t3code ]; then
+      spawn_model_pin_note "unverified: pin '$MODEL' could not be addressed for this Claude t3code launch (no session address exists for this path)"
+    elif [ "$RAW_LAUNCH" -eq 1 ]; then
+      spawn_model_pin_note "unverified: pin '$MODEL' could not be addressed for this raw Claude launch (no session address exists for this path)"
+    else
+      spawn_model_pin_note "unverified: pin '$MODEL' could not be addressed for this Claude launch (no fresh --session-id was available)"
+    fi
+    ;;
+  pi | pi-signed)
+    if [ -n "$PIN_RESUME_MODEL_FILE" ]; then
+      spawn_assert_pi_resume_model_pin "$PIN_RESUME_MODEL_FILE" "$PIN_RESUME_MODEL_BASELINE" "$MODEL"
+    else
+      spawn_model_pin_note "unverified: pin '$MODEL' has no session record this launcher can read back for a fresh $HARNESS launch"
+    fi
+    ;;
+  *)
+    spawn_model_pin_note "unverified: pin '$MODEL' has no session model this launcher can read back for harness '$HARNESS'"
+    ;;
+  esac
+}
+
+# relaunch_resume_ref: the resume form a RELAUNCH hands its replacement so the
+# endpoint's runtime keeps its status authority.
 #
-# Prints the arguments with the single leading space that appends them to the
-# launch line, so an empty result leaves every other launch byte-identical.
+# Why this exists, and why it is relaunch-only: some runtimes bind a pane's agent
+# status to one session identity and ignore reports carrying another (the defect
+# fixed 2026-09-21 for Herdr-backed Pi workers - docs/herdr-backend.md "Agent
+# status authority and relaunch"). A fresh replacement session is exactly such a
+# report, so the pane freezes at the previous agent's last reported state. Passing
+# the SAME session back to the replacement keeps that identity, and the authority
+# with it; no fresh spawn needs this because nothing is bound yet.
+#
+# The reference is read from the endpoint's own runtime record, never guessed from
+# what looks recent, and only for an adapter with a verified resume form whose own
+# agent label reported it (bin/fm-control-lib.sh's fm_control_relaunch_resume_flag
+# owns both rules, and bin/backends/herdr.sh's
+# fm_backend_herdr_pane_agent_session_ref owns the read). Every other combination
+# prints nothing, so the launch stays exactly what it was before this existed: a
+# fresh session.
 #
 # Only the Herdr backend is asked: it is the one adapter whose runtime records a
 # per-pane agent session, and on every other backend the pane carries no such
-# identity for a replacement to preserve. An unreadable registration - no
-# agent, a stale one, a malformed reference - degrades to that same
-# fresh-session launch rather than refusing, because nothing here is a safety
-# property; it preserves a display and supervision signal.
-relaunch_resume_args() {  # <harness> <backend> <target>
+# identity for a replacement to preserve. An unreadable registration - no agent, a
+# stale one, a malformed reference - degrades to that same fresh-session launch
+# rather than refusing, because nothing here is a safety property; it preserves a
+# display and supervision signal.
+relaunch_resume_ref() {  # <harness> <backend> <target> -> "<flag>\t<reference>"
   local harness=${1-} backend=${2-} target=${3-} identity agent ref flag
   [ "$backend" = herdr ] || return 0
   [ -n "$target" ] || return 0
@@ -3471,7 +3770,7 @@ relaunch_resume_args() {  # <harness> <backend> <target>
   ref=${identity#*$'\t'}
   flag=$(fm_control_relaunch_resume_flag "$harness" "$agent") || return 0
   [ -n "$flag" ] && [ -n "$ref" ] || return 0
-  printf -- ' %s %s' "$flag" "$(shell_quote "$ref")"
+  printf '%s\t%s' "$flag" "$ref"
 }
 
 model_flag_for_harness() {
@@ -7172,18 +7471,59 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+CLAUDE_SESSION_ID=
+CLAUDE_SESSION_ARGS=
+CLAUDE_SESSION_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-${HOME:-$PWD}/.claude}
+if [ "$HARNESS" = claude ] && [ "$BACKEND" != t3code ] && [ "$RAW_LAUNCH" -eq 0 ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+  # A pinned Claude launch takes its own collision-checked session id so the
+  # assertion after delivery reads THAT session's transcript instead of guessing
+  # which session in the project is recent. Only a launch that carries the
+  # __CLAUDESESSION__ placeholder is given one: a raw command has no such slot, so
+  # an id minted for it could never reach Claude or name a transcript. No uuidgen
+  # means no address either: the launch line is unchanged and the assertion
+  # records the pin as unverified instead of polling for a session that cannot be
+  # written.
+  case "$LAUNCH" in
+  *__CLAUDESESSION__*)
+    if CLAUDE_SESSION_ID=$(spawn_claude_fresh_session_id "$CLAUDE_SESSION_CONFIG_DIR"); then
+      CLAUDE_SESSION_ARGS="--session-id $(shell_quote "$CLAUDE_SESSION_ID") "
+    else
+      CLAUDE_SESSION_ID=
+    fi
+    ;;
+  esac
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "$OPENCODE_MAJOR")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL" "$OPENCODE_MAJOR") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__CLAUDESESSION__/$CLAUDE_SESSION_ARGS}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
 # placeholder; an empty value leaves every other launch byte-identical.
+# The resumed reference is captured before the launch as well, because the
+# pinned-model assertion below reads the turn the replacement itself produced and
+# must be able to tell that turn from the history the session inherited.
+RESUME_SPEC=
 RESUME_ARGS=
+PIN_RESUME_MODEL_FILE=
+PIN_RESUME_MODEL_BASELINE=0
 if [ "$RELAUNCH" -eq 1 ]; then
-  RESUME_ARGS=$(relaunch_resume_args "$HARNESS" "$BACKEND" "$T") || RESUME_ARGS=
+  RESUME_SPEC=$(relaunch_resume_ref "$HARNESS" "$BACKEND" "$T") || RESUME_SPEC=
+  if [ -n "$RESUME_SPEC" ]; then
+    RESUME_ARGS=" $(printf -- '%s %s' "${RESUME_SPEC%%$'\t'*}" "$(shell_quote "${RESUME_SPEC#*$'\t'}")")"
+    case "$HARNESS" in
+    pi | pi-signed)
+      pin_pi_root=${PI_CODING_AGENT_DIR:-${HOME:-$PWD}/.pi/agent}
+      [ -z "$WORKER_ACCOUNT_ROOT" ] || pin_pi_root=$WORKER_ACCOUNT_ROOT
+      PIN_RESUME_MODEL_FILE=$(spawn_pi_session_file "${RESUME_SPEC#*$'\t'}" "$pin_pi_root") || PIN_RESUME_MODEL_FILE=
+      [ -z "$PIN_RESUME_MODEL_FILE" ] ||
+        PIN_RESUME_MODEL_BASELINE=$(spawn_pi_session_line_count "$PIN_RESUME_MODEL_FILE")
+      ;;
+    esac
+  fi
 fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
@@ -7771,6 +8111,11 @@ if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
     exit 1
   fi
 fi
+# The launch is delivered, so this is the last point where the started session
+# exists and can be asked what model it runs on. It records the answer and never
+# fails the spawn: a mismatch is a fact about a live worker, not a reason to
+# discard one.
+spawn_assert_model_pin
 
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then

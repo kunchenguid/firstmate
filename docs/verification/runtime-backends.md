@@ -577,6 +577,70 @@ ok - unseeded path without --approve still prompts on Trust project folder?
 
 Portable launch-command coverage lives in `tests/fm-spawn-dispatch-profile.test.sh` (`test_pi_seeded_secondmate_preapproves_project_trust`, `test_pi_worker_launch_omits_seeded_home_approve`, `test_pi_approve_probe_omits_unsupported_flag`).
 
+## Pinned model readback after a launch
+
+`bin/fm-spawn.sh` records the model the started session reports against the pin it was given, because `--model` is a request rather than proof.
+Model evidence goes exclusively to the spawn's stderr and never writes to task status, so a concurrent worker decision, wait, or terminal outcome remains authoritative.
+The measurements below decide how that read has to work: two taken on Linux x86_64 on 2026-10-31, and the failed-request record from this page's "2026-09-02 historical post-construction provider-error fallback" section further down.
+
+Pi 1.4.0 (`pi --version`) applies `--model` when it resumes a session, so the session's stored model does not win over the pin, and the history a resumed session inherited is not evidence about the replacement that resumed it.
+A session created on `openai-codex/gpt-5.6-luna` and then resumed twice with a different `--model` each time:
+
+```sh
+pi -p --no-tools --session-dir "$sessions" --model openai-codex/gpt-5.6-luna 'reply with exactly: OK'
+pi -p --no-tools --session "$session_file" --model openai-codex/gpt-6-sol 'reply with exactly: DONE'
+pi -p --no-tools --session "$session_file" --provider openai-codex --model openai-codex/gpt-6.1-terra 'reply with exactly: X'
+```
+
+Observed records in that one session file:
+
+```text
+model_change  openai-codex/gpt-5.6-luna
+assistant     openai-codex/gpt-5.6-luna  stop=stop
+assistant     openai-codex/gpt-6-sol  stop=stop
+assistant     openai-codex/gpt-6.1-terra  stop=stop
+```
+
+The resumed turn carries the pinned model even with `--provider` confinement, and Pi writes no new `model_change` line on resume, so its stored model line stays at the original model while the resume runs another.
+That is why the assertion reads a turn the launched session produced instead of the last model in the file: refusing a resume whose history disagrees with a changed pin would refuse every legitimate re-pin.
+A turn Pi could not complete is not such a turn either: a rejected request is persisted as an assistant record carrying the model it was asked for with `stopReason: "error"`, the shape the real-SDK guard recorded on Pi 0.84.4 in that 2026-09-02 section.
+So only a record whose own stopReason shows a completed turn (`stop`, `length`, or `toolUse`) counts as evidence, and a session that produced only failed attempts is recorded unverified rather than asserted.
+A Pi launch that starts fresh rather than resuming addresses no session the launcher knows, so it is recorded unverified.
+A Pi relaunch whose registered session file does not exist yet is read from that same path once Pi creates it, so the probe waits for the replacement's own turn there instead of reading the absence as no statement.
+
+Claude Code 2.1.314 (`claude --version`) honours an explicit `--session-id` and writes that session's transcript to `<config-dir>/projects/<slug>/<session-id>.jsonl`, which is the address `bin/fm-spawn.sh` gives a pinned Claude launch.
+Its assistant records carry the model the API reported for that response, which is the fact the pin is compared with; a session that could not run a model at all records `"model":"<synthetic>"`, which the launcher reads as no statement and therefore unverified.
+Claude documents an alias and its dated snapshot as the same model, so a launch pinned to `claude-haiku-4-5` that reports `claude-haiku-4-5-20251001` is that pin holding, in either direction; `spawn_model_pin_matches` owns which pairs it normalizes, and a different version or a decorated id stays a mismatch.
+Only a canonical non-T3 launch carries that address: raw commands and T3 launches have no launcher-provided session address, so the launcher mints no session id for either and emits unverified immediately instead of polling a transcript that cannot exist.
+
+Portable coverage pins this logic with fixture transcripts and no installed harness: `tests/fm-control-relaunch.test.sh` (`test_herdr_relaunch_asserts_a_pinned_pi_resume_on_the_turn_it_produced`, `test_herdr_relaunch_reports_a_pinned_pi_resume_turn_that_differs_from_the_pin`, `test_herdr_relaunch_records_a_pinned_pi_resume_as_unverified_without_a_new_turn`, `test_herdr_relaunch_requires_a_completed_pi_response`, `test_herdr_relaunch_reads_a_recreated_pi_session`), `tests/fm-spawn-dispatch-profile.test.sh` (`test_claude_model_pin_asserts_the_model_the_session_reports`, `test_claude_model_pin_mismatch_is_reported_without_failing_the_spawn`, `test_claude_model_pin_snapshot_verdicts`, `test_claude_model_pin_is_unverified_when_the_session_reports_no_model`, `test_claude_model_pin_is_unverified_when_uuidgen_is_unavailable`, `test_raw_claude_launch_does_not_allocate_a_session_id`, `test_claude_model_pin_note_never_displaces_the_workers_own_state`, `test_claude_model_verdict_preserves_status_bytes`, `test_claude_spawn_without_a_pin_keeps_its_session_id_and_writes_no_pin_note`), and `tests/fm-backend-t3code.test.sh` (`test_t3_claude_pin_has_no_launcher_session_address`).
+The boundaries that capture a launch result forward the verdict instead of discarding it, and each is pinned by the portable regression its own path runs: `tests/fm-remote-secondmate-relaunch.test.sh` (a mismatch on a remote relaunch reaches its caller), `tests/fm-remote-secondmate-trace-context.test.sh` (the remote host and parent launch boundaries), `tests/fm-secondmate-liveness.test.sh` (`test_sweep_reports_replacement_model_verdict`), `tests/fm-wake-queue.test.sh` (`test_secondmate_liveness_tick_relaunches_dead_endpoint_once`), and `tests/fm-secondmate-restart.test.sh` (`test_restart_forwards_the_relaunch_model_verdict`, an `/updatefirstmate` restart whose relaunch reported a mismatch).
+Every one of those filters is `sed -E` over a parenthesized `(asserted|mismatch|unverified)` alternation, never a basic-expression `\|`, which is a GNU extension stock BSD/macOS sed rejects: such a filter would exit 0 having matched nothing, silently dropping the evidence it exists to relay. Its per-path case above fails on that silent drop, because it asserts the verdict actually arrives at the caller.
+The guard selects its initial Pi model with `FM_MODEL_PIN_READBACK_PI_MODEL` (default `openai-codex/gpt-5.6-luna`), its resume model with `FM_MODEL_PIN_READBACK_PI_RESUME_MODEL` (default `openai-codex/gpt-5.6-sol`), and its Claude pin with `FM_MODEL_PIN_READBACK_CLAUDE_MODEL` (default `claude-haiku-4-5`), and fails directly, naming the selecting variable, when one cannot run.
+The two Pi values must differ, because a changed pin is the fact the resume proves.
+The two 2026-10-31 vendor facts above are re-proven against the installed binaries by `tests/fm-model-pin-readback-live-e2e.test.sh`, which is what refreshes this record after an upgrade; it is opt-in because it spends a few tokens, and it reports an absent harness by name instead of passing over it.
+
+```sh
+FM_MODEL_PIN_READBACK_LIVE=1 bash tests/fm-model-pin-readback-live-e2e.test.sh
+```
+
+Its last run on this host, on pi 1.4.0 and Claude Code 2.1.316:
+
+```sh
+FM_MODEL_PIN_READBACK_LIVE=1 FM_MODEL_PIN_READBACK_PI_MODEL=openai-codex/gpt-5.6-luna \
+  bash tests/fm-model-pin-readback-live-e2e.test.sh
+```
+
+```text
+# pi 1.4.0: inherited turn openai-codex/gpt-5.6-luna, resumed turn openai-codex/gpt-5.6-sol in one record
+ok - pi 1.4.0: a resumed session's own turn carries the model it was pinned to, over an inherited record naming another
+# claude 2.1.316 (Claude Code) reported claude-haiku-4-5-20251001 for pin claude-haiku-4-5
+ok - claude 2.1.316 (Claude Code): a pinned launch reads back the model its own session id addresses
+```
+
+That Claude half now confirms both facts the readback rests on: the transcript is written under the session id the launch carries, and the API reports the dated snapshot of the pinned alias, which is the pairing `spawn_model_pin_matches` normalizes and the portable `test_claude_model_pin_snapshot_verdicts` cases pin.
+An earlier run of the same guard on this host recorded `<synthetic>` because its session ran no model, and the guard reporting that instead of a verdict is the unverified path's live confirmation.
+
 ## Launch-prompt backstop signatures
 
 `bin/fm-busy-lib.sh`'s launch-prompt backstop (`fm_busy_launch_prompt_parked`) reclassifies a launch whose busy record is still pinned at the fm-spawn seed as `unknown launch-prompt`, rather than `busy fm-spawn`, when the captured pane matches that harness's own recognized trust, sign-in, or first-run dialog.
@@ -2114,7 +2178,7 @@ Resuming the bound session instead makes the replacement's reports land, which i
 poll 8: {"agent_status":"working","session":".../2026-09-21T14-10-08-776Z_01a0c44d.jsonl"}
 ```
 
-The read that supplies the reference is `bin/backends/herdr.sh`'s `fm_backend_herdr_pane_agent_session_ref`, the per-harness rule is `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_flag`, and the launch argument is composed by `relaunch_resume_args` in `bin/fm-spawn.sh`; `docs/herdr-backend.md` "Agent status authority and relaunch" owns the contract. Nothing here changes `resume` as a control verb, and only a relaunch asks for it.
+The read that supplies the reference is `bin/backends/herdr.sh`'s `fm_backend_herdr_pane_agent_session_ref`, the per-harness rule is `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_flag`, and the launch reference is supplied by `relaunch_resume_ref` in `bin/fm-spawn.sh`; `docs/herdr-backend.md` "Agent status authority and relaunch" owns the contract. Nothing here changes `resume` as a control verb, and only a relaunch asks for it.
 
 ### Away-mode transport
 
