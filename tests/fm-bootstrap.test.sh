@@ -292,6 +292,19 @@ SH
   printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/second.meta"
   printf 'kind=ship\nbackend=tmux\nwindow=missing:window\n' > "$case_dir/home/state/no-tab.meta"
   printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/no-window.meta"
+  printf '%s\n' 'kind=ship' 'window=%1' > "$case_dir/home/state/implicit-tmux.meta"
+  printf 'kind=ship\nbackend=orca\nwindow=Orca display\nterminal=orca-endpoint\n' > "$case_dir/home/state/orca-terminal.meta"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = list-panes ] && printf '%s\n' '%1'
+exit 0
+SH
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = terminal ] && [ "${2:-}" = read && [ "${4:-}" = --terminal ] && [ "${5:-}" = orca-endpoint ] || exit 1
+printf '%s\n' '{"ok":true,"result":{"tail":[]}}'
+SH
+  chmod +x "$fakebin/orca"
   printf 'backend=tmux\nwindow=outside:window\npr=https://example.test/pull/42\n' > "$case_dir/outside.meta"
   ln -s "$case_dir/outside.meta" "$case_dir/home/state/linked.meta"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -306,6 +319,10 @@ SH
     "bootstrap did not report metadata whose endpoint is missing"
   assert_contains "$out" 'RECORD_HYGIENE: metadata has no endpoint: no-window' \
     "bootstrap did not report metadata without a window"
+  assert_not_contains "$out" 'metadata has no endpoint: implicit-tmux' \
+    "bootstrap did not resolve an implicit tmux backend target"
+  assert_not_contains "$out" 'metadata has no endpoint: orca-terminal' \
+    "bootstrap did not resolve the Orca terminal target"
   assert_not_contains "$out" 'linked' "bootstrap read symlinked metadata"
   [ -f "$case_dir/home/data/orphan/status.log" ] || fail "bootstrap did not archive the orphan status log"
   [ ! -e "$case_dir/home/state/orphan.status" ] || fail "archived orphan status log remained in state"
