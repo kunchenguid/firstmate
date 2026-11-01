@@ -94,8 +94,10 @@ While supervision is still needed and away mode remains inactive, an actionable 
 
 The hook handles the session lock as follows:
 
-- A session-lock owner, including a tagged `win:<pid>` holder on Windows/Git Bash, that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes.
-- A live owner the session does not own, an absent lock, or an unusable lock keeps the competing hook inert.
+- A session-lock owner, including a tagged `win:<pid>` holder on Windows/Git Bash, that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before an auto-arm generation is claimed.
+- A live owner the session does not own, an absent lock, or an unusable lock keeps the competing hook silent without recovery, a generation claim, or arming.
+
+The advisory pending decision can precede a session-identity refusal; [`turnend-guard.md`](turnend-guard.md#claude-cooperative-mode) owns that coordination.
 
 Whether the session owns that lock is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
 That verdict accepts either of two cases:
@@ -105,7 +107,7 @@ That verdict accepts either of two cases:
 
 With that verdict, a background session keeps arming after its transient helper chain is recycled.
 [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns the Claude guard's behavior when that live owner is genuinely another session.
-The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
+AFK and supervision need are checked before pending publication and rechecked after identity resolution, before session-lock recovery or generation claims, so a transition to away mode or an idle home during that work cannot start a park.
 
 ### Claude arm failures
 
@@ -525,7 +527,8 @@ It checks that a newly appended keyed decision is classified without rereading e
 
 - The auto-arm's scope.
 - Stale and live session owners.
-- Unchanged AFK and need boundaries.
+- AFK and need boundaries, including transitions during identity resolution that prevent session recovery, generation claims, and parking.
+- Pending-marker cleanup once a claim is visible, after exit, and on refusing or idle firings.
 - Single-flight.
 - Supersession of a dead session's orphaned claim by the replacement session's first Stop, including a resumed session that carries the dead one's conversation id, and a claim with no readable session lock.
 - A recycled background bridge keeping its live claim on the trusted session id pinned to the lock holder's recorded session-lock identity.

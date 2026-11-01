@@ -768,7 +768,7 @@ tests/fm-ci-workflow.test.sh 5833
 tests/fm-classify-corr-token.test.sh 23085
 tests/fm-classify-decision-key.test.sh 4362
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 73
-tests/fm-claude-stop-autoarm.test.sh 61189
+tests/fm-claude-stop-autoarm.test.sh 62500
 tests/fm-claude-trust.test.sh 12010
 tests/fm-cmux-claude-composer-live-e2e.test.sh 77
 tests/fm-codex-continuity-live-e2e.test.sh 108
@@ -933,7 +933,7 @@ tests/fm-tool-update-check.test.sh 14383
 tests/fm-trace-context-lib.test.sh 221
 tests/fm-trace-context-spawn.test.sh 57488
 tests/fm-turnend-foreign-owner-arm-fix.test.sh 5575
-tests/fm-turnend-guard.test.sh 34727
+tests/fm-turnend-guard.test.sh 43000
 tests/fm-update.test.sh 11894
 tests/fm-vendor-auth-probe.test.sh 43278
 tests/fm-voice-relay.test.sh 28917

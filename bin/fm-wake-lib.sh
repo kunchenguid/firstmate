@@ -2400,6 +2400,63 @@ _fm_autoarm_write_owned_locked() {  # <state-dir> <gen> <outcome> [marker-file] 
   return 0
 }
 
+# Pending-decision marker format and lifecycle (guard wait policy:
+# docs/turnend-guard.md "Claude cooperative mode"; eligibility gates:
+# docs/watcher-continuity.md "Claude session-lock ownership").
+# state/.claude-autoarm-pending.<pid> contains that publisher's fm_pid_identity
+# followed by a newline, atomically renamed into place. The hook publishes
+# before process-table-bound identity and claim work, clears the marker once
+# its generation claim is visible, and registers EXIT cleanup for other exits.
+# A marker is advisory only: never a claim or single-flight exclusion.
+# Publishers prune dead or identity-mismatched records, not live expired ones;
+# fm_autoarm_pending_live ignores expired records without removing them.
+# Regression: tests/fm-claude-stop-autoarm.test.sh.
+FM_AUTOARM_PENDING_MARKER=
+fm_autoarm_pending_publish() {  # <state-dir>
+  local state=$1 pid identity marker tmp other other_pid recorded
+  FM_AUTOARM_PENDING_MARKER=
+  pid=${BASHPID:-$$}
+  for other in "$state"/.claude-autoarm-pending.*; do
+    [ -f "$other" ] || continue
+    other_pid=${other##*.}
+    case "$other_pid" in ''|*[!0-9]*) continue ;; esac
+    recorded=$(cat "$other" 2>/dev/null || true)
+    if ! fm_pid_alive "$other_pid" \
+      || [ "$(fm_pid_identity "$other_pid" 2>/dev/null)" != "$recorded" ]; then
+      rm -f "$other" 2>/dev/null || true
+    fi
+  done
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  marker="$state/.claude-autoarm-pending.$pid"
+  tmp="$state/.claude-autoarm-pending-tmp.$pid"
+  if ! printf '%s\n' "$identity" > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$marker" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  # shellcheck disable=SC2034 # Read by the publishing hook after this returns.
+  FM_AUTOARM_PENDING_MARKER=$marker
+}
+
+# True while any pending-decision marker names a live, identity-matched pid and
+# is younger than <max-age> seconds (default 30).
+fm_autoarm_pending_live() {  # <state-dir> [max-age-seconds]
+  local state=$1 max=${2:-30} marker pid recorded current
+  case "$max" in ''|*[!0-9]*|0) max=30 ;; esac
+  for marker in "$state"/.claude-autoarm-pending.*; do
+    [ -f "$marker" ] || continue
+    pid=${marker##*.}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$(fm_path_age "$marker")" -lt "$max" ] || continue
+    fm_pid_alive "$pid" || continue
+    recorded=$(cat "$marker" 2>/dev/null) || continue
+    current=$(fm_pid_identity "$pid" 2>/dev/null) || continue
+    [ -n "$recorded" ] && [ "$recorded" = "$current" ] || continue
+    return 0
+  done
+  return 1
+}
+
 # Lockless pre-side-effect ownership check: true while the ledger still names
 # <gen> owned by this process. A superseded owner must go silent instead of
 # arming, mutating shared state, or emitting.

@@ -10,20 +10,17 @@
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
-#   - Identity: only when THIS session holds state/.lock, as
-#     bin/fm-session-lock-lib.sh decides it: the recorded pid is a harness
-#     ancestor, or a live lock was recorded under this same trusted Claude
-#     session id (which is what keeps a background session arming after its
-#     transient helper chain is recycled).
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#   - Identity: bin/fm-session-lock-lib.sh owns session ownership;
+#     docs/watcher-continuity.md "Claude session-lock ownership" owns recovery
+#     and eligibility gates. A competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
 #   - Need: arms only while the home needs supervision, as
 #     bin/fm-supervision-lib.sh defines it; an idle home exits 0.
+#   - Pending decision: docs/turnend-guard.md "Claude cooperative mode" owns
+#     guard coordination; fm_autoarm_pending_publish in bin/fm-wake-lib.sh
+#     owns the marker format and lifecycle.
 #   - Single-flight: Claude does not dedupe async hooks, so exactly one
 #     GENERATION owner arms per event epoch: the epoch ledger's monotonic
 #     sequence is the claim generation, every firing defers (exit 0) to a live
@@ -215,22 +212,6 @@ fi
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
-# --- identity: only the lock-owning session's hooks may arm ------------------
-# A prior session may have died after leaving its harness identity in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case; it
-# resolves a tagged identity too, so a dead Windows session is still recoverable
-# rather than being read as a malformed lock nobody may ever clear.
-# Defer the mutating claim until after the unchanged AFK and need gates, so an
-# idle or away home remains byte-for-byte inert. Missing or malformed locks are
-# uncertainty rather than stale-owner evidence and remain inert.
-RECOVER_SESSION_LOCK=0
-if ! fm_session_lock_owned_by_self "$STATE"; then
-  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  fm_session_pid_valid "$LOCK_PID" || exit 0
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
-  RECOVER_SESSION_LOCK=1
-fi
-
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
 [ -e "$STATE/.afk" ] && exit 0
 
@@ -240,10 +221,38 @@ need_supervision() {
 }
 need_supervision || exit 0
 
+# --- pending decision: tell the concurrent guard this firing is deciding ------
+# Publish before process-table-bound identity work, which can outlast the
+# concurrent guard's base wait on a busy host; marker contract:
+# fm_autoarm_pending_publish in bin/fm-wake-lib.sh.
+fm_autoarm_pending_publish "$STATE" || true
+trap '[ -z "$FM_AUTOARM_PENDING_MARKER" ] || rm -f "$FM_AUTOARM_PENDING_MARKER" 2>/dev/null || true' EXIT
+
+# --- identity: only the lock-owning session's hooks may arm ------------------
+# A prior session may have died after leaving its harness identity in .lock.
+# Use the shared liveness predicate to recognize only that stale-owner case; it
+# resolves a tagged identity too, so a dead Windows session is still recoverable
+# rather than being read as a malformed lock nobody may ever clear.
+# Defer recovery and generation claims until eligibility is rechecked after
+# identity resolution (docs/watcher-continuity.md "Claude session-lock ownership").
+# Missing or malformed locks are uncertainty rather than stale-owner evidence.
+RECOVER_SESSION_LOCK=0
+if ! fm_session_lock_owned_by_self "$STATE"; then
+  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  fm_session_pid_valid "$LOCK_PID" || exit 0
+  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  RECOVER_SESSION_LOCK=1
+fi
+
+# Identity resolution can span a captain turn; an AFK/idle transition must not
+# start a park. Regression: tests/fm-claude-stop-autoarm.test.sh.
+[ -e "$STATE/.afk" ] && exit 0
+need_supervision || exit 0
+
 # --- stale session-lock recovery ---------------------------------------------
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
 # remain the single acquisition owner, then re-verify current-session identity
-# before touching any auto-arm state.
+# before claiming an auto-arm generation.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
@@ -273,6 +282,12 @@ if [ "$CLAIM_RC" -ne 0 ]; then
 fi
 MY_GEN=$FM_AUTOARM_MY_GEN
 [ -n "$MY_GEN" ] || exit 0
+# The claim is now visible in the ledger, so the pending marker has served its
+# purpose; a parked generation must not keep extending later guards' waits.
+if [ -n "$FM_AUTOARM_PENDING_MARKER" ]; then
+  rm -f "$FM_AUTOARM_PENDING_MARKER" 2>/dev/null || true
+  FM_AUTOARM_PENDING_MARKER=
+fi
 
 # Commit <outcome> (optionally with the once-per-episode notice marker) for
 # this generation. Success means this generation's translation WINS and the
