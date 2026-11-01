@@ -95,6 +95,12 @@ Also report verdict captain for:
 - a needed credential or login;
 - anything destructive, irreversible, or security-sensitive.
 Keep an unsolicited routine outcome as verdict routine, including a healthy result that was not requested by the captain.
+A stale recheck of a declared external wait names a merge conflict when its text contains "merge conflict with its base".
+That phrase means the task's recorded pull request conflicts with its base.
+Report verdict captain, name the merge conflict, and include the pull request URL copied from the task record.
+Never set silent for that outcome.
+Do not merge, rebase, refresh, or comment on that pull request.
+A recheck that does not name a conflict stays the ordinary no-change wait and may stay a silent routine outcome.
 Keep an unchanged fleet review silent as instructed above.
 When genuinely in doubt, choose captain: a spurious escalation costs a glance, a swallowed one costs trust.
 Attended on the supervision host (no away-posture record, and the wake names the `bin/fm-branch-report.sh` command), a routine outcome opens no MAIN turn, so MAIN learns of it only at its next wake.

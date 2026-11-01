@@ -123,7 +123,9 @@ The status-presentation cursor bounds that span, and a missing or unmatched curs
 Single-task crewmate signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both crewmate and second-mate logs.
 
 For a stale row, `scopeForUnreadWake` folds the mapped task's status log.
-It excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`.
+It excludes the row when any `needs-decision` remains open, the current meaningful declaration is `captain-held`, or the payload names a merge conflict with its base.
+That conflict clause is `pause_recheck_conflict_clause` in `bin/fm-classify-lib.sh`.
+Excluding it keeps the conflict with the primary instead of a silent routine outcome.
 An unreadable or symlinked status log fails the scope closed rather than influencing routing.
 
 Before cross-referencing them, the dispatcher resolves trigger keys and every currently unread excluded decision row to task identity.

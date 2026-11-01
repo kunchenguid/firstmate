@@ -1350,7 +1350,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
 #     the block below and escalate what it finds; that block owns its file set.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason conflict dialog_name persisted
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1493,10 +1493,11 @@ housekeeping() {  # <state>
             _now > "$marker"
           fi
         elif [ -n "$last" ] && status_is_paused "$last"; then
+          conflict=$(pause_recheck_conflict_clause "$state/$task.meta")
           if [ "$bounded_until" -eq 1 ]; then
-            pause_reason="paused ${age}s (awaiting external, the declared time is beyond the recheck cadence; confirm the wait still holds): $win"
+            pause_reason="paused ${age}s (awaiting external, the declared time is beyond the recheck cadence; confirm the wait still holds${conflict}): $win"
           else
-            pause_reason="paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+            pause_reason="paused ${age}s (awaiting external, recheck whether the wait still holds${conflict}): $win"
           fi
           if escalate_add "$state" "$pause_reason"; then
             _now > "$marker"
