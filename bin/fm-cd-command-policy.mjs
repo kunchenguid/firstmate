@@ -9,11 +9,20 @@
 // scoping to the real primary checkout lives in the bin/fm-cd-pretool-check.sh
 // transport, not here. See docs/cd-guard.md for the full contract.
 //
+// One target is exempt: a `cd` whose single literal absolute argument resolves
+// to exactly the home passed as --home under both path rules: logical (`..`
+// collapsed lexically, Bash's default) and physical (symlinks followed component
+// by component, as under `set -P`). Either rule leaving the home, or failing to
+// resolve, denies. That cd cannot move the shell out of the home, so it is allowed. A relative, expanded, tilde,
+// glob, or option-bearing target is never resolved and stays denied, as does
+// every pushd and popd. Without --home no target is exempt.
+//
 // The shell tokenizer and command-position analysis are imported from
 // bin/fm-arm-command-policy.mjs, the sole owner of firstmate's shell
 // classification, so this guard never duplicates shell lexing. This policy
 // never evaluates, expands, sources, or runs any byte of the submitted command;
-// it inspects lexical command positions only.
+// it inspects lexical command positions only, and resolves the one literal
+// absolute path it compares against the home.
 
 import { Lexer, splitProgram, commandPosition } from "./fm-arm-command-policy.mjs";
 import { realpathSync } from "node:fs";
@@ -68,7 +77,32 @@ function hasCommandQueryPrefix(position) {
   return false;
 }
 
-function decision(command) {
+function resolvedPaths(path) {
+  try {
+    return [realpathSync(path), realpathSync.native(path)];
+  } catch {
+    return null;
+  }
+}
+
+// The exempt shape is exactly `cd <literal-absolute-path>`, optionally after
+// `--`. A word carrying an expansion, substitution, glob, or tilde has a value
+// this policy cannot know without evaluating it, so it is never resolved.
+function cdTargetsHome(command, position, wordIndex, home) {
+  if (!home || command.value !== "cd") return false;
+  const args = position.words.slice(wordIndex + 1);
+  if (args[0]?.value === "--" && args[0].literal) args.shift();
+  if (args.length !== 1) return false;
+  const [target] = args;
+  if (!target.literal || target.subs.length > 0 || target.unquotedExpansion) return false;
+  if (!target.value.startsWith("/")) return false;
+  const resolvedTarget = resolvedPaths(target.value);
+  const resolvedHome = resolvedPaths(home);
+  if (resolvedTarget === null || resolvedHome === null) return false;
+  return resolvedTarget.every((path) => path === resolvedHome[1]);
+}
+
+function decision(command, { home = "" } = {}) {
   const lexed = new Lexer(command).tokenize();
   // Fail open on syntax this classifier cannot tokenize. The cd-guard's threat
   // model is agent mistakes - an accidental bare `cd projects/foo` always
@@ -94,13 +128,14 @@ function decision(command) {
     if (!command) continue;
     if (!CD_BUILTINS.has(command.value)) continue;
     if (position.wrappers.some((wrapper) => FORKING_WRAPPERS.has(wrapper))) continue;
+    if (cdTargetsHome(command, position, wordIndex, home)) continue;
     return deny("persistent-cd");
   }
   return { decision: "allow" };
 }
 
 function parseArguments(argv) {
-  const result = { command: "", commandSet: false };
+  const result = { command: "", commandSet: false, home: "" };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
     if (name === "--command") {
@@ -113,6 +148,16 @@ function parseArguments(argv) {
     if (name.startsWith("--command=")) {
       result.command = name.slice("--command=".length);
       result.commandSet = true;
+      continue;
+    }
+    if (name === "--home") {
+      if (i + 1 >= argv.length) throw new Error("--home requires a value");
+      result.home = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (name.startsWith("--home=")) {
+      result.home = name.slice("--home=".length);
       continue;
     }
     throw new Error(`unknown argument: ${name}`);
@@ -137,7 +182,7 @@ if (invokedDirectly()) {
     if (!args.commandSet || !args.command) {
       process.stdout.write("allow\n");
     } else {
-      const result = decision(args.command);
+      const result = decision(args.command, { home: args.home });
       if (result.decision === "allow") {
         process.stdout.write("allow\n");
       } else {

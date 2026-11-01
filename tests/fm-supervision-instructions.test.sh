@@ -342,6 +342,35 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_literal_paths_in_rendered_snippets() {
+  local name home harness out quoted_config
+  for name in normal 'R&D "double" '\''single'\'' home'; do
+    home="$TMP_ROOT/$name"
+    mkdir -p "$home/config" "$home/state"
+    : > "$home/config/supervision-host-off"
+    quoted_config="'$(printf '%s' "$home/config/x-mode.env" | sed "s/'/'\\\\''/g")'"
+    for harness in pi pi-signed omp codex grok cursor opencode claude; do
+      out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$RENDER" --harness "$harness" --x-mode 1)
+      assert_not_contains "$out" '__FM_' "$harness: literal path leaked a placeholder"
+      case "$harness" in
+        pi|pi-signed)
+          assert_contains "$out" "$home/.pi/extensions/fm-primary-pi-watch.ts" "Pi watch path changed"
+          assert_contains "$out" "$home/.pi/extensions/fm-primary-turnend-guard.ts" "Pi turn-end path changed"
+          ;;
+        omp)
+          assert_contains "$out" "$home/.omp/extensions/fm-primary-omp-watch.ts" "omp watch path changed"
+          assert_contains "$out" "$home/.omp/extensions/fm-primary-turnend-guard.ts" "omp turn-end path changed"
+          ;;
+        grok)
+          assert_contains "$out" "[ -f $quoted_config ] && . $quoted_config; exec bin/fm-watch-arm.sh" "quoted config path changed"
+          ;;
+      esac
+    done
+  done
+  pass "snippets preserve literal ampersands, quotes and spaces in paths across primary harnesses"
+}
+
+test_literal_paths_in_rendered_snippets
 test_supervision_host_protocol_on_a_claude_home_unless_off
 test_supervision_host_protocol_on_every_arm_owner
 test_selected_harness_block_only
