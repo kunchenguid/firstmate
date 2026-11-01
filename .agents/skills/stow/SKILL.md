@@ -110,6 +110,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
 5. Evaluate every dated entry in each editable memory file against its tier clock.
    Where the optional pass horizon is enabled, first increment the unreinforced-pass counter of every dated entry step 4 did not reinforce - that increment is the pass tick - then judge each dated entry against both of its horizons and treat it as stale at whichever it reaches first.
    Re-validate a stale `aging` entry from current evidence and refresh its date, or archive it.
+   Archiving an entry its own clock made stale is retirement, not relocation: it is firstmate's call in every file, a shared one included, under the expiry-retirement rule in "Captain calls" below.
    Re-confirm a stale `perishable` entry against its named condition: still open means refresh the date, while resolved, expired, or no longer checkable means archive it in this pass.
    Promote `perishable` to `aging` when its condition keeps proving durable past its expected life, and retier in place when a supersession changes an entry's lifetime.
    `pinned` is exempt from this automatic decay step entirely.
@@ -121,6 +122,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    This guard binds every removal rung in this pass, including budget eviction and decay archival.
 7. When the total is still over budget after decay and consolidation, make aggressive reduction the default, using editable files only and in this order: archive every editable stale, superseded, or low-utility entry that is eligible for archival; consolidate tighter; run the over-budget offload sweep below and autonomously relocate every eligible non-pinned conditional entry into an already-existing allowed owner only after that owner holds it; then, only when the convergence precondition below holds, archive eligible `aging` entries oldest-reinforced-first until within budget.
    A proposal, a future migration, or an accepted exception is never budget relief in this pass.
+   Every exit in this step that is not expiry retirement passes the reach check first: a live `data/captain-shared.md` entry archived, evicted, or offloaded for budget alone leaves every inheriting home that still relies on it, so it is held as step 8 describes, never done on firstmate's own call.
    Budget eviction considers only editable `aging` entries that carry a last-reinforced date and are not pending offload or pending capture; a `<!--g-->` legacy-grace entry is ineligible until its grace cycle resolves, so eviction can neither cancel a promised grace cycle nor prefer just-validated entries over unvalidated ones.
    Convergence precondition: before evicting anything, total the eligible pool and check that archiving all of it would reach the budget; when even that cannot, skip the eviction rung entirely, archive nothing for budget reasons, and carry the concrete inability to the final step, naming the exempt pinned and pending-capture floor that crowds out the budget.
    Automatic processes never move a `pinned` entry: decay clocks, legacy grace cycles, oldest-first budget eviction, immediate budget archiving, and autonomous offload do not apply to it.
@@ -129,7 +131,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Finish at or below the effective budget, or hold a concrete captain call under the rules below before ending the pass.
    A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
    Route that constraint to the primary owner.
-   A shared-file entry is read by every inheriting home, so the primary's firstmate may move one as its own call only when the reach check shows the destination on the shared, inherited surface every inheriting home already loads; a destination only the primary can see - a home-local skill, a local archive, anything under its own data - makes the move a removal for the other homes.
+   A shared-file entry is read by every inheriting home, so the primary's firstmate may move one as its own call only when the reach check shows the destination on the shared, inherited surface every inheriting home already loads, or when the move is expiry retirement; a destination only the primary can see - a home-local skill, a local archive, anything under its own data - makes the move a removal for the other homes.
    Hold that at the primary owning level through `bin/fm-captain-hold.sh hold <task-id> --class permanent-removal --reason "<reason>"`, naming the shortfall, each named shared-file entry, and which homes would stop seeing it, with exactly these options in this order: raise the affected home's effective budget, which loses nothing, or remove the named entries from those homes.
    Trimming that would drop words carrying meaning is held the same way, and changing what a preference means is held as `--class design-pick`.
    When the convergence precondition skipped eviction, report the exempt pinned and pending-capture floor and the remaining shortfall as that concrete inability rather than archiving eligible knowledge that could not close the gap.
@@ -173,7 +175,7 @@ Every test must hold for a candidate:
 
 - Editable source: this home owns the memory file and may relocate the entry; a read-only shared entry is routed to its primary owner instead.
 - Durable: not `perishable`, not stale, and expected to remain true for months.
-- Eligible by authority: only a non-pinned, dated `aging` entry that is not pending offload or pending capture may be autonomously relocated to an already-existing allowed owner, while a `pinned` entry may be relocated only intact, through the pinned offload flow below, and can never be archived or evicted for budget relief.
+- Eligible by authority: only a non-pinned, dated `aging` entry that is not pending offload or pending capture may be autonomously relocated to an already-existing allowed owner that the reach check reports `reach=reversible`, while a `pinned` entry may be relocated only intact, through the pinned offload flow below, and can never be archived or evicted for budget relief.
 - Conditional: a one-line nameable trigger exists, and a session that never touches that trigger runs no risk from omitting the fact.
 - Fat enough to matter: roughly 50 estimated tokens or more, handled largest-first, because consolidation handles smaller entries.
 - A destination below fits the entry's privacy and visibility.
@@ -202,13 +204,14 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 ### Flow: check reach, reduce, propose, migrate, remove
 
 1. Check reach before any relocation.
-   Run `bin/fm-stow-cascade.sh --reach <memory-file> <destination>` for the candidate's source file and its proposed destination; it names every home that reads the source today and whether each can reach the destination.
+   Run `bin/fm-stow-cascade.sh --reach <memory-file> <destination>` for the candidate's source file and its proposed destination - an archive, a JIT owner, or a consolidation target; it names every home that reads the source today and whether each can reach the destination.
+   For a shared entry, an inheriting home reaches only the shared surface it loads, `data/captain-shared.md` itself, so a move within that file is `reach=reversible` and a move anywhere only this home can see is `reach=removal`.
    Record its reader lines in the completion receipt.
    Only `reach=reversible` (exit 0) lets the move count as reversible, firstmate's own call.
-   `reach=removal` (exit 4) means the move deletes the entry for each reader marked `reachable=no`: it is never firstmate's call, so either pick a destination every reader reaches or hold it as the removal step 8 describes, naming those homes in the reason and offering a budget raise first.
+   `reach=removal` (exit 4) means the move deletes the entry for each reader marked `reachable=no`: unless it is expiry retirement, it is never firstmate's call, so either pick a destination every reader reaches or hold it as the removal step 8 describes, naming those homes in the reason and offering a budget raise first.
 2. Reduce non-pinned material now.
    For each eligible non-pinned candidate, record its first line, source file, estimated tokens, one-line trigger, live destination, privacy and visibility verdict, and actual budget relief in the completion receipt.
-   Autonomously relocate it only by adding it to an already-existing allowed JIT note, or by routing it through a project's established delivery path to an already-existing allowed project-level destination, then confirming that destination holds the quoted entry before removing the memory entry.
+   Autonomously relocate it only when the reach check reports `reach=reversible`, and only by adding it to an already-existing allowed JIT note, or by routing it through a project's established delivery path to an already-existing allowed project-level destination, then confirming that destination holds the quoted entry before removing the memory entry.
    A destination that needs creation, uncompleted project delivery, or any other future work is not live and cannot count as relief, so continue with the next archival or eviction rung instead of leaving an over-budget proposal pending.
 3. Propose pinned relocation only.
    For a pinned candidate, append a `proposed-offload` section with the same fields to the completion receipt, and create or refresh one durable backlog item with `bin/fm-tasks-axi.sh add`, `bin/fm-tasks-axi.sh show <id> --full`, and `bin/fm-tasks-axi.sh update <id> --body-file <path>` as appropriate.
@@ -235,10 +238,25 @@ This list is the check every change to this skill must keep true: each instructi
 
 - Permanently removing pinned content he owns, or trimming it in a way that drops words carrying meaning, including the last-resort over-budget call in step 8: `permanent-removal`.
 - Relocating content to a destination that a home reading it today cannot reach, which the reach check reports as `reach=removal`, including a shared-file entry moved anywhere only the primary can see; held at the primary owning level with the homes that would stop seeing it named, and a budget raise offered first: `permanent-removal`.
+- Archiving an entry that has no expiry marker, or a live entry another home still relies on, out of a file some other home reads, because that is a removal for those homes rather than retirement: `permanent-removal`.
 - Truncating a grown `data/memory-archive.md`: `permanent-removal`.
 - Changing what one of his preferences means: `design-pick`.
 
-Firstmate's own calls, needing no captain approval: archiving, consolidation, eviction of eligible `aging` entries, offload of non-pinned entries, and relocation of an intact pinned entry to a destination the record names and the reach check reports `reach=reversible`.
+Firstmate's own calls, needing no captain approval, are exactly the moves one of these two conditions covers:
+
+- Reachable move: the reach check reports `reach=reversible`, the content survives intact, and the record names where it went.
+- Expiry retirement: the entry carries its own expiry marker (`<!--a:…-->` or `<!--p:…-->`), its own clock has made it stale and it did not re-validate, it goes to `data/memory-archive.md` rather than into nothing, and the record names where it went and which homes stop reading it.
+  When an expired entry gets archived is never a captain call, in any file.
+
+Every other move of content some other home reads is held under `permanent-removal`.
+The moves this skill lets firstmate make alone on shared material (`data/captain-shared.md`, in a primary home), and the condition that covers each:
+
+- Reinforcing, stamping, retiering in place, and the header pointer (marking rules, step 4, step 5): the entry stays in the shared file - reachable move.
+- Decay archival of a stale dated entry (step 5): expiry retirement.
+- Consolidation (step 6): a merge or rewrite that keeps every fact in the shared file is a reachable move; archiving a superseded or duplicate shared entry is covered only as expiry retirement, otherwise held.
+- Budget archival, eviction, and offload (step 7, flow step 2): covered only when the reach check reports `reach=reversible` or the exit is expiry retirement; a live shared entry archived, evicted, or offloaded for budget alone is held.
+- Pinned relocation (flow step 3): reachable move only, so in a home with secondmates it stays in the shared file or is held.
+- Legacy grace (`<!--g-->`, one-time migration): never applies to the shared file, whose default tier is `pinned`.
 
 ## Knowledge sweep and routing
 
