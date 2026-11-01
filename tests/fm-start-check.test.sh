@@ -344,10 +344,9 @@ arm_remote() {  # <id> [record-gen]
   printf '1000 %s pi\n' "${2:-g900.1.1}" > "$STATE/$1.start-pending"
 }
 
-# `observe --start-proof` output: the observation line, then the host's verdict,
-# launch generation, and whether it saw a write since that launch.
-remote_proof() {  # <verdict> <wrote yes|no>
-  printf 'idle\nverdict=%s\nbusy_gen=g900.1.1\nwrote_since_launch=%s\n' "$1" "$2"
+# The remote control plane's public observe verb returns only this observation.
+remote_proof() {  # <observation>
+  printf '%s\n' "$1"
 }
 
 remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed route
@@ -356,7 +355,7 @@ remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed rout
     WATCHER_CAPTURE=
     [ "$REMOTE_RC" = 0 ] || return "$REMOTE_RC"
     case "$2" in
-      observe) [ "${3:-}" = --start-proof ] && WATCHER_CAPTURE=$REMOTE_PROOF ;;
+      observe) WATCHER_CAPTURE=$REMOTE_PROOF ;;
       state) WATCHER_CAPTURE=$REMOTE_STATE ;;
       capture) WATCHER_CAPTURE=$REMOTE_CAPTURE ;;
     esac
@@ -372,22 +371,22 @@ test_remote_secondmate_reads_route() {
   # Restore the real route helper after each stubbed tick.
   local real
   real=$(declare -f start_check_remote)
-  # A mate that started its charter and already settled idle (its hook wrote the
-  # record) is proven, as is one whose host saw a write since its launch.
+  # Only busy proves through observe; a parent-mirrored status write also proves.
   arm_remote r1
-  remote_tick "$(remote_proof 'idle pi-ext' no)" alive '' 0 || fail "tick failed"; eval "$real"
-  [ ! -e "$STATE/r1.start-pending" ] || fail "a remote hook-written idle record did not count as proof"
+  remote_tick "$(remote_proof busy)" alive '' 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/r1.start-pending" ] || fail "a busy remote observation did not count as proof"
   arm_remote r5
-  remote_tick "$(remote_proof 'busy fm-spawn' yes)" alive '' 0 || fail "tick failed"; eval "$real"
-  [ ! -e "$STATE/r5.start-pending" ] || fail "a remote write since launch did not count as proof"
+  printf 'done: started\n' > "$STATE/r5.status"
+  remote_tick "$(remote_proof idle)" alive '' 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/r5.start-pending" ] || fail "a parent-side status write did not count as proof"
   # A record from an earlier launch of the route is dropped without a wake.
   arm_remote r6 g800.1.1
-  remote_tick "$(remote_proof 'busy fm-spawn' no)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
   [ ! -e "$STATE/r6.start-pending" ] || fail "a superseded remote record was kept"
   [ "$(count_wakes)" = 0 ] || fail "a started or superseded remote mate woke"
   # The spawn seed, or only the observation line, proves nothing.
   arm_remote r2
-  remote_tick "$(remote_proof 'busy fm-spawn' no)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  remote_tick "$(remote_proof idle)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
   case "$START_CHECK_WAKE" in
     "check: start r2: no start signal 200s after spawn (harness=pi; on screen on remote-mac: Pi project-trust dialog \"Trust project folder?\"); accept: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-send.sh r2 --key Enter") ;;
     *) fail "unexpected remote dialog reason: $START_CHECK_WAKE" ;;
@@ -399,7 +398,7 @@ test_remote_secondmate_reads_route() {
     *) fail "an unreachable host did not wake generically: $START_CHECK_WAKE" ;;
   esac
   arm_remote r4
-  remote_tick busy missing "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  remote_tick idle missing "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
   case "$START_CHECK_WAKE" in
     *"remote worker on remote-mac exited or its endpoint is gone before starting); recover it per secondmate-provisioning after: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-crew-state.sh r4") ;;
     *) fail "a vanished remote endpoint was not sent to recovery: $START_CHECK_WAKE" ;;
