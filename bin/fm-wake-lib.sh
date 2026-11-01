@@ -2839,6 +2839,12 @@ fm_wake_print_deduped() {
       if ($3 == "heartbeat") {
         dedupe = "heartbeat"
       }
+      # A check payload is the event itself, not a newer view of one state,
+      # and the acknowledgement consumes every row it hides: collapse only
+      # identical check rows.
+      if ($3 == "check") {
+        dedupe = dedupe SUBSEP $5
+      }
       if (!(dedupe in seen)) {
         order[++count] = dedupe
         seen[dedupe] = 1

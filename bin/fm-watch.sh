@@ -4048,7 +4048,9 @@ EOF
             continue
           fi
         fi
-        reason="check: $c: $out"
+        # One line, as the queued row stores it: wake consumers keep only
+        # prefixed lines, so a later output line would otherwise be dropped.
+        reason="check: $c: $(printf '%s' "$out" | fm_wake_clean_field)"
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ]; then
             # A merge poll armed on a secondmate is residue: the mate is a
