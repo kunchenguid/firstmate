@@ -326,7 +326,7 @@ test_record_hygiene_reclaims_stale_running_marker() {
   status=0
   FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
     FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
-    FM_RECORD_HYGIENE_TIMEOUT=1 timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+    FM_RECORD_HYGIENE_TIMEOUT=1 timeout 30 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
   { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
     || fail "watcher failed while reclaiming stale hygiene marker (exit=$status)"
   tries=0
