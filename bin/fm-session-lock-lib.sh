@@ -150,16 +150,26 @@ fm_process_argv() {  # <pid>
   esac
   command -v python3 >/dev/null 2>&1 || return 1
   python3 - "$pid" <<'FM_PROCARGV_EOF'
-import ctypes, sys
+import ctypes, errno, sys
 lib = ctypes.CDLL(None, use_errno=True)
 mib = (ctypes.c_int * 3)(1, 49, int(sys.argv[1]))  # CTL_KERN, KERN_PROCARGS2
-size = ctypes.c_size_t(0)
-if lib.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+# The region is sized at probe time and can grow before the read (the target
+# may rewrite its argv), so the read requests slack and an ENOMEM pair retries
+# with a fresh probe. Exhausted retries still fail closed.
+data = None
+for _ in range(3):
+    size = ctypes.c_size_t(0)
+    if lib.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        sys.exit(1)
+    size.value += 4096
+    buf = ctypes.create_string_buffer(size.value)
+    if lib.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0:
+        data = buf.raw[:size.value]
+        break
+    if ctypes.get_errno() != errno.ENOMEM:
+        sys.exit(1)
+if data is None:
     sys.exit(1)
-buf = ctypes.create_string_buffer(size.value)
-if lib.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
-    sys.exit(1)
-data = buf.raw[:size.value]
 argc = int.from_bytes(data[:4], sys.byteorder)
 parts = data[4:].split(b'\0')
 if not parts or parts[0] == b'':
