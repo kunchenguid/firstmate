@@ -1191,6 +1191,29 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Contract: ship and scout briefs tell the worker to run an allow-listed command
+# bare, because Claude Code's auto mode applies an allow rule only to that form.
+test_allow_listed_commands_run_bare() {
+  local home brief
+  home="$TMP_ROOT/bare-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bare-ship some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bare-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  for brief in "$home/data/brief-bare-ship/brief.md" "$home/data/brief-bare-scout/brief.md"; do
+    assert_grep 'Run a command the operator allow-listed' "$brief" \
+      "$brief: missing the bare allow-listed command rule"
+    # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+    assert_grep 'never inside that subshell or with a `;`, `&&`, pipe, redirect, `timeout`, or `VAR=` prefix' "$brief" \
+      "$brief: bare-command rule does not name the wrappers that defeat an allow rule"
+    # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+    assert_grep '`no-mistakes axi respond --run <id>` answers a run from anywhere' "$brief" \
+      "$brief: bare-command rule does not give the cd-free respond form"
+  done
+  pass "fm-brief: ship and scout briefs run allow-listed commands bare"
+}
+
 # Contract: the inbox listing the brief tells a worker to run succeeds silently
 # on an empty or absent inbox and lists messages in numeric order, in bash and zsh.
 test_inbox_listing_command_is_safe_on_empty_inbox() {
@@ -1718,6 +1741,7 @@ test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_completion_write_exception_is_task_scoped
 test_scout_and_secondmate_scaffold
+test_allow_listed_commands_run_bare
 test_scout_lavish_line_follows_presentation_floor
 test_inbox_listing_command_is_safe_on_empty_inbox
 test_workers_wait_without_spending_turns
