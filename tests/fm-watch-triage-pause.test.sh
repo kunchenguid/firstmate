@@ -1465,6 +1465,14 @@ test_reused_task_id_does_not_inherit_overdue_pause() {
   pass "a reused task id with fresh working status does not inherit overdue pause state"
 }
 
+test_malformed_dated_pause_is_not_undated_overdue() {
+  local dir state result
+  dir=$(paused_until_fixture malformed-until "" 90000); state="$dir/state"
+  result=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; status_pause_is_overdue "paused: waiting until not-a-time" 90000 "$(date +%s)"; printf "%s" "$?"' _ "$WATCH")
+  [ "$result" = 1 ] || fail "malformed dated pause entered the undated overdue path"
+  pass "malformed dated pauses remain on bounded recheck"
+}
+
 test_undated_pause_overdue_bound() {
   local dir state statusf class
   dir=$(paused_until_fixture undated-overdue "" 30); state="$dir/state"; statusf="$state/until.status"
@@ -1642,6 +1650,7 @@ fm_test_run \
   test_overdue_marker_survives_reconcile_and_closes_on_working \
   test_overdue_terminal_status_ignores_pane_display_churn \
   test_reused_task_id_does_not_inherit_overdue_pause \
+  test_malformed_dated_pause_is_not_undated_overdue \
   test_undated_pause_overdue_bound \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
   test_paused_bg_job_until_timeout_rechecks_after_the_job_ends
