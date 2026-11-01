@@ -289,6 +289,24 @@ test_watcher_scan_keeps_name_shared_files_outside_remote_mates() {
   pass "scan_signals keeps parent-replies.status outside remote mate homes"
 }
 
+test_record_hygiene_skips_remote_parent_channel() {
+  local dir out
+  dir="$TMP_ROOT/record-hygiene"
+  seed_remote_mate "$dir/home"
+  touch -t 202001010000 "$dir/home/state/parent-replies.status"
+  mkdir -p "$dir/home/data"
+  out=$(FM_TEST_LIB_SOURCED=1 FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    bash -c '
+      . "$1/bin/fm-bootstrap.sh" >/dev/null 2>&1 || true
+      . "$1/bin/fm-record-hygiene-lib.sh"
+      STATE="$2/state"; DATA="$2/data"; SCRIPT_DIR="$1/bin"
+      record_hygiene_report
+    ' _ "$ROOT" "$dir/home") || fail "record hygiene scan failed"
+  case "$out" in *parent-replies*) fail "remote parent channel was reported: $out" ;; esac
+  [ -f "$dir/home/state/parent-replies.status" ] || fail "remote parent channel was archived"
+  pass "record hygiene leaves a remote mate's parent channel untouched"
+}
+
 # --- unit: the away-mode daemon's heartbeat catch-all backstop --------------
 
 # The daemon runs the watcher's twin catch-all scan while a home is away, so it
@@ -406,6 +424,7 @@ test_channel_lines_never_reach_the_remote_unread_surface
 test_name_shared_file_folds_in_a_main_home
 test_name_shared_file_folds_in_a_local_mate
 test_watcher_scan_skips_channel_and_keeps_task_in_remote_mate
+test_record_hygiene_skips_remote_parent_channel
 test_heartbeat_backstop_skips_channel_in_remote_mate
 test_watcher_scan_keeps_name_shared_files_outside_remote_mates
 test_daemon_heartbeat_backstop_skips_channel_in_remote_mate
