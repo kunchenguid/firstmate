@@ -83,6 +83,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    Ship and scout replacements also pass the [worker tool exclusion checks](configuration.md#worker-tool-exclusions-configcrew-exclude-tools) at this step.
 2. **Safe checkpoint.**
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
+   For a ship or scout, the pool slot's owner claim must name this task or be absent ([slot ownership](architecture.md#delivery-modes-are-explicit-per-task)).
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
 3. **Record the note.**
