@@ -343,6 +343,32 @@ fm_send_count_colons() { # <string>
   printf '%s' $((${#s} - ${#no_colons}))
 }
 
+# When an explicit outside-home target has no recorded harness, detect kiro
+# from the live pane's foreground process group so the kiro-only composer
+# rules apply (fm_composer_kiro_scope). The live e2e guard owns why this
+# reads the foreground group through fm-harness.sh ancestry rather than
+# #{pane_current_command}: a toolbox wrapper can rename the tmux field
+# while comm still reads kiro-cli. Any other (or unreadable) process leaves
+# TARGET_HARNESS empty, which is the pre-kiro default and keeps the
+# non-kiro typed path - including the unknown-harness `$` settle - unchanged.
+fm_send_detect_kiro_from_live_target() {
+  local pid verdict
+  [ -n "$TARGET_HARNESS" ] && return 0
+  [ "$TARGET_BACKEND" = tmux ] || return 0
+  [ -n "$RESOLVED_TARGET" ] || return 0
+  fm_backend_source tmux || return 0
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    case "$pid" in *[!0-9]*) continue ;; esac
+    verdict=$("$SCRIPT_DIR/fm-harness.sh" ancestry "$pid" 2>/dev/null || true)
+    [ "$verdict" = "comm kiro" ] || continue
+    TARGET_HARNESS=kiro
+    return 0
+  done <<EOF
+$(fm_backend_tmux_foreground_pids "$RESOLVED_TARGET" 2>/dev/null || true)
+EOF
+}
+
 fm_send_resolve_target() { # <raw-target>
   local raw=$1 meta pane_meta target backend assumed colons id session hint
 
@@ -450,6 +476,12 @@ fm_send_resolve_target() { # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
+fm_send_detect_kiro_from_live_target
+# The recorded harness, or kiro detected from a meta-less explicit target's
+# live pane, scopes the kiro-only composer rules for every composer read this
+# send makes (fm_composer_kiro_scope in bin/fm-composer-lib.sh).
+# shellcheck disable=SC2034
+FM_COMPOSER_HARNESS=$TARGET_HARNESS
 shift
 
 # Supervision lease guard: a steer is overlap territory between the two Pi
@@ -752,10 +784,12 @@ fm_send_feed_resolved_holds() { # <answer-text>
   fi
 }
 
-# Resolve the target's harness from its meta (recorded by fm-spawn), used only to
-# scope the codex `$<skill>` popup-settle below. A task selector carries
-# meta; an explicit backend-target escape hatch has none, so its harness is
-# unknown and treated as non-codex (the safe default that keeps the fast path).
+# Resolve the target's harness from its meta (recorded by fm-spawn), used to
+# scope the codex `$<skill>` popup-settle below and the kiro composer rules
+# above. A task selector carries meta. An explicit backend-target escape hatch
+# has none, so its harness stays unknown and is treated as non-codex (the safe
+# default that keeps the `$` fast path) unless the live pane's foreground
+# process group is kiro (fm_send_detect_kiro_from_live_target).
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 # Do not add a separate passive liveness preflight here. Active send paths own

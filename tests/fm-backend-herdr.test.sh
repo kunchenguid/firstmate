@@ -823,6 +823,114 @@ test_registered_agent_with_an_empty_foreground_over_a_real_shell_settles_via_des
   pass "herdr stale registration: an empty foreground list over a real shell is not unreadable, it settles via the descendant walk"
 }
 
+# --- foreground process parsing ----------------------------------------------
+#
+# The watcher classifies every busy pane on every poll, so reading each
+# foreground process must not cost a jq process per field. These cases drive
+# fm_backend_herdr_pane_process_state over one canned `pane process-info` body
+# through a counting jq shim that runs the real jq.
+
+process_state_read() {  # <dir-suffix> <process-info-body> -> "<verdict> <jq-calls>"
+  local dir="$TMP_ROOT/process-state-$1" resp log fb real_jq
+  mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+  printf '%s\n' "$2" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  real_jq=$(command -v jq)
+  cat > "$fb/jq" <<SH
+#!/usr/bin/env bash
+printf 'jq\n' >> "$dir/jq-calls"
+exec "$real_jq" "\$@"
+SH
+  chmod +x "$fb/jq"
+  : > "$dir/jq-calls"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      v=$(fm_backend_herdr_pane_process_state fmtest w1:p2)
+      printf "%s %s" "$v" "$(wc -l < "$1" | tr -d " ")"' "$ROOT" "$dir/jq-calls"
+}
+
+process_info_body() {  # <shell-pid> <foreground-processes-json-array>
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":%s}}}' "$1" "$1" "$2"
+}
+
+test_process_state_reads_every_foreground_process_with_args_intact() {
+  local gemini=/usr/local/lib/node_modules/@google/gemini-cli/dist/index.js out
+  # The harness is the last of several processes, and only its full command
+  # line names it, so the verdict needs every record and the args past the
+  # first space.
+  out=$(process_state_read many-cmdline "$(process_info_body 4242 \
+    '[{"pid":4250,"name":"git","argv0":"git","argv":["git","status"],"cmdline":"git status"},
+      {"pid":4251,"name":"starship","argv":["/usr/local/bin/starship","prompt"]},
+      {"pid":4252,"name":"node","argv0":"node","cmdline":"node --max-old-space-size=10000 '"$gemini"'"}]')")
+  [ "${out%% *}" = agent ] \
+    || fail "a harness named only by the cmdline of the last foreground process must read agent, got '$out'"
+  out=$(process_state_read many-argv "$(process_info_body 4242 \
+    '[{"pid":4250,"name":"git","argv0":"git"},
+      {"pid":4252,"name":"node","argv":["node","--max-old-space-size=10000","'"$gemini"'"]}]')")
+  [ "${out%% *}" = agent ] \
+    || fail "args joined from argv must reach the classifier whole, got '$out'"
+  out=$(process_state_read tab-cmdline "$(process_info_body 4242 \
+    '[{"pid":4252,"name":"node","argv0":"node","cmdline":"node\t'"$gemini"'\n"}]')")
+  [ "${out%% *}" = agent ] \
+    || fail "a tab inside the cmdline must reach the classifier as a tab, not an escape, got '$out'"
+  out=$(process_state_read node-only "$(process_info_body 4242 \
+    '[{"pid":4252,"name":"node","argv0":"node","cmdline":"node --max-old-space-size=10000"}]')")
+  [ "${out%% *}" = other ] \
+    || fail "a node process with no harness argument must stay other, got '$out'"
+  pass "herdr process state: every foreground process is read, with spaced and tabbed args intact"
+}
+
+test_process_state_tolerates_missing_and_malformed_process_fields() {
+  local out
+  out=$(process_state_read missing-fields "$(process_info_body 4242 \
+    '[null, "str", 5, {}, {"pid":"7","name":7,"argv":"notarray","argv0":["a"]}, {"name":"git"}]')")
+  [ "${out%% *}" = other ] \
+    || fail "missing or malformed fields with no harness must read other, got '$out'"
+  out=$(process_state_read argv-only "$(process_info_body 4242 '[{}, {"argv":["/opt/tools/pi","--continue"]}]')")
+  [ "${out%% *}" = agent ] \
+    || fail "argv[0] must name the harness when name and argv0 are missing, got '$out'"
+  out=$(process_state_read argv0-only "$(process_info_body 4242 '[{"pid":4243,"name":"node","argv0":"pi"}]')")
+  [ "${out%% *}" = agent ] \
+    || fail "argv0 must name the harness when argv and cmdline are missing, got '$out'"
+  out=$(process_state_read no-shell-pid \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","foreground_processes":[{"name":"node","argv0":"pi"}]}}}')
+  [ "${out%% *}" = unreadable ] \
+    || fail "a process view with no shell pid must stay unreadable even with a harness in it, got '$out'"
+  out=$(process_state_read not-an-array \
+    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_processes":{"name":"pi"}}}}')
+  [ "${out%% *}" = unreadable ] \
+    || fail "a foreground list that is not an array must read unreadable, got '$out'"
+  pass "herdr process state: missing fields read empty and malformed views stay unreadable"
+}
+
+test_process_state_shell_verdict_survives_several_shell_processes() {
+  local sleep_bin shell_pid out
+  sleep_bin=$(command -v sleep) || fail "sleep not found"
+  "$sleep_bin" 300 &
+  shell_pid=$!
+  out=$(process_state_read two-shells "$(process_info_body "$shell_pid" \
+    '[{"pid":'"$shell_pid"',"name":"zsh","argv0":"-zsh","cmdline":"-zsh"},{"pid":1,"name":"bash","argv":["bash","-l"]}]')")
+  kill "$shell_pid" 2>/dev/null || true
+  [ "${out%% *}" = shell ] \
+    || fail "a foreground of only shells over a real childless shell must read shell, got '$out'"
+  pass "herdr process state: a foreground of several shells still proves a shell-only pane"
+}
+
+test_process_state_jq_calls_do_not_grow_with_foreground_processes() {
+  local one many procs i
+  procs='{"pid":4250,"name":"git","argv0":"git","argv":["git","status"]}'
+  for i in 1 2 3 4 5 6 7; do
+    procs="$procs,{\"pid\":$((4250 + i)),\"name\":\"rg\",\"argv0\":\"rg\",\"argv\":[\"rg\",\"needle\"]}"
+  done
+  one=$(process_state_read jq-one "$(process_info_body 4242 '[{"pid":4250,"name":"git","argv0":"git","argv":["git","status"]}]')")
+  many=$(process_state_read jq-many "$(process_info_body 4242 "[$procs]")")
+  [ "${one%% *}" = other ] && [ "${many%% *}" = other ] \
+    || fail "non-harness foregrounds must read other, got '$one' and '$many'"
+  [ "${one#* }" = "${many#* }" ] \
+    || fail "jq calls must not grow with the foreground process count: 1 process took ${one#* }, 8 took ${many#* }"
+  pass "herdr process state: one sample costs the same jq calls for 1 or 8 foreground processes"
+}
+
 test_projection_reclaim_rollback_refuses_a_stale_registration() {
   local out
   out=$(bash -c '. "$0/bin/backends/herdr.sh"
@@ -6181,6 +6289,10 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
 test_agent_descendant_under_a_spaced_install_path_stays_alive
 test_registered_agent_with_an_unreadable_process_view_is_unknown
 test_registered_agent_with_an_empty_foreground_over_a_real_shell_settles_via_descendant_walk
+test_process_state_reads_every_foreground_process_with_args_intact
+test_process_state_tolerates_missing_and_malformed_process_fields
+test_process_state_shell_verdict_survives_several_shell_processes
+test_process_state_jq_calls_do_not_grow_with_foreground_processes
 test_projection_reclaim_rollback_refuses_a_stale_registration
 test_busy_state_never_reports_a_shell_only_pane_busy
 test_cli_caches_the_selected_client_within_a_process
