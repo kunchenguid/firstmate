@@ -1561,6 +1561,7 @@ test_treehouse_pool_report_is_read_only_and_classifies_pools() {
   git init -q "$many_repo"
   real_jq=$(command -v jq)
   jq_count_file="$case_dir/jq-count"
+  rm -f "$fakebin/treehouse"
   cat > "$fakebin/jq" <<'SH'
 #!/usr/bin/env bash
 printf '.\n' >> "$FM_TEST_JQ_COUNT"
@@ -1601,7 +1602,7 @@ JSON
 JSON
   before=$(find "$root" "$registered" "$other_home_clone" "$fractional_repo" "$leased_repo" "$many_repo" -type f -exec shasum -a 256 {} \; | sort)
   : > "$jq_count_file"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_JQ_COUNT="$jq_count_file" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" FM_POOL_ORPHAN_DAYS=30 \
+  out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" treehouse)" FM_TEST_JQ_COUNT="$jq_count_file" FM_TEST_REAL_JQ="$real_jq" TREEHOUSE_ROOT="$root" FM_POOL_ORPHAN_DAYS=30 \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   jq_calls=$(wc -l < "$jq_count_file")

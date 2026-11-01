@@ -1561,7 +1561,7 @@ detect_local_tools() {
 treehouse_pool_report() {
   local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool records slot repo common created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} duplicate duplicate_reported seen_pair i now
   local -a seen_repos=() seen_pools=()
-  [ -d "$root" ] && command -v jq >/dev/null 2>&1 && command -v treehouse >/dev/null 2>&1 || return 0
+  [ -d "$root" ] && command -v jq >/dev/null 2>&1 || return 0
   case "$threshold" in ''|*[!0-9]*) threshold=30 ;; esac
   now=$(date +%s)
   records=$(mktemp "${TMPDIR:-/tmp}/fm-pool-records.XXXXXX") || return 0
