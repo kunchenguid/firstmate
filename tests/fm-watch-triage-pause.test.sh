@@ -1423,6 +1423,48 @@ test_overdue_marker_survives_reconcile_and_closes_on_working() {
   pass "a fresh overdue marker survives reconciliation and closes when the worker resumes"
 }
 
+test_overdue_terminal_status_ignores_pane_display_churn() {
+  local dir state statusf pid
+  dir=$(paused_until_fixture overdue-display-churn "$(( $(date +%s) - 90000 ))" 90000); state="$dir/state"; statusf="$state/until.status"
+  printf 'window=test:fm-until\nkind=ship\n' > "$state/until.meta"
+  set_mtime "$(( $(date +%s) - 90000 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-until_status"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "overdue pause did not open its decision"; }
+  grep -Fq 'paused-overdue-until' < <(status_open_decisions "$statusf") || fail "overdue decision was not opened"
+  ack_stopped_cycle "$state" || fail "could not acknowledge overdue decision"
+
+  printf 'idle, waiting for the reset; display changed\n' > "$dir/pane.txt"
+  until_watch "$dir" 240
+  pid=$UNTIL_PID
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "terminal overdue pause repeated a stale wake after pane display changed: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || fail "pane display churn printed another stale wake"
+  [ ! -s "$state/.wake-queue" ] || fail "pane display churn queued another stale wake"
+  reap "$pid"
+  pass "an open overdue decision suppresses terminal stale wakes caused only by pane display churn"
+}
+
+test_reused_task_id_does_not_inherit_overdue_pause() {
+  local dir state statusf
+  dir=$(paused_until_fixture reused-overdue-task "" 90000); state="$dir/state"; statusf="$state/until.status"
+  printf 'paused: waiting for an external dependency\n' > "$statusf"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_FAKE_CREW_STATE='state: working · source: active run' bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced() { printf "%s\n" "$3" >> "$2"; }
+    fm_wake_append() { :; }
+    wake() { :; }
+    resurface_absorbed test:fm-until "$STATE/.paused-resurfaced-reused" 90000 overdue "" 0 "$2" "blocked [key=paused-overdue-until]: paused 90000s, wait overdue - decide or release" "$STATE/.paused-overdue-until"
+    mv "$2" "$2.retired"
+    printf "working: fresh task\n" > "$2"
+    result=$(pause_state_class test:fm-until until)
+    [ "$result" != paused ] || exit 1
+    [ ! -e "$STATE/.paused-overdue-until" ]
+  ' _ "$WATCH" "$statusf" || fail "a reused task id inherited its prior overdue pause marker"
+  pass "a reused task id with fresh working status does not inherit overdue pause state"
+}
+
 test_undated_pause_overdue_bound() {
   local dir state statusf class
   dir=$(paused_until_fixture undated-overdue "" 30); state="$dir/state"; statusf="$state/until.status"
@@ -1598,6 +1640,8 @@ fm_test_run \
   test_paused_until_that_passed_is_rechecked_before_the_cadence \
   test_overdue_resume_race_uses_block_line_offset \
   test_overdue_marker_survives_reconcile_and_closes_on_working \
+  test_overdue_terminal_status_ignores_pane_display_churn \
+  test_reused_task_id_does_not_inherit_overdue_pause \
   test_undated_pause_overdue_bound \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
   test_paused_bg_job_until_timeout_rechecks_after_the_job_ends
