@@ -203,7 +203,7 @@ enroll_new() { # deadline : enroll recorded and branch PRs not yet durably owned
   local pids=()
   : > "$TMP/enroll.tsv"
   jq -r --slurpfile health "$TMP/health.json" '
-    .[] | select($health[0].prs[.url] == null) | .url as $url | .tasks[] | [., $url] | @tsv' \
+    .[] | select(.final | not) | select($health[0].prs[.url] == null) | .url as $url | .tasks[] | [., $url] | @tsv' \
     "$TMP/owned.json" >> "$TMP/enroll.tsv"
   mkdir "$TMP/branches"
   while IFS=$'\t' read -r id wt; do

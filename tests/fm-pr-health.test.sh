@@ -43,6 +43,9 @@ model() {
 }
 case "$1 $2" in
   'api graphql')
+    case "$*" in
+      *reviewThreads*) printf '[{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}]\n'; exit 0 ;;
+    esac
     n=
     for arg in "$@"; do case "$arg" in number=*) n=${arg#number=} ;; esac; done
     model "$n" | jq '[{data:{repository:{pullRequest:{
@@ -602,6 +605,32 @@ test_all_owned_pr_reads_start_in_one_wave() {
   pass 'all owned PR reads start in one wave without rotating a backlog'
 }
 
+test_final_contributions_are_not_enrolled_again() {
+  local home n copy
+  home=$(new_home final-enroll)
+  for n in 1 2 3; do
+    task "$home" "done$n" "pr=https://github.com/o/r/pull/$n"
+    pr "$home" "$n" "$HEAD_A" "$BASE_1" false false
+    set_pr "$home" "$n" '.state = "merged"'
+  done
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll || fail "could not make the PRs final"
+  copy="$home/bincopy"
+  cp -R "$ROOT/bin" "$copy"
+  mv "$copy/fm-contributions.sh" "$copy/fm-contributions.real.sh"
+  cat > "$copy/fm-contributions.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FORGE/contributions.log"
+exec "$(dirname "${BASH_SOURCE[0]}")/fm-contributions.real.sh" "$@"
+SH
+  chmod +x "$copy/fm-contributions.sh"
+  with_home "$home" "$copy/fm-pr-health.sh" arm >/dev/null || fail 'could not arm the PR health monitor'
+  pass_once "$home" >/dev/null
+  pass_once "$home" >/dev/null
+  ! grep -q '^enroll' "$home/forge/contributions.log" 2>/dev/null \
+    || fail "final PRs were enrolled again: $(grep '^enroll' "$home/forge/contributions.log")"
+  pass 'final contributions are not enrolled on a poll'
+}
+
 failures=0
 for test_name in test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \
@@ -616,7 +645,7 @@ for test_name in test_unknown_then_dirty_wakes_once test_dirty_again_at_same_com
   test_nothing_prints_while_nothing_changed test_merged_pr_is_not_read_again test_absent_flag_changes_nothing \
   test_watcher_surfaces_one_wake test_failure_once_per_latest_commit_after_cleanup \
   test_all_owned_pr_reads_start_in_one_wave test_checks_on_later_pages \
-  test_unsupported_provider_has_no_github_reads; do
+  test_unsupported_provider_has_no_github_reads test_final_contributions_are_not_enrolled_again; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures PR health regressions"
