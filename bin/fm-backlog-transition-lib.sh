@@ -825,7 +825,8 @@ EOF
   FM_BACKLOG_DOWNGRADE_LINKS=
   FM_BACKLOG_DOWNGRADE_NOTE=
   recorded=$(printf '%s\n' "$FM_BACKLOG_ROW_BODY" \
-    | sed -n '/^Historical record: /p' | head -1)
+    | sed -n -e 's/^.*; \(Historical record: .*\)$/\1/p' -e 't' \
+        -e '/^Historical record: /p' | head -1)
   [ "${#links[@]}" -gt 0 ] || { FM_BACKLOG_DOWNGRADE_NOTE=$recorded; return 0; }
   for url in "${links[@]}"; do
     skip=0

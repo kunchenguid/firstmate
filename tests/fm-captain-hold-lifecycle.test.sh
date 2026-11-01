@@ -3863,6 +3863,52 @@ test_answer_records_the_note_a_retained_record_carried() {
   pass "answer records the note a retained record carried"
 }
 
+test_answer_records_a_composed_note_once() {
+  local home id pr show body
+  home=$(make_home answer-composed-note-retry)
+  id=sample-answer-composed-note
+  pr=https://github.com/sample/sample/pull/55
+  tasks_in "$home" add "$id" "Ship the retried composed note" --kind ship --repo sample >/dev/null \
+    || fail "could not create the composed note fixture"
+  tasks_in "$home" update "$id" --pr "$pr" >/dev/null \
+    || fail "could not attach the unverified pull-request link"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the composed note fixture"
+  # The retained record's completion note names no link, and the row carries
+  # one no run verified, so the answer composes the two into a single line.
+  printf 'id=%s\ndata=%s\nspawn_gen=fixture-%s\ncleanup_incomplete=0\nmode=retain\narg=--note\narg=local%%20main\n' \
+    "$id" "$home/data" "$id" > "$home/state/$id.backlog-close"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = sample-answer-composed-note ] \
+   && [ ! -e "$FM_HOME/close-failed-once" ]; then
+  : > "$FM_HOME/close-failed-once" || exit 93
+  exit 92
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  printf 'Proceed without merging.\n' > "$home/answer.txt"
+  set +e
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null 2>&1
+  set -e
+  rm -f "$home/fakebin/tasks-axi"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the retried answer to a composed note failed"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the retried composed row is gone"
+  assert_contains "$show" "state: done" "the retried answer did not close the row"
+  assert_contains "$show" "$pr" "the retried answer lost the pull-request URL"
+  body=$(tasks_in "$home" show "$id" --full | sed -n 's/^  body: //p' | head -1)
+  [ "$(printf '%s' "$body" | grep -o "Historical record: $pr" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the retried answer duplicated its historical-record note: $body"
+  [ "$(printf '%s' "$body" | grep -o 'local main' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the retried answer duplicated the retained note: $body"
+  assert_no_grep '(merged ' "$home/data/backlog.md" \
+    "the retried composed answer recorded a merge nobody read"
+  pass "a retried answer records a composed note once"
+}
+
 test_answer_downgrades_a_recorded_link_no_run_verified() {
   local home id pr show marker
   home=$(make_home answer-legacy-record)
@@ -5576,6 +5622,7 @@ test_answer_survives_a_failed_close_without_losing_the_link
 test_answer_ignores_a_merge_fact_for_another_link
 test_answer_keeps_only_the_link_it_verified
 test_answer_records_an_interrupted_downgrade_note_once
+test_answer_records_a_composed_note_once
 test_answer_records_the_note_a_retained_record_carried
 test_answer_downgrades_a_recorded_link_no_run_verified
 test_merge_approval_releases_before_zero_done_retention
