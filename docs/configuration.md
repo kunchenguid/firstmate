@@ -2322,7 +2322,8 @@ Blank lines, `#` comments, and any other line authorize nothing: only a line equ
 An absent, unreadable, or symlinked file authorizes no Enterprise hosts.
 
 GitHub pull request URLs are otherwise identical on every GitHub host, so a hostname's shape cannot show whether it is a GitHub host or a look-alike such as `github.com.evil`, and [`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh)'s `fm_github_host_allowed` accepts an Enterprise host only when this file names it.
-That covers registration through `bin/fm-pr-check.sh`, the merge poll, `bin/fm-pr-merge.sh`, and the merge-outcome and teardown reads, which all carry the parsed host through `gh` and `gh-axi` via `GH_HOST`.
+That covers registration through `bin/fm-pr-check.sh`, the merge poll, `bin/fm-pr-merge.sh`, the [PR health monitor](#pr-health-monitor-configpr-health-monitor)'s per-PR reads, and the merge-outcome and teardown reads, which all carry the parsed host through `gh` and `gh-axi` via `GH_HOST` rather than inheriting an ambient one.
+The account notifications feed that drives those PR reads is not host-scoped: it stays on `github.com` whatever Enterprise hosts this home owns, so a home without `github.com` authentication keeps working through the monitor's documented full-sweep fallback.
 A host named here still needs its own `gh` authentication (`gh auth login --hostname <host>`), exactly as `gh` itself requires.
 
 The file is local to each home and not part of secondmate inherited configuration, so a secondmate home that serves such a project names the host in its own copy.
