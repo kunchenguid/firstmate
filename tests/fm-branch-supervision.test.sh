@@ -1352,9 +1352,9 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
 # --- away posture: main parked, standing authority relocated -----------------
 
 # The relocation is exactly bin/fm-lease-lib.sh's role-partition paragraph:
-# the branch passes the main-only partition for the PR merge and a fresh spawn
-# ONLY while a confirmed, live away-posture record exists; local-only landing
-# is never relocated; the record's spend cap binds a fresh ordinary spawn for
+# the branch passes the main-only partition for the PR merge, local-only
+# landing, and a fresh spawn ONLY while a confirmed, live away-posture record
+# exists; the record's spend cap binds a fresh ordinary spawn for
 # either actor; and an unconfirmed, archived, or invalid record is absence,
 # restoring the attended refusal byte for byte.
 test_away_record_relocates_main_owned_actions_to_the_branch() {
