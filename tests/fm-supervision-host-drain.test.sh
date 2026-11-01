@@ -270,7 +270,7 @@ test_branch_outcomes_collapse_repeated_captain_outcomes_per_task() {
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-1 --verdict captain --summary 'task-1 changed again' >/dev/null \
     || fail "fixture: could not record the later task-1 outcome"
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "BRANCH OUTCOMES: 3 newer captain outcome(s) are held back (byte cap); they follow on the next drain once these are acknowledged" \
+  assert_contains "$drained" "BRANCH OUTCOMES: 3 newer outcome(s) to act on are held back (byte cap); they follow on the next drain once these are acknowledged" \
     "the section must count every held-back captain row"
   assert_contains "$drained" "[seq 5, recorded 0m ago] task-1: task-1 $pad" "the first task must show its newest outcome the acknowledgement covers"
   assert_not_contains "$drained" "task-1 changed again" "a row after a held-back one must wait, since the acknowledgement cannot cover it"
@@ -585,11 +585,44 @@ test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair() {
   pass "drain: an outcome the host drain presented but main never acknowledged survives an outcome index repair"
 }
 
+# 31 October 2026: most branch outcomes said captain while meaning "main must
+# act", and that is how firstmate's own questions reached the captain as his.
+# A main outcome is stored, presented, and acknowledged like a captain one, but
+# its drain line says it is firstmate's to act on, and it is never counted as a
+# captain call.
+test_a_main_outcome_reaches_main_without_counting_as_a_captain_call() {
+  local home drained seq rows
+  home="$TMP_ROOT/drain-main-verdict"
+  mkdir -p "$home/state" "$home/config"
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict main \
+    --summary 'local branch ready to land') || fail "the store refused a main outcome"
+  [ "$seq" = 1 ] || fail "the main outcome got seq $seq"
+  if FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict main --silent true \
+      --summary 'still nothing new' >/dev/null 2>&1; then
+    fail "the store accepted a silent main outcome"
+  fi
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task token --verdict captain \
+    --summary 'needs the captain to sign in' >/dev/null || fail "fixture: could not record a captain outcome"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" "[seq 1, recorded 0m ago, main to act, not a captain call] landing: local branch ready to land" \
+    "the drain did not present the main outcome as firstmate's to act on"
+  assert_contains "$drained" "[seq 2, recorded 0m ago] token: needs the captain to sign in" \
+    "the drain changed how a captain outcome reads"
+  rows=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed | jq -r '"\(.seq):\(.verdict)"' | tr '\n' ' ')
+  assert_equals "$rows" "1:main 2:captain " "a presented main outcome did not wait for main's acknowledgement"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 >/dev/null \
+    || fail "main could not acknowledge a main outcome"
+  rows=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed | jq -r '"\(.seq):\(.verdict)"' | tr '\n' ' ')
+  assert_equals "$rows" "2:captain " "acknowledging the main outcome did not leave only the captain outcome open"
+  pass "a main outcome reaches main like a captain outcome, labelled as firstmate's to act on"
+}
+
 fm_test_run \
   test_report_surface_enforces_actor_turn_and_scope \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
   test_branch_outcomes_only_on_a_host_home_off_pi \
+  test_a_main_outcome_reaches_main_without_counting_as_a_captain_call \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_collapse_repeated_captain_outcomes_per_task \
   test_branch_outcomes_present_a_long_away_window_once \

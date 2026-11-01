@@ -585,7 +585,10 @@ EOF
 # because those outcomes wait for the return; quiet mode's record is a present
 # captain (bin/fm-afk-contract.sh AWAY OR QUIET). Bounded, and silent when
 # nothing is new or unprocessed.
-#   - Captain outcomes come first and never wait behind routine ones. Every
+#   - Acted-on outcomes (verdict main or captain, bin/fm-branch-outcome.sh)
+#     come first and never wait behind routine ones; a line whose newest row
+#     is verdict main says so, so a main outcome never reads as a captain call.
+#     The rest of this paragraph says "captain" for both. Every
 #     unprocessed captain row is presented on every drain until main
 #     acknowledges it, collapsed to one line per task: the task's newest
 #     presented summary, naming how many unprocessed captain outcomes it
@@ -638,10 +641,10 @@ print_branch_outcomes_section() {
   [ -n "$rows" ] || return 0
   if ! through=$(printf '%s\n' "$rows" | jq -s 'map(select(.unread) | .seq) | max // 0' 2>/dev/null) \
     || ! captain=$(printf '%s\n' "$rows" | jq -rs '
-      map(select(.verdict == "captain")) | sort_by(.seq)
+      map(select(.verdict != "routine")) | sort_by(.seq)
       | reduce .[] as $r ({count: {}, lines: []};
           .count[$r.task] += 1
-          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
+          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago\(if $r.verdict == "main" then ", main to act, not a captain call" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
       | .lines[]' 2>/dev/null) \
     || ! routine=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "routine" and .silent != true)) | sort_by(.seq) | reverse | .[]
       | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
@@ -676,13 +679,13 @@ print_branch_outcomes_section() {
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
+    text="BRANCH OUTCOMES (outcomes the supervision session recorded for you to act on, one line per task, oldest first; verdict main is firstmate's own to act on and never a question for the captain, while verdict captain names one of the captain's own categories; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
 "
     for line in "${captain_lines[@]}"; do
       text="$text$line
 "
     done
-    [ "$held" -eq 0 ] || text="${text}BRANCH OUTCOMES: $held newer captain outcome(s) are held back (byte cap); they follow on the next drain once these are acknowledged
+    [ "$held" -eq 0 ] || text="${text}BRANCH OUTCOMES: $held newer outcome(s) to act on are held back (byte cap); they follow on the next drain once these are acknowledged
 "
     text="${text}BRANCH OUTCOMES: after processing them run bin/fm-branch-outcome.sh mark-processed --through $target; until then every drain presents them again
 "
