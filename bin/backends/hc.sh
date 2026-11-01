@@ -132,11 +132,11 @@ EOF
 }
 
 # fm_backend_hc_env_run: run the resolved binary with exactly <session>'s env
-# pins, the one point every hc command passes through. Inside a view it refuses
-# before reaching hc, because hc starts a core on any command (measured on hc
-# 0.1.15 from a plain `hc get`), and a core started there would show workers the
-# view. The refusal is a plain failure, never hc's not_found status:
-# endpoint-state reads report a recorded task as unreadable and kill and
+# pins, the point every hc command but the version probe passes through. Inside
+# a view it refuses before reaching hc, because hc starts a core on any command
+# (measured on hc 0.1.15 from a plain `hc get`), and a core started there would
+# show workers the view. The refusal is a plain failure, never hc's not_found
+# status: endpoint-state reads report a recorded task as unreadable and kill and
 # relaunch refuse, while the presence check behind the session-start digest and
 # the fleet snapshot reports it as dead.
 # Ambient HC_TERMINAL_* routing markers are always stripped. An inherited
