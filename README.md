@@ -65,6 +65,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 The first mate detects supported missing or outdated tools and offers their install or upgrade after you approve.
 Backend-specific setup is linked in [Documentation](#documentation).
+For Bitbucket Cloud projects, see [pull-request setup and merge limits](docs/configuration.md#bitbucket-cloud-pull-requests-no_mistakes_bitbucket_email--no_mistakes_bitbucket_api_token).
 
 ### Recommended harnesses
 

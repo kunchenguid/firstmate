@@ -69,7 +69,7 @@ Clone into `projects/<name>` and add the registry entry only after the destinati
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
-Confirm the matching CLI is authenticated for a non-GitHub host: `glab auth login` for a GitLab project, whose merge watch and merge use glab, or a `tea login add` for a `forge=forgejo` project, whose merge watch, merge, and generated ship brief use tea.
+Confirm the provider's tools and authentication are ready using [Forge selection](../../../docs/configuration.md#forge-selection-dataprojectsmd-forge-token).
 
 ## Create a project
 
