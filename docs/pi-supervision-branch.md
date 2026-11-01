@@ -603,7 +603,7 @@ The captain's away words are the whole mandate:
 - The branch reads them at the tail.
 - It decides by its own judgment whether the event in front of it is the moment they name.
 - It acts on them only through the guarded scripts, never by analogy.
-- It holds with verdict captain on doubt.
+- It reports doubt with verdict main, left for MAIN at the return.
 
 `bin/fm-branch-prompt.sh` "Postures" owns those execution rules.
 It requires every action taken under the words to open its outcome summary with "per your away instructions:".
