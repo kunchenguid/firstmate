@@ -109,6 +109,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+- Teardown's append-only log of every process it killed or spared, `state/teardown-processes.log` (`bin/fm-teardown.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
