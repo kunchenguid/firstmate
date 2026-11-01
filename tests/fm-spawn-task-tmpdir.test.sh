@@ -214,8 +214,43 @@ test_shared_root_refused_before_scratch() {
   pass "a world-writable pre-existing task root is refused before any scratch directory is created"
 }
 
+# A reused scratch directory is safe only when it is a real directory owned by
+# this user; then spawn tightens it to 0700 and uses it. A reused symlink, even
+# one pointing at a directory this user owns, is refused because the scratch must
+# stay inside the recorded task root.
+test_reused_task_scratch_is_repaired_or_refused() {
+  local rec id out status seen outside
+
+  id="tmpdir-reused-dir-$RUN_SUFFIX"
+  rec=$(make_case reusedir codex "$id")
+  read_case "$rec"
+  mkdir -p "/tmp/fm-$id/tmp"
+  chmod 755 "/tmp/fm-$id/tmp"
+  out=$(run_case_spawn "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should repair a reused owned scratch directory: $out"
+  install_temp_probe "$FAKEBIN_DIR" codex
+  seen=$(emitted_temp_env "$FAKEBIN_DIR" "$LAUNCH_LOG" "$PANE_LOG") \
+    || fail "reused scratch directory: the emitted launch failed to run"
+  assert_task_scratch "$id" "reused scratch directory" "$seen"
+
+  id="tmpdir-reused-link-$RUN_SUFFIX"
+  rec=$(make_case reuselink codex "$id")
+  read_case "$rec"
+  outside="$TMP_ROOT/outside-$id"
+  mkdir -p "/tmp/fm-$id" "$outside"
+  ln -s "$outside" "/tmp/fm-$id/tmp"
+  out=$(run_case_spawn "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn must refuse a reused scratch symlink: $out"
+  assert_contains "$out" "task scratch directory /tmp/fm-$id/tmp already exists and is not a private directory owned by this user" \
+    "the refusal must name the scratch ownership check"
+  pass "a reused owned scratch directory is tightened, while a reused scratch symlink is refused"
+}
+
 test_ship_gets_task_scratch
 test_scout_gets_task_scratch
 test_shared_tmp_and_gotmp_stay_reachable
 test_secondmate_keeps_ambient_temp
 test_shared_root_refused_before_scratch
+test_reused_task_scratch_is_repaired_or_refused
