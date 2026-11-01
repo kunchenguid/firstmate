@@ -552,7 +552,7 @@ trusted: /private/tmp/fm-sm-trust-live-69759/fm-homes/livemate-n1
 No dialog appeared, the composer was reached, and neither did the machine-scoped bypass warning, because this ran against the real config.
 The lab home was deleted and the test entry was removed from the store and verified absent, with the same point-in-time caveat as the worktree arms above.
 
-`bin/fm-spawn.sh` therefore pre-registers the directory every claude launch starts in through `bin/fm-claude-trust.sh` before launch, and `tests/fm-claude-trust.test.sh` pins both halves of the scope contract for both shapes: a fresh worktree and a seeded secondmate home are trusted, and an out-of-scope path is refused.
+The [trust helper's header](../../bin/fm-claude-trust.sh) owns the current registration scope and refusals, with regression coverage in [tests/fm-claude-trust.test.sh](../../tests/fm-claude-trust.test.sh).
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
