@@ -554,6 +554,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/best-practices-adapters.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/commandcode.md",
       "audience": "maintainer-verification"
     },
