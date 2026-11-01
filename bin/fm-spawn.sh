@@ -442,11 +442,13 @@
 #   keeps env -i and the operational floor, replaces destination expansion of
 #   allowlisted names with the snapshotted values, and sets
 #   GIT_CONFIG_NOSYSTEM=1 so a system credential helper cannot answer for the
-#   worker. Values are shell-quoted only in the owner-only staged launch file,
-#   never terminal input, and the pane deletes that file as sourcing starts,
-#   before the worker executes; a deletion failure refuses the worker launch and
-#   keeps the interactive shell, even with errexit set (a Bash 3.2 or dash
-#   errexit pane still exits if spawn reclaims the file in the instant between
+#   worker. For a ship or scout, the task's TMPDIR, TMP, and TEMP are then
+#   assigned again, so an allowlisted temp name cannot move its scratch out of
+#   /tmp/fm-<id>/tmp. Values are shell-quoted only in the owner-only staged
+#   launch file, never terminal input, and the pane deletes that file as
+#   sourcing starts, before the worker executes; a deletion failure refuses the
+#   worker launch and keeps the interactive shell, even with errexit set (a
+#   Bash 3.2 or dash errexit pane still exits if spawn reclaims the file in the instant between
 #   the pane's existence check and its source). Spawn waits up to 30
 #   seconds for that deletion; if the pane never ran the command or could not
 #   delete the file, or HUP, INT or TERM interrupts spawn first, spawn removes
