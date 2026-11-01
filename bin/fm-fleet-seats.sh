@@ -1723,13 +1723,34 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
         gen_ok "$gen" || unavailable "host supervisor $id has unaccounted occupancy"
         if reservation=$(host_reservation "$id" "$gen"); then
           op=${reservation##*.seat-reservation.}
+          # The retained reservation keeps the model the parent asked for, which
+          # is not the model that runs when an observing operation bound an
+          # already-running supervisor on another model. That receipt records
+          # the generation and model it actually found, so it is the proof for
+          # this generation and the request model is not compared.
+          requested_model=-
+          if [ "$op" != "$gen" ]; then
+            receipt=$ROOT_STATE/parent-route/$id.seat-operation.$op
+            [ -f "$receipt" ] && [ ! -L "$receipt" ] \
+              && [ "$(record_field "$receipt" actual_generation)" = "$gen" ] \
+              || unavailable "host supervisor $id has unaccounted occupancy"
+            bound_model=$(record_field "$receipt" actual_model)
+            if [ -n "$bound_model" ]; then
+              [ "$bound_model" = "$(record_field "$meta" model)" ] \
+                || unavailable "host supervisor $id has unaccounted occupancy"
+            else
+              requested_model=$(record_field "$meta" model)
+            fi
+          fi
           if ! private_file_ok "$reservation" \
-            || ! jq -e --arg t "$id" --arg g "$op" --arg h "$ROOT_HOME" --arg m "$(record_field "$meta" model)" '
+            || ! jq -e --arg t "$id" --arg g "$op" --arg h "$ROOT_HOME" \
+              --arg m "$(record_field "$meta" model)" --arg req "$requested_model" '
               .schema == "fm-fleet-seat-holder.v2" and .task == $t
               and (.incarnations | length == 1)
               and any(.incarnations[]; .generation == $g and .kind == "secondmate"
                 and .lifecycle == "reserved" and .launch_phase == "dispatching"
-                and .model == (if $m == "-" or $m == "default" or $m == "" then null else $m end)
+                and (if $req == "-" then (.model | type == "string" and length > 0) or .model == null
+                  else .model == (if $m == "-" or $m == "default" or $m == "" then null else $m end) end)
                 and .route.placement == "remote"
                 and .route.operation == $g and .route.home == $h)
             ' "$reservation" >/dev/null 2>&1; then
