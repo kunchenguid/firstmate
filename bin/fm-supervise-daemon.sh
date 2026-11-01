@@ -1474,8 +1474,8 @@ housekeeping() {  # <state>
         blocked_line="blocked [key=paused-overdue-$task]: paused ${status_age}s, wait overdue - decide or release"
         fm_wake_status_append_self_announced "$state" "$state/$task.status" "$blocked_line"; append_rc=$?
         [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || continue
-        size=$(LC_ALL=C awk -v target="$blocked_line" '
-          { end = offset + length($0) + 1; if ($0 == target) found = end; offset = end }
+        size=$(LC_ALL=C awk -v prefix="blocked [key=paused-overdue-$task]" '
+          { end = offset + length($0) + 1; if (index($0, prefix) == 1) found = end; offset = end }
           END { if (found) print found; else exit 1 }
         ' "$state/$task.status") || continue
         case "$size" in ''|*[!0-9]*) continue ;; esac

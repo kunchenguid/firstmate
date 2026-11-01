@@ -1393,6 +1393,63 @@ test_housekeeping_busy_declared_wait_matures_its_window() {
   pass "housekeeping matures a busy pane's declared-wait window into exactly one recheck per window"
 }
 
+test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
+  local dir state fakebin task win pane key statusf marker identity offset blocked actual_identity rc
+  dir=$(make_supercase overdue-pause-away-mode)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=overdue-away; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  printf 'paused: waiting for dependency\n' > "$statusf"
+  printf 'idle prompt $\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  : > "$state/.afk"
+  printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$key"
+  sleep 2
+  FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+    FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+
+  blocked="blocked [key=paused-overdue-$task]"
+  [ "$(grep -cF "$blocked" "$statusf")" -eq 1 ] \
+    || fail "away-mode housekeeping did not append exactly one overdue decision: $(cat "$statusf")"
+  marker="$state/.paused-overdue-$task"
+  [ -f "$marker" ] || fail "away-mode housekeeping did not preserve the overdue marker"
+  IFS=: read -r identity offset < "$marker"
+  if [ "$(uname)" = Darwin ]; then
+    actual_identity=$(/usr/bin/stat -f '%d %i' "$statusf")
+  else
+    actual_identity=$(stat -c '%d %i' "$statusf")
+  fi
+  [ "$identity" = "$actual_identity" ] \
+    || fail "away-mode marker is not bound to the status-log identity"
+  [ "$offset" = "$(log_size "$statusf")" ] \
+    || fail "away-mode marker does not point to the exact blocked-line end"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "away-mode overdue recheck did not queue exactly one stale escalation"
+  status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
+    || fail "away-mode overdue decision is absent from the open-decision fold"
+
+  printf 'resolved [key=unrelated]: unrelated answer\n' >> "$statusf"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; pause_overdue_reconcile "$2" "$3"' \
+    _ "$ROOT/bin/fm-watch.sh" "$task" "$statusf" \
+    || fail "unrelated resolution incorrectly cleared the overdue marker"
+  [ -f "$marker" ] || fail "unrelated resolution removed the overdue marker"
+  status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
+    || fail "unrelated resolution closed the overdue decision"
+
+  printf 'working: dependency cleared, resuming\n' >> "$statusf"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; pause_overdue_reconcile "$2" "$3"' \
+    _ "$ROOT/bin/fm-watch.sh" "$task" "$statusf"
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "worker resume did not reconcile the overdue decision (rc=$rc)"
+  [ ! -e "$marker" ] || fail "worker resume retained the overdue marker"
+  status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
+    && fail "worker resume left the overdue decision open"
+  pass "away-mode housekeeping opens one overdue decision and worker resume closes it"
+}
+
 test_housekeeping_declared_time_controls_pause_recheck() {
   local dir state fakebin task win pane key now future distant past escalations
   dir=$(make_supercase pause-until-cadence)
@@ -3479,6 +3536,7 @@ test_housekeeping_captain_held_resurfaces_and_resets
 test_housekeeping_captain_held_silenced_only_by_an_away_record
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
+test_housekeeping_overdue_pause_opens_one_decision_in_away_mode
 test_housekeeping_declared_time_controls_pause_recheck
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
