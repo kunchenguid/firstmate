@@ -3507,7 +3507,7 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 | `hc kill <t>` on a live shell | Exit 0; `hc get` then reports `state: finished`, `reason: killed`. |
 | `hc rm <t>` after kill | Exit 0; `hc get` then exits 3. |
 | `hc send <t> 'cd /usr'` | Pasted and submitted; `foreground.cwd` became `/usr`. |
-| `hc --version` (0.1.14, 2026-10-30) | Prints `hc 0.1.14`; the adapter's binary gate requires this `hc x.y.z` shape at or above 0.1.14. |
+| `hc --version` (0.1.14, 2026-10-30) | Prints `hc 0.1.14`; the adapter's binary gate requires this `hc x.y.z` shape at or above 0.1.15, the first version where `hc run --name` was verified (0.1.14 was not checked for it). |
 | `hello` over `hc connect --session <s>` (0.1.14, 2026-10-30) | Answered `{"result":{"generation":1,...}}`; the adapter refuses any other generation. |
 | `hc send <t> --wait --timeout <n> -- <text>` (0.1.14, 2026-10-30) | Returns `{"started":<bool|null>,"wait":{"status",...}}`; `started:true` or `wait.status:working` natively confirms the submit. Exit 9 is `blocked` (never forced), 3 `not_found`, 11 `finished`; text after `--` survives leading dashes. |
 | `hc keys <t> -- <key>` (0.1.14, 2026-10-30) | Accepts the `--` delimiter before key names. |
@@ -3577,9 +3577,54 @@ ok - hc liveness: grok grok 1.0.41 (4220f3b224a6) [stable] classifies alive in h
 
 Teardown swept the session's serve/hold daemons plus the harness processes they held, and the fleet-state tripwire confirmed the recorded real-core file metadata inventory unchanged.
 
+### Local exit, replacement, and names
+
+Measured on 2026-10-31 on Linux with `hc 0.1.15` and `omp/18.14.1`.
+Every real-core command ran with a unique non-default `HC_SESSION`, scratch XDG state/runtime/config/data/cache directories, and inherited `HC_SOCKET`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` removed.
+Each guard stopped only its own private core and removed its scratch directories on exit.
+No Herdr TUI session or Herdr.app window was changed.
+`hc run --name` is verified on `hc 0.1.15`, so the adapter's minimum `hc` version is 0.1.15.
+
+Refresh the liveness proof with:
+
+```sh
+bin/fm-test-run.sh tests/fm-backend-hc-liveness-live-e2e.test.sh
+```
+
+The installed supported harnesses classified `alive`: Claude Code 2.1.316, Codex 0.166.0, OpenCode 2.2.5, Pi 1.4.0, Grok 1.0.70, Cursor 2026.10.22-27dcf5f, Gemini 0.66.0, Muse 1.4.14-R7309.1, omp 18.14.1, and agy 1.4.12.
+Pi-signed, Kimi, Rovo, Devin, Polytoken, and Kiro were absent and explicitly reported unverified.
+Command Code and Cortex were not applicable because their launch adapters restrict them to tmux and Herdr.
+
+Refresh the prompt-spending lifecycle proof with:
+
+```sh
+FM_HC_CONTROL_LIVE=1 bin/fm-test-run.sh tests/fm-control-hc-live-e2e.test.sh
+```
+
+The guard reads the core task name through both `hc get` and `hc ls`.
+It runs real omp, exits it through `fm-control`, checks that its process is gone and the shell remains, repeats the idempotent exit, then relaunches through the real launch owner.
+The replacement has a different process id but the same terminal address and name, a republished hc session/address record, the requested effort, and unchanged local edits.
+It also checks refusal with unsubmitted composer input and after the terminal is removed.
+Observed guard output:
+
+```text
+ok - hc control live: omp remains alive throughout a real shell-tool turn
+ok - hc control live: omp exits to a shell and repeated exit is idempotent
+ok - hc control live: replacement is alive in the same named terminal with local work preserved
+ok - hc control live: pending input and unprovable absence still refuse
+FM_TEST_COMPLETE
+```
+
+On a bare initial omp screen, the unstyled capture includes a right-aligned thinking-effort hint and the composer reads `unknown`.
+After an ordinary reply, the empty `❯` composer reads `empty`; typed input returns `unknown` and is refused rather than overwritten.
+No hint or unknown-state proof was relaxed to enable lifecycle control.
+Missing and finished hc terminals remain unprovable for control because the task record does not bind a core/socket identity.
+Herdr.app's installed guide and adoption implementation identify `herdr.tab` terminals as unnamed tabs; core names do not name those tabs, and no visual app proof is claimed.
+
 ### Not verified
 
-- A ship spawn, and a spawn with a real harness rather than the stand-in.
+- A fresh ship spawn with a real harness rather than the stand-in; the real omp replacement launch is verified above.
 - `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
+- Conversational submit confirmation across harnesses beyond the exercised omp lifecycle path.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
 - How the `herdr.space` and `herdr.tab` labels display in Herdr.app.
