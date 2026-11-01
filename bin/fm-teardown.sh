@@ -51,7 +51,9 @@
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
-# its base branch instead of the default branch.
+# its base branch instead of the default branch, and a local-only task with one
+# is judged landed against that local base branch (the one bin/fm-merge-local.sh
+# fast-forwards) instead of the branch the clone's origin/HEAD record names.
 # Squash merges collapse the branch's commits, so per-commit patch ids against main
 # no longer match, and a pipeline rebase can leave the local worktree diverged from
 # the PR head. A diverged copy is not treated as landed: path-set coverage, git
@@ -75,8 +77,9 @@
 # at most ten non-exempt untracked paths. tests/fm-teardown.test.sh covers hidden
 # untracked work and the clean return control.
 # local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge after configured approval) as a fallback
-# for the common case where there is no remote at all.
+# branch, or into the task's recorded base branch when it has one (firstmate
+# performs that merge after configured approval), as a fallback for the common
+# case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -1797,7 +1800,8 @@ work_is_landed() {
 }
 
 # The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
+# deliverable is its report, a local-only ship lands on its local base branch
+# (the recorded completion note keeps its fixed "local main" token), and every
 # other ship carries the PR recorded on its own record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
@@ -2136,8 +2140,19 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+    # A recorded base branch is the branch the landing fast-forwarded, so the
+    # landed test reads it and never consults the clone's origin/HEAD record.
+    if [ -n "$BASE_BRANCH" ]; then
+      git -C "$PROJ" show-ref --verify --quiet "refs/heads/$BASE_BRANCH" || {
+        echo "REFUSED: task $ID recorded base branch '$BASE_BRANCH', but $PROJ has no local branch of that name to judge its work landed against." >&2
+        echo "Restore that branch, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
+      }
+      DEFAULT=$BASE_BRANCH
+    else
+      DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+    fi
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "refs/heads/$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
