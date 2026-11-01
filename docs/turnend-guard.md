@@ -123,6 +123,11 @@ The exception has these limits:
 It needs a different verdict because it fires mid-turn, when the auto-arm model runs no watcher at all.
 The verdict depends on the supervision model.
 
+Under every model, an idle home whose only need is registered custom checks (`FM_SUP_CHECKS_ONLY` from `bin/fm-supervision-lib.sh`: no task in flight, no process-event source, no Relay poll) raises no alarm when its beacon is stale or absent.
+That is the ordinary state after a session-scoped harness was closed across a break, and no worker or external wait rides on the watcher.
+Such a call also ends any open down-episode, so work dispatched later onto a still-down watcher re-alarms in full.
+The turn-end guard keeps treating the same home as needing supervision and still arms the watcher for those checks.
+
 #### Claude Stop auto-arm model
 
 Under the Claude Stop auto-arm model a beacon fresh within grace is healthy even with no live watcher process.
@@ -582,7 +587,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 `tests/fm-turnend-guard.test.sh` covers:
 
-- The predicate.
+- The predicate, including the `FM_SUP_CHECKS_ONLY` flag staying unhealthy for the turn-end guard.
 - Main and secondmate primary scope.
 - Child-worktree exclusion.
 - `FM_HOME` and `FM_STATE_OVERRIDE` precedence.
@@ -614,7 +619,7 @@ It proves that a live foreign owner still prevents arming while repeated non-own
 - The auto-arm model's healthy fresh-beacon-without-a-watcher case, session-and-recovery-bound long-turn rewake tolerance, independently broken tolerance signals, open-claim negative control, stale-beacon alarm, and isolation from other models.
 - The extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 
-It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
+It also covers true-reason banner wording, reason-keyed episode dedup surviving a beacon mtime change, and the idle checks-only exemption with its task, source, and Relay negative controls.
 
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed:
 

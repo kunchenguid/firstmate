@@ -260,6 +260,82 @@ test_x_mode_without_live_watcher_stays_alarm() {
   pass "fm-guard stale banner: X-mode polling without a live watcher remains unhealthy"
 }
 
+# Register a custom check through the shipped bin/fm-check-register.sh, the way
+# bin/fm-contributions.sh arms its background poll.
+register_custom_check() {
+  local home=$1 id=$2
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$home/state/$id.check.sh"
+  chmod 700 "$home/state/$id.check.sh"
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+    || fail "fm-check-register.sh could not register $id"
+}
+
+# Session start after a break on a session-scoped harness: no task in flight,
+# only a background check armed, and a beacon long past grace. Neither the
+# locked path (writable guard via the drain) nor the read-only advisory path may
+# raise the watcher-down alarm, under any supervision model.
+test_idle_checks_only_cold_beacon_stays_silent() {
+  local dir home out run
+  dir=$(make_guard_case idle-checks-only)
+  home=$(case_home "$dir")
+  rm -f "$home/state/task.meta"
+  register_custom_check "$home" contributions
+  touch -t 201901010000 "$home/state/.last-watcher-beat"
+  for run in run_guard_case_read_only run_guard_case run_guard_case run_guard_case_autoarm run_guard_case_extension; do
+    out=$("$run" "$dir")
+    assert_not_contains "$out" "WATCHER DOWN" "$run alarmed on an idle checks-only home: $out"
+    assert_not_contains "$out" "watcher still down" "$run printed the down reminder on an idle checks-only home: $out"
+  done
+  rm -f "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  assert_not_contains "$out" "WATCHER DOWN" "an absent beacon on an idle checks-only home alarmed: $out"
+  assert_absent "$home/state/.guard-watcher-stale-banner" "an idle checks-only home must not open a down-episode"
+  pass "fm-guard stale banner: an idle checks-only home with a cold beacon raises no watcher-down alarm"
+}
+
+# The idle exemption covers only checks: a task, an event source, or a relay
+# poll beside the same cold check keeps the full alarm.
+test_checks_with_other_need_still_alarm() {
+  local dir home out kind
+  for kind in task source relay; do
+    dir=$(make_guard_case "checks-plus-$kind")
+    home=$(case_home "$dir")
+    rm -f "$home/state/task.meta"
+    register_custom_check "$home" contributions
+    touch -t 201901010000 "$home/state/.last-watcher-beat"
+    case "$kind" in
+      task) fm_write_meta "$home/state/task.meta" "window=firstmate:fm-task" "kind=ship" ;;
+      source) mkdir -p "$home/state/procevent"; : > "$home/state/procevent/s.source" ;;
+      relay) : > "$home/state/x-watch.check.sh" ;;
+    esac
+    out=$(run_guard_case "$dir")
+    [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+      || fail "a cold beacon with a $kind beside the check must still alarm: $out"
+    out=$(run_guard_case "$dir")
+    assert_contains "$out" "watcher still down" "a $kind beside the check must keep the down reminder"
+  done
+  pass "fm-guard stale banner: a task, source, or relay poll beside a check keeps the alarm"
+}
+
+# An idle checks-only call ends an earlier episode, so work dispatched later
+# onto the still-down watcher gets the full banner rather than the reminder.
+test_idle_checks_only_ends_episode() {
+  local dir home out
+  dir=$(make_guard_case idle-checks-ends-episode)
+  home=$(case_home "$dir")
+  register_custom_check "$home" contributions
+  out=$(run_guard_case "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] || fail "task in flight did not alarm: $out"
+  rm -f "$home/state/task.meta"
+  out=$(run_guard_case "$dir")
+  [ -z "$out" ] || fail "idle checks-only home must stay silent: $out"
+  fm_write_meta "$home/state/task.meta" "window=firstmate:fm-task" "kind=ship"
+  out=$(run_guard_case "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "new work after an idle checks-only interval must re-alarm in full: $out"
+  pass "fm-guard stale banner: an idle checks-only interval ends the down-episode"
+}
+
 test_healthy_recovery_rearms_next_stale_episode() {
   local dir home out1 healthy out2 pid
   dir=$(make_guard_case healthy-recovery)
@@ -1022,6 +1098,9 @@ test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm
+test_idle_checks_only_cold_beacon_stays_silent
+test_checks_with_other_need_still_alarm
+test_idle_checks_only_ends_episode
 test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_home_isolation
