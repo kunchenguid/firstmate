@@ -2475,7 +2475,12 @@ handle_paused_stale() {  # <window> <task> <hash>
   last=$(status_declared_wait_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
-  if status_is_captain_held "$last"; then
+  if status_is_paused "$last" && status_pause_is_overdue "$last" "$age" "$now"; then
+    detail="paused, wait overdue"
+    reason="paused ${age}s, wait overdue - decide or release"
+    declaration="$declaration:overdue"
+    min_age=0
+  elif status_is_captain_held "$last"; then
     if away_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
       return 0
@@ -2486,11 +2491,6 @@ handle_paused_stale() {  # <window> <task> <hash>
     if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
       return 0
-    elif [ "$now" -gt "$(( until + PAUSE_RESURFACE_SECS ))" ]; then
-      detail="paused, wait overdue"
-      reason="paused ${age}s, wait overdue - decide or release"
-      declaration="$declaration:overdue"
-      min_age=0
     elif [ "$now" -lt "$until" ]; then
       detail="paused, declared time beyond recheck cadence"
       reason="paused ${age}s, awaiting external - the declared time is beyond the recheck cadence; confirm the wait still holds"
@@ -2503,17 +2503,8 @@ handle_paused_stale() {  # <window> <task> <hash>
       min_age=0
     fi
   else
-    local undated_max=$PAUSE_UNDATED_MAX_SECS
-    case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
-    if [ "$age" -gt "$undated_max" ]; then
-      detail="paused, wait overdue"
-      reason="paused ${age}s, wait overdue - decide or release"
-      declaration="$declaration:overdue"
-      min_age=0
-    else
-      detail="paused, awaiting external"
-      reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
-    fi
+    detail="paused, awaiting external"
+    reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
   if [ "$detail" = "paused, wait overdue" ]; then
     resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$statusf" "blocked [key=paused-overdue-$task]: paused ${age}s, wait overdue - decide or release" "$STATE/.paused-overdue-$task"
