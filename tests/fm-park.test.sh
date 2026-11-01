@@ -298,8 +298,8 @@ test_gitlab_gate_clean_and_unclean_conditions() {
   gl_fixture "$w" psha=0000000000000000000000000000000000000004; expect_unclean "$w" gl-ci-old-sha "CI is none"
   gl_fixture "$w" dms=requested_changes; expect_unclean "$w" gl-changes "changes are requested"
   gl_fixture "$w" dms=jira_association_missing; expect_unclean "$w" gl-other "merge status jira_association_missing"
-  gl_fixture "$w" notes='[{"notes":[{"author":{"username":"bob"},"system":false,"created_at":"2026-01-01T00:00:00Z","resolvable":true,"resolved":false}]}]'
-  expect_unclean "$w" gl-thread "1 review thread(s) unresolved"
+  gl_fixture "$w" notes='[{"notes":[{"author":{"username":"bob"},"system":false,"created_at":"2026-01-01T00:00:00Z","resolvable":true,"resolved":false},{"author":{"username":"alice"},"system":false,"created_at":"2026-01-01T00:01:00Z","resolvable":true,"resolved":false},{"author":{"username":"carol"},"system":false,"created_at":"2026-01-01T00:02:00Z","resolvable":true,"resolved":true}]}]'
+  expect_unclean "$w" gl-thread "2 review thread(s) unresolved"
   # CodeRabbit's group bot posted before this head's pipeline was created.
   gl_fixture "$w" created="$NOW_ISO" finished="$NOW_ISO"
   expect_unclean "$w" gl-bot-stale "automated reviewers (group_42_bot_abc) have not submitted a review of this head"

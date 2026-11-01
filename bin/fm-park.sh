@@ -355,7 +355,7 @@ GITLAB_NORMALIZE='
       ci_done_at: ($hp.finished_at // null),
       pushed_at: ($hp.created_at // null),
       changes_requested: ($s == "requested_changes"),
-      threads_unresolved: ([$d[] | select(any(.notes[]?; .resolvable == true and .resolved != true))] | length),
+      threads_unresolved: ([$d[].notes[]? | select(.resolvable == true and .resolved != true)] | length),
       threads_complete: true,
       activity: [$d[] | .notes[]? | select(.system != true)
         | {author: (.author.username // "ghost"), bot: false, at: .created_at,
