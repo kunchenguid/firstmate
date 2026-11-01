@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 record_hygiene_report() {
-  local file id output now cutoff archive dir pr seen_prs prior backend target endpoint_state n file_mtime read_timeout read_status exclude
+  local file id output now cutoff archive dir pr seen_prs prior n file_mtime read_timeout read_status exclude
   read_timeout=${FM_RECORD_HYGIENE_READ_TIMEOUT:-10}
   case "$read_timeout" in ''|*[!0-9]*|0) read_timeout=10 ;; esac
   seen_prs=
@@ -49,34 +49,6 @@ record_hygiene_report() {
     [ -n "$(fm_meta_get "$file" remote_host)" ] && continue
     if [ -z "$(fm_meta_get "$file" window)" ]; then
       echo "RECORD_HYGIENE: metadata has no tab: $id"
-    fi
-    backend=$(fm_backend_of_meta "$file")
-    target=$(fm_backend_target_of_meta "$file")
-    if [ -z "$backend" ] || [ -z "$target" ]; then
-      echo "RECORD_HYGIENE: metadata has no endpoint: $id"
-    else
-      # shellcheck disable=SC2016 # The timed child receives the function and arguments as positional parameters.
-      if fm_run_timed "$read_timeout" bash -c 'source "$1"; shift; "$@"' _ "$SCRIPT_DIR/fm-backend.sh" fm_backend_target_exists "$backend" "$target" >/dev/null 2>&1; then
-        :
-      else
-        read_status=$?
-        if fm_timed_out "$read_status"; then
-          echo "RECORD_HYGIENE: endpoint read timed out after ${read_timeout}s: $id"
-        else
-          # shellcheck disable=SC2016 # The timed child receives the function and arguments as positional parameters.
-          endpoint_state=$(fm_run_timed "$read_timeout" bash -c 'source "$1"; shift; "$@"' _ "$SCRIPT_DIR/fm-backend.sh" fm_backend_agent_state "$backend" "$target" 2>/dev/null)
-          read_status=$?
-          if fm_timed_out "$read_status"; then
-            echo "RECORD_HYGIENE: endpoint read timed out after ${read_timeout}s: $id"
-          elif [ "$endpoint_state" = missing ]; then
-            echo "RECORD_HYGIENE: metadata has no endpoint: $id"
-          elif [ "$endpoint_state" = unreadable ]; then
-            echo "RECORD_HYGIENE: metadata endpoint could not be read: $id"
-          elif [ "$endpoint_state" = unverified ]; then
-            echo "RECORD_HYGIENE: metadata endpoint could not be verified: $id"
-          fi
-        fi
-      fi
     fi
     pr=$(sed -n 's/^pr=//p' "$file" | head -1)
     [ -n "$pr" ] || continue
