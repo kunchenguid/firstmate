@@ -14,6 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
+| Dormant Zalo folder bridge | [Zalo folder bridge](#dormant-zalo-folder-bridge-configzalo-folder-qaenv) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -2391,6 +2392,49 @@ A fail-closed poll that already queued a wake, and a timeout, always print so th
 
 `FM_MAIL_CHECK_BUDGET` (default 15, valid 5..25) bounds one standing poll and is cut down to fit `FM_CHECK_TIMEOUT`.
 `bin/fm-mail-check.sh disarm` removes the standing check.
+
+## Dormant Zalo folder bridge (config/zalo-folder-qa.env)
+
+`bin/fm-zalo-folder-qa.sh` is a dormant bridge for the exact Zalo group `TỒN KHO ÂM-DƯƠNG` and exact Microsoft Graph folder `Check tồn kho âm`.
+Nothing starts, schedules, or arms it automatically.
+Its `run` command is Linux-only and must be invoked explicitly in the foreground.
+The `--help`, `check`, and `handle` commands remain offline and portable, while `source-status` may contact Microsoft Graph on any supported host.
+
+The bridge has no workbook schema, stock calculation semantics, isolated data handler, allowed-query policy, freshness threshold, or per-file evidence contract.
+It therefore never reads Graph file content or interprets a question.
+Every newly observed eligible text message from the configured group receives only the fixed source-unavailable response, including traversal, mutation, and prompt-override text.
+Direct messages, other groups, bot messages, malformed events, and unsupported events receive no reply.
+Question content is never sent to Graph, an executable handler, or Firstmate authority.
+`source-status` verifies only the exact configured drive and folder identity and always reports the source unavailable because freshness evidence is undefined.
+
+The configuration defaults to `$FM_HOME/config/zalo-folder-qa.env`.
+`FM_ZALO_FOLDER_QA_CONFIG` selects another configuration file.
+The file contains exactly one `KEY=value` record for each required key:
+
+| Key | Required value |
+| --- | --- |
+| `ZALO_BOT_TOKEN` | Private Zalo bot token. |
+| `ZALO_BOT_ID` | Exact string ID returned as `result.id` by Zalo `getMe`. |
+| `ZALO_GROUP_ID` | Exact private `chat.id` of `TỒN KHO ÂM-DƯƠNG`. |
+| `GRAPH_DRIVE_ID` | Exact private Microsoft Graph drive ID. |
+| `GRAPH_FOLDER_ID` | Exact private Microsoft Graph item ID for `Check tồn kho âm`. |
+| `GRAPH_REFRESH_TOKEN_FILE` | Absolute path to the private refresh-token file used to request `Files.Read`. |
+| `MAX_SEEN_RECEIPTS` | Whole number from 1 through 1,000,000 bounding durable message receipts. |
+
+Blank lines and lines beginning with `#` are allowed, but unknown keys, duplicate keys, malformed records, and missing values are refused.
+The configuration file and refresh-token file must each be a regular, non-symlink file with mode `600`, owned by the current user, and have exactly one hard link.
+The refresh-token exchange requires `Files.Read` and rejects scopes containing `Files.ReadWrite`, `Files.Read.All`, `Sites.ReadWrite`, or `Sites.FullControl`.
+
+`check` validates this configuration without contacting Zalo or Graph and prints no private value.
+`handle` classifies one event from standard input without contacting either service or sending a reply.
+`source-status` performs only the Graph token exchange and pinned folder probe.
+`run` refuses a non-Linux platform before reading configuration, creating state, or contacting either service.
+On Linux it verifies the exact bot identity and group capability before polling, pins every send to the configured group, and never contacts Graph.
+
+`run` stores restart-persistent message receipts under `$FM_HOME/state/zalo-folder-qa/seen`, or the corresponding `FM_STATE_OVERRIDE` root.
+An already-sent message ID is suppressed across restarts.
+The configured receipt bound stops new messages before it can be exceeded.
+An uncertain send or unresolved `pending` receipt stops the bridge before further polling or sending and requires operator reconciliation; there is no automatic retry or reconciliation command.
 
 ## Relay (.env)
 
