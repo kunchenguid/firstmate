@@ -4615,6 +4615,137 @@ kill -0 -"$CRASH_PID" 2>/dev/null \
   || fail "a refused retirement signalled the leaderless group anyway"
 pass "a group whose leader died to something else is still refused, not signalled"
 kill -KILL -"$CRASH_PID" 2>/dev/null || true
+# --- a shared state root arrives with the host's umask, not this module's ----
+# Every other firstmate script creates $FM_HOME/state with a plain mkdir, so on
+# a umask-002 host the root this module operates on is group-writable and its
+# privacy contract was never established. The module has to establish it rather
+# than refuse the whole home, and the tightening has to be real and idempotent.
+file_mode() {  # <path>: the existing out-of-process spelling used above
+  PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
+    '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$1"
+}
+HSHARED="$TMP_ROOT/hshared"
+(umask 002; mkdir -p "$HSHARED/state")
+shared_mode=$(file_mode "$HSHARED/state")
+[ "$shared_mode" = 775 ] || fail "fixture did not produce a group-writable state root, got: $shared_mode"
+shared_out=$(pe "$HSHARED" list 2>&1) || fail "a group-writable shared state root was refused: $shared_out"
+assert_contains "$shared_out" "no sources registered" "the module did not operate on the established root"
+shared_mode=$(file_mode "$HSHARED/state")
+[ $((8#$shared_mode & 8#022)) -eq 0 ] \
+  || fail "the state root was still group- or other-writable after use, mode: $shared_mode"
+pe "$HSHARED" list >/dev/null 2>&1 || fail "establishing the private state root is not idempotent"
+[ "$(file_mode "$HSHARED/state")" = "$shared_mode" ] \
+  || fail "a repeat run changed the established state-root mode again"
+
+# A root we cannot tighten still fails closed rather than being operated on.
+FAIL_CHMOD_ROOT_BIN="$TMP_ROOT/fail-chmod-root-bin"
+mkdir -p "$FAIL_CHMOD_ROOT_BIN"
+cat > "$FAIL_CHMOD_ROOT_BIN/chmod" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$FAIL_CHMOD_ROOT_BIN/chmod"
+HUNFIXABLE="$TMP_ROOT/hunfixable"
+(umask 002; mkdir -p "$HUNFIXABLE/state")
+unfixable_status=0
+unfixable_out=$(PATH="$FAIL_CHMOD_ROOT_BIN:$PATH" pe "$HUNFIXABLE" list 2>&1) || unfixable_status=$?
+[ "$unfixable_status" -ne 0 ] || fail "a state root that could not be tightened was operated on anyway"
+assert_contains "$unfixable_out" "not a private directory" \
+  "an unestablishable state root is not reported through the owned interface"
+pass "a shared group-writable state root is established privately, idempotently, or refused"
+
+# --- a swapped state root path between check and chmod does not get damaged ---
+# A TOCTOU swap replacing the state directory between open and chmod must not
+# redirect the permission change to the replacement directory at that path.
+# The directory is pinned via file descriptor (/proc/self/fd/N) so chmod operates
+# on the opened inode, leaving the replacement's permissions untouched, and
+# revalidation refuses the swapped root.
+SWAP_CHMOD_BIN="$TMP_ROOT/swap-chmod-bin"
+mkdir -p "$SWAP_CHMOD_BIN"
+cat > "$SWAP_CHMOD_BIN/chmod" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_TEST_TOCTOU_TARGET:-}" ] && [ -n "${FM_TEST_TOCTOU_REPLACEMENT:-}" ]; then
+  target=$FM_TEST_TOCTOU_TARGET
+  replacement=$FM_TEST_TOCTOU_REPLACEMENT
+  unset FM_TEST_TOCTOU_TARGET FM_TEST_TOCTOU_REPLACEMENT
+  mv "$target" "${target}.orig"
+  mv "$replacement" "$target"
+fi
+exec /bin/chmod "$@"
+SH
+chmod +x "$SWAP_CHMOD_BIN/chmod"
+
+HTOCTOU="$TMP_ROOT/htoctou"
+(umask 002; mkdir -p "$HTOCTOU/state")
+HREPLACEMENT="$TMP_ROOT/htoctou-replacement"
+(umask 000; mkdir -p "$HREPLACEMENT")
+repl_mode_before=$(file_mode "$HREPLACEMENT")
+[ "$repl_mode_before" = 777 ] || fail "replacement fixture was not 777, got: $repl_mode_before"
+
+toctou_status=0
+toctou_out=$(
+  FM_TEST_TOCTOU_TARGET="$HTOCTOU/state" \
+  FM_TEST_TOCTOU_REPLACEMENT="$HREPLACEMENT" \
+  PATH="$SWAP_CHMOD_BIN:$PATH" \
+  pe "$HTOCTOU" list 2>&1
+) || toctou_status=$?
+
+[ "$toctou_status" -ne 0 ] || fail "a swapped state root was operated on instead of being refused"
+assert_contains "$toctou_out" "not a private directory" \
+  "a swapped state root is refused by post-chmod validation"
+
+repl_mode_after=$(file_mode "$HTOCTOU/state")
+[ "$repl_mode_after" = "$repl_mode_before" ] \
+  || fail "the swapped state root at the path had its permissions modified (before=$repl_mode_before after=$repl_mode_after)"
+
+orig_mode_after=$(file_mode "$HTOCTOU/state.orig")
+[ $((8#$orig_mode_after & 8#022)) -eq 0 ] \
+  || fail "the opened original state root inode was not tightened, mode: $orig_mode_after"
+
+pass "a swapped state root between check and chmod does not get its permissions changed"
+
+# A swap after the root is opened but before the pinned object is validated
+# leaves the path naming a different inode than the descriptor, so neither the
+# pinned original nor the replacement now at the path has its mode changed.
+SWAP_STAT_BIN="$TMP_ROOT/swap-stat-bin"
+mkdir -p "$SWAP_STAT_BIN"
+REAL_STAT=$(command -v stat)
+cat > "$SWAP_STAT_BIN/stat" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *'/fd/9 '*)
+    if [ -n "\${FM_TEST_TOCTOU_TARGET:-}" ] && [ -n "\${FM_TEST_TOCTOU_REPLACEMENT:-}" ]; then
+      mv "\$FM_TEST_TOCTOU_TARGET" "\${FM_TEST_TOCTOU_TARGET}.orig"
+      mv "\$FM_TEST_TOCTOU_REPLACEMENT" "\$FM_TEST_TOCTOU_TARGET"
+    fi
+    ;;
+esac
+exec "$REAL_STAT" "\$@"
+SH
+chmod +x "$SWAP_STAT_BIN/stat"
+
+HPRESWAP="$TMP_ROOT/hpreswap"
+(umask 002; mkdir -p "$HPRESWAP/state")
+preswap_orig_before=$(file_mode "$HPRESWAP/state")
+HPRESWAP_REPL="$TMP_ROOT/hpreswap-replacement"
+(umask 000; mkdir -p "$HPRESWAP_REPL")
+
+preswap_status=0
+preswap_out=$(
+  FM_TEST_TOCTOU_TARGET="$HPRESWAP/state" \
+  FM_TEST_TOCTOU_REPLACEMENT="$HPRESWAP_REPL" \
+  PATH="$SWAP_STAT_BIN:$PATH" \
+  pe "$HPRESWAP" list 2>&1
+) || preswap_status=$?
+
+[ "$preswap_status" -ne 0 ] || fail "a root swapped before pinned validation was operated on"
+assert_contains "$preswap_out" "not a private directory" \
+  "a root swapped before pinned validation is refused through the owned interface"
+[ "$(file_mode "$HPRESWAP/state")" = 777 ] \
+  || fail "the replacement swapped in before pinned validation had its mode changed"
+[ "$(file_mode "$HPRESWAP/state.orig")" = "$preswap_orig_before" ] \
+  || fail "the pinned original was chmodded although it no longer matched the path"
+pass "a state root swapped before pinned validation is refused without any chmod"
 
 # --- arm reports ready only once this registration's listener is running ----
 # The public arm path used to print armed as soon as registration was stored.

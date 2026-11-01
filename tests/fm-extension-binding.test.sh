@@ -140,6 +140,8 @@ new_home() {
 
 make_package() {  # <dir> <id> <adapter> [fixed-scenario] [required-consent]
   local dir=$1 id=$2 adapter=$3 fixed=${4:-good} consent=${5:-} required
+  # A package root is operator-supplied code the host executes, so the host
+  # refuses a group- or other-writable one outright rather than tightening it.
   mkdir -p "$dir"
   if [ -n "$consent" ]; then
     required=$(printf '["%s"]' "$consent")
