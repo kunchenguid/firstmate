@@ -1574,6 +1574,8 @@ test_treehouse_pool_report_is_read_only_and_classifies_pools() {
   git -C "$registered" push -q -u origin HEAD
   git clone -q "$bare_repo" "$clone_one"
   git clone -q "$bare_repo" "$clone_two"
+  git -C "$clone_one" remote set-url origin 'https://pool-user:pool-password@example.invalid/repo.git'
+  git -C "$clone_two" remote set-url origin 'https://pool-user:pool-password@example.invalid/repo.git'
   real_jq=$(command -v jq)
   jq_count_file="$case_dir/jq-count"
   rm -f "$fakebin/treehouse"
@@ -1629,7 +1631,9 @@ JSON
   assert_contains "$out" "unregistered pool $root/orphan" "pool with no existing project repository was not reported"
   assert_not_contains "$out" "unregistered pool $root/other-home" "another home's existing project clone was falsely reported orphaned"
   assert_contains "$out" "unregistered pool $root/nested" "a slot inside a parent repository was mistaken for its own checkout"
-  assert_contains "$out" "duplicate-clone pool $root/two" "separate clones with one origin were not reported as duplicates"
+  assert_contains "$out" "duplicate-clone pool $root/two (project $clone_two)" "separate clones with one origin were not reported with a local project path"
+  assert_not_contains "$out" "pool-user" "duplicate-pool report exposed the origin username"
+  assert_not_contains "$out" "pool-password" "duplicate-pool report exposed the origin password"
   assert_not_contains "$out" "duplicate-clone pool $root/many" "sibling slots in one pool were reported as duplicate pools"
   [ "$jq_calls" -le $((64 * 3)) ] || fail "pool scan used $jq_calls jq invocations for 64 slots; expected a linear bound"
   assert_not_contains "$out" "duplicate-clone pool $root/one" "sibling slots in one pool were reported as duplicate pools"
