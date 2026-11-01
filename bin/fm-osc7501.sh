@@ -44,7 +44,9 @@
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
 # firstmate's own id=fm attention marks on Rex are a separate supervisor-side
-# feature (bin/fm-rex-marks.sh) and compose unchanged. The watcher re-emits
+# feature (bin/fm-rex-marks.sh) and compose unchanged. Rex's activity readers
+# skip every app=firstmate-* record (bin/backends/rex.sh), so a record this
+# bridge wrote never comes back as the activity it reads. The watcher re-emits
 # only on change plus a heartbeat (records outlive resends, but a terminal
 # that dropped one is repaired). Its lifetime is the agent incarnation: the
 # launch runs `disarm` right after the agent command returns, and the watcher
