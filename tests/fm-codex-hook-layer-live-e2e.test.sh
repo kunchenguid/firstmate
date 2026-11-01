@@ -23,7 +23,7 @@ set -u
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-fm_live_gate default-on FM_CODEX_HOOK_LAYER_LIVE codex
+fm_live_gate default-on FM_CODEX_HOOK_LAYER_LIVE codex jq python3
 
 CODEX_VERSION=$(codex --version 2>&1)
 TMP_ROOT=$(fm_test_tmproot fm-codex-hook-layer-live)
@@ -33,7 +33,7 @@ TMP_ROOT=$(fm_test_tmproot fm-codex-hook-layer-live)
 capture_codex_launch() {
   local name=$1
   shift
-  local case_dir home proj wt fakebin launchlog id
+  local case_dir home proj wt fakebin launchlog id spawn_output
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -46,9 +46,11 @@ capture_codex_launch() {
   fm_test_spawn_brief "$home" "$id"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   : > "$launchlog"
-  FM_FAKE_LAUNCH_LOG="$launchlog" \
-    fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" "$@" >/dev/null 2>&1 ||
-    fail "codex $CODEX_VERSION: fm-spawn could not build a crewmate launch"
+  spawn_output=$(CODEX_HOME="${CODEX_HOME:-$HOME/.codex}" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" "$@" 2>&1) || {
+    printf 'codex %s: fm-spawn could not build a crewmate launch: %s\n' "$CODEX_VERSION" "$spawn_output" >&2
+    return 1
+  }
   cat "$launchlog"
 }
 
@@ -56,14 +58,14 @@ capture_codex_launch() {
 # and the positional brief, which is everything codex itself is configured by.
 codex_global_flags() {
   local launch=$1 flags
-  flags=${launch#*codex }
+  flags=${launch##* codex }
   flags=${flags%%\"\$(*}
   printf '%s' "$flags"
 }
 
 test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmate_launch() {
   local launch flags listing
-  launch=$(capture_codex_launch ship --mode no-mistakes --yolo off)
+  launch=$(capture_codex_launch ship --mode no-mistakes --yolo off) || fail "codex $CODEX_VERSION could not capture the crewmate launch"
   flags=$(codex_global_flags "$launch")
   case " $flags " in
     *' --approve-for-me '*) ;;
@@ -101,7 +103,56 @@ test_installed_codex_still_reports_the_hook_feature() {
   printf 'ok - codex %s still publishes the hook feature flag firstmate disables\n' "$CODEX_VERSION"
 }
 
+test_catalog_efforts_reach_real_codex_thread() {
+  local catalog model effort launch flags
+  catalog=$("$ROOT/bin/fm-harness.sh" codex-catalog)
+  for effort in max ultra; do
+    model=$(printf '%s\n' "$catalog" | jq -r --arg effort "$effort" '[.[] | select(any(.supported_reasoning_levels[]?; .effort == $effort)) | .slug][0] // empty')
+    if [ -z "$model" ]; then
+      printf 'skip - codex %s catalog has no model advertising %s\n' "$CODEX_VERSION" "$effort"
+      continue
+    fi
+    launch=$(capture_codex_launch "effort-$effort" --mode no-mistakes --yolo off --model "$model" --effort "$effort") || fail "codex $CODEX_VERSION could not capture $model $effort"
+    # Expand the flags as the pane shell would, including the catalog lookup.
+    flags=$(eval "printf '%s\n' $(codex_global_flags "$launch")")
+    FM_TEST_FLAGS="$flags" FM_TEST_MODEL="$model" FM_TEST_EFFORT="$effort" python3 - <<'PYCODE' || fail "codex $CODEX_VERSION did not retain $model $effort"
+import json, os, queue, subprocess, threading, time
+flags = os.environ['FM_TEST_FLAGS'].split('\n')
+config = []
+for i, flag in enumerate(flags):
+    if flag == '-c' and flags[i+1].startswith('model_reasoning_effort='):
+        config += ['-c', flags[i+1]]
+assert config, 'captured launch omitted reasoning config'
+p = subprocess.Popen(['codex', 'app-server', *config], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+lines = queue.Queue()
+def pump():
+    for line in p.stdout: lines.put(line)
+    lines.put('')
+threading.Thread(target=pump, daemon=True).start()
+def request(i, method, params, timeout=60):
+    p.stdin.write(json.dumps({'id': i, 'method': method, 'params': params}) + '\n'); p.stdin.flush()
+    deadline = time.monotonic() + timeout
+    while True:
+        try: line = lines.get(timeout=max(0, deadline - time.monotonic()))
+        except queue.Empty: raise TimeoutError(f'app-server did not answer {method} within {timeout}s')
+        if not line: raise RuntimeError('app-server exited')
+        reply = json.loads(line)
+        if reply.get('id') == i: return reply
+try:
+    request(1, 'initialize', {'clientInfo': {'name': 'firstmate-test', 'version': '1'}})
+    result = request(2, 'thread/start', {'model': os.environ['FM_TEST_MODEL'], 'ephemeral': True})['result']
+    assert result['model'] == os.environ['FM_TEST_MODEL'] and result['reasoningEffort'] == os.environ['FM_TEST_EFFORT'], result
+finally:
+    p.terminate()
+    try: p.wait(timeout=5)
+    except subprocess.TimeoutExpired: p.kill(); p.wait()
+PYCODE
+    printf 'ok - codex %s thread retains %s %s from the captured launch\n' "$CODEX_VERSION" "$model" "$effort"
+  done
+}
+
 test_installed_codex_still_reports_the_hook_feature
 test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmate_launch
+test_catalog_efforts_reach_real_codex_thread
 
 echo "# all fm-codex-hook-layer-live-e2e tests passed"

@@ -1838,6 +1838,20 @@ t3_worker_spawn() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$WORKER_PROJ" "$harness" --scout --backend t3code "$@" 2>&1
 }
 
+test_spawn_codex_max_uses_t3_catalog() {
+  local id out rc create
+  id=$(t3_uid t3codexmax)
+  t3_case codex-max
+  t3_worker_setup "$id"
+  t3_world_set 'w.providers = [{ providerInstanceId: "codex", driverKind: "codex", constraints: [], models: [{ id: "gpt-5.6-sol", options: [{ id: "reasoningEffort", type: "select", options: [{ id: "max" }] }] }] }]'
+  out=$(CODEX_HOME="$CASE_DIR/no-local-catalog" t3_worker_spawn "$id" codex --model gpt-5.6-sol --effort max); rc=$?
+  expect_code 0 "$rc" "T3 must use its own catalog for Codex max: $out"
+  assert_not_contains "$out" 'omitting max' "local catalog must not produce a false T3 warning"
+  create=$(t3_log_line_of 'r.tool === "t3_thread_launch"')
+  [ "$(t3_request "$create" 'r.arguments.modelSelection')" = '{"instanceId":"codex","model":"gpt-5.6-sol","options":[{"id":"reasoningEffort","value":"max"}]}' ] || fail "T3 must receive max from its own catalog"
+  pass "T3 Codex max uses the server catalog without a local omission warning"
+}
+
 test_spawn_refuses_launch_settings_t3_cannot_honor() {  # <config-file> <content> <expected-error> [harness]
   local file=$1 content=$2 expect=$3 harness=${4:-claude} model id out rc
   case "$harness" in claude) model=claude-sonnet-5 ;; codex) model=gpt-5.6-sol ;; esac
@@ -2793,6 +2807,7 @@ test_spawn_refuses_launch_settings_t3_cannot_honor claude-permission-mode auto "
 test_spawn_refuses_launch_settings_t3_cannot_honor codex-approval-mode approve-for-me "config/codex-approval-mode=approve-for-me" codex
 test_spawn_refuses_launch_settings_t3_cannot_honor codex-permission-mode restricted "config/codex-permission-mode=restricted" codex
 test_spawn_codex_accepts_bypass_approval_mode
+test_spawn_codex_max_uses_t3_catalog
 test_spawn_refuses_launch_settings_t3_cannot_honor launch-env-allowlist HOME "config/launch-env-allowlist"
 test_spawn_refuses_raw_launch_command
 test_spawn_abort_returns_lease_only_after_archive ok

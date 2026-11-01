@@ -1634,6 +1634,7 @@ It retains `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` 
 
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
+For Codex effort restrictions with this filter, see [model, effort, and fallback behavior](#crew-dispatch-profiles-configcrew-dispatchjson).
 
 Unless the Orca environment source below is configured, allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
 Listing a name does not provision it in a daemon's environment or transfer credentials to another machine.
@@ -1841,13 +1842,20 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 
 **Model, effort, and fallback behavior**
 
-- `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
-- Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
+- On pane backends, Codex `ultra` requires an explicit model advertising it in the Codex cache, and Pi native `ultra` requires a `codex-native/` model.
+  Codex `max` is threaded for `gpt-5.6-luna` or a model the Codex cache advertises it for, and is otherwise omitted with a warning.
+  Spawn and relaunch read the cache from the selected Codex home and refuse an unsupported `ultra` before provisioning or stopping a worker.
+  Without [`config/launch-env-allowlist`](#worker-launch-environment-configlaunch-env-allowlist), that home is the caller's own `CODEX_HOME` (default `~/.codex`), resolved against the caller's working directory if relative, and a Codex `max` or `ultra` worker launches with that same `CODEX_HOME`.
+  With the filter, a fresh Orca spawn can use the [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) snapshot for both the check and the launch: an explicitly selected absolute `CODEX_HOME`, or an explicitly selected absolute `HOME` when `CODEX_HOME` is absent or unset.
+  Otherwise catalog-dependent `max` and `ultra` refuse before provisioning or stopping, while `gpt-5.6-luna` `max` launches with the filtered environment unchanged.
+  `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` own validation and launch mapping.
+  A missing cache never blocks Luna `max`.
+  Dispatch and bootstrap validation only require Codex `max` and `ultra` to name an explicit model; the selected spawn or relaunch checks the cache, so a stale or missing entry never rejects the whole rules file.
 - On pane backends, an omitted model or effort means the selected harness uses its own default for that axis; [T3 selection](t3code-backend.md#provider-instances-and-models) owns server-backed defaults.
 - OpenCode receives the effort as its default `build` agent's `variant`, keyed to the resolved model, inside the `OPENCODE_CONFIG_CONTENT` JSON its launch already writes (the per-model reasoning-effort field of the config schema, verified on opencode 1.18.32); with no model resolved, the effort is recorded in task metadata but omitted from the launch.
 - Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 - If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
-- On pane backends, except for `ultra` under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
+- On pane backends, except for `ultra` under the validation contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
   For T3 Code, follow the [catalog validation contract](t3code-backend.md#provider-instances-and-models).
 - Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
 
