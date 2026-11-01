@@ -9,7 +9,7 @@ It provides task tabs and their terminal blocks while Treehouse continues to pro
 Pick Rex when you already run Firstmate inside Rex and want each task as its own tab next to your session.
 The Rex server must run on the same machine as Firstmate because spawn and liveness checks compare Rex-reported process and filesystem data with local machine state.
 For a new spawn, only a `unix://` endpoint reported by `rex whoami --json` is accepted as proof of locality; other transports, including local TCP endpoints, or an unreadable endpoint are refused before a tab is created or a worktree is leased.
-Use [remote second mates](remote-secondmates.md) to run workers on another host; a remote second mate can run on Rex there when the host's personal server is the persistent `rex server start` shape, which the remote doctor verifies.
+Use [remote second mates](remote-secondmates.md) to run workers on another host; a remote second mate can run on Rex there when the host's personal server is the persistent `rex server start` shape, which the remote doctor verifies; its `--fix` starts that server only when none answers and never stops or restarts an answering one.
 Rex is in beta, and its sessions live in a personal server that restores them across a server stop when the restarted server binds the same endpoint and state directory; a restored block comes back as a fresh login shell that keeps its working directory.
 
 Prerequisites:

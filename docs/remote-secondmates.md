@@ -272,7 +272,9 @@ Over the plain SSH doctor bootstrap, it writes and reloads two Firstmate-owned l
 
 Both are scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
 The Herdr agent applies only to the herdr backend; a rex-verified host needs only the remote-job worker there.
-Under `--backend rex --fix`, it also starts the account's persistent rex server, restarting an exit-empty one into the durable shape on the same socket and state directory.
+Under `--backend rex --fix`, it also starts the account's persistent rex server when none answers.
+It never stops or restarts an answering server, because a stop ends every process in that server's sessions, including unrelated work and sibling agents, and a restore brings back only shells.
+An answering exit-empty server is reported as a human gap: at a time when nothing runs there, an operator runs `rex server stop` and then `rex server start` on that account, and rex stays not ready until then.
 
 ### How the Herdr launch agent starts its server
 

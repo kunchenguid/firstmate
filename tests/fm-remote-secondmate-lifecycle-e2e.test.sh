@@ -1583,6 +1583,37 @@ assert_contains "$BOOT_DRIFT" "runs on backend 'rex', but this home recorded 'he
   "the full sweep did not report the recorded/remote backend drift"
 mv -f "$TMP_ROOT/parent-ios-rex-good.meta" "$PARENT/state/ios.meta"
 
+# A named key reaches the rex endpoint through its recorded route: the parent's
+# fm-send crosses to the remote key verb, which must address the rex block from
+# that host's endpoint record rather than as a bare tmux-looking target.
+: > "$REX_FAKE/keys"
+remote_env "$ROOT/bin/fm-send.sh" fm-ios --key Escape >"$TMP_ROOT/send-rex-key.out" 2>&1 \
+  || fail "a key was not sent to the remote rex secondmate: $(cat "$TMP_ROOT/send-rex-key.out")"
+assert_grep '^escape$' "$REX_FAKE/keys" "the remote rex endpoint never received the Escape key"
+pass "a key reaches a remote rex secondmate through its recorded endpoint"
+
+# Recovery keeps the recorded backend: once the rex agent exits, the startup
+# sweep relaunches the mate on rex again, never on the herdr default.
+rex_target_before=$(sed -n 's/^remote_target=//p' "$PARENT/state/ios.meta" | tail -1)
+herdr_launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+rm -f "$REX_FAKE/agent-blocks"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = dead ] \
+  || fail "the exited rex agent was not projected dead from its own host"
+BOOT_REX_DEAD=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_not_contains "$BOOT_REX_DEAD" 'SECONDMATE_LIVENESS: secondmate ios:' \
+  "the dead rex secondmate was not relaunched cleanly"
+assert_contains "$BOOT_REX_DEAD" 'secondmate ios relaunched after remote endpoint dead' \
+  "the dead rex secondmate was not reported relaunched"
+assert_grep 'remote_backend=rex' "$PARENT/state/ios.meta" "recovery moved the rex secondmate off its recorded backend"
+assert_grep 'backend=rex' "$remote_route_meta" "recovery rewrote the remote endpoint onto another backend"
+[ "$(sed -n 's/^remote_target=//p' "$PARENT/state/ios.meta" | tail -1)" != "$rex_target_before" ] \
+  || fail "recovery did not record a fresh rex endpoint"
+[ "$(grep -c '^tab create' "$HERDR_LOG" || true)" = "$herdr_launches_before" ] \
+  || fail "recovery launched the rex secondmate into herdr"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the relaunched rex endpoint did not read alive"
+pass "liveness recovery relaunches a remote rex secondmate on rex"
+
 mv -f "$TMP_ROOT/remote-ios-before-rex.meta" "$remote_route_meta"
 mv -f "$TMP_ROOT/parent-ios-before-rex.meta" "$PARENT/state/ios.meta"
 pass "a remote secondmate may run on rex with strict route validation both ways"

@@ -28,7 +28,9 @@
 # bin/fm-remote-herdr-owner-lib.sh owns that birth test. On the Rex backend the
 # account instead needs a rex CLI and a persistent `rex server start` server on
 # the account's personal unix socket, which is detached from every SSH session;
-# --fix may run `rex server start` but never installs the CLI. The remote job
+# --fix may run `rex server start` when no server answers, but never installs
+# the CLI and never stops or restarts an answering server: an exit-when-empty
+# server is a human gap that needs an operator-scheduled restart. The remote job
 # worker is backend-independent, so its Aqua login-session requirement is
 # checked under either backend. Doctor remains invokable over the plain-SSH
 # bootstrap path to inspect and repair that worker. SSH cannot create an Aqua
@@ -56,8 +58,8 @@
 #
 # --fix is idempotent and closes only automatable gaps: it writes and reloads
 # both Firstmate-owned Aqua agents, starts the Linux workers where no Aqua agent
-# applies, starts or restarts a persistent rex server when that backend needs
-# one, recreates the entrypoint symlink, and may add an owned ~/.local/bin
+# applies, starts a persistent rex server when that backend needs one and none
+# answers, recreates the entrypoint symlink, and may add an owned ~/.local/bin
 # wrapper for a required tool it can discover under nvm, asdf, or mise. It never
 # installs packages, creates a login session, writes an auto-login password,
 # changes FileVault, stores an account password, or replaces a non-Firstmate
@@ -724,26 +726,23 @@ check_rex_server() {
   esac
   exit_empty=$(rex_whoami_json | jq -r '.exit_empty // empty' 2>/dev/null)
   if [ "$exit_empty" = true ]; then
-    record rex-server "fixable: the rex server at $endpoint exits when empty, so a second mate's session would not survive an idle stretch" \
-      "rerun this command with --fix to restart it as a persistent rex server"
+    record rex-server "human: the rex server at $endpoint exits when empty, so a second mate's session would not survive an idle stretch" \
+      "at a time when nothing runs on that account's rex server, run 'rex server stop' and then 'rex server start' there to bring it back as a persistent server, then rerun this command; Firstmate never stops an answering server, because that ends every process in its sessions"
     return 0
   fi
   record rex-server "ok: persistent rex server on $endpoint (API revision $server_api)"
 }
 
 # A persistent rex server is `rex server start`, detached from every SSH
-# session. An answering exit_empty server is stopped first so the same socket
-# and state directory come back under the persistent shape; sessions created
-# there are restored, not lost.
+# session. This repair runs only when no server answers; an answering server is
+# never stopped or restarted here, because stopping it ends every process in
+# its sessions and restoring them brings back shells, not that work.
 start_rex_server() {
   local rex
   rex=$(rex_bin) || {
     fix_report rex-server failed "rex does not resolve, so no server was started"
     return 1
   }
-  if [ "$(rex_whoami_json | jq -r '.exit_empty // false' 2>/dev/null)" = true ]; then
-    "$rex" server stop >/dev/null 2>&1 || true
-  fi
   if "$rex" server start >/dev/null 2>&1; then
     fix_report rex-server applied "started a persistent rex server"
     return 0

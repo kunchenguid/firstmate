@@ -975,22 +975,28 @@ assert_no_grep 'dev.firstmate.herdr' "$CASE_LAUNCHCTL_LOG" \
   "the rex server repair touched a herdr launch agent"
 pass "--fix starts a missing rex server as the persistent shape"
 
-# An exit-empty server is durable-looking but ephemeral; --fix restarts it
-# persistent on the same socket.
+# An exit-empty server is durable-looking but ephemeral. It still answers, and
+# may hold unrelated sessions and sibling agents whose processes a stop would
+# kill, so --fix must leave it running and hand the restart to an operator.
 new_case Darwin no-herdr gui
 install_case_rex
 printf 'true\n' > "$CASE_STATE/rexfake/exit-empty"
 doctor --backend rex
 expect_code 1 "$DOCTOR_RC" "an exit-empty rex server was accepted as durable readiness"
-assert_contains "$DOCTOR_OUT" 'check rex-server=fixable:' "an exit-empty rex server was not tagged fixable"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "an exit-empty rex server was not tagged human"
 assert_contains "$DOCTOR_OUT" 'exits when empty' "the exit-empty gap did not name its durability problem"
 doctor --backend rex --fix
-expect_code 0 "$DOCTOR_RC" "--fix did not restart the exit-empty rex server persistent"
-assert_contains "$DOCTOR_OUT" 'check rex-server=ok: persistent rex server' \
-  "the restarted rex server was not confirmed persistent"
-assert_grep 'rex server stop' "$CASE_STATE/rexfake/log" "--fix did not stop the exit-empty server first"
-assert_grep 'rex server start' "$CASE_STATE/rexfake/log" "--fix did not start the persistent server"
-pass "--fix restarts an exit-empty rex server as the persistent shape"
+expect_code 1 "$DOCTOR_RC" "--fix reported an exit-empty rex server ready"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' \
+  "--fix did not keep the exit-empty server a human gap"
+assert_contains "$DOCTOR_OUT" "action: rex-server: at a time when nothing runs on that account's rex server, run 'rex server stop' and then 'rex server start'" \
+  "--fix did not hand the operator-scheduled restart to a person"
+assert_not_contains "$DOCTOR_OUT" 'fix rex-server=' "--fix attempted a repair on an answering rex server"
+assert_no_grep 'rex server stop' "$CASE_STATE/rexfake/log" "--fix stopped an answering rex server"
+assert_no_grep 'rex server start' "$CASE_STATE/rexfake/log" "--fix restarted an answering rex server"
+[ ! -e "$CASE_STATE/rexfake/down" ] || fail "--fix left the answering rex server down"
+assert_grep '^true$' "$CASE_STATE/rexfake/exit-empty" "--fix changed the answering rex server's shape"
+pass "--fix never stops an answering exit-empty rex server and reports the operator restart"
 
 # A rex CLI below the verified API floor is a human gap, as is a server one.
 new_case Darwin no-herdr gui

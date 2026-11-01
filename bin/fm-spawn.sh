@@ -1345,22 +1345,6 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
-  # A remote second mate runs only on a backend whose session-provider server
-  # outlives every SSH connection that supervises it: herdr (its server belongs
-  # to the host's GUI login session) is the default; rex runs on the host's
-  # persistent personal rex server. bin/fm-remote-doctor.sh gates that host on
-  # the selected backend, and the remote home's config/backend never overrides
-  # the explicit selection.
-  case "${BACKEND_ARG:--}" in
-  -) backend=herdr ;;
-  herdr | rex) backend=$BACKEND_ARG ;;
-  *)
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: a remote secondmate runs only on the herdr or rex backend, not '$BACKEND_ARG'" >&2
-    return 1
-    ;;
-  esac
   case "$effort" in
   - | low | medium | high | xhigh | max | ultra) ;;
   *)
@@ -1388,6 +1372,28 @@ spawn_remote_secondmate() {
       return 1
     fi
   fi
+  # A remote second mate runs only on a backend whose session-provider server
+  # outlives every SSH connection that supervises it: herdr (its server belongs
+  # to the host's GUI login session) is the default; rex runs on the host's
+  # persistent personal rex server. Without an explicit selection a relaunch
+  # keeps the backend its record names, and a record written before rex
+  # existed names none, so it is herdr. bin/fm-remote-doctor.sh gates that host
+  # on the selected backend, and the remote home's config/backend never
+  # overrides the selection.
+  backend=${BACKEND_ARG:-}
+  if [ -z "$backend" ] && [ -f "$meta" ]; then
+    backend=$(fm_meta_get "$meta" remote_backend)
+  fi
+  case "${backend:--}" in
+  -) backend=herdr ;;
+  herdr | rex) ;;
+  *)
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: a remote secondmate runs only on the herdr or rex backend, not '$backend'" >&2
+    return 1
+    ;;
+  esac
   # Gate the host before anything is published or transferred, so a host that
   # cannot hold a durable Herdr endpoint refuses here rather than half-way
   # through a launch. This is also the readiness gate every liveness relaunch
