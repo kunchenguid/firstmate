@@ -134,6 +134,18 @@ test_proof_before_deadline_is_silent() {
   pass "a hook-written record before the deadline removes the record silently"
 }
 
+test_same_second_turn_end_is_proof() {
+  reset_state
+  open_pane t1 "$PI_DIALOG"
+  arm_task t1 pi 1000
+  touch "$STATE/t1.turn-ended"
+  epoch=$(stat -f %m "$STATE/t1.turn-ended" 2>/dev/null || stat -c %Y "$STATE/t1.turn-ended")
+  printf '%s %s pi\n' "$epoch" "$ARMED_GEN" > "$STATE/t1.start-pending"
+  start_check_tick 1120 || fail "tick failed"
+  [ "$(count_wakes)" = 0 ] || fail "turn-ended in the launch second was not accepted as proof"
+  pass "turn-ended proof at the launch epoch is accepted"
+}
+
 test_pi_dialog_named_once() {
   local reason
   reset_state
@@ -340,6 +352,7 @@ test_watcher_loop_single_named_wake() {
 fm_test_run \
   test_spawn_arms_marker \
   test_proof_before_deadline_is_silent \
+  test_same_second_turn_end_is_proof \
   test_pi_dialog_named_once \
   test_claude_dialog_has_no_key \
   test_dead_agent_names_relaunch \

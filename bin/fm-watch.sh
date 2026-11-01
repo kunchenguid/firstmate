@@ -2843,7 +2843,7 @@ start_check_started() {  # <id> <meta> <epoch>
   local id=$1 meta=$2 epoch=$3 f m verdict backend target tail
   for f in "$STATE/$id.status" "$STATE/$id.turn-ended"; do
     m=$(stat_mtime "$f") || continue
-    [ "$m" -gt "$epoch" ] && return 0
+    [ "$m" -ge "$epoch" ] && return 0
   done
   verdict=$(fm_busy_classify_meta "$meta" "$id" "$STATE")
   case "$verdict" in
@@ -2933,37 +2933,44 @@ start_check_reason() {  # <id> <meta> <harness> <age>
 }
 
 start_check_tick() {  # [now-epoch], for deterministic clock callers
-  local now=${1:-} f id epoch gen harness meta mgen reason target
+  local now=${1:-} f id epoch gen harness meta mgen reason target lock
   START_CHECK_WAKE=
   for f in "$STATE"/*.start-pending; do
     [ -f "$f" ] || continue
     id=${f##*/}
     id=${id%.start-pending}
+    meta="$STATE/$id.meta"
+    lock=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_acquire_wait "$lock" || return 1
+    [ -f "$f" ] || { fm_lock_release "$lock"; continue; }
     epoch=; gen=; harness=
     read -r epoch gen harness _ < "$f" || true
-    meta="$STATE/$id.meta"
-    case "$epoch" in ''|*[!0-9]*) rm -f -- "$f"; continue ;; esac
+    case "$epoch" in ''|*[!0-9]*) rm -f -- "$f"; fm_lock_release "$lock"; continue ;; esac
     if [ ! -f "$meta" ]; then
       rm -f -- "$f"
+      fm_lock_release "$lock"
       continue
     fi
     mgen=$(fm_meta_get "$meta" busy_gen)
     if [ "${mgen:--}" != "$gen" ]; then
       rm -f -- "$f"
+      fm_lock_release "$lock"
       continue
     fi
     if start_check_started "$id" "$meta" "$epoch"; then
       rm -f -- "$f"
+      fm_lock_release "$lock"
       triage_log "start check: $id started"
       continue
     fi
     [ -n "$now" ] || fm_epoch_seconds_to now
-    [ "$((now - epoch))" -ge "$START_CHECK_SECS" ] || continue
-    [ -z "$START_CHECK_WAKE" ] || continue
+    [ "$((now - epoch))" -ge "$START_CHECK_SECS" ] || { fm_lock_release "$lock"; continue; }
+    [ -z "$START_CHECK_WAKE" ] || { fm_lock_release "$lock"; continue; }
     start_check_reason "$id" "$meta" "$harness" "$((now - epoch))"
     reason=$START_CHECK_REASON
-    fm_wake_append check "start:$id" "$reason" || return 1
+    fm_wake_append check "start:$id" "$reason" || { fm_lock_release "$lock"; return 1; }
     rm -f -- "$f"
+    fm_lock_release "$lock"
     # The stale backbone absorbed this parked pane while the record stood; mark
     # the screen this wake already named so it does not re-surface as stale.
     target=$(fm_backend_target_of_meta "$meta")

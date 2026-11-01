@@ -7660,6 +7660,7 @@ else
       sleep 0.2
     done
   }
+  START_CHECK_EPOCH=$(date +%s)
   SPAWN_LAUNCH_SENT=1
   # errexit is on here: a failed send still exits, and Orca source mode first
   # removes the credential-bearing file the pane never received.
@@ -7868,11 +7869,14 @@ opencode) START_CHECK=1; [ "$OPENCODE_MAJOR" -lt 2 ] || START_CHECK=0 ;;
 esac
 [ "$BACKEND" != t3code ] && [ "$RAW_LAUNCH" -eq 0 ] || START_CHECK=0
 if [ "$START_CHECK" -eq 1 ]; then
-  if ! { printf '%s %s %s\n' "$(date +%s)" "${BUSY_GEN:--}" "$HARNESS" >"$START_PENDING.tmp.$$" \
+  START_PENDING_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  fm_lock_acquire_wait "$START_PENDING_LOCK"
+  if ! { printf '%s %s %s\n' "$START_CHECK_EPOCH" "${BUSY_GEN:--}" "$HARNESS" >"$START_PENDING.tmp.$$" \
     && mv -f "$START_PENDING.tmp.$$" "$START_PENDING"; }; then
     rm -f "$START_PENDING.tmp.$$"
     echo "warning: could not arm the start check for $ID; inspect the worker yourself in about two minutes" >&2
   fi
+  fm_lock_release "$START_PENDING_LOCK"
 else
   rm -f "$START_PENDING"
 fi
