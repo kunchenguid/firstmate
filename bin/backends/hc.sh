@@ -59,8 +59,9 @@
 . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
 
 # The verified floor: the oldest herdr-core release every adapter surface
-# (including `send --wait` and the `hello` handshake) was exercised against.
-FM_BACKEND_HC_MIN_VERSION=0.1.14
+# (including `send --wait`, the `hello` handshake and `run --name`) was
+# exercised against. `run --name` is verified on 0.1.15 only.
+FM_BACKEND_HC_MIN_VERSION=0.1.15
 
 # The one protocol generation this adapter speaks.
 FM_BACKEND_HC_GENERATION=1
@@ -509,8 +510,9 @@ EOF
   printf 'ambiguous'
 }
 
-# Process-group scan: 0 = positive harness evidence, 1 = a complete shell-only
-# group, 2 = incomplete or unattributed. Failed reads must never prove `dead`.
+# Process-group scan: 0 = positive harness evidence, 1 = a complete group with
+# no harness (the foreground's own class comes from hc get, so only other
+# members can be unattributed), 2 = incomplete or unattributed. Failed reads must never prove `dead`.
 fm_backend_hc_group_has_agent() {  # <pid>
   local pid=$1 pgid member mpgid comm args processes seen=0 uncertain=0 class
   case "$pid" in ''|*[!0123456789]*) return 2 ;; esac
@@ -527,7 +529,7 @@ fm_backend_hc_group_has_agent() {  # <pid>
     fi
     class=$(fm_agent_process_classify "$comm" "${args%% *}" "$args" "$member")
     [ "$class" != agent ] || return 0
-    [ "$class" = shell ] || uncertain=1
+    [ "$member" = "$pid" ] || [ "$class" = shell ] || uncertain=1
   done <<EOF
 $processes
 EOF

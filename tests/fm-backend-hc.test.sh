@@ -33,7 +33,7 @@ cmd=${1:-}
 last=""
 for a in "$@"; do last=$a; done
 case "$cmd" in
-  --version) printf 'hc %s\n' "${FAKE_HC_VERSION:-0.1.14}" ;;
+  --version) printf 'hc %s\n' "${FAKE_HC_VERSION:-0.1.15}" ;;
   server) printf '{"live":0}\n' ;;
   connect)
     IFS= read -r _req || true
@@ -84,7 +84,7 @@ SH
 case "$*" in
   '-o pgid= -p '*)
     [ ! -e "$FAKE_HC_DIR/ps-pgid-fails" ] || exit 1
-    printf '1\n' ;;
+    printf '%s\n' "${*: -1}" ;;
   '-A -o pid=,pgid=,comm=')
     [ ! -e "$FAKE_HC_DIR/ps-list-fails" ] || exit 1
     if [ -e "$FAKE_HC_DIR/ps-list" ]; then cat "$FAKE_HC_DIR/ps-list"; else printf '1 1 sh\n'; fi ;;
@@ -241,6 +241,9 @@ test_agent_state_classifies_foreground_and_absence() {
   write_terminal "$D" t4 live fm-a1 "$tag" node node
   write_terminal "$D" t5 live fm-a1 "$tag" "" ""
   printf '1\n' > "$D/t6.exit"
+  jq '.foreground.pid=4' "$D/t4.json" > "$D/new.json"; mv "$D/new.json" "$D/t4.json"
+  printf '1 1 sh\n4 4 node\n' > "$D/ps-list"
+  printf 'node\n' > "$D/ps-args-4"
   # shellcheck disable=SC2016 # the inner shell expands it
   out=$(hc_shell 'for a in t1 t2 t3 t4 t5 t6 t7; do printf "%s=%s " $a "$(fm_backend_agent_state hc fmtest:$a)"; done')
   assert_equals "$out" "t1=alive t2=dead t3=missing t4=ambiguous t5=unreadable t6=unreadable t7=missing " \
@@ -329,6 +332,7 @@ test_container_ensure_gates_binary_version_and_generation() {
   assert_equals "$out" fmtest "container_ensure prints the session after every gate passes"
   : > "$D/log"
   FAKE_HC_VERSION=0.1.9 expect_refused hc_shell 'fm_backend_hc_container_ensure'
+  FAKE_HC_VERSION=0.1.14 expect_refused hc_shell 'fm_backend_hc_container_ensure'
   FAKE_HC_VERSION=bogus expect_refused hc_shell 'fm_backend_hc_container_ensure'
   FAKE_HC_GENERATION=2 expect_refused hc_shell 'fm_backend_hc_container_ensure'
   FAKE_HC_GENERATION=1 hc_shell 'fm_backend_hc_container_ensure' >/dev/null \
@@ -471,7 +475,9 @@ test_control_exit_preserves_all_refusals() {
       dialog) printf 'Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm · Esc to cancel\n' > "$D/screen" ;;
       read-fails) touch "$D/read-fails" ;;
       unreadable) printf '1\n' > "$D/t2.exit" ;;
-      ambiguous) jq '.foreground.name="node" | .foreground.argv=["node"]' "$D/t2.json" > "$D/new.json"; mv "$D/new.json" "$D/t2.json" ;;
+      ambiguous)
+        jq '.foreground.name="node" | .foreground.argv=["node"]' "$D/t2.json" > "$D/new.json"; mv "$D/new.json" "$D/t2.json"
+        printf '1 1 node\n' > "$D/ps-list"; printf 'node\n' > "$D/ps-args-1" ;;
       missing) rm "$D/t2.json" ;;
       finished) jq '.state="finished"' "$D/t2.json" > "$D/new.json"; mv "$D/new.json" "$D/t2.json" ;;
       foreign-task) jq '.labels["firstmate.task"]="fm-stranger" | .foreground.name="sh" | .foreground.argv=["sh"]' "$D/t2.json" > "$D/new.json"; mv "$D/new.json" "$D/t2.json" ;;
@@ -483,6 +489,7 @@ test_control_exit_preserves_all_refusals() {
     rc=0
     out=$(run_hc_control exit) || rc=$?
     [ "$rc" -ne 0 ] || fail "$scenario must refuse, got $out"
+    [ "$scenario" != ambiguous ] || assert_contains "$out" ambiguous "a readable unrelated foreground reports ambiguous, not unreadable"
     [ ! -e "$D/sent" ] || fail "$scenario must not submit lifecycle input"
     assert_not_contains "$(cat "$D/log" 2>/dev/null)" $'\x1fkeys\x1f' "$scenario must not press keys"
   done

@@ -11,7 +11,8 @@ This page owns operator setup and supported limits; the adapter header in `bin/b
 
 Prerequisites:
 
-- Herdr Core at version 0.1.14 or later, self-identifying as `hc x.y.z`, and a core speaking protocol generation 1.
+- Herdr Core at version 0.1.15 or later, self-identifying as `hc x.y.z`, and a core speaking protocol generation 1.
+  0.1.15 is the first version whose `hc run --name` (the task-derived terminal name) was verified; the adapter passes it on every create.
   Binary resolution uses an executable `FM_HC_BIN` override first, then `herdr-core` on `PATH`, then the `hc` alias.
   `hc` starts its own core on first use.
   [`bin/fm-install-hc.sh`](../bin/fm-install-hc.sh) owns installation usage and the checksum-verified release pin; updates remain operator-run.

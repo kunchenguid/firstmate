@@ -3507,7 +3507,7 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 | `hc kill <t>` on a live shell | Exit 0; `hc get` then reports `state: finished`, `reason: killed`. |
 | `hc rm <t>` after kill | Exit 0; `hc get` then exits 3. |
 | `hc send <t> 'cd /usr'` | Pasted and submitted; `foreground.cwd` became `/usr`. |
-| `hc --version` (0.1.14, 2026-10-30) | Prints `hc 0.1.14`; the adapter's binary gate requires this `hc x.y.z` shape at or above 0.1.14. |
+| `hc --version` (0.1.14, 2026-10-30) | Prints `hc 0.1.14`; the adapter's binary gate requires this `hc x.y.z` shape at or above 0.1.15, the first version where `hc run --name` was verified (0.1.14 was not checked for it). |
 | `hello` over `hc connect --session <s>` (0.1.14, 2026-10-30) | Answered `{"result":{"generation":1,...}}`; the adapter refuses any other generation. |
 | `hc send <t> --wait --timeout <n> -- <text>` (0.1.14, 2026-10-30) | Returns `{"started":<bool|null>,"wait":{"status",...}}`; `started:true` or `wait.status:working` natively confirms the submit. Exit 9 is `blocked` (never forced), 3 `not_found`, 11 `finished`; text after `--` survives leading dashes. |
 | `hc keys <t> -- <key>` (0.1.14, 2026-10-30) | Accepts the `--` delimiter before key names. |
@@ -3583,6 +3583,7 @@ Measured on 2026-10-31 on Linux with `hc 0.1.15` and `omp/18.14.1`.
 Every real-core command ran with a unique non-default `HC_SESSION`, scratch XDG state/runtime/config/data/cache directories, and inherited `HC_SOCKET`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` removed.
 Each guard stopped only its own private core and removed its scratch directories on exit.
 No Herdr TUI session or Herdr.app window was changed.
+`hc run --name` is verified on `hc 0.1.15`, so the adapter's minimum `hc` version is 0.1.15.
 
 Refresh the liveness proof with:
 
