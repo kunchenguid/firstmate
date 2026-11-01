@@ -1466,6 +1466,26 @@ housekeeping() {  # <state>
     if status_is_captain_held "$last" && fm_afk_contract_away_present "$state"; then
       continue
     fi
+    status_mtime=$(_stat_file_mtime "$state/$task.status" 2>/dev/null || echo "$now")
+    status_age=$(( now - status_mtime ))
+    if status_is_paused "$last" && status_pause_is_overdue "$last" "$status_age" "$now"; then
+      overdue_marker="$state/.paused-overdue-$task"
+      if [ ! -e "$overdue_marker" ]; then
+        blocked_line="blocked [key=paused-overdue-$task]: paused ${status_age}s, wait overdue - decide or release"
+        if fm_wake_status_append_self_announced "$state" "$state/$task.status" "$blocked_line"; then
+          if [ "$(uname)" = Darwin ]; then
+            identity=$(/usr/bin/stat -f '%d %i' "$state/$task.status" 2>/dev/null)
+          else
+            identity=$(stat -c '%d %i' "$state/$task.status" 2>/dev/null)
+          fi
+          size=$(_fm_status_file_size "$state/$task.status") || size=0
+          printf '%s:%s\n' "$identity" "$size" > "$overdue_marker"
+          escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release)" || true
+          _now > "$marker"
+        fi
+      fi
+      continue
+    fi
     if until=$(status_paused_until "$last"); then
       if [ "$now" -lt "$until" ] && [ "$age" -lt "$pause_secs" ]; then
         continue
