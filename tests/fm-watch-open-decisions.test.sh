@@ -331,8 +331,33 @@ test_reminder_cycle_still_delivers_procevent_result() {
     || fail "the drain did not present the reminder queued in the same cycle"
   pass "a cycle that queues a reminder still delivers a captured process-event result to the same drain"
 }
+
+# A later wake in the reminder's cycle can be a routine signal the attended
+# supervision branch may take. The branch drains only the rows it may claim,
+# never the reminder's check row, so main must still be the close's owner:
+# judged by the real offer rule both Pi and the supervision host route through.
+test_reminder_cycle_keeps_a_later_branch_wake_on_main() {
+  local dir="$TMP_ROOT/reminder-branch" offer
+  reminder_case "$dir" || fail "could not surface and acknowledge the decision before it aged"
+  printf 'project=demo\nwindow=fm-other\n' > "$dir/state/other.meta"
+  printf 'working: building the fixture\n' > "$dir/state/other.status"
+  touch "$dir/config/open-decision-reminders"
+  watch_once "$dir" "$dir/out" \
+    || fail "real watcher failed to wake: $(cat "$dir/out.err")"
+  grep -F "signal: $dir/state/other.status" "$dir/out" >/dev/null \
+    || fail "the cycle did not close with the routine signal: $(cat "$dir/out")"
+  [ "$(queued_reminders "$dir")" = 1 ] || fail "the reminder was not durably queued exactly once"
+  offer=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" node "$ROOT/bin/fm-branch-dispatch.mjs" offer < "$dir/out") \
+    || fail "the branch offer rule could not judge the close"
+  case "$offer" in
+    *eligible=0*) ;;
+    *) fail "a close carrying the queued reminder was offered to the branch: $(cat "$dir/out") -> $offer" ;;
+  esac
+  pass "a later branch-routable wake in a reminder cycle still closes on main"
+}
 fm_test_run test_disabled test_oldest_and_backoff test_numeric_keys_are_distinct \
   test_numeric_tasks_are_distinct test_resolution_and_reopen \
   test_wait_exemptions test_unknown_times_and_keyless test_timed_fold_is_incremental \
   test_invalid_settings test_timed_cursor_retirement test_watcher_loop \
-  test_reminder_cycle_still_reconciles_procevent test_reminder_cycle_still_delivers_procevent_result
+  test_reminder_cycle_still_reconciles_procevent test_reminder_cycle_still_delivers_procevent_result \
+  test_reminder_cycle_keeps_a_later_branch_wake_on_main
