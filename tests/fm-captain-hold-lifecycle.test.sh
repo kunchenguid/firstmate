@@ -3298,6 +3298,39 @@ SH
   pass "an answer before cleanup replay notes the retained Gerrit change"
 }
 
+# External review P1 "Different change hides delivery note": the answer skipped
+# its own completion note whenever that text appeared anywhere in the body, so a
+# note for change /123 looked recorded once a note for /1234 was present. Only an
+# exact line, or the semicolon suffix of a retention line, records the sentence.
+test_answer_keeps_a_gerrit_note_that_shares_a_numeric_prefix() {
+  local home id older newer show body expected
+  home=$(make_home answer-gerrit-prefix-note)
+  id=sample-answer-gerrit-prefix-note
+  older=https://gerrit.example.com/c/project/+/1234
+  newer=https://gerrit.example.com/c/project/+/123
+  tasks_in "$home" add "$id" "Ship the two held Gerrit changes" --kind ship --repo sample >/dev/null \
+    || fail "could not create the Gerrit prefix note fixture"
+  expected="Deliverable of the finished work: report data/$id/report.md; Gerrit change $older"
+  tasks_in "$home" update "$id" --body "$expected" >/dev/null \
+    || fail "could not record the earlier Gerrit retention"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the Gerrit prefix note fixture"
+  printf 'id=%s\ndata=%s\nspawn_gen=fixture-%s\ncleanup_incomplete=0\nmode=retain\narg=--pr\narg=%s\n' \
+    "$id" "$home/data" "$id" "$newer" > "$home/state/$id.backlog-close"
+
+  printf 'Proceed with the second change.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer the Gerrit prefix row"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered Gerrit prefix row is gone"
+  assert_contains "$show" "state: done" "the answer did not close the Gerrit prefix row"
+  body=$(tasks_in "$home" show "$id" --full | sed -n 's/^  body: //p' | head -1 | jq -r .)
+  printf '%s\n' "$body" | grep -qxF "Gerrit change $newer" \
+    || fail "the answer hid the /123 note behind the /1234 note: $body"
+  printf '%s\n' "$body" | grep -qxF "$expected" \
+    || fail "the answer changed or duplicated the earlier /1234 retention: $body"
+  pass "an answer keeps a Gerrit note that shares a numeric prefix with another"
+}
+
 test_unusable_pending_close_record_names_its_reason() {
   local home id wt rc err marker
   home=$(make_home unusable-pending-close-reason)
@@ -5751,6 +5784,7 @@ test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_answer_before_cleanup_replay_preserves_the_retained_report
 test_answer_before_cleanup_replay_notes_a_retained_gerrit_change
+test_answer_keeps_a_gerrit_note_that_shares_a_numeric_prefix
 test_unusable_pending_close_record_names_its_reason
 test_relocated_report_does_not_wedge_an_answer_before_replay
 test_teardown_retains_captain_calls_in_a_relocated_backlog
