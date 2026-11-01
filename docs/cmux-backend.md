@@ -33,6 +33,8 @@ Open Settings > Automation and choose a viable Socket Control Mode before the fi
 
 Automation mode is the recommended same-user boundary.
 `allowAll` can execute commands through a world-writable control socket and should be selected only as an explicit security tradeoff.
+`cmuxOnly` can appear to work while Firstmate itself runs inside cmux, because every Firstmate process is then a descendant of the app.
+It fails once any of them is reparented, so a working socket under that mode is not evidence of support.
 
 For Password mode, store the password as the first line of local gitignored `config/cmux-socket-password` or provide `CMUX_SOCKET_PASSWORD` in Firstmate's environment.
 The adapter reads the file fresh from the effective config directory and does not overwrite an ambient password when the file is absent.
@@ -112,10 +114,21 @@ Firstmate does not attempt to close the macOS window because cmux's socket canno
 Real tests share the captain's running app rather than creating an isolated cmux session.
 `tests/cmux-test-safety.sh` permits cleanup only for an exact currently listed `fm-test-` workspace and never enumerates and closes unrelated workspaces or relaunches the app.
 
+## Operating cmux alongside the backend
+
+The cmux CLI is far richer than this adapter uses, offering windows, splits, panes, and additional surface types.
+A pane created for the captain to look at is safe only in its own non-`fm-` workspace, because teardown closes a task's entire workspace and every surface in it; a pane hosting work is invisible to `state/`, unsupervised, and unrecoverable, so work belongs only in a task spawned through `bin/fm-spawn.sh`.
+A viewing workspace must not carry an `fm-` title and must stay in the same window as its tasks, because label lookup and recovery search only cmux's current window, so focusing a workspace in another window hides every task workspace from them.
+
+cmux's routine Agent Hibernation kills idle background agent processes once the live-terminal count passes its configured limit.
+Its trigger profile - a restorable agent reporting idle, an off-screen terminal, and unchanged output through the idle and confirmation windows - is exactly a worker parked on a captain decision, so confirm `terminal.agentHibernation.enabled` is false before running a cmux-backed fleet.
+Under critical memory pressure cmux may still hibernate a bounded batch of idle background agents with that setting false, and no setting removes that floor.
+
 ## Active limits
 
 - cmux is experimental, macOS-only, GUI-first, and requires the app running.
 - Socket access requires a one-time manual Settings change.
+- Agent Hibernation is a second manual Settings prerequisite that nothing preflights, so a fleet started with it enabled can lose workers parked on a captain decision, and even with it disabled, critical memory pressure can still hibernate a bounded batch of idle background agents.
 - Secondmate spawns are unsupported until a per-home lifecycle design is verified.
 - There is no native busy or push-event signal.
 - A target can disappear after structural readiness and before the operation.
