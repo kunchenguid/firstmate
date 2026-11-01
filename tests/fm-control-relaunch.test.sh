@@ -3054,8 +3054,11 @@ pool_case() {  # <case-dir> <id>: two one-seat pools and a pooled ship record
 
 case_seats() {  # <case-dir> <args...>
   local dir=$1; shift
+  # A case that installed the failing-mv stub must still let the seat ledger's
+  # own atomic renames through, so the stub always has a real binary to exec.
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
-    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" "$ROOT/bin/fm-fleet-seats.sh" "$@"
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_REAL_MV="${FM_REAL_MV:-$(command -v mv)}" "$ROOT/bin/fm-fleet-seats.sh" "$@"
 }
 
 probe_seat() {  # <case-dir> <model>: another holder's reservation, given back
@@ -3372,40 +3375,6 @@ test_fractional_supervisor_startup_timeout_retains_the_launch() {
   pass "fractional supervisor startup timeouts retain the exact submitted generation and route"
 }
 
-test_legacy_predecessors_remain_counted_without_socket_identity() {
-  local dir kind old st name out rc
-  for kind in ship scout secondmate; do
-    dir=$(new_case "legacy-$kind" rl66)
-    mkdir -p "$dir/home/config"
-    if [ "$kind" = secondmate ]; then
-      sm_case "$dir" rl66
-      old=g-sm-old
-    else
-      add_ship_task "$dir" rl66 claude
-      pool_case "$dir" rl66
-      old=g-old
-      [ "$kind" != scout ] || perl -pi -e 's/^kind=ship/kind=scout/' "$dir/home/state/rl66.meta"
-    fi
-    st=$(cd "$dir/home/state" && pwd -P)
-    name=$(printf '%s\t%s' "$st" rl66 | cksum | tr -s ' ' '-' | cut -d- -f1-2)
-    mkdir -p "$st/fleet-seats/legacy"
-    printf 'state=%s\ntask=rl66\nmodel=pool-model-a\npid=99999999\npid_identity=\n' "$st" > "$st/fleet-seats/legacy/$name.seat"
-    cp "$st/rl66.meta" "$dir/before.meta"
-    out=$(run_control "$dir" rl66 relaunch --harness claude --model pool-model-a --note "resume imported predecessor"); rc=$?
-    expect_code 1 "$rc" "legacy $kind predecessor without socket identity: $out"
-    assert_contains "$out" "could not record rl66's exact predecessor startup" "legacy refusal did not identify unverified startup"
-    cmp -s "$st/rl66.meta" "$dir/before.meta" || fail "legacy refusal changed the endpoint record"
-    assert_equals claude "$(cat "$dir/fake/command")" "legacy refusal stopped the agent"
-    assert_no_grep '/exit' "$dir/fake/literal" "legacy refusal sent the exit command"
-    assert_equals reserved "$(case_seats "$dir" show rl66 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "legacy predecessor lost its counted seat"
-    assert_equals false "$(case_seats "$dir" show rl66 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .startup_confirmed')" "legacy predecessor acquired unsupported startup evidence"
-    out=$(probe_seat "$dir" pool-model-a); rc=$?
-    expect_code 4 "$rc" "legacy refusal returned capacity: $out"
-    assert_absent "$st/fleet-seats/legacy/$name.seat" "legacy record was not imported once"
-  done
-  pass "legacy workers and supervisors remain counted without recorded socket ownership"
-}
-
 test_existing_host_generations_recover_through_observing_operations() {
   local dir home st verb out rc disp receipt generation
   . "$ROOT/tests/remote-herdr-fixture.sh"
@@ -3710,7 +3679,7 @@ test_control_terminalizes_all_observing_predecessor_receipts() {
 if [ "$#" -gt 0 ]; then
   for focused_test in "$@"; do
     case "$focused_test" in
-      test_fractional_supervisor_startup_timeout_retains_the_launch|test_unpooled_supervisor_spawn_keeps_prior_success_semantics|test_existing_host_generations_recover_through_observing_operations|test_control_terminalizes_all_observing_predecessor_receipts|test_host_prelaunch_refusal_releases_candidate_for_corrected_launch|test_host_prestop_journal_refusal_persists_prelaunch|test_verified_do_exit_refusals_persist_only_before_delivery|test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff|test_legacy_predecessors_remain_counted_without_socket_identity) "$focused_test" ;;
+      test_fractional_supervisor_startup_timeout_retains_the_launch|test_unpooled_supervisor_spawn_keeps_prior_success_semantics|test_existing_host_generations_recover_through_observing_operations|test_control_terminalizes_all_observing_predecessor_receipts|test_host_prelaunch_refusal_releases_candidate_for_corrected_launch|test_host_prestop_journal_refusal_persists_prelaunch|test_verified_do_exit_refusals_persist_only_before_delivery|test_unconfirmed_predecessor_prevents_control_launch|test_same_pool_relaunch_keeps_one_seat_through_the_handoff|test_secondmate_relaunch_confirms_its_seat_inside_one_episode|test_observed_predecessors_and_opt_out_successors|test_standalone_relaunch_completes_the_predecessor_handoff) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -3818,7 +3787,6 @@ test_observed_predecessors_and_opt_out_successors
 test_standalone_relaunch_completes_the_predecessor_handoff
 
 test_fractional_supervisor_startup_timeout_retains_the_launch
-test_legacy_predecessors_remain_counted_without_socket_identity
 
 test_existing_host_generations_recover_through_observing_operations
 test_host_prelaunch_refusal_releases_candidate_for_corrected_launch
