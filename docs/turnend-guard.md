@@ -402,7 +402,13 @@ Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure pro
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 
 The foreground arm legitimately follows a healthy watcher until its next wake.
-The hook therefore catches HUP, TERM, and INT from host timeout or teardown and routes interruptions through the same failure-episode decisions as other terminal failures, including the [attended exhaustion decision](#attended-fail-open).
+The hook catches HUP, TERM, and INT from host timeout or teardown.
+If the producing session no longer matches the lock's process identity and recorded session id, the hook records `session-ended` and exits 0 silently without creating a failure notice.
+The existing trusted-session ownership proof preserves that match across a verified same-session lock re-anchor.
+While that session remains current, interruptions use the ordinary failure progression, including its notice deduplication, attended-alarm limits, and the [attended exhaustion decision](#attended-fail-open).
+An interruption notice carries the producing session's lock-holder identity and recorded session id, which are rechecked under the auto-arm owner lock before committing the failure.
+Before taking its first generation, a replacement that no longer matches that session clears the interrupted episode's notice, attended alarm, and block budget, so its first genuine failure can notify even if a process number and executable path are reused.
+Empty legacy markers and ordinary failure notices retain their existing behavior.
 Claude drops that exit 2 when it terminated the hook at the configured timeout itself, so a park that outlives the timeout ends without a rewake (`bin/fm-claude-stop-autoarm.sh` header).
 
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count.
@@ -436,10 +442,10 @@ Two writers can commit `state/.claude-autoarm-failure-alarmed`, both under the s
 - The Stop auto-arm's own terminal failure: the exhausted continuation is the one participant that knows no automatic continuation remains, so when this session's consumed block count is already over budget it commits the alarm in the same owned critical section as its `failed-suppressed` ledger write and delivers the one loud final rewake.
   Every failed-suppressed continuation - an ordinary exhausted failure, a lost supervision-host hand-back, an interrupted hook, or a refused healthy-watcher reset - takes this one exhaustion decision before it commits another retry, because the guard's claim-open step-aside would otherwise leave the alarm unwritten on every Stop.
 
-After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.
+After that alarm, the Stop auto-arm suppresses further exit-2 continuations until the episode resets, so the final fail-open remains reachable.
+[Failure progression and block budget](#failure-progression-and-block-budget) owns the reset boundaries, including positive watcher recovery and replacement-session isolation of an interrupted episode.
 The alarm cannot repeat during that failure episode, and a later unhealthy stop blocks again.
 Every suppressed continuation in the episode emits one reason line instead of an empty rewake body, stating why no operator notice repeats and whether a Stop-owned retry stays scheduled.
-A positively verified healthy watcher clears the failure notice, alarm, and block budget for a future independent episode.
 A Claude failure notice describes the automatic mechanism as broken and does not direct a routine manual background arm.
 
 ### Passive adapters

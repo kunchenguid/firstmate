@@ -40,12 +40,12 @@
 #     waits on inside this hook-owned process tree (never a fire-and-forget
 #     shell &); Claude owns the process group, so its timeout/session teardown
 #     kills arm and watcher together, and the hook TERMs the arm with itself.
-#     HUP, TERM, and INT are translated through the ordinary durable failure
-#     handoff instead of leaving the generation frozen at arming. Claude does
-#     not deliver the exit 2 of a hook it terminated at the configured timeout
+#     HUP, TERM, and INT follow the session-aware interruption contract in
+#     docs/turnend-guard.md. Claude does not deliver the exit 2 of a hook it
+#     terminated at the configured timeout
 #     as a rewake (measured on Claude Code 2.1.278 and 2.1.281,
 #     docs/verification/supervision.md), so a park that outlives that timeout
-#     records the failure durably without waking an idle primary; nothing here
+#     records the failure durably without waking an idle primary. Nothing
 #     shortens a quiet park, because no-change heartbeats are absorbed without
 #     closing the arm.
 #   - Handling successor: Pi, omp, and OpenCode start the next arm before they
@@ -250,6 +250,9 @@ if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
 fi
 
 # --- single-flight generation claim --------------------------------------------
+SESSION_PID=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
+SESSION_IDENTITY=$(fm_session_pid_identity "$SESSION_PID" 2>/dev/null || true)
+SESSION_ID=$(fm_session_lock_recorded_session_id "$STATE" 2>/dev/null || true)
 # Claude runs one background process per firing with no dedupe. Exactly one
 # generation owner arms and translates per event epoch: every firing defers to
 # a live open claim, and a stuck, dead, identity-mismatched, or finished claim
@@ -281,8 +284,8 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # the same hold. Failure means refused or unverifiable: the caller goes silent
 # (cleanup, exit 0) - the harness discards the collected stderr on exit 0, so
 # even an already-printed banner is never delivered by a losing generation.
-autoarm_commit() {  # <outcome> [marker-file]
-  local outcome=$1 marker=${2:-} session_pid recovery
+autoarm_commit() {  # <outcome> [marker-file] [interrupted-session-identity]
+  local outcome=$1 marker=${2:-} marker_identity=${3:-} session_pid recovery
   if [ "$outcome" = rewake ]; then
     fm_session_lock_owned_by_self "$STATE" || return 2
     session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
@@ -292,10 +295,8 @@ autoarm_commit() {  # <outcome> [marker-file]
       *) return 2 ;;
     esac
     fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery"
-  elif [ -n "$marker" ]; then
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker"
   else
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" '' '' "$marker_identity" "$SESSION_ID"
   fi
 }
 
@@ -392,8 +393,13 @@ autoarm_alarm_banner() {
 # decided: an already-alarmed episode schedules no Stop-owned retry (exit 0),
 # anything else keeps it alive (exit 2). Text already on stderr, such as the
 # host's actionable wake lines, is delivered with whichever rewake wins.
-autoarm_exit_suppressed() {  # <cause>
-  local cause=$1 rc
+autoarm_exit_suppressed() {  # <cause> [interrupted-session-identity]
+  local cause=$1 marker_identity=${2:-} rc
+  if [ -n "$marker_identity" ] && ! fm_autoarm_session_matches "$STATE" "$marker_identity" "$SESSION_ID"; then
+    autoarm_record session-ended
+    [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
   autoarm_commit_attended_alarm
   rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -411,7 +417,7 @@ autoarm_exit_suppressed() {  # <cause>
     fi
     cause='firstmate watcher auto-arm could not clear the resolved failure episode - a verified healthy watcher is running, but the episode reset was refused'
   fi
-  if ! autoarm_commit failed-suppressed; then
+  if ! autoarm_commit failed-suppressed '' "$marker_identity"; then
     [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
@@ -431,6 +437,7 @@ autoarm_exit_suppressed() {  # <cause>
 # failure protocol instead: the winning generation records a terminal outcome,
 # creates the episode marker, and exits 2 so Claude delivers a recovery turn -
 # except after Claude's own timeout kill, whose exit 2 is dropped (header).
+# Without a matching session, the hook closes silently as session-ended.
 # A superseded generation remains silent, and an episode whose attended
 # fail-open was already consumed must not restart automatic continuation.
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
@@ -442,6 +449,10 @@ handle_autoarm_signal() {
     wait "$ARM_PID" 2>/dev/null || true
   fi
   [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+  if ! fm_autoarm_session_matches "$STATE" "$SESSION_IDENTITY" "$SESSION_ID"; then
+    autoarm_record session-ended
+    exit 0
+  fi
   if [ "$AUTOARM_COMMITTED_ALARM" -eq 1 ]; then
     autoarm_alarm_banner
     exit 2
@@ -454,10 +465,10 @@ handle_autoarm_signal() {
   if [ ! -e "$FAILURE_NOTICE" ]; then
     printf 'firstmate watcher auto-arm INTERRUPTED by %s - the Stop-owned automatic supervision mechanism did not reach a terminal watcher outcome.\n' "$signal" >&2
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n' >&2
-    autoarm_commit failed "$FAILURE_NOTICE" && exit 2
+    autoarm_commit failed "$FAILURE_NOTICE" "$SESSION_IDENTITY" && exit 2
     exit 0
   fi
-  autoarm_exit_suppressed "firstmate watcher auto-arm interrupted by $signal - the failure episode notice was already consumed"
+  autoarm_exit_suppressed "firstmate watcher auto-arm interrupted by $signal - the failure episode notice was already consumed" "$SESSION_IDENTITY"
 }
 
 trap 'handle_autoarm_signal HUP' HUP
