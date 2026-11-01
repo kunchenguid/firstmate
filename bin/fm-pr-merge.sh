@@ -23,8 +23,10 @@
 # default_merge_style, read live, and a merge is refused when it cannot be read.
 # A GitHub merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the pull request
-# is open, not a draft, mergeable, free of conflicts, every unwaived check
-# is green at the exact current head commit, where github_checks_not_green below
+# is open, not a draft, mergeable, free of conflicts, not headed by a
+# long-lived branch the merge would delete (long_lived_head_refusals below
+# owns which branches count), every unwaived check is green at the exact
+# current head commit, where github_checks_not_green below
 # owns what makes a check green and judges each one by its current run, and
 # every unwaived check the forge requires for the base branch has reported at
 # that head. When mergeable is the only failing condition and reads UNKNOWN,
@@ -100,9 +102,11 @@
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
-# blocking_discussions_resolved is true, and the head pipeline succeeded at the
-# exact current head commit. Every failing condition is reported, not just the
-# first. An attended --allow-no-pipeline, for a repository that deliberately
+# blocking_discussions_resolved is true, the merge request is not headed by a
+# long-lived branch the merge would delete (long_lived_head_refusals below owns
+# which branches count), and the head pipeline succeeded at the exact current
+# head commit. Every failing condition is reported, not just the first. An
+# attended --allow-no-pipeline, for a repository that deliberately
 # runs no merge request pipeline, waives only the pipeline condition and only
 # when GitLab reports head_pipeline as present and null: a failed, running,
 # canceled, or stale pipeline still refuses, every other condition still
@@ -117,7 +121,9 @@
 #
 # A Forgejo merge is refused unless every pre-merge condition holds, each read
 # live at merge time: the pull request is open, not a draft, mergeable is
-# true, and the combined commit status at the exact current head, read across
+# true, not headed by a long-lived branch the merge would delete
+# (long_lived_head_refusals below owns which branches count), and the combined
+# commit status at the exact current head, read across
 # every status page, is success (an unconfigured status, reported as "none",
 # refuses rather than being treated as nothing to check, the same reading
 # GitLab's null head_pipeline gets above). Every
@@ -582,6 +588,7 @@ gitlab_verify_mergeable() {
   local total=0 named=0 refusals=''
   local state='' detail='' conflicts='' discussions=''
   local live_head='' pipeline_sha='' pipeline_status='' pipeline_absent='' async_configured=''
+  local head_ref='' cross=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -605,7 +612,9 @@ gitlab_verify_mergeable() {
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
         "pipeline_absent=" + (if has("head_pipeline") and .head_pipeline == null then "true" else "false" end),
-        "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end)
+        "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end),
+        "head_ref=" + ((.source_branch // "") | tostring),
+        "cross=" + (if (.source_project_id | type) == "number" and (.target_project_id | type) == "number" then (.source_project_id != .target_project_id | tostring) else "" end)
       else
         error("merge request payload is not an object")
       end' 2>/dev/null); then
@@ -624,6 +633,8 @@ gitlab_verify_mergeable() {
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
       pipeline_absent=*) pipeline_absent=${line#pipeline_absent=} ;;
       async_configured=*) async_configured=${line#async_configured=} ;;
+      head_ref=*) head_ref=${line#head_ref=} ;;
+      cross=*) cross=${line#cross=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
@@ -633,7 +644,8 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 9 ] || [ "$total" -ne 9 ]; then
+  if [ "$named" -ne 11 ] || [ "$total" -ne 11 ] || [ -z "$head_ref" ] \
+    || { [ "$cross" != true ] && [ "$cross" != false ]; }; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -660,6 +672,9 @@ FIELDS
 "
   [ "$discussions" = true ] \
     || refusals="$refusals  - blocking_discussions_resolved is \"${discussions:-unreadable}\", not true
+"
+  line=$(long_lived_head_refusals gitlab "$head_ref" "$cross")
+  [ -z "$line" ] || refusals="$refusals$line
 "
   # The waiver covers only a head_pipeline GitLab reports as null; a failed,
   # running, canceled, or stale pipeline is a verdict, not an absence of one.
@@ -691,6 +706,21 @@ FIELDS
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
 }
 
+gitlab_repository_json() {
+  GITLAB_HOST="$FM_PR_HOST" glab api --hostname "$FM_PR_HOST" \
+    "projects/$(urlencode_path_segment "$PR_PATH")" 2>/dev/null
+}
+
+# How many open merge requests target the given branch, or nonzero when that
+# cannot be read. One is enough to know the answer is not zero.
+gitlab_open_based_count() {
+  local json
+  json=$(GITLAB_HOST="$FM_PR_HOST" glab api --hostname "$FM_PR_HOST" \
+    "projects/$(urlencode_path_segment "$PR_PATH")/merge_requests?state=opened&target_branch=$(urlencode_path_segment "$1")&per_page=1" 2>/dev/null) \
+    || return 1
+  printf '%s' "$json" | jq -er 'if type == "array" then length else error("not a list") end' 2>/dev/null
+}
+
 # Pre-merge conditions for a Forgejo pull request, read from one live view of
 # it. tea's single-PR view ignores field selection entirely (verified against
 # a real instance), so the raw API is read directly through "tea api" instead
@@ -705,6 +735,7 @@ forgejo_verify_mergeable() {
   local pr_json status_json fields line
   local total=0 named=0 refusals=''
   local state='' mergeable='' draft='' live_head='' ci_state='' page_state='' page_count='' page=1
+  local head_ref='' cross=''
 
   if ! pr_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
       "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$pr_json" ]; then
@@ -716,7 +747,9 @@ forgejo_verify_mergeable() {
         "state=" + ((.state // "") | tostring),
         "mergeable=" + (.mergeable | tostring),
         "draft=" + (.draft | tostring),
-        "head=" + ((.head.sha // "") | tostring)
+        "head=" + ((.head.sha // "") | tostring),
+        "head_ref=" + ((.head.ref // "") | tostring),
+        "cross=" + (if (.head.repo_id | type) == "number" and (.base.repo_id | type) == "number" then (.head.repo_id != .base.repo_id | tostring) else "" end)
       else
         error("pull request payload is not an object")
       end' 2>/dev/null); then
@@ -730,13 +763,16 @@ forgejo_verify_mergeable() {
       mergeable=*) mergeable=${line#mergeable=} ;;
       draft=*) draft=${line#draft=} ;;
       head=*) live_head=${line#head=} ;;
+      head_ref=*) head_ref=${line#head_ref=} ;;
+      cross=*) cross=${line#cross=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ]; then
+  if [ "$named" -ne 6 ] || [ "$total" -ne 6 ] || [ -z "$head_ref" ] \
+    || { [ "$cross" != true ] && [ "$cross" != false ]; }; then
     echo "error: could not read the Forgejo pull request state before merging" >&2
     return 1
   fi
@@ -806,6 +842,9 @@ FIELDS
   [ "$draft" != true ] \
     || refusals="$refusals  - the pull request is a draft
 "
+  line=$(long_lived_head_refusals forgejo "$head_ref" "$cross")
+  [ -z "$line" ] || refusals="$refusals$line
+"
   [ "$ci_state" = success ] \
     || refusals="$refusals  - the combined commit status is \"$ci_state\", not success
 "
@@ -818,6 +857,29 @@ FIELDS
   printf 'verified: %s is open and mergeable, with a successful combined status at head %s\n' \
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
+}
+
+forgejo_repository_json() {
+  tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" "/repos/{owner}/{repo}" 2>/dev/null
+}
+
+# How many open pull requests are based on the given branch, or nonzero when
+# that cannot be read. The pulls list takes no base filter, so every page of
+# open pull requests is read until an empty one, with the same page bound the
+# combined status read above uses.
+forgejo_open_based_count() {
+  local json count total=0 page=1
+  while [ "$page" -le 100 ]; do
+    json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+      "/repos/{owner}/{repo}/pulls?state=open&limit=50&page=$page" 2>/dev/null) || return 1
+    count=$(printf '%s' "$json" | jq -er --arg base "$1" '
+      if type == "array" then "\(length) \([.[] | select(.base.ref == $base)] | length)"
+      else error("not a list") end' 2>/dev/null) || return 1
+    [ "${count% *}" != 0 ] || { printf '%s\n' "$total"; return 0; }
+    total=$((total + ${count#* }))
+    page=$((page + 1))
+  done
+  return 1
 }
 
 # The caller's own extra arguments may only name a merge method, in the same
@@ -851,8 +913,7 @@ forgejo_reject_unsupported_args() {
 # replaced by a style chosen here.
 forgejo_default_merge_style() {
   local repo_json style
-  repo_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
-    "/repos/{owner}/{repo}" 2>/dev/null) || repo_json=
+  repo_json=$(forgejo_repository_json) || repo_json=
   style=$(printf '%s' "$repo_json" | jq -r '
     if type == "object" and (.default_merge_style | type) == "string"
     then .default_merge_style else "" end' 2>/dev/null) || style=
@@ -949,7 +1010,7 @@ github_read_required_contexts() {
   local base=$1 branch_path branch_json rules_json classic='' ruleset='' api_err api_err_text
   FM_PR_GITHUB_REQUIRED='[]'
   FM_PR_GITHUB_REQUIRED_ERROR=
-  branch_path=$(github_urlencode_path_segment "$base")
+  branch_path=$(urlencode_path_segment "$base")
 
   if ! branch_json=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$branch_path" 2>/dev/null) \
     || [ -z "$branch_json" ] \
@@ -1027,6 +1088,58 @@ github_required_checks_missing() {
   ' 2>/dev/null || return 1
 }
 
+# Print why merging this pull or merge request would delete a long-lived
+# branch, or nothing when its head is an ordinary topic branch. Every forge can
+# remove a same-repository head branch after a merge whatever the merge command
+# passed: GitHub's repository-level delete_branch_on_merge, Forgejo/Gitea's
+# default_delete_branch_after_merge, and GitLab's force_remove_source_branch,
+# which the project default sets when the merge request is opened. So merging a
+# back-merge whose head is main, master, develop, the repository's default
+# branch, or the base of another open pull or merge request deletes that
+# branch. The only safe answer is to refuse before the merge and have the
+# back-merge opened from a disposable branch instead. A cross-repository head
+# lives in a fork that no such setting touches. An unreadable fact is reported
+# as a refusal reason rather than taken as safe. The facts come from the
+# forge's own <forge>_repository_json, whose default_branch every forge names
+# the same way, and <forge>_open_based_count. Args: forge head_ref
+# cross_repository
+long_lived_head_refusals() {
+  local forge=$1 head=$2 cross=$3 noun='pull request' repo default based
+  [ "$cross" = false ] || return 0
+  [ "$forge" != gitlab ] || noun='merge request'
+  case "$head" in
+    main|master|develop)
+      printf '  - head branch "%s" is a long-lived branch that merging would delete; open the %s from a disposable branch instead\n' "$head" "$noun"
+      return 0
+      ;;
+  esac
+  if ! repo=$("${forge}_repository_json") \
+    || ! default=$(printf '%s' "$repo" | jq -er 'if (.default_branch | type) == "string" and .default_branch != "" then .default_branch else error("no default branch") end' 2>/dev/null); then
+    printf '  - the repository default branch could not be read, so a long-lived head branch "%s" cannot be ruled out\n' "$head"
+  elif [ "$head" = "$default" ]; then
+    printf '  - head branch "%s" is the repository default branch, which merging would delete; open the %s from a disposable branch instead\n' "$head" "$noun"
+    return 0
+  fi
+  if ! based=$("${forge}_open_based_count" "$head"); then
+    printf '  - open %ss based on "%s" could not be read, so a long-lived head branch cannot be ruled out\n' "$noun" "$head"
+  elif [ "$based" -gt 0 ]; then
+    printf '  - head branch "%s" is the base of another open %s, which merging would delete; open the %s from a disposable branch instead\n' "$head" "$noun" "$noun"
+  fi
+}
+
+github_repository_json() {
+  gh api "repos/$PR_OWNER/$PR_REPO" 2>/dev/null
+}
+
+# How many open pull requests are based on the given branch, or nonzero when
+# that cannot be read. One is enough to know the answer is not zero.
+github_open_based_count() {
+  local json
+  json=$(gh api -X GET "repos/$PR_OWNER/$PR_REPO/pulls" -f state=open -f base="$1" -f per_page=1 2>/dev/null) \
+    || return 1
+  printf '%s' "$json" | jq -er 'if type == "array" then length else error("not a list") end' 2>/dev/null
+}
+
 # Pre-merge conditions from a live PR view, base requirements, and head producers.
 # Sets FM_PR_MERGE_HEAD to the verified head on success. Returns 3, rather than
 # the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
@@ -1035,8 +1148,9 @@ github_verify_mergeable() {
   local json fields line red name covered missing unreported producers runs
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
+  local head_ref='' cross=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,headRefName,isCrossRepository,baseRefName,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -1047,7 +1161,9 @@ github_verify_mergeable() {
         "mergeable=" + ((.mergeable // "") | tostring),
         "merge_state=" + ((.mergeStateStatus // "") | tostring),
         "head=" + ((.headRefOid // "") | tostring),
-        "base=" + ((.baseRefName // "") | tostring)
+        "base=" + ((.baseRefName // "") | tostring),
+        "head_ref=" + ((.headRefName // "") | tostring),
+        "cross=" + (if .isCrossRepository == null then "" else .isCrossRepository end | tostring)
       else
         error("pull request payload is not an object")
       end' 2>/dev/null); then
@@ -1062,13 +1178,16 @@ github_verify_mergeable() {
       merge_state=*) merge_state=${line#merge_state=} ;;
       head=*) live_head=${line#head=} ;;
       base=*) base=${line#base=} ;;
+      head_ref=*) head_ref=${line#head_ref=} ;;
+      cross=*) cross=${line#cross=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 5 ] || [ "$total" -ne 5 ] || [ -z "$base" ]; then
+  if [ "$named" -ne 7 ] || [ "$total" -ne 7 ] || [ -z "$base" ] || [ -z "$head_ref" ] \
+    || { [ "$cross" != true ] && [ "$cross" != false ]; }; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
@@ -1098,6 +1217,9 @@ FIELDS
 "
   [ "$merge_state" != DIRTY ] \
     || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
+"
+  line=$(long_lived_head_refusals github "$head_ref" "$cross")
+  [ -z "$line" ] || refusals="$refusals$line
 "
 
   uncovered=''
@@ -1272,7 +1394,7 @@ github_read_outcome() {
   return 1
 }
 
-github_urlencode_path_segment() {
+urlencode_path_segment() {
   local LC_ALL=C input=$1 encoded='' char octet hex
   while [ -n "$input" ]; do
     char=${input%"${input#?}"}
@@ -1320,7 +1442,7 @@ github_read_queue_method() {
   FM_PR_GITHUB_QUEUE_STATUS=unreadable
   command -v gh >/dev/null 2>&1 || return 0
   [ -n "$FM_PR_GITHUB_BASE" ] || return 0
-  branch_path=$(github_urlencode_path_segment "$FM_PR_GITHUB_BASE")
+  branch_path=$(urlencode_path_segment "$FM_PR_GITHUB_BASE")
   api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-queue-rules.XXXXXX") || return 0
   if ! methods=$(gh api \
     --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" \
