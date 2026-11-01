@@ -236,6 +236,14 @@
 #             current AGENTS.md to print before the bulky digest. The baseline
 #             remains immutable so every later drifted compaction refreshes
 #             again, while an equal baseline emits no instruction refresh.
+#
+# STAND-DOWN: an FM_NO_LOCK=1 session, and an unattended Claude session
+# (CLAUDE_CODE_SESSION_ATTENDED=0 in an environment a live Claude ancestor
+# owns) unless FM_SESSIONSTART_ALLOW_UNATTENDED=1, prints one stderr line and exits 0 before any state or lock work, so an agent
+# that runs this script itself still never takes the fleet lock.
+# bin/fm-session-standdown-lib.sh owns that predicate; FM_SESSION_STANDDOWN_CHECKED=1,
+# set only by bin/fm-sessionstart-run.sh after it applied the payload-bound
+# form, skips the check here.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -274,6 +282,14 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# shellcheck source=bin/fm-session-standdown-lib.sh
+. "$SCRIPT_DIR/fm-session-standdown-lib.sh"
+# shellcheck disable=SC2119 # A direct call has no payload session id by design.
+if [ "${FM_SESSION_STANDDOWN_CHECKED:-}" != 1 ] && fm_session_start_stands_down; then
+  printf 'fm-session-start: stood down: this session is marked FM_NO_LOCK=1 or is an unattended Claude session, so it never takes the fleet session lock\n' >&2
+  exit 0
+fi
 
 # --- 0. runtime bound ---------------------------------------------------------
 # The ordered stage list is the contract behind the truncation banner: the child
