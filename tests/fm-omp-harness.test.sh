@@ -13,8 +13,8 @@
 # catches vendor drift against a real omp. Neither replaces the other.
 #
 # The load-bearing contracts:
-#   1. omp publishes no marker; the anchored process name `omp` is the ancestry
-#      evidence, and ompd/comp never identify.
+#   1. omp publishes no marker; the anchored native process name `omp` or an
+#      exact omp script run by Bun is the ancestry evidence, and ompd/comp never identify.
 #   2. FM_OMP_HARNESS=omp is a precedence override that needs a real omp
 #      ancestor: it beats an inherited CLAUDECODE under omp and is inert when it
 #      leaks into a worker whose ancestry holds no omp.
@@ -65,15 +65,33 @@ make_named_shells() {  # <dir> -> echoes <bindir>
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
-  local bin out
+  local bin out blind="$TMP_ROOT/blind-ancestry"
   bin=$(make_named_shells "$TMP_ROOT/named")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "a process named omp must detect as omp, got '$out'"
+  # The decoy must not identify ON ITS OWN NAME, so the suite's own primary is
+  # blinded here too. Without that, a suite running inside an omp session
+  # resolves its own ancestry to omp, the decoy inherits it, and the assertion
+  # fails on the real parent rather than on the decoy's name - a Bun-hosted omp
+  # primary makes exactly that ancestry resolvable. The stub below blinds only
+  # PPID queries: answering comm/args with `bash` would also hide the decoy's
+  # own real name (ompd/comp), making the assertion below true by construction.
+  # Blinding only the parent link keeps the decoy's own name visible while its
+  # ancestors resolve to nothing, so the walk genuinely tests the decoy's name.
+  mkdir -p "$blind"
+  cat > "$blind/ps" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  '-o ppid= -p '*) printf '%s\n' 1 ;;
+  *) exec /bin/ps "$@" ;;
+esac
+STUB
+  chmod +x "$blind/ps"
   for decoy in ompd comp; do
     # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-    out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS PATH="$blind:$PATH" \
       "$bin/$decoy" -c '"$1"; :' _ "$HARNESS")
     [ "$out" != omp ] || fail "'$decoy' merely contains omp and must not detect as omp"
   done
@@ -82,9 +100,12 @@ test_detection_anchored_name_and_marker_precedence() {
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
+  # ...and is inert when it leaks into a worker with no omp ancestor. Blind the
+  # suite's own primary so its structural identity cannot outrank the marker.
+  mkdir -p "$blind"
+  fm_fake_blind_ancestry "$blind"
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS PATH="$blind:$PATH" CLAUDECODE=1 FM_OMP_HARNESS=omp \
     bash -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
@@ -103,6 +124,119 @@ test_lock_identity_and_liveness_classification() {
   [ "$(fm_agent_process_classify_name ompd)" != agent ] || fail "tmux liveness must not classify ompd as an agent"
   [ "$(fm_agent_process_classify_name comp)" != agent ] || fail "tmux liveness must not classify comp as an agent"
   pass "session lock and tmux liveness: omp is anchored, decoys stay out"
+}
+
+# A Bun argv element carrying a space is ONE token: fm_bun_harness_argv_name
+# decides from real argv slots, so each case below passes every argument
+# separately, exactly as the kernel recorded it.
+bun_argv_must_reject() {  # <argv0> [args...]
+  if fm_bun_harness_argv_name "$@" >/dev/null; then
+    fail "an ordinary Bun argv was misidentified as a harness: $*"
+  fi
+}
+
+test_bun_hosted_omp_detection_and_lock() {
+  local bin="$TMP_ROOT/bun-hosted/bin" home="$TMP_ROOT/bun-hosted/home"
+  local out owner
+  [ "$(fm_bun_harness_argv_name bun /Users/u/.bun/bin/omp --resume session)" = omp ] \
+    || fail "session-lock identity must accept a Bun-hosted omp script"
+  [ "$(fm_bun_harness_argv_name bun --smol /usr/local/bin/pi)" = pi ] \
+    || fail "session-lock identity must accept a valueless Bun option before the script"
+  bun_argv_must_reject bun /tmp/tool.js build --tag claude
+  bun_argv_must_reject bun /tmp/tool.js --cwd /opt/omp
+  bun_argv_must_reject bun /tmp/tool.js /opt/omp
+  bun_argv_must_reject bun --cwd /opt/omp /tmp/tool.js
+  bun_argv_must_reject bun --smol --cwd /opt/omp /tmp/tool.js
+  bun_argv_must_reject bun -e claude
+  bun_argv_must_reject bun tool.js claude
+  bun_argv_must_reject bun /opt/omp/data/file.js
+  bun_argv_must_reject bun /tmp/cli.js --x
+  bun_argv_must_reject bun /tmp/ompd
+  # The two directions a re-split flattened command line gets wrong: one
+  # argument with a space inside must not manufacture a harness path, and a
+  # real harness under a spaced directory must keep its basename.
+  bun_argv_must_reject bun '/tmp/omp tools/task.js'
+  [ "$(fm_bun_harness_argv_name bun '/opt/My Tools/omp')" = omp ] \
+    || fail "a real omp under a spaced directory must identify as omp"
+  # Without a live pid there is no boundary-preserving argv source at all, so
+  # the flattened-string entry point fails closed.
+  if fm_harness_process_matches bun 'bun /Users/u/.bun/bin/omp --resume session'; then
+    fail "a flattened Bun command line without a pid must fail closed"
+  fi
+
+  mkdir -p "$bin" "$home/state"
+  ln -sf /bin/bash "$bin/bun"
+  cat > "$bin/omp" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_TEST_BUN_HOME/state/owner.pid"
+"$1"
+:
+SH
+  chmod +x "$bin/omp"
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    FM_TEST_BUN_HOME="$home" CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    "$bin/bun" "$bin/omp" "$HARNESS")
+  [ "$out" = omp ] || fail "a Bun-hosted omp must outrank an inherited Claude marker, got '$out'"
+  out=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_TEST_BUN_HOME="$home" FM_HOME="$home" CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    "$bin/bun" "$bin/omp" "$ROOT/bin/fm-lock.sh")
+  owner=$(cat "$home/state/owner.pid")
+  [ "$out" = "lock acquired: harness pid $owner" ] \
+    || fail "a Bun-hosted omp could not acquire its home lock: $out"
+  [ "$(cat "$home/state/.lock")" = "$owner" ] \
+    || fail "the Bun-hosted omp lock names $(cat "$home/state/.lock"), expected $owner"
+
+  # Live spaced-path proofs through the real argv readers (/proc cmdline on
+  # Linux, KERN_PROCARGS2 on macOS): a Bun script whose SINGLE argument
+  # contains a space must never be re-split into an omp path. Probe the fake
+  # Bun process DIRECTLY instead of letting fm-harness.sh walk the suite's own
+  # ancestry: when the suite itself runs inside an omp session within eight
+  # hops, that outer session legitimately satisfies the walk and the assertion
+  # would fail even though the script path was rejected correctly.
+  mkdir -p "$TMP_ROOT/omp tools"
+  cat > "$TMP_ROOT/omp tools/task.js" <<'SH'
+#!/usr/bin/env bash
+"$@"
+:
+SH
+  chmod +x "$TMP_ROOT/omp tools/task.js"
+  "$bin/bun" "$TMP_ROOT/omp tools/task.js" sleep 30 &
+  local probe=$! probe_argv='' tries=0
+  # Wait out the fork/exec window: mid-exec the child still carries the
+  # suite's own argv, and probing then would test the wrong command line.
+  while [ "$tries" -lt 100 ]; do
+    probe_argv=$(fm_process_argv "$probe" 2>/dev/null | sed -n 2p)
+    [ "$probe_argv" = "$TMP_ROOT/omp tools/task.js" ] && break
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ "$probe_argv" = "$TMP_ROOT/omp tools/task.js" ] || {
+    kill "$probe" 2>/dev/null; wait "$probe" 2>/dev/null
+    fail "fixture: the fake Bun process did not publish its spaced script path as one argv element"
+  }
+  if fm_bun_harness_name "$bin/bun" "$probe" >/dev/null; then
+    kill "$probe" 2>/dev/null; wait "$probe" 2>/dev/null
+    fail "a space inside one Bun script argument must not manufacture an omp path"
+  fi
+  kill "$probe" 2>/dev/null || true
+  wait "$probe" 2>/dev/null || true
+  # The other direction, end to end through fm-harness.sh: a genuine omp
+  # script under a spaced directory is identified from its real argv boundary,
+  # so the marker outranks an inherited CLAUDECODE. (The nearest-match walk
+  # finds this fake Bun first, so an outer omp session cannot mask it.)
+  mkdir -p "$TMP_ROOT/My Tools"
+  cat > "$TMP_ROOT/My Tools/omp" <<'SH'
+#!/usr/bin/env bash
+"$1"
+:
+SH
+  chmod +x "$TMP_ROOT/My Tools/omp"
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    CLAUDECODE=1 FM_OMP_HARNESS=omp \
+    "$bin/bun" "$TMP_ROOT/My Tools/omp" "$HARNESS")
+  [ "$out" = omp ] \
+    || fail "a Bun-hosted omp under a spaced directory must outrank an inherited Claude marker, got '$out'"
+  pass "fm-harness and session lock: Bun-hosted omp is identified from real argv boundaries without admitting ordinary Bun commands"
 }
 
 # --- 2. Launch ---------------------------------------------------------------
@@ -965,6 +1099,7 @@ EOF
 
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
+test_bun_hosted_omp_detection_and_lock
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
