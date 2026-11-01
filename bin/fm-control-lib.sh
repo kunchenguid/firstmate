@@ -520,13 +520,13 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
     # A secondmate's .claude/settings.local.json belongs to the captain.
     # Retire only the firstmate-owned settings file the launch passes to
     # --settings and the Stop pointer that carries the same busy generation.
-    # A crewmate's hook file is the worktree settings.local.json.
+    # A crewmate's hooks are merged into the worktree settings.local.json
+    # alongside the worker's own settings, so that file is never listed here:
+    # bin/fm-spawn.sh retires only its generated hooks.
     claude)
       if [ "$kind" = secondmate ]; then
         printf '%s\n' "$state/$id.claude-settings.json"
         printf '%s\n' "$wt/.fm-busy-stop"
-      else
-        printf '%s\n' "$wt/.claude/settings.local.json"
       fi
       ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
@@ -625,8 +625,9 @@ fm_control_harness_wiring_dirs() {  # <harness> <state-dir> <id>
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.
 # grok and kimi are the two adapters whose turn-end hook is global and gated by
-# a private token file; every other adapter's wiring is fully covered by
-# fm_control_harness_wiring_paths. Prints the registry path or nothing.
+# a private token file; other adapters have no global registry entry. Claude
+# worker-hook retirement is owned by bin/fm-spawn.sh rather than the path list.
+# Prints the registry path or nothing.
 fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   local harness=${1-} state=${2-} id=${3-}
   [ -n "$state" ] && [ -n "$id" ] || return 1
