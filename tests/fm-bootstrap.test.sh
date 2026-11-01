@@ -1411,6 +1411,11 @@ kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"k
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
 cursor model profile is accepted^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high"}}]}^empty^
 unsupported cursor effort is flagged^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor:high
+mid-task fallback true is accepted^{"default":{"harness":"codex"},"mid_task_fallback":true}^empty^
+mid-task fallback false is accepted^{"default":{"harness":"codex"},"mid_task_fallback":false}^empty^
+mid-task fallback lower-effort object is accepted^{"default":{"harness":"codex"},"mid_task_fallback":{"allow_lower_reasoning_class":true}}^empty^
+mid-task fallback false object is flagged^{"default":{"harness":"codex"},"mid_task_fallback":{"allow_lower_reasoning_class":false}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - mid_task_fallback must be true, false, or an object whose only key is allow_lower_reasoning_class set to true
+mid-task fallback string is flagged^{"default":{"harness":"codex"},"mid_task_fallback":"yes"}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - mid_task_fallback must be true, false, or an object whose only key is allow_lower_reasoning_class set to true
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
 top-level shared_quota true is accepted^{"shared_quota":true,"rules":[{"when":"big feature","use":{"harness":"claude"}}]}^empty^
 top-level shared_quota false is accepted^{"shared_quota":false,"rules":[{"when":"big feature","use":{"harness":"claude"}}]}^empty^
