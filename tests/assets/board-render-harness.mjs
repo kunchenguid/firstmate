@@ -27,6 +27,7 @@ class Node {
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      remove: (c) => { this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" "); },
       toggle: (c, force) => {
         const classes = new Set(this.className.split(/\s+/).filter(Boolean));
         const enabled = force ?? !classes.has(c);
