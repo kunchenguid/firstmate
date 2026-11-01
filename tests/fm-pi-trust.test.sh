@@ -6,7 +6,9 @@
 # that path), and every failure mode stops the spawn instead of launching a
 # worker that would park on "Trust project folder?" with nobody to press Enter.
 # It also proves that an Orca launch-env source's supplied HOME, not the
-# spawning process's, selects the store an unpinned worker reads.
+# spawning process's, selects the store an unpinned worker reads, and that the
+# launch line names the HOME whose store was registered so a pane carrying a
+# different HOME cannot redirect the worker to another one.
 #
 # NO TEST TOUCHES THE REAL USER STORE. Every script-level case runs with an
 # isolated HOME and an explicit --agent-dir under the fixture root, and every
@@ -738,7 +740,7 @@ EOF
     fm_test_run_spawn "$HOME_DIR" "$PROJ_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
     --mode no-mistakes --yolo off --backend orca)
   expect_code 1 $? "a launch whose source leaves HOME unset must refuse: $out"
-  assert_contains "$out" "could not resolve the HOME" \
+  assert_contains "$out" "could not name the HOME" \
     "the unset refusal must name what it could not resolve"
   assert_contains "$out" "refusing to launch a pi worker" \
     "the unset refusal must say it would not launch the worker"
@@ -764,7 +766,7 @@ EOF
     fm_test_run_spawn "$HOME_DIR" "$PROJ_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
     --mode no-mistakes --yolo off --backend orca)
   expect_code 1 $? "a launch whose source sets HOME empty must refuse: $out"
-  assert_contains "$out" "could not resolve the HOME" \
+  assert_contains "$out" "could not name the HOME" \
     "the empty refusal must name what it could not resolve"
   assert_contains "$out" "refusing to launch a pi worker" \
     "the empty refusal must say it would not launch the worker"
@@ -773,6 +775,109 @@ EOF
   assert_absent "$store" "a launch with an empty HOME must not register in the supplied home's store"
   assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn must not publish a task record"
   pass "an unpinned launch whose source sets HOME empty refuses instead of registering elsewhere"
+}
+
+# The launch line must name the HOME the registration used. A pane is created by
+# a long-lived daemon whose HOME this process cannot see, so a registration that
+# trusted this process's HOME while the pane expanded another one would leave
+# the worker on the dialog. This runs the emitted launch in a pane whose HOME is
+# a different directory and reads the store the launched worker would consult.
+test_pi_spawn_names_the_registered_home_on_the_launch() {
+  local rec id out store pane_home launch agent
+  id=pi-trust-launch-home
+  rec=$(make_pi_spawn_case spawn-launch-home pi "$id")
+  IFS='|' read -r CASE HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+$rec
+EOF
+  store="$HOME_DIR/user-home/.pi/agent/trust.json"
+  pane_home="$CASE/pane-home"
+  mkdir -p "$pane_home"
+
+  cat > "$FAKEBIN_DIR/pi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Pi 0.84.0' 'Options: --help --tui-mode <mode> --approve'
+  exit 0
+fi
+if [ -n "${FM_TEST_WORKER_RECORD:-}" ]; then
+  printf 'home=%s\nagent=%s\n' "$HOME" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" > "$FM_TEST_WORKER_RECORD"
+fi
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/pi"
+
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE/launch.log" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "a pi spawn should succeed: $out"
+  assert_trusted "$store" "$(cd -P -- "$WT_DIR" && pwd -P)" \
+    "the spawn did not register under the home its launch names"
+  launch=$(cat "$CASE/launch.log")
+  assert_contains "$launch" "HOME='$HOME_DIR/user-home'" \
+    "the unpinned pi launch must name the HOME whose trust store was registered"
+
+  env -i HOME="$pane_home" PATH="$FAKEBIN_DIR:$PATH" TERM=xterm \
+    PI_CODING_AGENT_DIR="$CASE/ambient-pi" FM_TEST_WORKER_RECORD="$CASE/worker" \
+    bash -c "$launch" || fail "the recorded pi launch failed in a pane with another HOME"
+  [ "$(sed -n 's/^home=//p' "$CASE/worker")" = "$HOME_DIR/user-home" ] \
+    || fail "the worker did not receive the HOME the spawn registered: $(cat "$CASE/worker")"
+  agent=$(sed -n 's/^agent=//p' "$CASE/worker")
+  [ "$agent" = "$HOME_DIR/user-home/.pi/agent" ] \
+    || fail "the worker would read $agent, not the store the spawn registered"
+  assert_trusted "$agent/trust.json" "$(cd -P -- "$WT_DIR" && pwd -P)" \
+    "the worker's own store does not carry the worktree the spawn registered"
+  assert_absent "$pane_home/.pi/agent/trust.json" \
+    "the pane's own HOME must not be the store the worker reads"
+  pass "an unpinned pi launch names the registered store's HOME, so its worker reads it"
+}
+
+# run_spawn_without_home <unset|empty> <home> <pane> <fakebin> [fm-spawn args]
+# The spawn world of fm_test_run_spawn with the spawning process's HOME unset or
+# empty, for the shapes where no HOME can be named at all.
+run_spawn_without_home() {
+  local mode=$1 home=$2 pane=$3 fakebin=$4
+  shift 4
+  if [ "$mode" = unset ]; then
+    unset HOME
+  else
+    HOME=
+    export HOME
+  fi
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" CLAUDE_CONFIG_DIR='' \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
+    PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
+}
+
+# A spawn with no HOME of its own names no store at all. Registering under some
+# other home would write an entry the worker never reads, which is the mismatch
+# the launch-line rule exists to remove, so it refuses instead.
+test_pi_spawn_refuses_when_no_home_can_be_named() {
+  local rec id mode out store
+  for mode in empty unset; do
+    id="pi-trust-no-home-$mode"
+    rec=$(make_pi_spawn_case "spawn-no-home-$mode" pi "$id")
+    IFS='|' read -r CASE HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+$rec
+EOF
+    store="$HOME_DIR/user-home/.pi/agent/trust.json"
+    : > "$CASE/launch.log"
+
+    out=$(FM_FAKE_LAUNCH_LOG="$CASE/launch.log" \
+      run_spawn_without_home "$mode" \
+      "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+    expect_code 1 $? "a spawn with a $mode HOME must refuse: $out"
+    assert_contains "$out" "could not name the HOME" \
+      "the $mode refusal must name what could not be selected"
+    assert_contains "$out" "refusing to launch a pi worker" \
+      "the $mode refusal must say it would not launch the worker"
+    assert_absent "$store" "a $mode HOME must not register in another home's store"
+    assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn must not publish a task record"
+    [ ! -s "$CASE/launch.log" ] || fail "a $mode HOME must not launch a worker: $(cat "$CASE/launch.log")"
+  done
+  pass "an unpinned pi spawn with no HOME of its own refuses instead of guessing a store"
 }
 
 test_pi_spawn_registers_the_worktree() {
@@ -922,6 +1027,8 @@ test_pi_spawn_registers_the_launch_env_home_store
 test_pi_spawn_refuses_an_unwritable_launch_env_home_store
 test_pi_spawn_refuses_a_launch_env_without_home
 test_pi_spawn_refuses_an_empty_launch_env_home
+test_pi_spawn_names_the_registered_home_on_the_launch
+test_pi_spawn_refuses_when_no_home_can_be_named
 test_pi_spawn_ignores_the_spawning_process_agent_root
 test_pi_spawn_refuses_when_registration_fails
 test_pi_spawn_respects_the_never_policy

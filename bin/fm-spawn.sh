@@ -484,12 +484,14 @@
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. docs/configuration.md's "Worker account pin" section owns unpinned
 #   account selection: an unpinned pi/pi-signed launch explicitly unsets
-#   PI_CODING_AGENT_DIR on its launch line, so it deterministically reads Pi's
-#   default <home>/.pi/agent store whatever the pane daemon exports, where
-#   <home> is the HOME that launch line carries (an Orca launch-env source can
-#   supply a different one, and a source that leaves HOME unset or empty refuses
-#   the spawn because that launch's root cannot be named), unless a raw launch
-#   command names its own agent root, which then wins.
+#   PI_CODING_AGENT_DIR and names the HOME the trust registration used on its
+#   launch line, so it deterministically reads exactly that home's
+#   <home>/.pi/agent store whatever the pane daemon or terminal exports; an Orca
+#   launch-env source that supplies HOME supplies that value, and a source that
+#   leaves HOME unset or empty - or a spawn without a HOME of its own - refuses
+#   the spawn because no store can be named. A raw launch command that names its
+#   own agent root or HOME applies its assignment after these and reads its own
+#   store instead.
 #   A present file pins every supported launch of
 #   that runner from this home - ship, scout, local secondmate, raw Claude
 #   command, and relaunch - to the declared account root, and the spawn
@@ -5884,16 +5886,17 @@ fi
 spawn_enter_recorded_worktree
 spawn_assert_agent_worktree
 
-# The HOME the launch line gives its worker. Only an Orca launch-env source can
-# replace it, and its snapshot is already the shell-quoted NAME=value list that
-# launch line will apply inside the cleared environment. When that source owns
-# HOME - the name is allowlisted - only its own record can set it: a record that
-# leaves HOME unset or empty gives the worker a root Pi derives from the account
-# database or from the worker's own directory, neither of which this spawn can
-# name, so both refuse instead of registering in a store nobody reads. Every
-# other launch forwards the pane's HOME, which this process's own HOME stands in
-# for.
-spawn_launch_effective_home() {
+# The HOME whose <home>/.pi/agent store the launch line gives its worker. No
+# pane environment is read for it: a pane is created by a long-lived
+# tmux/herdr/terminal daemon whose HOME this process cannot see, and the backend
+# surface cannot query a pane's environment, so guessing the pane's HOME would
+# register in a store the worker may never read. The launch line instead names
+# this value explicitly beside the PI_CODING_AGENT_DIR unset below, which makes
+# the registered store and the worker's store the same value on every backend.
+# An Orca launch-env source that owns HOME already names its snapshotted value on
+# that launch line, so that value is used; a source that leaves HOME unset or
+# empty, and a spawn without a HOME of its own, name no store at all and refuse.
+spawn_pi_store_home() {
   local env_args=${1-} word home=${HOME:-} found=0 source_home=0
   if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
     case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
@@ -5951,6 +5954,7 @@ spawn_launch_effective_home() {
 # for the home it starts in and a persistent home-level entry would widen a
 # grant for no gain.
 AGY_TRUST_PREREGISTERED=0
+SPAWN_PI_TRUST_HOME=
 case "$HARNESS" in
 claude*)
   if [ "$KIND" = secondmate ]; then
@@ -5964,27 +5968,25 @@ claude*)
   fi
   ;;
 pi | pi-signed)
-  # The store is the one the LAUNCH will read: a worker account pin names the
-  # root on the launch line itself, and an unpinned launch line unsets
-  # PI_CODING_AGENT_DIR in its env prefix below, so that worker deterministically
-  # reads Pi's default <home>/.pi/agent. <home> is the HOME that launch line
-  # carries, which an Orca launch-env source can replace with the value it
-  # snapshotted. The exception is a raw launch command that itself names an agent
-  # root: that assignment wins after the unset, so it reads its own store. The
-  # spawning process's own environment is not an input, because a pane is created
-  # by a long-lived tmux/herdr daemon that does not inherit firstmate's
-  # environment. Only the realpath is registered, because Pi keys its store by
-  # the canonical path.
+  # The store is the one the LAUNCH will read. A worker account pin names the
+  # root on the launch line itself. An unpinned launch line unsets
+  # PI_CODING_AGENT_DIR and names the HOME selected here explicitly, so that
+  # worker deterministically reads exactly this <home>/.pi/agent whatever its
+  # pane or terminal exports; the exception is a raw launch command that names
+  # its own agent root or HOME, whose assignment wins and which then reads its
+  # own store. A HOME no input can name refuses below, because registering in a
+  # guessed store would leave the worker on the dialog. Only the realpath is
+  # registered, because Pi keys its store by the canonical path.
   if [ "$KIND" != secondmate ]; then
     spawn_pi_trust_args=("$WT" "$PROJ_ABS")
     if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
       spawn_pi_trust_args=(--agent-dir "$WORKER_ACCOUNT_ROOT" "${spawn_pi_trust_args[@]}")
     else
-      spawn_pi_trust_home=$(spawn_launch_effective_home "$ORCA_LAUNCH_ENV_ARGS") || {
-        echo "error: could not resolve the HOME an unpinned $HARNESS launch will read, so its Pi trust store cannot be selected: that launch carries no HOME or an empty one, and it would read a root this spawn cannot name; refusing to launch a $HARNESS worker that could park on the trust dialog; $(spawn_endpoint_hint)" >&2
+      SPAWN_PI_TRUST_HOME=$(spawn_pi_store_home "$ORCA_LAUNCH_ENV_ARGS") || {
+        echo "error: could not name the HOME an unpinned $HARNESS launch will read, so its Pi trust store cannot be selected: no input names a usable HOME (the launch-env source leaves it unset or empty, or this spawn has none), and the launch would read a store this spawn cannot name; refusing to launch a $HARNESS worker that could park on the trust dialog; $(spawn_endpoint_hint)" >&2
         exit 1
       }
-      spawn_pi_trust_args=(--agent-dir "$spawn_pi_trust_home/.pi/agent" "${spawn_pi_trust_args[@]}")
+      spawn_pi_trust_args=(--agent-dir "$SPAWN_PI_TRUST_HOME/.pi/agent" "${spawn_pi_trust_args[@]}")
     fi
     if ! "$FM_ROOT/bin/fm-pi-trust.sh" "${spawn_pi_trust_args[@]}" >/dev/null; then
       echo "error: could not pre-register Pi project trust for $WT; refusing to launch a $HARNESS worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
@@ -7390,7 +7392,14 @@ pi | pi-signed)
   if [ -n "$WORKER_ACCOUNT" ]; then
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   else
-    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u PI_CODING_AGENT_DIR $LAUNCH"
+    # Name the HOME whose <home>/.pi/agent store the registration wrote, so the
+    # worker cannot read a different one from whatever pane or terminal it lands
+    # in. A secondmate home carries --approve instead and names no store.
+    pi_store_home=
+    if [ -n "$SPAWN_PI_TRUST_HOME" ]; then
+      pi_store_home="HOME=$(shell_quote "$SPAWN_PI_TRUST_HOME") "
+    fi
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u PI_CODING_AGENT_DIR ${pi_store_home}$LAUNCH"
   fi
   ;;
 claude | codex | opencode | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | kiro)

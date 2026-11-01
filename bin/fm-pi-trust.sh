@@ -45,19 +45,21 @@
 #
 # THE STORE IS THE ONE THE LAUNCH LINE NAMES. A worker account pin puts its root
 # on the launch line and bin/fm-spawn.sh passes that root as --agent-dir. An
-# unpinned pi/pi-signed launch line explicitly unsets PI_CODING_AGENT_DIR, so
-# that worker deterministically reads Pi's default `<home>/.pi/agent`; <home> is
-# the HOME that launch line carries, which an Orca launch-env source
-# (config/launch-env-tmux-session) can replace with the value it snapshotted,
-# and bin/fm-spawn.sh resolves that home and passes its agent root as
-# --agent-dir too; a source that leaves HOME unset or empty names no such home,
-# so bin/fm-spawn.sh refuses that spawn rather than writing an entry its worker
-# would never read. The one exception is a raw launch command that itself names
-# an agent root: its own assignment applies after the unset, so that worker
-# reads the named root and the entry written here is not the one it consults. An
-# operator who needs a different agent root or account selects one with
-# config/pi-account rather than by exporting the variable. The invoking
-# process's environment is not one of the inputs.
+# unpinned pi/pi-signed launch line explicitly unsets PI_CODING_AGENT_DIR and
+# names the same `<home>` this store lives under, so that worker reads Pi's
+# default `<home>/.pi/agent` whatever HOME its pane, terminal, or daemon
+# otherwise exports; <home> is the value bin/fm-spawn.sh selected for this run -
+# an Orca launch-env source (config/launch-env-tmux-session) supplies it when
+# that source owns HOME - and the same value is passed here as --agent-dir. A
+# source that leaves HOME unset or empty, and a spawn with no HOME of its own,
+# name no such home at all, so bin/fm-spawn.sh refuses that spawn rather than
+# writing an entry its worker would never read. The one exception is a raw
+# launch command that itself names an agent root or HOME: its own assignment
+# applies after the unset, so that worker reads the named root and the entry
+# written here is not the one it consults. An operator who needs a different
+# agent root or account selects one with config/pi-account rather than by
+# exporting the variable. The ambient PI_CODING_AGENT_DIR is not an input; the
+# only home this script reads is its HOME argument and --agent-dir.
 #
 # A lookup resolves the nearest recorded decision on the worktree path itself or
 # any ancestor, matching Pi's own `findNearestTrustEntry` walk, which skips
