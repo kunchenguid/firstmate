@@ -811,6 +811,19 @@ SH
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
 
+# True when <pid>'s parent is a reaper for orphaned processes: init itself, or
+# a subreaper systemd registers one hop below init (PR_SET_CHILD_SUBREAPER,
+# e.g. `systemd --user`) - a live host's per-user manager adopts orphans there
+# instead of letting them reach real init, and that is just as orphaned for
+# this fixture's purpose.
+is_orphaned() {  # <pid>
+  local parent
+  parent=$(ps -p "$1" -o ppid= 2>/dev/null | tr -d '[:space:]')
+  case "$parent" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$parent" = 1 ] && return 0
+  [ "$(ps -p "$parent" -o ppid= 2>/dev/null | tr -d '[:space:]')" = 1 ]
+}
+
 # A primary home with one task in flight, so the hook's scope and supervision-need
 # gates both pass and only identity decides the outcome.
 make_primary_home() {  # <dir>
@@ -825,9 +838,16 @@ make_primary_home() {  # <dir>
   # owner, exactly as a real session does at session start.
   cat > "$dir/session.sh" <<'SH'
 #!/usr/bin/env bash
+is_orphaned() {  # <pid>
+  local p
+  p=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  case "$p" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$p" = 1 ] && return 0
+  [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = 1 ]
+}
 if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
   i=0
-  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  while [ "$i" -lt 200 ] && ! is_orphaned "$$"; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -839,8 +859,15 @@ printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
 SH
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
+is_orphaned() {  # <pid>
+  local p
+  p=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  case "$p" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$p" = 1 ] && return 0
+  [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = 1 ]
+}
 i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+while [ "$i" -lt 200 ] && ! is_orphaned "$$"; do
   sleep 0.05
   i=$((i + 1))
 done
@@ -963,8 +990,15 @@ make_background_session_home() {  # <dir>
   # chain the assertions depend on.
   cat > "$dir/frontend.sh" <<'SH'
 #!/usr/bin/env bash
+is_orphaned() {  # <pid>
+  local p
+  p=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  case "$p" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$p" = 1 ] && return 0
+  [ "$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" = 1 ]
+}
 i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+while [ "$i" -lt 200 ] && ! is_orphaned "$$"; do
   sleep 0.05
   i=$((i + 1))
 done
@@ -1128,11 +1162,11 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   # the front-end that holds the lock stays alive.
   kill -TERM "$daemon"
   i=0
-  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != 1 ]; }; do
+  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || ! is_orphaned "$ptyhost"; }; do
     sleep 0.05
     i=$((i + 1))
   done
-  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
+  is_orphaned "$ptyhost" || fail "the pty-host was not reparented to init after the daemon ended"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
   # Phases 2-4: before the spare proves anything, a different id, the right id
