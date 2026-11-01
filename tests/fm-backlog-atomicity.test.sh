@@ -2059,6 +2059,89 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
 }
 
+# External review P1 "Interrupted retries lose extra links": the downgrade used to
+# take the links off the title before its note was durable, so a failed body write
+# cost every link the pending record did not itself carry. The note names every
+# link the title holds and lands in the body first, so the failed attempt leaves
+# the title untouched and the retry rebuilds the same complete note.
+test_recovery_keeps_every_link_before_it_strips_the_title() {
+  local case_dir home id out rc=0 a b body title real
+  id=atomic-heal-downgrade-order-b15
+  case_dir=$(make_home heal-downgrade-order)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  a=https://github.com/example/repo/pull/21
+  b=https://github.com/example/repo/pull/22
+  tasks-axi update "$id" --pr "$a" --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not attach the link the recorded close names"
+  tasks-axi update "$id" --pr "$b" --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not attach the sibling link the record never carried"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-two-links\narg=--pr\narg=%s\n' \
+    "$id" "$home/data" "$a" > "$home/state/$id.backlog-close"
+  # The first body write fails the way a lock or a backend error does.
+  real=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = update ] && [ ! -e "$home/body-write-failed-once" ]; then
+  for arg in "\$@"; do
+    if [ "\$arg" = --body-file ]; then
+      : > "$home/body-write-failed-once" || exit 93
+      exit 92
+    fi
+  done
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_bootstrap "$case_dir") || rc=$?
+  # Session start reports the refused replay and leaves the record it could not
+  # land, so the next start retries the same close.
+  assert_contains "$out" "recorded backlog close could not be replayed" \
+    "session start did not report the body write it could not make"
+  assert_present "$home/state/$id.backlog-close" \
+    "the failed replay retired the close it could not land"
+  title=$(tasks-axi show "$id" --full --file "$(backlog_of "$case_dir")" \
+    | sed -n 's/^  title: *//p' | head -1)
+  case "$title" in
+    *"$a"*) ;;
+    *) fail "the failed body write stripped the link it recorded the close for: $title" ;;
+  esac
+  case "$title" in
+    *"$b"*) ;;
+    *) fail "the failed body write stripped a link no record carried: $title" ;;
+  esac
+  body=$(tasks-axi show "$id" --full --file "$(backlog_of "$case_dir")" \
+    | sed -n 's/^  body: *//p' | head -1)
+  case "$body" in
+    *"Historical record:"*) fail "the failed body write still recorded its note: $body" ;;
+  esac
+
+  rm -f "$case_dir/fakebin/tasks-axi"
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "the retried replay left the row at $(row_state "$case_dir" "$id"): $out"
+  body=$(tasks-axi show "$id" --full --file "$(backlog_of "$case_dir")" \
+    | sed -n 's/^  body: *//p' | head -1)
+  case "$body" in
+    *"$a"*) ;;
+    *) fail "the retried replay lost the recorded link: $body" ;;
+  esac
+  case "$body" in
+    *"$b"*) ;;
+    *) fail "the retried replay lost the sibling link: $body" ;;
+  esac
+  [ "$(printf '%s' "$body" | grep -o 'Historical record:' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the retried replay duplicated its historical-record note: $body"
+  title=$(tasks-axi show "$id" --full --file "$(backlog_of "$case_dir")" \
+    | sed -n 's/^  title: *//p' | head -1)
+  case "$title" in
+    *https://*) fail "the retried replay left a pull-request link on the title: $title" ;;
+  esac
+  pass "session start records every link durably before it strips the title"
+}
+
 test_recovery_replays_a_verified_merge_as_a_merge() {
   local case_dir id out url=https://github.com/example/repo/pull/12
   id=atomic-heal-verified-b9
@@ -3408,6 +3491,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_keeps_every_link_before_it_strips_the_title
 test_recovery_replays_a_verified_merge_as_a_merge
 test_recovery_replays_a_failed_close_without_duplicating_its_note
 test_recovery_keeps_a_retained_url_until_its_note_is_durable
