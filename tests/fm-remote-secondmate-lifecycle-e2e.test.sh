@@ -1599,7 +1599,7 @@ herdr_launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
 rm -f "$REX_FAKE/agent-blocks"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = dead ] \
   || fail "the exited rex agent was not projected dead from its own host"
-BOOT_REX_DEAD=$(remote_env "$ROOT/bin/fm-bootstrap.sh")
+BOOT_REX_DEAD=$(FM_BOOTSTRAP_VERBOSE_FACTS=1 remote_env "$ROOT/bin/fm-bootstrap.sh")
 assert_not_contains "$BOOT_REX_DEAD" 'SECONDMATE_LIVENESS: secondmate ios:' \
   "the dead rex secondmate was not relaunched cleanly"
 assert_contains "$BOOT_REX_DEAD" 'secondmate ios relaunched after remote endpoint dead' \
