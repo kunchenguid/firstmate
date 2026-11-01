@@ -18,16 +18,40 @@ Prerequisites:
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
-Select hc with local `config/backend` containing `hc`, `FM_BACKEND=hc` for one launch, or an explicit request to Firstmate.
-It is never runtime auto-detected; see "Selection is explicit" below.
+Select hc explicitly with local `config/backend` containing `hc`, `FM_BACKEND=hc` for one launch, or an explicit request to Firstmate.
+An explicit setting always wins; see "Runtime auto-detection" below for when hc is also selected automatically.
 
 The core a task lands on is the one `HC_SESSION` names when the task is spawned, or hc's `default` session when it is unset.
-Herdr.app shows the `default` session's terminals.
+The Herdr app shows the terminals of the session it bound at launch, `default` unless the app was started with a different `HC_SESSION`.
 
-## Selection is explicit
+## Runtime auto-detection
 
-hc is explicit-only, like zellij, orca, Paseo, and tern.
-hc stamps `HC_TERMINAL_ID` into every process an hc terminal starts, including a tmux server or Herdr 1 client started inside one, so its presence never proves the captain chose hc and `fm_backend_detect` ignores it.
+hc is auto-detected only on the Herdr app's own signals, never on bare `HC_TERMINAL_*` markers: hc stamps them into every process an hc terminal starts, and an app-created terminal's env is deliberately identical to any other hc terminal's - the app sends `TERM_PROGRAM=herdr` in its `terminal.run` call, but the core's `child_env` normalizes that to `ghostty` for every child, app-created or not.
+What marks a terminal as the app's is its core-side record: the app stamps `herdr.space`/`herdr.tab` labels on every terminal it creates, and a non-empty `herdr.space` is the exact condition under which the app projects a terminal into its window.
+`bin/fm-backend.sh` `fm_backend_detect` owns the check order; this section owns what the signals mean.
+
+Two signals select hc, in this order, after every other surface marker has had its say:
+
+1. `app-terminal`: this process's own `HC_TERMINAL_ID` terminal carries a non-empty `herdr.space` label in its core's record.
+   The check is read-only and gated: a unix connect must first prove `HC_TERMINAL_SOCKET` live, because `hc` starts a core on contact with a missing socket and a bare `hc get` could create state; then one `hc get` reads the label through the resolved binary.
+   Missing markers, a dead socket, a missing or unusable `hc`/`jq` toolchain, a `get` failure, or an empty label are all a miss, never a detection.
+2. `app-window`: a live `herdr-app.sock` control socket under the resolved app home (`HERDR_APP_HOME`, else `XDG_CONFIG_HOME/herdr-app`, else `~/.config/herdr-app`).
+   The probe is the app's own liveness rule, a bare unix connect: a stale socket file refuses, an absent one never binds, and the app is never launched or talked to.
+   It is consulted only when no signal named this process's runtime, so a Firstmate on a plain shell on a host where the captain's window is open also opts into app presentation.
+
+An explicit `--backend`, `FM_BACKEND`, or `config/backend` always wins over detection.
+Inside the classic Herdr TUI, `HERDR_ENV=1` wins before the app signals are consulted, so the `herdr` backend keeps its behavior.
+A contradictory marker set (for example another surface's marker alongside the app's) keeps the earlier surface's verdict rather than switching - ambiguous input means no automatic switch.
+When a live app window is present but no usable hc toolchain resolves (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z`, plus `jq`), detection does not switch and `fm_backend_name` prints a notice naming the missing piece instead.
+An auto-detected hc prints a stderr notice naming the winning signal and records `backend_detect=app-terminal` or `backend_detect=app-window` in the task meta, so the spawn output and task record carry the reason for the choice.
+
+Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an explicit hc spawn does, so workers appear in the captain's window without the app ever being started by Firstmate.
+The app is local GUI presentation only: on a remote or headless home neither signal exists, and nothing here changes the remote `herdr` path.
+
+Two limits apply to auto-detection specifically:
+
+- A `--secondmate` spawn under an auto-detected hc fails the existing refusal rather than silently choosing another backend; set `config/backend` explicitly for a home that spawns secondmates.
+- Supervisor-endpoint discovery (`bin/fm-supervisor-target-lib.sh`) resolves an hc terminal running Firstmate to its `<session>:<address>` target, but `bin/fm-supervise-daemon.sh` does not support hc endpoints yet and refuses the resolved backend loudly instead of steering the wrong pane.
 
 ## Task shape and metadata
 
@@ -43,10 +67,13 @@ The terminal carries these labels:
 
 ```text
 backend=hc
+backend_detect=app-terminal
 window=<session>:<address>
 hc_session=<session>
 hc_terminal=<address>
 ```
+
+`backend_detect=` is the auto-detection signal only when one selected the backend; an explicitly selected hc writes no `backend_detect=` line.
 
 `<address>` is hc's terminal address such as `t7`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.
@@ -81,7 +108,8 @@ An input, capture, or close that carries the task label refuses a terminal whose
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.
 - `--secondmate` spawns are refused.
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
-- Naming a Herdr.app space needs the app window and is not done; whether the labels above display as intended in Herdr.app is not verified.
+- Naming a Herdr.app space needs the app window and is not done.
+  The `herdr.space`/`herdr.tab` label contract above is the app's documented bridge (its window projects labeled terminals as spaces/tabs and keeps unlabeled ones hidden); visual confirmation inside a real window remains outstanding.
 - hc has no event stream this adapter consumes; supervision polls like tmux.
 
 ## Tests

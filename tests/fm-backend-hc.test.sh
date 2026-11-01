@@ -104,17 +104,22 @@ expect_refused() {
 
 FM_TEST_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-test_hc_is_spawn_capable_and_never_autodetected() {
+test_hc_is_spawn_capable_and_needs_app_signals() {
   local out
+  # HC_TERMINAL_ID alone is never a selection: it reaches every process an hc
+  # terminal starts. Detection needs the Herdr app signals (the terminal's own
+  # herdr.space label on a live core, or a live herdr-app.sock window), which
+  # this env deliberately lacks; HERDR_APP_HOME is pinned to an empty dir so a
+  # real window on the developer's machine cannot leak into the result.
   out=$(bash -c '. "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
     fm_backend_validate_spawn hc && echo spawn-ok
-    unset TMUX HERDR_ENV CMUX_WORKSPACE_ID TERM_PROGRAM REX_BLOCK __CFBundleIdentifier
-    HC_TERMINAL_ID=t7 HC_SESSION=x fm_backend_detect >/dev/null && echo detected || echo not-detected
+    unset TMUX HERDR_ENV CMUX_WORKSPACE_ID TERM_PROGRAM REX_BLOCK __CFBundleIdentifier HC_TERMINAL_SOCKET
+    HC_TERMINAL_ID=t7 HC_SESSION=x HERDR_APP_HOME="'"$TMP_ROOT"'/no-app-home" fm_backend_detect >/dev/null && echo detected || echo not-detected
     fm_backend_required_tools hc' 2>&1)
   assert_contains "$out" spawn-ok "hc must be spawn-capable"
-  assert_contains "$out" not-detected "an inherited HC_TERMINAL_ID must not select hc"
+  assert_contains "$out" not-detected "bare HC_TERMINAL_* markers without an app signal must not select hc"
   assert_contains "$out" "hc jq treehouse" "hc needs hc, jq and treehouse"
-  pass "hc: explicit-only, spawn-capable, with its tool set"
+  pass "hc: spawn-capable, detects only on the Herdr app signals, with its tool set"
 }
 
 test_create_task_is_independent_labeled_and_refuses_duplicates() {
@@ -358,7 +363,7 @@ test_required_tool_check_uses_the_adapter_resolver() {
 }
 
 fm_test_run \
-  test_hc_is_spawn_capable_and_never_autodetected \
+  test_hc_is_spawn_capable_and_needs_app_signals \
   test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
   test_control_interrupt_delivers_the_harness_keys \

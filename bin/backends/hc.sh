@@ -11,10 +11,16 @@
 # Sourced only through bin/fm-backend.sh's fm_backend_source in normal
 # operation; the unit tests source it directly.
 #
-# Selection is explicit-only: `--backend hc`, FM_BACKEND=hc, or config/backend.
-# hc stamps HC_TERMINAL_ID into every process it starts, including a tmux or
-# Herdr 1 client started inside an hc terminal, so an inherited marker never
-# proves the captain chose hc and fm_backend_detect never reads it.
+# Selection: `--backend hc`, FM_BACKEND=hc, or config/backend always work;
+# runtime auto-detection selects hc only on the Herdr app's own signals -
+# this process's own terminal carrying a non-empty herdr.space label in its
+# core's record (the app's projection rule), or a live herdr-app.sock window
+# when no surface marker claimed the runtime. Bare HC_TERMINAL_* markers are
+# never a selection: hc stamps them into every process an hc terminal starts,
+# and an app terminal's env is deliberately identical to any other hc
+# terminal's (the core rewrites the app's TERM_PROGRAM=herdr claim to
+# "ghostty" for every child). fm_backend_detect owns the check order;
+# docs/hc-backend.md "Runtime auto-detection" owns the contract.
 #
 # Target string shape: "<session>:<address>". <session> is the hc session the
 # terminal lives in (HC_SESSION at spawn time, `default` when unset) and
