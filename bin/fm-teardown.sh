@@ -1903,10 +1903,10 @@ backlog_done_args() {
 # refuses (a repeated hyphen in the owner, for instance) and renders those as
 # merged too. So the `pr` shape is reserved for a merge this run read from the
 # forge, plus the change shapes the transition itself turns into a note (a GitLab
-# merge request or Gerrit change). Any other pull-request-shaped link is recorded
-# as a note, which keeps the URL and claims no merge; a value that is not
-# pull-request shaped at all keeps the `pr` shape so the close is refused instead
-# of silently losing the link (the pending-close validator owns that refusal).
+# merge request or Gerrit change). Any other URL is recorded as a note, which
+# keeps the URL and claims no merge; a value that is not a URL at all keeps the
+# `pr` shape so the close is refused instead of silently losing the link (the
+# pending-close validator owns that refusal).
 backlog_pr_completion_args() {  # <pr-url>
   if fm_backlog_pr_note_label "$1" >/dev/null; then
     # A GitLab merge request or Gerrit change is what the backlog transition

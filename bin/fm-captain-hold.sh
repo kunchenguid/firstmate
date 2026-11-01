@@ -1326,8 +1326,8 @@ close_answered() {  # <task-id> <release-0-or-1>
   fi
   if [ "${RETAINED_CLOSE_ARGS[0]-}" = --pr ]; then
     # The close boundary keeps the verified link and takes any other one off the
-    # title into a body note, so the closed row renders merged only for the PR
-    # this run read.
+    # title into a body note, so the closed row renders merged only for the PR a
+    # run verified.
     if ! fm_backlog_done "$DATA" "$id" --pr "${RETAINED_CLOSE_ARGS[1]}" >/dev/null; then
       return 1
     fi

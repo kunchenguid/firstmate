@@ -182,7 +182,7 @@ An interrupted cleanup therefore replays the retention at the next session start
 
 If the captain answers before replay, `answer` validates that record and copies any supported retained pull request or report into the row before closing it.
 A completion note the record carried - such as a local-only delivery's `local main` - is written to the task body before the close as well.
-An answer records a merge only when the task's `<id>.pr-merge` merge-verification record, or that pending-close record, says some run read the merge from the forge; otherwise a pull request link already on the row moves into a body note that keeps the URL and states the merge was not verified, so the answer never closes a row as a merge nobody read.
+An answer records a merge only when the task's `<id>.pr-merge` merge-verification record, or that pending-close record, says some run read the merge from the forge; otherwise a link already on the row moves into a body note that keeps the URL and states the merge was not verified, so the answer never closes a row as a merge nobody read.
 A retained Gerrit change or GitLab merge request URL is instead recorded as a `Gerrit change <url>` or `GitLab merge request <url>` note on that close.
 Replay then retires the record.
 
