@@ -2941,7 +2941,7 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
     id=${id%.start-pending}
     meta="$STATE/$id.meta"
     lock=$(fm_meta_lock_path "$meta") || return 1
-    fm_lock_acquire_wait "$lock" || return 1
+    fm_lock_try_acquire "$lock" || continue
     [ -f "$f" ] || { fm_lock_release "$lock"; continue; }
     epoch=; gen=; harness=
     read -r epoch gen harness _ < "$f" || true
