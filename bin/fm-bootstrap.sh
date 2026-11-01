@@ -1611,7 +1611,7 @@ treehouse_pool_report() {
         done
         if [ "$duplicate" -eq 1 ]; then
           if [ "$duplicate_reported" -eq 0 ]; then
-            echo "TREEHOUSE_POOL_REPORT: duplicate-clone pool $pool (project $identity)"
+            echo "TREEHOUSE_POOL_REPORT: duplicate-clone pool $pool (project $repo)"
             duplicate_reported=1
           fi
         fi
