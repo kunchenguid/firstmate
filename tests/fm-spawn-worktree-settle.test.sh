@@ -67,12 +67,54 @@ case "${1:-}" in
     exit 0 ;;
   kill-window) : > "$window_file"; exit 0 ;;
   has-session|new-session) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    for arg in "$@"; do
+      case "$arg" in
+        *'fm-treehouse-shell.sh'*)
+          if [ -n "${FM_FAKE_TREEHOUSE_OUTPUT:-}" ]; then
+            SHELL="$(dirname "$0")/login-shell" COLUMNS=${FM_FAKE_COLUMNS:-80} bash -c "$arg" >> "$FM_FAKE_TREEHOUSE_OUTPUT" 2>&1
+          else
+            SHELL="$(dirname "$0")/login-shell" COLUMNS=${FM_FAKE_COLUMNS:-80} bash -c "$arg" >/dev/null 2>&1
+          fi
+          if [ "${FM_FAKE_DROP_TREEHOUSE_FAILURE_FILE:-0}" = 1 ]; then
+            failure=${arg#*FM_TREEHOUSE_FAILURE_FILE=}
+            failure=${failure%% FM_TREEHOUSE_REAL_SHELL=*}
+            failure=${failure#\'}
+            failure=${failure%\'}
+            rm -f -- "$failure"
+          fi
+          ;;
+      esac
+    done
+    exit 0 ;;
+  capture-pane)
+    if [ -f "${FM_FAKE_TREEHOUSE_OUTPUT:-}" ]; then
+      visible_after=${FM_FAKE_TREEHOUSE_OUTPUT_AFTER_PANE_READS:-0}
+      pane_reads=0
+      [ ! -f "${FM_FAKE_PANE_COUNTFILE:-}" ] || pane_reads=$(cat "$FM_FAKE_PANE_COUNTFILE")
+      [ "$pane_reads" -lt "$visible_after" ] || {
+        if [ -n "${FM_FAKE_COLUMNS:-}" ]; then
+          fold -w "$FM_FAKE_COLUMNS" "$FM_FAKE_TREEHOUSE_OUTPUT"
+        else
+          cat "$FM_FAKE_TREEHOUSE_OUTPUT"
+        fi
+      }
+    fi
+    exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+cd "${FM_FAKE_TREEHOUSE_ALLOCATION:?}"
+"${SHELL:?}"
+SH
+  cat > "$fakebin/login-shell" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/login-shell"
   printf '%s\n' "$fakebin"
 }
 
@@ -121,6 +163,7 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_TREEHOUSE_ALLOCATION="$WT_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -232,6 +275,80 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+test_treehouse_failure_and_timeout() {
+  local rec id out status message cols
+  id=settle-pool-full
+  rec=$(make_settle_case pool-full "$id" 0)
+  read_settle_record "$rec"
+  WT_DIR="$PROJ_DIR"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TEST_TREEHOUSE_ERROR:-}" ] && exit 0
+printf '%s\n' "$FM_TEST_TREEHOUSE_ERROR" >&2
+exit 1
+SH
+  message="all 16 worktrees are in use or dirty (max_trees = 16). Run 'treehouse status' to see details, or increase max_trees in treehouse.toml"
+  for cols in 20 70 80; do
+    rm -f "$COUNTFILE" "$COUNTFILE.window"
+    out=$(FM_TEST_TREEHOUSE_ERROR="$message" FM_FAKE_COLUMNS="$cols" \
+      FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" run_settle_spawn "$id")
+    status=$?
+    expect_code 1 "$status" "pool exhaustion should stop spawn"
+    assert_contains "$out" "error: $message" "wrapped treehouse diagnostic was not preserved"
+    assert_contains "$out" "Run 'treehouse status' in $PROJ_DIR" "missing recovery hint"
+    [ "$(< "$COUNTFILE")" = 1 ] || fail "failed get was not detected on the first poll"
+    assert_absent "$HOME_DIR/state/$id.meta" "failed get published metadata"
+  done
+  rm -f "$COUNTFILE" "$COUNTFILE.window"
+  out=$(FM_TEST_TREEHOUSE_ERROR="$message" FM_FAKE_COLUMNS=20 \
+    FM_FAKE_DROP_TREEHOUSE_FAILURE_FILE=1 \
+    FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" run_settle_spawn "$id")
+  expect_code 1 "$?" "narrow-pane fallback should stop spawn"
+  assert_contains "$out" "error: $message" "narrow-pane fallback did not reconstruct the wrapped failure marker and diagnostic"
+  [ "$(< "$COUNTFILE")" = 1 ] || fail "narrow-pane fallback was not immediate"
+  rm -f "$COUNTFILE" "$COUNTFILE.window"
+  message='Error: cannot read treehouse.toml: permission denied'
+  out=$(FM_TEST_TREEHOUSE_ERROR="$message" FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" run_settle_spawn "$id")
+  expect_code 1 "$?" "other treehouse failures should stop spawn"
+  assert_contains "$out" "error: $message" "generic error was not preserved"
+  assert_not_contains "$out" "free or return a slot" "non-capacity error suggested freeing slots"
+  [ "$(< "$COUNTFILE")" = 1 ] || fail "generic failure was not immediate"
+  rm -f "$COUNTFILE" "$COUNTFILE.window"
+  # Previous failures remain in scrollback but must not abort this quiet get.
+  out=$(FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" run_settle_spawn "$id")
+  expect_code 1 "$?" "quiet get should time out"
+  assert_contains "$out" "did not enter an isolated worktree within 60s" "timeout diagnostic changed"
+  [ "$(< "$COUNTFILE")" = 60 ] || fail "quiet get did not receive all 60 polls"
+  pass "treehouse failures are immediate and verbatim; quiet get retains its timeout"
+}
+
+test_treehouse_failure_and_timeout
+
+test_stable_stale_path_does_not_outrank_failure() {
+  local rec id out status message
+  id=settle-stale-then-failed
+  rec=$(make_settle_case stale-then-failed "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TEST_TREEHOUSE_ERROR:?}" >&2
+exit 1
+SH
+  message='all 16 worktrees are in use or dirty'
+
+  out=$(FM_TEST_TREEHOUSE_ERROR="$message" \
+    FM_FAKE_TREEHOUSE_OUTPUT="$HOME_DIR/pane-output" \
+    FM_FAKE_TREEHOUSE_OUTPUT_AFTER_PANE_READS=3 run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "allocation failure should outrank a stable stale pane path"
+  assert_contains "$out" "error: $message" "allocation failure was not reported"
+  [ "$(< "$COUNTFILE")" = 1 ] || fail "spawn did not stop on the invocation-bound allocation failure before considering the stale path"
+  assert_absent "$HOME_DIR/state/$id.meta" "failed allocation published stale-path metadata"
+  pass "a stable stale path cannot outrank a completed allocation failure"
+}
+
 test_unborn_head_project_is_refused_at_once() {
   local rec id out status started elapsed
   id=settle-unborn-head-z5
@@ -257,6 +374,7 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_stable_stale_path_does_not_outrank_failure
 test_unborn_head_project_is_refused_at_once
 
 echo "# all fm-spawn-worktree-settle tests passed"

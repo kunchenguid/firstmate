@@ -327,9 +327,13 @@
 #   the same isolation test screens every read: a pane still showing the project
 #   or the repository primary while `treehouse get` prepares the slot is waited
 #   out as a transient rather than adopted and then refused, so a home that is
-#   itself a linked worktree of the project repository still launches. A pane
-#   that never reaches an isolated worktree refuses at the end of that wait,
-#   naming the last path seen and why it was rejected.
+#   itself a linked worktree of the project repository still launches. Spawn
+#   accepts a settled path only after this invocation of `treehouse get` confirms
+#   it allocated that same worktree. A failed allocation is reported immediately
+#   with Treehouse's diagnostic; pool exhaustion also points to `treehouse status`
+#   and `max_trees`. A pane that never reaches the confirmed isolated worktree
+#   refuses at the end of the wait, naming the last path seen and why it was
+#   rejected.
 #   That placement is proven only at launch. Every ship or scout therefore
 #   receives `FM_TASK_ID=<task-id>` before launch, on the same backend-specific
 #   environment channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -1608,6 +1612,8 @@ GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
 SPAWN_STAGED_LAUNCH_FILE=
+SPAWN_TREEHOUSE_READY_FILE=
+SPAWN_TREEHOUSE_FAILURE_FILE=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1651,6 +1657,14 @@ spawn_orca_reclaim_launch_file() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "$SPAWN_TREEHOUSE_READY_FILE" ]; then
+    rm -f -- "$SPAWN_TREEHOUSE_READY_FILE" 2>/dev/null || true
+    SPAWN_TREEHOUSE_READY_FILE=
+  fi
+  if [ -n "$SPAWN_TREEHOUSE_FAILURE_FILE" ]; then
+    rm -f -- "$SPAWN_TREEHOUSE_FAILURE_FILE" 2>/dev/null || true
+    SPAWN_TREEHOUSE_FAILURE_FILE=
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -5775,7 +5789,63 @@ elif [ "$RELAUNCH" -eq 1 ]; then
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A t3code slot was leased and validated in its target branch above.
   if [ "$BACKEND" != t3code ]; then
-    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+    # Delimit this command's output so old errors in scrollback cannot abort it.
+    # The failure marker proves get returned unsuccessfully; a successful get
+    # still enters its interactive shell exactly as before.
+    wt_output_marker="FM_TH_GET_$$"
+    SPAWN_TREEHOUSE_READY_FILE="$STATE/.$ID.treehouse-ready.${BASHPID:-$$}"
+    SPAWN_TREEHOUSE_FAILURE_FILE="$STATE/.$ID.treehouse-failure.${BASHPID:-$$}"
+    rm -f -- "$SPAWN_TREEHOUSE_READY_FILE" "$SPAWN_TREEHOUSE_FAILURE_FILE"
+    spawn_send_text_line "$WT_TARGET" "printf '\\n%s\\n' '${wt_output_marker}'; FM_TREEHOUSE_READY_FILE=$(shell_quote "$SPAWN_TREEHOUSE_READY_FILE") FM_TREEHOUSE_FAILURE_FILE=$(shell_quote "$SPAWN_TREEHOUSE_FAILURE_FILE") FM_TREEHOUSE_REAL_SHELL=\"\$SHELL\" $(shell_quote "$SCRIPT_DIR/fm-treehouse-shell.sh") --get || printf '\\n%s\\n%s\\n' \"\$COLUMNS\" '${wt_output_marker}_FAILED'"
+
+    wt_failure_message() {
+      awk '
+        { sub(/[[:space:]]+$/, "") }
+        $0 != "" && first == "" { first=$0 }
+        error == "" && (tolower($0) ~ /(^|[[:space:]])error:/ || index($0, "worktrees are in use or dirty")) { error=$0 }
+        END {
+          if (error != "") print error
+          else if (first != "") print first
+          else print "treehouse get failed without an error message"
+        }
+      '
+    }
+
+    # Backend captures can contain visual rows. Find the reported pane width,
+    # join the wrapped failure marker first, then reconstruct its diagnostics.
+    wt_get_failure() {  # <marker>
+      awk -v marker="$1" '
+        { sub(/[[:space:]]+$/, "") }
+        $0 == marker { active=1; n=0; next }
+        active { rows[++n] = $0 }
+        END {
+          target=marker "_FAILED"
+          end=0; cols=0
+          for (j = n; j >= 1 && end == 0; j--) {
+            if (rows[j] !~ /^[0-9]+$/ || rows[j] + 0 < 2) continue
+            joined=""
+            for (k = j + 1; k <= n && length(joined) < length(target); k++) joined=joined rows[k]
+            if (joined == target) { cols=rows[j] + 0; end=j - 1 }
+          }
+          if (end == 0) exit
+          first=""; error=""
+          for (i = 1; i <= end; i++) {
+            line=rows[i]
+            while (i < end && rows[i + 1] != "" && (length(rows[i]) == cols || length(rows[i]) == cols - 1)) {
+              sep=(length(rows[i]) == cols - 1) ? " " : ""
+              i++
+              line=line sep rows[i]
+            }
+            if (line == "") continue
+            if (first == "") first=line
+            if (error == "" && (tolower(line) ~ /(^|[[:space:]])error:/ || index(line, "worktrees are in use or dirty"))) error=line
+          }
+          if (error != "") print error
+          else if (first != "") print first
+          else print "treehouse get failed without an error message"
+        }
+      '
+    }
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
     # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -5815,14 +5885,47 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     for _ in $(seq 1 60); do
       p=$(spawn_current_path "$WT_TARGET" || true)
       [ -z "$p" ] || last_seen="$p"
+      wt_error=""
+      if [ -f "$SPAWN_TREEHOUSE_FAILURE_FILE" ] && [ ! -L "$SPAWN_TREEHOUSE_FAILURE_FILE" ]; then
+        wt_error=$(wt_failure_message < "$SPAWN_TREEHOUSE_FAILURE_FILE")
+      else
+        if [ "$BACKEND" = tmux ]; then
+          wt_pane=$(tmux capture-pane -p -J -t "$WT_TARGET" -S -200 2>/dev/null || true)
+        else
+          wt_pane=$(fm_backend_capture "$BACKEND" "$T" 200 "$W" 2>/dev/null || true)
+        fi
+        wt_error=$(printf '%s\n' "$wt_pane" | wt_get_failure "$wt_output_marker")
+      fi
+      if [ -n "$wt_error" ]; then
+        printf 'error: %s\n' "$wt_error" >&2
+        case "$wt_error" in
+          *'worktrees are in use or dirty'*)
+            printf "Run 'treehouse status' in %s and free or return a slot, or increase max_trees in treehouse.toml.\n" "$PROJ_ABS" >&2 ;;
+          *) printf 'Check that treehouse itself is working in %s, then retry.\n' "$PROJ_ABS" >&2 ;;
+        esac
+        exit 1
+      fi
+      wt_allocated=""
+      if [ -f "$SPAWN_TREEHOUSE_READY_FILE" ] && [ ! -L "$SPAWN_TREEHOUSE_READY_FILE" ]; then
+        IFS= read -r wt_allocated < "$SPAWN_TREEHOUSE_READY_FILE" || wt_allocated=""
+        [ -z "$wt_allocated" ] || wt_allocated=$(real_path_or_raw "$wt_allocated")
+      fi
       if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
         p_real=$(real_path_or_raw "$p")
-        last_reason="it is an isolated worktree, but no second read agreed with it"
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
+        if [ -z "$wt_allocated" ]; then
+          candidate=""
+          last_reason="treehouse get has not confirmed the worktree it allocated"
+        elif [ "$p_real" != "$wt_allocated" ]; then
+          candidate=""
+          last_reason="it does not match the worktree allocated by treehouse get ('$wt_allocated')"
+        else
+          last_reason="it is the allocated worktree, but no second read agreed with it"
+          if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
+            WT="$p"
+            break
+          fi
+          candidate="$p_real"
         fi
-        candidate="$p_real"
       else
         candidate=""
         [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
@@ -5833,6 +5936,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
       exit 1
     fi
+    rm -f -- "$SPAWN_TREEHOUSE_READY_FILE" "$SPAWN_TREEHOUSE_FAILURE_FILE"
+    SPAWN_TREEHOUSE_READY_FILE=
+    SPAWN_TREEHOUSE_FAILURE_FILE=
 
     if spawn_endpoint_closes_on_abort; then
       validate_spawn_worktree "treehouse get" "$WT ($(spawn_endpoint_hint))"
