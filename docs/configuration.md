@@ -570,7 +570,7 @@ The Herdr app signals are checked after every other surface marker: a process in
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent, and [`docs/rex-backend.md`](rex-backend.md#auto-detection) for why a nested tmux or Herdr inside a Rex block is never read as Rex.
 
 Auto-detected Herdr and Rex stay silent like tmux, while auto-detected cmux prints a stderr notice naming `config/backend` and `--backend tmux` because cmux remains experimental.
-An hc selection from a Herdr app signal prints the same class of notice and records `backend_detect=` in the task meta; an app signal with no usable herdr-core binary is not a detection and the notice names the missing piece instead of switching.
+An hc selection from a Herdr app signal prints the same class of notice and records `backend_detect=` in the task meta; an app signal with no usable herdr-core toolchain, or with no running core for the session a spawn would use, is not a detection and the notice names the missing piece instead of switching.
 T3 Code, Zellij, Orca, Paseo, and tern are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
 Paseo and tern stay explicit-only because their runtime markers leak into every descendant process, so they cannot stand for a selection (see [`docs/paseo-backend.md`](paseo-backend.md#selection-is-explicit) and [`docs/tern-backend.md`](tern-backend.md#selection-is-explicit)); bare `HC_TERMINAL_*` markers leak the same way, so hc detection requires the Herdr app's own signals.
 

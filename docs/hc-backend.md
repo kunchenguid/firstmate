@@ -39,10 +39,16 @@ Two signals select hc, in this order, after every other surface marker has had i
    The probe is the app's own liveness rule, a bare unix connect: a stale socket file refuses, an absent one never binds, and the app is never launched or talked to.
    It is consulted only when no signal named this process's runtime, so a Firstmate on a plain shell on a host where the captain's window is open also opts into app presentation.
 
+Both signals bind the core a spawn would actually reach, the `HC_SESSION` (else `default`) session, and require it to be running already, because the adapter's container ensure starts a missing core and detection must never start one.
+`bin/fm-backend.sh` resolves that core's socket without calling `hc`: an `FM_HC_SOCKET` pin, else `$XDG_RUNTIME_DIR/herdr-core/<session>.sock` when `XDG_RUNTIME_DIR` is set, else `${XDG_STATE_HOME:-~/.local/state}/herdr-core/<session>/<session>.sock`, the layout measured on hc 0.1.14.
+`app-terminal` additionally requires `HC_TERMINAL_SOCKET` to be that same socket, so a labeled terminal on some other core never steers a spawn.
+`app-window` requires that socket to accept a connection; with no running core it does not switch and the notice names the session it would not start.
+The app shows the session it bound at launch, so a captain whose app runs a session other than `default` sets the same `HC_SESSION` for Firstmate or selects hc explicitly.
+
 An explicit `--backend`, `FM_BACKEND`, or `config/backend` always wins over detection.
 Inside the classic Herdr TUI, `HERDR_ENV=1` wins before the app signals are consulted, so the `herdr` backend keeps its behavior.
 A contradictory marker set (for example another surface's marker alongside the app's) keeps the earlier surface's verdict rather than switching - ambiguous input means no automatic switch.
-When a live app window is present but no usable hc toolchain resolves (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z`, plus `jq`), detection does not switch and `fm_backend_name` prints a notice naming the missing piece instead.
+When a live app window or a live hc terminal is present but no usable hc toolchain resolves (an executable `FM_HC_BIN`, or `herdr-core`/`hc` on `PATH` reporting `hc x.y.z`, plus `jq`), detection does not switch and a notice names the missing piece instead; a bare terminal marker set is still never a detection.
 An auto-detected hc prints a stderr notice naming the winning signal and records `backend_detect=app-terminal` or `backend_detect=app-window` in the task meta, so the spawn output and task record carry the reason for the choice.
 
 Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an explicit hc spawn does, so workers appear in the captain's window without the app ever being started by Firstmate.
@@ -117,6 +123,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 `tests/fm-backend-hc.test.sh` pins the adapter against a fake `hc`.
 `tests/fm-backend-hc-liveness-live-e2e.test.sh` is the default-on live guard: it launches every installed harness bare in a private core and requires `alive`.
 `tests/fm-backend-hc-smoke.test.sh` drives the real binary in an isolated lab; [`bin/fm-hc-lab.sh`](../bin/fm-hc-lab.sh) owns the isolation and metadata-tripwire contract, and [`tests/hc-test-safety.sh`](../tests/hc-test-safety.sh) owns guarded test teardown.
-The smoke skips when no resolved Core binary or `jq` is available; provisioning and teardown failures fail the test.
+`tests/fm-backend-hc-appdetect-smoke.test.sh` runs real `bin/fm-spawn.sh` spawns in the same kind of lab for the app-terminal, app-window, and explicit cases, and checks that a window over a session with no running core starts nothing.
+The smokes skip when no resolved Core binary or `jq` is available; provisioning and teardown failures fail the test.
 For CI coverage, see [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend); the workflow requires `jq` and rejects the `hc not found` skip.
 [`bin/fm-hc-ci-cleanup.sh`](../bin/fm-hc-ci-cleanup.sh) owns job-end cleanup mechanics.
