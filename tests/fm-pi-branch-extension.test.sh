@@ -386,6 +386,10 @@ export function fuzzyFilter(items, query, getText) {
   const needle = query.toLowerCase();
   return items.filter((item) => getText(item).toLowerCase().includes(needle));
 }
+
+export function hyperlink(text, url) {
+  return `\u001b]8;;${url}\u001b\\${text}\u001b]8;;\u001b\\`;
+}
 JS
   cat > "$repo/node_modules/typebox/package.json" <<'JSON'
 {"name":"typebox","type":"module","exports":"./index.js"}
@@ -863,7 +867,7 @@ if (listedText.split("\n").length !== 2 || !listedText.includes("checks green"))
 }
 if (!renderers.has("fm-branch-merge")) throw new Error("merge-note renderer missing");
 if (!entryRenderers.has("fm-branch-visible-outcome")) throw new Error("visible captain-outcome renderer missing");
-const assertRenderedNote = (note, glyph) => {
+const renderNote = (note) => {
   const fgCalls = [];
   const rendered = renderers.get("fm-branch-merge")(
     { content: note },
@@ -875,6 +879,10 @@ const assertRenderedNote = (note, glyph) => {
       },
     },
   );
+  return { rendered, fgCalls };
+};
+const assertRenderedNote = (note, glyph) => {
+  const { rendered, fgCalls } = renderNote(note);
   if (!String(rendered.text).includes(glyph)) throw new Error(`renderer dropped ${glyph}: ${rendered.text}`);
   if (String(rendered.text).includes("branch merged")) throw new Error(`renderer kept boilerplate: ${rendered.text}`);
   if (rendered.paddingX === 0 && rendered.paddingY === 0) {
@@ -895,6 +903,23 @@ const assertRenderedNote = (note, glyph) => {
   }
 };
 assertRenderedNote(sentToMain[0].message.content, "⛵");
+const pullUrl = "https://github.com/connectwithclayton/toolroll/pull/148";
+const linkedNote = renderNote(`⛵ fm-toolroll-ci: CI fix merged: ${pullUrl}`);
+const exactLink = `\u001b]8;;${pullUrl}\u001b\\${pullUrl}\u001b]8;;\u001b\\`;
+if (!linkedNote.rendered.text.includes(exactLink)) {
+  throw new Error(`routine PR notification did not expose its exact URL as a terminal link: ${JSON.stringify(linkedNote.rendered.text)}`);
+}
+if (!linkedNote.fgCalls.some((call) => call.color === "accent" && call.text === pullUrl)) {
+  throw new Error(`routine PR notification did not distinguish its clickable URL: ${JSON.stringify(linkedNote.fgCalls)}`);
+}
+const punctuatedNote = renderNote(`⛵ fm-toolroll-ci: CI fix merged: ${pullUrl}.`);
+if (!punctuatedNote.rendered.text.includes(`${exactLink}.`)) {
+  throw new Error(`routine PR notification did not preserve sentence punctuation outside its click target: ${JSON.stringify(punctuatedNote.rendered.text)}`);
+}
+const malformedSuffix = renderNote(`⛵ fm-toolroll-ci: ${pullUrl}/files`);
+if (malformedSuffix.rendered.text.includes("\u001b]8;;")) {
+  throw new Error("routine notification linked only a prefix of a longer pull-request path");
+}
 const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
   captainEntries[0],
   { expanded: false },
