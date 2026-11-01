@@ -26,6 +26,14 @@ mkdir -p "$BRIEF_HOME/data"
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
 # is a weak guard on its own; test_no_heredoc_in_command_substitution and the
 # macos-stock-bash CI job carry the real cross-version enforcement.
+test_script_parses() {
+  local out rc
+  out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
+  [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
+  pass "fm-brief.sh: bash -n succeeds"
+}
+
 test_repository_positional_is_scout_optional_and_ship_required() {
   local home out rc
   home="$TMP_ROOT/repo-positional-home"
@@ -33,7 +41,15 @@ test_repository_positional_is_scout_optional_and_ship_required() {
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" scout-no-repo --scout 2>&1); rc=$?
   expect_code 0 "$rc" "scout scaffold without a repository must succeed (got: $out)"
-  [ -f "$home/data/scout-no-repo/brief.md" ] || fail "scout scaffold without a repository wrote no brief"
+  grep -Fxq 'You are in a disposable git worktree of the task repository, at a detached HEAD on a clean default branch.' \
+    "$home/data/scout-no-repo/brief.md" || fail "scout scaffold without a repository rendered a malformed Setup line"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" scout-no-repo-base --scout --base-branch release/1 2>&1); rc=$?
+  expect_code 0 "$rc" "scout scaffold with a base branch and no repository must succeed (got: $out)"
+  # shellcheck disable=SC2016 # The inner shell expands its own positional parameters.
+  out=$(bash -c '. "$1" && fm_brief_base_branches "$2"' _ "$ROOT/bin/fm-dod-lib.sh" "$home/data/scout-no-repo-base/brief.md") \
+    || fail "repository-less scout Setup line lost its base branch"
+  [ "$out" = release/1 ] || fail "repository-less scout Setup line carried the wrong base branch: $out"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ship-no-repo --mode direct-PR 2>&1); rc=$?
   expect_code 1 "$rc" "ship scaffold without a repository must refuse (got: $out)"
@@ -44,16 +60,35 @@ test_repository_positional_is_scout_optional_and_ship_required() {
   case "$out" in
     *"unbound variable"*) fail "ship scaffold without a repository crashed: $out" ;;
   esac
-  [ ! -e "$home/data/ship-no-repo/brief.md" ] || fail "refused ship scaffold wrote a brief"
+  [ ! -e "$home/data/ship-no-repo" ] || fail "refused ship scaffold left a data directory"
   pass "fm-brief.sh: repository positional is optional for scouts and required for ships"
 }
 
-test_script_parses() {
-  local out rc
-  out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
-  expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
-  [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
-  pass "fm-brief.sh: bash -n succeeds"
+expect_missing_task_id_refused() {  # <home> <fm-brief.sh args...>
+  local home=$1 out rc
+  shift
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$@" 2>&1); rc=$?
+  expect_code 1 "$rc" "missing task id must refuse for [$*] (got: $out)"
+  case "$out" in
+    *"require a task id"*) ;;
+    *) fail "missing task id gave no clear refusal for [$*]: $out" ;;
+  esac
+}
+
+test_missing_task_id_is_refused() {
+  local home left
+  home="$TMP_ROOT/missing-id-home"
+  mkdir -p "$home/data"
+
+  expect_missing_task_id_refused "$home" --scout
+  expect_missing_task_id_refused "$home" --mode direct-PR
+  expect_missing_task_id_refused "$home" --secondmate --no-projects
+  expect_missing_task_id_refused "$home" "" --scout
+  expect_missing_task_id_refused "$home" "" repo --mode local-only --branch-prefix x-
+
+  left=$(ls -A "$home/data")
+  [ -z "$left" ] || fail "refused scaffold wrote into data: $left"
+  pass "fm-brief.sh: a missing task id is refused for every brief kind"
 }
 
 # Structural class guard (issues #166, #958, #1069): never build a variable by
@@ -1755,3 +1790,4 @@ test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
 test_repository_positional_is_scout_optional_and_ship_required
+test_missing_task_id_is_refused

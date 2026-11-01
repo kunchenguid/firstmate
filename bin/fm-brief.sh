@@ -394,6 +394,10 @@ if [ "$KIND" = ship ] && [ "$MODE" != local-only ] && [ "$PROJECT_DIR_SET" -eq 1
       ;;
   esac
 fi
+[ -n "${POS[0]:-}" ] || {
+  echo "error: briefs require a task id as the first positional argument; see fm-brief.sh --help" >&2
+  exit 1
+}
 ID=${POS[0]}
 BRANCH="$BRANCH_PREFIX$ID"
 if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
@@ -439,6 +443,12 @@ append_brief_include() {
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+# A scout needs no repository; a ship brief names the one it delivers into.
+REPO=${POS[1]:-}
+if [ "$KIND" = ship ] && [ -z "$REPO" ]; then
+  echo "error: ship briefs require a repository: fm-brief.sh <task-id> <repo-name> --mode <mode>" >&2
+  exit 1
+fi
 mkdir -p "$DATA/$ID"
 
 ASK_USER_BLOCK=
@@ -603,13 +613,6 @@ fi
 exit 0
 fi
 
-# A scout needs no repository; a ship brief names the one it delivers into.
-REPO=${POS[1]:-}
-if [ "$KIND" = ship ] && [ -z "$REPO" ]; then
-  echo "error: ship briefs require a repository: fm-brief.sh <task-id> <repo-name> --mode <mode>" >&2
-  exit 1
-fi
-
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -695,10 +698,10 @@ EOF
 SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
 
 if [ -n "$BASE_BRANCH" ]; then
-  SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
+  SETUP_BASE="You are in a disposable git worktree of ${REPO:-the task repository}, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
 else
-  SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch."
+  SETUP_BASE="You are in a disposable git worktree of ${REPO:-the task repository}, at a detached HEAD on a clean default branch."
 fi
 
 if [ "$KIND" = scout ]; then
