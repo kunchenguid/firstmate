@@ -339,6 +339,59 @@ test_a_slow_remote_is_bounded_and_the_rest_still_report() {
   pass "one slow or unreachable home is bounded and every other home still reports"
 }
 
+run_reach() { # <home> <memory-file> <destination>
+  env -i PATH="$FAKEBIN:$BASE_PATH" HOME="${HOME:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" \
+    FM_HOME="$1" "$CASCADE" --reach "$2" "$3"
+}
+
+# The captain's test for a relocation is that the content survives somewhere
+# every home that reads it can still find. A secondmate loads its inherited copy
+# of data/captain-shared.md, never the primary's home-local skills, so moving a
+# shared entry into such a skill deletes it for the secondmate: --reach must say
+# removal and name that home. The same skill is reachable for an entry of the
+# primary's own data/captain.md, which no other home reads, and a destination
+# inside the secondmate's home is out of the primary's own reach.
+test_reach_reports_a_home_local_shared_relocation_as_a_removal() {
+  local primary secondmate out rc
+  primary=$(new_primary reach)
+  secondmate=$(new_home reach-secondmate)
+  local_record reach-secondmate "$secondmate" > "$primary/data/secondmates.md"
+
+  set +e
+  out=$(run_reach "$primary" data/captain-shared.md .agents/skills/shared-pref/SKILL.md)
+  rc=$?
+  set -e
+  expect_code 4 "$rc" "a shared entry moved to a primary-only skill was not refused as a removal"
+  assert_contains "$out" "reader=this-home placement=local home=$primary reachable=yes" \
+    "the primary did not see its own destination as reachable"
+  assert_contains "$out" "reader=reach-secondmate placement=local home=$secondmate reachable=no" \
+    "the inheriting secondmate was not named as losing the entry"
+  assert_contains "$out" 'reach=removal' "the relocation was not reported as a removal"
+  assert_not_contains "$out" 'reach=reversible' "a removal was also reported as reversible"
+
+  set +e
+  out=$(run_reach "$primary" data/captain.md .agents/skills/own-pref/SKILL.md)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "an entry only this home reads was refused when its destination is in this home"
+  assert_contains "$out" 'reach=reversible' "a home-local move of a home-local entry was not reversible"
+  assert_not_contains "$out" 'reader=reach-secondmate' "a secondmate was counted as reading data/captain.md"
+
+  set +e
+  out=$(run_reach "$primary" data/captain.md "$secondmate/.agents/skills/elsewhere/SKILL.md")
+  rc=$?
+  set -e
+  expect_code 4 "$rc" "a destination outside every reader's home was reported reachable"
+
+  set +e
+  out=$(run_reach "$secondmate" data/captain-shared.md .agents/skills/x/SKILL.md 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a secondmate home relocated a primary-owned shared entry"
+  assert_contains "$out" 'primary-owned' "the secondmate refusal did not name the primary owner"
+  pass "--reach reports a shared-file move to a home-local skill as a removal for the inheriting homes"
+}
+
 test_no_cascade_without_secondmates_or_from_a_secondmate_home() {
   local primary secondmate out rc
   primary=$(new_primary quiet)
@@ -368,3 +421,4 @@ test_transport_routes_by_placement_and_liveness
 test_receipt_facts_are_complete_and_show_before_and_after
 test_a_slow_remote_is_bounded_and_the_rest_still_report
 test_no_cascade_without_secondmates_or_from_a_secondmate_home
+test_reach_reports_a_home_local_shared_relocation_as_a_removal
