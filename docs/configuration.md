@@ -660,7 +660,7 @@ The local `config/rex-tint` file opts in to a subtle background tint on waiting 
 
 Firstmate launches a worker-side OSC 7501 Program Status Protocol bridge so supporting terminals can display task status even when the harness does not report it natively.
 [`bin/fm-osc7501.sh`](../bin/fm-osc7501.sh)'s header owns terminal eligibility, native-reporter exclusion, signal precedence and activity sources, record fields, and watcher lifecycle.
-The local `config/osc7501-status` file gates the feature per home: `on` (the default when absent) or `off`; an unrecognized word warns once and reads as off.
+The local `config/osc7501-status` file gates the feature per home: `on` (the default when absent) or `off`; an unrecognized word warns once, in the worker pane that launches next, and reads as off.
 
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
 Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
