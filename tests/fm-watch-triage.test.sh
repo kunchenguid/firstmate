@@ -735,7 +735,7 @@ test_claimed_run_outcomes() {
     git -C "$wt" init -q
     branch=$(git -C "$wt" symbolic-ref --short HEAD)
     printf 'worktree=%s\n' "$wt" > "$state/$task.meta"
-    printf 'working: validation started\nworking: checking progress\n' > "$state/$task.status"
+    printf 'working [at=1234567890] [key=validation]: validation started\nworking: implementing validation setup\nworking: checking progress\n' > "$state/$task.status"
     { printf '%s\n' "$(( $(date +%s) - 60 ))"; printf '%s\n%s\n' "$branch" '1'; } > "$state/.claimed-run-$task"
     printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$state/$task.status")" \
       "$(size_of "$state/$task.status")" "$(_fm_open_decisions_file_ident "$state/$task.status")" \
