@@ -718,6 +718,9 @@ unit_herdr_partial_create_recovery() {
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY=/bin/true \
     FM_AFK_LAUNCH_LABEL=afk-exact-label RECORDED="$recorded" bash -c '
     . "$1"
+    # The root-pane rule the recovery path counts with is the Herdr adapter
+    # shared helper, so the adapter is sourced even though its CLI is stubbed.
+    . "$2/bin/backends/herdr.sh"
     fm_backend_source() { return 0; }
     fm_backend_herdr_server_ensure() { return 0; }
     fm_backend_herdr_cli() {
@@ -732,7 +735,7 @@ unit_herdr_partial_create_recovery() {
     }
     fm_afk_launch_record_write() { printf "%s:%s:%s" "$1" "$2" "$3" > "$RECORDED"; }
     fm_afk_launch_create_herdr lab:captain herdr
-  ' _ "$LAUNCH"
+  ' _ "$LAUNCH" "$ROOT"
   if [ "$(cat "$recorded" 2>/dev/null || true)" = "herdr:lab:pane-exact:ws-partial" ]; then
     pass "herdr create: malformed response recovers durable exact ownership"
   else

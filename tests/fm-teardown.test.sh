@@ -3178,7 +3178,7 @@ case "\${1:-} \${2:-}" in
     esac
     ;;
   "pane list")
-    printf '%s\n' '{"result":{"panes":[{"pane_id":"wG:pQ","tab_id":"wG:tQ"}]}}'
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG"}]}}'
     ;;
   "status --json")
     printf '%s\n' '{"server":{"running":true}}'
@@ -3191,6 +3191,9 @@ case "\${1:-} \${2:-}" in
     fi
     ;;
   "pane close")
+    : > "\${FM_FAKE_HERDR_CLOSED:?}"
+    ;;
+  "tab close")
     : > "\${FM_FAKE_HERDR_CLOSED:?}"
     ;;
   "pane get")
@@ -3270,7 +3273,7 @@ SH
   if grep -q "teardown task-x1 complete" "$case_dir/stdout"; then
     : > "$release"; fail "herdr-orphan-refusal: refusal still reported cleanup complete"
   fi
-  if grep -q "^pane close" "$log"; then
+  if grep -qE "^(pane|tab) close" "$log"; then
     : > "$release"; fail "herdr-orphan-refusal: an unlocked pane close was attempted under contention"
   fi
 
@@ -3836,6 +3839,12 @@ case "${1:-} ${2:-}" in
     fi
     : > "${FM_FAKE_HERDR_CLOSED:?}"
     ;;
+  "tab close")
+    if [ "${FM_FAKE_HERDR_CLOSE_FAIL:-0}" = 1 ]; then
+      exit 1
+    fi
+    : > "${FM_FAKE_HERDR_CLOSED:?}"
+    ;;
   "pane get")
     if [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
       if [ "${FM_FAKE_HERDR_PRESENCE_UNKNOWN:-0}" = 1 ]; then
@@ -3848,7 +3857,10 @@ case "${1:-} ${2:-}" in
     printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
     ;;
   "tab get")
-    printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}'
+    case "${3:-}" in
+      "w1:t2") printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2","workspace_id":"w1"}}}' ;;
+      *) printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}' ;;
+    esac
     ;;
   "tab focus")
     if [ "${FM_FAKE_HERDR_RESTORE_FAIL:-0}" = 1 ]; then

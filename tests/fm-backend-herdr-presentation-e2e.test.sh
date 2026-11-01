@@ -29,6 +29,7 @@ TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
 TREEHOUSE_LOCK_DIR="$TMP_ROOT/treehouse-call.lock"
 MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
+WORKSPACE_CREATE_LOG="$TMP_ROOT/workspace-creates.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
 mkdir -p "$FAKEBIN"
@@ -36,8 +37,9 @@ mkdir -p "$FAKEBIN"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$MOVE_CALL_LOG"
 : > "$FOCUS_AUDIT_LOG"
+: > "$WORKSPACE_CREATE_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
-export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG TREEHOUSE_LOCK_DIR MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG TREEHOUSE_LOCK_DIR MOVE_CALL_LOG FOCUS_AUDIT_LOG WORKSPACE_CREATE_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated trailing
@@ -134,6 +136,7 @@ case "${1:-} ${2:-}" in
   "workspace create") mutation=workspace-create; mutation_target=$label ;;
   "tab create") mutation=tab-create; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
+  "tab close") mutation=tab-close ;;
   "tab focus") mutation=tab-focus ;;
 esac
 refusal_probe=0
@@ -151,6 +154,11 @@ else
   status=$?
 fi
 if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
+  printf '%s\t%s\t%s\t%s\n' \
+    "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty')" \
+    "$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty')" \
+    "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty')" \
+    "$label" >> "$WORKSPACE_CREATE_LOG"
   case "$label" in
     $'└ active-seeded · p:'*)
       mkdir -p "$ACTIVE_SEEDED_CONTROL"
@@ -162,6 +170,7 @@ if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
       task=${label#$'└ '}; task=${task%% *}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$POST_CREATE_ABORT_CONTROL/$task/workspace"
+      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.tab.tab_id')" > "$POST_CREATE_ABORT_CONTROL/$task/seeded-tab"
       ;;
   esac
 fi
@@ -175,6 +184,7 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       task=${label#fm-}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
+      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.tab.tab_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-tab"
       ;;
   esac
 fi
@@ -350,22 +360,30 @@ focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
 
 assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
   local start=$1 case_name=$2 changed
+  # Herdr 0.9.x's `workspace create --no-focus` and `tab create --no-focus`
+  # steal focus to the new container; the adapter repairs that with an exact
+  # focus restore, so a create is not required to leave focus unchanged here.
+  # The move and close primitives still must preserve or restore the exact
+  # active workspace and tab, and assert_focus_is checks the net focus after
+  # each spawn.
   changed=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' '
-    ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || $1 == "pane-close") && $2 != $3 {
+    ($1 == "workspace-move" || $1 == "pane-close" || $1 == "tab-close") && $2 != $3 {
       print $0
     }
   ')
-  [ -z "$changed" ] || fail "$case_name changed active workspace/tab inside a create, move, or seeded cleanup: $changed"
+  [ -z "$changed" ] || fail "$case_name changed active workspace/tab inside a move or seeded cleanup: $changed"
 }
 
 # The focus-safe emptying-close plan removes a last pane through Herdr's
 # pane-death path with no pane.close mutation at all (the raw explicit-close
 # defect is demonstrated by tests/fm-backend-herdr-focus-flash-e2e.test.sh);
 # a fallback plain close must preserve or immediately restore exact focus.
-assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
-  local start=$1 pane_id=$2 expected=$3
-  sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane_id" -v expected="$expected" '
-    $1 == "pane-close" && $4 == pane {
+# On Herdr 0.9.x the close is a `tab close` of the exact tab (terminal plus
+# sidebar), so the assertion matches that mutation when a tab id is supplied.
+assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus> [tab-id]
+  local start=$1 pane_id=$2 expected=$3 tab_id=${4:-}
+  sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v pane="$pane_id" -v tab="$tab_id" -v expected="$expected" '
+    ($1 == "pane-close" && $4 == pane) || ($1 == "tab-close" && $4 == tab) {
       saw_close = 1
       if ($2 != expected) { bad = 1 }
       else if ($3 == expected) { preserved = 1 }
@@ -376,7 +394,7 @@ assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
       preserved = 1
     }
     END { exit(bad || (saw_close && !preserved) ? 1 : 0) }
-  ' || fail "projected pane close did not preserve or restore the exact active workspace and tab"
+  ' || fail "projected close did not preserve or restore the exact active workspace and tab"
   if lab pane get "$pane_id" >/dev/null 2>&1; then
     fail "projected cleanup left exact pane $pane_id alive"
   fi
@@ -509,12 +527,30 @@ session_presentation_lock_path() {
   ' "$ROOT" "$HERDR_LAB_SESSION"
 }
 
-assert_no_ordering_lifecycle_calls_since() {  # <line-count> <case-name>
-  local start=$1 name=$2 calls
+# Ordering and cleanup never close, rename, or delete a workspace, session, or
+# server, and never mutate a label. A projection's own seeded-tab prune and its
+# rollback of the disposable workspace's own tabs are the expected tab closes
+# inside these sections, so each caller names the exact tab ids those closes may
+# remove; a close of any other tab stays a failure.
+assert_no_ordering_lifecycle_calls_since() {  # <line-count> <case-name> [allowed-tab-id...]
+  local start=$1 name=$2 calls closed tab candidate allowed
+  shift 2
   calls=$(sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG")
-  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(close|rename)|tab\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
-    fail "$name introduced a workspace/tab/session lifecycle or label mutation call"
+  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(close|rename)|tab\trename|session\t(stop|delete)|server)' >/dev/null 2>&1; then
+    fail "$name introduced a workspace/session lifecycle or label mutation call"
   fi
+  closed=$(printf '%s\n' "$calls" | awk -F '\t' '$1 == "tab" && $2 == "close" { print $3 }')
+  [ -z "$closed" ] && return 0
+  while IFS= read -r tab; do
+    [ -n "$tab" ] || continue
+    allowed=0
+    for candidate in "$@"; do
+      [ "$tab" = "$candidate" ] && allowed=1 && break
+    done
+    [ "$allowed" = 1 ] || fail "$name closed tab $tab outside the disposable workspace's own tabs"
+  done <<EOF
+$closed
+EOF
 }
 
 assert_no_projection_mutation_since() {  # <line-count> <case-name>
@@ -680,14 +716,16 @@ PROJECTED_TABS=$(lab tab list --workspace "$PROJECTED_WSID")
 PROJECTED_PANES=$(lab pane list --workspace "$PROJECTED_WSID")
 [ "$(printf '%s' "$PROJECTED_TABS" | jq -r '.result.tabs | length')" = 1 ] \
   || fail "projected workspace retained a seeded or placeholder tab"
-[ "$(printf '%s' "$PROJECTED_PANES" | jq -r '.result.panes | length')" = 1 ] \
+# A 0.9.x projection holds one terminal root pane plus a chrome Sidebar pane,
+# so count only the root panes rather than asserting a single pane.
+[ "$(printf '%s' "$PROJECTED_PANES" | jq -r '[.result.panes[]? | select(((.label // "") != "Sidebar") and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0)] | length')" = 1 ] \
   || fail "projected workspace did not contain exactly one task pane"
 printf '%s' "$PROJECTED_TABS" | jq -e --arg tab "$PROJECTED_TAB" \
   '.result.tabs[0].tab_id == $tab and .result.tabs[0].label == "fm-shape"' >/dev/null 2>&1 \
   || fail "projected workspace's only tab was not the normal fm-shape task tab"
 printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
-  '.result.panes[0].pane_id == $pane' >/dev/null 2>&1 \
-  || fail "projected workspace's only pane was not the exact recorded task pane"
+  '[.result.panes[]? | select(((.label // "") != "Sidebar") and ([.tokens // {} | to_entries[]? | select(.key | startswith("herdr-sidebar-"))] | length) == 0)][0].pane_id == $pane' >/dev/null 2>&1 \
+  || fail "projected workspace's only task pane was not the exact recorded task pane"
 SECOND_TWO_INFO=$(lab workspace get "$SECOND_TWO_WSID") || fail "focused secondmate disappeared during projected create"
 [ "$(printf '%s' "$SECOND_TWO_INFO" | jq -r '.result.workspace.focused')" = true ] \
   || fail "projected create or workspace.move stole focus from the captain's current space"
@@ -705,13 +743,14 @@ if grep -F "target is the captain's active tab" "$TMP_ROOT/active-seeded.err" >/
 fi
 ACTIVE_SEEDED_PANE=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-pane")
 ACTIVE_SEEDED_TASK_PANE=$(cat "$ACTIVE_SEEDED_CONTROL/task-pane")
+ACTIVE_SEEDED_TAB=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-tab")
 if lab pane get "$ACTIVE_SEEDED_PANE" >/dev/null 2>&1; then
   fail "detached persisted-focus seeded prune left the seeded pane behind"
 fi
 lab pane get "$ACTIVE_SEEDED_TASK_PANE" >/dev/null 2>&1 \
   || fail "detached persisted-focus seeded prune lost the task pane"
-sed -n "$((ACTIVE_SEEDED_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -F $'pane\tclose\t'"$ACTIVE_SEEDED_PANE" >/dev/null 2>&1 \
-  || fail "detached persisted-focus seeded prune did not close the seeded pane"
+sed -n "$((ACTIVE_SEEDED_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -F $'tab\tclose\t'"$ACTIVE_SEEDED_TAB" >/dev/null 2>&1 \
+  || fail "detached persisted-focus seeded prune did not close the seeded tab"
 lab tab focus "$SECOND_TWO_TAB" >/dev/null || fail "could not restore the captured captain tab after the active seeded-tab fixture"
 assert_focus_is "$CAPTAIN_FOCUS" "active seeded-tab fixture restoration"
 rm -rf "$ACTIVE_SEEDED_CONTROL"
@@ -762,7 +801,7 @@ LOCK_CONTENTION_WSID=$(grep '^herdr_workspace_id=' "$LOCK_CONTENTION_META" | cut
 LOCK_CONTENTION_CALLS=$(sed -n "$((LOCK_CONTENTION_START + 1)),\$p" "$HERDR_CALL_LOG")
 # session list is required to resolve the shared session lock path before the
 # bounded acquire attempt; it must not unlock projection create or move.
-if printf '%s\n' "$LOCK_CONTENTION_CALLS" | grep -E $'^(workspace\tcreate|pane\tclose|api\tschema)' >/dev/null 2>&1; then
+if printf '%s\n' "$LOCK_CONTENTION_CALLS" | grep -E $'^(workspace\tcreate|(pane|tab)\tclose|api\tschema)' >/dev/null 2>&1; then
   fail "bounded lock contention performed an unlocked projection mutation or ordering capability call"
 fi
 [ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$LOCK_CONTENTION_MOVE_START" ] \
@@ -774,6 +813,7 @@ teardown_task lock-contended "$HOME_DIR" > "$TMP_ROOT/lock-contended-teardown.ou
 assert_focus_is "$CAPTAIN_FOCUS" "bounded presentation lock flat fallback teardown"
 pass "real Herdr lab: bounded lock contention warns and falls back flat without projection or focus drift"
 PROJECTION_ORDER_START=$(log_line_count)
+PROJECTION_ORDER_CREATE_START=$(wc -l < "$WORKSPACE_CREATE_LOG" | tr -d '[:space:]')
 
 [ "$OFF_WT" = "$ON_WT" ] || fail "Treehouse did not reuse the same fixture worktree, so byte comparison is inconclusive"
 normalize_meta "$OFF_META" > "$TMP_ROOT/off.meta.normalized"
@@ -823,7 +863,10 @@ SECOND_ORDER_AFTER=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | s
   || fail "primary workspace ordering changed secondmate relative order"
 [ "$(lab workspace get "$SECOND_TWO_WSID" | jq -r '.result.workspace.focused')" = true ] \
   || fail "concurrent primary workspace ordering stole focus"
-assert_no_ordering_lifecycle_calls_since "$PROJECTION_ORDER_START" "successful presentation ordering"
+PROJECTION_ORDER_SEEDED_TABS=$(sed -n "$((PROJECTION_ORDER_CREATE_START + 1)),\$p" "$WORKSPACE_CREATE_LOG" \
+  | awk -F '\t' '$4 ~ /^└ order-/ { print $2 }')
+assert_no_ordering_lifecycle_calls_since "$PROJECTION_ORDER_START" "successful presentation ordering" \
+  $PROJECTION_ORDER_SEEDED_TABS
 pass "real Herdr lab: concurrent primary workers form one stable contiguous block without active workspace/tab drift"
 
 # Force only the raw move transport to fail after a safe projected create.
@@ -837,6 +880,7 @@ SH
 chmod +x "$FAIL_MOVER"
 FAIL_START=$(log_line_count)
 FAIL_FOCUS_AUDIT_START=$(focus_audit_line_count)
+FAIL_CREATE_START=$(wc -l < "$WORKSPACE_CREATE_LOG" | tr -d '[:space:]')
 FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAIL_MOVER" \
   spawn_task order-fail "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/order-fail.out" 2> "$TMP_ROOT/order-fail.err" \
   || fail "move-failure projected spawn should still succeed: $(cat "$TMP_ROOT/order-fail.err")"
@@ -853,12 +897,14 @@ FAIL_LIST=$(lab workspace list) || fail "could not inspect the move-failure fall
   || fail "workspace.move failure did not leave the safe worker in Herdr's default appended order"
 lab pane get "$ORDER_FAIL_PANE" >/dev/null 2>&1 \
   || fail "workspace.move failure cleaned up the safely-created task pane"
-FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '$1 == "pane" && $2 == "close" { print $3 }')
-[ "$(printf '%s\n' "$FAIL_CLOSED_PANES" | awk 'NF { n += 1 } END { print n + 0 }')" = 1 ] \
-  || fail "move-failure spawn performed a pane close beyond the normal seeded-pane prune"
-[ "$FAIL_CLOSED_PANES" != "$ORDER_FAIL_PANE" ] \
-  || fail "move-failure spawn closed its exact task pane"
-assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"
+ORDER_FAIL_SEEDED_TAB=$(sed -n "$((FAIL_CREATE_START + 1)),\$p" "$WORKSPACE_CREATE_LOG" \
+  | awk -F '\t' '$4 ~ /^└ order-fail/ { print $2 }')
+[ -n "$ORDER_FAIL_SEEDED_TAB" ] \
+  || fail "move-failure spawn did not record its disposable workspace's seeded default tab"
+FAIL_CLOSED_TABS=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '$1 == "tab" && $2 == "close" { print $3 }')
+[ "$FAIL_CLOSED_TABS" = "$ORDER_FAIL_SEEDED_TAB" ] \
+  || fail "move-failure spawn closed a tab other than its own seeded default tab: $FAIL_CLOSED_TABS"
+assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering" "$ORDER_FAIL_SEEDED_TAB"
 pass "real Herdr lab: forced workspace.move failure leaves a successful worker in default order with a warning and no cleanup"
 
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
@@ -881,25 +927,29 @@ grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 
   || fail "post-create abort fixture B did not reach the armed validation failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
-ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
+ABORT_A_TAB=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-tab")
+ABORT_B_TAB=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-tab")
+ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_TAB" -v b="$ABORT_B_TAB" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  $1 == "tab-close" && $4 == a { print "close-a" }
+  $1 == "tab-close" && $4 == b { print "close-b" }
 ')
 case "$ABORT_SEQUENCE" in
   $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
   *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
 esac
-ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
-  ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || ($1 == "pane-close" && $4 != a && $4 != b)) && $2 != $3 { print }
+ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_TAB" -v b="$ABORT_B_TAB" '
+  ($1 == "workspace-move" || ($1 == "tab-close" && $4 != a && $4 != b)) && $2 != $3 { print }
 ')
 [ -z "$ABORT_UNRESTORED" ] \
-  || fail "post-create abort create, prune, or move changed exact focus: $ABORT_UNRESTORED"
+  || fail "post-create abort move changed exact focus: $ABORT_UNRESTORED"
 assert_focus_is "$CAPTAIN_FOCUS" "concurrent post-create abort cleanup"
-assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_A_PANE" "$CAPTAIN_FOCUS"
-assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_B_PANE" "$CAPTAIN_FOCUS"
-assert_no_ordering_lifecycle_calls_since "$ABORT_START" "concurrent post-create abort cleanup"
+assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_A_PANE" "$CAPTAIN_FOCUS" "$ABORT_A_TAB"
+assert_cleanup_focus_preserved "$ABORT_FOCUS_START" "$ABORT_B_PANE" "$CAPTAIN_FOCUS" "$ABORT_B_TAB"
+assert_no_ordering_lifecycle_calls_since "$ABORT_START" "concurrent post-create abort cleanup" \
+  "$ABORT_A_TAB" "$ABORT_B_TAB" \
+  "$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/seeded-tab")" "$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/seeded-tab")"
 for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
   if lab pane get "$ABORT_PANE" >/dev/null 2>&1; then
     fail "serialized post-create abort cleanup left exact task pane $ABORT_PANE alive"
@@ -907,15 +957,26 @@ for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
 done
 [ ! -e "$HOME_DIR/state/abort-a.meta" ] && [ ! -e "$HOME_DIR/state/abort-b.meta" ] \
   || fail "post-create abort fixtures published task metadata before launch"
+# The rollback must retire both attempt journals and remove both disposable
+# workspaces, so assert the observable outcome instead of deleting the journals
+# by hand.
+[ ! -e "$HOME_DIR/state/abort-a.herdr-presentation" ] \
+  || fail "post-create abort cleanup left the abort-a attempt journal behind"
+[ ! -e "$HOME_DIR/state/abort-b.herdr-presentation" ] \
+  || fail "post-create abort cleanup left the abort-b attempt journal behind"
+for ABORT_TASK in abort-a abort-b; do
+  if lab workspace get "$(cat "$POST_CREATE_ABORT_CONTROL/$ABORT_TASK/workspace")" >/dev/null 2>&1; then
+    fail "post-create abort cleanup left the $ABORT_TASK disposable workspace behind"
+  fi
+done
 rm -rf "$POST_CREATE_ABORT_CONTROL"
-rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
 pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
 
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "projected teardown"
-assert_cleanup_focus_preserved "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS"
+assert_cleanup_focus_preserved "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS" "$PROJECTED_TAB"
 pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for endpoint IDs and spawn incarnation"
 if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
   fail "closing the exact projected task pane did not remove its last-tab workspace"

@@ -580,7 +580,7 @@ fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorde
 }
 
 fm_afk_launch_herdr_recover_created() {  # <session> <label>
-  local session=$1 label=$2 workspaces ws_count wsid panes pane_count pane attempt=0
+  local session=$1 label=$2 workspaces ws_count wsid panes root_panes pane_count pane attempt=0
   while [ "$attempt" -lt 20 ]; do
     attempt=$((attempt + 1))
     workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || { sleep 0.05; continue; }
@@ -595,13 +595,16 @@ fm_afk_launch_herdr_recover_created() {  # <session> <label>
       '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null) || return 1
     [ -n "$wsid" ] || return 1
     panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || { sleep 0.05; continue; }
-    pane_count=$(printf '%s' "$panes" | jq '[.result.panes[]?] | length' 2>/dev/null) || { sleep 0.05; continue; }
+    # Count only terminal root panes through the shared root-pane rule, so the
+    # 0.9.x per-tab Sidebar pane is never counted as a second task pane.
+    root_panes=$(printf '%s' "$panes" | fm_backend_herdr_root_pane_ids) || { sleep 0.05; continue; }
+    pane_count=$(printf '%s\n' "$root_panes" | awk 'NF { n += 1 } END { print n + 0 }')
     if [ "$pane_count" = 0 ]; then
       sleep 0.05
       continue
     fi
     [ "$pane_count" = 1 ] || return 1
-    pane=$(printf '%s' "$panes" | jq -r '.result.panes[0].pane_id // empty' 2>/dev/null) || return 1
+    pane=$root_panes
     [ -n "$pane" ] || return 1
     printf '%s\t%s' "$wsid" "$pane"
     return 0
