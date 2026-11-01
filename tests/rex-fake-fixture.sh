@@ -233,6 +233,7 @@ SH
 make_rex_fake() {
   local dir=$1
   mkdir -p "$dir/bin" "$dir/fake/process" "$dir/fake/status" "$dir/fake/capture" "$dir/fake/cursor" "$dir/home/state"
+  # shellcheck disable=SC2016 # Expanded by the generated fake at runtime.
   write_rex_fake_cli "$dir/bin/rex" 'D="${FM_REX_FAKE_DIR:?}"'
 }
 
