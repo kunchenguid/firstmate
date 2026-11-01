@@ -4009,7 +4009,7 @@ while :; do
     cursor_claim=
     if [ -f "$cursor" ]; then
       read -r cursor_dev cursor_ino cursor_size cursor_claim < "$cursor"
-      case "$cursor_dev:$cursor_ino:$cursor_size" in *[!0-9:]*|'') cursor_dev= ;; esac
+      case "$cursor_dev:$cursor_ino:$cursor_size" in *[!0-9:]*) cursor_dev= ;; esac
     fi
     if [ -n "$cursor_dev" ] && [ -f "$identity" ] && [ "$f" -ef "$identity" ] && [ ! "$f" -nt "$cursor" ] \
       && ! claimed_run_has_appended_bytes "$f" "$cursor_size"; then
@@ -4020,7 +4020,7 @@ while :; do
       read -r dev ino size <<EOF
 $stat_result
 EOF
-      case "$dev:$ino:$size" in *[!0-9:]*|'') continue ;; esac
+      case "$dev:$ino:$size" in *[!0-9:]*) continue ;; esac
       offset=0
       if [ "$cursor_dev:$cursor_ino" = "$dev:$ino" ] && [ -n "$cursor_size" ] && [ "$size" -ge "$cursor_size" ]; then
         offset=$cursor_size
