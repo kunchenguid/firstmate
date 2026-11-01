@@ -386,6 +386,30 @@ test_heartbeat_absorbs_paused_held_blocked_rows() {
   pass "heartbeat: paused, held, and blocked rows stay silent"
 }
 
+# A sweep read that hangs must not hold the heartbeat: it is cut off at
+# FM_PROGRESS_SWEEP_TIMEOUT_SECS and queued as the sweep-failed check wake.
+test_heartbeat_bounds_a_hung_sweep() {
+  local home start elapsed reason
+  home=$(make_home hb-hung-sweep)
+  cp -R "$ROOT/bin" "$home/bin"
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$home/bin/fm-progress-sweep.sh"
+  chmod +x "$home/bin/fm-progress-sweep.sh"
+  start=$(date +%s)
+  reason=$(
+    export FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_PROGRESS_SWEEP_TIMEOUT_SECS=2
+    # shellcheck source=bin/fm-watch.sh
+    . "$home/bin/fm-watch.sh"
+    progress_orphans_enqueue || exit $?
+    printf '%s\n' "$PROGRESS_ORPHAN_REASON"
+  ) || fail "a hung sweep must still wake the heartbeat"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$elapsed" -lt 15 ] || fail "a hung sweep held the heartbeat for ${elapsed}s past its 2s bound"
+  assert_equals "check: progress-sweep failed: timed out after 2s" "$reason" "the wake must say the sweep timed out"
+  awk -F '\t' '$3 == "check" && $4 == "progress-sweep-error" { f = 1 } END { exit !f }' \
+    "$home/state/.wake-queue" || fail "the timed-out sweep was not queued as a progress-sweep-error check wake"
+  pass "heartbeat: a hung sweep is cut off at its bound and queued as a sweep failure"
+}
+
 # --- turn-end guard -----------------------------------------------------------
 
 make_guard_home() {  # <name> -> primary-shaped home with a live, healthy watcher
@@ -509,6 +533,24 @@ test_guard_claude_idle_followup_is_per_session() {
   pass "turn-end guard: each Claude session gets its own one forced idle follow-up"
 }
 
+# No watcher is up when the Stop begins, and the Stop-owned auto-arm already
+# owns recovery (a fresh rewake epoch). That handoff settles supervision only:
+# the orphans must still refuse the turn end as IDLE, once.
+test_guard_claude_autoarm_handoff_still_refuses_idle() {
+  local home out status payload
+  home=$(make_guard_home guard-claude-autoarm)
+  seed_oct31 "$home"
+  printf 'epoch=3 owner_pid=999 outcome=rewake updated_at=%s\n' "$(date +%s)" > "$home/state/.claude-autoarm-epoch"
+  payload='{"stop_hook_active":true,"session_id":"sess-arm"}'
+  out=$(run_guard "$home" "$payload" --claude); status=$?
+  expect_code 2 "$status" "an auto-arm handoff with orphans present must be refused: $out"
+  assert_contains "$out" "TURN WOULD END IDLE - 2 item(s)" "the handoff refusal must carry the IDLE banner"
+  assert_not_contains "$out" "TURN WOULD END BLIND" "an auto-arm that owns recovery is not blind"
+  out=$(run_guard "$home" "$payload" --claude); status=$?
+  expect_code 0 "$status" "the forced follow-up's own stop must still end: $out"
+  pass "turn-end guard: a Claude auto-arm handoff still refuses an idle turn end"
+}
+
 # Runs the guard as its own harness process (argv0 codex), so its session
 # ancestry is fixed by the test rather than by whatever launched the suite.
 # With <own-lock>, that harness pid is first written as the home lock owner.
@@ -577,6 +619,56 @@ EOF
   pass "Pi adapter: an idle refusal is relayed without the supervision-outage framing"
 }
 
+# A successful arm ("armed") settles supervision only, so both OpenCode
+# turn-end handlers must still run the guard and relay its IDLE refusal.
+test_opencode_adapter_runs_idle_guard_after_arming() {
+  local repo out status
+  command -v node >/dev/null 2>&1 || { pass "OpenCode idle-after-arm skipped: node not found"; return 0; }
+  repo="$TMP_ROOT/opencode-idle-root"
+  mkdir -p "$repo/bin"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '●  TURN WOULD END IDLE - 1 item(s) in flight or ready with no worker, wait, hold, or blocker:\n' >&2
+exit 2
+SH
+  chmod +x "$repo/bin/fm-turnend-guard.sh"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js" REPO="$repo" \
+    node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+globalThis.__firstmateOpenCodeWatchArm = { ensureArmed: async () => "armed" };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const check = (handler, text) => {
+  if (!text.includes("TURN WOULD END IDLE")) throw new Error(`${handler}: idle refusal not delivered after arming: ${text}`);
+  if (text.includes("TURN WOULD END BLIND")) throw new Error(`${handler}: idle refusal framed as blind: ${text}`);
+};
+let serverSeen = "";
+const hooks = await mod.FmPrimaryTurnendGuard({
+  client: { session: { promptAsync: async (request) => { serverSeen = request.body.parts[0].text; } } },
+  directory: process.env.REPO,
+  worktree: process.env.REPO,
+});
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "server-session" } } });
+check("server handler", serverSeen);
+let setupSeen = "";
+mod.default.setup({
+  location: { project: { directory: process.env.REPO } },
+  event: {
+    subscribe: async () => (async function* () {
+      yield { type: "session.execution.succeeded", properties: { sessionID: "setup-session" } };
+    })(),
+  },
+  session: { prompt: async ({ text }) => { setupSeen = text; } },
+});
+for (let i = 0; i < 100 && !setupSeen; i += 1) await new Promise((r) => setTimeout(r, 50));
+check("setup handler", setupSeen);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "both OpenCode handlers must run the guard after a successful arm: $out"
+  pass "OpenCode adapter: a successful arm still delivers the IDLE refusal from both handlers"
+}
+
 fm_test_run \
   test_sweep_flags_oct31_dead_worker_and_unlanded_work \
   test_sweep_paused_held_blocked_rows_have_reasons \
@@ -590,10 +682,13 @@ fm_test_run \
   test_heartbeat_wakes_on_oct31_orphan \
   test_heartbeat_requeue_skips_unacknowledged_orphan \
   test_heartbeat_absorbs_paused_held_blocked_rows \
+  test_heartbeat_bounds_a_hung_sweep \
   test_guard_refuses_idle_turn_on_oct31_state \
   test_guard_silent_for_paused_held_blocked_rows \
   test_guard_refuses_idle_with_nothing_in_flight \
   test_guard_claude_mode_bounds_idle_followup \
   test_guard_claude_idle_followup_is_per_session \
+  test_guard_claude_autoarm_handoff_still_refuses_idle \
   test_guard_readonly_session_not_refused_idle \
-  test_pi_adapter_relays_idle_banner_unframed
+  test_pi_adapter_relays_idle_banner_unframed \
+  test_opencode_adapter_runs_idle_guard_after_arming

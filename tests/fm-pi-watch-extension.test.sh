@@ -5573,15 +5573,21 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: started pid=1 (beacon fresh)\n'
 SH
+  # The guard still runs after a successful arm (its idle refusal must fire),
+  # but never before the arm: it records whether the arm had already run.
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'guard\n' >> "${FM_GUARD_LOG:?}"
-printf 'guard should not run\n' >&2
+if [ -e "${FM_ARM_LOG:?}" ]; then
+  printf 'guard-after-arm\n' >> "${FM_GUARD_LOG:?}"
+  exit 0
+fi
+printf 'guard-before-arm\n' >> "${FM_GUARD_LOG:?}"
+printf 'guard ran before the arm\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
   out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
@@ -5613,8 +5619,8 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm did not run");
   process.exit(1);
 }
-if (existsSync(process.env.FM_GUARD_LOG)) {
-  console.error("turn-end guard ran before the watch arm could establish supervision");
+if (!existsSync(process.env.FM_GUARD_LOG) || readFileSync(process.env.FM_GUARD_LOG, "utf8") !== "guard-after-arm\n") {
+  console.error("turn-end guard did not run exactly once, after the watch arm established supervision");
   process.exit(1);
 }
 if (promptBody) {

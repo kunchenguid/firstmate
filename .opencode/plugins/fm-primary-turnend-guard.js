@@ -60,11 +60,15 @@ function runGuard(root) {
   return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], '{"stop_hook_active":false}');
 }
 
+// True when the watch-arm coordinator already owns this turn end's follow-up:
+// a delivered wake, or a failure it surfaces through its own retry path. A
+// successful arm ("armed") settles supervision only, so the guard still runs
+// and its TURN WOULD END IDLE refusal can fire for orphaned items.
 async function letWatchArmRun(sessionID, client) {
   const coordinator = globalThis[COORDINATOR_KEY];
   if (!coordinator?.ensureArmed) return false;
   const status = await coordinator.ensureArmed(sessionID, client);
-  return status === "armed" || status === "wake" || status === "failed";
+  return status === "wake" || status === "failed";
 }
 
 export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {

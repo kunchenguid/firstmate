@@ -600,12 +600,15 @@ failure_episode_verified() {
   esac
 }
 
+# A handoff to the auto-arm settles supervision, not idleness: orphaned items
+# are still refused here, exactly as on the supervised paths above.
 i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
       fm_failure_episode_reset "$STATE" || exit 2
     fi
+    idle_check
     exit 0
   fi
   sleep 0.1
@@ -615,6 +618,7 @@ if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     fm_failure_episode_reset "$STATE" || exit 2
   fi
+  idle_check
   exit 0
 fi
 
@@ -636,5 +640,8 @@ if [ "$terminal_status" -eq 0 ]; then
   printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
   exit 0
 fi
-[ "$terminal_status" -eq 2 ] && exit 0
+if [ "$terminal_status" -eq 2 ]; then
+  idle_check
+  exit 0
+fi
 block_stop
