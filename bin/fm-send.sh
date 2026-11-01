@@ -825,7 +825,7 @@ fm_send_refuse_if_captain_held() { # <task-id>
   case " $RESOLVE_HOLD_KEYS " in
   *" $id "*) [ "$(fm_lease_actor 2>/dev/null)" = branch ] || return 0 ;;
   esac
-  show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || show=
+  show=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || show=
   reason=$(printf '%s\n' "$show" | sed -n 's/^  hold_reason: //p' | head -1)
   reason=$(printf '%s' "$reason" | perl -MJSON::PP -e 'local $/; my $v = <STDIN>; my $d = eval { JSON::PP->new->allow_nonref->decode($v) }; $d = $v unless defined $d; print((split /\n/, $d)[0] // "")' 2>/dev/null) || reason=
   if [ "$(fm_lease_actor 2>/dev/null)" = branch ]; then

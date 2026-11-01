@@ -96,6 +96,21 @@ test_held_task_refuses_steer() {
   pass "fm-send captain hold: a held task refuses a text steer and says how to release it"
 }
 
+test_relocated_data_dir_reason_in_refusal() {
+  local dir err
+  dir=$(make_case reloc)
+  mkdir -p "$dir/reloc"
+  printf '## In flight\n\n## Queued\n\n## Done\n' >"$dir/reloc/backlog.md"
+  export FM_DATA_OVERRIDE="$dir/reloc"
+  in_home "$dir" "$ROOT/bin/fm-tasks-axi.sh" add t1 "task t1" >/dev/null 2>&1 || { unset FM_DATA_OVERRIDE; fail "could not add t1 in the relocated data dir"; }
+  hold_task "$dir" t1 "Relocated reason"
+  send "$dir" t1 "resume the work" && { unset FM_DATA_OVERRIDE; fail "a held task in a relocated data dir accepted a steer"; }
+  unset FM_DATA_OVERRIDE
+  err=$(cat "$dir/send.err")
+  assert_contains "$err" "Relocated reason" "the refusal should carry the hold reason from the relocated data dir"
+  pass "fm-send captain hold: a relocated data dir's hold reason appears in the refusal"
+}
+
 test_expired_hold_still_refuses() {
   local dir rc
   dir=$(make_case expired)
@@ -211,6 +226,7 @@ test_unheld_and_backlogless_homes_steer() {
 }
 
 test_held_task_refuses_steer
+test_relocated_data_dir_reason_in_refusal
 test_expired_hold_still_refuses
 test_key_send_passes_while_held
 test_release_lets_steer_through
