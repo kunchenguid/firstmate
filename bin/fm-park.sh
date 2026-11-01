@@ -462,6 +462,7 @@ TRIGGER_PROGRAM="$JQ_TIME"'
         (if $s.changes_requested then "changes were requested" else empty end),
         (if $s.conflict == "conflict" then "the PR has merge conflicts" else empty end),
         (if $s.threads_unresolved > 0 then "\($s.threads_unresolved) review thread(s) unresolved" else empty end),
+        (if ($s.threads_complete | not) then "review threads could not all be read" else empty end),
         ([$s.activity[] | select(([.at, .touched] | map(ts // 0) | max) > $parked and (.approval_only | not)) | .author] | unique
          | if length > 0 then "new comments from \(join(", "))" else empty end)
       ]
