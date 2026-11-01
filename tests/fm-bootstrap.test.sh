@@ -334,18 +334,27 @@ SH
 }
 
 test_record_hygiene_reclaims_stale_running_marker() {
-  local case_dir status marker
+  local case_dir status tries
   case_dir="$TMP_ROOT/record-hygiene-stale-marker"
   mkdir -p "$case_dir/home"/{state,data,config}
   printf '99999999 nonexistent-process-start-time\n' > "$case_dir/home/state/.record-hygiene-running"
+  printf 'kind=ship\nbackend=tmux\n' > "$case_dir/home/state/hygiene.meta"
   status=0
   FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_LIVE=0 \
     FM_POLL=1 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_CHECK_INTERVAL=999999 \
-    timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
+    FM_RECORD_HYGIENE_TIMEOUT=1 timeout 5 "$ROOT/bin/fm-watch.sh" >"$case_dir/out" 2>"$case_dir/err" || status=$?
   { [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; } \
     || fail "watcher failed while reclaiming stale hygiene marker (exit=$status)"
-  marker=$(cat "$case_dir/home/state/.record-hygiene-running" 2>/dev/null || true)
-  case "$marker" in ''|"99999999 "*) fail "stale hygiene marker was not replaced" ;; esac
+  tries=0
+  while [ ! -s "$case_dir/home/state/.record-hygiene-last" ] \
+      && ! grep -q $'\tcheck\trecord-hygiene\t' "$case_dir/home/state/.wake-queue" 2>/dev/null \
+      && [ "$tries" -lt 30 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  [ -s "$case_dir/home/state/.record-hygiene-last" ] \
+    || grep -q $'\tcheck\trecord-hygiene\t' "$case_dir/home/state/.wake-queue" 2>/dev/null \
+    || fail "replacement hygiene worker did not complete within 3s"
   pass "watcher reclaims a stale hygiene marker and starts a worker"
 }
 
