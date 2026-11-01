@@ -316,10 +316,12 @@ read_notifications() { # deadline
   jq -r --arg since "$since" '.[] | select(.subject.type == "PullRequest" and (.updated_at // "") >= $since)
     | .subject.url // "" | capture("^https://api[.]github[.]com/repos/(?<path>[^/]+/[^/]+)/pulls/(?<n>[1-9][0-9]*)$")
     | "https://github.com/\(.path)/pull/\(.n)"' "$TMP/notify.json" | sort -u > "$TMP/events"
-  jq --arg lm "$next_lm" --arg since "$next_since" '.notifications = ((.notifications // {}) + {last_modified:$lm,since:$since})' \
-    "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"
-  # The first read only sets the cursor, and a full page may hide older events.
-  [ -z "$lm" ] || [ "$(jq length "$TMP/notify.json")" -ge 50 ] || NOTIFY_OK=1
+  # Do not advance either cursor component while later pages may be hidden.
+  if [ "$(jq length "$TMP/notify.json")" -lt 50 ]; then
+    jq --arg lm "$next_lm" --arg since "$next_since" '.notifications = ((.notifications // {}) + {last_modified:$lm,since:$since})' \
+      "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"
+    [ -z "$lm" ] || NOTIFY_OK=1
+  fi
 }
 
 poll() {
