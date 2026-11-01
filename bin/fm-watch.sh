@@ -3060,18 +3060,23 @@ scan_signals() {
 # Dedup uses the same .seen-* discipline as scan_signals: the durable record is
 # always written before its marker, so nothing is suppressed before it is queued,
 # and re-announcement, drain-time deduplication, and the handled acknowledgement
-# keep their existing owners untouched.
+# keep their existing owners untouched. The marker holds the newest queue
+# sequence surfaced for its key, so a captured result's row that reconcile
+# re-announces surfaces under its own headline again, while a row
+# already surfaced and still queued is left to the drain.
 procevent_surfaced_marker() {  # <queue-key>
   printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
 }
 
 procevent_surface_after_output() {
-  local output_status=$1 key marker tmp status=0
+  local output_status=$1 key seq marker tmp status=0
   if [ "$output_status" -eq 0 ]; then
-    for key in $PROCEVENT_SURFACED; do
+    for key in $PROCEVENT_SURFACED_ROWS; do
+      seq=${key##*@}
+      key=${key%@*}
       marker=$(procevent_surfaced_marker "$key")
       tmp=$(umask 077; mktemp "$STATE/.seen-procevent.XXXXXX") || { status=1; continue; }
-      if ! mv -f -- "$tmp" "$marker"; then
+      if ! printf '%s\n' "$seq" > "$tmp" || ! mv -f -- "$tmp" "$marker"; then
         rm -f -- "$tmp"
         status=1
       fi
@@ -3082,14 +3087,24 @@ procevent_surface_after_output() {
 }
 
 procevent_surface_queued() {
-  local key reason captured="" stranded="" unstarted=""
+  local key seq marker surfaced reason captured="" stranded="" unstarted=""
   PROCEVENT_SURFACED=
+  PROCEVENT_SURFACED_ROWS=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  while IFS= read -r key; do
-    case "$key" in procevent:*) ;; *) continue ;; esac
-    [ -e "$(procevent_surfaced_marker "$key")" ] && continue
+  while IFS=$'\t' read -r key seq; do
+    marker=$(procevent_surfaced_marker "$key")
+    if [ -e "$marker" ]; then
+      # Source-health keys are announced once per episode under a fresh key,
+      # so a surfaced one stays surfaced for good.
+      case "$key" in procevent:*:stranded:*|procevent:*:launch-failed:*) continue ;; esac
+      # A marker from before sequences were recorded names no row, so its key
+      # surfaces once more and the marker then records the row it surfaced.
+      surfaced=$(head -n 1 "$marker" 2>/dev/null || true)
+      case "$surfaced" in ''|*[!0-9]*) ;; *) [ "$surfaced" -lt "$seq" ] || continue ;; esac
+    fi
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
+    PROCEVENT_SURFACED_ROWS="$PROCEVENT_SURFACED_ROWS $key@$seq"
     # A stranded source or one whose launch never proved itself is the opposite
     # of a captured result: nothing is collecting for it. Headlining either as
     # a capture would present it as healthy, which is the shape of defect
@@ -3099,7 +3114,10 @@ procevent_surface_queued() {
       procevent:*:launch-failed:*) unstarted="$unstarted $key" ;;
       *) captured="$captured $key" ;;
     esac
-  done < <(fm_wake_queued_keys_locked check)
+  done < <(awk -F '\t' 'NF >= 5 && $3 == "check" && $4 ~ /^procevent:/ && $2 ~ /^[0-9]+$/ {
+      if (!($4 in newest)) order[++n] = $4
+      if ($2 + 0 > newest[$4] + 0) newest[$4] = $2
+    } END { for (i = 1; i <= n; i++) print order[i] "\t" newest[order[i]] }' "$FM_WAKE_QUEUE" 2>/dev/null)
   if [ -z "$PROCEVENT_SURFACED" ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
