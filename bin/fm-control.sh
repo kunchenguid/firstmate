@@ -705,8 +705,11 @@ do_exit() {
   fm_control_backend_exit_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, whose T3 Orchestrator V2 tools have no session stop, so 'exit' cannot stop its agent; 'interrupt' ends the running turn and teardown archives the thread"
   state=$(agent_state)
+  # Same busy-wiring retirement as do_stop's already-not-running early returns:
+  # a no-op where no incarnation is armed.
   case "$state" in
     dead)
+      retire_busy_incarnation
       printf 'already-stopped'
       return 0
       ;;
@@ -727,6 +730,7 @@ do_exit() {
           # verb normally preserves did not survive. The worktree and every
           # uncommitted change are untouched, and `relaunch` re-creates the
           # endpoint from here.
+          retire_busy_incarnation
           printf 'endpoint-gone'
           return 0
           ;;
@@ -735,6 +739,7 @@ do_exit() {
           # no agent - a herdr pane whose session server was merely stopped is
           # the common case. Nothing is gone, so this is the ordinary
           # already-stopped outcome.
+          retire_busy_incarnation
           printf 'already-stopped'
           return 0
           ;;
