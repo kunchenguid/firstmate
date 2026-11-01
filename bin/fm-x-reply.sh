@@ -22,6 +22,8 @@
 # surplus positional is a usage error before anything is recorded or posted, and
 # reply text that starts with '-' is only accepted via --text-file or stdin.
 #
+# bin/fm-public-text-check.sh owns public-evidence policy; text is checked before
+# reply lookup, payload construction, dry-run output, or transport.
 # Optional --image <path> attaches one local image file to the answer or followup
 # POST body as {media_type,data_base64}. Supported extension mapping includes
 # PNG, JPEG, GIF, WebP, BMP, and TIFF. If long text becomes a thread, the relay
@@ -237,6 +239,7 @@ if [ -z "$TEXT" ]; then
   echo "fm-x-reply: empty reply text" >&2
   exit 2
 fi
+printf '%s\n' "$TEXT" | "$SCRIPT_DIR/fm-public-text-check.sh" - || exit 1
 
 # The endpoint is the only behavioral difference between an answer and a
 # follow-up; everything below (split, payload, dry-run, post) is shared.
