@@ -1468,7 +1468,7 @@ test_reused_task_id_does_not_inherit_overdue_pause() {
 test_malformed_dated_pause_is_not_undated_overdue() {
   local dir state result
   dir=$(paused_until_fixture malformed-until "" 90000); state="$dir/state"
-  result=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; status_pause_is_overdue "paused: waiting until not-a-time" 90000 "$(date +%s)"; printf "%s" "$?"' _ "$WATCH")
+  result=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=60 bash -c '. "$1"; status_pause_is_overdue "paused: waiting until not-a-time" 90000 "$(date +%s)"; printf "%s" "$?"' _ "$WATCH")
   [ "$result" = 1 ] || fail "malformed dated pause entered the undated overdue path"
   pass "malformed dated pauses remain on bounded recheck"
 }

@@ -1432,18 +1432,18 @@ test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
     || fail "away-mode overdue decision is absent from the open-decision fold"
 
   printf 'resolved [key=unrelated]: unrelated answer\n' >> "$statusf"
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; pause_overdue_reconcile "$2" "$3"' \
-    _ "$ROOT/bin/fm-watch.sh" "$task" "$statusf" \
-    || fail "unrelated resolution incorrectly cleared the overdue marker"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" housekeeping "$state" \
+    || fail "daemon housekeeping failed to reconcile unrelated resolution"
   [ -f "$marker" ] || fail "unrelated resolution removed the overdue marker"
   status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
     || fail "unrelated resolution closed the overdue decision"
 
   printf 'working: dependency cleared, resuming\n' >> "$statusf"
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; pause_overdue_reconcile "$2" "$3"' \
-    _ "$ROOT/bin/fm-watch.sh" "$task" "$statusf"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" housekeeping "$state"
   rc=$?
-  [ "$rc" -eq 1 ] || fail "worker resume did not reconcile the overdue decision (rc=$rc)"
+  [ "$rc" -eq 0 ] || fail "daemon housekeeping failed to reconcile worker resume (rc=$rc)"
   [ ! -e "$marker" ] || fail "worker resume retained the overdue marker"
   status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
     && fail "worker resume left the overdue decision open"
