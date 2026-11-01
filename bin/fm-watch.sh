@@ -3982,7 +3982,7 @@ while :; do
   # Remember each distinct claim and verify it after a bounded delay on this poll loop.
   claimed_run_tick() {
   local LC_ALL=C f task meta wt branch claim marker seen cursor stamp recorded_branch recorded_claim runs line line_verb line_note
-  local stat_result dev ino size cursor_dev cursor_ino cursor_size cursor_claim offset appended consumed line_end
+  local stat_result dev ino size cursor_dev cursor_ino cursor_size cursor_claim offset appended consumed line_end identity
   case "$CLAIMED_RUN_DELAY" in ''|*[!0-9]*) return 0 ;; esac
   for f in "$STATE"/*.status; do
     [ -f "$f" ] || continue
@@ -3990,6 +3990,7 @@ while :; do
     marker="$STATE/.claimed-run-$task"
     seen="$STATE/.claimed-run-seen-$task"
     cursor="$STATE/.claimed-run-cursor-$task"
+    identity="$STATE/.claimed-run-identity-$task"
     cursor_dev=
     cursor_ino=
     cursor_size=
@@ -3998,7 +3999,7 @@ while :; do
       read -r cursor_dev cursor_ino cursor_size cursor_claim < "$cursor"
       case "$cursor_dev:$cursor_ino:$cursor_size" in *[!0-9:]*|'') cursor_dev= ;; esac
     fi
-    if [ -n "$cursor_dev" ] && [ ! "$f" -nt "$cursor" ]; then
+    if [ -n "$cursor_dev" ] && [ -f "$identity" ] && [ "$f" -ef "$identity" ] && [ ! "$f" -nt "$cursor" ]; then
       dev=$cursor_dev; ino=$cursor_ino; size=$cursor_size
       offset=$cursor_size; claim=$cursor_claim; stat_result=
     else
@@ -4035,6 +4036,8 @@ EOF
       fi
       cursor_claim=$claim
       printf '%s %s %s %s\n' "$dev" "$ino" "$offset" "$cursor_claim" > "$cursor"
+      rm -f "$identity"
+      ln "$f" "$identity" 2>/dev/null || :
     fi
     [ -n "$claim" ] || [ -f "$marker" ] || continue
     meta="$STATE/$task.meta"
