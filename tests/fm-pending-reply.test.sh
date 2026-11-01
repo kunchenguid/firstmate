@@ -2029,6 +2029,8 @@ test_escalated_undelivered_correlation_stays_retryable() {
   pass "an escalated correlation stays retryable only while undelivered"
 }
 
+# The test clock is scoped to this fixture's subshell.
+# shellcheck disable=SC2030
 test_same_kind_escalation_reopens_after_operator_close() {
   (
     local dir fb log home state corr status blocked open
@@ -2123,8 +2125,159 @@ test_summary_keeps_accents_and_caps_by_character() {
   pass "the summary keeps accented letters, drops control characters, and caps by character"
 }
 
+# Decision folds may be shared only for a denied, unchanged task snapshot in
+# this tick. Correlations keep their own delivery and resolution authority.
+# Fixture exports and probes deliberately remain inside their test subshells.
+# shellcheck disable=SC2030,SC2031
+test_tick_reuses_only_unchanged_decision_denials() (
+  local home state corr rec i calls="$TMP_ROOT/decision-folds" sends="$TMP_ROOT/decision-sends"
+  home=$(setup_parent decision-folds)
+  state="$home/state"
+  mkdir -p "$home/config"
+  export FM_CONFIG_OVERRIDE="$home/config" FM_PENDING_REPLY_NOW=20000
+  : > "$home/config/wait-no-turns"
+  : > "$calls"
+  : > "$sends"
+  printf 'kind=secondmate\n' > "$state/hibit.meta"
+  printf 'needs-decision [key=scope]: choose\n' > "$state/hibit.status"
+  for ((i=1; i<=12; i++)); do
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "request $i")
+    fm_pending_reply_mark_delivered "$state" "$corr" 100
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" request_turn_completed_epoch 101
+  done
+  eval "$(declare -f status_own_open_decisions | sed '1s/status_own_open_decisions/original_status_own_open_decisions/')"
+  # shellcheck disable=SC2329
+  status_own_open_decisions() {
+    printf 'fold\n' >> "$calls"
+    original_status_own_open_decisions "$@"
+  }
+  # shellcheck disable=SC2329
+  decision_cache_send() { printf '%s\n' "$2" >> "$sends"; }
+  export FM_PENDING_REPLY_SEND_HOOK=decision_cache_send
+  fm_pending_reply_tick "$state"
+  [ "$(wc -l < "$calls")" -eq 1 ] || fail "12 denied requests must fold one unchanged task once per tick"
+  [ ! -s "$sends" ] || fail "decision-denied requests must never send"
+  for rec in "$state/pending-replies"/*; do
+    [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] || fail "denied record was lost"
+    [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || fail "denial consumed recovery authority"
+  done
+  fm_pending_reply_tick "$state"
+  [ "$(wc -l < "$calls")" -eq 2 ] || fail "denial cache must not survive its tick"
+  # An unavailable snapshot directory disables reuse, never the decision guard.
+  TMPDIR="$home/missing-tmp" fm_pending_reply_tick "$state" 2>/dev/null
+  [ "$(wc -l < "$calls")" -eq 14 ] || fail "snapshot failure must fall back to authoritative folds"
+  [ ! -s "$sends" ] || fail "snapshot failure bypassed a decision denial"
+  # A different task keeps independent authority even in the same tick.
+  corr=$(fm_pending_reply_create "$home" "$state" other "independent request")
+  fm_pending_reply_mark_delivered "$state" "$corr" 100
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" request_turn_completed_epoch 101
+  fm_pending_reply_tick "$state"
+  [ "$(wc -l < "$sends")" -eq 1 ] || fail "one task's denial leaked into another task's recovery"
+  [ "$(fm_pending_reply_get "$rec" phase)" = recovery_sent ] || fail "other task did not keep its own delivery authority"
+  printf 'resolved [key=scope]: chosen\n' >> "$state/hibit.status"
+  fm_pending_reply_tick "$state"
+  [ "$(wc -l < "$sends")" -eq 13 ] || fail "each resolved request must recover exactly once"
+  for rec in "$state/pending-replies"/*; do
+    [ "$(fm_pending_reply_get "$rec" phase)" = recovery_sent ] || fail "allowed request did not recover"
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    [ "$(grep -c "corr=$corr" "$sends")" -eq 1 ] || fail "correlation lost its own send authority"
+    fm_pending_reply_send_recovery "$state" "$corr" && fail "recovery sent twice"
+  done
+  pass "tick folds unchanged denied decisions once, preserves requests, and recovers each exactly once after resolution"
+)
+
+# shellcheck disable=SC2030,SC2031
+test_tick_invalidates_decision_snapshot_changes() (
+  local change home state corr rec i count calls
+  for change in append truncate replace rewrite kind; do
+    home=$(setup_parent "decision-$change")
+    state="$home/state"
+    calls="$home/folds"
+    mkdir -p "$home/config"
+    export FM_CONFIG_OVERRIDE="$home/config" FM_PENDING_REPLY_NOW=20000
+    : > "$home/config/wait-no-turns"
+    : > "$calls"
+    printf 'kind=secondmate\n' > "$state/hibit.meta"
+    printf 'needs-decision [key=scope]: choose\ndone: still waiting\n' > "$state/hibit.status"
+    for ((i=1; i<=3; i++)); do
+      corr=$(fm_pending_reply_create "$home" "$state" hibit "request $i")
+      fm_pending_reply_mark_delivered "$state" "$corr" 100
+      rec=$(fm_pending_reply_path "$state" "$corr")
+      fm_pending_reply_set "$rec" request_turn_completed_epoch 101
+    done
+    (
+      count=0
+      eval "$(declare -f status_own_open_decisions | sed '1s/status_own_open_decisions/original_status_own_open_decisions/')"
+      eval "$(declare -f fm_pending_reply_tick_one | sed '1s/fm_pending_reply_tick_one/original_tick_one/')"
+      # shellcheck disable=SC2329
+      status_own_open_decisions() { printf 'fold\n' >> "$calls"; original_status_own_open_decisions "$@"; }
+      # shellcheck disable=SC2329
+      snapshot_send() { printf 'send\n' >> "$home/sends"; }
+      export FM_PENDING_REPLY_SEND_HOOK=snapshot_send
+      # Mutate between two records within the same production tick.
+      # shellcheck disable=SC2329
+      fm_pending_reply_tick_one() {
+        original_tick_one "$@"
+        count=$((count+1))
+        [ "$count" -eq 1 ] || return 0
+        case "$change" in
+          append) printf 'resolved [key=scope]: chosen\n' >> "$state/hibit.status" ;;
+          truncate) : > "$state/hibit.status" ;;
+          replace) cp "$state/hibit.status" "$state/new"; mv "$state/new" "$state/hibit.status" ;;
+          rewrite) sed 's/needs-decision/resolved      /' "$state/hibit.status" > "$state/new"; cat "$state/new" > "$state/hibit.status" ;;
+          kind) printf 'kind=ship\n' > "$state/hibit.meta" ;;
+        esac
+      }
+      fm_pending_reply_tick "$state"
+    )
+    if [ "$change" = replace ]; then
+      [ "$(wc -l < "$calls")" -eq 2 ] || fail "replacement must invalidate even with identical bytes"
+      [ ! -e "$home/sends" ] || fail "replacement with open decision allowed a send"
+    else
+      [ -f "$home/sends" ] && [ "$(wc -l < "$home/sends")" -eq 2 ] || fail "$change must invalidate denied decisions within the tick"
+    fi
+  done
+  pass "append, truncation, replacement, same-size rewrite, and kind changes invalidate decision denials"
+)
+
+# A new decision can arrive after the initial eligibility fold. The final
+# uncached check, under the correlation lock, must still refuse delivery.
+# shellcheck disable=SC2030,SC2031
+test_recovery_rechecks_decision_before_allowed_delivery() (
+  local home state corr rec
+  home=$(setup_parent decision-before-send)
+  state="$home/state"
+  mkdir -p "$home/config"
+  export FM_CONFIG_OVERRIDE="$home/config" FM_PENDING_REPLY_NOW=20000
+  : > "$home/config/wait-no-turns"
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "do not interrupt a new decision")
+  fm_pending_reply_mark_delivered "$state" "$corr" 100
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_set "$rec" request_turn_completed_epoch 101
+  eval "$(declare -f _fm_pending_reply_try_resolve_locked | sed '1s/_fm_pending_reply_try_resolve_locked/original_resolve_locked/')"
+  # shellcheck disable=SC2329
+  _fm_pending_reply_try_resolve_locked() {
+    local rc=0
+    original_resolve_locked "$@" || rc=$?
+    printf 'needs-decision [key=new]: choose\n' >> "$state/hibit.status"
+    return "$rc"
+  }
+  # shellcheck disable=SC2329
+  late_decision_send() { printf 'send\n' >> "$home/sends"; }
+  export FM_PENDING_REPLY_SEND_HOOK=late_decision_send
+  fm_pending_reply_send_recovery "$state" "$corr" && fail "a newly opened decision allowed delivery"
+  [ ! -e "$home/sends" ] || fail "fresh decision check did not prevent delivery"
+  [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || fail "denial consumed the one recovery"
+  pass "an uncached decision check immediately before delivery refuses a newly opened decision"
+)
+
 # --- run --------------------------------------------------------------------
 
+test_recovery_rechecks_decision_before_allowed_delivery || fail "pre-delivery decision regression failed"
+test_tick_reuses_only_unchanged_decision_denials || fail "decision denial reuse regression failed"
+test_tick_invalidates_decision_snapshot_changes || fail "decision snapshot invalidation regression failed"
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_waits_while_the_mate_has_an_open_decision

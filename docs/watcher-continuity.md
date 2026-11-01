@@ -42,6 +42,9 @@ Each adapter:
 - Preserves one child or scheduled retry at a time.
 - Applies bounded exponential retry after an unexpected or failed close.
 
+Pi reports an existing cycle healthy only when `bin/fm-wake-lib.sh` verifies its home, watcher path, process identity, and fresh progress beacon.
+The extension independently checks an established arm every 30 seconds and replaces an identity-proved watcher whose progress beacon is stale, without waiting for another tool call.
+An arm awaiting readiness or a scheduled retry is reported separately; a stale or missing beacon is unhealthy, and an unproved retirement relationship leaves the existing processes untouched.
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
 A failed follow-up never cancels continuity restoration.
 
@@ -448,6 +451,7 @@ Defaults and overrides, including Claude Stop's outer successor-status wait, are
 ### Pi and OpenCode watch extension
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops.
+It also proves an established arm reports healthy only on this home's verified identity and fresh beacon, that a stale or missing beacon on an identity-proved watcher is replaced exactly once, that unproved identities preserve both the child and foreign lock metadata, and that the 30-second health monitor replaces a wedged watcher with no further tool call.
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
 - Blocks prompt delivery to prove the successor launches first.
