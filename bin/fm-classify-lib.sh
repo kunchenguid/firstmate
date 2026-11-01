@@ -724,12 +724,12 @@ _fm_decision_slug_ok() {  # <slug>
 # worker-written stamp cannot move it: a readable time like [at=10:30] carries
 # colons that would otherwise end the head mid-tag and hand the caller a note
 # and a key sliced out of the timestamp. The line's own bytes are never altered.
-status_line_note() {  # <status-line> -> text after the first colon, trimmed
+status_line_note() {  # <status-line> [<out-var>] -> text after the first colon, trimmed
   local n k unstamped
   _fm_status_unstamped "$1" unstamped
   case "$unstamped" in
     *:*) n=${unstamped#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
-    *) printf '%s' "$unstamped"; return 0 ;;
+    *) n=$unstamped ;;
   esac
   # A note-head token that states this line's key (no before-colon token, valid
   # slug) is key metadata, not note text: strip it so both stated-key positions
@@ -739,7 +739,7 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
   fi
-  printf '%s' "$n"
+  if [ "$#" -gt 1 ]; then printf -v "$2" '%s' "$n"; else printf '%s' "$n"; fi
 }
 _fm_decision_key() {  # <status-line> [<keyless>] -> key slug, or <keyless> (default "default") when no token
   local k unstamped
