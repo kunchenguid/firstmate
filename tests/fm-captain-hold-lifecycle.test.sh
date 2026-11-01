@@ -5102,6 +5102,39 @@ EOF
 # listed class is accepted, the class is recorded and projected for Bearings,
 # a re-hold replaces it, the captain's own "later" requires --until, and a
 # deferred call of any other class keeps its own class alongside its date.
+# The ask-user-authority policy escalates four kinds of finding to the
+# captain (.agents/skills/ask-user-authority/SKILL.md "Escalate only genuinely
+# ambiguous findings"): a contract expansion, an unsettled product or
+# architecture call, a repeated same-theme finding, and a destructive or
+# security-sensitive choice. Each must have a class a hold accepts, or an
+# escalated finding is either dropped or forced into a wrong class. An unknown
+# class, such as a catch-all named for how the finding arrived, still refuses
+# with the full list and writes nothing.
+test_every_ask_user_escalation_has_a_class() {
+  local home cls before after
+  home=$(make_home escalation-classes)
+  for cls in product-or-scope-expansion design-pick repeated-finding-ruling destructive-irreversible-security; do
+    run_captain "$home" hold "sample-escalation-$cls" --title "Escalated finding: $cls" --class "$cls" \
+      --reason "ask-user finding escalated" --repo sample > "$home/$cls.out" 2> "$home/$cls.err" \
+      || fail "hold refused the escalation class $cls: $(cat "$home/$cls.err")"
+    assert_contains "$(tasks_in "$home" show "sample-escalation-$cls" --full)" "Captain hold class: $cls" \
+      "the escalation class $cls was not recorded"
+  done
+  before=$(cat "$home/data/backlog.md")
+  if run_captain "$home" hold sample-escalation-catchall --title "Escalated finding" --class ask-user-escalation \
+      --reason "ask-user finding escalated" --repo sample > "$home/catchall.out" 2> "$home/catchall.err"; then
+    fail "hold accepted a catch-all escalation class"
+  fi
+  for cls in money design-pick repeated-finding-ruling deferred-by-captain; do
+    assert_grep "$cls" "$home/catchall.err" "the unknown-class refusal did not list $cls"
+  done
+  assert_grep 'if no class fits, it is not a captain call' "$home/catchall.err" \
+    "the unknown-class refusal did not say a call no class fits is firstmate's"
+  after=$(cat "$home/data/backlog.md")
+  assert_equals "$after" "$before" "a refused catch-all hold changed the backlog"
+  pass "every ask-user escalation kind has a class a hold accepts, and a catch-all still refuses with the list"
+}
+
 test_hold_requires_a_known_class() {
   local home id cls out err show before after snap
   home=$(make_home typed-hold)
@@ -5135,6 +5168,8 @@ physical-or-credential
 product-or-scope-expansion
 destructive-irreversible-security
 discard-unlanded
+design-pick
+repeated-finding-ruling
 deferred-by-captain" "the captain-hold class vocabulary changed"
 
   while IFS= read -r cls; do
@@ -5182,6 +5217,7 @@ EOF
 }
 
 test_hold_requires_a_known_class
+test_every_ask_user_escalation_has_a_class
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_follow_backend_holds
 test_interrupted_origin_move_does_not_inherit_the_previous_answer
