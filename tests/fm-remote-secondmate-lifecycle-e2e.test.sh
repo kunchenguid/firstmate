@@ -1614,6 +1614,27 @@ assert_grep 'backend=rex' "$remote_route_meta" "recovery rewrote the remote endp
   || fail "the relaunched rex endpoint did not read alive"
 pass "liveness recovery relaunches a remote rex secondmate on rex"
 
+# A stopped remote rex server stays stopped under every control-plane probe:
+# Rex starts a missing server as exit-empty, which remote readiness refuses and
+# cannot repair while it answers. Once a persistent server is started, the
+# startup sweep relaunches the mate on it.
+"$REMOTE_ROOT/bin/rex" server stop >/dev/null || fail "the fake remote rex server did not stop"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = unreadable ] \
+  || fail "a stopped remote rex server was not projected unreadable"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - rex >/dev/null 2>&1; then
+  fail "a launch over a stopped remote rex server was accepted"
+fi
+[ -f "$REX_FAKE/down" ] || fail "a remote control-plane probe started the stopped rex server"
+"$REMOTE_ROOT/bin/rex" server start >/dev/null || fail "the fake remote rex server did not start"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = missing ] \
+  || fail "the restarted rex server did not prove the old block missing"
+BOOT_REX_RESTARTED=$(FM_BOOTSTRAP_VERBOSE_FACTS=1 remote_env "$ROOT/bin/fm-bootstrap.sh")
+assert_contains "$BOOT_REX_RESTARTED" 'secondmate ios relaunched after remote endpoint missing' \
+  "the rex secondmate was not relaunched onto the restarted persistent server"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the rex secondmate relaunched onto the restarted server did not read alive"
+pass "remote rex control-plane probes never start a stopped server, and recovery follows a persistent start"
+
 mv -f "$TMP_ROOT/remote-ios-before-rex.meta" "$remote_route_meta"
 mv -f "$TMP_ROOT/parent-ios-before-rex.meta" "$PARENT/state/ios.meta"
 pass "a remote secondmate may run on rex with strict route validation both ways"

@@ -63,6 +63,10 @@ TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
 REMOTE_HERDR_SESSION=fm-remote
+# Rex starts a missing server as exit-empty, which remote readiness refuses and
+# cannot repair while it answers, so nothing this control plane runs may start
+# one: bin/fm-remote-doctor.sh --fix alone starts the persistent server.
+export FM_BACKEND_REX_NO_AUTOSTART=1
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }

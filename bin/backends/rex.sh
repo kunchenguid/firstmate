@@ -44,6 +44,7 @@
 # starts a server; spawn, cleanup, and the control plane's absence recheck let
 # the CLI start a missing personal server, because a stopped server ends every
 # session on it and a started one then answers "not found" with authority.
+# FM_BACKEND_REX_NO_AUTOSTART=1 withholds that start (fm_backend_rex_cli).
 #
 # Viewport: Rex has no viewport-only read, so the visible viewport is DERIVED
 # as the last `size.rows` lines of the styled `format` read, which always ends
@@ -113,17 +114,27 @@ fm_backend_rex_tool_check() {
   return 0
 }
 
-# fm_backend_rex_cli: one CLI call that may start a missing personal server.
+# fm_backend_rex_cli: one CLI call that may start a missing personal server,
+# unless FM_BACKEND_REX_NO_AUTOSTART=1 makes every call a read that never
+# starts one. A remote second mate's host-local control plane sets it
+# (bin/fm-remote-secondmate-control.sh): there an automatic start creates an
+# exit-empty server, and only remote readiness may start the persistent one.
 fm_backend_rex_cli() {  # <rex-args...>
   local bin
   bin=$(fm_backend_rex_bin) || return 1
-  "$bin" "$@"
+  if [ "${FM_BACKEND_REX_NO_AUTOSTART:-}" = 1 ]; then
+    "$bin" --autostart=false "$@"
+  else
+    "$bin" "$@"
+  fi
 }
 
 # fm_backend_rex_read: one CLI call that never starts a server; an unreachable
 # server exits 4 instead.
 fm_backend_rex_read() {  # <rex-args...>
-  fm_backend_rex_cli --autostart=false "$@"
+  local bin
+  bin=$(fm_backend_rex_bin) || return 1
+  "$bin" --autostart=false "$@"
 }
 
 # fm_backend_rex_failure_class: classify a failed call from its exit status

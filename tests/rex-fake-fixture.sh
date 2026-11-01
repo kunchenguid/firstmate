@@ -12,7 +12,8 @@
 # Every invocation is logged as one space-joined line to <dir>/fake/log.
 # Marker files under <dir>/fake steer failure modes: `unreachable` (every
 # call exits 4), `down` (a stopped server: --autostart=false reads exit 4, any
-# other call starts a fresh server with no sessions), `ls-fail`, `close-noop`
+# other call starts a fresh exit-empty server with no sessions, as Rex's
+# automatic start does), `ls-fail`, `close-noop`
 # (a close that leaves the block alive), and `do-fail` (`do` exits 3 before
 # subscribing). Per-block canned reads live in fake/process/<uuid>.json,
 # fake/status/<uuid>.json, fake/capture/<uuid>.txt and fake/capture/<uuid>.vt.
@@ -25,7 +26,8 @@
 #   fake/client-api  - the revision `rex version` reports (default 5)
 #   fake/server-api  - the api_revision server.status reports (default 5)
 # `server stop` marks the server down and `server start` brings it back as a
-# persistent server (exit-empty cleared). A fake dir carrying `agent-on-send`
+# persistent server (exit-empty cleared); a server started from down holds no
+# sessions, because a stopped server ends every session on it. A fake dir carrying `agent-on-send`
 # models a registered agent: a `send` into a block makes that block's `process`
 # read report the harness named by fake/harness as the foreground program,
 # which is how a fixture remote host reads a launched mate as alive.
@@ -64,8 +66,11 @@ case "${1:-}" in
     [ ! -f "$D/unreachable" ] || { echo "error: could not connect to the rex server" >&2; exit 4; }
     shift
     case "${1:-}" in
-      start) rm -f "$D/down"; printf 'false\n' > "$D/exit-empty" ;;
+      start)
+        [ ! -f "$D/down" ] || printf '{"sessions":[]}' >"$S"
+        rm -f "$D/down"; printf 'false\n' > "$D/exit-empty" ;;
       run)
+        [ ! -f "$D/down" ] || printf '{"sessions":[]}' >"$S"
         rm -f "$D/down"
         if [ -n "$exitempty" ]; then printf 'true\n' > "$D/exit-empty"; fi ;;
       stop)
@@ -80,6 +85,7 @@ if [ -f "$D/down" ]; then
   if [ "$autostart" = 0 ]; then echo "error: could not connect to the rex server" >&2; exit 4; fi
   rm -f "$D/down"
   printf '{"sessions":[]}' >"$S"
+  printf 'true\n' > "$D/exit-empty"
 fi
 newid() {
   local n
