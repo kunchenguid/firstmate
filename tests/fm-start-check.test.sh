@@ -404,7 +404,28 @@ test_remote_secondmate_reads_route() {
     *) fail "a vanished remote endpoint was not sent to recovery: $START_CHECK_WAKE" ;;
   esac
   [ "$(count_wakes)" = 3 ] || fail "expected one wake per unstarted remote launch"
-  pass "a remote secondmate's proof and cause are read through its route; an unreachable host is neither proof nor death"
+  # The real route wrapper bounds observe, state, and capture independently.
+  reset_state
+  arm_remote r7
+  mkdir -p "$TMP_ROOT/hanging-route"
+  printf '#!/bin/sh\nsleep 5\n' > "$TMP_ROOT/hanging-route/fm-on.sh"
+  chmod +x "$TMP_ROOT/hanging-route/fm-on.sh"
+  ln -s "$ROOT/bin/fm-crew-state.sh" "$TMP_ROOT/hanging-route/fm-crew-state.sh"
+  local saved_script_dir=$SCRIPT_DIR start elapsed
+  SCRIPT_DIR=$TMP_ROOT/hanging-route
+  FM_START_CHECK_ROUTE_SECS=1
+  START_CHECK_ROUTE_SECS=1
+  start=$(date +%s)
+  start_check_tick 1200 || fail "tick failed for a timed-out route"
+  elapsed=$(($(date +%s) - start))
+  SCRIPT_DIR=$saved_script_dir
+  [ "$elapsed" -lt 6 ] || fail "timed-out remote route stalled the tick for ${elapsed}s"
+  case "$START_CHECK_WAKE" in
+    "check: start r7: no start signal 200s after spawn (harness=pi; remote host remote-mac); inspect: FM_HOME=$FM_HOME $TMP_ROOT/hanging-route/fm-crew-state.sh r7") ;;
+    *) fail "a timed-out remote route was treated as proof or death: $START_CHECK_WAKE" ;;
+  esac
+  [ "$(count_wakes)" = 1 ] || fail "timed-out route did not queue exactly one generic wake"
+  pass "remote route calls are bounded; an unreachable host is neither proof nor death"
 }
 
 test_one_wake_per_poll() {

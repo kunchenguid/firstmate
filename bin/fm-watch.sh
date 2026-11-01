@@ -133,8 +133,8 @@
 #                          spawn, judged on the next poll, so the wake lands
 #                          within about FM_START_CHECK_SECS plus one FM_POLL for
 #                          local workers; remote secondmates add proof- and
-#                          cause-read route round trips, with no fixed remote
-#                          bound. <n> is the real elapsed time: one wake per launch,
+#                          cause-read route round trips, each capped at
+#                          FM_START_CHECK_ROUTE_SECS. <n> is the real elapsed time: one wake per launch,
 #                          including remote secondmates, naming an exited agent,
 #                          a vanished endpoint, a recognized launch dialog, or an
 #                          unsubmitted brief, and the command that clears it; the
@@ -2840,17 +2840,19 @@ EOF
 # rules. At most one wake is queued per poll, like the reminder tick above.
 START_CHECK_SECS=${FM_START_CHECK_SECS:-120}
 case "$START_CHECK_SECS" in ''|0*|*[!0-9]*) START_CHECK_SECS=120 ;; esac
+START_CHECK_ROUTE_SECS=${FM_START_CHECK_ROUTE_SECS:-20}
+case "$START_CHECK_ROUTE_SECS" in ''|0*|*[!0-9]*) START_CHECK_ROUTE_SECS=20 ;; esac
 START_CHECK_WAKE=
 
 # A remote secondmate's endpoint and busy record live on its host, so its start
 # check reads them through the recorded route (bin/fm-on.sh and the host's
 # bin/fm-remote-secondmate-control.sh verbs), as the secondmate liveness tick
-# does. The call runs through watcher_waited so a stop is never held by it. An
-# unreachable host returns nonzero and is neither proof nor death.
+# does. watcher_waited keeps shutdown interruptible; fm_run_timed bounds each
+# route call. An unreachable host returns nonzero and is neither proof nor death.
 start_check_remote() {  # <id> <verb> [args...]; output in WATCHER_CAPTURE
   local id=$1 verb=$2
   shift 2
-  watcher_waited "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh "$verb" "$id" "$@"
+  watcher_waited fm_run_timed "$START_CHECK_ROUTE_SECS" "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh "$verb" "$id" "$@"
 }
 
 # 0 when a busy-contract verdict proves a started worker: busy from anything but
