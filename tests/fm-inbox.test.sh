@@ -492,9 +492,121 @@ assert_equals "healthy" "$(printf '%s' "$held" | json_get wake_consumer state)" 
   "lock-holder ancestry plus a fresh beacon is a healthy wake consumer"
 assert_equals "True" "$(printf '%s' "$held" | json_get can_receive)" \
   "a held lock with a healthy wake consumer can receive work"
+# shellcheck disable=SC2016 # Perl program must retain child-side quoting.
+inspected_from_pig=$(env FM_SUPERVISION_MODEL=autoarm FM_HOME="$home" \
+  FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+  FM_CONFIG_OVERRIDE="$home/config" perl -e '
+    $0 = "pig";
+    my $child = fork();
+    die "fork failed" unless defined $child;
+    if ($child == 0) { exec @ARGV or die $!; }
+    waitpid($child, 0);
+    exit($? >> 8);
+  ' "$INBOX_BIN" ready) || fail "a PiG observer could not inspect another home"
+assert_equals "healthy" "$(printf '%s' "$inspected_from_pig" | json_get wake_consumer state)" \
+  "the inspected home's explicit model must override the PiG observer's own identity"
 kill_holder
 trap fm_test_cleanup EXIT
-pass "readiness says unknown (or not-receivable) instead of inferring liveness from a lock"
+
+for family in pig codex; do
+  home=$(make_home "ready-holder-$family")
+  perl -e '$0=shift; sleep 60' "$family" &
+  holder_pid=$!
+  sleep 0.2
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  touch "$home/state/.last-watcher-beat"
+  watch_version=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pi_extension_version "$1/.pi/extensions/fm-primary-pi-watch.ts"' _ "$ROOT")
+  turnend_version=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pi_extension_version "$1/.pi/extensions/fm-primary-turnend-guard.ts"' _ "$ROOT")
+  printf '%s\n%s\ngeneration=1 phase=active\n' "$watch_version" "$holder_pid" > "$home/state/.pi-watch-extension-loaded"
+  printf '%s\n%s\n' "$turnend_version" "$holder_pid" > "$home/state/.pi-turnend-extension-loaded"
+  held=$(run_inbox "$home" ready) || fail "ready should succeed for a $family holder"
+  if [ "$family" = pig ]; then
+    assert_equals "unknown" "$(printf '%s' "$held" | json_get wake_consumer state)" \
+      "PiG extension markers do not establish supervision health"
+    assert_equals "supervision-unverified" "$(printf '%s' "$held" | json_get wake_consumer reason)" \
+      "PiG readiness reports its unverified lifecycle explicitly"
+    assert_equals "unknown" "$(printf '%s' "$held" | json_get can_receive)" \
+      "PiG markers cannot claim the home can receive work"
+    forced=$(FM_SUPERVISION_MODEL=extension run_inbox "$home" ready) \
+      || fail "ready should succeed when an extension model override is set for PiG"
+    assert_equals "unknown" "$(printf '%s' "$forced" | json_get wake_consumer state)" \
+      "an extension-model override cannot convert a PiG lock into a healthy verdict"
+  else
+    assert_equals "no-watcher" "$(printf '%s' "$held" | json_get wake_consumer reason)" \
+      "a persistent-model holder gets no credit for Pi extension markers"
+  fi
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+done
+
+for family in pig pi pi-signed omp; do
+  home=$(make_home "ready-descendant-$family")
+  marker_pid_file="$home/marker-pid"
+  perl -e '
+    $0 = shift;
+    my $pidfile = shift;
+    my $child = fork();
+    die "fork failed" unless defined $child;
+    if ($child == 0) {
+      $0 = "node-extension";
+      open my $fh, ">", $pidfile or die $!;
+      print {$fh} $$;
+      close $fh;
+      sleep 60;
+      exit 0;
+    }
+    sleep 60;
+  ' "$family" "$marker_pid_file" &
+  holder_pid=$!
+  for _ in $(seq 1 50); do
+    [ -s "$marker_pid_file" ] && break
+    sleep 0.1
+  done
+  [ -s "$marker_pid_file" ] || fail "$family lock holder did not publish a live extension child"
+  marker_pid=$(cat "$marker_pid_file")
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  touch "$home/state/.last-watcher-beat"
+  if [ "$family" = omp ]; then
+    watch_version=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pi_extension_version "$1/.omp/extensions/fm-primary-omp-watch.ts"' _ "$ROOT")
+    turnend_version=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pi_extension_version "$1/.omp/extensions/fm-primary-turnend-guard.ts"' _ "$ROOT")
+    printf '%s\n%s\n' "$watch_version" "$marker_pid" > "$home/state/.omp-watch-extension-loaded"
+    printf '%s\n%s\n' "$turnend_version" "$marker_pid" > "$home/state/.omp-turnend-extension-loaded"
+  else
+    watch_version=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pi_extension_version "$1/.pi/extensions/fm-primary-pi-watch.ts"' _ "$ROOT")
+    turnend_version=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pi_extension_version "$1/.pi/extensions/fm-primary-turnend-guard.ts"' _ "$ROOT")
+    printf '%s\n%s\ngeneration=1 phase=active\n' "$watch_version" "$marker_pid" > "$home/state/.pi-watch-extension-loaded"
+    printf '%s\n%s\n' "$turnend_version" "$marker_pid" > "$home/state/.pi-turnend-extension-loaded"
+  fi
+  held=$(env -u FM_PIG_HARNESS -u FM_SUPERVISION_MODEL \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$INBOX_BIN" ready) \
+    || fail "ready failed for a descendant-marked $family holder"
+  if [ "$family" = pig ]; then
+    assert_equals "unknown" "$(printf '%s' "$held" | json_get wake_consumer state)" \
+      "PiG descendant markers do not claim an unverified lifecycle is healthy"
+    assert_equals "supervision-unverified" "$(printf '%s' "$held" | json_get wake_consumer reason)" \
+      "PiG descendant markers are reported as unverified"
+    assert_equals "unknown" "$(printf '%s' "$held" | json_get can_receive)" \
+      "PiG descendant markers cannot claim the home can receive work"
+  else
+    assert_equals "no-watcher" "$(printf '%s' "$held" | json_get wake_consumer reason)" \
+      "$family extension markers from a descendant do not satisfy exact-owner proof"
+  fi
+  kill "$marker_pid" "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+done
+# shellcheck disable=SC2016 # Perl and child-shell programs intentionally use literal quotes.
+model_from_pig=$(env FM_SUPERVISION_MODEL=extension perl -e '
+  $0 = "pig";
+  my $child = fork();
+  die "fork failed" unless defined $child;
+  if ($child == 0) { exec @ARGV or die $!; }
+  waitpid($child, 0);
+  exit($? >> 8);
+' bash -c '. "$1/bin/fm-wake-lib.sh"; fm_supervision_model' _ "$ROOT")
+assert_equals "unverified" "$model_from_pig" \
+  "a PiG primary must remain unverified despite its generic model override"
+pass "readiness requires live PiG-owned descendants and preserves strict Pi and OMP ownership"
 
 # --- invalid input ----------------------------------------------------------
 

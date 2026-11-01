@@ -55,7 +55,7 @@
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
 # terminal it is already in. Harnesses with a native in-pane tracked-background
 # tool (claude, grok) run it there directly and it is fine. A harness with NO
-# native background mechanism (pi) has to manufacture a terminal, and doing that
+# native background mechanism (Pi and PiG) has to manufacture a terminal, and doing that
 # by SPLITTING the captain's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
 # workspace with --no-focus, or a detached tmux session) that never touches the
@@ -311,18 +311,18 @@ fm_afk_launch_quiet_check() {
   printf 'Quiet mode needs nothing on this home: the ordinary supervision session already handles the wakes it can while the captain is present, never opens a turn here for a routine outcome, and hands this conversation only what needs it; no daemon and no away record are used.\n'
 }
 
-# The away daemon is no longer launched on Pi, nor for away mode on a primary
-# whose home runs the supervision host (fm_supervision_host_enabled,
-# docs/supervision-host.md): the posture record is the whole entry there and
-# the ordinary supervision session runs in both postures. Quiet mode runs the
-# daemon on that home only where a quiet `enter` found the attended host
-# unready (the header's QUIET MODE), so a quiet entry or a refresh of a running
-# quiet daemon is allowed.
+# The away daemon is no longer launched on Pi-family extension primaries, nor for
+# away mode on a primary whose home runs the supervision host
+# (fm_supervision_host_enabled, docs/supervision-host.md): the posture record is
+# the whole entry there and the ordinary supervision session runs in both
+# postures. Quiet mode runs the daemon on that home only where a quiet `enter`
+# found the attended host unready (the header's QUIET MODE), so a quiet entry or
+# a refresh of a running quiet daemon is allowed.
 fm_afk_launch_daemon_allowed() {
   local harness mode
   harness=$(fm_afk_launch_primary_harness)
   case "$harness" in
-    pi|pi-signed)
+    pi|pi-signed|pig)
       fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh enter and stop)"
       return 1 ;;
   esac

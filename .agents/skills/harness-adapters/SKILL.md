@@ -34,6 +34,7 @@ Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> int
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
 Muse, Gemini, Devin, Command Code, Polytoken, Cortex, and Kiro are verified only for crewmate and scout work, never a secondmate or primary.
+PiG has a primary-only adapter; worker resolution refuses until `config/crew-harness` names a verified worker adapter.
 
 ## Detection
 
@@ -41,8 +42,9 @@ Muse, Gemini, Devin, Command Code, Polytoken, Cortex, and Kiro are verified only
 A marker names its harness, but a structural ancestor of a different harness outranks it, because a marker is ordinary environment state a child or a multiplexer can retain while ancestry is what proves who owns the process tree.
 Only `FM_PI_HARNESS=pi-signed` at the launch boundary together with `PI_CODING_AGENT=true` selects Pi-signed; shared unmarked launcher ancestry remains Pi.
 omp publishes no marker of its own; `FM_OMP_HARNESS=omp` is Firstmate's launch marker and the anchored process name `omp` is its ancestry evidence, as `references/harness/omp.md` records.
+PiG publishes no marker of its own; `FM_PIG_HARNESS=pig` is Firstmate's primary launch marker and is trusted only with an exact `pig` process in ancestry, as `references/harness/pig.md` records.
 `../../../bin/fm-spawn.sh` owns worker marker establishment, while the README launch command owns the signed-primary boundary.
-`../../../bin/fm-harness.sh crew` resolves `config/crew-harness`, where absent or `default` means firstmate's own harness.
+`../../../bin/fm-harness.sh crew` resolves `config/crew-harness`, where absent or `default` means firstmate's own harness except that PiG requires an explicit verified worker harness.
 [`docs/configuration.md`](../../../docs/configuration.md#choose-the-secondmate-harness) owns secondmate pin resolution, including per-mate overrides; [`bin/fm-harness.sh`](../../../bin/fm-harness.sh) owns the resolver commands.
 `../../../bin/fm-spawn.sh` re-resolves on every spawn, and an explicit per-spawn argument wins for that spawn.
 A new adapter's verified marker and command name must land in `../../../bin/fm-harness.sh`.
@@ -86,6 +88,7 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "opencode": "references/harness/opencode.md",
     "pi": "references/harness/pi.md",
     "pi-signed": "references/harness/pi.md",
+    "pig": "references/harness/pig.md",
     "grok": "references/harness/grok.md",
     "kimi": "references/harness/kimi.md",
     "cursor": "references/harness/cursor.md",

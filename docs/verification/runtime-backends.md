@@ -2968,6 +2968,53 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+## PiG v0.4.1 Go extension
+
+The Firstmate Go runtime extension targets the released PiG v0.4.1 SDK v0.3.1, with no local `replace`.
+On 2026-10-14, the installed runtime reported PiG `0.4.1+1.0.3` and the host toolchain reported `go1.27.2 darwin/arm64`.
+From `.pig/extensions/firstmate`, `go test ./...`, `go build ./...`, `go vet ./...`, `go test -race ./...`, and `go mod tidy -diff` passed.
+The test output was `ok github.com/MichaelKinsy/firstmate-pig-extension` and `ok github.com/MichaelKinsy/firstmate-pig-extension/lib` for both standard and race-enabled tests; build, vet, and tidy-diff were silent with exit code 0.
+The installed PiG validator accepted and registered the extension without a model prompt:
+
+```sh
+FM_PIG_EXTENSION_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pig-primary-live-e2e.test.sh
+```
+
+```text
+ok - PiG 0.4.1+1.0.3 validates and registers the Firstmate Go extension without a model prompt
+```
+
+The token-free guard runs by default wherever PiG, jq, and Go are installed, verifies a supported PiG release and the Go extension definition, and does not submit a prompt.
+On 2026-11-01, PiG `0.5.3+1.4.0.74f46864` also accepted and registered the same Go extension with `pig install --validate-only --json .pig/extensions/firstmate`; the returned JSON reported `valid: true`, `registered: true`, and `language: go`.
+This token-free check does not verify the supervision lifecycle on 0.5.3.
+The credentialed primary E2E passed on 2026-10-17 with PiG 0.4.1+1.0.3 and `openai-codex/gpt-6-luna` at medium effort, in isolated Herdr and Firstmate homes:
+
+```sh
+FM_PIG_PRIMARY_LIVE_E2E=1 \
+FM_PIG_PRIMARY_LIVE_MODEL=openai-codex/gpt-6-luna \
+FM_PIG_PRIMARY_LIVE_THINKING=medium \
+FM_PIG_PRIMARY_LIVE_CODE_ROOT=<Firstmate-repository> \
+bash tests/fm-pig-primary-supervision-live-e2e.test.sh
+```
+
+```text
+ok - PiG session start delivers the Firstmate digest from a throwaway FM_HOME
+ok - PiG /ahoy runs directly in the TUI
+ok - PiG /bearings reads and renders the live Firstmate fleet
+ok - PiG pre-tool guard blocks a persistent primary-home directory change
+ok - PiG pre-tool guard blocks a wrapped direct watcher launch
+ok - PiG delivers an actionable wake and the turn-end guard accepts healthy supervision
+ok - fm-control interrupt cancels a live PiG turn and preserves its pane
+ok - fm-control refuses PiG relaunch as primary-only and preserves the live lab agent
+ok - fm-control exit stops PiG while preserving the isolated Herdr pane
+ok - PiG turn-end guard injects recovery when the lab watcher is missing
+ok - PiG primary live verification completed on 0.4.1+1.0.3
+```
+
+This verifies the direct TUI callbacks, session-start context delivery, watcher presence across the tested turns, pre-tool denial, actionable wake delivery to the main conversation, healthy and unhealthy turn-end handling, and `fm-control.sh` interrupt and clean-state exit.
+A separate run observed the expected safety refusal when exit followed recovery and Herdr could not prove the composer empty; the isolated lab teardown ended that session without bypassing the refusal.
+The extension README records the released-SDK limits on host transcript presentation and managed agent sessions.
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.

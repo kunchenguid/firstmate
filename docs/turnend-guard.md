@@ -139,7 +139,7 @@ Without that proof a stale or absent beacon is a genuine lapse and alarms.
 
 Under the extension model (Pi, pi-signed, and omp) a live identity-matched watcher is the ordinary healthy state.
 A genuinely unheld lock with a beacon fresh within grace is also healthy while a live Pi or omp session provably owns continuity.
-That hand-off is benign because `.pi/extensions/fm-primary-pi-watch.ts` and `.omp/extensions/fm-primary-omp-watch.ts` tear the watcher down on every actionable wake and spawn the replacement themselves.
+That hand-off is benign because `.pi/extensions/fm-primary-pi-watch.ts` and `.omp/extensions/fm-primary-omp-watch.ts` tear the watcher down on every actionable wake and spawn the replacement themselves. PiG readiness is always unknown until live lifecycle verification; its configured Pi extension path does not establish watcher restoration or wake delivery.
 
 A lock is genuinely unheld only in one of these cases:
 
@@ -160,7 +160,7 @@ omp never inherits the Pi tolerance because its proof is keyed on its own two fi
 Requiring the turn-end guard extension as well as the watch extension is deliberate, because a home without that structural backstop has no benign hand-off to tolerate.
 
 Without that proof an unheld lock alarms exactly as it did before.
-An unloaded, version-drifted, or exited Pi or omp session is therefore loud immediately.
+An unloaded, version-drifted, or exited Pi or omp session is therefore loud immediately. PiG's lifecycle recovery remains unverified.
 A cycle the extension never restores is loud once the beacon passes grace.
 
 #### Persistent-watcher harnesses
@@ -612,7 +612,7 @@ It proves that a live foreign owner still prevents arming while repeated non-own
 
 - The persistent model's fresh-leftover-beacon negative control.
 - The auto-arm model's healthy fresh-beacon-without-a-watcher case, session-and-recovery-bound long-turn rewake tolerance, independently broken tolerance signals, open-claim negative control, stale-beacon alarm, and isolation from other models.
-- The extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
+- The extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi/pi-signed harness routing; PiG's unverified readiness behavior.
 
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 
