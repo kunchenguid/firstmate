@@ -1147,6 +1147,42 @@ test_rejected_set_wakes_once_per_distinct_set() {
   pass "rejected state checks wake once per distinct set and stay recorded"
 }
 
+test_rejected_path_with_space_is_tracked_and_shown() {
+  local dir state rc sig digest
+  dir=$(make_case rejected-space)
+  state="$dir/home/state"
+  printf '#!/usr/bin/env bash\nprintf ran\n' > "$state/bad one.check.sh"
+  chmod 0640 "$state/bad one.check.sh"
+
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "space-path watcher failed: $(cat "$dir/watch.err")"
+  sig=$(grep -F "$state/bad one.check.sh mode=" "$state/.rejected-checks" || true)
+  case "$sig" in
+    *" mode="?*" mtime="?*) ;;
+    *) fail "record did not hold the whole spaced path with its mode and mtime: $(cat "$state/.rejected-checks")" ;;
+  esac
+
+  digest=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-session-start.sh" 2>&1 || true)
+  case "$digest" in
+    *"REJECTED STATE CHECKS"*"bad one.check.sh"*) ;;
+    *) fail "digest did not list the rejected check: $digest" ;;
+  esac
+
+  rm -f "$state/.rejected-checks"
+  digest=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-session-start.sh" 2>&1 || true)
+  case "$digest" in
+    *"REJECTED STATE CHECKS"*) fail "digest showed the section with no record" ;;
+  esac
+  pass "rejected path with a space is tracked and the digest shows it only while recorded"
+}
+
 test_rejected_metacharacter_bytes_are_inert() {
   local dir family rc before after
   dir=$(make_case rejected-metacharacters)
@@ -3874,6 +3910,7 @@ test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_rejected_set_wakes_once_per_distinct_set
+test_rejected_path_with_space_is_tracked_and_shown
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
