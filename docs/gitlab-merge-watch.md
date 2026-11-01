@@ -53,7 +53,6 @@ Two things about plain `glab` were established by running it, because assuming e
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
 The merged check therefore reads glab's own field output, which needs no JSON processor; the poll's degraded read (head pipeline, merge-train car) is JSON-only and needs `jq`, and without `jq` the poll falls back to this field read so merged wakes keep working.
-Registration refuses to arm a GitLab watch without `jq`; if the baseline read itself is unreadable, it can still publish the poll with an unknown baseline.
 Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
