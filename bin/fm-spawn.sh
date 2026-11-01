@@ -1395,7 +1395,7 @@ spawn_remote_secondmate() {
     ;;
   esac
   # Gate the host before anything is published or transferred, so a host that
-  # cannot hold a durable Herdr endpoint refuses here rather than half-way
+  # cannot hold a durable endpoint refuses here rather than half-way
   # through a launch. This is also the readiness gate every liveness relaunch
   # passes through, because recovery respawns through this same route.
   rc=0

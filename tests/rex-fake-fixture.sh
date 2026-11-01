@@ -20,15 +20,16 @@
 # `do` stands in for the bounded event reader: it prints "@subscribed", then
 # replays fake/events (a `sleep N` line pauses), and exits 0.
 #
-# Remote-readiness and remote-route coverage adds three controls on top:
+# Remote-readiness and remote-route coverage adds four controls on top:
 #   fake/endpoint    - the endpoint whoami reports (default unix:///fake/rex.sock)
 #   fake/exit-empty  - the exit_empty flag whoami reports (default false)
 #   fake/client-api  - the revision `rex version` reports (default 5)
 #   fake/server-api  - the api_revision server.status reports (default 5)
 # `server stop` marks the server down and `server start` brings it back as a
-# persistent server (exit-empty cleared); a server started from down holds no
-# sessions, because a stopped server ends every session on it. A fake dir carrying `agent-on-send`
-# models a registered agent: a `send` into a block makes that block's `process`
+# persistent server (exit-empty cleared). This fixture models missing-session
+# recovery by discarding sessions on restart, not Rex's same-endpoint session
+# restoration. A fake dir carrying `agent-on-send` models a registered agent:
+# a `send` into a block makes that block's `process`
 # read report the harness named by fake/harness as the foreground program,
 # which is how a fixture remote host reads a launched mate as alive.
 

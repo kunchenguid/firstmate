@@ -2481,7 +2481,8 @@ Use the [Rex regression entry points](../rex-backend.md#regression-entry-points)
 
 Verified on 2026-10-30 against `rex 0.1.0-preview.12` (commit `e6592f7`, API revision 8) installed through the public `install.sh --tarball` inside a disposable Apple `container` VM: Debian GNU/Linux 12, glibc 2.36, aarch64, 2 CPUs, 4 GB.
 The server ran on a private socket `unix:///tmp/rv/rex.sock` with a private `--state-dir /tmp/rv/state`; the container and image were deleted afterwards.
-This run cleared Rex as a remote second mate backend on Linux and fixed the durability contract the remote readiness gate now verifies; the full transcript lives outside the repository.
+This run checked Rex server primitives on Linux, not an end-to-end Firstmate remote second-mate lifecycle; the full transcript lives outside the repository.
+The current operator contract is in [remote readiness](../remote-secondmates.md#repair-with---fix), with portable regressions in [`fm-remote-doctor.test.sh`](../../tests/fm-remote-doctor.test.sh) and [`fm-remote-secondmate-lifecycle-e2e.test.sh`](../../tests/fm-remote-secondmate-lifecycle-e2e.test.sh).
 
 Every check passed:
 

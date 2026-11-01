@@ -42,8 +42,8 @@
 # line, 3 target not found (or an ambiguous label, which full ids never are),
 # 4 server unreachable. Passive reads pass --autostart=false so a probe never
 # starts a server; spawn, cleanup, and the control plane's absence recheck let
-# the CLI start a missing personal server, because a stopped server ends every
-# session on it and a started one then answers "not found" with authority.
+# the CLI start a missing personal server so it can prove whether the recorded
+# block restored as a shell or is authoritatively missing.
 # FM_BACKEND_REX_NO_AUTOSTART=1 withholds that start (fm_backend_rex_cli).
 #
 # Viewport: Rex has no viewport-only read, so the visible viewport is DERIVED
@@ -115,8 +115,7 @@ fm_backend_rex_tool_check() {
 }
 
 # fm_backend_rex_cli: one CLI call that may start a missing personal server,
-# unless FM_BACKEND_REX_NO_AUTOSTART=1 makes every call a read that never
-# starts one. A remote second mate's host-local control plane sets it
+# unless FM_BACKEND_REX_NO_AUTOSTART=1 prevents calls from starting one. A remote second mate's host-local control plane sets it
 # (bin/fm-remote-secondmate-control.sh): there an automatic start creates an
 # exit-empty server, and only remote readiness may start the persistent one.
 fm_backend_rex_cli() {  # <rex-args...>
