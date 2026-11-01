@@ -29,6 +29,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-watch-pane-lib.sh" "$dir/bin/fm-watch-pane-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
@@ -783,6 +784,17 @@ test_arms_for_x_mode_poll_need_without_inflight() {
   expect_code 2 "$status" "an X-mode relay poll need must keep the auto-arm active with zero tasks in flight"
   [ -e "$dir/state/arm-ran" ] || fail "hook did not arm for the X-mode poll need"
   pass "auto-arm: X-mode poll need arms the cycle even with no tasks in flight"
+}
+
+test_arms_for_pane_watch_without_inflight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/watch-need")
+  printf 'sess\tops\tdesign\tDesign\t0\n' > "$dir/state/watched-panes"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a watch-only home must arm and rewake on an actionable cycle"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm for the pane watch"
+  pass "auto-arm: an explicit pane watch arms the cycle with no tasks in flight"
 }
 
 test_arms_for_registered_custom_check_without_inflight() {
@@ -2020,6 +2032,7 @@ test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight
+test_arms_for_pane_watch_without_inflight
 test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_term_mid_arm_commits_failure_and_rewakes

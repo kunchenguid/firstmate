@@ -3402,10 +3402,30 @@ heartbeat_scan_finds_actionable() {
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
-  local w b session first_backend="" first_session="" rec rc
+  local w b session first_backend="" first_session="" rec rc row
   local windows=() t3_windows=()
+  # Refresh label identities before each bounded wait. These panes have no task
+  # status logs, so level polling is also their backstop when push is unavailable
+  # or another backend/session owns this cycle's single multiplexed connection.
+  FM_WATCHED_PANES=$(fm_watch_pane_resolve "$STATE") || FM_WATCHED_PANES=
+  # Resolution ran in a command substitution; load its backend in this process
+  # too, including homes with only operator watches and no task metadata.
+  if [ -n "$FM_WATCHED_PANES" ]; then
+    fm_backend_source herdr || FM_WATCHED_PANES=
+  fi
+  while IFS=$'\t' read -r w row; do
+    [ -n "$w" ] || continue
+    session=${w%%:*}
+    row=$(fm_backend_herdr_agent_status_raw "$session" "${w#*:}")
+    [ -n "$row" ] || continue
+    rec=$(fm_backend_herdr_normalize_event "${w#*:}" "" "$row" "")
+    if fm_backend_herdr_apply_transition "$STATE" "$session" "$rec" >/dev/null; then
+      handle_push_transition herdr "$session" "$rec"
+    fi
+  done <<< "$FM_WATCHED_PANES"
   while IFS= read -r w; do
     b=$(window_backend "$w")
+    [ -z "$(fm_watch_pane_lookup "$w")" ] || b=herdr
     fm_backend_has_push "$b" || continue
     # Secondmate endpoints are supervised via status writes, not pane/agent
     # state (an idle or blocked secondmate agent pane is healthy by design), so
@@ -3427,7 +3447,7 @@ event_wait_or_sleep() {
       continue
     fi
     windows+=("$w")
-  done < <(recorded_windows)
+  done < <({ recorded_windows; printf '%s\n' "$FM_WATCHED_PANES" | cut -f1; } | awk 'NF && !seen[$0]++')
   if [ "${#windows[@]}" -eq 0 ] && [ "${#t3_windows[@]}" -gt 0 ]; then
     first_backend=t3code
     first_session=$(fm_backend_event_session t3code "${t3_windows[0]}")

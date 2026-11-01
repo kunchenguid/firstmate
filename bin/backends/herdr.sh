@@ -85,6 +85,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # through fm_transition_policy - it never re-encodes the mapping.
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
+# shellcheck source=bin/fm-watch-pane-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-watch-pane-lib.sh"
 
 # Shared, backend-neutral harness-process identity (bin/fm-agent-process-lib.sh):
 # the same agent|shell|other vocabulary the tmux adapter proves liveness with,
@@ -3930,17 +3932,44 @@ fm_backend_herdr_list_live() {  # <session>
   done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
 }
 
+# Read-only, exact-label identity for an explicitly watched single-pane tab.
+# Reject zero/multiple workspaces, tabs, or panes rather than picking a root.
+fm_backend_herdr_resolve_watched_pane() {  # <session> <workspace-label> <tab-label>
+  local session=$1 workspace=$2 tab=$3 raw wsid tabid pane
+  raw=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  wsid=$(printf '%s' "$raw" | jq -er --arg want "$workspace" \
+    '[.result.workspaces[]? | select(.label == $want) | .workspace_id]
+     | select(length == 1) | .[0] | select(type == "string" and length > 0)') || {
+    echo "error: watched pane workspace missing or ambiguous: $session / $workspace" >&2
+    return 1
+  }
+  raw=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+  tabid=$(printf '%s' "$raw" | jq -er --arg want "$tab" \
+    '[.result.tabs[]? | select(.label == $want) | .tab_id]
+     | select(length == 1) | .[0] | select(type == "string" and length > 0)') || {
+    echo "error: watched pane tab missing or ambiguous: $session / $workspace / $tab" >&2
+    return 1
+  }
+  raw=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
+  pane=$(printf '%s' "$raw" | jq -er --arg tab "$tabid" \
+    '[.result.panes[]? | select(.tab_id == $tab) | .pane_id]
+     | select(length == 1) | .[0] | select(type == "string" and length > 0)') || {
+    echo "error: watched tab must have exactly one pane: $session / $workspace / $tab" >&2
+    return 1
+  }
+  printf '%s:%s' "$session" "$pane"
+}
+
 # --- native event push: pane.agent_status_changed subscriber -----------------
 #
 # The push half of the immediate blocked-state escalation (AGENTS.md section 8,
-# docs/herdr-backend.md "Native pane.agent_status_changed push escalation").
+# docs/herdr-backend.md "Push events and polling fallback").
 # fm_backend_herdr_wait_transition is the watcher's bounded wait primitive for
 # herdr homes: instead of a blind sleep, it blocks on herdr's native event
-# stream and returns the instant a subscribed pane transitions to `blocked`, so
-# a crew waiting on the human wakes its supervisor sub-second instead of after
-# the ~240s stale-pane wedge timer. Everything not `blocked` is streamed too
-# (the policy, not the subscription, makes `blocked` the sole immediate action)
-# so `working` edges clear the per-pane dedupe marker. Polling stays the
+# stream and returns a fresh actionable transition under fm_transition_policy.
+# That shared owner also defines watched-pane opt-in and deduplication behavior.
+# All statuses are streamed so non-actionable edges can still update dedupe.
+# Polling stays the
 # permanent fail-closed backstop: below-capability, a connect/subscribe failure,
 # or a missing reader all fall back to the caller sleeping the same budget.
 
@@ -4016,7 +4045,8 @@ fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
 }
 
 fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
-  fm_transition_apply "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2" "$3"
+  fm_transition_apply "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2" "$3" \
+    "$(fm_watch_pane_context "$2:$(fm_transition_pane_id "$3")")"
 }
 
 fm_backend_herdr_commit_transition() {  # <state_dir> <session> <record>
@@ -4029,7 +4059,7 @@ fm_backend_herdr_clear_transition() {  # <state_dir> <window>
 
 # fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to
 # <timeout_secs> for one of <pane_window...> ("<session>:<pane_id>") to reach a
-# fresh `blocked` edge, then prints the normalized record and returns 0.
+# fresh actionable edge, then prints the normalized record and returns 0.
 # Returns 1 on a clean timeout (the reader ran the full budget, no fresh
 # actionable edge - the caller has effectively already slept and just continues)
 # and 2 when the event path is unusable (not capable, socket unresolved, reader
@@ -4051,6 +4081,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   local w pane_id
   local pane_ids=()
   for w in "${windows[@]}"; do
+    [ "${w%%:*}" = "$session" ] || continue
     pane_id=${w#*:}
     if [ -z "$pane_id" ] || [ "$pane_id" = "$w" ]; then
       continue
@@ -4093,6 +4124,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   # marker here too.
   if [ "$rc" -ne 2 ]; then
     for w in "${windows[@]}"; do
+      [ "${w%%:*}" = "$session" ] || continue
       pane_id=${w#*:}
       if [ -z "$pane_id" ] || [ "$pane_id" = "$w" ]; then
         continue
@@ -4122,6 +4154,8 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     status=$(printf '%s' "$line" | cut -f3)
     agent=$(printf '%s' "$line" | cut -f4)
     [ -n "$pane_id" ] || continue
+    # A server must not expand our explicit subscription to another pane.
+    case " $(printf '%s ' "${pane_ids[@]}")" in *" $pane_id "*) ;; *) continue ;; esac
     record=$(fm_backend_herdr_normalize_event "$pane_id" "$ws" "$status" "$agent")
     if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then
       printf '%s' "$hit"
