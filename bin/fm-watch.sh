@@ -314,9 +314,11 @@ WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 if [ "$(uname)" = Darwin ]; then
   stat_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
   stat_devino() { /usr/bin/stat -f '%d %i' "$1" 2>/dev/null; }  # device + inode pair
+  stat_devino_size() { /usr/bin/stat -f '%d %i %z' "$1" 2>/dev/null; }
 else
   stat_mtime() { stat -c %Y "$1" 2>/dev/null; }
   stat_devino() { stat -c '%d %i' "$1" 2>/dev/null; }
+  stat_devino_size() { stat -c '%d %i %s' "$1" 2>/dev/null; }
 fi
 # Record the held state directory's device+inode now that stat_devino exists.
 # The per-poll teardown check re-stats the path instead of comparing /dev/fd/6
@@ -3979,26 +3981,71 @@ while :; do
   # A worker's routine validation-started line is not itself an actionable wake.
   # Remember each distinct claim and verify it after a bounded delay on this poll loop.
   claimed_run_tick() {
-  local f task meta wt branch claim marker seen stamp recorded_branch recorded_claim runs line line_no
+  local LC_ALL=C f task meta wt branch claim marker seen cursor stamp recorded_branch recorded_claim runs line line_verb line_note
+  local stat_result dev ino size cursor_dev cursor_ino cursor_size cursor_claim offset appended consumed line_end
   case "$CLAIMED_RUN_DELAY" in ''|*[!0-9]*) return 0 ;; esac
   for f in "$STATE"/*.status; do
     [ -f "$f" ] || continue
     task=${f##*/}; task=${task%.status}
-    claim=
-    line_no=0
-    while IFS= read -r line || [ -n "$line" ]; do
-      line_no=$((line_no + 1))
-      if [ "$(status_line_verb "$line")" = working ] && [ "$(status_line_note "$line")" = 'validation started' ]; then
-        claim=$line_no
+    marker="$STATE/.claimed-run-$task"
+    seen="$STATE/.claimed-run-seen-$task"
+    cursor="$STATE/.claimed-run-cursor-$task"
+    stat_result=$(stat_devino_size "$f") || continue
+    read -r dev ino size <<EOF
+$stat_result
+EOF
+    case "$dev" in ''|*[!0-9]*) continue ;; esac
+    case "$ino" in ''|*[!0-9]*) continue ;; esac
+    case "$size" in ''|*[!0-9]*) continue ;; esac
+    cursor_dev=
+    cursor_ino=
+    cursor_size=
+    cursor_claim=
+    if [ -f "$cursor" ]; then
+      read -r cursor_dev cursor_ino cursor_size cursor_claim < "$cursor"
+      case "$cursor_dev" in ''|*[!0-9]*) cursor_dev= ;; esac
+      case "$cursor_ino" in ''|*[!0-9]*) cursor_ino= ;; esac
+      case "$cursor_size" in ''|*[!0-9]*) cursor_size= ;; esac
+      case "$cursor_claim" in ''|*[!0-9]*) cursor_claim= ;; esac
+      if [ -z "$cursor_dev" ] || [ -z "$cursor_ino" ] || [ -z "$cursor_size" ]; then
+        cursor_dev=
+        cursor_ino=
+        cursor_size=
+        cursor_claim=
       fi
-    done < "$f"
+    fi
+    offset=0
+    if [ "$cursor_dev:$cursor_ino" = "$dev:$ino" ] && [ -n "$cursor_size" ] && [ "$size" -ge "$cursor_size" ]; then
+      offset=$cursor_size
+    elif [ -n "$cursor_dev" ]; then
+      rm -f "$marker" "$seen"
+      cursor_claim=
+    fi
+    claim=$cursor_claim
+    if [ "$size" -gt "$offset" ]; then
+      appended=$(tail -c +"$((offset + 1))" "$f"; printf '\001') || continue
+      appended=${appended%$'\001'}
+      consumed=0
+      while IFS= read -r line || [ -n "$line" ]; do
+        consumed=$((consumed + ${#line} + 1))
+        status_line_verb "$line" line_verb
+        status_line_note "$line" line_note
+        if [ "$line_verb" = working ] && [ "$line_note" = 'validation started' ]; then
+          line_end=$((offset + consumed))
+          claim=$line_end
+        fi
+      done <<< "$appended"
+      cursor_claim=$claim
+      printf '%s %s %s %s\n' "$dev" "$ino" "$size" "$cursor_claim" > "$cursor"
+    elif [ ! -f "$cursor" ]; then
+      printf '%s %s %s %s\n' "$dev" "$ino" "$size" "$cursor_claim" > "$cursor"
+    fi
+    [ -n "$claim" ] || [ -f "$marker" ] || continue
     meta="$STATE/$task.meta"
     wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -n 1 | cut -d= -f2-)
     [ -d "$wt" ] || continue
     branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
     [ -n "$branch" ] || continue
-    marker="$STATE/.claimed-run-$task"
-    seen="$STATE/.claimed-run-seen-$task"
     stamp=$(sed -n '1p' "$marker" 2>/dev/null || true)
     recorded_branch=$(sed -n '2p' "$marker" 2>/dev/null || true)
     recorded_claim=$(sed -n '3p' "$marker" 2>/dev/null || true)
@@ -4011,6 +4058,7 @@ while :; do
     [ -n "$recorded_claim" ] && [ "$recorded_branch" = "$branch" ] || continue
     if [ "$(sed -n '1p' "$seen" 2>/dev/null || true)" = "$branch:$recorded_claim" ]; then
       rm -f "$marker"
+      printf '%s %s %s\n' "$dev" "$ino" "$size" > "$cursor"
       continue
     fi
     case "$stamp" in ''|*[!0-9]*) rm -f "$marker"; continue ;; esac
@@ -4020,10 +4068,12 @@ while :; do
       fm_wake_append check "claimed-run-$task" "check: validation claim has no run for $branch (worker reported validation started)" || return 1
       printf '%s\n' "$branch:$recorded_claim" > "$seen"
       rm -f "$marker"
+      printf '%s %s %s\n' "$dev" "$ino" "$size" > "$cursor"
       wake "check: validation claim has no run for $branch (worker reported validation started)"
     else
       printf '%s\n' "$branch:$recorded_claim" > "$seen"
       rm -f "$marker"
+      printf '%s %s %s\n' "$dev" "$ino" "$size" > "$cursor"
     fi
   done
   }

@@ -775,6 +775,51 @@ SH
   pass "delayed validation claims flag only when the branch has no run, then clear their markers"
 }
 
+test_claimed_run_incremental_log() {
+  local dir state fakebin out wt status_file cursor reads_before reads_after real_tail pid
+  dir=$(make_case claimed-run-incremental); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; wt="$dir/worktree"; status_file="$state/claim.status"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  printf 'worktree=%s\n' "$wt" > "$state/claim.meta"
+  printf 'working: preparing validation\n' > "$status_file"
+  printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$status_file")" \
+    "$(size_of "$status_file")" "$(_fm_open_decisions_file_ident "$status_file")" \
+    > "$state/.seen-claim_status"
+  cursor="$state/.claimed-run-cursor-claim"
+  reads="$dir/status-tail-calls"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run other-branch\n'
+SH
+  cat > "$fakebin/tail" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [ "$arg" != "$FM_CLAIM_STATUS_FILE" ] || printf 'x' >> "$FM_STATUS_TAIL_CALLS"
+done
+exec "$FM_REAL_TAIL" "$@"
+SH
+  chmod +x "$fakebin/no-mistakes" "$fakebin/tail"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  real_tail=$(command -v tail)
+  export FM_CLAIM_STATUS_FILE="$status_file" FM_STATUS_TAIL_CALLS="$reads" FM_REAL_TAIL="$real_tail"
+  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "incremental watcher exited before its first cycle"; }
+  [ -s "$cursor" ] || { reap "$pid"; fail "watcher did not create the byte-offset cursor"; }
+  reads_before=$(wc -c < "$reads" 2>/dev/null | tr -d '[:space:]'); reads_before=${reads_before:-0}
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "incremental watcher exited on an unchanged log"; }
+  reads_after=$(wc -c < "$reads" 2>/dev/null | tr -d '[:space:]'); reads_after=${reads_after:-0}
+  [ "$reads_after" = "$reads_before" ] || { reap "$pid"; fail "unchanged log was reread"; }
+  printf 'working [at=1234567890]: validation started\n' >> "$status_file"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "appended validation claim was not detected"; }
+  [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "appended claim did not produce exactly one wake: $(cat "$out")"
+  unset FM_EXPECT_BRANCH FM_FAKE_CREW_STATE FM_CLAIM_STATUS_FILE FM_STATUS_TAIL_CALLS FM_REAL_TAIL
+  pass "unchanged status logs are skipped and appended validation claims are detected once"
+}
+
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
@@ -5373,6 +5418,7 @@ fm_test_run \
   test_signal_crew_provably_working_classifier \
   test_secondmate_status_routine_absorbed_routed_surfaced_classifier \
   test_claimed_run_outcomes \
+  test_claimed_run_incremental_log \
   test_provably_working_signal_absorbed \
   test_turn_ended_provably_working_absorbed \
   test_turn_ended_not_working_surfaced \

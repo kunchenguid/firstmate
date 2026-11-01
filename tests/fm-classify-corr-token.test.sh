@@ -545,7 +545,7 @@ EOF
 }
 
 test_optional_event_time() {
-  local line stamped epoch before after dir
+  local line stamped epoch before after dir note
   before=$(date +%s)
   line="needs-decision corr=$CORR [key=timed]: choose: A or B"
   stamped=$(status_stamp_line "$line") || fail "status writer could not stamp an event"
@@ -555,6 +555,8 @@ test_optional_event_time() {
   [ "$(status_line_verb "$stamped")" = needs-decision ] || fail "time changed verb"
   [ "$(_fm_decision_key "$stamped")" = timed ] || fail "time changed key"
   [ "$(status_line_note "$stamped")" = 'choose: A or B' ] || fail "time changed note"
+  status_line_note "$stamped" note
+  [ "$note" = 'choose: A or B' ] || fail "output-variable note differs"
   [ "$(status_stamp_line "$stamped")" = "$stamped" ] || fail "restamping changed emission time"
   line='done [at=1700000000]: old event'
   [ "$(status_stamp_line "$line")" = "$line" ] || fail "writer replaced an old emission time"
