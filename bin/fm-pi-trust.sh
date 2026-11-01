@@ -6,9 +6,10 @@
 #
 # Usage: fm-pi-trust.sh [--agent-dir <dir>] <worktree> <project>
 #   --agent-dir <dir>  the Pi agent root the launch will read (a pinned root's
-#                      PI_CODING_AGENT_DIR, or for an unpinned launch the
-#                      default <home>/.pi/agent of the HOME that launch line
-#                      carries); default $HOME/.pi/agent. The invoking process's own
+#                      PI_CODING_AGENT_DIR, or for an unpinned crewmate or scout
+#                      launch the <home>/.pi/agent of the HOME that launch line
+#                      names); omitted, this script uses $HOME/.pi/agent of its
+#                      own process. The invoking process's own
 #                      PI_CODING_AGENT_DIR is never an input: panes are created
 #                      by a long-lived daemon that does not inherit firstmate's
 #                      environment, so it is not evidence of what the worker
@@ -45,21 +46,24 @@
 #
 # THE STORE IS THE ONE THE LAUNCH LINE NAMES. A worker account pin puts its root
 # on the launch line and bin/fm-spawn.sh passes that root as --agent-dir. An
-# unpinned pi/pi-signed launch line explicitly unsets PI_CODING_AGENT_DIR and
-# names the same `<home>` this store lives under, so that worker reads Pi's
-# default `<home>/.pi/agent` whatever HOME its pane, terminal, or daemon
-# otherwise exports; <home> is the value bin/fm-spawn.sh selected for this run -
-# an Orca launch-env source (config/launch-env-tmux-session) supplies it when
-# that source owns HOME - and the same value is passed here as --agent-dir. A
-# source that leaves HOME unset or empty, and a spawn with no HOME of its own,
-# name no such home at all, so bin/fm-spawn.sh refuses that spawn rather than
-# writing an entry its worker would never read. The one exception is a raw
-# launch command that itself names an agent root or HOME: its own assignment
-# applies after the unset, so that worker reads the named root and the entry
-# written here is not the one it consults. An operator who needs a different
-# agent root or account selects one with config/pi-account rather than by
-# exporting the variable. The ambient PI_CODING_AGENT_DIR is not an input; the
-# only home this script reads is its HOME argument and --agent-dir.
+# unpinned pi/pi-signed crewmate or scout launch line explicitly unsets
+# PI_CODING_AGENT_DIR and names the same `<home>` this store lives under, so
+# that worker reads Pi's default `<home>/.pi/agent` whatever HOME its pane,
+# terminal, or daemon otherwise exports; <home> is the value bin/fm-spawn.sh
+# selected for this run - this spawning process's own HOME, or the value an Orca
+# launch-env source (config/launch-env-tmux-session) supplies when that source
+# owns HOME - and the same value is passed here as --agent-dir. An unpinned
+# secondmate launch names no HOME and keeps its seeded home's session-scoped
+# --approve, so it is not registered here. A source that leaves HOME unset or
+# empty, and a spawn with no HOME of its own, name no such home at all, so
+# bin/fm-spawn.sh refuses that spawn rather than writing an entry its worker
+# would never read. The one exception is a raw launch command that itself names
+# an agent root or HOME: its own assignment applies after the unset, so that
+# worker reads the named root and the entry written here is not the one it
+# consults. An operator who needs a different agent root or account selects one
+# with config/pi-account rather than by exporting the variable. The ambient
+# PI_CODING_AGENT_DIR is not an input; the only home this script reads is its
+# HOME argument and --agent-dir.
 #
 # A lookup resolves the nearest recorded decision on the worktree path itself or
 # any ancestor, matching Pi's own `findNearestTrustEntry` walk, which skips

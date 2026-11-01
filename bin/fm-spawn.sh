@@ -403,7 +403,11 @@
 #   directories. An empty file retains only the operational floor below.
 #   Names are read once per spawn; unless the Orca source below applies, values
 #   are expanded in the destination pane, not copied from the invoking process
-#   or written into the launch text.
+#   or written into the launch text. The one exception is a Pi crewmate or scout
+#   launch's HOME: Firstmate writes this spawning process's own HOME there, or
+#   the Orca source's snapshotted value, so the Pi trust store registered before
+#   launch is the store that worker reads, and an allowlisted or pane HOME never
+#   reaches that worker.
 #   Unset names stay unset and empty values stay empty.
 #   The fixed operational floor is HOME PATH USER LOGNAME SHELL TERM COLORTERM
 #   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
@@ -483,13 +487,15 @@
 #   before provisioning; __PIEXCLUDE__ below owns the Pi launch substitution.
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. docs/configuration.md's "Worker account pin" section owns unpinned
-#   account selection: an unpinned pi/pi-signed launch explicitly unsets
-#   PI_CODING_AGENT_DIR and names the HOME the trust registration used on its
-#   launch line, so it deterministically reads exactly that home's
-#   <home>/.pi/agent store whatever the pane daemon or terminal exports; an Orca
-#   launch-env source that supplies HOME supplies that value, and a source that
-#   leaves HOME unset or empty - or a spawn without a HOME of its own - refuses
-#   the spawn because no store can be named. A raw launch command that names its
+#   account selection: an unpinned pi/pi-signed crewmate or scout launch
+#   explicitly unsets PI_CODING_AGENT_DIR and names the HOME the trust
+#   registration used on its launch line - this spawning process's own HOME, or
+#   the value an Orca launch-env source supplies - so it deterministically reads
+#   exactly that home's <home>/.pi/agent store whatever the pane daemon or
+#   terminal exports; a source that leaves HOME unset or empty, or a spawn
+#   without a HOME of its own, refuses that crewmate or scout spawn because no
+#   store can be named. An unpinned secondmate launch names no HOME and keeps
+#   the session-scoped --approve instead. A raw launch command that names its
 #   own agent root or HOME applies its assignment after these and reads its own
 #   store instead.
 #   A present file pins every supported launch of

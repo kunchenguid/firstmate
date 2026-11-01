@@ -1469,7 +1469,10 @@ Each relaunch installs a fresh worker extension with the home's current list, so
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
 The pin is opt-in: without a home-wide or per-secondmate pin, pane-backed Claude launches keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
-Unpinned Pi and pi-signed launches explicitly unset `PI_CODING_AGENT_DIR` and name the HOME the spawn's trust registration used on their launch line, so an unpinned launch deterministically uses Pi's `<home>/.pi/agent` store instead of whatever account the pane's daemon or terminal happens to export; `<home>` is the HOME that launch line carries, including one supplied by the [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) below. A raw launch command that names its own agent root or HOME keeps that assignment and reads its own store instead. Select a different agent root or account with `config/pi-account`, not by exporting the variable.
+Unpinned Pi and pi-signed crewmate and scout launches explicitly unset `PI_CODING_AGENT_DIR` and name the HOME whose `<home>/.pi/agent` trust store the spawn registered on their launch line, so the worker deterministically uses that store instead of whatever account the pane's daemon or terminal happens to export; `<home>` is the HOME the spawning Firstmate process carries, or the value an [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) supplies.
+An unpinned secondmate launch names no HOME and keeps the session-scoped `--approve` instead.
+A raw launch command that names its own agent root or HOME keeps that assignment and reads its own store instead.
+Select a different agent root or account with `config/pi-account`, not by exporting the variable.
 
 Both files are local and gitignored.
 
@@ -1603,7 +1606,7 @@ The flag is read only for ship and scout spawns, secondmate charters never take 
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
 T3 Code starts the provider from the server's environment and cannot apply this command boundary, so `backend=t3code` refuses when the file exists; [`t3code-backend.md`](t3code-backend.md#active-limits) owns that backend limit.
-With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
+With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker, except the HOME an unpinned Pi crewmate or scout launch names, which [Worker account pin](#worker-account-pin-configclaude-account-configpi-account) owns.
 
 Do not assume every worker inherits the invoking Firstmate process's current environment.
 The file is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md).
@@ -1635,10 +1638,12 @@ It retains `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` 
 [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact retained names and parsing mechanics.
 
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
-An unpinned Pi or pi-signed launch unsets `PI_CODING_AGENT_DIR` after even an allowlisted forwarding and names the HOME whose `<home>/.pi/agent` store the spawn registered, so neither this file nor the pane's own HOME can select their agent root; use [`config/pi-account`](#worker-account-pin-configclaude-account-configpi-account) to select it instead.
+An unpinned Pi or pi-signed crewmate or scout launch unsets `PI_CODING_AGENT_DIR` after even an allowlisted forwarding and names the HOME whose `<home>/.pi/agent` store the spawn registered - the spawning Firstmate process's own HOME, or the Orca source's snapshotted value - so neither this file nor the pane's own HOME selects that worker's home at all; an unpinned secondmate launch keeps the HOME this file or the pane supplies and only sheds `PI_CODING_AGENT_DIR`.
+Use [`config/pi-account`](#worker-account-pin-configclaude-account-configpi-account) to select their agent root instead.
 The command shell and worker may still create their own variables.
 
-Unless the Orca environment source below is configured, allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command. The one exception is a Pi launch's explicitly named HOME above, which is an intentional Firstmate launch assignment rather than a forwarded name.
+Unless the Orca environment source below is configured, allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
+The one exception is the HOME a Pi crewmate or scout launch names above, which Firstmate assigns rather than forwards.
 Listing a name does not provision it in a daemon's environment or transfer credentials to another machine.
 
 On the Orca backend the destination is an Orca terminal whose environment comes from the Orca app and your shell startup files, not from Firstmate or its tmux session.
@@ -1651,8 +1656,8 @@ Create the local, gitignored `config/launch-env-tmux-session` containing that se
 The source requires `config/launch-env-allowlist` and reads only its names from the session's local environment (`tmux set-environment -t <session>`), so tmux's automatic values such as `SSH_AUTH_SOCK` are never forwarded unless listed.
 A listed name missing from the session, an unreadable session, or a malformed selector stops the spawn before Orca creates the worktree or terminal; a name removed with `tmux set-environment -r` stays deliberately unset.
 Source mode also sets `GIT_CONFIG_NOSYSTEM=1`, so a system Git credential helper cannot answer with personal credentials.
-A snapshotted `HOME` is also the home an unpinned Pi or pi-signed worker uses for its `<home>/.pi/agent` trust store, so the spawn registers its worktree in that store before launch and names the same `HOME` on the worker's launch line.
-A source that leaves `HOME` unset or empty names no such home, so an unpinned Pi or pi-signed spawn refuses with a named error instead of registering an entry that worker would never read.
+A snapshotted `HOME` is also the home an unpinned Pi or pi-signed crewmate or scout worker uses for its `<home>/.pi/agent` trust store, so the spawn registers its worktree in that store before launch and names the same `HOME` on the worker's launch line.
+A source that leaves `HOME` unset or empty names no such home, so an unpinned Pi or pi-signed crewmate or scout spawn refuses with a named error instead of registering an entry that worker would never read.
 Values travel only in the owner-only staged launch file, never terminal input, and the pane deletes that file before the worker starts.
 If the pane has not run the launch command and deleted the file within 30 seconds, or the spawn is interrupted before then, Firstmate removes the file unless the pane already did, leaves the Orca terminal open, and reports the spawn as failed rather than leaving credentials on disk.
 The source applies to fresh Orca spawns; `--relaunch` is refused on Orca because it has no recovery-grade agent-state classifier.
