@@ -664,6 +664,21 @@ case "$mode" in
       --startup) startup=1 ;;
       *) printf 'usage: fm-inactive-reconcile.sh scan [--startup]\n' >&2; exit 2 ;;
     esac
+    # Fast path: most polls are idle, not-yet-due calls, so check the cadence
+    # with builtins and file tests before paying for the timed re-exec, its
+    # perl or bash fork, and the scan lock below - none of those protect
+    # anything here because nothing but this read-only check has run yet.
+    # ledger_pass still runs every poll in a secondmate home; a call found due
+    # here is left untouched and falls through to the locked, timed scan so it
+    # still gets that path's mkdir, lock, and budget handling exactly as before.
+    if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
+      mkdir -p "$STATE" "$OUTCOME_DIR" || exit 1
+      [ ! -L "$OUTCOME_DIR" ] || exit 1
+      if self=$(home_secondmate_id); then
+        ledger_pass
+      fi
+      exit 0
+    fi
     # The scan's own whole-second deadline enforces the budget; this outer
     # process-group kill is only the backstop for a scan wedged outside every
     # bounded section (an unbounded lock wait), so it fires one second after
