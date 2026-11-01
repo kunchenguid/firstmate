@@ -3990,13 +3990,20 @@ while :; do
     marker="$STATE/.claimed-run-$task"
     seen="$STATE/.claimed-run-seen-$task"
     cursor="$STATE/.claimed-run-cursor-$task"
-    stat_result=$(stat_devino_size "$f") || continue
-    read -r dev ino size <<EOF
+    if [ -f "$cursor" ] && [ ! "$f" -nt "$cursor" ]; then
+      read -r dev ino size cursor_claim < "$cursor"
+      [ -n "$cursor_claim" ] || cursor_claim=
+      claim=$cursor_claim
+      stat_result=
+    else
+      stat_result=$(stat_devino_size "$f") || continue
+      read -r dev ino size <<EOF
 $stat_result
 EOF
-    case "$dev" in ''|*[!0-9]*) continue ;; esac
-    case "$ino" in ''|*[!0-9]*) continue ;; esac
-    case "$size" in ''|*[!0-9]*) continue ;; esac
+      case "$dev" in ''|*[!0-9]*) continue ;; esac
+      case "$ino" in ''|*[!0-9]*) continue ;; esac
+      case "$size" in ''|*[!0-9]*) continue ;; esac
+    fi
     cursor_dev=
     cursor_ino=
     cursor_size=
@@ -4022,23 +4029,24 @@ EOF
       cursor_claim=
     fi
     claim=$cursor_claim
-    if [ "$size" -gt "$offset" ]; then
-      appended=$(tail -c +"$((offset + 1))" "$f"; printf '\001') || continue
-      appended=${appended%$'\001'}
-      consumed=0
-      while IFS= read -r line || [ -n "$line" ]; do
-        consumed=$((consumed + ${#line} + 1))
-        status_line_verb "$line" line_verb
-        status_line_note "$line" line_note
-        if [ "$line_verb" = working ] && [ "$line_note" = 'validation started' ]; then
-          line_end=$((offset + consumed))
-          claim=$line_end
-        fi
-      done <<< "$appended"
+    if [ -n "$stat_result" ]; then
+      if [ "$size" -gt "$offset" ]; then
+        appended=$(tail -c +"$((offset + 1))" "$f"; printf '\001') || continue
+        appended=${appended%$'\001'}
+        complete=${appended%$'\n'*$'\n'}
+        consumed=${#complete}
+        while IFS= read -r line; do
+          status_line_verb "$line" line_verb
+          status_line_note "$line" line_note
+          if [ "$line_verb" = working ] && [ "$line_note" = 'validation started' ]; then
+            line_end=$((offset + consumed))
+            claim=$line_end
+          fi
+        done <<< "$complete"
+        offset=$((offset + consumed))
+      fi
       cursor_claim=$claim
-      printf '%s %s %s %s\n' "$dev" "$ino" "$size" "$cursor_claim" > "$cursor"
-    elif [ ! -f "$cursor" ]; then
-      printf '%s %s %s %s\n' "$dev" "$ino" "$size" "$cursor_claim" > "$cursor"
+      printf '%s %s %s %s\n' "$dev" "$ino" "$offset" "$cursor_claim" > "$cursor"
     fi
     [ -n "$claim" ] || [ -f "$marker" ] || continue
     meta="$STATE/$task.meta"
