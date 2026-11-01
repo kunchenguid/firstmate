@@ -1309,7 +1309,7 @@ close_answered() {  # <task-id> <release-0-or-1>
   local id=$1 note i merged=0 recorded=''
   if [ "$2" = 1 ]; then
     tasks_axi unhold "$id" >/dev/null
-    return 0
+    return
   fi
   apply_pending_retained_artifact "$id" || return 1
   # Without a pending-close record, the task's durable merge-verification record

@@ -992,6 +992,46 @@ EOF
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+test_release_reports_a_failed_unhold() {
+  local home show
+  home=$(make_home release-failed-unhold)
+  tasks_in "$home" add sample-release-fails "Ship the failed release sample" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create the failed unhold fixture"
+  run_captain "$home" hold sample-release-fails --reason "captain go needed" >/dev/null \
+    || fail "could not hold the failed unhold fixture"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = unhold ] && [ "${2:-}" = sample-release-fails ] \
+   && [ ! -e "$FM_HOME/unhold-failed-once" ]; then
+  : > "$FM_HOME/unhold-failed-once" || exit 93
+  exit 92
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  printf 'Go ahead.\n' > "$home/go.txt"
+  if run_captain "$home" answer sample-release-fails --decision-file "$home/go.txt" --release \
+      > "$home/failed.out" 2> "$home/failed.err"; then
+    fail "a failed unhold reported a successful release"
+  fi
+  assert_not_contains "$(cat "$home/failed.out")" "released:" \
+    "a failed unhold printed a release success line"
+  show=$(tasks_in "$home" show sample-release-fails --full)
+  assert_contains "$show" "held: yes" "a failed unhold released the task anyway"
+  assert_contains "$show" "hold_kind: captain" "a failed unhold dropped the captain hold"
+
+  rm -f "$home/fakebin/tasks-axi"
+  run_captain "$home" answer sample-release-fails --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "the release retry failed after a failed unhold"
+  show=$(tasks_in "$home" show sample-release-fails --full)
+  assert_contains "$show" "held: no" "the release retry did not lift the hold"
+  assert_contains "$show" "Resolution mode: released" \
+    "the release retry did not record its close path"
+  pass "a failed unhold fails the release instead of claiming success"
+}
+
 # A captain hold is released only in an attended session: the away posture
 # record and the away daemon flag each refuse --release, through `answer` and
 # the keyed-answer intake alike, before anything is written. No record and a
@@ -5616,6 +5656,7 @@ test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_release_reports_a_failed_unhold
 test_release_is_attended_only
 test_release_rechecks_away_after_waiting_on_task_lock
 test_hold_stamp_precedes_hold_visibility
