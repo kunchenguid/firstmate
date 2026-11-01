@@ -735,6 +735,16 @@ fm_backlog_shown_value() {  # <shown-field>
 # URL in the prose.
 FM_BACKLOG_TITLE_PROSE=
 FM_BACKLOG_TITLE_PR_LINKS=
+# True for a title token that is a URL at all. The title's merge claim is decided
+# by failing closed - a URL that is not the one link this close verified leaves
+# the title - rather than by predicting which shapes the renderer accepts.
+fm_backlog_title_url_is_link() {  # <token>
+  case "$1" in
+    https://*|http://*) return 0 ;;
+  esac
+  return 1
+}
+
 fm_backlog_title_split_pr_links() {  # <title>
   local rest=$1 out='' url trailing
   FM_BACKLOG_TITLE_PROSE=
@@ -757,9 +767,12 @@ fm_backlog_title_split_pr_links() {  # <title>
         *) break ;;
       esac
     done
-    if ( fm_pr_url_parse "$url" \
-         && { [ "$FM_PR_PROVIDER" = forgejo ] \
-              || { [ "$FM_PR_PROVIDER" = github ] && [ "$FM_PR_HOST" = github.com ]; }; } ); then
+    # Fail closed, without mirroring the renderer's classification: every URL on
+    # the title may be one tasks-axi would print as a merge claim, and this
+    # repository cannot enumerate the shapes that renderer accepts. So each URL
+    # leaves the title for the body note, and the only link a closed row can still
+    # carry is the one this run verified (FM_BACKLOG_PR_LINK_EXCLUDE).
+    if fm_backlog_title_url_is_link "$url"; then
       # Keep the separating space that sat before the link; the trailing trim
       # below removes it when the link ended the title.
       case "$rest" in \ *) rest=${rest# } ;; esac

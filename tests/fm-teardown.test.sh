@@ -1223,6 +1223,31 @@ SH
     "a pulls-path link the gate could not classify was recorded as a merge nobody read"
   assert_grep 'api.git/pulls/5' "$case_dir/data/backlog.md" \
     "the unread pulls-path link was dropped instead of kept in the note"
+
+  # The same link shape already sitting on the ROW's title: the title splitter
+  # has to recognise it too, or the close leaves it there and the row renders as
+  # a merge no run read.
+  case_dir=$(make_case tasks-axi-renderer-accepted-title-link)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/o--o/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  tasks-axi update task-x1 --pr https://github.com/o--o/repo/pull/7 \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a renderer-accepted title link failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left the title-link item at $(backlog_row_state "$case_dir"): $out"
+  assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
+    "a renderer-accepted link left on the title rendered the closed row as a merge"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F 'https://github.com/o--o/repo/pull/7' >/dev/null \
+    || fail "the title-side unread link was dropped instead of kept in the note"
   pass "teardown keeps a renderer-accepted but unparseable link as an unconfirmed note"
 }
 

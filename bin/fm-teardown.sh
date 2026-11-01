@@ -1921,7 +1921,9 @@ backlog_pr_completion_args() {  # <pr-url>
     # claim, never invent one. A value that is not a URL at all keeps the `pr`
     # shape so the transition refuses the close instead of losing the link.
     case "$1" in
-      https://*) BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because its pull request state could not be read: $1. The link is a historical record whose merge was not verified in this run") ;;
+      https://*|http://*)
+        BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because its pull request state could not be read: $1. The link is a historical record whose merge was not verified in this run")
+        ;;
       *) BACKLOG_DONE_ARGS=(--pr "$1") ;;
     esac
     return 0
