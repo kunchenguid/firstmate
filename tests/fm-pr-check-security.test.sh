@@ -3471,6 +3471,93 @@ shift_registration_device() {  # <state> <id> [both|data|check]
   esac
 }
 
+test_registered_poll_survives_template_update_and_relaunch() {
+  local scenario dir state historical_poll registration_hash rc
+  for scenario in template-update relaunch combined; do
+    dir=$(make_case "registered-poll-$scenario")
+    state="$dir/home/state"
+    historical_poll="$dir/historical-fm-pr-poll.sh"
+    if [ "$scenario" = relaunch ]; then
+      cp "$POLL" "$historical_poll"
+    else
+      # An older generation may contain different code. It must never execute:
+      # the watcher dispatches the current repository poll with validated data.
+      # The stub's whole body is reachable, so a mistaken execution of the
+      # registered copy writes the marker, reports a non-merged result, and
+      # reaches no forge instead of passing on the current poll's behaviour.
+      cat > "$historical_poll" <<SH
+#!/usr/bin/env bash
+printf 'historical poll executed\\n' > '$dir/sidecar-executed'
+printf 'historical-generation\\n'
+SH
+    fi
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$historical_poll"
+    if [ "$scenario" != template-update ]; then
+      printf 'control_relaunch_tx=114614.20261024T230110Z.26328\n' >> "$state/task-a.meta"
+    fi
+    if [ "$scenario" != relaunch ]; then
+      ! cmp -s "$POLL" "$state/task-a.check.sh" || fail "$scenario did not change the template"
+    fi
+    fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+      || fail "$scenario rejected an intact registered generation"
+    fm_pr_poll_snapshot_matches "$state" task-a "$POLL" \
+      || fail "$scenario lost its registered snapshot"
+    # A cycle that sees no merge must leave the authenticated generation armed
+    # instead of revoking it for diverging from the updated template.
+    add_stop_custom_check "$dir"
+    rc=0
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-open.out" 2> "$dir/watch-open.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$scenario open watcher failed: $(cat "$dir/watch-open.err")"
+    ! grep -F 'rejected unauthenticated state checks' "$dir/watch-open.out" >/dev/null \
+      || fail "$scenario revoked an intact generation before its merge: $(cat "$dir/watch-open.out")"
+    case "$(cat "$dir/watch-open.out")" in
+      check:*z-stop.check.sh:*stop-cycle) ;;
+      *) fail "$scenario open cycle did not reach the control check: $(cat "$dir/watch-open.out")" ;;
+    esac
+    fm_pr_poll_snapshot_matches "$state" task-a "$POLL" \
+      || fail "$scenario disarmed an intact generation before its merge"
+    ack_watcher_cycle "$state" || fail "$scenario could not acknowledge the open cycle"
+    rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check" "$dir/gh.log"
+    rc=0
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$scenario watcher failed: $(cat "$dir/watch.err")"
+    grep -F 'task-a.check.sh: merged' "$dir/watch.out" >/dev/null \
+      || fail "$scenario did not detect the merge: $(cat "$dir/watch.out")"
+    [ ! -e "$dir/sidecar-executed" ] || fail "$scenario executed state-file code"
+    grep -F 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" >/dev/null \
+      || fail "$scenario did not run the repository poll"
+    awk -F'\t' -v prefix="check: merge landed: task-a https://github.com/o/r/pull/1" \
+      'index($5, prefix) == 1 { found=1 } END { exit !found }' "$state/.wake-queue" \
+      || fail "$scenario lost the merge notification: $(merged_ledger_row "$state" task-a)"
+    assert_poll_absent "$state" task-a
+    # Re-arm the same old generation to test tampering on its original inode.
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$historical_poll"
+    registration_hash=$(fm_pr_sha256 "$state/task-a.pr-poll-registration")
+    printf '# forged after registration\n' >> "$state/task-a.check.sh"
+    ! fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+      || fail "$scenario accepted a forged check"
+    [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$registration_hash" ] \
+      || fail "$scenario rewrote trust for a forged check"
+  done
+  for scenario in unknown-field duplicate-pr; do
+    dir=$(make_case "registered-poll-$scenario")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+    printf 'control_relaunch_tx=114614.20261024T230110Z.26328\n' >> "$state/task-a.meta"
+    case "$scenario" in
+      unknown-field) printf 'injected=value\n' >> "$state/task-a.meta" ;;
+      duplicate-pr) printf 'pr=https://github.com/o/r/pull/2\n' >> "$state/task-a.meta" ;;
+    esac
+    ! fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+      || fail "$scenario accepted forged metadata after the relaunch marker"
+  done
+  pass "registered generations survive template updates and relaunch metadata without executing sidecar code or trusting forged bytes"
+}
+
 test_device_renumbered_poll_stays_armed() {
   local dir state out rc original
   dir=$(make_case device-renumber-merged)
@@ -3801,6 +3888,7 @@ test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
+test_registered_poll_survives_template_update_and_relaunch
 test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts
 test_device_rerecord_serializes_direct_rearm
