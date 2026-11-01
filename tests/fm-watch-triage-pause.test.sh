@@ -1378,26 +1378,19 @@ test_overdue_resume_race_uses_block_line_offset() {
   local dir state statusf
   dir=$(paused_until_fixture overdue-resume-race "" 90000); state="$dir/state"; statusf="$state/overdue-resume-race.status"
   printf 'paused: waiting for an external dependency\n' > "$statusf"
-  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" TEST_STATUS="$statusf" bash -c '
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
     . "$1"
-    fm_wake_status_append_self_announced() { printf "%s\\n" "$3" >> "$2"; }
     fm_wake_append() { :; }
     wake() { :; }
-    awk() {
-      local arg
-      for arg in "$@"; do
-        case "$arg" in target=*) printf "working: resumed\\n" >> "$TEST_STATUS"; break ;; esac
-      done
-      command awk "$@"
-    }
-    resurface_absorbed test:fm-until "$STATE/.paused-resurfaced-overdue-resume-race" 0 overdue "" 0 "$TEST_STATUS" \
+    resurface_absorbed test:fm-until "$STATE/.paused-resurfaced-overdue-resume-race" 0 overdue "" 0 "$2" \
       "blocked [key=paused-overdue-overdue-resume-race]: paused 90000s, wait overdue - decide or release" \
       "$STATE/.paused-overdue-overdue-resume-race"
-    pause_overdue_reconcile overdue-resume-race "$TEST_STATUS"
+    printf "working: resumed\\n" >> "$2"
+    pause_overdue_reconcile overdue-resume-race "$2"
     [ "$?" -eq 1 ] || exit 1
     [ ! -e "$STATE/.paused-overdue-overdue-resume-race" ] || exit 1
-    grep -Fq "resolved [key=paused-overdue-overdue-resume-race]" "$TEST_STATUS"
-  ' _ "$WATCH" || fail "a resume appended just after the blocked line was not closed using the recorded byte boundary"
+    grep -Fq "resolved [key=paused-overdue-overdue-resume-race]" "$2"
+  ' _ "$WATCH" "$statusf" || fail "a resume appended just after the blocked line was not closed using the recorded byte boundary"
   pass "a resume racing the overdue marker write closes the decision after the watcher blocked line"
 }
 
