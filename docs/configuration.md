@@ -608,6 +608,8 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 
 - Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
 
+- A remote secondmate's route record additionally records `fleet_seat_generation=` when a fleet seat accounts for its launch or relaunch; the [seat contract](#fleet-seat-pools-configfleet-seats) owns that counted generation.
+
 - A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 
 - A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
@@ -617,7 +619,7 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 - An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 
 - A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
-- A t3code task additionally records `t3_thread_id=` and `t3_project_id=`, with `window=fm-<id>` kept as the shared firstmate alias.
+- A t3code task additionally records `t3_thread_id=`, `t3_project_id=`, and `t3_server=`, with `window=fm-<id>` kept as the shared firstmate alias; the [T3 lifecycle contract](t3code-backend.md#current-lifecycle-and-safety) owns what `t3_server=` binds.
 
 - A tern task additionally records `tern_session_id=`, `tern_tab_id=`, and `tern_block_id=`.
 - An hc task additionally records `hc_session=` and `hc_terminal=`, with `window=<hc_session>:<hc_terminal>`.
@@ -907,12 +909,12 @@ Consumers that need one consistent snapshot resolve `live` once and read that im
 Superseded live generations remain selectable for 30 completed days before a later sync removes them.
 The published generation is exact, so a later sync retracts allowlisted files that are no longer live and represents a pending-to-handled message move only at its current path.
 
-Enabled teardown commits metadata, the live status when present, and pending and handled inbox messages under `<export-root>/archive/<task>/<spawn_gen>/` before those source records are retired.
+Enabled teardown commits metadata, the live status when present, and pending and handled inbox messages under `<export-root>/archive/<task>/<generation>/` before those source records are retired.
 Direct archive calls acquire the task metadata lock, while teardown calls under the same lock it already holds, so the exact source set is re-enumerated immediately before commit.
 Each attempt builds a fresh sibling staging directory, flushes every copied file, directory, and manifest, and publishes the complete generation with one descriptor-relative rename.
 `manifest.v1.json` carries the version, capture time, completeness, source-relative names, byte counts, and SHA-256 values.
 Retries parse that JSON with duplicate-key rejection, require the exact v1 fields and types, and verify a one-to-one mapping between manifest entries and archived regular files.
-A reused task ID writes its distinct `spawn_gen` rather than overwriting an earlier generation.
+A reused task ID writes its distinct generation rather than overwriting an earlier generation, and the archive directory is named from the task's launch generation: `spawn_gen` when present, else a remote secondmate's `remote_spawn_gen`, else `fleet_seat_generation`.
 Only strictly valid committed generations older than 30 completed days are pruned by manifest mtime, matching task status archive retention, and scan failures warn without undoing a successful capture.
 If the archive cannot commit, teardown reports the reason and stops before deleting metadata, status, or inbox sources.
 Removing `config/record-export-root` is the explicit escape hatch back to ordinary teardown behavior.
@@ -2142,6 +2144,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - A remote secondmate shares the same capacity through the existing primary-to-remote transport: while a declaration exists or needs clearing, the primary's watcher delivers the current pool declaration to each remote about every 30 seconds outside the fleet lock, with certificate publication fenced by the pending epoch, and a pooled remote launch files a seat request in that host's remote root home and waits for that answer.
 - Each remote home and its local descendants share one host ledger, delivery path, and certificate, including pooled descendants that predate the declaration.
 - Unpooled remote approvals are recorded as holders before certificate publication, so a later policy change counts them immediately.
+- A supervisor already running on a remote host when its pools are declared is counted exactly once: that host reports it in the serve certificate, and a primary route record naming the same registered route and model as one certificate holder is not charged as a second seat, even when that record predates generation recording. A record matching no holder stays counted on its own.
 - A remote secondmate's own seat is parent-owned in the shared root ledger: an initial launch or relaunch reserves its generation before the host's launch or relaunch operation, and the host reports one outcome bound to that generation.
 - A host refusal before launch releases only the new candidate and leaves the old agent's seat alone.
 - A confirmed start counts the model the host actually runs, reports any mismatch with the requested model, and survives a failed update of the primary's own record.

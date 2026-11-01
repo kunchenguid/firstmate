@@ -107,6 +107,7 @@ Task tabs in a second Rex session stay on polling, because one reader covers one
 ## Cleanup and the absence proof
 
 Cleanup closes only the task's block, which closes its tab, and then proves it gone: only an exact not-found after the close counts, so a close that failed or left the block alive keeps the task's records.
+Both the close and that proof run only against the task's recorded creation server: a missing `rex_server=` or one naming a server this process does not reach preserves the task and its worktree instead of closing a same-numbered block elsewhere, and `--force` does not bypass it.
 An already-gone block counts as closed.
 A per-home session left with no tabs is then killed, but only the exact recorded session carrying this home's label, never the launcher session, and never when its view cannot be read.
 An omitted `windows` field is treated as an empty session for both retirement and adoption, so a crewless secondmate can relaunch into its emptied session.
