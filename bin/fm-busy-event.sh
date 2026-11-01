@@ -41,7 +41,8 @@
 #       keyed needs-decision event to state/<id>.status without changing busy
 #       state or answering the prompt. Duplicate requests share a key derived
 #       from the incarnation, lifecycle sequence, session, tool input, and
-#       transcript byte position. The status log is the durable dedup record;
+#       transcript byte position. The next apply event of the same incarnation
+#       appends the matching resolved line once. The status log is the durable dedup record;
 #       the existing watcher surfaces it even while the busy record is open.
 #
 #   retire <state-dir> <id> (--gen G | --current-gen)
@@ -212,7 +213,7 @@ clear_stream() {
 }
 
 clear_stream_incarnation() {
-  rm -f "$STATE/$ID.model-stream" "$STATE/$ID.model-stream-order" "$STATE/$ID.model-progress"
+  rm -f "$STATE/$ID.model-stream" "$STATE/$ID.model-stream-order" "$STATE/$ID.model-progress" "$STATE/$ID.permission-keys"
 }
 
 old_umask=$(umask)
@@ -351,6 +352,9 @@ if [ "$CMD" = permission-request ]; then
       "$(date +%s)" "$request_key" "$tool" >> "$status" || {
       lock_release; umask "$old_umask"; exit 1;
     }
+    printf '%s %s\n' "$GEN" "$request_key" >> "$STATE/$ID.permission-keys" || {
+      lock_release; umask "$old_umask"; exit 1;
+    }
   fi
   lock_release
   umask "$old_umask"
@@ -378,6 +382,14 @@ write_record "$GEN" $((OLD_SEQ + 1)) || {
 }
 if [ "$NEW_STATE" != busy ]; then
   clear_stream || { lock_release; exit 1; }
+fi
+if [ -f "$STATE/$ID.permission-keys" ]; then
+  while read -r key_gen request_key; do
+    [ "$key_gen" = "$GEN" ] || continue
+    printf 'resolved [at=%s] [key=%s]: worker resumed after the Claude permission prompt\n' \
+      "$(date +%s)" "$request_key" >> "$STATE/$ID.status" || true
+  done < "$STATE/$ID.permission-keys"
+  rm -f "$STATE/$ID.permission-keys"
 fi
 umask "$old_umask"
 # Best effort: the record already settled, so a failed touch never refuses it.
