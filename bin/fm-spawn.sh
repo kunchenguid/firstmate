@@ -7660,6 +7660,7 @@ else
       sleep 0.2
     done
   }
+  START_CHECK_EPOCH=$(date +%s)
   SPAWN_LAUNCH_SENT=1
   # errexit is on here: a failed send still exits, and Orca source mode first
   # removes the credential-bearing file the pane never received.
@@ -7851,6 +7852,33 @@ SPAWN_META_LOCK_HELD=0
 if [ "$T3CODE_LAUNCH_UNCONFIRMED" = 1 ]; then
   echo "error: the launch brief for $ID may already have been delivered to T3 thread $T: its outcome is unproven (a lost reply or a T3 error that can follow a commit). The task record is kept; inspect the thread in T3 Code, and if the brief is absent resend only the identical brief text, which reuses its request id within the hour" >&2
   exit 1
+fi
+
+# Arm the watcher's one-shot start check (bin/fm-watch.sh start_check_tick
+# owns the record format and the wake) for every launch that reaches here
+# without proof the brief started. kimi, rovo, OpenCode 2, agy, and polytoken
+# already proved it in their own post-launch gates above, a T3 Code launch
+# carries its own unconfirmed-delivery path, and a raw launch command carries
+# no adapter wiring that could ever post the proof. A relaunch rewrites the
+# record with the replacement's generation, or removes an earlier one.
+START_PENDING="$STATE/$ID.start-pending"
+case "$HARNESS" in
+kimi* | rovo* | agy | polytoken) START_CHECK=0 ;;
+opencode) START_CHECK=1; [ "$OPENCODE_MAJOR" -lt 2 ] || START_CHECK=0 ;;
+*) START_CHECK=1 ;;
+esac
+[ "$BACKEND" != t3code ] && [ "$RAW_LAUNCH" -eq 0 ] || START_CHECK=0
+if [ "$START_CHECK" -eq 1 ]; then
+  START_PENDING_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  fm_lock_acquire_wait "$START_PENDING_LOCK"
+  if ! { printf '%s %s %s\n' "$START_CHECK_EPOCH" "${BUSY_GEN:--}" "$HARNESS" >"$START_PENDING.tmp.$$" \
+    && mv -f "$START_PENDING.tmp.$$" "$START_PENDING"; }; then
+    rm -f "$START_PENDING.tmp.$$"
+    echo "warning: could not arm the start check for $ID; inspect the worker yourself in about two minutes" >&2
+  fi
+  fm_lock_release "$START_PENDING_LOCK"
+else
+  rm -f "$START_PENDING"
 fi
 
 SPAWN_DELIVERY=

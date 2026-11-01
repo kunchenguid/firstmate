@@ -72,7 +72,7 @@
 #      time (state=busy source=fm-spawn - no adapter hook has posted since
 #      launch) AND the caller supplied a captured tail that matches that
 #      harness's own recognized interactive-prompt signature (a trust
-#      dialog, sign-in screen, or first-run menu - fm_busy_launch_prompt_parked
+#      dialog, sign-in screen, or first-run menu - fm_busy_launch_prompt_name
 #      owns the per-harness table). That combination classifies unknown
 #      launch-prompt instead: the launch never actually started the brief, so
 #      it must not read as proof of an active turn. A record that has
@@ -1039,10 +1039,12 @@ fm_busy_claude_launch_prompt_tail() {
   buf=$(cat)
   if printf '%s' "$buf" | grep -qiE "${FM_BUSY_CLAUDE_TRUST_PROMPT_REGEX:-Quick safety check: Is this a project you created or one you trust\\?}" \
     && printf '%s' "$buf" | grep -qiE 'No, exit|Enter to confirm'; then
+    printf 'Claude workspace-trust dialog\tnone\n'
     return 0
   fi
   printf '%s' "$buf" | grep -qiE "${FM_BUSY_CLAUDE_IMPORTS_PROMPT_REGEX:-Allow external CLAUDE\\.md file imports\\?}" \
-    && printf '%s' "$buf" | grep -qiE 'No, disable external imports|Yes, allow external imports'
+    && printf '%s' "$buf" | grep -qiE 'No, disable external imports|Yes, allow external imports' \
+    && printf 'Claude external-imports dialog\tnone\n'
 }
 
 # fm_busy_pi_launch_prompt_tail: Pi's project-trust dialog. Live-verified on
@@ -1061,7 +1063,8 @@ fm_busy_pi_launch_prompt_tail() {
   local buf
   buf=$(cat)
   printf '%s' "$buf" | grep -qiE "${FM_BUSY_PI_LAUNCH_PROMPT_REGEX:-Trust project folder\\?}" \
-    && printf '%s' "$buf" | grep -qiE 'Do not trust'
+    && printf '%s' "$buf" | grep -qiE 'Do not trust' \
+    && printf 'Pi project-trust dialog "Trust project folder?"\tenter\n'
 }
 
 # fm_busy_gemini_launch_prompt_tail: Gemini's workspace-trust dialog ("Do you
@@ -1089,29 +1092,43 @@ fm_busy_gemini_launch_prompt_tail() {
   buf=$(cat)
   if printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_TRUST_PROMPT_REGEX:-Do you trust the files in this folder\\?}" \
     && printf '%s' "$buf" | grep -qiE "Trust folder|Don't trust"; then
+    printf 'Gemini folder-trust dialog "Do you trust the files in this folder?"\tenter\n'
     return 0
   fi
   if printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_AUTH_PROMPT_REGEX:-How would you like to authenticate for this project\\?}" \
     && printf '%s' "$buf" | grep -qiE 'Use Gemini API Key|No authentication method selected'; then
+    printf 'Gemini auth-method picker (credential needed)\tnone\n'
     return 0
   fi
-  printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_APIKEY_PROMPT_REGEX:-Enter Gemini API Key}"
+  printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_APIKEY_PROMPT_REGEX:-Enter Gemini API Key}" \
+    && printf 'Gemini API-key entry (credential needed)\tnone\n'
 }
 
-# fm_busy_launch_prompt_parked: dispatch to the signature above for <harness>,
-# or fail when this harness has none. Consumes the tail on stdin. Scoped to
-# exactly the harnesses fm-spawn.sh arms with the fm-spawn busy source
-# (claude*, opencode*, pi, pi-signed, omp, gemini) since only those can ever
-# read a pinned "busy fm-spawn" record; codex and standalone Kimi already
-# classify unknown before a record is ever consulted, and opencode ships no
-# trust dialog at all.
-fm_busy_launch_prompt_parked() {  # <harness>
+# fm_busy_launch_prompt_name: the one launch-dialog table. Dispatches to the
+# signature above for <harness>, consuming the tail on stdin, and on a match
+# prints one line `<dialog name><TAB><accept>`, where <accept> is `enter` only
+# for a dialog whose recorded preselected option is the affirmative one (so a
+# single Enter accepts it) and `none` for every dialog Enter would decline or
+# that needs a credential. Fails when the tail matches nothing or this harness
+# has no recorded signature. Scoped to the harnesses whose dialog text is
+# recorded: the busy backstop below only ever consults it for a record pinned
+# at the fm-spawn seed (claude*, pi, pi-signed, omp, gemini), and the
+# watcher's start check (bin/fm-watch.sh start_check_tick) uses the name and
+# accept kind to word its single not-started wake. opencode ships no trust
+# dialog at all.
+fm_busy_launch_prompt_name() {  # <harness>
   case "${1:-}" in
     claude*) fm_busy_claude_launch_prompt_tail ;;
     pi | pi-signed | omp) fm_busy_pi_launch_prompt_tail ;;
     gemini) fm_busy_gemini_launch_prompt_tail ;;
     *) return 1 ;;
   esac
+}
+
+# fm_busy_launch_prompt_parked: 0 when the tail on stdin matches <harness>'s
+# recorded launch dialog (fm_busy_launch_prompt_name owns the table).
+fm_busy_launch_prompt_parked() {  # <harness>
+  fm_busy_launch_prompt_name "${1:-}" >/dev/null
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the

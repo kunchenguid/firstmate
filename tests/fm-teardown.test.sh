@@ -3933,7 +3933,7 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 }
 
 # A task's per-task watcher markers (.seen-<id>_status, .seen-<id>_turn-ended,
-# .hb-surfaced-<id>) and an orphaned presentation journal - one whose pane the
+# .hb-surfaced-<id>, <id>.start-pending) and an orphaned presentation journal - one whose pane the
 # close path proved gone without retiring it - must not outlive teardown, while
 # another task's markers and a journal bound to a different pane must.
 seed_watcher_markers() {  # <case-dir> <task-id>
@@ -3941,6 +3941,7 @@ seed_watcher_markers() {  # <case-dir> <task-id>
   printf '0:0\n' > "$state/.seen-${id}_status"
   printf '0:0\n' > "$state/.seen-${id}_turn-ended"
   printf '0\n' > "$state/.hb-surfaced-$id"
+  printf '1000 - pi\n' > "$state/$id.start-pending"
 }
 
 test_teardown_retires_task_watcher_markers_and_orphan_journal() {
@@ -3961,11 +3962,13 @@ test_teardown_retires_task_watcher_markers_and_orphan_journal() {
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "retire-watcher-markers: teardown failed: $(cat "$case_dir/stderr")"
-  for marker in .seen-task-x1_status .seen-task-x1_turn-ended .hb-surfaced-task-x1 task-x1.herdr-presentation; do
+  for marker in .seen-task-x1_status .seen-task-x1_turn-ended .hb-surfaced-task-x1 task-x1.herdr-presentation \
+    task-x1.start-pending; do
     assert_absent "$case_dir/state/$marker" "teardown left the torn-down task's $marker behind"
   done
   for marker in .seen-task-y2_status .seen-task-y2_turn-ended .hb-surfaced-task-y2 task-y2.herdr-presentation \
-    .seen-task-x1_extra_status .seen-task-x1_extra_turn-ended .hb-surfaced-task-x1_extra; do
+    task-y2.start-pending .seen-task-x1_extra_status .seen-task-x1_extra_turn-ended .hb-surfaced-task-x1_extra \
+    task-x1_extra.start-pending; do
     assert_present "$case_dir/state/$marker" "teardown removed another task's $marker"
   done
   pass "teardown retires the task's own watcher markers and orphaned presentation journal, leaving other tasks' markers alone"
