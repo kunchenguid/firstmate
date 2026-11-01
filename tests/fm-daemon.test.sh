@@ -1458,6 +1458,28 @@ test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
   pass "away-mode housekeeping opens one overdue decision and worker resume closes it"
 }
 
+test_housekeeping_quiet_overdue_pause_opens_decision() {
+  local dir state fakebin task win pane statusf
+  dir=$(make_supercase quiet-overdue-pause)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=overdue-quiet; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
+  printf 'paused: waiting for dependency\n' > "$statusf"
+  printf 'idle prompt $\n' > "$pane"
+  fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$task"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+    || fail "fixture: could not record the quiet posture"
+  sleep 2
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+    FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ "$(grep -cF "blocked [key=paused-overdue-$task]" "$statusf")" -eq 1 ] \
+    || fail "quiet-mode housekeeping did not open one overdue decision"
+  [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] \
+    || fail "quiet-mode housekeeping did not queue one stale escalation"
+  pass "quiet-mode housekeeping applies the overdue pause ceiling"
+}
+
 test_housekeeping_overdue_pause_preserves_prior_actionable_event() {
   local dir state fakebin task win pane statusf blocked
   dir=$(make_supercase overdue-pause-unread-event)
@@ -3584,6 +3606,7 @@ test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
 test_housekeeping_overdue_pause_opens_one_decision_in_away_mode
 test_housekeeping_overdue_pause_preserves_prior_actionable_event
+test_housekeeping_quiet_overdue_pause_opens_decision
 test_housekeeping_declared_time_controls_pause_recheck
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
