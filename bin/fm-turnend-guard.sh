@@ -70,17 +70,17 @@
 #      own under the shared ancestry-or-trusted-id verdict exits with a read-only
 #      diagnostic instead of blocking a session that cannot repair supervision
 #      without stealing ownership;
-#   3. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
-#      for the auto-arm to claim this home (a live OPEN generation claim in the
-#      state/.claude-autoarm-epoch ledger - fm_autoarm_claim_open - or a legacy
+#   3. otherwise wait for the auto-arm to claim this home (a live OPEN generation
+#      claim in state/.claude-autoarm-epoch - fm_autoarm_claim_open - or a legacy
 #      build's lock-holding claim under the legacy abandonment proof) or to
 #      record a fresh actionable exit-2 outcome
 #      (state/.claude-autoarm-epoch) for this event epoch - either proof allows
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
-#      pending-decision coordination: docs/turnend-guard.md "Claude cooperative mode";
+#      bounded wait policy, including pending decisions:
+#      docs/turnend-guard.md "Claude cooperative mode";
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
-#   4. only when neither materializes is the auto-arm genuinely absent: re-block
+#   4. if recovery remains unconfirmed at the end of that wait, re-block
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
