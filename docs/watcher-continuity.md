@@ -19,22 +19,23 @@ In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a wat
 
 ## Ownership
 
-On Pi, omp, OpenCode, Cursor, and Claude primaries, one component owns re-arming the watcher.
+On Pi, pi-signed, omp, OpenCode, Cursor, and Claude primaries, one component owns re-arming the watcher. PiG is configured with the Pi watcher extension, but watcher restoration and wake delivery are unverified.
 Codex and Grok keep their own protocols; see [Manual recovery and other harnesses](#manual-recovery-and-other-harnesses).
 
 | Harness | Re-arm owner |
 | --- | --- |
-| Pi | `.pi/extensions/fm-primary-pi-watch.ts` |
+| Pi and pi-signed | `.pi/extensions/fm-primary-pi-watch.ts` |
+| PiG | Configured to load `.pi/extensions/fm-primary-pi-watch.ts`; runtime re-arm behavior is unverified |
 | omp | `.omp/extensions/fm-primary-omp-watch.ts` |
 | OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` |
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
 | Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
 
-On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
+On a host-eligible primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host). PiG is configured with the Pi extension path. Its `/ahoy` and `/bearings` registration and skill handoffs are verified over RPC, but watcher restoration, wake delivery, background coverage, lifecycle recovery, and direct TUI behavior remain unverified; readiness remains unknown.
 
 ### Pi, omp, and OpenCode adapters
 
-Pi's `.pi/extensions/fm-primary-pi-watch.ts`, omp's `.omp/extensions/fm-primary-omp-watch.ts`, and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
+The Pi `.pi/extensions/fm-primary-pi-watch.ts`, omp's `.omp/extensions/fm-primary-omp-watch.ts`, and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close. PiG's configured use of the Pi extension does not verify that it restores a watcher after child close.
 Each adapter:
 
 - Starts the next arm before delivering the wake prompt.
@@ -119,7 +120,7 @@ The beacon is `state/.last-watcher-beat`, which only the watcher process touches
 
 ### Supervision host
 
-On a non-Pi primary, a home that runs the supervision host runs `bin/fm-supervision-host.sh` in place of the arm its re-arm owner would start.
+On a host-eligible primary, a home that runs the supervision host runs `bin/fm-supervision-host.sh` in place of the arm its re-arm owner would start.
 The host owns successive watcher cycles through the same arm.
 [supervision-host.md](supervision-host.md#failure-direction) owns the default hand-back's downtime restoration, including when the successor already exited.
 Its [acknowledged hand-back](supervision-host.md#acknowledged-hand-back) section owns the opt-in Claude transfer that preserves supervision and retries delivery until main acknowledges the specific queued check.
@@ -129,7 +130,7 @@ The arm's recovery and acknowledgement contracts below still apply.
 
 This section covers what each re-arm owner does between an actionable close and the wake reaching the model.
 
-### Pi, omp, and OpenCode successor start
+### Pi-compatible, omp, and OpenCode successor start
 
 After an actionable Pi, omp, or OpenCode child close, the adapter:
 
@@ -137,6 +138,8 @@ After an actionable Pi, omp, or OpenCode child close, the adapter:
 2. Starts and verifies one singleton successor.
 3. Confirms the handling handoff before scheduling the follow-up: Pi confirms against the restoration's own recovery token, while omp and OpenCode confirm against the current successor.
 4. Delivers the original wake.
+
+PiG's corresponding child-close recovery and wake delivery remain unverified.
 
 A complete Pi reason line can be observed while the predecessor is still finishing durable cleanup.
 That line is retained for replacement handoff, but the adapter never treats that already-ready predecessor as its own successor.

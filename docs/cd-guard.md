@@ -88,7 +88,7 @@ It does not permit `cd /home/project`, because an absolute-path `cd` to anything
 - Codex sends stdin JSON at `.tool_input.command` without `--claude`.
 - Grok sends stdin JSON at `.toolInput.command`.
 - OpenCode sends the exact command string through `--command <exact string>`.
-- Pi, pi-signed, and omp send the exact command string through `--command <exact string>`.
+- Pi, pi-signed, PiG, and omp send the exact command string through `--command <exact string>`.
 - Cursor sends stdin JSON at `.tool_input.command` and adds `--cursor`, which renders the deny as Cursor's own returned decision object.
 
 Processing order is cheapest-first: a strict-superset prefilter, then the primary-checkout scope, then the Node policy owner.
@@ -108,7 +108,7 @@ Identical in shape to `docs/arm-pretool-check.md`:
 - `--claude` suppresses stdout completely because Claude ignores a PreToolUse deny when stdout is nonempty.
 - Codex blocks on exit 2 and displays stderr.
 - OpenCode throws only when the checker exits 2.
-- Pi, pi-signed, and omp return `{block: true}` only when the checker exits 2.
+- Pi, pi-signed, PiG, and omp return `{block: true}` only when the checker exits 2.
 
 ## Shared classifier ownership
 

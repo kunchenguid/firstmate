@@ -2295,6 +2295,7 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
+RAW_SHELL_C=0
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -2471,7 +2472,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro)
+  '' | claude | codex | opencode | pi | pi-signed | pig | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -3014,12 +3015,27 @@ case "$ARG3" in
   RAW_LAUNCH=1
   LAUNCH=$ARG3
   HARNESS=""
+  raw_skip_next=0
   for word in $LAUNCH; do
-    case "$word" in [A-Za-z_]*=*) continue ;; *)
-      HARNESS=$(basename "$word")
-      break
-      ;;
+    if [ "$raw_skip_next" -eq 1 ]; then
+      raw_skip_next=0
+      continue
+    fi
+    case "$word" in
+      [A-Za-z_]*=*) continue ;;
+      -u|--unset|-C|--chdir) raw_skip_next=1; continue ;;
+      -S|--split-string) raw_skip_next=1; continue ;;
     esac
+    word=${word#\"}
+    word=${word#\'}
+    word=${word%\"}
+    word=${word%\'}
+    case "$(basename -- "$word")" in
+      env|command|nohup|--) continue ;;
+      -*) continue ;;
+    esac
+    HARNESS=$(basename -- "$word")
+    break
   done
   ;;
 '')
@@ -3029,32 +3045,78 @@ case "$ARG3" in
   # active. Resolving here on every spawn is what makes the split DURABLE - a
   # respawn (recovery, /updatefirstmate, restart) re-resolves, so
   # config/secondmate-harness keeps governing secondmate launches across restarts.
-  # The launch_template lookup below is the unverified-adapter guard for both
-  # kinds: a harness with no template aborts the spawn.
   if [ "$KIND" = secondmate ]; then
-    HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate "$ID")
+    HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate "$ID") || exit 1
     harness_src='config/secondmate-harness (falling back to config/crew-harness)'
   else
     if [ -f "$CONFIG/crew-dispatch.json" ]; then
       echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
       exit 1
     fi
-    HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
+    HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew) || exit 1
     harness_src='config/crew-harness'
   fi
-  LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
-    echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
-    exit 1
-  }
   ;;
-*)
-  HARNESS=$ARG3
-  LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
-    echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
-    exit 1
-  }
-  ;;
+*) HARNESS=$ARG3 ;;
 esac
+
+raw_shell_has_c_flag() {  # <shell-option>
+  case "$1" in
+    --*) return 1 ;;
+    -c|-?*c*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ "$RAW_LAUNCH" -eq 1 ]; then
+  case "$HARNESS" in
+    bash|sh|dash|zsh|ksh)
+      shell_seen=0
+      raw_shell_skip_next=0
+      for word in $LAUNCH; do
+        if [ "$raw_shell_skip_next" -eq 1 ]; then
+          raw_shell_skip_next=0
+          continue
+        fi
+        if [ "$shell_seen" -eq 1 ] && raw_shell_has_c_flag "$word"; then
+          RAW_SHELL_C=1
+          break
+        fi
+        case "$word" in
+          -u|--unset|-C|--chdir|-S|--split-string) raw_shell_skip_next=1; continue ;;
+        esac
+        case "$(basename -- "$word")" in
+          bash|sh|dash|zsh|ksh) shell_seen=1 ;;
+        esac
+      done
+      ;;
+  esac
+fi
+
+case "$KIND:$HARNESS:$RAW_SHELL_C" in
+  ship:pig:*|scout:pig:*|secondmate:pig:*)
+    echo "error: PiG is verified as a primary-only harness and cannot be dispatched for ship, scout, or secondmate work; select a separately verified harness" >&2
+    exit 1
+    ;;
+  ship:*:1|scout:*:1|secondmate:*:1)
+    echo "error: raw shell -c launches cannot be safely classified for worker dispatch; select a direct harness or a verified launch template" >&2
+    exit 1
+    ;;
+esac
+
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  if [ -z "$ARG3" ]; then
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+      echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
+      exit 1
+    }
+  else
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+      echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
+      exit 1
+    }
+  fi
+fi
 
 # muse, gemini, devin, commandcode, polytoken, cortex, and kiro are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.

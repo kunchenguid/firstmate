@@ -1,14 +1,14 @@
 # Supervision host
 
-The supervision host runs the supervision branch's contract beside a primary that is not Pi.
+The supervision host runs the supervision branch's contract beside a host-eligible primary that does not use the Pi-compatible in-process extension branch.
 This doc explains how it does that and which script owns each part, for maintainers changing the host, its engine, or a primary's arm owner.
 
-On Pi the branch is a second conversation inside the captain's own process ([pi-supervision-branch.md](pi-supervision-branch.md)).
-Off Pi no such process exists.
-So the host owns the watcher cycle for the primary and runs the branch as a headless engine session.
+On Pi and pi-signed the branch is a second conversation inside the captain's own process. PiG is configured to load the same branch extension ([pi-supervision-branch.md](pi-supervision-branch.md)), but its branch processing, watcher restoration, wake delivery, lifecycle recovery, and direct TUI behavior are unverified; readiness remains unknown.
+Other supported primaries have no such in-process branch, so the host owns their watcher cycle and runs the branch as a headless engine session.
+Only PiG's `/ahoy` and `/bearings` registration and skill handoffs have been exercised over RPC.
 
-It is one architecture with Pi's, not a second one.
-These parts are shared with Pi and decide what the branch may do:
+It is one architecture with the Pi-compatible extension branch, not a second one.
+These parts are shared with Pi and the configured PiG integration and describe what the branch may do; this does not verify that PiG runs the branch lifecycle:
 
 - The same branch prompt.
 - The same row eligibility.
@@ -34,7 +34,7 @@ Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, Codex, or Antigravit
 - `/afk` launches no away daemon on a home of those harnesses that runs the host, because the host is the away session there.
 - `/quiet` enters nothing where the attended host runs, and elsewhere launches the daemon; see [Quiet mode](#quiet-mode).
   While the daemon's flag `state/.afk` exists, the host stands aside exactly as the plain arm does.
-- Pi keeps its in-process branch whatever the file says, and no Pi engine is built.
+- Pi and pi-signed keep their in-process branch whatever the file says, and no Pi engine is built. PiG is configured for an in-process branch and does not launch this host, but its runtime delivery and processing remain unverified.
 - Kimi has no primary supervision protocol, so it has no arm owner to run the host.
 
 ### Not yet on the host
@@ -108,7 +108,7 @@ Only an away record is away: no record, or the record daemon-backed quiet mode w
 ### Attended
 
 The host asks the Pi branch's offer rule (`branchOfferForWake`, through `bin/fm-branch-dispatch.mjs offer`) whether the branch may take the close.
-So a close reaches main off Pi exactly when it would on Pi: a check trigger, a decision-owned signal or stale trigger, and a scan that is unsafe or holds nothing for the branch stay main's.
+So a close reaches main on a host-running primary exactly when it would on Pi: a check trigger, a decision-owned signal or stale trigger, and a scan that is unsafe or holds nothing for the branch stay main's.
 On that main-only pass-through the host starts the successor watcher cycle and leaves it running, then prints the close unchanged.
 That successor, like one a turn hands back at its start (see [Away](#away)), runs in a process group of its own, so the harness tearing down the hook's group after the rewake does not stop it.
 The host confirms no handling handoff and republishes the watcher's recovery marker as downtime, even when an earlier engine turn left it reading handling, because the re-arm owner delivers a close to main only while that marker reads downtime.
@@ -217,13 +217,13 @@ The drain's header owns the section's bounds; these rules keep it bounded and in
 - The byte cap shows only the oldest contiguous run of captain outcomes, so the printed acknowledgement covers exactly the rows shown, and it counts the newer ones it holds back, which follow once the run is acknowledged.
 - Routine outcomes never open a main turn: the next drain lists the newest visible one once, for awareness and with nothing to acknowledge, and collapses older visible routine notes into a count; silent routine outcomes never appear.
 
-The section runs only for main on a home that runs the host and whose primary is not Pi, and never while the away record exists.
+The section runs only for main on a home that runs the host and whose primary is not Pi, pi-signed, or PiG, and never while the away record exists.
 The drain is the only presenter of these outcomes and the only owner of their read cursor, the away window's included: the return brief counts the window's outcomes and points at the section instead of listing them.
 On a Claude Code primary the Calm mod separately shows bounded, display-only supervision notes to the captain ([`calm.md`](calm.md#supervision-notes-on-claude-code)); it moves no outcome marker and adds nothing to main's context.
 A long away window no longer requires a drain per outcome: each task's captain outcomes collapse to one line, subject to the captain byte cap, and visible routine notes past the section's limit collapse into a count; after main acknowledges all captain outcomes no later drain shows anything from the window again.
 A drain that cannot read or project the store (jq missing included), print the section, or advance its read cursor says so and marks nothing it has not shown as read, and it exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
 The section's budgets count bytes in any locale, so a multibyte summary is cut on a whole UTF-8 character boundary to fit them.
-An unprocessed captain outcome is never adopted as processed, including across an index repair or a switch to Pi; the absent-marker rule is owned by `bin/fm-branch-outcome.sh`.
+An unprocessed captain outcome is never adopted as processed, including across an index repair or a switch to Pi or PiG; the absent-marker rule is owned by `bin/fm-branch-outcome.sh`.
 A home already switched to the host can re-present its unacknowledged outcomes after an upgrade or interrupted switch, so each captain line shows its recorded age and the section asks main to check current task state before acting.
 Main's reply to the captain covers only the outcomes still open, as if an already-settled one had never been listed.
 Main runs the printed acknowledgement for every presented outcome, settled and handled open ones alike.
@@ -457,7 +457,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-supervision-instructions.test.sh` | The rendered protocol, including Grok's arm command. |
 | `tests/fm-host-mirror.test.sh` | The dialog mirror's writers through the tracked Claude and Cursor registrations, the home gate, the feed, and the verified-writer list. |
 | `tests/fm-afk-launch.test.sh` | The home gate on each primary, the `/afk` daemon refusal, and `/quiet` on a home that runs the host: the statement, the paused statement, each named missing part, the quiet daemon fallback that carries its recorded mode, a failed quiet start that archives its quiet record, and the refusal under a live away record until the return. |
-| `tests/fm-afk-return.test.sh` | The return's drain-owned read-cursor advance through the away window on a host home, and none on Pi. |
+| `tests/fm-afk-return.test.sh` | The return's drain-owned read-cursor advance through the away window on a host home, and none on Pi or PiG. |
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
 | `tests/fm-supervision-host-attended-live-e2e.test.sh` | Opt-in credentialed guard for repeated attended main-only hand-backs to an idle Claude primary, the successor's own close, a close that turns main-only at its turn, and a stand-in remote listener; accepts a pre-fix ref for a negative control. |
 | `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |

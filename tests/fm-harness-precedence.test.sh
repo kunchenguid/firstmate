@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Child-bash snippets intentionally preserve runtime positional expansion.
 # Behavior tests for bin/fm-harness.sh's marker-vs-ancestry precedence boundary,
 # and for the supervision protocol session start selects from it.
 #
@@ -29,7 +30,7 @@ set -u
 
 # This suite states the markers it means to test in every case. Drop the ambient
 # ones so a verdict never depends on which harness launched the suite.
-unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PIG_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
   FM_SUPERVISION_ACTOR FM_SUPERVISION_PRIMARY_HARNESS
 
 HARNESS="$ROOT/bin/fm-harness.sh"
@@ -122,7 +123,9 @@ with_blind_ancestry() {  # <fakebin> [VAR=VAL ...]
 
 named_bin() {  # <dir> <name>
   mkdir -p "$1"
-  cp "$(command -v bash)" "$1/$2"
+  # A symlink preserves the harness name in process metadata without copying
+  # the platform-signed system shell to an untrusted path.
+  ln -sf "$(command -v bash)" "$1/$2"
   printf '%s\n' "$1/$2"
 }
 
@@ -217,6 +220,52 @@ test_retained_cursor_marker_does_not_rename_a_nested_claude() {
   [ "$got" = claude ] \
     || fail "a claude tree carrying a retained cursor launcher marker resolved '$got', expected claude"
   pass "a retained cursor marker does not rename a nested claude worker"
+}
+
+test_pig_primary_marker_requires_real_ancestry() {
+  local bin fakebin got home
+  bin=$(named_bin "$TMP_ROOT/pig-tree" pig)
+  got=$(under_process "$bin")
+  [ "$got" = pig ] || fail "an unmarked pig executable resolved '$got', expected pig"
+  # shellcheck disable=SC2016
+  got=$(env -u PI_CODING_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_PIG_HARNESS=pig \
+    "$bin" -c 'r=$("$1"); printf "%s" "$r"' _ "$HARNESS")
+  [ "$got" = pig ] || fail "FM_PIG_HARNESS under pig ancestry with CLAUDECODE resolved '$got', expected pig"
+  fakebin=$(blind_ancestry_bin "$TMP_ROOT/pig-marker-without-ancestry")
+  got=$(with_blind_ancestry "$fakebin" CLAUDECODE=1 FM_PIG_HARNESS=pig)
+  [ "$got" = claude ] || fail "a leaked FM_PIG_HARNESS without pig ancestry resolved '$got', expected claude"
+  got=$(under_process "$bin" CLAUDECODE=1)
+  [ "$got" = pig ] || fail "a pig executable with an inherited CLAUDECODE resolved '$got', expected pig"
+
+  home="$TMP_ROOT/pig-worker-home"
+  mkdir -p "$home/config"
+  # shellcheck disable=SC2016
+  got=$(FM_HOME="$home" "$bin" -c 'r=$("$1" crew 2>&1); rc=$?; printf "%s\nrc=%s" "$r" "$rc"' _ "$HARNESS")
+  assert_contains "$got" "PiG is verified as a primary-only harness" "default crew resolution must not silently dispatch through PiG"
+  assert_contains "$got" "rc=2" "default crew resolution under PiG must return an actionable refusal"
+  printf 'pi\n' > "$home/config/crew-harness"
+  # shellcheck disable=SC2016
+  got=$(FM_HOME="$home" "$bin" -c 'r=$("$1" crew); printf "%s" "$r"' _ "$HARNESS")
+  [ "$got" = pi ] || fail "an explicit verified worker harness must resolve under PiG, got '$got'"
+
+  printf 'pig\n' > "$home/config/crew-harness"
+  # shellcheck disable=SC2016
+  got=$(FM_HOME="$home" "$bin" -c 'r=$("$1" crew 2>&1); rc=$?; printf "%s\nrc=%s" "$r" "$rc"' _ "$HARNESS")
+  assert_contains "$got" "PiG is verified as a primary-only harness" "an explicit PiG crew selection must refuse"
+  assert_contains "$got" "rc=2" "an explicit PiG crew selection must return refusal status"
+  printf 'pig\n' > "$home/config/secondmate-harness"
+  # shellcheck disable=SC2016
+  got=$(FM_HOME="$home" "$bin" -c 'r=$("$1" secondmate 2>&1); rc=$?; printf "%s\nrc=%s" "$r" "$rc"' _ "$HARNESS")
+  assert_contains "$got" "PiG is verified as a primary-only harness" "an explicit PiG secondmate selection must refuse"
+  assert_contains "$got" "rc=2" "an explicit PiG secondmate selection must return refusal status"
+
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_harness_process_matches pig '' || fail "the primary session lock must accept the exact PiG executable"
+  ! fm_harness_process_matches piglet '' || fail "the primary session lock must not accept a piglet decoy"
+  . "$ROOT/bin/fm-agent-process-lib.sh"
+  [ "$(fm_agent_process_classify_name pig)" = agent ] || fail "tmux liveness must classify the PiG primary as an agent"
+  pass "PiG detection is ancestry-bound, primary-only, and leaves worker harness selection explicit"
 }
 
 # --- 3. Pi keeps the marker's more specific identity ------------------------
@@ -830,6 +879,7 @@ test_markerless_ancestry_outranks_foreign_marker
 test_genuine_marker_and_ancestry_agree
 test_cursor_ordering_still_decides_when_ancestry_is_silent
 test_retained_cursor_marker_does_not_rename_a_nested_claude
+test_pig_primary_marker_requires_real_ancestry
 test_pi_signed_survives_agreeing_ancestry
 test_interpreter_args_match_does_not_outrank_a_marker
 test_native_child_of_an_interpreter_shim_decides_at_comm_strength

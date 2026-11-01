@@ -106,6 +106,7 @@ fi
 case "$HARNESS" in
   claude|codex|opencode|pi|grok|cursor|omp|agy) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
+  pig) SNIPPET="$DOC_DIR/pig.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
@@ -125,6 +126,7 @@ esac
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
+pi_branch_ext="$FM_ROOT/.pi/extensions/fm-branch-supervision.ts"
 omp_ext="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
 omp_turnend_ext="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
@@ -169,6 +171,7 @@ render_snippet() {  # [snippet]
     esac
     line=${line//__FM_PI_EXT__/$pi_ext}
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
+    line=${line//__FM_PI_BRANCH_EXT__/$pi_branch_ext}
     line=${line//__FM_OMP_RESTART_LONG__/$omp_restart_long}
     line=${line//__FM_OMP_RESTART_SHORT__/$omp_restart_short}
     line=${line//__FM_OMP_EXT__/$omp_ext}
@@ -212,6 +215,9 @@ repair_line() {
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
       ;;
+    pig)
+      printf '%s\n' 'PiG watcher restoration, wake delivery, background-wake coverage, and lifecycle recovery are unverified; do not arm or repair the watcher based on Pi guidance. Only /ahoy and /bearings registration and skill handoff are verified.'
+      ;;
     omp)
       # shellcheck disable=SC2016  # backticks are literal markdown in the rendered text
       if [ "$omp_home_elsewhere" -eq 1 ]; then
@@ -252,6 +258,9 @@ ordinary_wake_line() {
       ;;
     pi|pi-signed)
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'
+      ;;
+    pig)
+      printf '%s\n' '- Ordinary wake: PiG wake delivery and watcher continuity are unverified; only /ahoy and /bearings registration and skill handoff are verified.'
       ;;
     omp)
       printf '%s\n' '- Ordinary wake: the omp extension already owns watcher continuity; do not arm another cycle.'

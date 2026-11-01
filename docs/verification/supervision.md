@@ -55,6 +55,43 @@ Both tracked `.omp/extensions/*.ts` files loaded by auto-discovery alone (no `-e
 omp's `session_start` payload carries no reason field, so the adapter derives the source: the first start of the process is `startup` (or `resume` from a `--continue`/`--resume` launch line) and a later in-process start is `clear`; `tests/fm-omp-harness.test.sh` pins that mapping over a fake omp API.
 A file named both by `-e` and by auto-discovery loads twice (two factory calls, doubled `session_stop` continuations), which is why a secondmate launch never names its auto-discovered primary extensions with `-e` and the per-task busy extension lives in `state/`.
 
+### PiG primary integration, live verification, 2026-10-17
+
+The installed PiG 0.4.1+1.0.3 runtime was exercised on macOS arm64 with `openai-codex/gpt-6-luna` at medium effort in a named Herdr lab and throwaway Firstmate homes.
+The credentialed end-to-end test was run as:
+
+```sh
+FM_PIG_PRIMARY_LIVE_E2E=1 \
+FM_PIG_PRIMARY_LIVE_MODEL=openai-codex/gpt-6-luna \
+FM_PIG_PRIMARY_LIVE_THINKING=medium \
+FM_PIG_PRIMARY_LIVE_CODE_ROOT=<Firstmate-repository> \
+bash tests/fm-pig-primary-supervision-live-e2e.test.sh
+```
+
+It passed live session-start digest delivery, direct TUI `/ahoy` and `/bearings`, pre-tool denials for a persistent primary-home directory change and a wrapped direct watcher launch, actionable status-wake delivery into the idle main conversation, watcher presence after wake delivery, and both healthy and missing-watcher turn-end behavior.
+It also passed `bin/fm-control.sh` interrupt and clean-state exit, and verified that unsupported PiG primary-only worker relaunch is refused while preserving the live agent.
+The missing-watcher recovery fixture used a second throwaway home seeded with an active task before session start, then let the guarded lab teardown stop the session rather than attempting lifecycle exit after recovery.
+
+A preceding run verified the exit safety refusal after recovery: when Herdr reported the composer as pending or unknown, `fm-control.sh` refused to type the exit command and left the agent alive.
+That refusal is expected safety behavior, not an exit failure.
+
+Background delivery to a separate managed supervision branch and filtering host transcript rows remain unverified because PiG's released SDK cannot create managed agent sessions or filter host rows.
+The live wake was verified only in the main TUI conversation, and no workaround is claimed for the upstream SDK limits.
+PiG remains intentionally unavailable as a worker, scout, or secondmate adapter.
+The exact current boundary is in [the PiG harness reference](../../.agents/skills/harness-adapters/references/harness/pig.md).
+The Go runtime extension's SDK compatibility and installed-runtime validation are recorded in [`runtime-backends.md`](runtime-backends.md#pig-v041-go-extension).
+
+### PiG primary recheck, live verification, 2026-10-19
+
+A second installed PiG primary run used a separate scratch home and an explicitly named non-default Herdr session, with `FM_PIG_PRIMARY_LIVE_CODE_ROOT` set to the plain Firstmate checkout because the test worktree is linked.
+The model quoted the injected session-start digest from that scratch home, directly invoked `/ahoy` and `/bearings`, accepted both pre-tool denials, received an actionable status wake in main, and passed the healthy-cycle turn-end check.
+The run also verified `fm-control.sh` interrupt, primary-only relaunch refusal, and exit behavior.
+The first primary's watcher was confirmed live after the actionable wake.
+The second-home recovery assertion did not pass: the extension-loaded marker and session lock existed, but the test did not observe a live watcher lock before its timeout.
+This is an unresolved recovery result, not evidence that automatic recovery works or that the owning PiG extension failed to load.
+The probe did not exercise dispatch intake, worker briefing or spawn, ship-ready landing, section 9 escalation wording, or wake-drain acknowledgement.
+The exact output and current SDK/API research are in the private task report; no managed background branch capability was proven.
+
 ### Run-tier source vocabulary and context-reset injection
 
 The run tier depends on three facts only the vendor can supply: the session-open source it reports, whether hook stdout reaches model context on a context-RESET open rather than only a cold one, and whether a worker the hook detaches survives the hook returning.

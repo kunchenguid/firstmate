@@ -254,6 +254,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/pig.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/polytoken.md",
       "audience": "agent-runtime"
     },
@@ -295,6 +299,10 @@
     },
     {
       "path": ".greptile/rules.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": ".pig/extensions/firstmate/README.md",
       "audience": "maintainer-architecture"
     },
     {
@@ -511,6 +519,10 @@
     },
     {
       "path": "docs/supervision-protocols/pi.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-protocols/pig.md",
       "audience": "agent-runtime"
     },
     {
