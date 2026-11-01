@@ -508,6 +508,60 @@ EOF
   pass "Pi health monitor tolerates a slow retire without a false failure alarm"
 }
 
+test_pi_health_monitor_respects_long_poll_grace() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-health-long-poll-root"
+  home="$TMP_ROOT/pi-health-long-poll-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
+  # A long-poll home may legitimately leave its beacon untouched past 300s, so
+  # the health check must derive its grace from the poll cadence.
+  printf 'FM_POLL=600\n' > "$home/config/watch.env"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/starts"
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_HOME/stop" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const realSetInterval=globalThis.setInterval;
+globalThis.setInterval=(callback,_ms,...args)=>realSetInterval(callback,20,...args);
+const messages=[];
+const handlers=new Map();
+const pi={on(event,handler){handlers.set(event,handler);},registerCommand(){},registerTool(){},sendUserMessage:async(message)=>{messages.push(message);}};
+const home=process.env.FM_HOME, state=`${home}/state`;
+const starts=()=>readFileSync(`${home}/starts`,"utf8").trim().split("\n").length;
+writeFileSync(`${state}/.lock`,`${process.pid}\n`);
+const mod=await import(pathToFileURL(process.env.PLUGIN).href);mod.default(pi);
+const age=(seconds)=>{const t=new Date(Date.now()-seconds*1000);utimesSync(`${state}/.last-watcher-beat`,t,t);};
+try {
+  await handlers.get("session_start")({});
+  for(let i=0;i<200 && !existsSync(`${state}/.last-watcher-beat`);i++) await new Promise(r=>setTimeout(r,10));
+  assert.equal(starts(),1,"first arm must start once");
+  // 400s is stale under a fixed 300s floor but healthy under 600s poll + 60s.
+  age(400);
+  await new Promise(r=>setTimeout(r,400));
+  assert.equal(starts(),1,"a 400s beacon under FM_POLL=600 must not be retired");
+  assert.equal(messages.length,0,`a long-poll grace must stay quiet: ${messages.join(" | ")}`);
+  age(700);
+  for(let i=0;i<300 && starts()<2;i++) await new Promise(r=>setTimeout(r,10));
+  assert.equal(starts(),2,"a 700s beacon past the derived grace must be retired once");
+} finally { writeFileSync(`${home}/stop`,"stop\n"); }
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi health monitor must derive its grace from the poll cadence: $out"
+  [ -z "$out" ] || fail "Pi health long-poll test printed output: $out"
+  pass "Pi health monitor derives its grace from the home's poll cadence"
+}
+
 test_pi_unready_arm_has_bounded_start_grace() {
   local repo home out status
   repo="$TMP_ROOT/pi-unready-grace-root"
@@ -5973,6 +6027,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_health_monitor_replaces_a_wedged_watcher
 test_pi_health_monitor_tolerates_a_slow_retire
+test_pi_health_monitor_respects_long_poll_grace
 test_pi_unready_arm_has_bounded_start_grace
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery

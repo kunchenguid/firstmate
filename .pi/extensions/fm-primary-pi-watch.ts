@@ -281,11 +281,15 @@ function watcherIdentityOwned(): boolean {
 }
 
 function watcherHealthy(): boolean {
+  // The grace default must follow the home's poll cadence, not a fixed 300s:
+  // a long-poll home (FM_POLL=600) legitimately leaves its beacon untouched
+  // for longer than 300s, and a fixed floor would retire that healthy watcher
+  // on every check. fm_poll_derived_grace is the one owner of that derivation.
   const result = spawnSync("bash", ["-c", `
     . "$1" || exit 1
     [ ! -f "$FM_CONFIG_OVERRIDE/watch.env" ] || . "$FM_CONFIG_OVERRIDE/watch.env"
     [ ! -f "$FM_CONFIG_OVERRIDE/x-mode.env" ] || . "$FM_CONFIG_OVERRIDE/x-mode.env"
-    fm_watcher_healthy "$2" "$3" "\${FM_GUARD_GRACE:-300}" "$FM_HOME"
+    fm_watcher_healthy "$2" "$3" "\${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}" "$FM_HOME"
   `, "fm-pi-watch-health", `${fmRoot}/bin/fm-wake-lib.sh`, state, `${fmRoot}/bin/fm-watch.sh`], {
     env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state, FM_CONFIG_OVERRIDE: config },
     encoding: "utf8",

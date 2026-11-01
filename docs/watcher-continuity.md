@@ -43,7 +43,7 @@ Each adapter:
 - Applies bounded exponential retry after an unexpected or failed close.
 
 Pi reports an existing cycle as `starting` while readiness is unconfirmed, `healthy` only when `bin/fm-wake-lib.sh` verifies its home, watcher path, and process identity against a fresh progress beacon while this session owns the lock, `retrying` while it retires and replaces an identity-proved watcher or owns a scheduled continuity retry, and `unhealthy` when it cannot confirm that this home owns the watcher, which withholds replacement.
-The extension independently checks an established arm every 30 seconds and replaces an identity-proved watcher whose progress beacon is stale, without waiting for another tool call.
+The extension independently checks an established arm every 30 seconds and replaces an identity-proved watcher whose progress beacon is past the shared guard grace, which derives from the home's poll cadence rather than a fixed 300-second floor (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)), without waiting for another tool call.
 An unproved retirement relationship leaves the existing processes and foreign lock metadata untouched.
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of reporting that arm's state.
 A failed follow-up never cancels continuity restoration.
@@ -451,7 +451,7 @@ Defaults and overrides, including Claude Stop's outer successor-status wait, are
 ### Pi and OpenCode watch extension
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and the explicit `starting`, `healthy`, `retrying`, and `unhealthy` state each owned call reports.
-It also proves an established arm reports healthy only on this home's verified identity and fresh beacon, that a stale or missing beacon on an identity-proved watcher is replaced exactly once, that unproved identities preserve both the child and foreign lock metadata, and that the 30-second health monitor replaces a wedged watcher with no further tool call.
+It also proves an established arm reports healthy only on this home's verified identity and fresh beacon, that a stale or missing beacon on an identity-proved watcher is replaced exactly once, that the grace judging staleness follows the home's poll cadence instead of a fixed 300-second floor, that unproved identities preserve both the child and foreign lock metadata, and that the 30-second health monitor replaces a wedged watcher with no further tool call.
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
 - Blocks prompt delivery to prove the successor launches first.
