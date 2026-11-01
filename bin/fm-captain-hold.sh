@@ -1356,14 +1356,14 @@ close_answered() {  # <task-id> <release-0-or-1>
     esac
   fi
   if [ -n "$recorded" ]; then
-    # The body may already carry this sentence inside another line - a retention
-    # composes its deliverable with the same historical-record prose - and the
-    # append dedupes whole lines only, so it would persist a second, standalone
-    # copy of the same sentence.
+    # The body may already carry this sentence as its own line, or as the
+    # semicolon suffix a retention composes onto its deliverable line. Only those
+    # exact shapes count: a sentence naming change /123 is not already recorded
+    # by one naming /1234, which the append would otherwise mistake for it.
     fm_backlog_row_title_body "$DATA" "$id" \
       || { report_retained_artifact_failure "$id" "the answer's completion note"; return 1; }
-    case "$FM_BACKLOG_ROW_BODY" in
-      *"$recorded"*) ;;
+    case $'\n'"$FM_BACKLOG_ROW_BODY"$'\n' in
+      *$'\n'"$recorded"$'\n'*|*'; '"$recorded"$'\n'*) ;;
       *)
         fm_backlog_body_append_line "$DATA" "$id" "$recorded" \
           || { report_retained_artifact_failure "$id" "the answer's completion note"; return 1; }
