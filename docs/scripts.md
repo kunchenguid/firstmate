@@ -70,6 +70,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | [`fm-approval-failover.sh`](../bin/fm-approval-failover.sh) | Save a captain-approved managed-approval fallback and recover a worker after observed defeated bypass |
 | `fm-git-strip-ai-trailers.sh` | Strip known AI commit trailers at commit-msg time and install that hook, plus any forge=external push guard, for a fleet launch |
 | `fm-git-push-guard.sh`  | Refuse a forge=external task's pushes to the shared origin and of task-prefixed branches, and write its per-task guard record ([design](external-review-forge.md)) |
+| `fm-local-llm.py`       | Draft commit messages and test log summaries with a configured local model            |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab, cmux workspace, and tern session titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer shapes, capability-aware screen classification, and verdicts |
