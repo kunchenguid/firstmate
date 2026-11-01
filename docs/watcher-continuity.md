@@ -42,10 +42,10 @@ Each adapter:
 - Preserves one child or scheduled retry at a time.
 - Applies bounded exponential retry after an unexpected or failed close.
 
-Pi reports an existing cycle healthy only when `bin/fm-wake-lib.sh` verifies its home, watcher path, process identity, and fresh progress beacon.
+Pi reports an existing cycle as `starting` while readiness is unconfirmed, `healthy` only when `bin/fm-wake-lib.sh` verifies its home, watcher path, and process identity against a fresh progress beacon while this session owns the lock, `retrying` while it retires and replaces an identity-proved watcher or owns a scheduled continuity retry, and `unhealthy` when it cannot confirm that this home owns the watcher, which withholds replacement.
 The extension independently checks an established arm every 30 seconds and replaces an identity-proved watcher whose progress beacon is stale, without waiting for another tool call.
-An arm awaiting readiness or a scheduled retry is reported separately; a stale or missing beacon is unhealthy, and an unproved retirement relationship leaves the existing processes untouched.
-Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of answering unchanged.
+An unproved retirement relationship leaves the existing processes and foreign lock metadata untouched.
+Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of reporting that arm's state.
 A failed follow-up never cancels continuity restoration.
 
 ### Pi session replacement
@@ -149,7 +149,7 @@ A failed confirmation is a restoration failure: the adapter classifies the error
 Pi retires the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while omp and OpenCode retire the current successor whenever the restoration's watcher pid is no longer alive.
 On Pi a generation mismatch means a newer pipeline superseded this delivery mid-restore, so the wake routes like a confirmed delivery, with no failure appendix, and nothing is retired.
 An already-acknowledged episode confirms as a no-op when the confirmation names its generation, because the drain acknowledged it after the successor started but before the confirmation ran.
-The Pi extension diagnostic log is opt-in and off by default: only a positive FM_WATCH_EXTENSION_LOG_KEEP_LINES value appends restore attempts, readiness timeouts, and confirmation targets and results to state/.watch-extension.log, a bounded record that never changes supervision behavior.
+The Pi extension diagnostic log is opt-in and off by default: only a positive FM_WATCH_EXTENSION_LOG_KEEP_LINES value appends restore attempts, readiness timeouts, confirmation targets and results, health-monitor states, and slow-retire handoffs to state/.watch-extension.log, a bounded record that never changes supervision behavior.
 docs/configuration.md owns the knob's default and accepted values.
 A failed confirmation is never swallowed.
 
@@ -450,7 +450,7 @@ Defaults and overrides, including Claude Stop's outer successor-status wait, are
 
 ### Pi and OpenCode watch extension
 
-`tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops.
+`tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and the explicit `starting`, `healthy`, `retrying`, and `unhealthy` state each owned call reports.
 It also proves an established arm reports healthy only on this home's verified identity and fresh beacon, that a stale or missing beacon on an identity-proved watcher is replaced exactly once, that unproved identities preserve both the child and foreign lock metadata, and that the 30-second health monitor replaces a wedged watcher with no further tool call.
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
