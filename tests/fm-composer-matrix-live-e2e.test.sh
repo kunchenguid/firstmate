@@ -21,6 +21,9 @@
 #     composer must never make an idle composer read `pending`, because that
 #     verdict is what skips a steer's doorbell fleet-wide.
 #
+# FM_COMPOSER_MATRIX_LIVE_HARNESSES="agy" narrows the harness list; optional
+# Claude-named and zellij checks run only in the default, unfiltered pass.
+# FM_COMPOSER_MATRIX_CWD="/tmp" overrides launch cwd for pre-trusted paths.
 # Run explicitly with FM_COMPOSER_MATRIX_LIVE=1. No prompt is ever submitted
 # to any harness, so no model tokens are spent. An absent harness is reported
 # explicitly and skipped; a run that verified nothing fails rather than
@@ -43,6 +46,7 @@ SOCKET="fm-cmx-live-$$"
 SESSION="cmxlive"
 ZELLIJ_SESSION="fm-cmx-live-zj-$$"
 CHECKED=0
+HARNESSES_CHECKED=0
 FAILED=0
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup; exit 1; }
@@ -52,7 +56,7 @@ note() { printf '# %s\n' "$1"; }
 cleanup() {
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
   [ -z "${ZJ_BG:-}" ] || kill "$ZJ_BG" 2>/dev/null || true
-  if command -v zellij >/dev/null 2>&1; then
+  if [ -z "${FM_COMPOSER_MATRIX_LIVE_HARNESSES:-}" ] && command -v zellij >/dev/null 2>&1; then
     zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
   fi
 }
@@ -79,9 +83,10 @@ harness_version() {  # <binary>
 
 check_harness_idle_empty() {  # <name> <launch-cmd...>
   local name=$1 win="hx-$1" verdict='' i=0 budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45} version dismissed=0 startup_screen
+  local launch_cwd="${FM_COMPOSER_MATRIX_CWD:-$ROOT}"
   shift
   version=$(harness_version "$1")
-  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" -- "$@" \
+  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$launch_cwd" -- "$@" \
     || fail "$name ($version): could not launch in the isolated tmux server"
   while [ "$i" -lt "$budget" ]; do
     verdict=$(fm_tmux_composer_state "$SESSION:$win")
@@ -114,8 +119,34 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
       "$name" "$version" "${verdict:-unreadable}" >&2
   else
     CHECKED=$((CHECKED + 1))
+    HARNESSES_CHECKED=$((HARNESSES_CHECKED + 1))
     pass "$name ($version): real idle composer classifies empty"
     check_harness_idle_cursorless "$name" "$version" "$SESSION:$win"
+    if [ "$name" = agy ]; then
+      # No Enter: prove a real unsent draft is protected without spending tokens.
+      tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l 'composer-regression-draft'
+      verdict=''
+      for _ in $(seq 1 20); do
+        verdict=$(fm_tmux_composer_state "$SESSION:$win")
+        [ "$verdict" = pending ] && break
+        sleep 0.1
+      done
+      if [ "$verdict" = pending ]; then
+        local draft_screen draft_identity draft_cursorless
+        draft_screen=$(fm_tmux_composer_capture "$SESSION:$win")
+        draft_identity=$(fm_tmux_composer_identity "$SESSION:$win")
+        draft_cursorless=$(fm_composer_classify_screen $'styled=1\ncursor=0\nidentity=1\nrows=0' "$draft_screen" '' "$draft_identity")
+        if [ "$draft_cursorless" = pending ]; then
+          pass "agy ($version): real unsent draft remains pending on tmux and cursorless profiles"
+        else
+          FAILED=1
+          printf 'not ok - agy (%s): cursorless draft read %s, expected pending\n' "$version" "$draft_cursorless" >&2
+        fi
+      else
+        FAILED=1
+        printf 'not ok - agy (%s): unsent draft read %s, expected pending\n' "$version" "$verdict" >&2
+      fi
+    fi
   fi
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
 }
@@ -168,9 +199,14 @@ check_harness_idle_cursorless() {  # <name> <version> <target>
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --
-for h in claude codex opencode pi grok kimi muse; do
+for h in ${FM_COMPOSER_MATRIX_LIVE_HARNESSES:-claude codex opencode pi grok kimi muse agy}; do
+  case "$h" in claude|codex|opencode|pi|grok|kimi|muse|agy) ;; *) fail "unknown selected harness: $h" ;; esac
   if command -v "$h" >/dev/null 2>&1; then
-    check_harness_idle_empty "$h" "$h"
+    if [ "$h" = agy ]; then
+      CMX_REQUIRE_CURSORLESS_EMPTY=1 check_harness_idle_empty "$h" "$h"
+    else
+      check_harness_idle_empty "$h" "$h"
+    fi
   else
     note "harness absent, not verified here: $h"
   fi
@@ -178,10 +214,10 @@ done
 # A named claude session (`claude -n <name>`) right-aligns that name in the
 # rule above its composer; the cursorless read must still prove it empty, or
 # away-mode delivery to a named primary on a cursorless backend defers forever.
-if command -v claude >/dev/null 2>&1; then
+if [ -z "${FM_COMPOSER_MATRIX_LIVE_HARNESSES:-}" ] && command -v claude >/dev/null 2>&1; then
   CMX_REQUIRE_CURSORLESS_EMPTY=1 check_harness_idle_empty claude-named claude -n fm-cmx-named
 else
-  note "harness absent, not verified here: claude-named"
+  note "harness absent or not selected, not verified here: claude-named"
 fi
 
 # --- 2. The strict blank-row posture, live ----------------------------------
@@ -207,7 +243,7 @@ fi
 tmux -L "$SOCKET" kill-window -t "$SESSION:strictblank" 2>/dev/null || true
 
 # --- 3. zellij: real classifier + the false-positive regression -------------
-if command -v zellij >/dev/null 2>&1; then
+if [ -z "${FM_COMPOSER_MATRIX_LIVE_HARNESSES:-}" ] && command -v zellij >/dev/null 2>&1; then
   zj_version=$(zellij --version 2>/dev/null | head -1)
   [ -n "$zj_version" ] || zj_version='version-unknown'
   export FM_ROOT_OVERRIDE="$ROOT"
@@ -270,10 +306,10 @@ if command -v zellij >/dev/null 2>&1; then
   ZJ_BG=
   zellij delete-session --force "$ZELLIJ_SESSION" >/dev/null 2>&1 || true
 else
-  note "harness absent, not verified here: zellij (false-positive regression not exercised)"
+  note "harness absent or not selected, not verified here: zellij (false-positive regression not exercised)"
 fi
 
 # --- refuse a vacuous pass ---------------------------------------------------
 [ "$FAILED" -eq 0 ] || fail "live composer-matrix guard observed failures above"
-[ "$CHECKED" -gt 0 ] || fail "live composer-matrix guard verified nothing (no harness installed?); refusing a vacuous pass"
+[ "$HARNESSES_CHECKED" -gt 0 ] || fail "live composer-matrix guard verified no harness (none installed?); refusing a vacuous pass"
 pass "live composer-matrix guard verified $CHECKED live surface(s)"

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # fm-send typed-plane submit-confirm budget for agy targets.
 #
-# A typed send to an explicit tmux agy endpoint is acknowledged only by the
-# submit core's idle-to-busy transition poll: agy's bare `>` composer verdict
-# is `unknown` (dead-shell rule), so the poll watching the pane's verified
-# `esc to cancel` busy footer is the only proof a landed Enter can get. agy
+# This fake tmux renders an unframed agy `>` composer, which remains
+# `unknown` (dead-shell rule), unlike an identity-proven separator frame.
+# Its typed send needs the submit core's idle-to-busy transition poll: the
+# verified `esc to cancel` footer is its only proof of a landed Enter. agy
 # renders that footer ~1.5s after Enter for a short steer and ~4s for a
 # multi-line brief (live-measured on agy 1.2.1), while the shared default
 # confirm budget is 3 retries x 0.4s - so fm-send used to exit 1 "not

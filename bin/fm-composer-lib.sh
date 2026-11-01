@@ -2438,6 +2438,29 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
   printf 'empty'
 }
 
+# AGY shares the separator frame, but its first row must carry its `>` prompt.
+# Strip ANSI, not ghost styling: dim text in this identity-proven region can
+# be a draft and must not authorize injection. All continuation rows count.
+_fm_composer_classify_agy_rows() {  # <screen>
+  local screen=$1 row content
+  row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+  content=$(_fm_composer_screen_row "$row" "$screen" | fm_composer_strip_ansi)
+  fm_composer_normalize_trim_var content
+  case "$content" in
+    '>') content='' ;;
+    '>'[[:space:]]*) content=${content#>} ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  while :; do
+    fm_composer_normalize_trim_var content
+    [ -z "$content" ] || { printf 'pending'; return 0; }
+    row=$((row + 1))
+    [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ] || break
+    content=$(_fm_composer_screen_row "$row" "$screen" | fm_composer_strip_ansi)
+  done
+  printf 'empty'
+}
+
 _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 agent
   if [ "$has_identity" != 1 ]; then
@@ -2492,14 +2515,18 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   # polytoken keeps the strict unknown - its composer really is empty
   # mid-turn (Enter queues, verified live), but the unknown keeps the
   # busy-queue conversion honest through the submit cores.
-  if { [ "$agent" != pi ] && [ "$agent" != polytoken ]; } \
+  if { [ "$agent" != pi ] && [ "$agent" != polytoken ] && [ "$agent" != agy ]; } \
     || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
     printf 'unknown'
     return 0
   fi
-  state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
-  if [ "$state" = pending ]; then
-    printf 'pending'
+  if [ "$agent" = agy ]; then
+    state=$(_fm_composer_classify_agy_rows "$screen")
+  else
+    state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
+  fi
+  if [ "$state" != empty ]; then
+    printf '%s' "$state"
     return 0
   fi
   case "$agent_status" in
