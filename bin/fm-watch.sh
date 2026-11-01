@@ -3842,6 +3842,21 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+# Lifecycle watch-tick and heartbeat hooks (docs/configuration.md "Lifecycle
+# hooks"). Absent hooks/<event>.d each costs one directory test per cycle.
+# Present, the hooks run detached with no tie to this watcher's output, so a
+# slow hook never delays a poll or holds a wake open; each event has at most
+# one run in flight, and a run still going when the next is due is skipped.
+# Their output and failures go to state/.fm-hooks.log.
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
+WATCH_TICK_CYCLE=0
+WATCH_TICK_HOOK_PID=
+HEARTBEAT_HOOK_PID=
+watch_hook_idle() {  # <pid-or-empty>
+  [ -z "$1" ] || ! kill -0 "$1" 2>/dev/null
+}
+
 while :; do
   # Home-gone exit: a deleted home, state directory, or code root means this
   # watcher's world is gone (a torn-down temporary home or a discarded
@@ -3892,6 +3907,14 @@ while :; do
   # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups"):
   # display-only tags and agents view, never a wake. Off costs one file test.
   [ ! -e "$CONFIG/herdr-project-groups" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync || true
+  if fm_hooks_present watch-tick; then
+    WATCH_TICK_CYCLE=$((WATCH_TICK_CYCLE + 1))
+    if watch_hook_idle "$WATCH_TICK_HOOK_PID"; then
+      fm_hooks_emit watch-tick home="$FM_HOME" cycle:="$WATCH_TICK_CYCLE" watcher_pid:="$WATCHER_PID" \
+        </dev/null >>"$STATE/.fm-hooks.log" 2>&1 &
+      WATCH_TICK_HOOK_PID=$!
+    fi
+  fi
   # Opt-in Rex attention marks, validation progress, and tint (docs/rex-backend.md
   # "Attention marks"): display and desktop notification only, never a wake.
   # Off (no config file and no cached record) costs two file tests and a glob.
@@ -4496,6 +4519,10 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    if fm_hooks_present heartbeat && watch_hook_idle "$HEARTBEAT_HOOK_PID"; then
+      fm_hooks_emit heartbeat home="$FM_HOME" </dev/null >>"$STATE/.fm-hooks.log" 2>&1 &
+      HEARTBEAT_HOOK_PID=$!
+    fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,

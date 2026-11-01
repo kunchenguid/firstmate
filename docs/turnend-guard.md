@@ -56,6 +56,7 @@ The guard remains a backstop.
 ## Guard predicates
 
 The turn-end guard checks primary scope first, then supervision need, then watcher health.
+Between primary scope and supervision need it runs any installed `turn-end` lifecycle hooks, which can block one stop through the same exit-2 path; [`configuration.md`](configuration.md#lifecycle-hooks-hooks) owns that contract.
 The mid-turn pull warning in `bin/fm-guard.sh` judges watcher health differently, as described under [pull-warning verdict by supervision model](#pull-warning-verdict-by-supervision-model).
 
 ### Primary scope

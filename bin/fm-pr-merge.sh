@@ -97,6 +97,10 @@
 # setting, which the merge API applies, and imposing squash there would override
 # that convention rather than mirror the GitHub default.
 #
+# Installed pre-merge lifecycle hooks can refuse a merge (exit 3) before
+# anything is recorded; post-merge hooks run after a confirmed merge and never
+# change its outcome (docs/configuration.md "Lifecycle hooks").
+#
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
@@ -563,6 +567,21 @@ if [ "$PROVIDER" = forgejo ]; then
     echo "error: merging a Forgejo pull request at $PR_HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
     exit 1
   }
+fi
+
+# Lifecycle pre-merge hooks (docs/configuration.md "Lifecycle hooks") run once
+# the request is validated and before anything is recorded or sent to the
+# forge, so a refusal leaves nothing merged or recorded. Absent
+# hooks/pre-merge.d this is one directory test.
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
+if fm_hooks_present pre-merge; then
+  pre_merge_rc=0
+  fm_hooks_emit pre-merge task_id="$ID" pr_url="$URL" provider="$PROVIDER" >/dev/null || pre_merge_rc=$?
+  if [ "$pre_merge_rc" -ne 0 ]; then
+    echo "error: PR merge refused by a pre-merge hook (reason above); nothing was merged or recorded" >&2
+    exit 3
+  fi
 fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
@@ -1865,3 +1884,9 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
+# Lifecycle post-merge hooks (docs/configuration.md "Lifecycle hooks"): only a
+# merge the forge confirmed reaches here, and a hook failure never changes the
+# reported outcome. sha is the head commit this script verified and merged,
+# empty when the forge path does not bind one.
+fm_hooks_emit post-merge task_id="$ID" pr_url="$URL" sha="${FM_PR_MERGE_HEAD:-}" \
+  provider="$PROVIDER" >/dev/null || true

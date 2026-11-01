@@ -194,6 +194,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-hooks-lib.sh" "$dir/bin/fm-hooks-lib.sh"
+  cp "$ROOT/bin/fm-hooks.sh" "$dir/bin/fm-hooks.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
@@ -300,6 +302,38 @@ record_watcher_lock() {
   printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
   printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+}
+
+# Installed turn-end lifecycle hooks (docs/configuration.md "Lifecycle hooks")
+# block a stop once with their reason and never on a stop that already follows
+# a stop-hook continuation; with none installed the guard is unchanged.
+test_hook_turn_end_lifecycle_hook_blocks_once() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-lifecycle")
+  mkdir -p "$dir/hooks/turn-end.d"
+  printf '#!/bin/sh\ncat > "%s/payload.json"\necho "deliver the owed board reply before ending the turn" >&2\nexit 1\n' \
+    "$dir" > "$dir/hooks/turn-end.d/10-owed"
+  chmod +x "$dir/hooks/turn-end.d/10-owed"
+  out=$(printf '{"session_id":"sess-1","transcript_path":"/tmp/t.jsonl","stop_hook_active":false}' |
+    PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 2 "$status" "a refusing turn-end hook must block the stop"
+  assert_contains "$out" 'TURN END HELD BY A LIFECYCLE HOOK' "the block does not name the hook path"
+  assert_contains "$out" 'deliver the owed board reply before ending the turn' "the hook's reason is missing"
+  jq -e '.session == "sess-1" and .transcript_path == "/tmp/t.jsonl"' "$dir/payload.json" >/dev/null \
+    || fail "turn-end payload is wrong: $(cat "$dir/payload.json")"
+  rm -f "$dir/payload.json"
+  out=$(run_hook "$dir" true); status=$?
+  expect_code 0 "$status" "a stop that follows a continuation must not be blocked again"
+  [ -z "$out" ] || fail "the continuation stop produced output: $out"
+  out=$(printf '{"stop_hook_active":true}' | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$dir" \
+    bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1); status=$?
+  expect_code 0 "$status" "--claude: a stop that follows a continuation must not be blocked by hooks"
+  assert_absent "$dir/payload.json" "turn-end hooks ran on a continuation stop"
+  printf '#!/bin/sh\nexit 0\n' > "$dir/hooks/turn-end.d/10-owed"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "a passing turn-end hook must let the turn end"
+  [ -z "$out" ] || fail "a passing turn-end hook produced output: $out"
+  pass "fm-turnend-guard: a refusing turn-end hook blocks the stop once with its reason"
 }
 
 test_hook_silent_when_no_work_in_flight() {
@@ -895,7 +929,7 @@ test_tracked_claude_entries_inert_under_grok() {
   dir="$TMP_ROOT/claude-entries-grok-inert"
   mkdir -p "$dir/bin"
   for script in fm-turnend-guard.sh fm-claude-stop-autoarm.sh fm-sessionstart-run.sh \
-    fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-subagent-pretool-check.sh fm-host-mirror.sh; do
+    fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-subagent-pretool-check.sh fm-host-mirror.sh fm-dialog-hooks.sh; do
     printf '#!/usr/bin/env bash\nprintf ran >> %q\n' "$dir/invoked" > "$dir/bin/$script"
     chmod +x "$dir/bin/$script"
   done
@@ -936,7 +970,7 @@ test_tracked_claude_entries_inert_under_grok() {
       || fail "tracked entry for $target ran under a legacy GROK_AGENT environment"
   done < <(jq -r '.hooks[][].hooks[].command' "$ROOT/.claude/settings.json")
 
-  [ "$guarded" -eq 7 ] || fail "expected 7 grok-guarded tracked entries, saw $guarded"
+  [ "$guarded" -eq 9 ] || fail "expected 9 grok-guarded tracked entries, saw $guarded"
   [ "$unguarded" -eq 1 ] || fail "expected 1 documented unguarded tracked entry, saw $unguarded"
   pass "tracked .claude/settings.json entries: $guarded inert under grok, the documented subagent exception still armed, all live under Claude"
 }
@@ -1393,6 +1427,8 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-hooks-lib.sh" "$dir/bin/fm-hooks-lib.sh"
+  cp "$ROOT/bin/fm-hooks.sh" "$dir/bin/fm-hooks.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
@@ -2566,6 +2602,7 @@ test_predicate_unregistered_check_needs_nothing
 test_predicate_task_pr_poll_is_not_a_custom_check
 test_predicate_relay_shim_is_not_a_custom_check
 test_hook_silent_when_no_work_in_flight
+test_hook_turn_end_lifecycle_hook_blocks_once
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon

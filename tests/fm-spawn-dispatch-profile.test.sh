@@ -2710,10 +2710,64 @@ test_codex_permission_does_not_change_other_harnesses() {
   pass "Codex restricted mode leaves other harness launch flags unchanged"
 }
 
+# Lifecycle pre-spawn and post-spawn hooks (docs/configuration.md "Lifecycle
+# hooks"): a refusal stops the spawn before anything exists, printed output
+# never changes the launch, and post-spawn sees the verified start.
+write_spawn_hook() {  # <home> <event> <name> <body>
+  mkdir -p "$1/hooks/$2.d"
+  printf '#!/bin/sh\n%s\n' "$4" > "$1/hooks/$2.d/$3"
+  chmod +x "$1/hooks/$2.d/$3"
+}
+
+test_pre_spawn_hooks_refuse_and_post_spawn_sees_the_launch() {
+  local rec id out status
+  id="hook-refuse"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  write_spawn_hook "$HOME_DIR" pre-spawn 10-record "cat > '$CASE_DIR/payload.json'"
+  write_spawn_hook "$HOME_DIR" pre-spawn 20-policy "echo 'policy: worker cap 2/2 reached' >&2; exit 3"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 3 "$status" "refusing pre-spawn hook: $out"
+  assert_contains "$out" 'policy: worker cap 2/2 reached' "the hook's reason is shown"
+  assert_contains "$out" "a pre-spawn hook refused $id" "the refusal names the task"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused spawn launched an agent: $(cat "$LAUNCH_LOG")"
+  jq -e --arg id "$id" --arg brief "$HOME_DIR/data/$id/brief.md" --arg proj "$PROJ_DIR" '
+    .task_id == $id and .kind == "ship" and .harness == "claude" and .mode == "no-mistakes"
+    and .yolo == "off" and .brief_file == $brief and .project_dir == $proj
+  ' "$CASE_DIR/payload.json" >/dev/null || fail "pre-spawn payload is wrong: $(cat "$CASE_DIR/payload.json")"
+  pass "a refusing pre-spawn hook stops the spawn with its reason before any record or launch"
+
+  id="hook-accept"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  write_spawn_hook "$HOME_DIR" pre-spawn 10-route 'echo "{\"harness\":\"codex\"}"'
+  write_spawn_hook "$HOME_DIR" post-spawn 10-record "cat > '$CASE_DIR/post.json'"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 $? "accepting pre-spawn hook: $out"
+  assert_contains "$(cat "$LAUNCH_LOG")" "claude " "pre-spawn hook output changed the harness"
+  jq -e --arg id "$id" --arg wt "$WT_DIR" '
+    .task_id == $id and .kind == "ship" and .harness == "claude" and (.endpoint | length) > 0
+    and ((.worktree | rtrimstr("/")) as $w | ($w == $wt or ($w | endswith("/wt"))))
+  ' "$CASE_DIR/post.json" >/dev/null || fail "post-spawn payload is wrong: $(cat "$CASE_DIR/post.json" 2>/dev/null)"
+  pass "pre-spawn output never changes the launch, and post-spawn sees the verified start"
+
+  id="hook-none"
+  rec=$(make_spawn_case "$id" claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/hooks/pre-spawn.d"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 $? "empty pre-spawn folder: $out"
+  assert_not_contains "$out" 'pre-spawn hook' "an empty hook folder changed the spawn output"
+  pass "an empty pre-spawn folder leaves the spawn unchanged"
+}
+
 test_codex_permission_modes
 test_codex_permission_invalid_refuses_before_mutation
 test_codex_permission_does_not_change_other_harnesses
 test_launch_preserves_inherited_git_config
+test_pre_spawn_hooks_refuse_and_post_spawn_sees_the_launch
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell

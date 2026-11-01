@@ -202,6 +202,29 @@ fi
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || allow_exit
 
+# --- installed turn-end lifecycle hooks ----------------------------------------
+# docs/configuration.md "Lifecycle hooks". Absent hooks/turn-end.d this is one
+# directory test. A refusing hook blocks this stop once, with the hook's reason,
+# through the same exit-2 path every harness adapter already renders; a stop
+# that already follows a stop-hook continuation (stopHookActive or
+# stop_hook_active true, on every harness including --claude) never runs them,
+# so hooks can never hold a turn open twice. The supervision predicate below
+# runs on the next stop exactly as before.
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
+if [ "$STOP_HOOK_ACTIVE" != "true" ] && fm_hooks_present turn-end; then
+  TURN_END_TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // .transcriptPath // ""' 2>/dev/null || true)
+  TURN_END_SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // .sessionId // ""' 2>/dev/null || true)
+  turn_end_rc=0
+  TURN_END_REASON=$(fm_hooks_emit turn-end session="$TURN_END_SESSION" \
+    transcript_path="$TURN_END_TRANSCRIPT" home="$FM_HOME" 2>&1 >/dev/null) || turn_end_rc=$?
+  if [ "$turn_end_rc" -ne 0 ]; then
+    [ -n "$TURN_END_REASON" ] || TURN_END_REASON="turn-end hooks could not run (exit $turn_end_rc)"
+    printf 'TURN END HELD BY A LIFECYCLE HOOK - handle this before ending the turn:\n%s\n' "$TURN_END_REASON" >&2
+    exit 2
+  fi
+fi
+
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"

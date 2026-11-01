@@ -202,6 +202,8 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# Installed teardown lifecycle hooks then run, for forced teardowns too, and
+# never change the outcome (docs/configuration.md "Lifecycle hooks").
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -411,6 +413,8 @@ unset _teardown_source
 # Import those graphs once rather than initializing and analyzing them twice.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -4089,6 +4093,14 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
 teardown_retire_status "$STATE" "$ID" || exit 1
+# Lifecycle teardown hooks (docs/configuration.md "Lifecycle hooks"), past every
+# landed-work check and before the task record goes; forced=true marks the
+# authorized discard path. Absent hooks/teardown.d this is one directory test,
+# and a hook failure never changes the teardown.
+TEARDOWN_HOOK_FORCED=false
+[ "$FORCE" != "--force" ] || TEARDOWN_HOOK_FORCED=true
+fm_hooks_emit teardown task_id="$ID" kind="$KIND" worktree="$WT" endpoint="${T:-}" \
+  forced:="$TEARDOWN_HOOK_FORCED" >/dev/null || true
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
