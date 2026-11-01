@@ -1,0 +1,4 @@
+command -v rex: absent from PATH.
+Workspace-local acquisition attempted via https://www.superlogical.com/rex and https://www.superlogical.com/rex/docs/installation.
+Official site says: Log in with Discord to download; Log in with Discord to see the install commands.
+No authentication or system installation attempted. Provide a Rex CLI/server bundle on PATH or a repository-local binary to run the private-server regression.

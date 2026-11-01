@@ -1,0 +1,3 @@
+{'mode': 'silent', 'exit': 0, 'terminal_output': '\x1b]7501;?\x1b\\NO_INPUT_LEAK\r\nPROBE_ENDED\r\n', 'input_flags_restored': True, 'watchers_left': []}
+{'mode': 'answer', 'exit': 0, 'terminal_output': '\x1b]7501;?\x1b\\NO_INPUT_LEAK\r\n\x1b]7501;state=idle:app=firstmate-opencode:title=Zm0tcHR5\x1b\\PROBE_ENDED\r\n', 'input_flags_restored': True, 'watchers_left': []}
+{'mode': 'interrupt', 'exit': 0, 'terminal_output': 'ARM_PID=7136\r\n\x1b]7501;?\x1b\\/bin/bash: line 1:  7136 Terminated: 15          {run-worktree}/bin/fm-osc7501.sh arm --task pty --harness opencode --backend tmux --kind ship --state {run-worktree}/.live-test/pty-interrupt/state --config {run-worktree}/.live-test/pty-interrupt/config\r\nPROBE_ENDED\r\n', 'input_flags_restored': True, 'watchers_left': []}

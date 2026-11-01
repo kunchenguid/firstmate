@@ -1,0 +1,22 @@
+1..20
+ok - capability query: silent terminal gets one probe, no watcher
+ok - capability query: answering terminal arms watcher emitting working
+ok - status transitions: blocked->done, final record survives parent death
+ok - cleanup: worker exit emits a final idle, no stale working ghost
+ok - native gate: claude >= 2.1.295 emits no probe and arms no watcher
+ok - native gate: claude below the floor uses the generic reporter
+ok - native gate: an in-place harness upgrade is re-probed at the next launch
+ok - no corruption: capture holds only whole OSC 7501 records, no stray escapes
+ok - config gate: osc7501-status=off disables arm entirely
+ok - known-aware: HC_TERMINAL_ID arms with no capability probe
+ok - concurrent panes: each controlling terminal keeps its own reporter
+ok - lifecycle: disarm after the agent exits retires the reporter
+ok - lifecycle: relaunch retires the previous reporter before native/off gates
+ok - activity: a cursor worker reports working and idle from its transcript
+ok - activity: a grok worker reports working from its rendered pane
+ok - mapping: working while a turn runs, done after it, done as the final record
+ok - mapping: a paused worker reports working or idle from its busy state
+ok - lifecycle: relaunch confirms the old reporter is gone before arming
+ok - query safety: an interrupted probe restores the terminal mode
+ok - known-aware: an hc terminal reports despite inherited HERDR markers
+FM_TEST_COMPLETE

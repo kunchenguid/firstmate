@@ -1,0 +1,196 @@
+t1m: expected working  
+t1n: expected working  
+t1n: expected idle  
+t1n: expected blocked question 
+t1n: expected blocked auth 
+t1n: expected blocked permission 
+t1n: expected error  
+t1n: expected done  
+t1n: expected working  
+t1n: expected done  
+t1n: expected idle  
+t1n: expected working  
+rearm replaces and retires watcher 
+t1n: expected idle  
+disarm removes watcher 
+t1p: expected done  
+t1p: expected done  
+gate off 
+gate typo 
+visible config warning warning: osc7501: {run-worktree}/.live-test/typo/config/osc7501-status: unknown value; using off (on or off)
+WORKER_READY
+
+gate native 
+gate legacy 
+gate headless 
+tmux socket {run-worktree}/.t/tmux-501/fm-lab
+busy capture before reporter 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+worker diagnostic working on it
+  Ctrl+c:cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+busy grok-regexWORKER_READY
+
+t1w: expected working  
+real tmux busy viewport working on it
+  Ctrl+c:cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+t1w: expected done  
+real tmux idle viewport ready
+>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+RESULT all hc live assertions passed
+private tmux cleanup 
+isolated core stop 
