@@ -548,12 +548,17 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 // content and scope). Every turn end refreshes it into a persistent footer
 // status, so a live captain hold stays on screen until it is answered and a
 // zero shows as a zero. It never delays or changes the turn-end guard: a
-// failure only leaves the previous line in place.
+// failure only leaves the previous line in place. Only the newest read may set
+// the line: a slower, older read finishing later would put back a count the
+// newer read already replaced.
 type StatusContext = { ui?: { setStatus?: (key: string, text: string | undefined) => void } } | undefined;
+
+let waitingOnYouGeneration = 0;
 
 function refreshWaitingOnYou(ctx: StatusContext): void {
   const setStatus = ctx?.ui?.setStatus;
   if (typeof setStatus !== "function") return;
+  const generation = ++waitingOnYouGeneration;
   const invocation = firstmateShellInvocation(`${root}/bin/fm-waiting-on-you.sh`, []);
   let child: ChildProcess;
   try {
@@ -569,7 +574,7 @@ function refreshWaitingOnYou(ctx: StatusContext): void {
   child.on("error", () => clearTimeout(timer));
   child.on("close", (code) => {
     clearTimeout(timer);
-    if (code !== 0) return;
+    if (code !== 0 || generation !== waitingOnYouGeneration) return;
     const line = stdout.trim().split(/\r?\n/)[0] ?? "";
     try {
       setStatus.call(ctx?.ui, "fm-waiting-on-you", line || undefined);
