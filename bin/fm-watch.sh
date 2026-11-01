@@ -3928,7 +3928,8 @@ while :; do
   # the end of the cycle. With many open keys one is due on almost every poll,
   # so waking here ended every cycle before the process-event reconcile that
   # keeps runner owner leases fresh, the checks, and the signal and pane scans.
-  # Any wake later in this cycle carries the queued row to the same drain.
+  # Any wake later in this cycle leads with the reminder line (wake()), so that
+  # close stays main's and main's drain presents the queued row.
   open_decision_reminder_tick || {
     echo 'watcher: open-decision reminder check failed' >&2
     exit 1
