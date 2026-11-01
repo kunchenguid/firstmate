@@ -639,16 +639,20 @@ SH
   pass "a raw launch ending in a separator or a comment still runs the worker, its disarm, and config warnings"
 }
 
-# A raw launch command names no established agent: an absolute Claude Code
-# 2.1.316 (above the 2.1.295 native floor), the same Claude behind an `env`
-# wrapper (harness word env), and one behind a prefix assignment must each run
-# with no firstmate reporter beside it, even while PATH holds Claude 1.0.0
-# below the floor. The stand-in agent reports whether a reporter pidfile
-# <state>/.osc7501watch-* exists while it runs; a planted pidfile proves that
-# check observes the launch's own state directory.
-test_raw_launch_arms_no_reporter() {
-  local rec id out status launch raw n=0 oldbin newbin result
-  for raw in new-claude 'env claude --flag' 'FOO=1 claude --flag'; do
+# A raw launch's reporter follows the agent it establishes, while PATH holds
+# Claude 1.0.0 below the 2.1.295 native floor. A simple command naming a
+# harness by path is probed as itself: an absolute Claude 1.0.0 keeps its
+# reporter and an absolute Claude Code 2.1.316 reports natively, so it gets
+# none. A wrapper (`env claude`, harness word env), a prefix assignment, and a
+# compound command hide what runs, so they get no reporter either. The
+# stand-in agent reports whether a reporter pidfile <state>/.osc7501watch-*
+# exists while it runs.
+test_raw_launch_reporter_follows_established_agent() {
+  local rec id out status launch raw want n=0 oldbin newbin result
+  for raw in 'old|REPORTER-ARMED' 'new|NO-REPORTER' 'env claude --flag|NO-REPORTER' \
+    'FOO=1 claude --flag|NO-REPORTER' 'compound|NO-REPORTER'; do
+    want=${raw#*|}
+    raw=${raw%|*}
     n=$((n + 1))
     id=raw-native-$n-z15
     rec=$(make_spawn_case "raw-native-$n" claude "$id")
@@ -663,7 +667,11 @@ if ls "${FM_TASK_INBOX%/*}"/.osc7501watch-* >/dev/null 2>&1; then echo REPORTER-
 SH
     sed 's/1\.0\.0/2.1.316/' "$oldbin/claude" > "$newbin/claude"
     chmod +x "$oldbin/claude" "$newbin/claude"
-    [ "$raw" != new-claude ] || raw="$newbin/claude --flag"
+    case "$raw" in
+      old) raw="$oldbin/claude --flag" ;;
+      new) raw="$newbin/claude --flag" ;;
+      compound) raw="$oldbin/claude --flag && true" ;;
+    esac
     out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" "$raw")
     status=$?
     expect_code 0 "$status" "raw launch '$raw' should spawn: $out"
@@ -673,13 +681,9 @@ SH
       PATH="$oldbin:$PATH" FM_OSC7501_TTY="$CASE_DIR/tty" /bin/sh -c "$launch" 2>&1)
     status=$?
     expect_code 0 "$status" "staged launch for raw '$raw' failed: $result"
-    assert_contains "$result" NO-REPORTER "raw '$raw' armed a reporter: $result"
-    : > "$HOME_DIR/state/.osc7501watch-control"
-    result=$(cd "$CASE_DIR" && isolated_pane_env REX_BLOCK=b1 \
-      PATH="$oldbin:$PATH" FM_OSC7501_TTY="$CASE_DIR/tty" /bin/sh -c "$launch" 2>&1)
-    assert_contains "$result" REPORTER-ARMED "the stand-in cannot observe a reporter pidfile for raw '$raw': $result"
+    assert_contains "$result" "$want" "raw '$raw' reporter state: $result"
   done
-  pass "a raw launch command, native or wrapped, runs with no firstmate reporter"
+  pass "a raw launch keeps a reporter only for an established agent below its native floor"
 }
 
 test_chained_raw_launch_strips_ai_trailer_in_every_step() {
@@ -2809,7 +2813,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_raw_launch_trailing_separator_or_comment_keeps_disarm
-test_raw_launch_arms_no_reporter
+test_raw_launch_reporter_follows_established_agent
 test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort

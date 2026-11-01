@@ -7415,10 +7415,11 @@ fi
 # launch before the agent command, so the reporter's parent is the pane shell
 # that runs the agent. The reporter header owns eligibility and native-version
 # gates; pass the executable the launch runs so the native probe reads its
-# version. A raw launch command names no established agent - wrappers, quoting
-# and compound commands hide what actually runs - so it passes none and gets
-# no reporter. Its stderr stays on
-# the pane so a config warning reaches the user. The `disarm` after the agent
+# version. A raw launch command establishes it only as a simple command whose
+# first word is a plain path to a harness with a launch template; a wrapper,
+# assignment prefix, quoted or expanded path, compound command, or unknown
+# adapter hides what actually runs, so it passes none and gets no reporter.
+# Its stderr stays on the pane so a config warning reaches the user. The `disarm` after the agent
 # command retires the reporter when the agent exits, because the pane shell
 # that sourced the launch outlives it. Newlines, not `;`, delimit the agent
 # command, so a raw launch ending in a separator or a comment stays intact.
@@ -7428,6 +7429,17 @@ if [ "$RAW_LAUNCH" = 0 ]; then
     pi | pi-signed) OSC7501_AGENT_BIN=${PI_BIN:-} ;;
     muse) OSC7501_AGENT_BIN=${MUSE_BIN:-} ;;
     *) OSC7501_AGENT_BIN=$HARNESS ;;
+  esac
+else
+  read -r osc7501_word _ <<<"$RAW_COMMAND"
+  case "$RAW_COMMAND" in
+    *[\;\&\|]* | *$'\n'*) ;;
+    *)
+      case "$osc7501_word" in
+        '' | *[!A-Za-z0-9._/+-]*) ;;
+        *) (launch_template "$HARNESS" "$KIND") >/dev/null 2>&1 && OSC7501_AGENT_BIN=$osc7501_word ;;
+      esac
+      ;;
   esac
 fi
 LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") arm --task $(shell_quote "$ID") --harness $(shell_quote "$HARNESS") --backend $(shell_quote "$BACKEND") --kind $(shell_quote "$KIND") --state $(shell_quote "$STATE_REAL") --config $(shell_quote "$CONFIG") --target $(shell_quote "$T") --agent-bin $(shell_quote "$OSC7501_AGENT_BIN") >/dev/null || true
