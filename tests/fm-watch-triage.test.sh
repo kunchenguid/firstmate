@@ -794,7 +794,7 @@ printf 'run other-branch\n'
 SH
   cat > "$fakebin/tail" <<'SH'
 #!/usr/bin/env bash
-[ ! -e "$FM_STATUS_COUNT_SENTINEL" ] || printf '%s\n' tail >> "$FM_STATUS_EXTERNAL_CALLS"
+if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then printf '%s\n' tail >> "$FM_STATUS_EXTERNAL_CALLS"; exit 97; fi
 exec "$FM_REAL_TAIL" "$@"
 SH
   for command in stat wc grep sed date git; do
@@ -802,7 +802,7 @@ SH
     export "FM_REAL_$command"
     cat > "$fakebin/$command" <<'SH'
 #!/usr/bin/env bash
-[ ! -e "$FM_STATUS_COUNT_SENTINEL" ] || printf '%s\n' "${0##*/}" >> "$FM_STATUS_EXTERNAL_CALLS"
+if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then printf '%s\n' "${0##*/}" >> "$FM_STATUS_EXTERNAL_CALLS"; exit 97; fi
 real_var=FM_REAL_${0##*/}
 eval 'real_path=${'"$real_var"'}'
 exec "$real_path" "$@"
@@ -811,7 +811,7 @@ SH
   done
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-[ ! -e "$FM_STATUS_COUNT_SENTINEL" ] || printf '%s\n' no-mistakes >> "$FM_STATUS_EXTERNAL_CALLS"
+if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then printf '%s\n' no-mistakes >> "$FM_STATUS_EXTERNAL_CALLS"; exit 97; fi
 case " $* " in *' runs '*) printf 'run other-branch\n' ;; *) exec "$FM_REAL_NM" "$@" ;; esac
 SH
   FM_REAL_NM=$(command -v no-mistakes)
@@ -834,9 +834,9 @@ SH
   : > "$FM_STATUS_COUNT_SENTINEL"
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "incremental watcher exited on an unchanged log"; }
   rm -f "$FM_STATUS_COUNT_SENTINEL"
-  if grep -Eq '^(tail|stat|no-mistakes)$' "$reads"; then
+  if [ -s "$reads" ]; then
     reap "$pid"
-    fail "unchanged status log invoked external claimed-run readers: $(cat "$reads")"
+    fail "unchanged status log invoked external commands: $(cat "$reads")"
   fi
   printf 'working [at=1234567890]: validation started\n' >> "$status_file"
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "appended validation claim was not detected"; }
