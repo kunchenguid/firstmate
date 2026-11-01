@@ -1713,6 +1713,15 @@ When stripping is enabled, the hooks directory is read-only, so a hook manager r
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
 
+### Worker auto memory
+
+The optional local, gitignored `config/disable-worker-auto-memory` presence flag turns Claude Code's auto memory off for this home's ship and scout workers.
+With the flag present, every Claude ship or scout launch carries `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, which overrides every settings scope, so a worker's task notes never land in the project's shared auto memory.
+With the flag absent, workers keep Claude Code's default auto memory.
+Secondmates are persistent and own their knowledge, so they keep auto memory either way.
+The flag is not inherited into secondmate homes.
+Regression coverage lives in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh) and [`tests/fm-secondmate-harness.test.sh`](../tests/fm-secondmate-harness.test.sh).
+
 ## Project capacity (config/project-capacity)
 
 The optional local, gitignored `config/project-capacity` tells Firstmate how many workers a project can run at once on this machine, for a project whose machine-local resource - a heavy test suite, a local editor stack, a device - only serves a few workers at a time.
