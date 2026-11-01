@@ -426,19 +426,10 @@ show_field() {  # <show-output> <field>
 # libraries default it off and reject the whole value as "must be object or
 # array", so ask for it explicitly rather than inheriting the local default.
 decode_shown_value() {  # <shown-field>
-  local value=$1
-  case "$value" in
-    \"*\")
-      printf '%s' "$value" | perl -MJSON::PP -e '
-        local $/;
-        my $value = JSON::PP->new->utf8->allow_nonref->decode(<STDIN>);
-        binmode STDOUT, ":raw";
-        utf8::encode($value) if utf8::is_utf8($value);
-        print $value;
-      '
-      ;;
-    *) printf '%s' "$value" ;;
-  esac
+  # One `tasks-axi show` scalar decoder for the whole fleet:
+  # bin/fm-backlog-transition-lib.sh owns it, and this reads through it so the
+  # JSON-scalar handling cannot drift between the two callers.
+  fm_backlog_shown_value "$1"
 }
 
 # Decode show-encoded scalar fields and normalize the empty marker.
@@ -1233,6 +1224,15 @@ report_retained_artifact_failure() {  # <task-id> <marker-path>
     "$1" "$2" "${FM_BACKLOG_TRANSITION_ERROR:-no reason reported}" >&2
 }
 
+# The artifact a retained record owes the row it held. A `--pr` link is applied
+# as the close's own link only when some run verified that merge; a link no run
+# verified becomes a body note instead, so the answer keeps the delivery
+# traceable and never closes the row as a merge nobody read.
+#
+# The verified fact is read from the task's durable merge-verification record
+# first, because a retention that lands retires its pending-close record and the
+# answer then has nothing else to read. The pending-close record's own fact is
+# the fallback for an answer that arrives before that transition lands.
 apply_pending_retained_artifact() {  # <task-id>
   local id=$1 marker label
   local -a args=()
@@ -1244,14 +1244,42 @@ apply_pending_retained_artifact() {  # <task-id>
   [ "$FM_BACKLOG_CLOSE_VALIDATED_MODE" = retain ] || return 0
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   case "${args[0]-}" in
-    --pr|--report)
-      if [ "${args[0]}" = --pr ] && label=$(fm_backlog_pr_note_label "${args[1]-}"); then
+    --pr)
+      # The durable fact is trusted only for the link this record names, so a fact
+      # left behind by an earlier cycle cannot close a later delivery as merged.
+      if fm_backlog_merge_fact_read "$STATE" "$id" \
+         && [ "$FM_BACKLOG_MERGE_FACT_URL" = "${args[1]-}" ]; then
+        RETAINED_CLOSE_ARGS=(--pr "$FM_BACKLOG_MERGE_FACT_URL")
+        return 0
+      fi
+      if [ -n "$FM_BACKLOG_CLOSE_VALIDATED_MERGE_VERIFIED_AT" ] \
+         && fm_backlog_row_artifact_supported "$id" --pr "${args[1]-}"; then
+        RETAINED_CLOSE_ARGS=(--pr "${args[1]}")
+        return 0
+      fi
+      if label=$(fm_backlog_pr_note_label "${args[1]-}"); then
+        # A GitLab merge request or Gerrit change never was a pull-request merge
+        # link, so its own label stays the note this answer records. Any earlier
+        # pull-request link on the row is downgraded by close_answered below.
         RETAINED_CLOSE_ARGS=(--note "$label ${args[1]}")
         return 0
       fi
+      fm_backlog_pr_link_downgrade "$DATA" "$id" \
+        "the recorded retention did not verify the merge" "${args[1]-}" || return 1
+      RETAINED_CLOSE_ARGS=(--note "$FM_BACKLOG_DOWNGRADE_NOTE")
+      ;;
+    --report)
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0
       fm_backlog_mutate "$DATA" update "$id" "${args[@]}" \
         || { report_retained_artifact_failure "$id" "$marker"; return 1; }
+      ;;
+    --note)
+      # A retention that recorded its completion as a note - every unverified
+      # pull request does - owes that note to the close; dropping it here would
+      # lose the only copy of the delivery link.
+      fm_backlog_note_decode "${args[1]-}" >/dev/null \
+        || { report_retained_artifact_failure "$id" "$marker"; return 1; }
+      RETAINED_CLOSE_ARGS=(--note "$(fm_backlog_note_decode "${args[1]-}")")
       ;;
   esac
 }
@@ -1270,13 +1298,84 @@ release_attended() {
   ! fm_afk_contract_away_present "$STATE"
 }
 
+# Close a captain-held row on the captain's answer.
+#
+# The order below is the guarantee: the note that keeps an unverified delivery
+# link is written to the body first, the link leaves the title second, and the
+# row closes last. Each step is idempotent and the note is rebuilt from the body
+# when an interrupted earlier attempt already wrote it, so a failed or killed
+# close never costs the URL it is the only copy of.
 close_answered() {  # <task-id> <release-0-or-1>
+  local id=$1 note i merged=0 recorded=''
   if [ "$2" = 1 ]; then
-    tasks_axi unhold "$1" >/dev/null
-  else
-    apply_pending_retained_artifact "$1" || return 1
-    tasks_axi "done" "$1" "${RETAINED_CLOSE_ARGS[@]+"${RETAINED_CLOSE_ARGS[@]}"}" >/dev/null
+    tasks_axi unhold "$id" >/dev/null
+    return
   fi
+  apply_pending_retained_artifact "$id" || return 1
+  # Without a pending-close record, the task's durable merge-verification record
+  # is what tells this answer that a run read the merge; a retention that landed
+  # keeps the row's structured link and leaves that record behind for exactly
+  # this moment.
+  if [ "${RETAINED_CLOSE_ARGS[0]-}" != --pr ] \
+     && fm_backlog_merge_fact_read "$STATE" "$id" \
+     && fm_backlog_row_carries_pr_link "$DATA" "$id" "$FM_BACKLOG_MERGE_FACT_URL"; then
+    # The fact counts only while the row still shows that exact link: a fact from
+    # an earlier cycle, or one whose link the row no longer carries, is not
+    # evidence for this delivery.
+    RETAINED_CLOSE_ARGS=(--pr "$FM_BACKLOG_MERGE_FACT_URL")
+  fi
+  if [ "${RETAINED_CLOSE_ARGS[0]-}" = --pr ]; then
+    # The close boundary keeps the verified link and takes any other one off the
+    # title into a body note, so the closed row renders merged only for the PR a
+    # run verified.
+    if ! fm_backlog_done "$DATA" "$id" --pr "${RETAINED_CLOSE_ARGS[1]}" >/dev/null; then
+      return 1
+    fi
+    fm_backlog_merge_fact_remove "$STATE" "$id"
+    return 0
+  fi
+  if [ "${RETAINED_CLOSE_ARGS[0]-}" = --note ]; then
+    recorded="${RETAINED_CLOSE_ARGS[1]-}"
+  fi
+  # An answer that read no merge cannot close the row as one: the link becomes a
+  # historical note, which keeps the URL and states that this run did not verify
+  # the merge. The note is computed without changing anything, so it is written
+  # before the title loses the link.
+  fm_backlog_pr_link_note "$DATA" "$id" "the answer read no merge" || return 1
+  note=$FM_BACKLOG_DOWNGRADE_NOTE
+  if [ -n "$note" ] && [ -z "$recorded" ]; then
+    recorded=$note
+  elif [ -n "$note" ] \
+       && ! fm_backlog_text_names_links "$recorded" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
+    # The recorded note keeps a different link, or none, so this close records
+    # both - unless it already says this, which is what an interrupted earlier
+    # attempt leaves behind.
+    case $recorded in
+      *"$note"*) ;;
+      *) recorded="$recorded; $note" ;;
+    esac
+  fi
+  if [ -n "$recorded" ]; then
+    # The body may already carry this sentence as its own line, or as the
+    # semicolon suffix a retention composes onto its deliverable line. Only those
+    # exact shapes count: a sentence naming change /123 is not already recorded
+    # by one naming /1234, which the append would otherwise mistake for it.
+    fm_backlog_row_title_body "$DATA" "$id" \
+      || { report_retained_artifact_failure "$id" "the answer's completion note"; return 1; }
+    case $'\n'"$FM_BACKLOG_ROW_BODY"$'\n' in
+      *$'\n'"$recorded"$'\n'*|*'; '"$recorded"$'\n'*) ;;
+      *)
+        fm_backlog_body_append_line "$DATA" "$id" "$recorded" \
+          || { report_retained_artifact_failure "$id" "the answer's completion note"; return 1; }
+        ;;
+    esac
+  fi
+  fm_backlog_pr_title_strip "$DATA" "$id" || return 1
+  if ! tasks_axi "done" "$id" >/dev/null; then
+    return 1
+  fi
+  # The row is closed in the backlog, which is when the record has done its work.
+  fm_backlog_merge_fact_remove "$STATE" "$id"
 }
 
 remove_interrupted_answer_stamp() {  # <task-id>

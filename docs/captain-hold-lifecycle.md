@@ -167,6 +167,7 @@ After cleanup, and still under the task's own lock, teardown does three things:
 
 - It records one `Deliverable of the finished work: ...` line at the end of the task body.
 - It copies a supported pull request or canonical `data/<id>/report.md` into the row's structured artifact fields.
+  A pull request is copied only when the forge reports its merge in this run; otherwise the link is recorded in the deliverable line, because tasks-axi renders a closed row carrying a pull-request link as merged.
   A Gerrit change or GitLab merge request URL is not a pull request tasks-axi accepts, so it appears only in the deliverable line.
 - It runs `tasks-axi reopen`.
 
@@ -180,16 +181,16 @@ That record carries the retention intent as a `mode=retain` line.
 An interrupted cleanup therefore replays the retention at the next session start through the same record, validator, and lock as an ordinary close, and never closes the row.
 
 If the captain answers before replay, `answer` validates that record and copies any supported retained pull request or report into the row before closing it.
+A completion note the record carried - such as a local-only delivery's `local main` - is written to the task body before the close as well.
+An answer records a merge only when the task's `<id>.pr-merge` merge-verification record, or that pending-close record, says some run read the merge from the forge; otherwise a link already on the row moves into a body note that keeps the URL and states the merge was not verified, so the answer never closes a row as a merge nobody read.
 A retained Gerrit change or GitLab merge request URL is instead recorded as a `Gerrit change <url>` or `GitLab merge request <url>` note on that close.
 Replay then retires the record.
 
-### Known retained-delivery gaps
+### Known retained-delivery gap
 
-Two retained-delivery gaps remain bounded by tasks-axi 0.2.6.
-They are recorded for separate upstream work rather than representing defects introduced by this branch.
+One retained-delivery gap remains bounded by tasks-axi 0.2.6.
+It is recorded for separate upstream work rather than representing a defect introduced by this branch.
 
-- A retained local-only delivery cannot reach the row.
-  `--note` exists on `tasks-axi done` but not on `tasks-axi update`, while the durable pending-close record carrying that note is retired when retention completes.
 - A relocated retained report cannot reach the row, because tasks-axi accepts only `data/<id>/report.md`.
   `done` reports `Task report link must be a data/<id>/report.md path`, and `update` reports `--report must be a data/<id>/report.md path`.
 

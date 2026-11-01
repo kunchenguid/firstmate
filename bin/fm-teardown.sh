@@ -1699,6 +1699,76 @@ $unpushed
 EOF
 }
 
+# The merge fact a completion record may state, read from the forge in THIS run.
+# tasks-axi renders any closed row carrying a `pr` link as "merged", so recording
+# that link is a claim that the pull request merged; it therefore may not be
+# derived from the recorded pr= line, from an earlier read, or from the link's
+# presence. Only a GitHub or Forgejo pull request reaches the row as that link -
+# a GitLab merge request or a Gerrit change is already recorded as a note, which
+# claims no merge - so only those two forges are read here.
+# Sets FM_TEARDOWN_PR_MERGE to merged, unmerged, or unreadable, and
+# FM_TEARDOWN_PR_MERGE_DETAIL to the one-line reason a note states when the merge
+# is not confirmed. Every unreadable outcome - no forge client, an unreachable
+# forge, an incomplete record - stays unconfirmed rather than falling back to
+# "merged".
+FM_TEARDOWN_PR_MERGE=
+FM_TEARDOWN_PR_MERGE_DETAIL=
+pr_merge_fact() {  # <recorded-pr-url>
+  local url=$1 view state remainder merged_at resolved_url
+  FM_TEARDOWN_PR_MERGE=unreadable
+  FM_TEARDOWN_PR_MERGE_DETAIL="its pull request state could not be read"
+  [ -n "$url" ] || { FM_TEARDOWN_PR_MERGE_DETAIL="no pull request was recorded"; return 0; }
+  fm_pr_url_parse "$url" || return 0
+  case "$FM_PR_PROVIDER" in
+    forgejo)
+      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 0
+      if [ "$FM_PR_RECORD_MERGED" = true ]; then
+        FM_TEARDOWN_PR_MERGE=merged
+        FM_TEARDOWN_PR_MERGE_DETAIL=
+        return 0
+      fi
+      FM_TEARDOWN_PR_MERGE=unmerged
+      case "$FM_PR_RECORD_STATE" in
+        closed|CLOSED) FM_TEARDOWN_PR_MERGE_DETAIL="it was closed without being merged" ;;
+        *) FM_TEARDOWN_PR_MERGE_DETAIL="it was still open when this finished" ;;
+      esac
+      return 0
+      ;;
+    github) ;;
+    *)
+      FM_TEARDOWN_PR_MERGE_DETAIL="its change has no merge state this script reads"
+      return 0
+      ;;
+  esac
+  # The state and merge time travel together because the merge time is what
+  # distinguishes "merged" from a state string alone; a MERGED state with no
+  # merge time is an incomplete record, not a confirmation.
+  view=$(cd "$WT" && gh pr view "$url" --json state,mergedAt,url -q '.state + "\t" + (.mergedAt // "") + "\t" + .url' 2>/dev/null) || return 0
+  state=${view%%$'\t'*}
+  remainder=${view#*$'\t'}
+  [ "$state" != "$view" ] || return 0
+  merged_at=${remainder%%$'\t'*}
+  resolved_url=${remainder#*$'\t'}
+  [ "$merged_at" != "$remainder" ] || return 0
+  [ -n "$resolved_url" ] || return 0
+  case "$state" in
+    MERGED|merged)
+      [ -n "$merged_at" ] || return 0
+      FM_TEARDOWN_PR_MERGE=merged
+      FM_TEARDOWN_PR_MERGE_DETAIL=
+      ;;
+    OPEN|open)
+      FM_TEARDOWN_PR_MERGE=unmerged
+      FM_TEARDOWN_PR_MERGE_DETAIL="it was still open when this finished"
+      ;;
+    CLOSED|closed)
+      FM_TEARDOWN_PR_MERGE=unmerged
+      FM_TEARDOWN_PR_MERGE_DETAIL="it was closed without being merged"
+      ;;
+    *) return 0 ;;
+  esac
+}
+
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
 # forge for both the PR state and head: a recorded Forgejo URL is read through
@@ -1799,6 +1869,14 @@ work_is_landed() {
 # The completion links this teardown already holds locally. A scout's
 # deliverable is its report, a local-only ship lands on local main, and every
 # other ship carries the PR recorded on its own record.
+#
+# A transition carrying `pr` is read back by tasks-axi as the verdict "merged",
+# so the link is passed only when pr_merge_fact read that merge from the forge in
+# this run; otherwise the same link goes into the note, which keeps the delivery
+# visible and the verb honest - the row reads "done" and says what is still
+# awaited (backlog_pr_completion_args owns which shapes that applies to). This
+# holds for the captain-held retention as well as the close, because a retained
+# row's `pr` link is what the captain's later answer closes as merged.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
@@ -1812,10 +1890,58 @@ backlog_done_args() {
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
-        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+        backlog_pr_completion_args "$PR_URL"
       fi
       ;;
   esac
+}
+
+# The completion link for a ship whose record carries a PR, on either transition
+# that replaces this task's record. A transition carrying `pr` is read back by
+# tasks-axi as the verdict "merged", and tasks-axi's own classifier is the one
+# that prints it: it accepts pull-request links this script's stricter parser
+# refuses (a repeated hyphen in the owner, for instance) and renders those as
+# merged too. So the `pr` shape is reserved for a merge this run read from the
+# forge, plus the change shapes the transition itself turns into a note (a GitLab
+# merge request or Gerrit change). Any other URL is recorded as a note, which
+# keeps the URL and claims no merge; a value that is not a URL at all keeps the
+# `pr` shape so the close is refused instead of silently losing the link (the
+# pending-close validator owns that refusal).
+backlog_pr_completion_args() {  # <pr-url>
+  if fm_backlog_pr_note_label "$1" >/dev/null; then
+    # A GitLab merge request or Gerrit change is what the backlog transition
+    # itself turns into a note, so it makes no merge claim here.
+    BACKLOG_DONE_ARGS=(--pr "$1")
+    return 0
+  fi
+  if ! fm_pr_url_parse "$1"; then
+    # No second definition of "a link the renderer would print as merged" is
+    # written here: anything this script cannot positively read as a pull request
+    # is treated as unverified, so an unfamiliar URL shape can only cost a merge
+    # claim, never invent one. A value that is not a URL at all keeps the `pr`
+    # shape so the transition refuses the close instead of losing the link.
+    case "$1" in
+      https://*|http://*)
+        BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because its pull request state could not be read: $1. The link is a historical record whose merge was not verified in this run")
+        ;;
+      *) BACKLOG_DONE_ARGS=(--pr "$1") ;;
+    esac
+    return 0
+  fi
+  pr_merge_fact "$1"
+  if [ "$FM_TEARDOWN_PR_MERGE" = merged ]; then
+    BACKLOG_DONE_ARGS=(--pr "$1")
+    # The pending-close record carries this moment so that a replay can tell the
+    # merge this run read from a link written before that check existed, and the
+    # durable record carries it for a captain answer, which arrives after that
+    # pending-close record has been retired with the transition it recorded.
+    FM_BACKLOG_CLOSE_MERGE_VERIFIED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if ! fm_backlog_merge_fact_write "$STATE" "$ID" "$1" "$FM_BACKLOG_CLOSE_MERGE_VERIFIED_AT"; then
+      echo "warning: could not record the merge $ID's pull request reports ($FM_BACKLOG_TRANSITION_ERROR); a captain answer to a retained row will record a completion instead of a merge" >&2
+    fi
+  else
+    BACKLOG_DONE_ARGS=(--note "Delivered, merge not confirmed because $FM_TEARDOWN_PR_MERGE_DETAIL: $1. The link is a historical record whose merge was not verified in this run")
+  fi
 }
 
 # Closing the backlog item is this script's own last act on the record, not a
