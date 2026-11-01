@@ -3979,12 +3979,19 @@ while :; do
   # A worker's routine validation-started line is not itself an actionable wake.
   # Remember each distinct claim and verify it after a bounded delay on this poll loop.
   claimed_run_tick() {
-  local f task meta wt branch claim marker seen stamp recorded_branch recorded_claim runs
+  local f task meta wt branch claim marker seen stamp recorded_branch recorded_claim runs line line_no
   case "$CLAIMED_RUN_DELAY" in ''|*[!0-9]*) return 0 ;; esac
   for f in "$STATE"/*.status; do
     [ -f "$f" ] || continue
     task=${f##*/}; task=${task%.status}
-    claim=$(grep -nE '^[^:]*working: validation started([[:space:]]|$)' "$f" 2>/dev/null | tail -n 1 | cut -d: -f1)
+    claim=
+    line_no=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      line_no=$((line_no + 1))
+      if [ "$(status_line_verb "$line")" = working ] && [ "$(status_line_note "$line")" = 'validation started' ]; then
+        claim=$line_no
+      fi
+    done < "$f"
     meta="$STATE/$task.meta"
     wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -n 1 | cut -d= -f2-)
     [ -d "$wt" ] || continue
