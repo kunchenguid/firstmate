@@ -57,7 +57,7 @@ Registration validates a live Herdr session, an exact workspace label, an exact 
 The registry stores one tab-separated row per watch: `session`, `workspace-label`, `tab-label`, `label`, `notify-done` (`0` or `1`).
 Session names use letters, digits, `_`, `.`, and `-`; all fields are nonempty and contain no control characters.
 Labels and session/workspace/tab identities must be unique within the registry.
-Adding a label replaces its entry atomically; removing an absent label succeeds, and listing reads only the registry.
+The script header and help own registration, replacement, removal, and listing mechanics.
 
 Firstmate resolves those labels to current pane IDs before each bounded wait, so replacing a server or pane does not require saving a new ID.
 Missing or ambiguous identities are reported to stderr and skipped rather than guessed; renamed labels require registration again.
@@ -65,7 +65,9 @@ Any endpoint already recorded in task metadata retains its task policy, includin
 Only Herdr watches are supported; other backends keep their existing behavior.
 The existing single connection watches one backend/session group at a time, while registered panes in every group receive level polling on the ordinary poll cadence, including when push is unavailable.
 Blocked states produce a durable wake naming the watch label and status; `--notify-done` also enables immediate finish notification for that watch alone.
-Repeated states are deduplicated across reconnects, a working state rearms notification, and an opted-in blocked-to-done transition can notify once for each status.
+The transition policy and deduplication contract are owned by [`bin/fm-transition-lib.sh`](../bin/fm-transition-lib.sh).
+For an opted-in watch, changing between `blocked` and `done` can notify without an intervening `working` state; repeated readings of the last notified status are suppressed across reconnects.
+`working` rearms notification, while `idle` produces no wake and does not rearm it.
 Transient finish states may therefore notify for an opted-in watch; ordinary tasks continue to defer `done` to their existing completion handling.
 No command creates or closes a pane, and the operator should unregister a watch when its session ends.
 

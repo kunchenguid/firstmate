@@ -87,7 +87,7 @@ fm_transition_detail()       { fm_transition_field "$1" 6; }
 #
 #   actionable - escalate to the supervisor IMMEDIATELY (a fresh edge here is a
 #                durable wake now). `blocked` is the only immediately-actionable
-#                status today: herdr reports it precisely when a harness is
+#                status for task panes: herdr reports it when a harness is
 #                waiting on the human (a permission/trust dialog, an interactive
 #                menu, a wedged prompt) - the cases that write no status file
 #                and otherwise sit until the stale-pane wedge timer.
@@ -138,7 +138,8 @@ fm_transition_marker() {  # <state_dir> <prefix> <window>
 
 # fm_transition_apply: route one normalized record through the policy table,
 # maintaining the per-pane dedupe marker. On a fresh `actionable` edge (no
-# marker yet) it prints the record and returns 0; the caller commits the marker
+# marker yet, or a different last actionable status in watched-done context)
+# it prints the record and returns 0; the caller commits the marker
 # only after handling it. `absorb` clears the marker and returns 1. `rescan`
 # returns 3 with no output. `defer`, `fallback`, and an already-marked
 # `actionable` return 1 with no output. <session> reconstructs the window
