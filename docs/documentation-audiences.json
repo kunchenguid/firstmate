@@ -642,6 +642,18 @@
       "audience": "public-product"
     },
     {
+      "path": "tests/fixtures/pi-orphan-table/idle.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/pi-orphan-table/pasted-separator.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/pi-orphan-table/typed.txt",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "tests/captures/no-mistakes-v1.70.1/README.md",
       "audience": "maintainer-verification"
     },
