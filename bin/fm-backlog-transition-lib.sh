@@ -516,11 +516,11 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
-# tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull request
-# and refuses anything else, so a Gerrit change or GitLab merge request URL is
-# recorded on the row as a note instead. Prints the note's label for such a URL
-# and fails for one tasks-axi accepts. The subshell keeps the parse from
-# overwriting a caller's FM_PR_* identity.
+# tasks-axi reads a --pr link with its own pull-request classifier, which refuses
+# a GitLab merge request or a Gerrit change, so those URLs are recorded on the row
+# as a note instead. Prints the note's label for such a URL and fails for one
+# tasks-axi accepts. The subshell keeps the parse from overwriting a caller's
+# FM_PR_* identity.
 fm_backlog_pr_note_label() {  # <url>
   ( fm_pr_url_parse "$1" || exit 1
     case "$FM_PR_PROVIDER" in
@@ -533,13 +533,13 @@ fm_backlog_pr_note_label() {  # <url>
 # The pending-close record is a line-oriented file holding one `arg=` line per
 # flag, and a `--note` value is prose that lands in the task body, so the value's
 # own bytes have to survive that line. Only the bytes the record cannot express
-# are refused - a newline or a control byte would end the line, a leading dash
-# would read as a flag - while every printable byte is carried, escaped only
-# where the encoding itself needs it: `%` and the space. Ordinary punctuation in
-# prose is therefore storable, not a refusal that would turn a legitimate
-# destructive teardown into an error. Every reader decodes the value it reads, and
-# validation requires that re-encoding the decoded value reproduces the recorded
-# text, so a value is never silently altered.
+# are refused - a newline or a control byte would end the line or corrupt the
+# record - while every other printable byte is carried, escaped only where the
+# encoding itself needs it: `%` and the space. A leading dash is data rather than
+# a flag, so ordinary punctuation in prose is storable, not a refusal that would
+# turn a legitimate destructive teardown into an error. Every reader decodes the
+# value it reads, and validation requires that re-encoding the decoded value
+# reproduces the recorded text, so a value is never silently altered.
 #
 # The bound is the `--pr` bound the validator below enforces (2048) plus the
 # fixed prose a completion note composes around that link ("Delivered, merge not
@@ -549,10 +549,10 @@ fm_backlog_pr_note_label() {  # <url>
 # though the link itself is acceptable.
 FM_BACKLOG_NOTE_MAX=2400
 # Set by fm_backlog_pr_link_note, and through it by fm_backlog_pr_link_downgrade:
-# the unverified pull request links a caller may take off the title, one per line,
-# and the sentence that keeps them in the body. They are globals rather than
-# printed output because a caller runs in the same shell and needs the link list
-# to tell whether its own note already names them.
+# the unverified links a caller may take off the title, one per line, and the
+# sentence that keeps them in the body. They are globals rather than printed
+# output because a caller runs in the same shell and needs the link list to tell
+# whether its own note already names them.
 FM_BACKLOG_DOWNGRADE_LINKS=
 FM_BACKLOG_DOWNGRADE_NOTE=
 fm_backlog_note_encode() {  # <text>
@@ -618,8 +618,8 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
         ;;
       --pr)
         if label=$(fm_backlog_pr_note_label "$arg"); then
-          # tasks-axi takes only a canonical pull request as a pr link, so a
-          # GitLab merge request or Gerrit change is recorded as a note.
+          # tasks-axi's pull-request classifier refuses a GitLab merge request and
+          # a Gerrit change, so those are recorded as a note.
           note_text="$label $arg"
           close_args+=(--note "$label $arg")
         elif [ -n "$pr_url" ]; then
@@ -727,12 +727,12 @@ fm_backlog_shown_value() {  # <shown-field>
   esac
 }
 
-# Split <title> into its prose and the canonical pull request links tasks-axi
-# derives from it. Sets FM_BACKLOG_TITLE_PROSE (that prose, with the links removed
-# and the spacing normalized) and FM_BACKLOG_TITLE_PR_LINKS (one URL per line,
-# empty when there are none). tasks-axi trims sentence punctuation from the end of
-# each URL before classifying it, so the walk does the same and leaves every other
-# URL in the prose.
+# Split <title> into its prose and the links it carries. Sets
+# FM_BACKLOG_TITLE_PROSE (that prose, with the links removed and the spacing
+# normalized) and FM_BACKLOG_TITLE_PR_LINKS (one URL per line, empty when there are
+# none). The walk matches `https://` tokens and trims the sentence punctuation
+# tasks-axi trims before it classifies a URL; whether a token leaves the title is
+# left to the fail-closed rule below rather than mirrored from the renderer.
 FM_BACKLOG_TITLE_PROSE=
 FM_BACKLOG_TITLE_PR_LINKS=
 # True for a title token that is a URL at all. The title's merge claim is decided
@@ -820,14 +820,13 @@ fm_backlog_row_title_body() {  # <data-dir> <id>
   FM_BACKLOG_ROW_BODY=$body
 }
 
-# Set the note that keeps this row's unverified pull request links in the body.
-# It reads the row but changes nothing, so a caller can record the note durably
-# before it takes the link off the title. Links passed as further arguments are
-# recorded too, so a close replaying a recorded link names it even when it never
-# reached the title, and the note is empty when there is no link to record. A
-# note an interrupted earlier attempt already wrote is reused, so a retry
-# rebuilds the same record from the body instead of losing the URL with the title
-# it no longer carries.
+# Set the note that keeps this row's unverified links in the body. It reads the
+# row but changes nothing, so a caller can record the note durably before it takes
+# the link off the title. Links passed as further arguments are recorded too, so a
+# close replaying a recorded link names it even when it never reached the title,
+# and the note is empty when there is no link to record. A note an interrupted
+# earlier attempt already wrote is reused, so a retry rebuilds the same record from
+# the body instead of losing the URL with the title it no longer carries.
 FM_BACKLOG_PR_LINK_EXCLUDE=
 fm_backlog_pr_link_note() {  # <data-dir> <id> <reason> [url...]
   local data=$1 id=$2 reason=$3 url collected='' skip seen recorded
@@ -863,17 +862,15 @@ EOF
     FM_BACKLOG_DOWNGRADE_LINKS=${FM_BACKLOG_DOWNGRADE_LINKS:+$FM_BACKLOG_DOWNGRADE_LINKS$'\n'}$url
   done
   [ -n "$collected" ] || { FM_BACKLOG_DOWNGRADE_NOTE=$recorded; return 0; }
-  # No parentheses in this prose: the pending-close record percent-encodes a note
-  # value and refuses one whose bytes fall outside the set it can rebuild.
   FM_BACKLOG_DOWNGRADE_NOTE="Historical record: $collected - the merge was not verified in this run: $reason."
 }
 
-# Take every canonical pull request link off this row's title, leaving the prose
-# and any canonical tags intact. The link named by FM_BACKLOG_PR_LINK_EXCLUDE
-# stays, so a close that verified that merge keeps it while the links no run
-# verified leave. No flag or configuration overrides tasks-axi's renderer, which
-# writes "merged" for any closed row whose title carries such a link, so this is
-# how a row that records no verified merge stops claiming one.
+# Take every URL off this row's title, leaving the prose and any canonical tags
+# intact. The link named by FM_BACKLOG_PR_LINK_EXCLUDE stays, so a close that
+# verified that merge keeps it while the URLs no run verified leave. No flag or
+# configuration overrides tasks-axi's renderer, which writes "merged" for a closed
+# row whose title carries a pull request link, so this is how a row that records
+# no verified merge stops claiming one.
 fm_backlog_pr_title_strip() {  # <data-dir> <id>
   local data=$1 id=$2 prose url kept='' removed=0
   data=$(fm_backlog_data_absolute "$data") || return 1
@@ -933,13 +930,13 @@ fm_backlog_body_append_line() {  # <data-dir> <id> <line>
   rm -f -- "$tmp"
 }
 
-# Take this row's unverified pull request links off the title and record the
-# note that keeps them in the body: the shape every close that records no
-# verified merge uses. The note names every link the title carried at this
-# moment, so it is written to the body BEFORE the title loses any of them: a
-# failed or interrupted write then leaves the title untouched and a retry
-# rebuilds exactly the same note, instead of one naming only the link a pending
-# record happened to carry. Callers therefore owe no second copy of that sentence.
+# Take this row's unverified links off the title and record the note that keeps
+# them in the body: the shape every close that records no verified merge uses. The
+# note names every link the title carried at this moment, so it is written to the
+# body BEFORE the title loses any of them: a failed or interrupted write then
+# leaves the title untouched and a retry rebuilds exactly the same note, instead of
+# one naming only the link a pending record happened to carry. Callers therefore
+# owe no second copy of that sentence.
 fm_backlog_pr_link_downgrade() {  # <data-dir> <id> <reason> [url...]
   local data=$1 id=$2 reason=$3
   shift 3
@@ -1025,7 +1022,7 @@ fm_backlog_merge_fact_read() {  # <state-dir> <id>
   FM_BACKLOG_MERGE_FACT_VERIFIED_AT=$verified_at
 }
 
-# Print this row's canonical pull request links, one per line.
+# Print every URL this row's title carries, one per line.
 fm_backlog_row_pr_links() {  # <data-dir> <id>
   local data=$1 id=$2 url
   data=$(fm_backlog_data_absolute "$data") || return 1
@@ -1039,9 +1036,9 @@ $FM_BACKLOG_TITLE_PR_LINKS
 EOF
 }
 
-# Does this row's title still carry <url> as one of its pull request links? A
-# durable merge fact is trusted only for the link the row still shows, so a fact
-# left behind by an earlier cycle cannot close a later delivery as merged.
+# Does this row's title still carry <url> as one of its links? A durable merge
+# fact is trusted only for the link the row still shows, so a fact left behind by
+# an earlier cycle cannot close a later delivery as merged.
 fm_backlog_row_carries_pr_link() {  # <data-dir> <id> <url>
   local seen links
   links=$(fm_backlog_row_pr_links "$1" "$2") || return 1
