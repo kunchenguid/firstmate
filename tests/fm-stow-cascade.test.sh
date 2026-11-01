@@ -339,9 +339,11 @@ test_a_slow_remote_is_bounded_and_the_rest_still_report() {
   pass "one slow or unreachable home is bounded and every other home still reports"
 }
 
-run_reach() { # <home> <memory-file> <destination>
+run_reach() { # <home> <memory-file> <survivor>...
+  local home=$1
+  shift
   env -i PATH="$FAKEBIN:$BASE_PATH" HOME="${HOME:-/tmp}" TMPDIR="${TMPDIR:-/tmp}" \
-    FM_HOME="$1" "$CASCADE" --reach "$2" "$3"
+    FM_HOME="$home" "$CASCADE" --reach "$@"
 }
 
 # The captain's test for a relocation is that the content survives somewhere
@@ -418,6 +420,39 @@ test_reach_reports_a_home_local_shared_relocation_as_a_removal() {
   pass "--reach reports a shared-to-shared move as reachable and a shared move to home-local storage as a removal"
 }
 
+# Reachability is per fact, not per file. Dropping a shared duplicate into the
+# primary's archive loses nothing while its surviving copy stays in
+# data/captain-shared.md, which every inheriting home loads, so --reach given
+# both survivors must say reversible. The same drop whose only surviving copy is
+# in the primary's own data/captain.md leaves the secondmate unable to read the
+# fact, so it must say removal and name that home.
+test_reach_judges_a_dropped_duplicate_by_where_its_fact_survives() {
+  local primary secondmate out rc
+  primary=$(new_primary reach-duplicate)
+  secondmate=$(new_home reach-duplicate-secondmate)
+  local_record reach-duplicate-secondmate "$secondmate" > "$primary/data/secondmates.md"
+  printf '%s\n' '- a shared captain preference' '- a shared captain preference' > "$primary/data/captain-shared.md"
+
+  set +e
+  out=$(run_reach "$primary" data/captain-shared.md data/memory-archive.md data/captain-shared.md)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a duplicate whose surviving copy stays in the shared file was held as a removal"
+  assert_contains "$out" "reader=reach-duplicate-secondmate placement=local home=$secondmate reachable=yes" \
+    "the inheriting secondmate was said to lose a fact its shared copy still carries"
+  assert_contains "$out" 'reach=reversible' "a lossless duplicate drop was not reported reversible"
+
+  set +e
+  out=$(run_reach "$primary" data/captain-shared.md data/memory-archive.md data/captain.md)
+  rc=$?
+  set -e
+  expect_code 4 "$rc" "a duplicate whose surviving copy is only in this home was reported reachable"
+  assert_contains "$out" "reader=reach-duplicate-secondmate placement=local home=$secondmate reachable=no" \
+    "the inheriting secondmate was not named as losing the fact"
+  assert_contains "$out" 'reach=removal' "a duplicate drop that loses the fact for a home was not a removal"
+  pass "--reach judges a dropped duplicate by whether every reader still reads its surviving copy"
+}
+
 test_no_cascade_without_secondmates_or_from_a_secondmate_home() {
   local primary secondmate out rc
   primary=$(new_primary quiet)
@@ -448,3 +483,4 @@ test_receipt_facts_are_complete_and_show_before_and_after
 test_a_slow_remote_is_bounded_and_the_rest_still_report
 test_no_cascade_without_secondmates_or_from_a_secondmate_home
 test_reach_reports_a_home_local_shared_relocation_as_a_removal
+test_reach_judges_a_dropped_duplicate_by_where_its_fact_survives
