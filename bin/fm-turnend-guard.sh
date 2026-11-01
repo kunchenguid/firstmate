@@ -96,7 +96,6 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
@@ -205,6 +204,10 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || allow_exit
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# Beacon freshness uses the cadence the watcher declares (fm_beacon_grace: an
+# explicit FM_GUARD_GRACE, else the poll-derived default), so this boundary and
+# the arm that replaces a stalled cycle judge the same threshold.
+GRACE=$(fm_beacon_grace)
 if [ "$CLAUDE_MODE" -eq 1 ]; then
   # shellcheck source=bin/fm-session-lock-lib.sh
   . "$SCRIPT_DIR/fm-session-lock-lib.sh"

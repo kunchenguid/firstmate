@@ -62,20 +62,23 @@ file_mtime() {
 }
 
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
-  local state=$1 pid=$2 limit=${3:-300} beat first now i=0
-  beat="$state/.last-watcher-beat"
-  rm -f "$beat"
+  local state=$1 pid=$2 limit=${3:-300} mark first now i=0
+  # The cycle boundary, not the liveness beacon: a long cycle refreshes the
+  # beacon between sweep units (docs/turnend-guard.md "Cycle progress keeps the
+  # beacon fresh"), so only .watch-cycle advances once per completed poll.
+  mark="$state/.watch-cycle"
+  rm -f "$mark"
   first=""
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    first=$(file_mtime "$beat")
+    first=$(file_mtime "$mark")
     [ -n "$first" ] && break
     sleep 0.1
     i=$((i + 1))
   done
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    now=$(file_mtime "$beat")
+    now=$(file_mtime "$mark")
     if [ -n "$now" ] && [ "$now" != "$first" ]; then
       return 0
     fi

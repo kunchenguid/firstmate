@@ -344,12 +344,17 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-# The liveness beacon is touched once per cycle, immediately before the
-# terminal wait below (event_wait_or_sleep) as well as at the top of the next
-# one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
-# transitively above) is the single owner of the max(300, poll+60)
-# derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
+# The liveness beacon (BEAT, assigned before the poll loop) is touched at the top
+# of every cycle and refreshed again from inside a cycle's own sweeps by
+# fm_watch_beacon_progress (bin/fm-wake-lib.sh), so its age tracks progress
+# rather than whole-cycle length: a deep pending-reply backlog or a long check
+# sweep keeps it fresh while the watcher is demonstrably working, and a cycle
+# that genuinely stops progressing - the state this beacon exists to catch -
+# ages exactly as it did before. docs/turnend-guard.md "Cycle progress keeps
+# the beacon fresh" owns the contract.
+# fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced transitively above)
+# is the single owner of the max(300, poll+60) derivation - see
+# docs/turnend-guard.md "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
 # POLL is known.
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$POLL")}}
@@ -3244,6 +3249,7 @@ scan_signals() {
   # status_scan_parent_channel_exclude (fm-classify-lib.sh).
   exclude=$(status_scan_parent_channel_exclude "$STATE")
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
+    fm_watch_beacon_progress
     [ "$f" = "$exclude" ] && continue
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
@@ -3584,6 +3590,9 @@ heartbeat_scan_finds_actionable() {
   exclude=$(status_scan_parent_channel_exclude "$STATE")
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
   for f in "$STATE"/*.status; do
+    # The heartbeat runs on its own FM_HEARTBEAT cadence and walks every status
+    # log, so it is one of the sweeps that must keep the beacon fresh.
+    fm_watch_beacon_progress
     [ -e "$f" ] || [ -L "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
@@ -3745,6 +3754,16 @@ evict_stalled_holder() {
 EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
+# Cycle boundary, kept separate from the liveness beacon: CYCLE_MARK advances
+# exactly once per cycle, while the beacon also advances between the units of a
+# long cycle (below). A test or observer that wants to count completed poll
+# cycles waits on this, never on the beacon.
+CYCLE_MARK="$STATE/.watch-cycle"
+# Sweeps inside a cycle refresh this same beacon between units
+# (fm_watch_beacon_progress); exporting it is what tells those libraries a live
+# watcher owns them, so the same code stays inert in a one-shot command.
+FM_WATCH_BEACON_PATH=$BEAT
+export FM_WATCH_BEACON_PATH
 while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
   if [ -n "${FM_LOCK_HELD_PATH:-}" ]; then
     # The reclaim helper releases its steal and marker locks on publish
@@ -3787,7 +3806,7 @@ while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
   fi
   exit 0
 done
-rm -f "$BEAT"
+rm -f "$BEAT" "$CYCLE_MARK"
 if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
@@ -4110,7 +4129,12 @@ while :; do
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # The cycle's own sweeps refresh it again between units, so a long but
+  # progressing cycle never reads as a dead supervisor (above).
+  fm_watch_beacon_tick "$BEAT"
+  # The cycle boundary is its own marker, so counting completed cycles never
+  # has to interpret the liveness beacon's progress refreshes as cycle ticks.
+  : > "$CYCLE_MARK" 2>/dev/null || true
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
@@ -4222,6 +4246,10 @@ while :; do
       [ -z "$FM_CHECK_CUT" ] || fm_wake_append check pr-register "check: pr-register: $FM_CHECK_CUT" || exit 1
     fi
     for c in "$STATE"/*.check.sh; do
+      # A check sweep runs every registered check under its own timeout, so it
+      # can outlast the guard grace on a busy home; keep the beacon fresh
+      # between checks so a working sweep is never read as a dead supervisor.
+      fm_watch_beacon_progress
       [ -e "$c" ] || continue
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
@@ -4572,6 +4600,9 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    # Per-window crew-state reads shell out per endpoint, so this loop is the
+    # cycle's other long stretch: refresh the beacon per window.
+    fm_watch_beacon_progress
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale

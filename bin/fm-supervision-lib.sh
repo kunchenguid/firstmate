@@ -42,10 +42,12 @@ fm_sup_stat_mtime() {
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
-# grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
+# grace-seconds defaults to $FM_GUARD_GRACE, then the poll-derived default
+# (bin/fm-wake-lib.sh fm_beacon_grace owns it, so this matches fm-guard.sh and
+# the arm that replaces a stalled cycle).
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}} meta source check id beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
