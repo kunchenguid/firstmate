@@ -29,7 +29,8 @@
 # Last-Modified; GitHub answers an unchanged feed with a 304 that costs no rate
 # limit) and reads the owned PRs with new notification activity, PRs never
 # read, and PRs whose last read did not settle. Every owned PR is read when the
-# feed is unavailable, answers a full page, or was first read this pass, and as
+# feed is unavailable, answers a full page newer than the cursor, or was first
+# read this pass, and as
 # the fallback sweep every FALLBACK_SECONDS, because a base moving into
 # conflict or another app's failing check raises no notification. A
 # notification on a PR this home does not own is ignored without a read.
@@ -325,7 +326,10 @@ enroll_new() { # deadline : enroll recorded and branch PRs not yet durably owned
 
 # Owned PRs with new GitHub notification activity -> $TMP/events. Sets
 # NOTIFY_OK=1 only when the feed proved it holds every new event (a 304, or a
-# 200 short of a full page), so the caller may skip the fallback full sweep.
+# 200 that is short of a full page or reaches back past the saved cursor), so
+# the caller may skip the fallback full sweep. GitHub ignores since= on a
+# conditional request, so a changed feed answers with its newest page and the
+# cursor is applied here.
 FALLBACK_SECONDS=900 # ponytail: fixed fallback sweep; make it a config value if a home needs a faster unattended sweep
 read_notifications() { # deadline
   local lm since status next_lm next_since
@@ -354,10 +358,13 @@ read_notifications() { # deadline
     | "https://github.com/\(.path)/pull/\(.n)"' "$TMP/notify.json" | sort -u > "$TMP/events"
   jq --arg lm "$next_lm" --arg since "$next_since" '.notifications = ((.notifications // {}) + {last_modified:$lm,since:$since})' \
     "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"
-  # The first read and a full page leave NOTIFY_OK=0, so this pass reads every
-  # owned PR: events on unread pages are older than that read, and the cursor
-  # still advances, so a busy feed cannot pin the monitor to full sweeps.
-  [ -z "$lm" ] || [ "$(jq length "$TMP/notify.json")" -ge 50 ] || NOTIFY_OK=1
+  # The first read, and a full page whose oldest entry is still newer than the
+  # cursor, leave NOTIFY_OK=0, so this pass reads every owned PR: events on
+  # unread pages are older than that read, and the cursor still advances, so a
+  # busy feed cannot pin the monitor to full sweeps.
+  [ -z "$lm" ] || jq -e --arg since "$since" \
+    'length >= 50 and ([.[].updated_at | strings] | min // "") >= $since' "$TMP/notify.json" >/dev/null \
+    || NOTIFY_OK=1
 }
 
 poll() {

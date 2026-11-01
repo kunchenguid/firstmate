@@ -98,9 +98,13 @@ case "$1 $2" in
     [ -f "$FORGE/notifications.json" ] || exit 1
     lm=$(cat "$FORGE/notifications-lm")
     case "$*" in *"If-Modified-Since: $lm"*) printf 'HTTP/2.0 304 Not Modified\r\n\r\n'; exit 1 ;; esac
+    # Like GitHub, a conditional request ignores since= and answers with the
+    # newest page; an unconditional one honors it.
     since=$(printf '%s\n' "$@" | sed -n 's/.*[?&]since=\([^&]*\).*/\1/p')
+    case "$*" in *If-Modified-Since:*) since= ;; esac
     printf 'HTTP/2.0 200 OK\r\nLast-Modified: %s\r\n\r\n' "$lm"
-    jq --arg since "$since" '[.[] | select(.updated_at >= $since)]' "$FORGE/notifications.json" ;;
+    jq --arg since "$since" '[.[] | select(.updated_at >= $since)] | sort_by(.updated_at) | reverse | .[:50]' \
+      "$FORGE/notifications.json" ;;
   'api repos/o/r/issues/'*) printf '[[]]\n' ;;
   'api repos/o/r/commits/'*)
     case "$2" in *check-runs*) printf '[{"check_runs":[]}]\n' ;; *) printf '[[]]\n' ;; esac ;;
@@ -837,6 +841,27 @@ test_interrupted_pass_keeps_events_pending() {
   pass 'an interrupted pass leaves its notified PRs pending'
 }
 
+test_busy_feed_still_reads_only_events() {
+  local home before
+  home=$(new_home busy-feed)
+  task "$home" ship1 pr=https://github.com/o/r/pull/49
+  task "$home" ship2 pr=https://github.com/o/r/pull/50
+  pr "$home" 49 "$HEAD_A" "$BASE_1" true false
+  pr "$home" 50 "$HEAD_A" "$BASE_1" true false
+  feed "$home"
+  # A busy account: far more than one page of older notifications.
+  jq -n '[range(60) | {updated_at:("2026-10-31T00:\(10 + .):00Z"),reason:"subscribed",subject:{type:"PullRequest",url:"https://api.github.com/repos/o/r/pulls/99"}}]' \
+    > "$home/forge/notifications.json"
+  arm "$home"
+  expect_silent "$home" 'the first pass reads every owned PR'
+  set_pr "$home" 49 '.reviewDecision = "CHANGES_REQUESTED"'
+  notify "$home" o/r 49 2026-11-01T00:05:00Z author
+  before=$(reads "$home" 50)
+  expect_one "$home" 'pull/49 author must act' 'the new notification must read its PR'
+  [ "$(reads "$home" 50)" = "$before" ] || fail 'a full page reaching back past the cursor forced a full sweep'
+  pass 'a busy feed whose page reaches back past the cursor reads only the notified PR'
+}
+
 test_failed_event_read_is_retried() {
   local home
   home=$(new_home notification-retry)
@@ -856,7 +881,7 @@ test_failed_event_read_is_retried() {
 failures=0
 for test_name in test_maintainer_author_and_approval_states_are_distinct \
   test_pending_reviewer_without_review_decision_is_recorded test_check_suites_beyond_the_first_page_are_read test_endless_check_suite_pages_stay_unsettled test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
-  test_failed_event_read_is_retried test_unknown_mergeability_is_reread_but_a_conflict_is_not test_interrupted_pass_keeps_events_pending test_full_notification_page_forces_a_sweep_and_advances \
+  test_failed_event_read_is_retried test_busy_feed_still_reads_only_events test_unknown_mergeability_is_reread_but_a_conflict_is_not test_interrupted_pass_keeps_events_pending test_full_notification_page_forces_a_sweep_and_advances \
   test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \
   test_reported_failure_does_not_hide_a_later_required_failure \
