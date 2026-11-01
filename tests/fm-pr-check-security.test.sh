@@ -1626,6 +1626,35 @@ SH
   pass "returned custom check descendants are drained on installed and fallback timeout paths"
 }
 
+test_timed_out_custom_check_surfaces_with_partial_output() {
+  local backend dir state rc force_fallback
+  for backend in installed-timeout fallback-timeout; do
+    dir=$(make_case "timed-out-custom-check-$backend")
+    state="$dir/home/state"
+    cat > "$state/custom.check.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'finding before the cut\n'
+sleep 30
+printf 'finding after the cut\n'
+SH
+    chmod 0700 "$state/custom.check.sh"
+    FM_HOME="$dir/home" "$REGISTER" custom >/dev/null || fail "could not register $backend timed-out check"
+    force_fallback=0
+    [ "$backend" = installed-timeout ] || force_fallback=1
+
+    rc=0
+    FM_TEST_CHECK_TIMEOUT=1 FM_CHECK_FORCE_FALLBACK="$force_fallback" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$backend watcher did not stop on the timed-out check (rc=$rc): $(cat "$dir/watch.err")"
+    grep -qxF "check: $state/custom.check.sh: finding before the cut" "$dir/watch.out" \
+      || fail "$backend watcher dropped output printed before the timeout: $(cat "$dir/watch.out")"
+    grep -qxF 'timed out after 1s' "$dir/watch.out" \
+      || fail "$backend watcher kept a timed-out check silent: $(cat "$dir/watch.out")"
+    ! grep -qF 'finding after the cut' "$dir/watch.out" || fail "$backend watcher let the check run past its timeout"
+  done
+  pass "a timed-out custom check surfaces its timeout and earlier output on installed and fallback timeout paths"
+}
+
 test_teardown_removes_poll_artifacts() {
   local dir fakebin artifact counterpart rc
   dir=$(make_case teardown-cleanup)
@@ -3809,4 +3838,5 @@ test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
+test_timed_out_custom_check_surfaces_with_partial_output
 test_teardown_removes_poll_artifacts
