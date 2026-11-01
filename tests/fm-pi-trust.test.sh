@@ -5,6 +5,8 @@
 # Pi's own trust store for exactly the worktree path a spawn will use (and only
 # that path), and every failure mode stops the spawn instead of launching a
 # worker that would park on "Trust project folder?" with nobody to press Enter.
+# It also proves that an Orca launch-env source's supplied HOME, not the
+# spawning process's, selects the store an unpinned worker reads.
 #
 # NO TEST TOUCHES THE REAL USER STORE. Every script-level case runs with an
 # isolated HOME and an explicit --agent-dir under the fixture root, and every
@@ -503,6 +505,160 @@ SH
   printf '%s|%s|%s|%s|%s\n' "$case_dir" "$home" "$proj" "$wt" "$fakebin"
 }
 
+# make_pi_orca_spawn_case <name> <id>: a pi spawn on backend=orca whose
+# config/launch-env-tmux-session supplies HOME from a different home, the shape
+# an Orca home allowlist uses. Echoes
+# "<case>|<home>|<proj>|<worker-home>|<fakebin>".
+make_pi_orca_spawn_case() {
+  local name=$1 id=$2 case_dir home proj worker_home fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  worker_home="$case_dir/worker-home"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  cat > "$fakebin/pi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Pi 0.84.0' 'Options: --help --tui-mode <mode> --approve'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/pi"
+  cp "$fakebin/pi" "$fakebin/pi-signed"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+DIR="${FM_TEST_ORCA_DIR:?}"
+case "$1 $2" in
+  "status --json")
+    printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
+    exit 0
+    ;;
+  "repo show") exit 1 ;;
+  "repo add")
+    printf '{"ok":true,"result":{"repo":{"id":"repo1"}}}\n'
+    exit 0
+    ;;
+  "worktree create")
+    name=
+    prev=
+    for a in "$@"; do
+      [ "$prev" = --name ] && name=$a
+      prev=$a
+    done
+    wt="$DIR/orca-worktrees/$name"
+    mkdir -p "$DIR/orca-worktrees"
+    git -C "$DIR/project" worktree add --quiet -b "orca-$name" "$wt" >&2 || exit 1
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' "$name" "$wt"
+    exit 0
+    ;;
+  "terminal create")
+    printf '{"ok":true,"result":{"terminal":{"handle":"term-1"}}}\n'
+    exit 0
+    ;;
+  "terminal send")
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = --text ]; then
+        case "$a" in
+          *"'"*/launch.*)
+            f=${a#*"'"}; f=${f%%"'"*}
+            cp "$f" "$f.copy" && rm -f "$f"
+            ;;
+        esac
+      fi
+      prev=$a
+    done
+    printf '{"ok":true}\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/orca"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *show-environment*)
+    name=
+    for a in "$@"; do name=$a; done
+    case "$name" in
+      HOME) printf 'HOME=%s\n' "${FM_TEST_TMUX_HOME:?}" ;;
+      *) printf '%s=stub\n' "$name" ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_test_spawn_home "$home" pi
+  fm_git_init_commit "$proj"
+  mkdir -p "$worker_home"
+  printf 'HOME\n' > "$home/config/launch-env-allowlist"
+  printf 'scoped-source\n' > "$home/config/launch-env-tmux-session"
+  fm_test_spawn_brief "$home" "$id"
+  printf '%s|%s|%s|%s|%s\n' "$case_dir" "$home" "$proj" "$worker_home" "$fakebin"
+}
+
+# An Orca launch-env source replaces HOME inside the cleared launch environment.
+# An unpinned pi worker reads Pi's default <home>/.pi/agent under that value, so
+# the registration must land there, not in the spawning process's home.
+test_pi_spawn_registers_the_launch_env_home_store() {
+  local rec id out store spawn_store wt_recorded staged launch
+  id=pi-trust-launch-env-home
+  rec=$(make_pi_orca_spawn_case spawn-launch-env "$id")
+  IFS='|' read -r CASE HOME_DIR PROJ_DIR WORKER_HOME FAKEBIN_DIR <<EOF
+$rec
+EOF
+  store="$WORKER_HOME/.pi/agent/trust.json"
+  spawn_store="$HOME_DIR/user-home/.pi/agent/trust.json"
+
+  out=$(FM_TEST_ORCA_DIR="$CASE" FM_TEST_TMUX_HOME="$WORKER_HOME" \
+    fm_test_run_spawn "$HOME_DIR" "$PROJ_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --backend orca)
+  expect_code 0 $? "an Orca launch-env HOME spawn should succeed: $out"
+  wt_recorded=$(grep '^worktree=' "$HOME_DIR/state/$id.meta" | cut -d= -f2-)
+  [ -n "$wt_recorded" ] || fail "the spawn did not record the worktree Orca created"
+  assert_trusted "$store" "$(cd -P -- "$wt_recorded" && pwd -P)" \
+    "the spawn registered the spawning process's home, not the HOME its launch line carries"
+  assert_absent "$spawn_store" \
+    "the unpinned worker does not read the spawning process's store"
+  launch=
+  for staged in /tmp/fm-"$id"+*/launch.*.sh.copy; do
+    [ -e "$staged" ] || continue
+    if grep -Fq "HOME='$WORKER_HOME'" "$staged"; then
+      launch=$staged
+      break
+    fi
+  done
+  [ -n "$launch" ] \
+    || fail "the fake Orca pane did not receive a launch line carrying HOME='$WORKER_HOME'"
+  pass "an Orca launch-env HOME registers the store its unpinned pi worker reads"
+}
+
+# The same case's refusal: when that effective store cannot be written, the
+# spawn stops instead of launching a worker that would park on the dialog.
+test_pi_spawn_refuses_an_unwritable_launch_env_home_store() {
+  local rec id out store
+  id=pi-trust-launch-env-refuse
+  rec=$(make_pi_orca_spawn_case spawn-launch-env-refuse "$id")
+  IFS='|' read -r CASE HOME_DIR PROJ_DIR WORKER_HOME FAKEBIN_DIR <<EOF
+$rec
+EOF
+  store="$WORKER_HOME/.pi/agent/trust.json"
+  mkdir -p "$store"
+
+  out=$(FM_TEST_ORCA_DIR="$CASE" FM_TEST_TMUX_HOME="$WORKER_HOME" \
+    fm_test_run_spawn "$HOME_DIR" "$PROJ_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
+    --mode no-mistakes --yolo off --backend orca)
+  expect_code 1 $? "a spawn whose effective trust store cannot be written must refuse: $out"
+  assert_contains "$out" "refusing to launch a pi worker" \
+    "the refusal must say it would not launch the worker"
+  assert_contains "$out" "$store" "the refusal must name the effective store"
+  pass "an unwritable launch-env HOME store refuses the spawn"
+}
+
 test_pi_spawn_registers_the_worktree() {
   local rec harness id out store launch
   for harness in pi pi-signed; do
@@ -645,6 +801,8 @@ test_saved_decision_outranks_the_policy
 test_policy_follows_the_pinned_root
 test_unreadable_settings_refuses_loudly
 test_pi_spawn_registers_the_worktree
+test_pi_spawn_registers_the_launch_env_home_store
+test_pi_spawn_refuses_an_unwritable_launch_env_home_store
 test_pi_spawn_ignores_the_spawning_process_agent_root
 test_pi_spawn_refuses_when_registration_fails
 test_pi_spawn_respects_the_never_policy

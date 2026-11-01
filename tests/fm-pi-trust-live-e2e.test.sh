@@ -184,7 +184,74 @@ probe_case ancestor-false "{\"$LAB_REAL\":false}" '' false false \
 probe_case null-skips "{\"$WT_REAL\":null,\"$LAB_REAL\":true}" '' true true \
   "a nearer null entry is skipped and the trusted ancestor resolves"
 
-# --- 5. The policy rule the script copies is Pi's own ----------------------
+# probe_trust_home <home>: ask the installed resolver about the lab worktree as
+# an unpinned worker with <home> sees it. HOME is the only store selector and
+# PI_CODING_AGENT_DIR is unset, exactly the environment an unpinned launch line
+# leaves after its explicit unset, so Pi takes <home>/.pi/agent.
+probe_trust_home() {
+  local home=$1
+  PI_PACKAGE_DIR="$PI_PACKAGE_DIR" env -u PI_CODING_AGENT_DIR HOME="$home" \
+    node --input-type=module - "$WT_REAL" "$PI_VERSION" <<'NODE'
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
+const [cwd, version] = process.argv.slice(2);
+const pkg = process.env.PI_PACKAGE_DIR;
+const load = async (rel) => import(pathToFileURL(join(pkg, rel)).href);
+let trustManager, projectTrust, config;
+try {
+  trustManager = await load("dist/core/trust-manager.js");
+  projectTrust = await load("dist/core/project-trust.js");
+  config = await load("dist/config.js");
+} catch (err) {
+  console.error(`installed Pi ${version} no longer exposes its trust manager at the expected path: ${err.message}`);
+  process.exit(3);
+}
+const agentDir = config.getAgentDir();
+const store = new trustManager.ProjectTrustStore(agentDir);
+const resolved = await projectTrust.resolveProjectTrusted({
+  cwd,
+  trustStore: store,
+  projectTrustContext: { hasUI: false },
+});
+process.stdout.write(
+  JSON.stringify({
+    agentDir,
+    trustGating: trustManager.hasTrustRequiringProjectResources(cwd),
+    decision: store.get(cwd),
+    resolved,
+  }),
+);
+NODE
+}
+
+# --- 5. A launch-env HOME selects the unpinned worker's default store -------
+# An Orca launch-env source can supply a HOME different from the spawning
+# process's, and an unpinned launch line unsets PI_CODING_AGENT_DIR, so that
+# worker reads <supplied home>/.pi/agent. Register through that HOME and ask the
+# installed resolver as that worker, with only HOME selecting the store.
+WORKER_HOME="$LAB_REAL/worker-home"
+mkdir -p "$WORKER_HOME"
+OUT=$(env -u PI_CODING_AGENT_DIR HOME="$WORKER_HOME" "$TRUST" "$WT" "$PROJ" 2>&1) \
+  || fail "fm-pi-trust.sh failed under a launch-env HOME: $OUT"
+assert_contains "$OUT" "trusted:" "the launch-env HOME registration did not report what it trusted"
+HOME_AGENT="$WORKER_HOME/.pi/agent"
+HOME_PROBE=
+if ! HOME_PROBE=$(probe_trust_home "$WORKER_HOME"); then
+  fail "the installed Pi package could not be probed for the launch-env HOME: $HOME_PROBE"
+fi
+printf '# launch-env home: %s\n' "$HOME_PROBE"
+# shellcheck disable=SC2016 # the JS template literals are literal here
+node -e '
+  const [raw, wantStore] = process.argv.slice(1);
+  const r = JSON.parse(raw);
+  if (r.agentDir !== wantStore) { console.error(`Pi read agent root ${r.agentDir}, not the launch-env home store ${wantStore}`); process.exit(1); }
+  if (r.trustGating !== true) { console.error("the lab worktree must hold a trust-requiring resource"); process.exit(1); }
+  if (r.decision !== true) { console.error("Pi did not read the launch-env home entry as trusted"); process.exit(1); }
+  if (r.resolved !== true) { console.error("Pi still resolves the worktree untrusted under the launch-env home"); process.exit(1); }
+' "$HOME_PROBE" "$HOME_AGENT" || fail "launch-env HOME verdict is wrong: $HOME_PROBE"
+pass "pi $PKG_VERSION: a worker launched with the supplied HOME resolves the worktree trusted with no dialog"
+
+# --- 6. The policy rule the script copies is Pi's own ----------------------
 # bin/fm-pi-trust.sh consults a saved decision first and defaultProjectTrust only
 # when none exists. Those two facts are driven through the INSTALLED resolver:
 # 'never' with no saved entry declines, and a saved true still wins over 'never'.
@@ -195,4 +262,4 @@ probe_case policy-never-saved-true "{\"$WT_REAL\":true}" never true true \
 probe_case policy-always '' always null true \
   "defaultProjectTrust always trusts the worktree with no saved entry"
 
-echo "# all fm-pi-trust-live-e2e checks passed (8)"
+echo "# all fm-pi-trust-live-e2e checks passed (9)"

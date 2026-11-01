@@ -485,8 +485,10 @@
 #   Opt-in. docs/configuration.md's "Worker account pin" section owns unpinned
 #   account selection: an unpinned pi/pi-signed launch explicitly unsets
 #   PI_CODING_AGENT_DIR on its launch line, so it deterministically reads Pi's
-#   default <home>/.pi/agent store whatever the pane daemon exports, unless a raw
-#   launch command names its own agent root, which then wins.
+#   default <home>/.pi/agent store whatever the pane daemon exports, where
+#   <home> is the HOME that launch line carries (an Orca launch-env source can
+#   supply a different one), unless a raw launch command names its own agent
+#   root, which then wins.
 #   A present file pins every supported launch of
 #   that runner from this home - ship, scout, local secondmate, raw Claude
 #   command, and relaunch - to the declared account root, and the spawn
@@ -5881,6 +5883,36 @@ fi
 spawn_enter_recorded_worktree
 spawn_assert_agent_worktree
 
+# The HOME the launch line gives its worker. Only an Orca launch-env source can
+# replace it, and its snapshot is already the shell-quoted NAME=value list that
+# launch line will apply inside the cleared environment. Re-split that list the
+# same way the pane's shell will and take its HOME record; a record that leaves
+# HOME unset or empty makes Pi fall back to the account's passwd home. Every
+# other launch forwards the pane's HOME, which this process's own HOME stands in
+# for.
+spawn_launch_effective_home() {
+  local env_args=${1-} word home=${HOME:-} found=0
+  # shellcheck disable=SC2294 # the list is the launch line's own quoted words.
+  eval "set -- $env_args"
+  for word in "$@"; do
+    case $word in
+    HOME=*)
+      home=${word#HOME=}
+      found=1
+      ;;
+    -HOME)
+      home=
+      found=1
+      ;;
+    esac
+  done
+  if [ "$found" -eq 1 ] && [ -z "$home" ]; then
+    home=$(env -u HOME node -e 'process.stdout.write(require("node:os").homedir())' 2>/dev/null) || return 1
+  fi
+  [ -n "$home" ] || return 1
+  printf '%s\n' "$home"
+}
+
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
 # created below. The dialog gates the pane before the brief is ever read, and it
@@ -5931,16 +5963,24 @@ pi | pi-signed)
   # The store is the one the LAUNCH will read: a worker account pin names the
   # root on the launch line itself, and an unpinned launch line unsets
   # PI_CODING_AGENT_DIR in its env prefix below, so that worker deterministically
-  # reads Pi's default <home>/.pi/agent. The exception is a raw launch command
-  # that itself names an agent root: that assignment wins after the unset, so it
-  # reads its own store. The spawning process's own environment is not an input,
-  # because a pane is created by a long-lived tmux/herdr daemon that does not
-  # inherit firstmate's environment. Only the realpath is registered, because Pi
-  # keys its store by the canonical path.
+  # reads Pi's default <home>/.pi/agent. <home> is the HOME that launch line
+  # carries, which an Orca launch-env source can replace with the value it
+  # snapshotted. The exception is a raw launch command that itself names an agent
+  # root: that assignment wins after the unset, so it reads its own store. The
+  # spawning process's own environment is not an input, because a pane is created
+  # by a long-lived tmux/herdr daemon that does not inherit firstmate's
+  # environment. Only the realpath is registered, because Pi keys its store by
+  # the canonical path.
   if [ "$KIND" != secondmate ]; then
     spawn_pi_trust_args=("$WT" "$PROJ_ABS")
     if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
       spawn_pi_trust_args=(--agent-dir "$WORKER_ACCOUNT_ROOT" "${spawn_pi_trust_args[@]}")
+    else
+      spawn_pi_trust_home=$(spawn_launch_effective_home "$ORCA_LAUNCH_ENV_ARGS") || {
+        echo "error: could not resolve the HOME an unpinned $HARNESS launch will read, so its Pi trust store cannot be selected; refusing to launch a worker that could park on the trust dialog; $(spawn_endpoint_hint)" >&2
+        exit 1
+      }
+      spawn_pi_trust_args=(--agent-dir "$spawn_pi_trust_home/.pi/agent" "${spawn_pi_trust_args[@]}")
     fi
     if ! "$FM_ROOT/bin/fm-pi-trust.sh" "${spawn_pi_trust_args[@]}" >/dev/null; then
       echo "error: could not pre-register Pi project trust for $WT; refusing to launch a $HARNESS worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
