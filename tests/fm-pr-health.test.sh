@@ -45,18 +45,18 @@ case "$1 $2" in
   'api graphql')
     n= suite_cursor=
     for arg in "$@"; do case "$arg" in number=*) n=${arg#number=} ;; suiteCursor=*) suite_cursor=${arg#suiteCursor=} ;; esac; done
-    if [ -n "$suite_cursor" ]; then
-      # A later check-suite page: suites_page2, endless when suites_truncated.
-      model "$n" | jq '{data:{repository:{pullRequest:{headRefOid:(.graphql_head // .head),
+    case "$*" in *'after:$suiteCursor'*)
+      # The check-suite query: page 1 is suites, a later page suites_page2,
+      # and every page claims another while suites_truncated.
+      model "$n" | jq --arg cursor "$suite_cursor" '(if $cursor == "" then (.suites // []) else (.suites_page2 // []) end) as $page
+        | {data:{repository:{pullRequest:{headRefOid:(.graphql_head // .head),
         commits:{nodes:[{commit:{oid:(.graphql_head // .head),checkSuites:{
-          pageInfo:{hasNextPage:(.suites_truncated // false),endCursor:"s3"},
-          nodes:[(.suites_page2 // [])[] | {conclusion,app:{slug:"github-actions"},workflowRun:{workflow:{name}}}]}}}]}}}}}'
-      exit 0
-    fi
+          pageInfo:{hasNextPage:((.suites_truncated // false) or ($cursor == "" and .suites_page2 != null)),endCursor:"s2"},
+          nodes:[$page[] | {conclusion,app:{slug:"github-actions"},workflowRun:{workflow:{name}}}]}}}]}}}}}'
+      exit 0 ;;
+    esac
     model "$n" | jq '[{data:{repository:{pullRequest:{
       headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},reviewDecision:(if has("reviewDecision") then .reviewDecision else "APPROVED" end),
-      commits:{nodes:[{commit:{oid:(.graphql_head // .head),checkSuites:{pageInfo:{hasNextPage:((.suites_truncated // false) or .suites_page2 != null),endCursor:"s2"},nodes:[(.suites // [])[]
-        | {conclusion,app:{slug:"github-actions"},workflowRun:{workflow:{name}}}]}}}]},
       reviewRequests:{nodes:[range(.requests) | {requestedReviewer:{__typename:"User"}}]},
       latestReviews:{nodes:[range(.reviews) | {author:{__typename:"User",login:"reviewer"}}]},
       statusCheckRollup:(if (.checks | length) == 0 then null else {
