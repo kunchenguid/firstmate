@@ -18,7 +18,9 @@ const STARTUP_WAIT_MS = 5000;
 // The host releases this barrier with a wall-clock deadline that counts time
 // the machine spent suspended. A wait that expired far past its deadline
 // cannot be a host that never answered: the machine slept across it. One
-// bounded re-arm follows; it is never granted twice.
+// bounded re-arm follows; it is never granted twice. A suspension that ends
+// inside the slack still kills at the bound, because without a second clock
+// the barrier cannot tell it from a host that never answered.
 const SUSPEND_SLACK_MS = 2000;
 const SUSPEND_GRACE_MS = 5000;
 const MAX_CONTROL_BYTES = 16384;

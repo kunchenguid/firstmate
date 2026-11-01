@@ -311,12 +311,14 @@ JS
 # The capture gate must accept every overrun_ms the host can emit (the host
 # validates JS safe integers, at most 16 digits) and reject beyond it, so a
 # long suspension can never silently lose the host-error identity that keeps
-# retries coalescing into one capture.
-overrun_boundary_case() { # <tag> <overrun-ms> <expect-host-error: yes|no> <expected-result-count after two rounds>
+# retries coalescing into one capture. The measured overrun differs on every
+# suspension kill, so identity ignores it while the stored evidence keeps the
+# first capture's value.
+overrun_boundary_case() { # <tag> <round1-overrun-ms> <round2-overrun-ms> <expect-host-error: yes|no> <expected-result-count after two rounds>
   (
     set -u
-    local case_root="$TMP_ROOT/overrun-$1" overrun=$2 expect_marker=$3 expect_count=$4
-    local home source claim_root evidence inbox round_result_count
+    local case_root="$TMP_ROOT/overrun-$1" overrun1=$2 overrun2=$3 expect_marker=$4 expect_count=$5
+    local home source claim_root evidence inbox round_result_count overrun stored_overrun
     local saved_home=${HOME:-} saved_xdg=${XDG_STATE_HOME:-}
     home="$case_root/home"
     source="boundary-$1"
@@ -346,9 +348,10 @@ SHIM
     fm_test_track_procevent_home "$home" "$claim_root"
     FM_HOME="$home" "$case_root/code/bin/fm-procevent.sh" register-extension ext-sleep "$source" \
       --config-ref boundary >/dev/null || fail "cannot register $1 fixture"
-    evidence=$(printf '{"schema":"firstmate.process-event-extension-error.v1","extension_id":"org.example.sleep-deadlines","operation":"source.poll","code":"timeout","bound":"invoke","overrun_ms":%s}' "$overrun")
     inbox="$home/state/procevent-inbox"
     for round in 1 2; do
+      if [ "$round" -eq 1 ]; then overrun=$overrun1; else overrun=$overrun2; fi
+      evidence=$(printf '{"schema":"firstmate.process-event-extension-error.v1","extension_id":"org.example.sleep-deadlines","operation":"source.poll","code":"timeout","bound":"invoke","overrun_ms":%s}' "$overrun")
       if [ "$round" -eq 1 ]; then
         FM_SHIM_EVIDENCE="$evidence" FM_HOME="$home" \
           "$case_root/code/bin/fm-procevent.sh" start "$source" > "$case_root/start.out" 2>&1 \
@@ -376,9 +379,13 @@ SHIM
       || fail "$1 did not settle at $expect_count captures"
     if [ "$expect_marker" = yes ]; then
       [ "$(host_error_count "$inbox" "$source")" -eq 1 ] \
-        || fail "an overrun at the capture gate cap lost its host-error identity"
+        || fail "an accepted overrun lost its host-error identity"
       [ "$expect_count" -eq 1 ] \
-        || fail "an overrun at the capture gate cap must coalesce retries into one capture"
+        || fail "an accepted overrun must coalesce retries into one capture"
+      stored_overrun=$(node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(value.overrun_ms))' "$inbox/$source.1.result") \
+        || fail "the stored capture evidence is not JSON"
+      [ "$stored_overrun" = "$overrun1" ] \
+        || fail "the stored capture lost its first overrun_ms (${stored_overrun})"
     else
       [ "$(host_error_count "$inbox" "$source")" -eq 0 ] \
         || fail "an overrun beyond the capture gate cap was accepted as host-error identity"
@@ -394,14 +401,19 @@ SHIM
 test_overrun_at_the_capture_gate_cap_keeps_host_error_identity() {
   # 9007199254740991 is Number.MAX_SAFE_INTEGER: the largest value the host
   # can emit, so the gate must accept it and keep retry dedupe working.
-  overrun_boundary_case cap 9007199254740991 yes 1 || exit 1
+  overrun_boundary_case cap 9007199254740991 9007199254740991 yes 1 || exit 1
   pass "an overrun at the capture gate cap keeps its host-error identity and retry coalescing"
+}
+
+test_overrun_differences_coalesce_into_one_capture() {
+  overrun_boundary_case drift 4000 4100 yes 1 || exit 1
+  pass "two suspension kills differing only in overrun_ms coalesce into one capture"
 }
 
 test_overrun_beyond_the_capture_gate_cap_is_rejected() {
   # 17 digits cannot come from a host-validated safe integer; the gate must
   # reject the envelope instead of recording a host-error identity.
-  overrun_boundary_case beyond 10000000000000000 no 2 || exit 1
+  overrun_boundary_case beyond 10000000000000000 10000000000000000 no 2 || exit 1
   pass "an overrun beyond the capture gate cap is rejected without host-error identity"
 }
 
@@ -429,4 +441,5 @@ fm_test_run \
   test_frozen_invocation_still_dies_at_bound \
   test_launch_ready_recovers_after_suspension \
   test_overrun_at_the_capture_gate_cap_keeps_host_error_identity \
+  test_overrun_differences_coalesce_into_one_capture \
   test_overrun_beyond_the_capture_gate_cap_is_rejected

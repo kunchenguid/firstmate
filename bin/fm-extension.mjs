@@ -121,6 +121,9 @@ const LAUNCH_READY_WAIT_MS = 5000;
 // suspended. A deadline callback that runs SUSPEND_SLACK_MS past its bound
 // cannot be a healthy host: the machine slept across the deadline, the bound
 // itself never got a fair chance, and the invocation must not take the blame.
+// A suspension that ends inside the slack still kills at the bound, because
+// without a second clock the host cannot tell it from a stall; detecting it is
+// its own change.
 const SUSPEND_SLACK_MS = 2000;
 // The one bounded re-arm granted after a suspension-detected deadline. It is
 // never granted twice, so a genuinely stalled invocation still dies at its
@@ -1876,8 +1879,10 @@ function errorEvidence(error, extensionId, operation) {
     evidence.bound = bound;
     // overrun_ms marks the suspension-driven kill: it exists only when the
     // deadline fired materially late and a bounded grace was granted, so a
-    // genuine stall keeps byte-stable evidence at its bound. isSafeInteger
-    // pins emission to the plain-digit range the capture gate accepts.
+    // genuine stall keeps the same evidence keys at its bound. The full
+    // envelope, overrun included, is what the capture gate stores; reuse
+    // identity compares the same envelope with only overrun_ms excluded.
+    // isSafeInteger pins emission to the plain-digit range the gate accepts.
     if (error.graceUsed === true && Number.isSafeInteger(error.overrunMs) && error.overrunMs >= 0) {
       evidence.overrun_ms = error.overrunMs;
     }

@@ -189,6 +189,7 @@ The capability has four operations:
 A long-poll implementation must return `no-result` before its bound timeout when no event arrives.
 A host timeout that fires on time while the machine runs normally is an actionable package failure, not a normal discovery cadence.
 When a deadline fires far past its bound because the machine was suspended across it, the host grants one short bounded grace instead of killing a healthy invocation, and the captured error records which bound fired and how far it overran, so a suspension-driven kill is never read as a package failure.
+A suspension that ends within the host's two-second slack still kills at its bound: without a second clock the host cannot distinguish it from a stall, so detecting that case is a separate change.
 A genuinely stalled invocation receives no grace and still dies at its bound.
 The shipped example uses a 55-second finite wait inside the default five-minute host bound, so an absent file produces no result and no wake before ordinary reconciliation starts the next wait.
 The package never receives a result-file path.
@@ -218,7 +219,8 @@ An unknown enabled version refuses rather than downgrading.
 A missing or changed package never executes.
 A malformed binding, integrity mismatch, failed handshake, crash, nonzero exit, timeout, oversized stream, wrong request id, or invalid response never selects another adapter.
 A source invocation failure becomes a bounded host-produced `firstmate.process-event-extension-error.v1` result and remains unhandled; a deadline-driven failure names its `bound`, and a suspension-driven kill additionally carries `overrun_ms`.
-For the same source, a repeated complete host-error envelope reuses an existing unhandled capture only when its host-error sidecar, exact result bytes, adapter, and immutable extension identity all match.
+For the same source, a repeated complete host-error envelope reuses an existing unhandled capture only when its host-error sidecar, result evidence excluding the volatile `overrun_ms` field, adapter, and immutable extension identity all match.
+The stored result keeps the full envelope including the first capture's `overrun_ms`, so two suspension kills of one bound still share one capture sequence.
 A matching retry allocates no new result sequence and records no handled acknowledgement.
 Ordinary reconciliation continues to publish the retained evidence and retry polling, so old failure evidence does not block recovery.
 A changed error or extension identity remains distinct, and a failure after its matching evidence was handled receives a fresh capture.

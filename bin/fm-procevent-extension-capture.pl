@@ -156,6 +156,33 @@ sub private_file_matches {
   }
   return $bytes eq $expected;
 }
+# A suspension-driven deadline kill carries the measured overrun, which differs
+# on every kill of the same bound. Identity - the host-error sidecar hash and
+# the comparison against a stored capture - excludes only that volatile field,
+# while the stored result keeps the full envelope the host emitted. Canonical
+# encoding keeps identity bytes stable across capture processes.
+sub host_error_identity_bytes {
+  my ($bytes) = @_;
+  my $value = eval { decode_json($bytes) };
+  return undef unless ref($value) eq 'HASH';
+  delete $value->{overrun_ms};
+  return JSON::PP->new->canonical->encode($value) . "\n";
+}
+sub host_error_result_matches {
+  my ($name, $expected) = @_;
+  sysopen(my $fh, $name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or return 0;
+  my @st = stat($fh);
+  return 0 unless @st && -f $fh && $st[4] == $< && ($st[2] & 07777) == 0600
+    && $st[3] == 1 && $st[7] <= 4096;
+  my $bytes = '';
+  while (length($bytes) < $st[7]) {
+    my $read = sysread($fh, my $buffer, $st[7] - length($bytes));
+    return 0 unless defined $read && $read > 0;
+    $bytes .= $buffer;
+  }
+  my $identity = host_error_identity_bytes($bytes);
+  return defined $identity && $identity eq $expected;
+}
 sub random_token {
   open(my $random, '<', '/dev/urandom') or fail('cannot create capture reservation');
   my $bytes = '';
@@ -256,7 +283,7 @@ if ($rc != 0 && $written == 0) {
   exit 0;
 }
 my $extension_owner = join("\n", "schema=fm-procevent-extension-owner.v1", "extension_id=$extension_id", "extension_version=$extension_version", "capability_version=$capability_version", "package_digest=$package_digest", "binding_digest=$binding_digest", "");
-my ($host_error, $error_bytes);
+my ($host_error, $error_bytes, $error_identity);
 if ($rc == 70 && !$truncated && $written > 0 && $written <= 1024) {
   seek($stage, 0, 0) or fail("cannot rewind host error");
   $error_bytes = '';
@@ -269,8 +296,9 @@ if ($rc == 70 && !$truncated && $written > 0 && $written <= 1024) {
   # Deadline failures extend the base four keys with bound, and with
   # overrun_ms only for a suspension-driven kill that received the bounded
   # grace. overrun_ms is capped at the host's own range (16 digits covers
-  # every JS safe integer the host validates), so both optional shapes stay
-  # byte-stable per failure mode and retry envelopes keep reusing one
+  # every JS safe integer the host validates). The mutable overrun is kept in
+  # the stored evidence but excluded from reuse identity, so repeated kills of
+  # one bound - each overrunning by its own measured amount - still reuse one
   # unhandled capture.
   my $deadline_keys = 0;
   if (ref($error) eq 'HASH' && keys(%$error) == 5
@@ -286,8 +314,9 @@ if ($rc == 70 && !$truncated && $written > 0 && $written <= 1024) {
       && ($error->{extension_id} // '') eq $extension_id
       && ($error->{operation} // '') eq 'source.poll'
       && !ref($error->{code}) && ($error->{code} // '') =~ /\A[a-z0-9-]{1,64}\z/) {
+    $error_identity = host_error_identity_bytes($error_bytes);
     $host_error = "schema=fm-procevent-host-error.v1\nidentity=sha256:"
-      . sha256_hex(join("\0", $adapter, $extension_owner, $error_bytes)) . "\n";
+      . sha256_hex(join("\0", $adapter, $extension_owner, $error_identity)) . "\n";
   }
 }
 chdir($inbox_dir) or fail("cannot enter inbox directory");
@@ -297,7 +326,7 @@ if (defined $host_error) {
     my $prefix = "$id.$1";
     next if -e "$prefix.handled" || -l "$prefix.handled";
     next unless private_file_matches($marker, $host_error)
-      && private_file_matches("$prefix.result", $error_bytes)
+      && host_error_result_matches("$prefix.result", $error_identity)
       && private_file_matches("$prefix.adapter", "$adapter\n")
       && private_file_matches("$prefix.extension", $extension_owner);
     close($stage) or fail("cannot close staged output");
