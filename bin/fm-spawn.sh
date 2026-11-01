@@ -7415,17 +7415,15 @@ fi
 # launch before the agent command, so the reporter's parent is the pane shell
 # that runs the agent. The reporter header owns eligibility and native-version
 # gates; pass the executable the launch runs so the native probe reads its
-# version. A raw launch runs its first word, which names that executable only
-# when no assignment precedes it; otherwise nothing is passed and the reporter
-# treats a natively reporting harness as native. Its stderr stays on
+# version. A raw launch command names no established agent - wrappers, quoting
+# and compound commands hide what actually runs - so it passes none and gets
+# no reporter. Its stderr stays on
 # the pane so a config warning reaches the user. The `disarm` after the agent
 # command retires the reporter when the agent exits, because the pane shell
 # that sourced the launch outlives it. Newlines, not `;`, delimit the agent
 # command, so a raw launch ending in a separator or a comment stays intact.
-if [ "$RAW_LAUNCH" = 1 ]; then
-  read -r OSC7501_AGENT_BIN _ <<<"$RAW_COMMAND"
-  case "$OSC7501_AGENT_BIN" in [A-Za-z_]*=*) OSC7501_AGENT_BIN= ;; esac
-else
+OSC7501_AGENT_BIN=
+if [ "$RAW_LAUNCH" = 0 ]; then
   case "$HARNESS" in
     pi | pi-signed) OSC7501_AGENT_BIN=${PI_BIN:-} ;;
     muse) OSC7501_AGENT_BIN=${MUSE_BIN:-} ;;

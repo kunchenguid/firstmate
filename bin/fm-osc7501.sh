@@ -18,17 +18,19 @@
 #      TERM_PROGRAM=ghostty); unknown terminals silently do nothing.
 #      backend=herdr (old herdr has no protocol support) and backend=t3code
 #      (no task tty) never report
-#   4. the harness must not already report natively: Claude Code >= 2.1.295
+#   4. the launch must name the executable it runs (--agent-bin); a launch
+#      that names none - fm-spawn's raw launch commands - has no established
+#      agent, so it never reports
+#   5. the harness must not already report natively: Claude Code >= 2.1.295
 #      and Pi >= 1.1.0 (herdr discussions #5073/#5106, verified 2026-10-30),
 #      codex-cli >= 0.163.0 (openai/codex#52725, first released in
 #      rust-v0.163.0, verified 2026-11-01), and Grok >= 1.0.67 and Muse Code
 #      >= 1.4.11 (the lowest versions verified reporting on Rex,
 #      docs/verification/runtime-backends.md) send their own root records;
 #      a terminal keeps one root record per pane, so a firstmate record would
-#      only replace theirs. The probe runs the executable the launch runs
-#      (--agent-bin); one of these harnesses with no such executable, or
-#      whose version cannot be read, counts as native, so no unprobed build
-#      shares the root record
+#      only replace theirs. The probe runs --agent-bin; one of these
+#      harnesses whose version cannot be read counts as native, so no
+#      unprobed build shares the root record
 #
 # When all of that holds, arm daemonizes `watch`, which polls firstmate's own
 # durable signals for the task and emits records to /dev/tty. Every record
@@ -231,9 +233,8 @@ EOF
 }
 
 # osc_native <harness> <agent-bin>: 0 when the launched agent reports
-# OSC 7501 itself at the probed version (floors: the header's gate 4). A
-# harness with a native floor reads as native when <agent-bin> is empty or its
-# probe fails.
+# OSC 7501 itself at the probed version (floors: the header's gate 5). A
+# harness with a native floor reads as native when its probe fails.
 osc_native() {
   local floor ver
   case "$1" in
@@ -244,7 +245,6 @@ osc_native() {
     muse) floor=1.4.11 ;;
     *) return 1 ;;
   esac
-  [ -n "${2:-}" ] || return 0
   ver=$(osc_probe_version "$2") || return 0
   osc_version_ge "$ver" "$floor"
 }
@@ -505,6 +505,7 @@ osc_arm() { # --task --harness --backend --kind --state --config [--target] [--a
   case "$backend" in herdr | t3code) exit 0 ;; esac
   osc_env_aware || exit 0
   # a natively reporting agent never sees a competing record
+  [ -n "$agent_bin" ] || exit 0
   osc_native "$harness" "$agent_bin" && exit 0
   FM_OSC7501_WATCHER=1 nohup bash "$SCRIPT_DIR/fm-osc7501.sh" watch \
     --task "$task" --kind "$kind" --state "$state" --harness "$harness" \

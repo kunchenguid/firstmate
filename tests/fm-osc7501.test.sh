@@ -108,7 +108,7 @@ termios.tcsetattr(slave, termios.TCSANOW, mode)
 typed = b"worker input must survive startup\n"
 os.write(master, typed)
 env = dict(os.environ, FM_OSC7501_TTY=os.ttyname(slave))
-subprocess.run(["bash", script, "arm", "--task", "t1", "--harness", "opencode",
+subprocess.run(["bash", script, "arm", "--task", "t1", "--harness", "opencode", "--agent-bin", "opencode",
                 "--backend", "tmux", "--kind", "ship", "--state", home + "/state",
                 "--config", home + "/config"], env=env, check=True, timeout=5)
 assert termios.tcgetattr(slave) == mode, "arm changed terminal modes"
@@ -132,7 +132,7 @@ t_ghostty_arms_watcher() {
   mkhome "$d"
   start_term "$d"
   env "${CLEAN_UNSET[@]}" TERM_PROGRAM=ghostty FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
-    --task t2 --harness opencode --backend tmux --kind ship \
+    --task t2 --harness opencode --agent-bin opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   assert_present "$(echo "$d/state"/.osc7501watch-* | head -1)" "aware: watcher pidfile recorded"
   busy_rec "$d/state" t2 busy
@@ -244,20 +244,22 @@ t_old_claude_uses_generic() {
   pass "native gate: claude below the floor uses the generic reporter"
 }
 
-# A natively reporting harness whose launched executable was not named must
-# not get a competing reporter, even when an old copy sits on PATH.
-t_native_harness_without_agent_bin_skips() {
-  local d=$TMP_ROOT/noagentbin
-  mkhome "$d"; mkfake "$d" claude 'claude 1.9.9'
+# A launch that names no executable has no established agent - fm-spawn's
+# raw launch commands, such as `env claude ...` with harness env - so it gets
+# no reporter, whatever its harness word.
+t_launch_without_agent_bin_skips() {
+  local d=$TMP_ROOT/noagentbin h
+  mkhome "$d"
   start_term "$d"
-  env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" \
-    PATH="$d/bin:$PATH" bash "$SCRIPT" arm \
-    --task t29 --harness claude --backend tmux --kind ship \
-    --state "$d/state" --config "$d/config"
-  [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
-    || fail "a claude with no named executable armed a watcher from the PATH copy"
+  for h in env claude; do
+    env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
+      --task t29 --harness "$h" --backend tmux --kind ship \
+      --state "$d/state" --config "$d/config"
+    [ -z "$(ls "$d/state"/.osc7501watch-* 2>/dev/null)" ] \
+      || fail "a $h launch naming no executable armed a watcher"
+  done
   stop_term
-  pass "native gate: a native-capable harness without --agent-bin arms nothing"
+  pass "eligibility: a launch without --agent-bin arms nothing"
 }
 
 # A harness upgraded in place across the native floor - the same symlink, its
@@ -399,7 +401,7 @@ t_config_off_disables() {
   mkhome "$d"; printf 'off\n' >"$d/config/osc7501-status"
   start_term "$d"
   env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
-    --task t8 --harness opencode --backend tmux --kind ship \
+    --task t8 --harness opencode --agent-bin opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   sleep 0.3
   stop_term
@@ -419,7 +421,7 @@ t_hc_marker_arms_watcher() {
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u REX_BLOCK -u REX_SESSION \
     -u TERM_PROGRAM \
     HC_TERMINAL_ID=t-1 FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
-    --task t9 --harness opencode --backend tmux --kind ship \
+    --task t9 --harness opencode --agent-bin opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   sleep 0.3
   assert_present "$(echo "$d/state"/.osc7501watch-* | head -1)" "hc env: watcher armed without a query"
@@ -460,7 +462,7 @@ t_concurrent_panes_keep_their_reporters() {
     mkdir -p "$d/$pane"
     # shellcheck disable=SC2016
     start_term "$d/$pane" env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID="$pane" FM_OSC7501_INTERVAL=1 \
-      bash -c 'echo $$ >"$5"; bash "$1" arm --task "$4" --harness opencode --backend tmux --kind ship --state "$2" --config "$3"; exec sleep 300' \
+      bash -c 'echo $$ >"$5"; bash "$1" arm --task "$4" --harness opencode --agent-bin opencode --backend tmux --kind ship --state "$2" --config "$3"; exec sleep 300' \
       _ "$SCRIPT" "$d/state" "$d/config" "t$pane" "$d/$pane/shell"
     eval "$pane=\$TERM_PID"
     wait_cap "$(printf 'fm-t%s' "$pane" | base64 | tr -d '\n')" "$d/$pane/cap" 60 || fail "pane $pane: no record for t$pane"
@@ -484,7 +486,7 @@ t_disarm_after_agent_exit_parks_idle() {
   start_term "$d"
   busy_rec "$d/state" t10 busy
   env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=x FM_OSC7501_TTY="$TERM_SLAVE" FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
-    --task t10 --harness opencode --backend tmux --kind ship \
+    --task t10 --harness opencode --agent-bin opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   local wpid
   wpid=$(watcher_pid "$d/state") || fail "disarm: no watcher armed"
@@ -507,12 +509,12 @@ t_rearm_retires_previous_reporter() {
   mkhome "$d"; mkfake "$d" claude 'claude 2.1.295'
   start_term "$d"
   env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x bash "$SCRIPT" arm \
-    --task t11 --harness opencode --backend tmux --kind ship \
+    --task t11 --harness opencode --agent-bin opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   local first second
   first=$(watcher_pid "$d/state") || fail "rearm: no first watcher"
   env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x bash "$SCRIPT" arm \
-    --task t11 --harness opencode --backend tmux --kind ship \
+    --task t11 --harness opencode --agent-bin opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   second=$(watcher_pid "$d/state") || fail "rearm: same-task relaunch armed no watcher"
   [ "$first" != "$second" ] || fail "rearm: same-task relaunch kept the old reporter"
@@ -647,12 +649,12 @@ t_retire_waits_for_slow_reporter() {
   done >"$d/state/t17.status"
   busy_rec "$d/state" t17 busy
   env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
-    --task t17 --harness opencode --backend tmux --kind ship \
+    --task t17 --harness opencode --agent-bin opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   first=$(watcher_pid "$d/state") || fail "slow: no first watcher"
   wait_cap 'state=working' "$d/cap" 200 || fail "slow: the first reporter never reported"
   env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$TERM_SLAVE" HC_TERMINAL_ID=x FM_OSC7501_INTERVAL=1 bash "$SCRIPT" arm \
-    --task t17 --harness opencode --backend tmux --kind ship \
+    --task t17 --harness opencode --agent-bin opencode --backend tmux --kind ship \
     --state "$d/state" --config "$d/config"
   if kill -0 "$first" 2>/dev/null; then
     kill -KILL "$first" 2>/dev/null
@@ -674,7 +676,7 @@ t_hc_terminal_with_inherited_herdr_markers() {
   start_term "$d"
   env "${CLEAN_UNSET[@]}" HC_TERMINAL_ID=t-2 HERDR_ENV=1 HERDR_PANE_ID=p-1 \
     FM_OSC7501_TTY="$TERM_SLAVE" bash "$SCRIPT" arm \
-    --task t14 --harness opencode --backend hc --kind ship \
+    --task t14 --harness opencode --agent-bin opencode --backend hc --kind ship \
     --state "$d/state" --config "$d/config"
   local wpid
   wpid=$(watcher_pid "$d/state") || fail "hc inside herdr: no watcher armed"
@@ -692,7 +694,7 @@ fm_test_run \
   t_final_idle_after_working \
   t_native_claude_skips_everything \
   t_old_claude_uses_generic \
-  t_native_harness_without_agent_bin_skips \
+  t_launch_without_agent_bin_skips \
   t_inplace_upgrade_reprobes_native \
   t_native_codex_threshold \
   t_unknown_activity_leaves_native_root \
