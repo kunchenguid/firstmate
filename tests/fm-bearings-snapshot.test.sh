@@ -1677,7 +1677,7 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
     --repo firstmate --file "$main_backlog" >/dev/null \
     || fail "could not create the answered captain question"
   run_captain "$home" "$fakebin" hold answered-question \
-    --reason "captain route choice pending" >/dev/null \
+    --class product-or-scope-expansion --reason "captain route choice pending" >/dev/null \
     || fail "could not hold the answered captain question"
   printf 'Choose route north.\n' > "$home/question-answer.txt"
   run_captain "$home" "$fakebin" answer answered-question \
@@ -1685,7 +1685,7 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
     || fail "could not close the answered captain question"
 
   run_captain "$home" "$fakebin" hold created-local-question \
-    --title "Choose local main" --reason "captain local route pending" >/dev/null \
+    --title "Choose local main" --class product-or-scope-expansion --reason "captain local route pending" >/dev/null \
     || fail "could not create the local-only captain question"
   created_kind=$("$TASKS_AXI_BIN" show created-local-question --full --file "$main_backlog" \
     | sed -n 's/^  kind: *//p' | head -1)
@@ -1697,7 +1697,7 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
     --repo firstmate --file "$main_backlog" >/dev/null \
     || fail "could not create the legacy kindless captain question"
   run_captain "$home" "$fakebin" hold legacy-local-question \
-    --reason "captain legacy local route pending" >/dev/null \
+    --class product-or-scope-expansion --reason "captain legacy local route pending" >/dev/null \
     || fail "could not hold the legacy kindless captain question"
   run_captain "$home" "$fakebin" answer legacy-local-question \
     --decision-file "$home/question-answer.txt" >/dev/null \
