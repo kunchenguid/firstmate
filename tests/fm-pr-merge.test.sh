@@ -1771,6 +1771,27 @@ test_malformed_url_refuses_before_merge() {
   pass "fm-pr-merge refuses malformed PR URLs before calling gh-axi"
 }
 
+test_help_prints_usage_and_exits_zero() {
+  local case_dir rc flag
+  case_dir=$(make_case help)
+  for flag in --help -h; do
+    set +e
+    run_pr_merge "$case_dir" "$flag" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "help: fm-pr-merge $flag must exit 0"
+    assert_grep 'fm-pr-merge.sh <task-id> <pr-url>' "$case_dir/stdout" \
+      "help: $flag must print the usage line from the header on stdout"
+    assert_grep 'Merge method on GitHub defaults to --squash' "$case_dir/stdout" \
+      "help: $flag must print the whole header, not a truncated range"
+    assert_no_grep '^#' "$case_dir/stdout" \
+      "help: $flag must strip the comment markers"
+    [ ! -s "$case_dir/stderr" ] || fail "help: $flag wrote to stderr: $(cat "$case_dir/stderr")"
+    [ ! -s "$case_dir/gh.log" ] || fail "help: $flag invoked gh"
+  done
+  pass "fm-pr-merge --help and -h print the header usage and exit 0"
+}
+
 test_rejects_unsafe_url_segments_before_recording() {
   local case_dir rc
   case_dir=$(make_case unsafe-url-segment)
@@ -2958,6 +2979,7 @@ test_github_queue_required_refusal_names_retry_flags
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
+test_help_prints_usage_and_exits_zero
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
 test_bundled_repo_override_args_refuse_before_recording

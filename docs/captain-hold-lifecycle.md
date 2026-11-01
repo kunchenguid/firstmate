@@ -111,6 +111,8 @@ The `answer` subcommand records the captain's exact words and resolves the call 
 | `answer --release` | Frees a captain-gated work item to proceed without completing it. |
 
 It requires a non-empty captain decision file of at most 8192 bytes.
+`answer --release` is attended-only: while the away-posture record exists it is refused before anything is written, and the keyed-answer intake refuses a `release` line the same way, because only the captain in an attended session releases a captain hold.
+A quiet record is a present captain and does not refuse.
 It then works in this order:
 
 1. It durably writes a resolution block carrying the decision digest and a `Resolution mode:`.
@@ -135,7 +137,7 @@ An expired deferral therefore remains answerable.
 
 ### Recording a reviewed inventory (`complete`)
 
-While originating task metadata is live, the `complete` subcommand unions the reviewed captain-held task ids, called the reviewed inventory, into `decision_keys=` and appends `decisions_reviewed=1`.
+While originating task metadata is live, the `complete` subcommand unions the reviewed captain-held task ids, called the reviewed inventory, into `decision_keys=` and records `decisions_reviewed=1`, replacing any earlier pair and writing it once ahead of any armed `pr=` merge-poll identity lines so those stay last.
 A post-teardown visual review can complete against the surviving report and durable tasks without recreating volatile task metadata.
 The [lifecycle policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy) assigns caller authority, including the scout's brief-scoped exception for an empty inventory.
 `tests/fm-brief.test.sh` pins that the scout brief's outside-worktree rule names exactly that `complete --none` command, so the write boundary and the completion step cannot drift apart again.
@@ -573,6 +575,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Answer-time resolution works through a bound channel with task-id keys.
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
+- `test_release_is_attended_only` exercises the attended-only release: the away posture record and the away daemon flag each refuse `answer --release` and a `release` intake line without writing, while no record and a quiet record release, and a closing answer is not gated.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - The status-log mirror holds: a held lane whose last line was `paused:` gains a self-announced `captain-held` declaration a repeated hold does not duplicate; a multi-line reason folds onto that one declaration line; release, closing answer, and reconcile close each retract it with no worker alive, and release and close still retract it under a later answer for another key; a re-hold starts a new keyed lifecycle; a worker's unrelated open decision survives both sides; a `complete` transfer left as the lane's last line is retracted once under its own key and read past to the answered `needs-decision`, while a transfer naming a still-open call, or sitting on a lane whose own call is still open, stays, and a transfer key the worker asked again stays open after settlement; a decision-only hold creates no status log; a lane with no status log yet gets its declaration without re-waking the home; and the divergence guard stays silent over the mirror's own key.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.

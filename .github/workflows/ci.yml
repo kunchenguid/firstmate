@@ -399,6 +399,94 @@ jobs:
             ${{ runner.temp }}/fm-herdr/default-server.log
           if-no-files-found: warn
 
+  # Required real-herdr-core (`hc`) lane: pinned install, serial hc family,
+  # hard-fail on "skip: hc not found". Mirrors tests-herdr's posture: the
+  # lab (bin/fm-hc-lab.sh) gives each session a private core, a fleet-state
+  # tripwire, and a serve/hold daemon sweep at teardown.
+  tests-hc:
+    name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Behavior tests (herdr-core)
+    runs-on: ubuntu-24.04
+    if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') && !(github.event.action == 'labeled' && github.event.label.name != 'full-ci') && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository || github.event.pull_request.author_association == 'OWNER' || github.event.pull_request.author_association == 'MEMBER' || github.event.pull_request.author_association == 'COLLABORATOR' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+    # Heavy tier (see the timeout policy above): the last-resort job backstop.
+    # The family-run step below owns the hang tripwire, so a wedged suite fails
+    # there with the always() cleanup and timing upload still running.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require tools for real herdr-core
+        run: |
+          set -eu
+          command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+          command -v curl >/dev/null || { echo "::error::curl is required"; exit 1; }
+          command -v tar >/dev/null || { echo "::error::tar is required"; exit 1; }
+          command -v sha256sum >/dev/null || { echo "::error::sha256sum is required"; exit 1; }
+          jq --version
+      - name: Install pinned herdr-core
+        run: |
+          set -eu
+          bin/fm-install-hc.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install pinned Treehouse
+        run: |
+          set -eu
+          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Assert herdr-core pin and Treehouse presence
+        run: |
+          set -eu
+          command -v herdr-core >/dev/null || { echo "::error::herdr-core not on PATH after install"; exit 1; }
+          command -v treehouse >/dev/null || { echo "::error::treehouse not on PATH after install"; exit 1; }
+          herdr-core --version
+          treehouse --version
+          version=$(herdr-core --version | awk '{print $2; exit}')
+          [ "$version" = "0.1.14" ] || {
+            echo "::error::expected exact herdr-core pin 0.1.14, got ${version:-<empty>}"
+            exit 1
+          }
+      - name: Snapshot pre-suite hc lab sessions
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-hc"
+          bin/fm-hc-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-hc/sessions-before.txt"
+      - name: Run hc family (serial, required)
+        id: run-real-hc-family
+        # Heavy tier step tripwire: above the healthy wall and far below the
+        # job backstop, so a hang fails this step and cleanup runs.
+        timeout-minutes: 20
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          # Pin the same resolved binary for the adapter, lab, and cleanup.
+          export FM_HC_BIN
+          FM_HC_BIN=$(command -v herdr-core)
+          # Serial only. Fail if any script reports hc not found. Live
+          # harness credential tests stay outside this family (opt-in env only).
+          bin/fm-test-run.sh --family hc \
+            --fail-on-gate-skip 'hc not found' \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-hc.json"
+      - name: Cleanup job-owned hc lab sessions
+        id: cleanup-hc-lab-sessions
+        if: always()
+        run: |
+          set -eu
+          export FM_HC_BIN
+          FM_HC_BIN=$(command -v herdr-core)
+          bin/fm-hc-ci-cleanup.sh teardown "$RUNNER_TEMP/fm-hc/sessions-before.txt" || {
+            echo "::warning::lab session cleanup reported a problem; see logs"
+            exit 1
+          }
+      - name: Upload hc timing and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-timing-hc
+          path: |
+            ${{ runner.temp }}/fm-test/fm-test-timing-hc.json
+            ${{ runner.temp }}/fm-hc/sessions-before.txt
+          if-no-files-found: warn
+
   # Aggregate per-lane timing into one summary artifact for critical-path review.
   tests-timing-aggregate:
     name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Behavior timing aggregate
@@ -410,6 +498,7 @@ jobs:
       - tests-portable-parallel-2
       - tests-portable-serial
       - tests-herdr
+      - tests-hc
     if: ${{ always() && !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') && !(github.event.action == 'labeled' && github.event.label.name != 'full-ci') && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository || github.event.pull_request.author_association == 'OWNER' || github.event.pull_request.author_association == 'MEMBER' || github.event.pull_request.author_association == 'COLLABORATOR' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
     steps:
       - uses: actions/checkout@v6
@@ -547,6 +636,7 @@ jobs:
       - tests-portable-parallel-2
       - tests-portable-serial
       - tests-herdr
+      - tests-hc
       - macos-stock-bash
       - invariants
     if: ${{ always() && !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') && !(github.event.action == 'labeled' && github.event.label.name != 'full-ci') }}
