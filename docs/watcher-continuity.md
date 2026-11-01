@@ -44,6 +44,7 @@ Each adapter:
 
 Pi reports an existing cycle as `starting` while readiness is unconfirmed, `healthy` only when `bin/fm-wake-lib.sh` verifies its home, watcher path, and process identity against a fresh progress beacon while this session owns the lock, `retrying` while it retires and replaces an identity-proved watcher or owns a scheduled continuity retry, and `unhealthy` when it cannot confirm that this home owns the watcher, which withholds replacement.
 The extension independently checks an established arm every 30 seconds and replaces an identity-proved watcher whose progress beacon is past the shared guard grace, which derives from the home's poll cadence rather than a fixed 300-second floor (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)), without waiting for another tool call.
+A replacement never waits out a slow exit: when that arm's retirement exceeds `FM_WATCH_ARM_RETIRE_TIMEOUT_MS`, the extension logs the timeout, releases the single-flight slot, and starts the replacement anyway, and the timed-out arm's later close adds no second replacement.
 An unproved retirement relationship leaves the existing processes and foreign lock metadata untouched.
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of reporting that arm's state.
 A failed follow-up never cancels continuity restoration.
@@ -149,7 +150,7 @@ A failed confirmation is a restoration failure: the adapter classifies the error
 Pi retires the current successor only when the failed token names its exact watcher pid and generation and that pid is no longer alive, while omp and OpenCode retire the current successor whenever the restoration's watcher pid is no longer alive.
 On Pi a generation mismatch means a newer pipeline superseded this delivery mid-restore, so the wake routes like a confirmed delivery, with no failure appendix, and nothing is retired.
 An already-acknowledged episode confirms as a no-op when the confirmation names its generation, because the drain acknowledged it after the successor started but before the confirmation ran.
-The Pi extension diagnostic log is opt-in and off by default: only a positive FM_WATCH_EXTENSION_LOG_KEEP_LINES value appends restore attempts, readiness timeouts, confirmation targets and results, health-monitor states, and slow-retire handoffs to state/.watch-extension.log, a bounded record that never changes supervision behavior.
+The Pi extension diagnostic log is opt-in and off by default: only a positive FM_WATCH_EXTENSION_LOG_KEEP_LINES value appends restore attempts, readiness timeouts, confirmation targets and results, health-monitor states, and slow-retire timeouts to state/.watch-extension.log, a bounded record that never changes supervision behavior.
 docs/configuration.md owns the knob's default and accepted values.
 A failed confirmation is never swallowed.
 
@@ -451,7 +452,7 @@ Defaults and overrides, including Claude Stop's outer successor-status wait, are
 ### Pi and OpenCode watch extension
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and the explicit `starting`, `healthy`, `retrying`, and `unhealthy` state each owned call reports.
-It also proves an established arm reports healthy only on this home's verified identity and fresh beacon, that a stale or missing beacon on an identity-proved watcher is replaced exactly once, that the grace judging staleness follows the home's poll cadence instead of a fixed 300-second floor, that unproved identities preserve both the child and foreign lock metadata, and that the 30-second health monitor replaces a wedged watcher with no further tool call.
+It also proves an established arm reports healthy only on this home's verified identity and fresh beacon, that a stale or missing beacon on an identity-proved watcher is replaced exactly once, that the grace judging staleness follows the home's poll cadence instead of a fixed 300-second floor, that unproved identities preserve both the child and foreign lock metadata, that an arm outliving its retire bound still yields exactly one replacement with no false failure alarm, and that the 30-second health monitor replaces a wedged watcher with no further tool call.
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
 - Blocks prompt delivery to prove the successor launches first.
