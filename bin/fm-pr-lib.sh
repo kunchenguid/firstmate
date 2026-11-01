@@ -1696,6 +1696,14 @@ fm_pr_poll_degraded_remove() {  # <state> <id>
     [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
     rm -f -- "$marker" || return 1
   }
+  fm_pr_poll_train_clear "$state" "$id"
+}
+
+# Forgets that the merge request was seen on its merge train; the watcher calls
+# it after waking for a drop, so only a later re-queue arms the next drop wake.
+fm_pr_poll_train_clear() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
   marker="$state/$id.pr-poll-train"
   [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
     [ -f "$marker" ] && [ ! -L "$marker" ] || return 1

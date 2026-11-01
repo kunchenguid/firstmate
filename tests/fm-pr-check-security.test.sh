@@ -1142,6 +1142,11 @@ test_github_enterprise_hosts() {
 # FM_TEST_WATCH_BOUND_PAUSE exists, so a case that holds the watcher on work it
 # injects, or makes it wait on concurrent work it started, charges that work's
 # duration to itself instead of to the watcher.
+# FM_TEST_WATCH_STOP_WHEN names a file whose appearance ends a step meant to
+# stay silent: one second of watcher time after it exists the guard TERMs the
+# watcher and returns 124, so a silent step proves its poll ran (the caller
+# removes the watcher's .last-check and names it here) without spending the
+# whole bound, while a wake still exits the watcher with its own status first.
 # FM_TEST_CHECK_TIMEOUT sets the per-check timeout for a case that exercises it.
 # Otherwise the product default applies: a tighter override silently kills a
 # correct poll on a loaded machine, and the watcher then only retries it or
@@ -1152,8 +1157,8 @@ run_watcher_bounded() {
   case_dir=$(dirname "$home")
   [ -z "${FM_TEST_CHECK_TIMEOUT:-}" ] || check_timeout_env=("FM_CHECK_TIMEOUT=$FM_TEST_CHECK_TIMEOUT")
   shift 2
-  perl -MPOSIX=WNOHANG -MTime::HiRes=time,sleep -e 'my $pause=shift; my $left=shift; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } my $last=time; while (waitpid($pid, WNOHANG) == 0) { my $now=time; $left -= $now - $last unless length $pause && -e $pause; $last=$now; if ($left <= 0) { kill "TERM", $pid; waitpid $pid, 0; exit 124 } sleep 0.02 } exit($? >> 8)' \
-    "${FM_TEST_WATCH_BOUND_PAUSE:-}" "${FM_TEST_WATCH_BOUND:-60}" env "${check_timeout_env[@]}" \
+  perl -MPOSIX=WNOHANG -MTime::HiRes=time,sleep -e 'my $pause=shift; my $left=shift; my $stop=shift; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } my $last=time; while (waitpid($pid, WNOHANG) == 0) { my $now=time; my $spent=$now - $last; $last=$now; unless (length $pause && -e $pause) { $left -= $spent; $left = 1 if length $stop && -e $stop && $left > 1; $stop = "" if length $stop && -e $stop } if ($left <= 0) { kill "TERM", $pid; waitpid $pid, 0; exit 124 } sleep 0.02 } exit($? >> 8)' \
+    "${FM_TEST_WATCH_BOUND_PAUSE:-}" "${FM_TEST_WATCH_BOUND:-60}" "${FM_TEST_WATCH_STOP_WHEN:-}" env "${check_timeout_env[@]}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" \
       FM_TEST_GH_LOG="$case_dir/gh.log" FM_TEST_GLAB_LOG="$case_dir/glab.log" \
       FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" FM_TEST_GERRIT_AXI_LOG="$case_dir/gerrit-axi.log" \
@@ -1366,7 +1371,7 @@ injected'; do
   rm -f "$state/.last-check"
   set +e
   rc=0
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err" || rc=$?
   set -e
   [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-2): rc=$rc"
@@ -1390,7 +1395,7 @@ injected'; do
   rm -f "$state/.last-check"
   set +e
   rc=0
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-4.out" 2> "$dir/watch-4.err" || rc=$?
   set -e
   [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-4): rc=$rc"
@@ -1402,7 +1407,7 @@ injected'; do
   rm -f "$state/.last-check"
   set +e
   rc=0
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=car \
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=car \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-5.out" 2> "$dir/watch-5.err" || rc=$?
   set -e
   [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-5): rc=$rc"
@@ -1418,7 +1423,7 @@ injected'; do
   rm -f "$state/.last-check"
   set +e
   rc=0
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=gone \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-7.out" 2> "$dir/watch-7.err" || rc=$?
   set -e
   [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-7): rc=$rc"
@@ -1428,7 +1433,7 @@ injected'; do
   rm -f "$state/.last-check"
   set +e
   rc=0
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=car \
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=car \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-8.out" 2> "$dir/watch-8.err" || rc=$?
   set -e
   [ "$rc" -eq 124 ] || fail "watcher ended before its bound on a step meant to stay silent (watch-8): rc=$rc"
@@ -1476,7 +1481,7 @@ test_arming_baselines_an_already_degraded_change() {
     || fail "arming a GitLab watch with a failed head pipeline failed"
   [ -f "$state/task-a.pr-poll-degraded" ] || fail "arming did not baseline the already failing pipeline"
   rm -f "$state/.last-check"
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err" || true
   [ "$(grep -c 'degraded after ready' "$dir/watch-1.out")" -eq 0 ] \
     || fail "watcher woke for a pipeline that was already failing at the ready report"
@@ -1522,9 +1527,11 @@ test_arming_baselines_an_already_degraded_change() {
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-failed.out" 2> "$dir/watch-failed.err" || true
   [ "$(grep -c 'degraded after ready: degraded pipeline=943' "$dir/watch-failed.out")" -eq 1 ] \
     || fail "watcher did not wake for a pipeline failure while on train"
+  ack_watcher_cycle "$state" || fail "pipeline-failure wake acknowledgement failed"
   rm -f "$state/.last-check"
-  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
+  FM_TEST_WATCH_STOP_WHEN="$state/.last-check" FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-recovered.out" 2> "$dir/watch-recovered.err" || true
+  ack_watcher_cycle "$state" || fail "recovery poll cycle acknowledgement failed"
   rm -f "$state/.last-check"
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err" || true
@@ -2918,11 +2925,14 @@ EOF
   [ "$out" = merged ] || fail "a merge between the initial MR read and a missing train car was not reported as merged: $out"
   [ "$(grep -F -c 'api projects/group%2Fsubgroup%2Fproject/merge_requests/7' "$dir/glab.log")" -eq 1 ] \
     || fail "the missing-car path did not make exactly one bounded MR-state recheck"
+  rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=closed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
-  [ -z "$out" ] || fail "a closed MR was reported as a train drop: $out"
-  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_RECHECK_FAIL=1 FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
   [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941" ] \
-    || fail "an unreadable MR recheck discarded the confirmed train drop: $out"
+    || fail "an unmerged closed MR was not reported as a train drop: $out"
+  rm -f "$dir/glab.log.train"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_RECHECK_FAIL=1 FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941 mr_state=unconfirmed" ] \
+    || fail "an unreadable MR recheck did not preserve the drop with an unconfirmed state: $out"
   rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=fail run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a failed merge-train read"

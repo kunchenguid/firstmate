@@ -184,14 +184,14 @@ case "$provider" in
     # on a still-open merge request emits the degraded pipeline line, because
     # a merge train drops a merge request when its pipeline does not succeed.
     # Any other open merge request has its merge-train car read: a present car
-    # emits "ontrain", an absent one (HTTP 404) emits a degraded train=dropped
-    # line, but only if a re-read still finds the merge request open (a train
-    # that just merged it also leaves no car), naming the merge request's
-    # detailed merge status and its head pipeline URL, and the watcher wakes
-    # only when it last saw the car on the train. Any other car read failure
-    # reads as not on a train, even for the arming baseline. Every error, a closed
-    # merge request, a pending or green head pipeline, and an unreadable record
-    # stay silent. Without jq the poll falls back to the plain state field,
+    # emits "ontrain"; after a car HTTP 404, a readable train list without the
+    # merge request triggers one bounded MR-state re-read. A merged re-read
+    # emits "merged"; any readable non-merged state emits a degraded train-drop
+    # line. If the re-read fails, the line includes mr_state=unconfirmed so the
+    # confirmed drop is not hidden. The watcher wakes only when it last saw the
+    # car on the train. Other car or train-list read failures stay silent, as do
+    # a pending or green head pipeline and an unreadable initial MR record.
+    # Without jq the poll falls back to the plain state field,
     # which keeps the merged wake for a watch armed before jq was required.
     enc=${path//\//%2F}
     gitlab_detail_read() {  # <api path>
@@ -346,13 +346,13 @@ case "$provider" in
             end' 2>/dev/null) || current_state=unknown
           case $current_state in
             merged) printf '%s\n' merged; exit 0 ;;
-            closed) exit 0 ;;
-            opened|locked|unknown) ;;
-            *) exit 0 ;;
+            opened|locked|closed) ;;
+            *) current_state=unknown ;;
           esac
           line="degraded train=dropped url=$url"
           [ -z "$reason" ] || line="$line reason=$reason"
           [ -z "$pipeline" ] || line="$line pipeline_url=https://$host/$path/-/pipelines/$pipeline"
+          [ "$current_state" != unknown ] || line="$line mr_state=unconfirmed"
           [ "${#line}" -le 2000 ] || exit 0
           printf '%s\n' "$line"
         fi

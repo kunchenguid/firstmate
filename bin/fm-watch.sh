@@ -4090,10 +4090,10 @@ EOF
           fi
           wake "$reason"
         elif [ "$is_pr_poll" -eq 1 ] && [ "$out" = ontrain ]; then
-          # A ready MR still on its merge train: remember it so a later drop
-          # (the car gone while the MR is still open) is a transition worth a
-          # wake. The marker is the same identity store the degraded wake
-          # dedupes on, so a drop wakes once and a re-queue arms the next one.
+          # A ready MR still on its merge train: remember it in the train
+          # marker so a later drop (the car gone while the MR is still open)
+          # is a transition worth a wake. The drop wake clears that marker,
+          # so a drop wakes once and a re-queue arms the next one.
           if ! fm_pr_poll_degraded_already_notified "$STATE" "$id" \
               "$provider" "$host" "$path" "$number" train=on; then
             fm_pr_poll_degraded_mark_notified "$STATE" "$id" \
@@ -4121,8 +4121,9 @@ EOF
             triage_log "PR poll for $id emitted an unreadable degraded result; staying silent"
             continue
           fi
-          if fm_pr_poll_degraded_already_notified "$STATE" "$id" \
-              "$provider" "$host" "$path" "$number" "$degraded_identity"; then
+          if [ "$degraded_identity" != train=dropped ] \
+              && fm_pr_poll_degraded_already_notified "$STATE" "$id" \
+                "$provider" "$host" "$path" "$number" "$degraded_identity"; then
             pr_poll_control_release || exit 1
             touch "$STATE/.last-check"
             triage_log "absorbed duplicate degraded PR poll result for $id"
@@ -4143,6 +4144,9 @@ EOF
           fm_wake_append check "$c" "$reason" || exit 1
           fm_pr_poll_degraded_mark_notified "$STATE" "$id" \
             "$provider" "$host" "$path" "$number" "$degraded_identity" || exit 1
+          if [ "$degraded_identity" = train=dropped ]; then
+            fm_pr_poll_train_clear "$STATE" "$id" || exit 1
+          fi
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
           wake "$reason"
