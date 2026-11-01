@@ -692,7 +692,7 @@ After /no-mistakes reports CI green (the CI-ready return point - do not wait for
 A draft cannot be merged, so a report on one leaves the merge unasked.
 The configured merge authority decides whether to merge the PR; firstmate relays the outcome. You never merge a PR.
 Append \`done [at=<epoch>]: PR {url} checks green\` after confirming the PR is ready for review, then stop.
-That \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
+That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
 If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
 EOF
       ;;
