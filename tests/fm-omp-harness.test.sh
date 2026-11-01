@@ -231,6 +231,7 @@ test_secondmate_launch_relies_on_discovery() {
   printf 'charter\n' > "$home/data/charter.md"
   printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
   git -C "$home" init -q -b main
+  fm_register_secondmate "$world/home/data/secondmates.md" sm "$home"
   fakebin=$(make_spawn_fakebin "$world/fake" claude)
   make_fake_omp "$fakebin"
   launchlog="$world/launch.log"
@@ -271,6 +272,7 @@ test_secondmate_config_pinned_model_is_validated() {
   printf 'charter\n' > "$home/data/charter.md"
   printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
   git -C "$home" init -q -b main
+  fm_register_secondmate "$world/home/data/secondmates.md" sm "$home"
   printf 'omp openai-codex/gpt-nope\n' > "$world/home/config/secondmate-harness"
   fakebin=$(make_spawn_fakebin "$world/fake" claude)
   make_fake_omp "$fakebin"
@@ -309,6 +311,7 @@ make_omp_secondmate_world() {  # <name> -> echoes <world>; seeded home at <world
 run_omp_secondmate_spawn() {  # <world> <spawn-args...>
   local world=$1
   shift
+  fm_register_secondmate "$world/home/data/secondmates.md" sm "$world/sm"
   # FM_BACKEND=tmux pins the fake tmux, as in the discovery case above.
   PATH="$world/fake/fakebin:$PATH" TMUX='fake,1,0' FM_BACKEND=tmux CLAUDECODE=1 \
     FM_ROOT_OVERRIDE='' FM_HOME="$world/home" \
