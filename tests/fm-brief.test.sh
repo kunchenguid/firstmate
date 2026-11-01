@@ -1305,6 +1305,14 @@ test_inbox_guidance_explains_marked_body_terminator() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
+    # These assertions verify rendered guidance, not whether an agent obeys it.
+    assert_grep "after a command returns and before starting the next expensive suite/campaign or a fresh blocking reattachment" "$brief" "$kind scaffold omitted the command boundary"
+    assert_grep "Move each read and accepted message to handled/ before starting that next command" "$brief" "$kind scaffold permits late acknowledgement"
+    assert_grep "retain the action and its deferred condition in the task's existing status/report" "$brief" "$kind scaffold lost deferred actions"
+    assert_grep "never completion or additional authority" "$brief" "$kind scaffold conflates receipt and authority"
+    assert_grep "separate matching resolution" "$brief" "$kind scaffold conflates acknowledgement and keyed resolution"
+    assert_grep "Do not interrupt an in-flight owned command" "$brief" "$kind scaffold lost in-flight command protection"
+    assert_grep "or add inbox polling during a blocked wait" "$brief" "$kind scaffold permits polling during waits"
     assert_grep 'fm_task_inbox_body' "$brief" "$kind scaffold omitted the format-aware inbox reader"
     assert_grep 'body-terminator=1' "$brief" "$kind scaffold omitted the body terminator marker"
     assert_grep 'not part of the logical message body' "$brief" "$kind scaffold omitted the synthetic terminator meaning"

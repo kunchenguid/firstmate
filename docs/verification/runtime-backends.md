@@ -1077,7 +1077,9 @@ The cursorless backends still defer: on a cursorless read (Herdr and Zellij) a f
 
 ## Steering-inbox doorbell
 
-The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
+Doorbell-triggered inbox processing was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the real `bin/fm-send.sh` end to end with a durable record, its doorbell, and one mid-wait re-ring playing the watcher's role.
+Worker command-boundary and acknowledgement guidance is owned by [`bin/fm-brief.sh`](../../bin/fm-brief.sh); [`tests/fm-brief.test.sh`](../../tests/fm-brief.test.sh) checks its rendered text.
+The live doorbell results below do not establish that workers follow that guidance between expensive commands.
 
 ```sh
 FM_SEND_INBOX_LIVE_E2E=1 tests/fm-send-inbox-doorbell-live-e2e.test.sh
