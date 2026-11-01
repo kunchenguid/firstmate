@@ -39,11 +39,11 @@ Each adapter:
 
 - Starts the next arm before delivering the wake prompt.
 - Checks current session-lock ownership at launch.
-- Preserves one child or scheduled retry at a time.
+- Preserves one child slot or scheduled retry at a time.
 - Applies bounded exponential retry after an unexpected or failed close.
 
 Pi reports an existing cycle as `starting` while readiness is unconfirmed, `healthy` only when `bin/fm-wake-lib.sh` verifies its home, watcher path, and process identity against a fresh progress beacon while this session owns the lock, `retrying` while it retires and replaces an identity-proved watcher or owns a scheduled continuity retry, and `unhealthy` when it cannot confirm that this home owns the watcher, which withholds replacement.
-The extension independently checks an established arm every 30 seconds and replaces an identity-proved watcher whose progress beacon is past the shared guard grace, which derives from the home's poll cadence rather than a fixed 300-second floor (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)), without waiting for another tool call.
+The extension independently checks an established arm every 30 seconds and replaces an identity-proved watcher whose progress beacon is past the shared guard grace, which derives from the home's poll cadence rather than a fixed 300-second floor (see [`turnend-guard.md`](turnend-guard.md#guard-grace-and-the-poll-cadence)), without waiting for another tool call.
 A replacement never waits out a slow exit: when that arm's retirement exceeds `FM_WATCH_ARM_RETIRE_TIMEOUT_MS`, the extension logs the timeout, releases the single-flight slot, and starts the replacement anyway, and the timed-out arm's later close adds no second replacement.
 An unproved retirement relationship leaves the existing processes and foreign lock metadata untouched.
 Pi treats an arm child whose process is already gone as an empty slot even while its close event is still pending, so a repair call or a scheduled retry starts a fresh arm instead of reporting that arm's state.
