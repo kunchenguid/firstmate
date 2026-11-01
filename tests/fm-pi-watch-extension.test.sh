@@ -508,6 +508,62 @@ EOF
   pass "Pi health monitor tolerates a slow retire without a false failure alarm"
 }
 
+test_pi_repair_rearms_when_arm_outlives_retire_timeout() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-retire-timeout-root"
+  home="$TMP_ROOT/pi-retire-timeout-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/starts"
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+# Model a watcher parked in a long poll or blocked in a foreground child: the
+# arm ignores TERM, so its close event cannot fire inside the retire wait and
+# an orphaned descendant keeps its stdio pipes open.
+trap '' TERM INT
+while [ ! -e "$FM_HOME/stop" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=100 FM_WATCH_REARM_RETRY_BASE_MS=10 FM_WATCH_REARM_RETRY_MAX_MS=20 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const messages=[];
+let tool;
+const pi={on(){},registerCommand(){},registerTool(candidate){if(candidate.name==="fm_watch_arm_pi") tool=candidate;},sendUserMessage:async(message)=>{messages.push(message);}};
+const state=`${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`,`${process.pid}\n`);
+const mod=await import(pathToFileURL(process.env.PLUGIN).href);mod.default(pi);
+const starts=()=>existsSync(`${process.env.FM_HOME}/starts`) ? readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n").filter(Boolean) : [];
+try {
+  const first=await tool.execute();
+  assert.equal(first.details.state,"starting");
+  for(let i=0;i<300 && !existsSync(`${state}/.last-watcher-beat`);i++) await new Promise(r=>setTimeout(r,10));
+  await new Promise(r=>setTimeout(r,100));
+  const oldPid=readFileSync(`${state}/.watch.lock/pid`,"utf8").trim();
+  const stale=new Date(Date.now()-1200_000);
+  utimesSync(`${state}/.last-watcher-beat`,stale,stale);
+  const repair=await tool.execute();
+  assert.equal(repair.details.state,"retrying","identity-proved stale watcher must be replaced");
+  for(let i=0;i<300 && starts().length<2;i++) await new Promise(r=>setTimeout(r,10));
+  assert.equal(starts().length,2,"a repair call whose retire timed out must still start one replacement");
+  for(let i=0;i<200 && readFileSync(`${state}/.watch.lock/pid`,"utf8").trim()===oldPid;i++) await new Promise(r=>setTimeout(r,10));
+  assert.notEqual(readFileSync(`${state}/.watch.lock/pid`,"utf8").trim(),oldPid,"replacement must own a new watcher process");
+  await new Promise(r=>setTimeout(r,300));
+  assert.equal(starts().length,2,"a late old-arm close must not churn a second replacement");
+  assert.deepEqual(messages,[],`a bounded retire timeout must not surface a false failure alarm: ${messages.join(" | ")}`);
+} finally { writeFileSync(`${process.env.FM_HOME}/stop`,"stop\n"); }
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi repair call must re-arm when the arm outlives the retire wait: $out"
+  [ -z "$out" ] || fail "Pi retire-timeout repair test printed output: $out"
+  pass "Pi repair call re-arms when an arm outlives the bounded retire wait"
+}
+
 test_pi_health_monitor_respects_long_poll_grace() {
   local repo home out status
   repo="$TMP_ROOT/pi-health-long-poll-root"
@@ -6027,6 +6083,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_health_monitor_replaces_a_wedged_watcher
 test_pi_health_monitor_tolerates_a_slow_retire
+test_pi_repair_rearms_when_arm_outlives_retire_timeout
 test_pi_health_monitor_respects_long_poll_grace
 test_pi_unready_arm_has_bounded_start_grace
 test_pi_scheduled_retry_call_is_owned_noop

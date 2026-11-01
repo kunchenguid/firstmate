@@ -1066,12 +1066,13 @@ export default function (pi: ExtensionAPI) {
     healthRepairs.add(armChild);
     healthReplacementArms.add(armChild);
     if (!(await retireArm(armChild))) {
-      // A SIGTERMed arm can take longer than armRetireTimeoutMs to close on a
-      // loaded host. Hand the slow exit to the close handler's bounded retry
-      // instead of waking main with a replacement failure that is not one.
-      healthReplacementArms.delete(armChild);
+      // A SIGTERMed arm can outlive armRetireTimeoutMs when it is parked on a
+      // descendant that inherits its stdio (a long-poll watcher, or a watcher
+      // blocked in a foreground child). Waiting for that close would leave
+      // supervision down indefinitely, so release the single-flight slot and
+      // let the replacement's --restart stop this home's recorded watcher now.
       appendExtensionLog(`health monitor retire=timeout arm=${armChild.pid ?? "none"} wait=${armRetireTimeoutMs}ms`);
-      return;
+      if (owner.child === armChild) owner.child = null;
     }
     if (!generationIsLive(owner)) return;
     owner.retryFailures = 0;
