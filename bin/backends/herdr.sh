@@ -1704,8 +1704,10 @@ fm_backend_herdr_server_owner_name() {  # <owner-marker>
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. The server outlives its launcher and passes its startup environment to
 # every later pane, so remove home, harness identity, and supervision selection
-# inherited from whichever agent happened to start it. Bounded poll for the
-# server to report running.
+# inherited from whichever agent happened to start it, plus every per-call
+# FM_SNAPSHOT_* and FM_CREW_STATE_* tuning value. A session listed in
+# config/herdr-server-external is owned by an operator service, so it is never
+# started here, only waited for. Bounded poll for the server to report running.
 #
 # A running server returns after one marker check in the session directory,
 # unless that directory holds a replacement marker. While the session directory
@@ -1716,7 +1718,7 @@ fm_backend_herdr_server_owner_name() {  # <owner-marker>
 # and fails naming the replacement or the owner otherwise. A replacement marker that
 # clears with no owner marker hands back to the Firstmate-owned start below.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 status running socket out i dir owner_marker replacing_marker owner polls=60
+  local session=$1 status running socket out i dir owner_marker replacing_marker owner polls=60 external=0
   status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null)
   running=$(printf '%s' "$status" | jq -r '.server.running // false' 2>/dev/null)
   socket=$(printf '%s' "$status" | jq -r '.server.socket // empty' 2>/dev/null)
@@ -1743,18 +1745,34 @@ fm_backend_herdr_server_ensure() {  # <session>
       [ ! -e "$replacing_marker" ] && [ "$(fm_backend_herdr_server_running_state "$session")" = running ] && return 0
     done
   fi
-  (
-    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
-      CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL
-    fm_backend_herdr_cli "$session" server </dev/null >/dev/null 2>&1 &
-  ) || return 1
+  fm_backend_herdr_server_external "$session" && external=1
+  if [ "$external" -eq 0 ]; then
+    (
+      unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
+        CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL \
+        "${!FM_SNAPSHOT_@}" "${!FM_CREW_STATE_@}"
+      fm_backend_herdr_cli "$session" server </dev/null >/dev/null 2>&1 &
+    ) || return 1
+  fi
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
     [ "$running" = "true" ] && return 0
     sleep 0.5
   done
-  echo "error: herdr server for session '$session' did not report running within 10s" >&2
+  if [ "$external" -eq 1 ]; then
+    echo "error: herdr server for session '$session' is externally owned (config/herdr-server-external) and did not report running within 10s; start it through its service" >&2
+  else
+    echo "error: herdr server for session '$session' did not report running within 10s" >&2
+  fi
   return 1
+}
+
+# fm_backend_herdr_server_external: succeed when this home's
+# config/herdr-server-external names <session> among its whitespace-separated
+# session names, meaning an operator service owns that server.
+fm_backend_herdr_server_external() {  # <session>
+  local file="${FM_CONFIG_OVERRIDE:-${FM_HOME:-$FM_BACKEND_HERDR_ROOT}/config}/herdr-server-external"
+  [ -f "$file" ] && tr -s '[:space:]' '\n' < "$file" | grep -qxF -- "$1"
 }
 
 # fm_backend_herdr_workspace_find_all: EVERY workspace id inside <session>
