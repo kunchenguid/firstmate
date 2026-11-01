@@ -252,10 +252,11 @@ Any other episode is left for the next cycle's arm check.
 An acknowledgement carries two separable facts:
 
 - Queue-row consumption is bound to the monotonic `--ack-through` sequence (further scoped per actor - see "Per-actor acknowledgement" below).
-- Only retiring the episode is bound to `--recovery-generation`.
+- Both queue-row consumption and episode retirement require a matching `--recovery-generation`.
 
-A generation mismatch therefore does not block consumption of rows through that sequence.
-It is a non-fatal result that names its own remedy: re-drain, then acknowledge the newer episode.
+A generation mismatch returns nonzero without consuming rows or changing the recovery marker.
+It names its own remedy: use the exact current acknowledgement command when available, or re-drain and acknowledge the newer episode.
+The drain validates before changing acknowledgement state, revalidates after its receipt-recording queue-lock handoff, and holds the marker lock through row consumption.
 
 The acknowledgement retires the marker only when no rows remain after sequence-bound consumption.
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
@@ -322,7 +323,8 @@ Failing the whole drain would strand the usable rows too.
 | Main `--ack-through <SEQ>` | Only claimed main rows at or below the cutoff. |
 | Branch | Only claimed branch rows at or below its cutoff. |
 
-A main acknowledgement first claims every unreserved row at or below its cutoff, so none is stranded.
+A main acknowledgement first selects every unreserved row at or below its cutoff, so none is stranded.
+It publishes those claims only after the final generation check under the queue and marker locks, excluding any intervening branch grant and leaving rows that arrived during receipt recording unclaimed.
 It leaves a row above the cutoff that arrived after presentation unowned, so an away-session grant can still take it rather than handing every later wake back to main.
 
 Every settled branch prompt releases any residual grant.
@@ -488,7 +490,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - An external append beside a handling successor's inherited rows that surfaces both before and after the prior handling turn acknowledges its rows, including after a lost or malformed sequence counter and when the new row repeats an acknowledged inherited row byte for byte.
 - A watcher close inside the handling window that must leave the printed acknowledgement valid.
 - A re-arm whose recovery cycle is slowed after confirmation and must still surface rather than read as a watcher that stayed live.
-- The self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
+- The moved-generation acknowledgement that refuses consumption and names its remedy.
 - The already-acknowledged confirmation no-op for a matching generation, with its mismatched-generation, dead-pid, and lock-mismatch rejections preserved.
 - The manual-restart generation churn that makes a confirmation for the churned generation report a mismatch, which an arm check without a reopen leaves in place.
 - A take-over that stays quiet after a confirmed TERM, including one that lands inside a herdr event wait, still surfaces queued work and self-exit downtime, and attaches without stopping a cycle the named arm does not own.
