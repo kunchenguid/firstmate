@@ -430,6 +430,7 @@ status_pause_is_overdue() {  # <status-line> <age-seconds> <now-epoch> -> succes
   if until=$(status_paused_until "$1"); then
     [ "$3" -gt "$(( until + ${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT} ))" ]
   else
+    case "$1" in *[Uu][Nn][Tt][Ii][Ll]*[[:space:]]*) return 1 ;; esac
     [ "$2" -gt "$undated_max" ]
   fi
 }
