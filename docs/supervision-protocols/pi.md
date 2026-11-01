@@ -16,7 +16,8 @@ When this session owns supervision, in either posture:
 9. An unexpected child close enters bounded exponential retry, and an exhausted retry or lost session lock is surfaced as a watcher failure instead of disappearing.
 10. Missing, failed, or unhealthy cycle only: if a later notification explicitly reports one of those repair conditions, drain queued wakes, inspect the failure text, call `fm_watch_arm_pi`, and restart the selected Pi-family executable with both extensions loaded if needed.
    A call made while the extension owns an arm child or scheduled retry reports that arm's own state instead of starting a second one: only `healthy` means verified watcher identity and fresh progress, while `starting`, `retrying`, and `unhealthy` mean continuity is not proven yet.
-   The extension's own 30-second health check replaces an identity-proved broken arm, so a redundant call is never the repair mechanism; `docs/watcher-continuity.md` owns the state contract.
+   `retrying` on an identity-proved watcher is itself a repair: the extension retires and replaces it, and its own 30-second health check runs the same replacement with no tool call.
+   `unhealthy` withholds replacement rather than touching a process or lock record this home cannot prove; `docs/watcher-continuity.md` owns the state contract.
 11. Never use shell `&` for watcher supervision.
    The arm mechanism above is extension-owned, not a model tool call, but a manual recovery probe that backgrounds, pipes, or bundles the arm is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`, wired into the turn-end guard extension at `__FM_PI_TURNEND_EXT__`).
 
