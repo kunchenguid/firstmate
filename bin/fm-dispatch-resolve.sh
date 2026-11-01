@@ -519,13 +519,15 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   # option values is not a rule Choice answer. Usage is display-only, so it is
   # kept only when both token counts are numeric.
   if [ "$DISPATCH_PROVIDER" = openai ]; then
+    # The binding is grouped explicitly: jq 1.8 parses `A and B as $x | C` as
+    # `(A and B) as $x | C`, which would bind the boolean instead of the answers.
     jq -e '
       (.answers | type) == "array" and
-      ([.answers[] | select(type == "object" and .name == "rule")]) as $rule |
+      (([.answers[] | select(type == "object" and .name == "rule")]) as $rule |
       ($rule | length) == 1 and $rule[0].type == "choice" and
       ($rule[0].probabilities | type) == "array" and
       all($rule[0].probabilities[]; type == "object" and (.value | type) == "string") and
-      ($rule[0].probabilities | map(.value) | length) == ($rule[0].probabilities | map(.value) | unique | length)' \
+      ($rule[0].probabilities | map(.value) | length) == ($rule[0].probabilities | map(.value) | unique | length))' \
       "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
     if ! jq --arg model "$DISPATCH_MODEL" '
       ([.answers[] | select(type == "object" and .name == "rule")][0]) as $a |
