@@ -3503,6 +3503,23 @@ SH
       || fail "$scenario rejected an intact registered generation"
     fm_pr_poll_snapshot_matches "$state" task-a "$POLL" \
       || fail "$scenario lost its registered snapshot"
+    # A cycle that sees no merge must leave the authenticated generation armed
+    # instead of revoking it for diverging from the updated template.
+    add_stop_custom_check "$dir"
+    rc=0
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-open.out" 2> "$dir/watch-open.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "$scenario open watcher failed: $(cat "$dir/watch-open.err")"
+    ! grep -F 'rejected unauthenticated state checks' "$dir/watch-open.out" >/dev/null \
+      || fail "$scenario revoked an intact generation before its merge: $(cat "$dir/watch-open.out")"
+    case "$(cat "$dir/watch-open.out")" in
+      check:*z-stop.check.sh:*stop-cycle) ;;
+      *) fail "$scenario open cycle did not reach the control check: $(cat "$dir/watch-open.out")" ;;
+    esac
+    fm_pr_poll_snapshot_matches "$state" task-a "$POLL" \
+      || fail "$scenario disarmed an intact generation before its merge"
+    ack_watcher_cycle "$state" || fail "$scenario could not acknowledge the open cycle"
+    rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check" "$dir/gh.log"
     rc=0
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
       run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
@@ -3512,6 +3529,9 @@ SH
     [ ! -e "$dir/sidecar-executed" ] || fail "$scenario executed state-file code"
     grep -F 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" >/dev/null \
       || fail "$scenario did not run the repository poll"
+    awk -F'\t' -v prefix="check: merge landed: task-a https://github.com/o/r/pull/1" \
+      'index($5, prefix) == 1 { found=1 } END { exit !found }' "$state/.wake-queue" \
+      || fail "$scenario lost the merge notification: $(merged_ledger_row "$state" task-a)"
     assert_poll_absent "$state" task-a
     # Re-arm the same old generation to test tampering on its original inode.
     seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$historical_poll"
