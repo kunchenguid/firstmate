@@ -1,15 +1,17 @@
 # shellcheck shell=bash
 record_hygiene_report() {
-  local file id output now cutoff archive dir pr seen_prs prior backend target endpoint_state n file_mtime read_timeout read_status
+  local file id output now cutoff archive dir pr seen_prs prior backend target endpoint_state n file_mtime read_timeout read_status exclude
   read_timeout=${FM_RECORD_HYGIENE_READ_TIMEOUT:-10}
   case "$read_timeout" in ''|*[!0-9]*|0) read_timeout=10 ;; esac
   seen_prs=
   now=$(date +%s)
   cutoff=$((now - 86400))
   [ -d "$STATE" ] || return 0
+  exclude=$(status_scan_parent_channel_exclude "$STATE")
 
   for file in "$STATE"/*.status; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
+    [ "$file" = "$exclude" ] && continue
     id=${file##*/}
     id=${id%.status}
     if [ ! -e "$STATE/$id.meta" ]; then
