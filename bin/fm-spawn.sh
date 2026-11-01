@@ -450,6 +450,8 @@
 #   The selector is not inherited into secondmate homes. This is not a
 #   filesystem sandbox; project and harness sandbox
 #   settings still own access to personal credential files.
+# Codex Herdr hook selection: bin/fm-codex-herdr-hooks.sh owns the opt-in
+# config/codex-herdr-hooks.json review and per-session selection mechanics.
 # Codex permission mode: docs/configuration.md owns config/codex-permission-mode.
 #
 # Claude permission mode (config/claude-permission-mode):
@@ -2738,6 +2740,8 @@ launch_template() {
     ;;
   # --disable hooks (equivalent to -c features.hooks=false) requests that codex
   # turn its whole lifecycle-hook layer off for CREWMATE and SCOUT launches only.
+  # Opt-in Herdr selection is owned by fm-codex-herdr-hooks.sh and applied
+  # below only to ordinary Codex tasks on Herdr; primary hooks stay unchanged.
   # Without it a crewmate launch parks forever on codex's hook-trust modal
   # ("N hooks are new or changed"), whose selection sits on "Review hooks" -
   # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
@@ -3967,6 +3971,14 @@ else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+fi
+# Validate operator opt-in before creating endpoints, leasing a worktree, or
+# publishing a task record. exec rechecks the actual worktree's inventory.
+CODEX_HERDR_HOOKS=0
+if [ "$HARNESS" = codex ] && [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] \
+  && { [ -e "$CONFIG/codex-herdr-hooks.json" ] || [ -L "$CONFIG/codex-herdr-hooks.json" ]; }; then
+  "$SCRIPT_DIR/fm-codex-herdr-hooks.sh" check "$CONFIG/codex-herdr-hooks.json" "$PROJ_ABS" || exit 1
+  CODEX_HERDR_HOOKS=1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   git -C "$PROJ_ABS" rev-parse --git-dir >/dev/null 2>&1 &&
@@ -6710,8 +6722,9 @@ EOF
     # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
     # probes and the evidence). Neither Codex path is usable on the
     # installed binary: a pane worker's turns are not observable through
-    # the app-server protocol, and its lifecycle hooks did not fire for a
-    # firstmate-launched worker. Codex therefore classifies unknown with
+    # the app-server protocol, and worker lifecycle hooks are disabled by
+    # default. The Herdr opt-in selects only identity, not busy-state hooks.
+    # Codex therefore classifies unknown with
     # an explicit reason rather than falling back to idle, and no busy
     # wiring is installed. The turn-end NOTIFICATION marker still rides
     # the launch command via -c notify=[...] and __TURNEND__.
@@ -7198,6 +7211,11 @@ case "$LAUNCH" in
   ;;
 esac
 LAUNCH=${LAUNCH//__CODEXAPPROVALFLAG__/$CODEX_APPROVAL_FLAG}
+if [ "$CODEX_HERDR_HOOKS" = 1 ]; then
+  CODEX_HERDR_COMMAND="$(shell_quote "$SCRIPT_DIR/fm-codex-herdr-hooks.sh") exec $(shell_quote "$CONFIG/codex-herdr-hooks.json") --"
+  LAUNCH=${LAUNCH/#codex /$CODEX_HERDR_COMMAND }
+  LAUNCH=${LAUNCH/ --disable hooks/}
+fi
 if [ "$KEEP_AI_TRAILERS" = 1 ]; then
   LAUNCH=${LAUNCH//__CLAUDEATTRIBUTION__/}
 else
