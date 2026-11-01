@@ -4863,6 +4863,12 @@ else
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+          # Reclaim checks the recorded parent's id AND unchanged label, which
+          # need not be the default home label when launched inside Herdr.
+          fm_backend_herdr_projection_journal_snapshot "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+          if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+            HERDR_PARENT_LABEL=$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL
+          fi
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
@@ -4909,7 +4915,10 @@ else
           HERDR_LAUNCHER_STATUS=$?
           set -e
           case "$HERDR_LAUNCHER_STATUS" in
-          0) HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID ;;
+          0)
+            HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+            HERDR_PARENT_LABEL=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_LABEL
+            ;;
           2) HERDR_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_parent_workspace_exact \
             "$HERDR_SES" "$HERDR_PARENT_LABEL" 2>/dev/null || true) ;;
           *)
@@ -4917,8 +4926,12 @@ else
             exit 1
             ;;
           esac
-          if [ -z "$HERDR_PARENT_WORKSPACE_ID" ]; then
+          if [ -z "$HERDR_PARENT_WORKSPACE_ID" ] || [ -z "$HERDR_PARENT_LABEL" ]; then
             echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
+            spawn_herdr_presentation_order_lock_release
+          elif [[ $HERDR_PARENT_LABEL == *$'\n'* ]]; then
+            # The restart journal stores one field per line.
+            echo "warning: herdr presentation parent label contains a line break and cannot be recorded in the restart journal; using the ordinary flat layout without projection" >&2
             spawn_herdr_presentation_order_lock_release
           else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1

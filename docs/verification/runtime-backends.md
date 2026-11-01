@@ -1638,6 +1638,29 @@ ok - real herdr E2E: a --secondmate launch still stands up that secondmate's own
 ok - real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact
 ```
 
+The full suite ran again on 2026-10-29 against Herdr 0.8.2 protocol 20.
+Every production spawn and teardown Herdr CLI call went through the lab helper's guarded `run`, and the restart used only its `stop` and `provision` actions.
+The `workspace.move` request went directly to the lab session's own socket, as resolved through that routed `session list`.
+No case failed or was skipped:
+
+```text
+ok - real herdr E2E: with one 'firstmate' workspace and no herdr parent, a crewmate still lands in this home's own workspace without stealing focus
+ok - real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace
+ok - real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus
+ok - real herdr E2E: with two 'firstmate' workspaces, a worker spawned from inside the second one lands in that exact workspace
+ok - real herdr E2E: the duplicate-labeled sibling workspace is left entirely untouched and focus is preserved
+ok - real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched
+ok - real herdr E2E: named parents retain their own contiguous children and exact bindings across interleaved launches without changing focus
+ok - real herdr E2E: a parent label with an internal or trailing line break spawns flat in its exact workspace with no journal or projection
+ok - real herdr E2E: an ambiguous home label with no launcher identity refuses before any worker endpoint exists
+ok - real herdr E2E: a launcher pane that no longer exists refuses before any worker endpoint exists
+ok - real herdr E2E: a secondmate launching its own worker gets the same exact-workspace guarantee, and its same-labeled sibling is untouched
+ok - real herdr E2E: a --secondmate launch still stands up that secondmate's own workspace instead of inheriting the launcher's
+ok - real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact
+ok - real herdr E2E: after a restart a named parent's child is reclaimed in place, while a renamed parent refuses reclaim and spawns flat
+ok - real herdr E2E: isolated lab session removed and default fleet session unchanged
+```
+
 That suite's headline case runs `bin/fm-spawn.sh` inside a real Herdr pane, so the parent identity comes from Herdr's own injection rather than a composed environment.
 Cross-session and contradictory bindings are covered deterministically in `tests/fm-backend-herdr.test.sh`, which can script a second server's socket without provisioning one.
 
