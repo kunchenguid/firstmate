@@ -339,9 +339,15 @@ test_held_lock_defers_without_waiting() {
 # A remote secondmate's proof and cause are read through its route; the stub
 # stands in for bin/fm-on.sh plus the host's control verbs, whose own suites
 # (fm-remote-secondmate-omp, fm-remote-secondmate-lifecycle-e2e) drive them.
-arm_remote() {  # <id>
-  printf 'window=remote:%s\nharness=pi\nkind=secondmate\nremote_host=remote-mac\n' "$1" > "$STATE/$1.meta"
-  printf '1000 - pi\n' > "$STATE/$1.start-pending"
+arm_remote() {  # <id> [record-gen]
+  printf 'window=remote:%s\nharness=pi\nkind=secondmate\nremote_host=remote-mac\nremote_busy_gen=g900.1.1\n' "$1" > "$STATE/$1.meta"
+  printf '1000 %s pi\n' "${2:-g900.1.1}" > "$STATE/$1.start-pending"
+}
+
+# `observe --start-proof` output: the observation line, then the host's verdict,
+# launch generation, and whether it saw a write since that launch.
+remote_proof() {  # <verdict> <wrote yes|no>
+  printf 'idle\nverdict=%s\nbusy_gen=g900.1.1\nwrote_since_launch=%s\n' "$1" "$2"
 }
 
 remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed route
@@ -350,7 +356,7 @@ remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed rout
     WATCHER_CAPTURE=
     [ "$REMOTE_RC" = 0 ] || return "$REMOTE_RC"
     case "$2" in
-      observe) WATCHER_CAPTURE=$REMOTE_PROOF ;;
+      observe) [ "${3:-}" = --start-proof ] && WATCHER_CAPTURE=$REMOTE_PROOF ;;
       state) WATCHER_CAPTURE=$REMOTE_STATE ;;
       capture) WATCHER_CAPTURE=$REMOTE_CAPTURE ;;
     esac
@@ -366,12 +372,22 @@ test_remote_secondmate_reads_route() {
   # Restore the real route helper after each stubbed tick.
   local real
   real=$(declare -f start_check_remote)
+  # A mate that started its charter and already settled idle (its hook wrote the
+  # record) is proven, as is one whose host saw a write since its launch.
   arm_remote r1
-  remote_tick busy alive '' 0 || fail "tick failed"; eval "$real"
-  [ ! -e "$STATE/r1.start-pending" ] || fail "a remote hook-written record did not count as proof"
-  [ "$(count_wakes)" = 0 ] || fail "a started remote mate woke"
+  remote_tick "$(remote_proof 'idle pi-ext' no)" alive '' 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/r1.start-pending" ] || fail "a remote hook-written idle record did not count as proof"
+  arm_remote r5
+  remote_tick "$(remote_proof 'busy fm-spawn' yes)" alive '' 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/r5.start-pending" ] || fail "a remote write since launch did not count as proof"
+  # A record from an earlier launch of the route is dropped without a wake.
+  arm_remote r6 g800.1.1
+  remote_tick "$(remote_proof 'busy fm-spawn' no)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  [ ! -e "$STATE/r6.start-pending" ] || fail "a superseded remote record was kept"
+  [ "$(count_wakes)" = 0 ] || fail "a started or superseded remote mate woke"
+  # The spawn seed, or only the observation line, proves nothing.
   arm_remote r2
-  remote_tick idle alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  remote_tick "$(remote_proof 'busy fm-spawn' no)" alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
   case "$START_CHECK_WAKE" in
     "check: start r2: no start signal 200s after spawn (harness=pi; on screen on remote-mac: Pi project-trust dialog \"Trust project folder?\"); accept: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-send.sh r2 --key Enter") ;;
     *) fail "unexpected remote dialog reason: $START_CHECK_WAKE" ;;
@@ -383,7 +399,7 @@ test_remote_secondmate_reads_route() {
     *) fail "an unreachable host did not wake generically: $START_CHECK_WAKE" ;;
   esac
   arm_remote r4
-  remote_tick idle missing "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  remote_tick busy missing "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
   case "$START_CHECK_WAKE" in
     *"remote worker on remote-mac exited or its endpoint is gone before starting); recover it per secondmate-provisioning after: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-crew-state.sh r4") ;;
     *) fail "a vanished remote endpoint was not sent to recovery: $START_CHECK_WAKE" ;;
@@ -412,11 +428,11 @@ test_watcher_loop_single_named_wake() {
   reset_state
   open_pane w1 "$PI_DIALOG"
   arm_task w1 pi "$(date +%s)"
-  FM_POLL=1 FM_START_CHECK_SECS=10 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+  FM_POLL=1 FM_START_CHECK_SECS=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_SECONDMATE_LIVENESS_SECS=99999999 FM_HOME_SUMMARY_INTERVAL=999999 \
     bash "$ROOT/bin/fm-watch.sh" > "$out" 2>/dev/null &
   pid=$!
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 1200 ]; do sleep 0.1; i=$((i + 1)); done
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   grep -q '^check: start w1: no start signal [0-9]*s after spawn (harness=pi; on screen: Pi project-trust dialog' "$out" \

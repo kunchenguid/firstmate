@@ -130,8 +130,11 @@
 #   check: start <id>: no start signal <n>s after spawn (harness=<h>[; <cause>]); <command>
 #                          a launch fm-spawn.sh could not prove started still has
 #                          no start proof FM_START_CHECK_SECS (default 120) after
-#                          spawn: one wake per launch naming an exited agent, a
-#                          vanished endpoint, a recognized launch dialog, or an
+#                          spawn, judged on the next poll, so the wake lands
+#                          within about FM_START_CHECK_SECS plus one FM_POLL and
+#                          <n> is the real elapsed time: one wake per launch,
+#                          including remote secondmates, naming an exited agent,
+#                          a vanished endpoint, a recognized launch dialog, or an
 #                          unsubmitted brief, and the command that clears it; the
 #                          stale path stays quiet for that pane meanwhile
 #                          (start_check_tick)
@@ -2865,9 +2868,12 @@ start_check_verdict_proves() {  # <verdict>
 
 # 0 when <id> shows positive evidence it began its brief at or after <epoch>: a
 # status line or completed turn written since the launch boundary, or a verdict
-# start_check_verdict_proves accepts, read from the remote host's own record for
-# a remote secondmate. Codex has no semantic source, so its rendered busy footer
-# counts unless the same tail shows a launch dialog.
+# start_check_verdict_proves accepts. A remote secondmate's evidence comes from
+# its host through `observe --start-proof` (bin/fm-remote-secondmate-control.sh):
+# the same verdict read from its own record, or a write the host judged against
+# its launch on its own clock. An unreachable host proves nothing. Codex has no
+# semantic source, so its rendered busy footer counts unless the same tail shows
+# a launch dialog.
 start_check_started() {  # <id> <meta> <epoch>
   local id=$1 meta=$2 epoch=$3 f m backend target tail
   for f in "$STATE/$id.status" "$STATE/$id.turn-ended"; do
@@ -2875,8 +2881,9 @@ start_check_started() {  # <id> <meta> <epoch>
     [ "$m" -ge "$epoch" ] && return 0
   done
   if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
-    start_check_remote "$id" observe || return 1
-    [ "$(printf '%s' "$WATCHER_CAPTURE" | head -1)" = busy ]
+    start_check_remote "$id" observe --start-proof || return 1
+    case "$WATCHER_CAPTURE" in *'wrote_since_launch=yes'*) return 0 ;; esac
+    start_check_verdict_proves "$(printf '%s\n' "$WATCHER_CAPTURE" | sed -n 's/^verdict=//p' | head -1)"
     return
   fi
   start_check_verdict_proves "$(fm_busy_classify_meta "$meta" "$id" "$STATE")" && return 0
@@ -3015,7 +3022,13 @@ start_check_tick() {  # [now-epoch], for deterministic clock callers
       fm_lock_release "$lock"
       continue
     fi
-    mgen=$(fm_meta_get "$meta" busy_gen)
+    # A remote secondmate's generation is its host's launch, recorded here as
+    # remote_busy_gen; this home holds no busy record for it.
+    if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+      mgen=$(fm_meta_get "$meta" remote_busy_gen)
+    else
+      mgen=$(fm_meta_get "$meta" busy_gen)
+    fi
     if [ "${mgen:--}" != "$gen" ]; then
       rm -f -- "$f"
       fm_lock_release "$lock"

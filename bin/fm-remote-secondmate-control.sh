@@ -10,7 +10,7 @@
 #   fm-remote-secondmate-control.sh send-stdin <id> [fire-and-forget]  # message on stdin
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
-#   fm-remote-secondmate-control.sh observe <id>
+#   fm-remote-secondmate-control.sh observe <id> [--start-proof]
 #   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
@@ -195,7 +195,13 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
+<<<<<<< HEAD
   local id=$1 harness model effort traceparent rex_session_id rex_server
+||||||| parent of 0bbf58d3 (fix(watch): prove a remote secondmate's start through observe --start-proof)
+  local id=$1 harness model effort traceparent
+=======
+  local id=$1 harness model effort traceparent busy_gen
+>>>>>>> 0bbf58d3 (fix(watch): prove a remote secondmate's start through observe --start-proof)
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   model=$(fm_meta_get "$REMOTE_ENDPOINT_META" model)
@@ -219,6 +225,8 @@ print_route() { # <id>
   printf 'model=%s\n' "$model"
   printf 'effort=%s\n' "$effort"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
+  busy_gen=$(fm_meta_get "$REMOTE_ENDPOINT_META" busy_gen)
+  [ -z "$busy_gen" ] || printf 'busy_gen=%s\n' "$busy_gen"
 }
 
 cmd_route() {
@@ -436,14 +444,40 @@ cmd_capture() {
   fm_backend_capture "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$lines" "fm-$id" | head -c 65536
 }
 
+# Without --start-proof the output is the single observation line the pending-
+# reply tracker compares whole. --start-proof appends what the parent's spawn
+# start check (bin/fm-watch.sh start_check_started) needs to prove a start: the
+# busy-contract verdict and launch generation from this mate's parent-route
+# record, and whether a status line or completed turn was written since that
+# launch, judged on this host's clock against the generation's own epoch.
 cmd_observe() {
-  local id=$1 harness
+  local id=$1 mode=${2:-} harness gen launch since=no f m
   validate_id "$id"
+  case "$mode" in ''|--start-proof) ;; *) usage ;; esac
   validate_home "$id"
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
   printf '\n'
+  [ "$mode" = --start-proof ] || return 0
+  # shellcheck source=bin/fm-busy-lib.sh
+  . "$SCRIPT_DIR/fm-busy-lib.sh"
+  gen=$(fm_meta_get "$REMOTE_ENDPOINT_META" busy_gen)
+  launch=${gen#g}
+  launch=${launch%%.*}
+  case "$launch" in ''|*[!0-9]*) launch= ;; esac
+  if [ -n "$launch" ]; then
+    for f in "$CONTROL_STATE/$id.status" "$CONTROL_STATE/$id.turn-ended"; do
+      [ -f "$f" ] || continue
+      if [ "$(uname)" = Darwin ]; then m=$(/usr/bin/stat -f %m "$f" 2>/dev/null || true)
+      else m=$(stat -c %Y "$f" 2>/dev/null || true); fi
+      case "$m" in ''|*[!0-9]*) continue ;; esac
+      [ "$m" -lt "$launch" ] || since=yes
+    done
+  fi
+  printf 'verdict=%s\n' "$(fm_busy_classify_meta "$REMOTE_ENDPOINT_META" "$id" "$CONTROL_STATE")"
+  printf 'busy_gen=%s\n' "$gen"
+  printf 'wrote_since_launch=%s\n' "$since"
 }
 
 # Make <commit> readable in this home's own object store without moving any other
@@ -552,7 +586,7 @@ case "${1:-}" in
   send-stdin) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_send_stdin "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
-  observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
+  observe) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_observe "$@" ;;
   sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;

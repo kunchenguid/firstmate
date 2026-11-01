@@ -1361,7 +1361,7 @@ spawn_remote_secondmate() {
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_rex_session_id remote_rex_server remote_rex_ok
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
-  local remote_start_epoch
+  local remote_start_epoch remote_busy_gen
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1585,7 +1585,17 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
+<<<<<<< HEAD
   if [ "$remote_backend" != "$backend" ]; then
+||||||| parent of 0bbf58d3 (fix(watch): prove a remote secondmate's start through observe --start-proof)
+  remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  if [ "$remote_backend" != herdr ]; then
+=======
+  remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  remote_busy_gen=$(printf '%s\n' "$out" | sed -n 's/^busy_gen=//p' | tail -1)
+  case "$remote_busy_gen" in *[!A-Za-z0-9._-]*) remote_busy_gen= ;; esac
+  if [ "$remote_backend" != herdr ]; then
+>>>>>>> 0bbf58d3 (fix(watch): prove a remote secondmate's start through observe --start-proof)
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1669,6 +1679,7 @@ spawn_remote_secondmate() {
     esac
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
+    [ -z "$remote_busy_gen" ] || echo "remote_busy_gen=$remote_busy_gen"
   } >"$tmp"
   if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
     if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
@@ -1690,12 +1701,12 @@ spawn_remote_secondmate() {
   fm_lock_release "$SPAWN_TASK_LOCK" || true
   # The remote host runs no watcher over this mate's route, so the start check
   # is armed here, where this home's watcher scans; it reads the proof back
-  # through the route (bin/fm-watch.sh start_check_tick). Kimi already proved
-  # its start in its own remote spawn gate. The parent record carries no busy
-  # generation, so it is armed with `-`.
+  # through the route (bin/fm-watch.sh start_check_tick). The record carries the
+  # remote launch's busy generation, recorded above as remote_busy_gen. Kimi
+  # already proved its start in its own remote spawn gate.
   case "$harness" in
-  kimi*) spawn_arm_start_check "$id" 0 "$remote_start_epoch" - "$harness" remote || true ;;
-  *) spawn_arm_start_check "$id" 1 "$remote_start_epoch" - "$harness" remote || true ;;
+  kimi*) spawn_arm_start_check "$id" 0 "$remote_start_epoch" "${remote_busy_gen:--}" "$harness" remote || true ;;
+  *) spawn_arm_start_check "$id" 1 "$remote_start_epoch" "${remote_busy_gen:--}" "$harness" remote || true ;;
   esac
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then

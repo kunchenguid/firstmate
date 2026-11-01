@@ -5,8 +5,9 @@
 #   A) bin/fm-remote-secondmate-control.sh launch accepts omp and drives the
 #      ordinary host-local secondmate spawn onto the Herdr fm-remote session,
 #      recording harness=omp and the pinned model in the endpoint metadata.
-#      It arms no spawn start check of its own; the parent's watcher uses the
-#      existing observe verb for semantic busy proof.
+#      It arms no spawn start check of its own; it reports the launch's busy
+#      generation in its route, and observe --start-proof reports the seeded
+#      busy record the parent's watcher reads as start evidence.
 #   B) The relaunch verb accepts omp and reaches the ordinary control plane's own
 #      pre-stop checkpoint, proving its harness gate passed.
 #   C) bin/fm-spawn.sh's parent-side remote secondmate gate accepts omp and
@@ -85,6 +86,13 @@ assert_grep 'herdr_session=fm-remote' "$META" "endpoint metadata did not record 
 # The parent's watcher owns the spawn start check, so the host-local launch arms
 # none in route state nothing scans.
 assert_absent "$HOME_DIR/state/parent-route/$ID.start-pending" "the host-local launch armed its own start check"
+omp_gen=$(sed -n 's/^busy_gen=//p' "$META")
+[ -n "$omp_gen" ] || fail "the omp launch seeded no busy generation"
+assert_grep "busy_gen=$omp_gen" "$TMP_ROOT/launch.out" "the printed route lost the launch's busy generation"
+ctl observe "$ID" --start-proof > "$TMP_ROOT/observe.out" 2>&1 || fail "observe --start-proof failed: $(cat "$TMP_ROOT/observe.out")"
+[ "$(sed -n '2,$p' "$TMP_ROOT/observe.out")" = "verdict=busy fm-spawn
+busy_gen=$omp_gen
+wrote_since_launch=no" ] || fail "observe --start-proof did not report the seeded record: $(cat "$TMP_ROOT/observe.out")"
 pass "A host-local launch accepts omp and records the fm-remote Herdr endpoint"
 
 # --- B) host-local relaunch ---------------------------------------------------
