@@ -223,18 +223,20 @@ test_branch_ack_retires_inactive_outcome_receipt() {
   pass "a branch-actor acknowledgement retires the inactive-outcome receipt and later scans stay quiet"
 }
 
-# A stalled first registration is bounded; later children and ledger delivery
-# still happen, and the persisted cursor wraps so the first child is retried.
+# One stalled registration per scan bounds work and the persisted cursor visits
+# every child before wrapping, while ledger delivery still runs first.
 test_slow_pr_watch_does_not_starve_ledger_or_later_children() {
-  local url='https://github.com/owner/repo/pull/1'
+  local i
   make_world slow-pr-watch; bind_secondmate local
-  write_child "$MATE" a-slow "done: PR $url checks green"
+  for i in 1 2 3; do
+    write_child "$MATE" "a-$i" "done: PR https://github.com/owner/repo/pull/$i checks green"
+  done
   write_child "$MATE" b-later 'done: later child finished'
   cat > "$WORLD/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_FORGE_LOG"
 case " $* " in
-  *'pull/1 '*) sleep 5; exit 0 ;;
+  *'pull/'*) sleep 5; exit 0 ;;
   *' --json isDraft '*) printf '{"isDraft":false}\n' ;;
   *' --json headRefOid '*) printf '{"headRefOid":"%s"}\n' "$FM_TEST_HEAD" ;;
   *' --json state '*) printf 'OPEN\n' ;;
@@ -243,16 +245,18 @@ SH
   chmod +x "$WORLD/fakebin/gh"
   FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
   grep -Fq 'child-outcome-b-later-done' "$MAIN/state/mate.status" \
-    || fail 'slow PR registration prevented later ledger delivery'
-  grep -Fq 'owner/repo/pull/1' "$WORLD/forge.log" \
-    || fail 'slow first registration was not attempted'
-  # One scan clears the exhausted cursor; the following scan starts at a-slow again.
-  FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
-  : > "$WORLD/forge.log"
-  FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
-  grep -Fq 'owner/repo/pull/1' "$WORLD/forge.log" \
-    || fail 'the cursor left the timed-out child permanently first'
-  pass 'slow PR registration is bounded, does not starve ledger delivery, and is retried after cursor wrap'
+    || fail 'slow PR registration prevented ledger delivery'
+  [ "$(wc -l < "$WORLD/forge.log")" -eq 1 ] \
+    || fail 'one scan attempted more than one stalled registration'
+  for i in 2 3; do
+    FM_FAKE_CREW_STATE=unknown run_reconcile "$MATE"
+    [ "$(wc -l < "$WORLD/forge.log")" -eq "$i" ] \
+      || fail "scan $i did not attempt exactly the next child"
+  done
+  for i in 1 2 3; do
+    grep -Fq "pull/$i" "$WORLD/forge.log" || fail "child $i was never attempted"
+  done
+  pass 'one stalled PR registration per scan bounds work and cursor traversal eventually attempts every child'
 }
 
 # A canonical ready ledger line is enough to record pr= and install the poll

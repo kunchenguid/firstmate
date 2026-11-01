@@ -515,31 +515,23 @@ arm_ready_pr_watch() { # <id> <meta>
 
 # Every ready status is eligible for arming on each scan, in every home.
 arm_ready_pr_watches() {
-  local meta id cursor seen=0 pass
+  local meta id cursor selected=''
   local marker="$STATE/.pr-watch-cursor"
   cursor=$(cat "$marker" 2>/dev/null || true)
-  for pass in after wrap; do
-    for meta in "$STATE"/*.meta; do
-      [ -f "$meta" ] || continue
-      id=$(basename "$meta" .meta)
-      valid_id "$id" || continue
-      if [ -n "$cursor" ]; then
-        if [ "$pass" = after ]; then
-          [[ "$id" > "$cursor" ]] || continue
-        else
-          [[ "$id" > "$cursor" ]] && continue
-        fi
-      elif [ "$pass" = wrap ]; then
-        continue
-      fi
-      arm_ready_pr_watch "$id" "$meta" || true
-      printf '%s\n' "$id" > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
-      seen=1
-    done
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    valid_id "$id" || continue
+    if [ -n "$cursor" ] && [[ "$id" > "$cursor" ]]; then
+      selected=$id
+      break
+    fi
+    [ -n "$selected" ] || selected=$id
   done
-  if [ "$seen" -eq 0 ] && [ -n "$cursor" ]; then
-    printf '\n' > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
-  fi
+  [ -n "$selected" ] || return 0
+  meta="$STATE/$selected.meta"
+  arm_ready_pr_watch "$selected" "$meta" || true
+  printf '%s\n' "$selected" > "$marker.tmp" && mv -f "$marker.tmp" "$marker"
 }
 
 # Every direct child's ledger is examined on each scan. Parent delivery remains
