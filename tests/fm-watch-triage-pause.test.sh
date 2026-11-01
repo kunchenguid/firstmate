@@ -1466,10 +1466,14 @@ test_reused_task_id_does_not_inherit_overdue_pause() {
 }
 
 test_malformed_dated_pause_is_not_undated_overdue() {
-  local dir state result
-  dir=$(paused_until_fixture malformed-until "" 90000); state="$dir/state"
+  local dir state result class statusf
+  dir=$(paused_until_fixture malformed-until "" 90000); state="$dir/state"; statusf="$state/until.status"
+  printf 'paused: waiting until not-a-time\n' > "$statusf"
+  set_mtime "$(( $(date +%s) - 90000 ))" "$statusf"
   result=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=60 bash -c '. "$1"; status_pause_is_overdue "paused: waiting until not-a-time" 90000 "$(date +%s)"; printf "%s" "$?"' _ "$WATCH")
   [ "$result" = 1 ] || fail "malformed dated pause entered the undated overdue path"
+  class=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_PAUSE_UNDATED_MAX_SECS=60 FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE='state: working · source: run-step' bash -c '. "$1"; pause_state_class test:fm-until until' _ "$WATCH")
+  [ "$class" = working ] || fail "watcher classification treated a malformed dated pause as overdue: $class"
   pass "malformed dated pauses remain on bounded recheck"
 }
 
