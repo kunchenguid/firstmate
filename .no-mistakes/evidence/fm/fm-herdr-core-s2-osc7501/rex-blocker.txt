@@ -1,0 +1,12 @@
+Required live Rex proof could not start.
+
+$ bash tests/fm-backend-rex-smoke.test.sh
+skip: rex CLI not found at $REX_BIN_DIR, on PATH, or at the server bundle path
+
+command -v rex: unavailable. No host filesystem search or system installation was performed.
+Attempted workspace-local acquisition route: fetched https://www.superlogical.com/rex and https://www.superlogical.com/rex/docs/installation.md; public installation content describes macOS beta availability but supplies no direct macOS artifact URL, and links to tester login. No credentials were changed and no login was attempted.
+
+claude --version: 2.1.316 (Claude Code).
+codex --version: timed out after 8 seconds; the real reporter native probe therefore exercises failed-probe exclusion, not a verified Codex version or native turn.
+
+To enable the required proof, supply the real Rex CLI/server on PATH or a repository-local executable path and a working existing Codex login. Run an isolated private Rex server via tests/rex-test-safety.sh, then verify native Codex working/idle root records survive an open decision, an old done declaration, heartbeat, unknown transitions, and ordinary disarm. Also verify bridge records cannot drive Rex busy/event readers.

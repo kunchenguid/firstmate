@@ -1,0 +1,40 @@
+treehouse get
+project main
+❯ treehouse get
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Setting up worktree...
+APFS sharing: cloned=0 logical_bytes=0 private_data_reduced_bytes=0
+🌳 Entered worktree at ~/.no-mistakes/worktrees/52b07e9083e7/01M6C5V0SWVRT0HZHREZ8XYXVM/.live-validation/spawn-home/pool
+/.treehouse/project-5ff8bb/2/project. Type 'exit' to return.
+project HEAD
+❯ cd -- '{run-worktree}/.live-validation/spawn-home/pool/
+.treehouse/project-5ff8bb/2/project'
+project HEAD
+❯ export GOTMPDIR=/tmp/fm-raw-live-2/gotmp
+export COMPACT_ADVISER_DISABLE=1
+export FM_TASK_ID=raw-live-2
+project HEAD
+❯ export COMPACT_ADVISER_DISABLE=1
+export FM_TASK_ID=raw-live-2
+project HEAD
+❯ export FM_TASK_ID=raw-live-2
+project HEAD
+❯ . '/tmp/fm-raw-live-2+ab9e2a9359dcd01ee0f747993111a834c2f46899ac19e09899a81557a14422d5/launch.s1793564277.92741.30079.
+sh'
+RAW-LIVE-2-RAN
+project HEAD
+❯
+
+
+
+
+
+
+
+
+
+
+
+

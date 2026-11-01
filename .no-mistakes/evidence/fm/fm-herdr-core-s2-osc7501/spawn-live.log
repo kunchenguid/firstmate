@@ -1,0 +1,94 @@
+{run-worktree}/.live-validation/spawn-home
+=== fm-spawn raw case 1 ===
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-validation/spawn-home
+spawned raw-live-1 harness=printf kind=scout window=launch:fm-raw-live-1 worktree={run-worktree}/.live-validation/spawn-home/pool/.treehouse/project-5ff8bb/1/project
+treehouse get
+project main
+❯ treehouse get
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Setting up worktree...
+APFS sharing: cloned=0 logical_bytes=0 private_data_reduced_bytes=0
+🌳 Entered worktree at ~/.no-mistakes/worktrees/52b07e9083e7/01M6C5V0SWVRT0HZHREZ8XYXVM/.live-validation/spawn-home/pool
+/.treehouse/project-5ff8bb/1/project. Type 'exit' to return.
+project HEAD
+❯ cd -- '{run-worktree}/.live-validation/spawn-home/pool/
+.treehouse/project-5ff8bb/1/project'
+project HEAD
+❯ export GOTMPDIR=/tmp/fm-raw-live-1/gotmp
+export COMPACT_ADVISER_DISABLE=1
+export FM_TASK_ID=raw-live-1
+project HEAD
+❯ export COMPACT_ADVISER_DISABLE=1
+export FM_TASK_ID=raw-live-1
+project HEAD
+❯ export FM_TASK_ID=raw-live-1
+project HEAD
+❯ . '/tmp/fm-raw-live-1+ab9e2a9359dcd01ee0f747993111a834c2f46899ac19e09899a81557a14422d5/launch.s1793564269.79067.4388.s
+h'
+warning: osc7501: {run-worktree}/.live-validation/spawn-h
+ome/config/osc7501-status: unknown value; using off (on or off)
+RAW-LIVE-1-RAN
+project HEAD
+❯
+
+
+
+
+
+
+
+
+
+
+=== fm-spawn raw case 2 ===
+fm-gate-refuse: gate agent lifecycle permitted only against lab home {run-worktree}/.live-validation/spawn-home
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e {run-worktree}/.pi/extensions/fm-primary-turnend-guard.ts -e {run-worktree}/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+spawned raw-live-2 harness=printf kind=scout window=launch:fm-raw-live-2 worktree={run-worktree}/.live-validation/spawn-home/pool/.treehouse/project-5ff8bb/2/project
+treehouse get
+project main
+❯ treehouse get
+A new version of treehouse is available: v3.1.0 → v3.1.8
+Run "treehouse update" to update
+
+🌳 Setting up worktree...
+APFS sharing: cloned=0 logical_bytes=0 private_data_reduced_bytes=0
+🌳 Entered worktree at ~/.no-mistakes/worktrees/52b07e9083e7/01M6C5V0SWVRT0HZHREZ8XYXVM/.live-validation/spawn-home/pool
+/.treehouse/project-5ff8bb/2/project. Type 'exit' to return.
+project HEAD
+❯ cd -- '{run-worktree}/.live-validation/spawn-home/pool/
+.treehouse/project-5ff8bb/2/project'
+project HEAD
+❯ export GOTMPDIR=/tmp/fm-raw-live-2/gotmp
+export COMPACT_ADVISER_DISABLE=1
+export FM_TASK_ID=raw-live-2
+project HEAD
+❯ export COMPACT_ADVISER_DISABLE=1
+export FM_TASK_ID=raw-live-2
+project HEAD
+❯ export FM_TASK_ID=raw-live-2
+project HEAD
+❯ . '/tmp/fm-raw-live-2+ab9e2a9359dcd01ee0f747993111a834c2f46899ac19e09899a81557a14422d5/launch.s1793564277.92741.30079.
+sh'
+RAW-LIVE-2-RAN
+project HEAD
+❯
+
+
+
+
+
+
+
+
+
+
+
+

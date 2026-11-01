@@ -1,0 +1,1 @@
+skip: rex CLI not found at $REX_BIN_DIR, on PATH, or at the server bundle path

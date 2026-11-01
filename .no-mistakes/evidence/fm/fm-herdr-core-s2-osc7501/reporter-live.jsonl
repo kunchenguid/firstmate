@@ -1,0 +1,36 @@
+{"scenario": "status-transitions", "action": "observed OSC 7501", "record": {"state": "working", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y="}}
+{"scenario": "status-transitions", "action": "observed OSC 7501", "record": {"state": "working", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y="}}
+{"scenario": "status-transitions", "action": "observed OSC 7501", "record": {"state": "idle", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y="}}
+{"scenario": "status-transitions", "action": "observed OSC 7501", "record": {"state": "blocked", "kind": "question", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y=", "msg": "TmVlZHMgeW91ciBkZWNpc2lvbjogY2hvb3NlIGEgY29sb3I/IA=="}}
+{"scenario": "status-transitions", "action": "observed OSC 7501", "record": {"state": "idle", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y="}}
+{"scenario": "status-transitions", "action": "observed OSC 7501", "record": {"state": "blocked", "kind": "auth", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y=", "msg": "QmxvY2tlZDogbWlzc2luZyBBUEkgdG9rZW4g"}}
+{"scenario": "status-transitions", "action": "observed OSC 7501", "record": {"state": "done", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y=", "msg": "UFIgcmVhZHk6IFBSIGh0dHBzOi8vZXhhbXBsZS50ZXN0L3ByLzk5"}}
+{"scenario": "status-transitions", "action": "observed OSC 7501", "record": {"state": "working", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y="}}
+{"scenario": "status-transitions", "action": "observed OSC 7501", "record": {"state": "done", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y=", "msg": "UFIgcmVhZHk6IFBSIGh0dHBzOi8vZXhhbXBsZS50ZXN0L3ByLzk5"}}
+{"scenario": "status-transitions", "action": "observed OSC 7501", "record": {"state": "error", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y=", "msg": "RmFpbGVkOiBzeW50aGV0aWMgYnVpbGQgZmFpbHVyZQ=="}}
+{"scenario": "status-transitions", "action": "ordinary disarm completed", "exit_code": 0, "records": 11}
+{"scenario": "exit-parks-idle", "action": "observed OSC 7501", "record": {"state": "working", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y="}}
+{"scenario": "exit-parks-idle", "action": "ordinary disarm completed", "exit_code": 0, "records": 2}
+{"scenario": "unknown-terminal", "action": "no watcher and zero protocol output"}
+{"scenario": "unknown-terminal", "action": "ordinary disarm completed", "exit_code": 0, "records": 0}
+{"scenario": "config-off", "action": "no watcher and zero protocol output"}
+{"scenario": "config-off", "action": "ordinary disarm completed", "exit_code": 0, "records": 0}
+{"scenario": "invalid-config", "action": "no watcher and zero protocol output"}
+{"scenario": "invalid-config", "action": "visible config warning", "output": "warning: osc7501: {run-worktree}/.live-validation/invalid-config/config/osc7501-status: unknown value; using off (on or off)\r\n"}
+{"scenario": "invalid-config", "action": "ordinary disarm completed", "exit_code": 0, "records": 0}
+{"scenario": "old-herdr", "action": "no watcher and zero protocol output"}
+{"scenario": "old-herdr", "action": "ordinary disarm completed", "exit_code": 0, "records": 0}
+{"scenario": "no-tty-backend", "action": "no watcher and zero protocol output"}
+{"scenario": "no-tty-backend", "action": "ordinary disarm completed", "exit_code": 0, "records": 0}
+{"scenario": "unresolved-identity", "action": "no watcher and zero protocol output"}
+{"scenario": "unresolved-identity", "action": "ordinary disarm completed", "exit_code": 0, "records": 0}
+{"scenario": "native-claude", "action": "actual executable version", "version": "2.1.316 (Claude Code)"}
+{"scenario": "native-claude", "action": "ordinary disarm completed", "exit_code": 0, "records": 0}
+{"scenario": "codex-probe-fails-closed", "action": "ordinary disarm completed", "exit_code": 0, "records": 0}
+{"scenario": "unknown-activity", "action": "observed OSC 7501", "record": {"state": "blocked", "kind": "question", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y=", "msg": "TmVlZHMgeW91ciBkZWNpc2lvbjogYXBwcm92ZT8g"}}
+{"scenario": "unknown-activity", "action": "unknown activity: no heartbeat despite old done and open question", "records_before": 1, "records_after": 1}
+{"scenario": "unknown-activity", "action": "observed OSC 7501", "record": {"state": "done", "app": "firstmate-opencode", "title": "Zm0tbG9jYWwtcHJvb2Y=", "msg": "RG9uZTogcmVzdWx0"}}
+{"scenario": "unknown-activity", "action": "ordinary disarm completed", "exit_code": 0, "records": 2}
+{"scenario": "unknown-activity", "action": "unknown activity: ordinary disarm writes no final record", "records": 2}
+{"scenario": "typed-input", "action": "startup input preserved", "readback": "input queued during startup"}
+{"scenario": "typed-input", "action": "ordinary disarm completed", "exit_code": 0, "records": 0}
