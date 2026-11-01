@@ -188,8 +188,8 @@ The capability has four operations:
 
 A long-poll implementation must return `no-result` before its bound timeout when no event arrives.
 A host timeout that fires on time while the machine runs normally is an actionable package failure, not a normal discovery cadence.
-When a deadline fires far past its bound because the machine was suspended across it, the host grants one short bounded grace instead of killing a healthy invocation, and the captured error records which bound fired and how far it overran, so a suspension-driven kill is never read as a package failure.
-A suspension that ends within the host's two-second slack still kills at its bound: without a second clock the host cannot distinguish it from a stall, so detecting that case is a separate change.
+When a deadline fires far past its bound, which is what a machine suspension across it produces, the host grants one short bounded grace instead of killing a healthy invocation, and the captured error records which bound fired and how far it overran, so a suspension-driven kill is never read as a package failure.
+The trigger is lateness alone: a suspension that ends within the host's two-second slack still kills at its bound, because without a second clock the host cannot distinguish it from a stall, so detecting that case is a separate change.
 A genuinely stalled invocation receives no grace and still dies at its bound.
 The shipped example uses a 55-second finite wait inside the default five-minute host bound, so an absent file produces no result and no wake before ordinary reconciliation starts the next wait.
 The package never receives a result-file path.
