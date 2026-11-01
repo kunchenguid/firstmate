@@ -45,6 +45,9 @@
 # and drops its gate, so a hold is never in both Captain's Call and Charted Next.
 # Aging is a projection safety net only; the durable
 # deferral remains re-holding with --until.
+# Every captain-hold decision carries `class`, the hold class the canonical
+# snapshot projected (null for a hold recorded before classes existed), so the
+# Captain's Call card can show which of the captain's categories it claims.
 #
 # Ordinary Charted Next gates are ordered by durable filed date, newest first,
 # before the FM_BEARINGS_GATES bound is applied. Gates without a comparable filed
@@ -527,14 +530,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.structured and .hold_bucket != null)
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
-            summary:hold_summary(.title; .hold_reason),owner:"(main)"} ]
+            summary:hold_summary(.title; .hold_reason),owner:"(main)",
+            class:(.hold_class // null)} ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
               | select(.source == "backlog" and .verb == "captain-hold")
               | select(($all_decisions == 1) or live_captain_call)
               | {id:($m.id + "/" + .id),key,verb,
                  summary:hold_summary((.summary // .id);
-                                      (.reason // "captain decision pending")),owner:$m.id} ]
+                                      (.reason // "captain decision pending")),owner:$m.id,
+                 class:(.class // null)} ]
             + [ $m.queued[]?
                 | select($all_decisions == 1 and .hold_kind == "captain")
                 | select(.id as $id
@@ -544,7 +549,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                          | index($id) | not)
                 | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
                    summary:hold_summary((.title // .id);
-                                        (.hold_reason // "captain decision pending")),owner:$m.id} ])[] ]) as $decisions_all
+                                        (.hold_reason // "captain decision pending")),owner:$m.id,
+                   class:(.hold_class // null)} ])[] ]) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]
