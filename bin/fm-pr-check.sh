@@ -314,7 +314,7 @@ fi
 if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   if [ -z "$BASELINE" ] || ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
       "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE"; then
-    rm -f -- "$STATE/$ID.pr-poll-degraded"
+    rm -f -- "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train"
   fi
 fi
 if [ "$CONTROL_LOCK_HELD" = 1 ]; then

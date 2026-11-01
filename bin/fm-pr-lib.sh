@@ -1649,7 +1649,11 @@ fm_pr_poll_degraded_already_notified() {  # <state> <id> <provider> <host> <path
   fm_pr_poll_degraded_identity_valid "$identity" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
-  marker="$state/$id.pr-poll-degraded"
+  if [ "$identity" = train=on ]; then
+    marker="$state/$id.pr-poll-train"
+  else
+    marker="$state/$id.pr-poll-degraded"
+  fi
   fm_pr_poll_degraded_marker_matches "$marker" "$state_device" \
     "$provider" "$host" "$path" "$number" "$identity"
 }
@@ -1660,7 +1664,11 @@ fm_pr_poll_degraded_mark_notified() {  # <state> <id> <provider> <host> <path> <
   fm_pr_poll_degraded_identity_valid "$identity" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
-  marker="$state/$id.pr-poll-degraded"
+  if [ "$identity" = train=on ]; then
+    marker="$state/$id.pr-poll-train"
+  else
+    marker="$state/$id.pr-poll-degraded"
+  fi
   fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
   umask 077
   tmp=$(mktemp "$state/.fm-pr-poll-degraded.XXXXXX") || return 1
@@ -1684,7 +1692,13 @@ fm_pr_poll_degraded_remove() {  # <state> <id>
   local state=$1 id=$2 marker
   fm_pr_task_id_valid "$id" || return 1
   marker="$state/$id.pr-poll-degraded"
-  [ -e "$marker" ] || [ -L "$marker" ] || return 0
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  rm -f -- "$marker"
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    rm -f -- "$marker" || return 1
+  }
+  marker="$state/$id.pr-poll-train"
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    rm -f -- "$marker"
+  }
 }

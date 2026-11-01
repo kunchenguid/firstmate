@@ -1518,6 +1518,14 @@ test_arming_baselines_an_already_degraded_change() {
   fm_pr_poll_degraded_already_notified "$state" task-a gitlab gitlab.example group/subgroup/project 7 train=on \
     || fail "arming did not record a merge request already on its train"
   rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed FM_TEST_GLAB_PIPELINE_ID=943 FM_TEST_GLAB_TRAIN=car \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-failed.out" 2> "$dir/watch-failed.err" || true
+  [ "$(grep -c 'degraded after ready: degraded pipeline=943' "$dir/watch-failed.out")" -eq 1 ] \
+    || fail "watcher did not wake for a pipeline failure while on train"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=car \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-recovered.out" 2> "$dir/watch-recovered.err" || true
+  rm -f "$state/.last-check"
   FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=success FM_TEST_GLAB_TRAIN=gone \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err" || true
   [ "$(grep -c 'degraded after ready: degraded train=dropped' "$dir/watch-1.out")" -eq 1 ] \
