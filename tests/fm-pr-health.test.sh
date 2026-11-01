@@ -80,6 +80,9 @@ case "$1 $2" in
     if [ -f "$FORGE/interrupt-$rest" ]; then
       # Stop the whole pass mid-read, as a check timeout would.
       rm -f "$FORGE/interrupt-$rest"
+      jq -e --arg url "https://github.com/o/r/pull/$rest" \
+        '.notifications.last_modified != "Sun, 01 Nov 2026 00:00:00 GMT" and (.notifications.pending | index($url) != null)' \
+        "$FM_STATE_OVERRIDE/pr-health.json" >/dev/null || exit 1
       poll_pid=$(cat "$FORGE/main-poll-pid")
       kill -TERM "$poll_pid"
       exit 1
@@ -833,7 +836,7 @@ test_interrupted_pass_keeps_events_pending() {
   set_pr "$home" 44 '.reviewDecision = "CHANGES_REQUESTED"'
   notify "$home" o/r 44 2026-11-01T00:04:00Z comment
   : > "$home/forge/interrupt-44"
-  with_home "$home" bash "$home/state/pr-health.check.sh" > "$home/poll.out" 2>&1 &
+  with_home "$home" "$ROOT/bin/fm-pr-health.sh" poll > "$home/poll.out" 2>&1 &
   poll_pid=$!
   printf '%s\n' "$poll_pid" > "$home/forge/main-poll-pid"
   poll_rc=0
