@@ -1141,6 +1141,7 @@ record_note() {
 do_relaunch() {
   local exit_result state note_line admission_out admission_store
   local quota_gate_out quota_gate_store relaunch_claude_store relaunch_pi_store relaunch_codex_store account_origin
+  local identity_store identity_session identity_out
   local -a spawn_args admission_args relaunch_account_stores quota_gate_args
 
   require_state_verified_backend relaunch
@@ -1188,10 +1189,27 @@ do_relaunch() {
   fi
   case "$TARGET_HARNESS" in
     claude)
-      relaunch_claude_store=$(fm_worker_account_effective_store "$TARGET_HARNESS" "$RELAUNCH_WORKER_ACCOUNT" "$relaunch_claude_store" "$account_origin") || return 1 ;;
+      relaunch_claude_store=$(fm_worker_account_effective_store "$TARGET_HARNESS" "$RELAUNCH_WORKER_ACCOUNT" "$relaunch_claude_store" "$account_origin") || return 1
+      if [ "$KIND" = secondmate ] && [ -z "$RELAUNCH_WORKER_ACCOUNT" ]; then
+        relaunch_claude_store=$("$SCRIPT_DIR/fm-home-identity.sh" store) || return 1
+      fi ;;
     pi|pi-signed)
       relaunch_pi_store=$(fm_worker_account_effective_store "$TARGET_HARNESS" "$RELAUNCH_WORKER_ACCOUNT" "$relaunch_pi_store" "$account_origin") || return 1 ;;
   esac
+
+  # bin/fm-spawn.sh refuses a second mate whose own pin differs from this
+  # selection, but only after the agent is stopped, so compare while it still runs.
+  if [ "$KIND" = secondmate ]; then
+    identity_store=$("$SCRIPT_DIR/fm-home-identity.sh" store) || return 1
+    if [ "$TARGET_HARNESS" = claude ] && [ -n "$RELAUNCH_WORKER_ACCOUNT" ]; then
+      identity_store=$relaunch_claude_store
+    fi
+    identity_session=$("$SCRIPT_DIR/fm-home-identity.sh" show | sed -n 's/^herdr_session=//p')
+    if ! identity_out=$("$SCRIPT_DIR/fm-home-identity.sh" verify "$WT" "$identity_session" "$identity_store" 2>&1); then
+      printf '%s\n' "$identity_out" >&2
+      die "second mate $ID is pinned to another identity; the running agent was left untouched and nothing changed. /exit it, exit this firstmate, re-run fm-home-identity.sh rebind, then start firstmate and relaunch it"
+    fi
+  fi
 
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"

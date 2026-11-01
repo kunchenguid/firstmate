@@ -2838,6 +2838,9 @@ fi
 case "$HARNESS" in
   claude)
     SPAWN_CLAUDE_STORE=$(fm_worker_account_effective_store "$HARNESS" "$WORKER_ACCOUNT" "$SPAWN_CLAUDE_STORE" "$SPAWN_ACCOUNT_ORIGIN") || exit 1
+    if [ "$KIND" = secondmate ] && [ -z "$WORKER_ACCOUNT" ]; then
+      SPAWN_CLAUDE_STORE=$HOME_PIN_STORE
+    fi
     [ -n "$SPAWN_CLAUDE_STORE" ] || SPAWN_CLAUDE_STORE=$HOME_PIN_STORE
     case "$SPAWN_CLAUDE_STORE" in
       ''|default) unset CLAUDE_CONFIG_DIR ;;

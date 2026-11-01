@@ -68,7 +68,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | [`fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) | Accepted origin-form owner shared by both remote provisioning boundaries |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-claude-admission.sh` | Pace firstmate's Claude launches onto a shaped credential store at a limit-reset edge, and report that store's committed parked demand |
-| `fm-home-identity.sh`    | Pin one firstmate home to the terminal session and Claude account it was started from, and refuse every other session |
+| `fm-home-identity.sh`    | Pin/check a home's session and Claude account, or deliberately rebind after clean exit; see [Home session and account pin](configuration.md#home-session-and-account-pin-datahome-identity) for switching and launch commands |
+| `fm-open.sh`             | Start this home's Claude on the `personal` or `geris` store chosen for this launch, from the `personal` Herdr session; see [Home session and account pin](configuration.md#home-session-and-account-pin-datahome-identity) |
 | `fm-git-strip-ai-trailers.sh` | Strip known AI commit trailers at commit-msg time and install that hook for a fleet launch |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |

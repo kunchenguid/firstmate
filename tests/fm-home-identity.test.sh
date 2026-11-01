@@ -337,6 +337,275 @@ test_a_home_pins_itself_on_first_use() {
   pass "an unpinned home takes the identity of the session that first uses it"
 }
 
+test_rebind() {
+  local home child out status pid mode
+  home=$(new_home "$TMP_ROOT/rebind/home")
+  child=$(new_home "$TMP_ROOT/rebind/child")
+  mkdir -p "$TMP_ROOT/rebind/empty" "$TMP_ROOT/rebind/new-store"
+  touch "$TMP_ROOT/rebind/new-store/.credentials.json"
+  identity "$home" personal "$GERIS_STORE" ensure >/dev/null || fail 'initial pin'
+  identity "$child" personal "$GERIS_STORE" ensure >/dev/null || fail 'child pin'
+  printf 'claude_config_dir=%s\n' "$GERIS_STORE" > "$home/state/running.meta"
+  printf -- '- child - Local mate. (home: %s; scope: test; projects: none; added 2026-11-01)\n' "$child" > "$home/data/secondmates.md"
+  printf -- '- remote - Remote mate. (host: example; root: /code; home: /remote; scope: test; projects: none; added 2026-11-01)\n' >> "$home/data/secondmates.md"
+  printf -- '- missing - Missing mate. (home: /nonexistent-fm-rebind-test; scope: test; projects: none; added 2026-11-01)\n' >> "$home/data/secondmates.md"
+  out=$(identity "$home" personal "$GERIS_STORE" rebind --store "$TMP_ROOT/rebind/new-store"); status=$?
+  expect_code 2 "$status" 'rebind requires confirmation'
+  assert_absent "$home/data/home-identity.history" 'no history on refusal'
+  out=$(identity "$home" personal "$GERIS_STORE" rebind --store "$TMP_ROOT/rebind/empty" --confirm); status=$?
+  expect_code 3 "$status" 'credential-free store refuses'
+  cp "$(command -v sleep)" "$TMP_ROOT/rebind/claude"
+  "$TMP_ROOT/rebind/claude" 120 & pid=$!
+  printf '%s\n' "$pid" > "$home/state/.lock"
+  out=$(identity "$home" personal "$GERIS_STORE" rebind --store "$TMP_ROOT/rebind/new-store" --confirm); status=$?
+  kill "$pid"; wait "$pid" 2>/dev/null || true
+  expect_code 3 "$status" 'live harness lock refuses'
+  assert_contains "$out" 'exit the live harness session first' 'actionable refusal'
+  assert_grep "$pid" "$home/state/.lock" 'live lock was not deleted'
+  assert_absent "$home/data/home-identity.history" 'no history on live-lock refusal'
+  out=$(identity "$home" personal "$GERIS_STORE" rebind --store "$TMP_ROOT/rebind/new-store" --confirm) || fail "rebind: $out"
+  assert_contains "$out" 'old identity: session=personal' 'old identity printed'
+  assert_contains "$out" "new identity: session=personal store=$TMP_ROOT/rebind/new-store" 'session preserved'
+  assert_contains "$out" 'secondmate child: re-pinned' 'local child propagated'
+  assert_contains "$out" 'secondmate remote: skipped (remote)' 'remote reported'
+  assert_contains "$out" 'secondmate missing: skipped (unreachable:' 'missing reported'
+  grep -Eq '^# rebound at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$home/data/home-identity.history" || fail 'UTC timestamp recorded'
+  assert_grep "claude_config_dir=$GERIS_STORE" "$home/data/home-identity.history" 'old pin archived'
+  assert_grep "claude_config_dir=$GERIS_STORE" "$child/data/home-identity.history" 'child old pin archived'
+  assert_grep "claude_config_dir=$GERIS_STORE" "$home/state/running.meta" 'running task unchanged'
+  assert_grep "$pid" "$home/state/.lock" 'stale lock left for next session'
+  mode=$(stat -c %a "$home/data/home-identity" 2>/dev/null || stat -f %Lp "$home/data/home-identity")
+  [ "$mode" = 600 ] || fail 'pin must be 0600'
+  identity "$child" personal "$TMP_ROOT/rebind/new-store" check >/dev/null || fail 'child new identity'
+  out=$(identity "$home" geris "$TMP_ROOT/rebind/new-store" check); status=$?
+  expect_code 3 "$status" 'mismatched session still refuses after rebind'
+  out=$(identity "$home" personal "$GERIS_STORE" check); status=$?
+  expect_code 3 "$status" 'old account still refuses after rebind'
+  identity "$home" personal "$GERIS_STORE" rebind --store "$TMP_ROOT/rebind/new-store" --session personal --confirm >/dev/null || fail 'explicit session'
+  # Back to the first subscription without changing the terminal session.
+  touch "$GERIS_STORE/.credentials.json"
+  identity "$home" personal "$TMP_ROOT/rebind/new-store" rebind --store "$GERIS_STORE" --confirm >/dev/null || fail 'switch back'
+  identity "$home" personal "$GERIS_STORE" check >/dev/null || fail 'original account restored'
+  out=$(REBIND_SEED=1 identity "$home" personal "$GERIS_STORE" seed "$child" personal "$TMP_ROOT/rebind/new-store"); status=$?
+  expect_code 3 "$status" 'seed cannot gain replacement authority from the environment'
+  mkdir -p "$TMP_ROOT/rebind/user/.claude"
+  touch "$TMP_ROOT/rebind/user/.claude/.credentials.json"
+  HOME="$TMP_ROOT/rebind/user" identity "$home" personal "$GERIS_STORE" rebind --store default --confirm >/dev/null || fail 'default store rebind'
+  HOME="$TMP_ROOT/rebind/user" identity "$home" personal '' check >/dev/null || fail 'default binding unsets account variable'
+  pass 'rebind confirmation, credentials, live lock, history, local propagation, and session isolation'
+}
+
+test_rebind_skips_a_live_secondmate_and_its_subtree_until_rerun() {
+  local base home child nested new pid out history_lines
+  base="$TMP_ROOT/rebind-live"
+  home=$(new_home "$base/home"); child=$(new_home "$base/child"); nested=$(new_home "$base/nested")
+  new="$base/new-store"
+  mkdir -p "$new"; touch "$new/.credentials.json"
+  identity "$home" personal "$GERIS_STORE" ensure >/dev/null || fail 'home pin'
+  identity "$child" personal "$GERIS_STORE" ensure >/dev/null || fail 'child pin'
+  identity "$nested" personal "$GERIS_STORE" ensure >/dev/null || fail 'nested pin'
+  printf -- '- child - Local mate. (home: %s; scope: test; projects: none; added 2026-11-01)\n' "$child" > "$home/data/secondmates.md"
+  printf -- '- nested - Nested mate. (home: %s; scope: test; projects: none; added 2026-11-01)\n' "$nested" > "$child/data/secondmates.md"
+  # A registry cycle must terminate instead of recursing forever.
+  printf -- '- back - Cycle. (home: %s; scope: test; projects: none; added 2026-11-01)\n' "$home" > "$nested/data/secondmates.md"
+
+  cp "$(command -v sleep)" "$base/claude"
+  "$base/claude" 120 & pid=$!
+  printf '%s\n' "$pid" > "$child/state/.lock"
+  out=$(identity "$home" personal "$GERIS_STORE" rebind --store "$new" --confirm) \
+    || { kill "$pid"; fail "a live second mate must not fail the rebind: $out"; }
+  assert_contains "$out" 'secondmate child: skipped (live session)' 'the live mate is reported as skipped'
+  assert_not_contains "$out" 'secondmate child: re-pinned' 'the live mate is not reported as moved'
+  identity "$child" personal "$GERIS_STORE" check >/dev/null || fail 'the live mate keeps its identity'
+  identity "$nested" personal "$GERIS_STORE" check >/dev/null || fail 'a live mate keeps its subtree on the matching identity'
+  identity "$home" personal "$new" check >/dev/null || fail 'the home itself still moved'
+  assert_absent "$child/state/.lock.acquire" 'the startup claim on the mate is released'
+  assert_grep "$pid" "$child/state/.lock" 'the live lock is untouched'
+  kill "$pid"; wait "$pid" 2>/dev/null || true
+
+  history_lines=$(grep -c '^# rebound at' "$home/data/home-identity.history")
+  out=$(identity "$home" personal "$new" rebind --store "$new" --confirm) || fail "re-run: $out"
+  assert_contains "$out" 'secondmate child: re-pinned' 'a re-run moves the exited mate'
+  assert_contains "$out" 'secondmate nested: re-pinned' 'a re-run reaches the nested mate'
+  identity "$child" personal "$new" check >/dev/null || fail 'child on the new identity'
+  identity "$nested" personal "$new" check >/dev/null || fail 'nested mate on the new identity'
+  [ "$history_lines" = "$(grep -c '^# rebound at' "$home/data/home-identity.history")" ] \
+    || fail 'a re-run to the same identity must not archive a move that did not happen'
+
+  out=$(identity "$home" personal "$new" rebind --store "$new" --confirm) || fail "second re-run: $out"
+  assert_contains "$out" 'secondmate child: already on the new identity' 'a settled mate is not reported as moved'
+  pass 'rebind skips a live second mate with its subtree and a re-run moves them'
+}
+
+test_rebind_keeps_a_worker_pinned_secondmate_acceptable_to_spawn_verify() {
+  local base home child new worker out
+  base="$TMP_ROOT/rebind-worker-pin"
+  home=$(new_home "$base/home"); child=$(new_home "$base/child")
+  new="$base/new-store"; worker="$base/worker-store"
+  mkdir -p "$new" "$worker"; touch "$new/.credentials.json"
+  identity "$home" personal "$GERIS_STORE" ensure >/dev/null || fail 'home pin'
+  identity "$child" personal "$worker" ensure >/dev/null || fail 'child pin'
+  printf -- '- child - Local mate. (home: %s; scope: test; projects: none; added 2026-11-01)\n' "$child" > "$home/data/secondmates.md"
+  printf '%s\n' "$worker" > "$home/config/claude-account"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  out=$(identity "$home" personal "$GERIS_STORE" rebind --store "$new" --confirm) || fail "rebind: $out"
+  identity "$home" personal "$new" verify "$child" personal "$worker" >/dev/null \
+    || fail 'the store spawn binds a worker-pinned mate to must stay accepted'
+
+  printf 'codex\n' > "$home/config/secondmate-harness"
+  out=$(identity "$home" personal "$new" rebind --store "$GERIS_STORE" --confirm) || fail "rebind back: $out"
+  identity "$home" personal "$GERIS_STORE" verify "$child" personal "$GERIS_STORE" >/dev/null \
+    || fail 'a Claude worker pin does not bind a second mate on another harness'
+  pass 'rebind pins a second mate to the store its launch selects'
+}
+
+test_rebind_decides_an_undetectable_harness_from_the_recorded_launch() {
+  local base home mate other orphan new worker out harness h
+  base="$TMP_ROOT/rebind-unknown-harness"
+  home=$(new_home "$base/home"); mate=$(new_home "$base/mate")
+  other=$(new_home "$base/other"); orphan=$(new_home "$base/orphan")
+  new="$base/new-store"; worker="$base/worker-store"
+  mkdir -p "$new" "$worker" "$base/blind"; touch "$new/.credentials.json"
+  printf '#!/bin/sh\nexit 0\n' > "$base/blind/ps"; chmod +x "$base/blind/ps"
+  for h in "$home" "$mate" "$other" "$orphan"; do
+    identity "$h" personal "$GERIS_STORE" ensure >/dev/null || fail "pin $h"
+  done
+  {
+    printf -- '- mate - Claude mate. (home: %s; scope: test; projects: none; added 2026-11-01)\n' "$mate"
+    printf -- '- other - Codex mate. (home: %s; scope: test; projects: none; added 2026-11-01)\n' "$other"
+    printf -- '- orphan - No record. (home: %s; scope: test; projects: none; added 2026-11-01)\n' "$orphan"
+  } > "$home/data/secondmates.md"
+  printf '%s\n' "$worker" > "$home/config/claude-account"
+  printf 'harness=claude\n' > "$home/state/mate.meta"
+  printf 'harness=codex\n' > "$home/state/other.meta"
+
+  plain_shell() {
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u CURSOR_AGENT \
+      -u CURSOR_INVOKED_AS -u FM_SUPERVISION_ACTOR -u FM_SUPERVISION_PRIMARY_HARNESS \
+      PATH="$base/blind:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+      HERDR_SESSION=personal CLAUDE_CONFIG_DIR="$GERIS_STORE" "$@"
+  }
+  harness=$(plain_shell "$ROOT/bin/fm-harness.sh" secondmate)
+  [ "$harness" = unknown ] || fail "the fixture must be undetectable, got '$harness'"
+  out=$(plain_shell "$IDENTITY" rebind --store "$new" --confirm 2>&1) || fail "rebind: $out"
+
+  identity "$home" personal "$new" verify "$mate" personal "$worker" >/dev/null \
+    || fail 'a recorded Claude mate must stay on the store spawn binds it to'
+  identity "$home" personal "$new" verify "$other" personal "$new" >/dev/null \
+    || fail 'a recorded non-Claude mate must follow the home'
+  assert_contains "$out" 'secondmate orphan: skipped (harness undecidable' 'an undecidable mate is reported'
+  identity "$home" personal "$new" verify "$orphan" personal "$GERIS_STORE" >/dev/null \
+    || fail 'an undecidable mate keeps its identity'
+  pass 'rebind in a plain shell pins by recorded harness and skips an undecidable mate'
+}
+
+# Throwaway HOME with both stub logins, a home pinned to personal, and a stub
+# claude that records what it was started with. Sets OPEN_* for open_home.
+open_case() {  # <name>
+  OPEN_BASE="$TMP_ROOT/$1"
+  OPEN_USER="$OPEN_BASE/user"
+  OPEN_HOME=$(new_home "$OPEN_BASE/home")
+  OPEN_LOG="$OPEN_BASE/launch"
+  mkdir -p "$OPEN_USER/.claude" "$OPEN_USER/.claude-geris" "$OPEN_BASE/bin"
+  touch "$OPEN_USER/.claude/.credentials.json" "$OPEN_USER/.claude-geris/.credentials.json"
+  OPEN_USER=$(cd "$OPEN_USER" && pwd -P)
+  OPEN_HOME=$(cd "$OPEN_HOME" && pwd -P)
+  cat > "$OPEN_BASE/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+{
+  printf 'cwd=%s\n' "$PWD"
+  printf 'store=%s\n' "${CLAUDE_CONFIG_DIR-unset}"
+  printf 'session=%s\n' "${HERDR_SESSION-unset}"
+  printf 'api_key=%s\n' "${ANTHROPIC_API_KEY-unset}"
+  printf 'args=%s\n' "$*"
+} > "$FM_OPEN_TEST_LOG"
+STUB
+  cat > "$OPEN_BASE/bin/herdr" <<'STUB'
+#!/bin/sh
+touch "$FM_OPEN_TEST_LOG.herdr"
+STUB
+  chmod +x "$OPEN_BASE/bin/claude" "$OPEN_BASE/bin/herdr"
+  identity "$OPEN_HOME" personal "$OPEN_USER/.claude" ensure >/dev/null || fail 'open home pin'
+}
+
+open_home() {  # <session> <fm-open args...>
+  local session=$1
+  shift
+  HOME="$OPEN_USER" FM_HOME="$OPEN_HOME" HERDR_SESSION="$session" \
+    CLAUDE_CONFIG_DIR="$OPEN_USER/.claude" ANTHROPIC_API_KEY=ambient \
+    PATH="$OPEN_BASE/bin:$PATH" FM_OPEN_TEST_LOG="$OPEN_LOG" \
+    "$ROOT/bin/fm-open.sh" "$@" 2>&1
+}
+
+test_fm_open_starts_the_same_home_on_either_subscription() {
+  local out log
+  open_case open-both
+  out=$(open_home personal geris --model opus --continue) || fail "geris launch: $out"
+  log=$(cat "$OPEN_LOG")
+  assert_contains "$log" "cwd=$OPEN_HOME" 'Claude starts from the home'
+  assert_contains "$log" "store=$OPEN_USER/.claude-geris" 'Claude gets the chosen store'
+  assert_contains "$log" 'session=personal' 'the Herdr session stays personal'
+  assert_contains "$log" 'api_key=unset' 'an ambient credential cannot outrank the chosen store'
+  assert_contains "$log" 'args=--dangerously-skip-permissions --model opus --continue' 'the cc posture and caller args reach Claude'
+  identity "$OPEN_HOME" personal "$OPEN_USER/.claude-geris" check >/dev/null || fail 'the pin follows the launch'
+  assert_absent "$OPEN_LOG.herdr" 'the launcher never runs Herdr'
+
+  out=$(open_home personal personal) || fail "personal launch: $out"
+  assert_contains "$(cat "$OPEN_LOG")" "store=$OPEN_USER/.claude" 'the same home starts back on personal'
+  identity "$OPEN_HOME" personal "$OPEN_USER/.claude" check >/dev/null || fail 'the pin moved back'
+  identity "$OPEN_HOME" personal "$OPEN_USER/.claude-geris" check >/dev/null && fail 'the previous store is refused'
+  [ "$(grep -c '^# rebound at' "$OPEN_HOME/data/home-identity.history")" = 2 ] || fail 'each move is kept in history'
+
+  out=$(open_home personal personal) || fail "repeat launch: $out"
+  [ "$(grep -c '^# rebound at' "$OPEN_HOME/data/home-identity.history")" = 2 ] || fail 'the same account adds no history'
+
+  out=$(HOME="$OPEN_USER" FM_HOME="$OPEN_HOME" HERDR_SESSION=personal "$IDENTITY" rebind --store default --confirm 2>&1) \
+    || fail "default restore: $out"
+  identity "$OPEN_HOME" personal '' check >/dev/null || fail 'a default pin accepts an unset CLAUDE_CONFIG_DIR'
+  identity "$OPEN_HOME" personal "$OPEN_USER/.claude" check >/dev/null && fail 'a default pin refuses the explicit path'
+  [ "$(grep -c '^# rebound at' "$OPEN_HOME/data/home-identity.history")" = 3 ] || fail 'the restore keeps history'
+  pass 'fm-open starts one home on either subscription, reversibly'
+}
+
+test_fm_open_refuses_without_starting_claude() {
+  local out rc pid before
+  open_case open-refuse
+  before=$(cat "$OPEN_HOME/data/home-identity")
+
+  out=$(open_home personal); expect_code 2 $? "no account: $out"
+  out=$(open_home personal work); expect_code 2 $? "unknown account: $out"
+  out=$(open_home geris geris); rc=$?
+  expect_code 3 "$rc" "another session: $out"
+
+  mkdir -p "$OPEN_BASE/sleeper"
+  cp "$(command -v sleep)" "$OPEN_BASE/sleeper/claude"
+  "$OPEN_BASE/sleeper/claude" 120 & pid=$!
+  printf '%s\n' "$pid" > "$OPEN_HOME/state/.lock"
+  out=$(open_home personal geris); rc=$?
+  expect_code 3 "$rc" "live lock: $out"
+  assert_contains "$out" 'its session lock is held' 'the live lock is named'
+  assert_grep "$pid" "$OPEN_HOME/state/.lock" 'the live lock is untouched'
+  kill "$pid"; wait "$pid" 2>/dev/null || true
+  rm -f "$OPEN_HOME/state/.lock"
+
+  rm "$OPEN_USER/.claude-geris/.credentials.json"
+  out=$(open_home personal geris); rc=$?
+  expect_code 3 "$rc" "missing login: $out"
+  [ "$before" = "$(cat "$OPEN_HOME/data/home-identity")" ] || fail 'a refused launch keeps the pin'
+
+  printf 'fm-home-identity-v1\nherdr_session=work\nclaude_config_dir=%s\n' "$OPEN_USER/.claude" > "$OPEN_HOME/data/home-identity"
+  out=$(open_home personal personal); rc=$?
+  expect_code 3 "$rc" "home of another session: $out"
+  assert_absent "$OPEN_LOG" 'no refusal starts Claude'
+  pass 'fm-open refuses a live lock, another session, or a missing login without starting Claude'
+}
+
+test_rebind
+test_rebind_skips_a_live_secondmate_and_its_subtree_until_rerun
+test_rebind_keeps_a_worker_pinned_secondmate_acceptable_to_spawn_verify
+test_rebind_decides_an_undetectable_harness_from_the_recorded_launch
+test_fm_open_starts_the_same_home_on_either_subscription
+test_fm_open_refuses_without_starting_claude
 test_a_home_refuses_the_other_session_in_both_directions
 test_the_pin_survives_a_restart
 test_an_unreadable_pin_is_never_replaced

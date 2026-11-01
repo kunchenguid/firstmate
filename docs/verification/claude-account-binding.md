@@ -39,6 +39,32 @@ Turns are deduplicated by `message.id`, because a resumed transcript replays pri
 
 A session counts as live committed demand only when its park is the last decisive record in the file, no resume, real turn, or `continued-in` follows it, and the park is no older than `FM_CLAUDE_DEMAND_MAX_AGE`.
 
+## Explicit launch-time Claude store
+
+Verified 2026-11-01 on Linux with Claude Code `2.1.316 (Claude Code)`.
+With `HERDR_SESSION=personal`, an explicit `CLAUDE_CONFIG_DIR` is honored by the real Claude executable rather than re-derived from the Herdr session.
+This token-free probe uses a throwaway HOME and empty store, not either operator login:
+
+```bash
+tmp=$(mktemp -d)
+mkdir -p "$tmp/home" "$tmp/store"
+env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN \
+  HOME="$tmp/home" CLAUDE_CONFIG_DIR="$tmp/store" HERDR_SESSION=personal \
+  strace -f -e trace=%file -o "$tmp/paths" claude auth status > "$tmp/status" 2>/dev/null
+# Exit 1 is expected: the throwaway store is not logged in.
+grep -oE '"[^" ]*(\.credentials.json|\.claude.json)"' "$tmp/paths" | sort -u
+```
+
+Observed output (temporary prefix normalized to `<tmp>`):
+
+```text
+"<tmp>/store/.claude.json"
+"<tmp>/store/.credentials.json"
+```
+
+The pin check compares the explicitly exported store as well as the session; `tests/fm-home-identity.test.sh` exercises switching the store while keeping `personal`, refusal of the previous store, and refusal of another session afterward.
+The operator launch and clean-exit contract remains in [configuration](../configuration.md#home-session-and-account-pin-datahome-identity).
+
 ## Executable coverage
 
 | Guarantee | Test |
@@ -57,6 +83,12 @@ A session counts as live committed demand only when its park is the last decisiv
 | Withdrawing one task never drops another whose id differs only by a regex metacharacter | `tests/fm-claude-admission.test.sh` |
 | A remote second mate is steered under its home's recorded session and account, and refused under any other | `tests/fm-remote-secondmate-identity.test.sh` |
 | A remote second mate's recorded account beats a caller that exports another one, store-bound or default | `tests/fm-remote-secondmate-identity.test.sh` |
+| Explicit rebind requires confirmation, credentials and no live lock; preserves the session, archives history, re-seeds local mates and leaves workers unchanged | `tests/fm-home-identity.test.sh` |
+| Rebind skips and reports a live second mate and its subtree, keeps a worker-pinned second mate on its pin, and reaches nested second mates | `tests/fm-home-identity.test.sh` |
+| With no detectable harness, rebind pins a worker-pinned second mate by its recorded harness and skips it when none is recorded | `tests/fm-home-identity.test.sh` |
+| `fm-open.sh` starts the same home on either store from `personal`, is reversible, and refuses a live lock, another session, or a home pinned elsewhere | `tests/fm-home-identity.test.sh` |
+| A second mate moved by rebind relaunches on the new store and stays accepted by its own home | `tests/fm-control-relaunch.test.sh` |
+| A relaunch of a second mate still pinned to another identity refuses before the agent is stopped | `tests/fm-control-relaunch.test.sh` |
 | A home refuses the other session in both directions, and survives a restart | `tests/fm-home-identity.test.sh` |
 | A spawn from a foreign session is refused and creates nothing | `tests/fm-home-identity.test.sh` |
 | A foreign-session spawn refusal is reported as the session mismatch even when the backlog preflight also refuses | `tests/fm-home-identity.test.sh` |
