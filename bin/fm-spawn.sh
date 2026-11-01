@@ -17,7 +17,10 @@
 #   refuses a brief whose `forge=` disagrees with the registered binding in
 #   either direction, and refuses --yolo on for a forge=gerrit or
 #   forge=external project, where yolo is inactive (bin/fm-project-mode.sh's
-#   header carries that decision). A forge=external ship also refuses a missing
+#   header carries that decision). The project's pr=manual binding is read the
+#   same way and agrees with the brief's " pr=manual" contract suffix in either
+#   direction; only a no-mistakes ship takes it, so a no-mistakes-prod-only
+#   project's direct-PR task expects none. A forge=external ship also refuses a missing
 #   review tool adapter and an unusable personal backup remote, installs the
 #   per-task pre-push guard (bin/fm-git-push-guard.sh) even when the home keeps
 #   AI trailers, and records forge=external, backup_remote=, and backup_prefix=
@@ -119,16 +122,16 @@
 #   docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
-#   adapter, and experimental zellij, orca, cmux, paseo, rex, t3code, and tern
-#   adapters. Orca owns both the task worktree and terminal, so ship/scout Orca
-#   spawns do not run treehouse get; cmux, paseo, rex, and tern are session
+#   adapter, and experimental zellij, orca, cmux, paseo, rex, t3code, tern,
+#   and hc adapters. Orca owns both the task worktree and terminal, so ship/scout Orca
+#   spawns do not run treehouse get; cmux, paseo, rex, tern, and hc are session
 #   providers only, exactly like herdr/zellij, so they do. Auto-detected herdr
 #   and rex stay silent like tmux; auto-detected cmux prints a loud stderr
-#   notice; zellij, orca, paseo, t3code, and tern are never auto-detected (the
-#   paseo and tern markers leak into every descendant process).
+#   notice; zellij, orca, paseo, t3code, tern, and hc are never auto-detected
+#   (the paseo, tern, and hc markers leak into every descendant process).
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. Orca, cmux, paseo, and tern do not support
+#   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
 #   --secondmate spawns.
 #   A rex crewmate or scout opens one tab in the Rex session the launching
 #   firstmate runs in when it runs directly inside Rex, otherwise in its home's
@@ -234,7 +237,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex|kiro)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -336,11 +339,24 @@
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch (or uses --base-branch, described
-#   above), and resets to its tip. When none is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   above), and resets to its tip. A home that creates the default-off
+#   config/spawn-base-primary-checkout flag (docs/configuration.md) instead
+#   resets a local-only ship or a scout without --base-branch to that same
+#   branch in the primary checkout when it strictly contains origin's tip: a
+#   local-only project lands work there through bin/fm-merge-local.sh and never
+#   pushes, so origin stays frozen at the last push. A publishing mode
+#   (bin/fm-dod-lib.sh fm_mode_publishes) and a named base branch keep origin's
+#   tip, because that work is delivered against origin. Two branches that have
+#   diverged also keep origin's tip, with a note counting both sides. The
+#   primary's commit is read from the local object store, so nothing more is
+#   fetched, and every base this picks contains origin's tip, so the reset
+#   discards nothing the origin-only rule would have kept. When no origin
+#   configuration is detected, spawn skips that remote freshness check and
+#   launches from the clean worktree's current HEAD. Relaunch reuses the
+#   recorded worktree without fetching or resetting its base. An unreachable
+#   detected origin, unresolved default branch, or non-clean worktree refuses
+#   a fresh spawn rather than risking a PR based on stale history or
+#   discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -390,7 +406,8 @@
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION TERM_PROGRAM
 #   REX_SESSION REX_BLOCK REX_SERVER REX_BIN_DIR TERN_IDENTITY TERN_PANE
-#   TERN_PANE_SOCKET TERN_WINDOW_KEY TERN_WINDOW_SOCKET, plus the task
+#   TERN_PANE_SOCKET TERN_WINDOW_KEY TERN_WINDOW_SOCKET HC_SESSION
+#   HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE, plus the task
 #   marker FM_TASK_ID that ship and scout panes receive above, plus the
 #   compact-adviser kill switch COMPACT_ADVISER_DISABLE, which the floor also
 #   pins to 1 with a literal assignment so it survives the cleared environment
@@ -545,6 +562,8 @@
 #                  writes the versioned `<root>-v1` sibling beside it)
 #     __POLYTOKENFACETS__ the worktree's `.polytoken/facets` dir carrying the
 #                  generated firstmate-worker facet (the project facet layer)
+#     __KIROBIN__   resolved, kiro-verified executable for a kiro launch
+#     __KIROHOME__  firstmate-owned per-task KIRO_HOME dir (hook agent config + trust setting)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # A --secondmate launch arms the same semantic busy contract (bin/fm-busy-lib.sh) in THIS
 # parent home for claude, opencode, pi, pi-signed, and omp, so the parent's active-turn
@@ -552,7 +571,7 @@
 # a mate's completed turns stay in its own home. Codex stays unknown until a semantic
 # source exists. Grok keeps its rendered-tail fallback and is not given a parent
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
-# as for a crewmate. Muse, gemini, agy, devin, cortex, and rovo are refused as secondmates.
+# as for a crewmate. Muse, gemini, devin, cortex, and rovo are refused as secondmates.
 # A raw launch command for a claude, pi, pi-signed, or omp secondmate is not armed
 # and retires any arm an earlier launch of that mate left, so its verdict is unknown:
 # the raw command carries no --settings or -e flag to load the wiring.
@@ -579,7 +598,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, devin, commandcode, and cortex are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, devin, commandcode, cortex, and kiro are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -587,14 +606,29 @@
 # only after a TUI readiness gate, then a delivery-confirmation gate - the same
 # launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
 # grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
-# agy installs no hook either - it exposes no hook surface at all - so it
-# carries no busy-source wiring and no turn-end hook. Its brief rides the launch
-# command, but a fresh worktree would park it on a folder-trust dialog, so the
-# spawn pre-registers the worktree in agy's own trust store through
-# bin/fm-agy-trust.sh (the claude shape, but non-fatal) and then waits for a
-# busy turn - answering the dialog first if it renders anyway - before
-# reporting success (the rovo/kimi launch-then-confirm shape). Its busy state
-# is a screen-scrape fallback like grok and rovo, and it is crewmate/scout only.
+# agy installs no per-task worker hook; its brief rides the launch command, and a
+# fresh worktree or secondmate home would park it on a folder-trust dialog, so the
+# spawn pre-registers the worktree or secondmate home in agy's own trust store
+# through bin/fm-agy-trust.sh (the claude shape, but non-fatal) and then waits for
+# a busy turn - answering the dialog first if it renders anyway - before reporting
+# success (the rovo/kimi launch-then-confirm shape). Its busy state is a
+# screen-scrape fallback like grok and rovo, while an agy SECONDMATE runs the
+# tracked project-scope .agents/hooks.json in its own home, whose stop-hook park
+# owns that home's supervision (docs/supervision-protocols/agy.md).
+# kiro (Kiro CLI, V2 engine) IS claude-shaped: its V2 agent-config hooks
+# (userPromptSubmit opens a turn, stop closes it and keeps the turn-ended
+# notification touch) are the per-task turn-end wiring. That config must not go
+# into the worktree's own .kiro/, so - mirroring gemini - the spawn writes a
+# firstmate-owned per-task agent config under state/<id>.kiro-home/agents/ and
+# reaches it by relocating KIRO_HOME onto that dir on the launch command; the
+# captain's real ~/.kiro is never touched, and auth is unaffected on AL2 where
+# it lives in the XDG data dir - where macOS carries auth is unestablished, so
+# a macOS worker may hit an auth prompt (docs/verification/kiro.md owns that
+# gap). --agent is name-only (a path is rejected), and --trust-all-tools
+# would otherwise block on a modal, so the spawn seeds
+# chat.disableTrustAllConfirmation into that per-task home's settings. kiro is
+# crewmate/scout only and refused for --secondmate. The kiro-hook record is its
+# only busy-state source (bin/fm-busy-lib.sh).
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -628,7 +662,7 @@
 # past. bin/fm-polytoken-lib.sh owns every generated artifact and the verified
 # facts; .agents/skills/harness-adapters/references/harness/polytoken.md owns the
 # knowledge record. polytoken is crewmate/scout only and is refused for
-# --secondmate, like agy and devin.
+# --secondmate, like devin.
 # Unless config/keep-ai-trailers is present, every claude launch carries the
 # attribution-off policy in its per-launch --settings JSON, so a spawned worker
 # never writes a Co-Authored-By trailer, Claude-Session link, or generated-with
@@ -684,6 +718,9 @@
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
 set -eu
+
+# Template replacements must stay literal on Bash 5.2+ and stock macOS Bash.
+shopt -u patsub_replacement 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -1276,7 +1313,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate "$id")
   fi
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor) ;;
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | omp) ;;
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -2215,6 +2252,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=tern does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  if [ "$BACKEND" = hc ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=hc does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
   fm_backend_runtime_check "$BACKEND" || exit 1
   if [ "$BACKEND" = rex ]; then
     fm_backend_rex_local_server_ensure || exit 1
@@ -2430,7 +2471,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2551,6 +2592,71 @@ agy_model_validate() {  # <agy-bin> <model>
   fi
   echo "error: agy model '$model' is not listed by 'agy models'; choose a listed id or omit --model" >&2
   return 1
+}
+
+# kiro pre-launch model validation. `kiro-cli chat --agent-engine v2
+# --list-models -f json` (kiro-cli 2.21.4) prints
+# {"models":[{"model_id":"<id>",...}],"default_model":"auto"} for the account's
+# catalog; model ids are bare (claude-opus-5, auto), never provider-prefixed. A
+# requested model absent from a reachable listing is concrete unsupported
+# evidence and refuses the spawn, so a stale id fails loudly here instead of
+# wedging a worker pane. The listing is a remote fetch that needs network and a
+# signed-in account, so the probe runs under the shared hard bound
+# (bin/fm-timeout-lib.sh) with stdin detached: a stalled fetch or a sign-in
+# prompt can never block the spawn before any pane exists. model_ids are read
+# with grep/sed rather than jq so the check has no extra dependency. An
+# unreachable listing establishes nothing (harness-adapters model-and-effort.md)
+# and launches unvalidated with a notice. The field pattern tolerates whitespace
+# around the JSON colon so a pretty-printed listing still yields model ids
+# instead of refusing every requested model. A listing that yields no model_id at
+# all - a renamed field, or an empty catalog - also establishes nothing about
+# whether the model exists, so it takes the same unvalidated-launch notice; only
+# a listing that parses and omits the requested id is unsupported evidence.
+kiro_model_validate() {  # <kiro-bin> <model>
+  local bin=$1 model=$2 listing ids rc=0 bound=${FM_KIRO_MODELS_TIMEOUT:-15}
+  case "$bound" in ''|*[!0-9]*|0*) bound=15 ;; esac
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  listing=$(fm_run_timed "$bound" "$bin" chat --agent-engine v2 --list-models -f json 2>/dev/null < /dev/null) || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$listing" ]; then
+    if [ "$rc" -eq 124 ]; then
+      echo "notice: 'kiro-cli --list-models' did not answer within ${bound}s; launching with --model '$model' unvalidated" >&2
+    else
+      echo "notice: 'kiro-cli --list-models' listing is unreachable (exit $rc); launching with --model '$model' unvalidated" >&2
+    fi
+    return 0
+  fi
+  ids=$(printf '%s' "$listing" | grep -oE '"model_id"[[:space:]]*:[[:space:]]*"[^"]+"' \
+    | sed 's/.*:[[:space:]]*"//;s/"$//')
+  if [ -z "$ids" ]; then
+    echo "notice: 'kiro-cli --list-models' listing carries no model_id; launching with --model '$model' unvalidated" >&2
+    return 0
+  fi
+  if printf '%s\n' "$ids" | grep -qxF -- "$model"; then
+    return 0
+  fi
+  echo "error: kiro model '$model' is not listed by 'kiro-cli --list-models'; choose a listed model_id or omit --model" >&2
+  return 1
+}
+
+# kiro's hook commands are single-token absolute paths, so a hook path carrying
+# whitespace or a shell-special character cannot be delivered as one token under
+# both interpretations - a shell splits or expands it, an argv split does not,
+# and no quoting fixes both. kiro has no second state source, so the seeded
+# busy record would never clear and the supervisor would read the worker as
+# provably working forever. Refuse alongside the model check, before any
+# worktree or pane exists, and name the path. The physical resolution is what
+# gets embedded, so that is what is checked; an unresolvable state dir falls
+# back to the configured string.
+kiro_hook_path_validate() {  # <state-dir> <id>
+  local state=$1 id=$2 real
+  real=$(cd "$state" 2>/dev/null && pwd -P) || real=$state
+  [ -n "$real" ] || real=$state
+  case "$real/$id.kiro-home" in
+    *[[:space:]\'\"\\\$\`\;\&\|\<\>\(\)\*\?\[\]\{\}\!]*)
+      echo "error: kiro hook scripts would live under '$real/$id.kiro-home', whose path contains whitespace or a shell-special character; kiro hook commands must be a single unquoted token, so point FM_HOME or FM_STATE_OVERRIDE at a path free of both" >&2
+      return 1 ;;
+  esac
+  return 0
 }
 
 # The Claude task-worker channel statement: the launch brief and the Firstmate
@@ -2718,6 +2824,24 @@ launch_template() {
   # agy exposes no hook surface, so busy state is a rendered-tail fallback
   # (bin/fm-busy-lib.sh) and nothing is armed below.
   agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
+  # kiro (Kiro CLI, V2 engine): a positional prompt starts the supervised
+  # interactive session and auto-submits the brief (verified: a positional
+  # brief submitted itself with no extra Enter, kiro-cli 2.21.4). --agent-engine
+  # v2 pins the AL2-supported engine (v3/KAS is out of scope and unsupported
+  # here). --agent names the firstmate-owned per-task agent config that carries
+  # the busy/turn-end hooks; --agent is name-only, so the config is reached by
+  # relocating KIRO_HOME onto the per-task home that holds an agents/firstmate.json
+  # (see the hook section below) rather than by a config path. --trust-all-tools
+  # auto-approves every tool call an unattended crewmate needs; its otherwise
+  # blocking confirmation modal is suppressed by the chat.disableTrustAllConfirmation
+  # setting the hook section seeds into that same per-task home. --model takes a
+  # bare catalog model_id from --list-models; --effort takes low|medium|high|xhigh|max.
+  # The foreign primary markers are cleared for the same reason cursor/gemini/agy
+  # clear them: kiro publishes no marker of its own and does not scrub an
+  # inherited CLAUDECODE, so bin/fm-harness.sh must not read a kiro worker as its
+  # launcher. The V2 stop hook is a real turn-end pair, so busy state is armed
+  # below (unlike agy's screen-scrape-only fallback).
+  kiro) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS KIRO_HOME=__KIROHOME__ __KIROBIN__ chat --agent-engine v2 --agent firstmate __MODELFLAG____EFFORTFLAG__--trust-all-tools "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -2932,7 +3056,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, devin, commandcode, polytoken, and cortex are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, devin, commandcode, polytoken, cortex, and kiro are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2942,8 +3066,6 @@ esac
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-# agy has none either: it exposes no hook surface for primary supervision and
-# docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
 # commandcode has none either: only its worker busy mod is verified, and
@@ -2952,7 +3074,10 @@ esac
 # docs/supervision-protocols/ carries no polytoken primary wake protocol.
 # cortex has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no cortex wake protocol (cortex 1.1.104).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ]; }; then
+# kiro has none either: this task verified only crewmate-side launch, busy state,
+# interrupt, exit, and resume on the V2 engine, and docs/supervision-protocols/
+# carries no kiro wake protocol (kiro-cli 2.21.4).
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = kiro ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -3065,6 +3190,12 @@ agy)
     exit 1
   }
   ;;
+kiro)
+  KIRO_BIN=$(resolve_pi_executable kiro-cli) || {
+    echo "error: kiro-cli executable not found on PATH; install Kiro CLI or select a different verified harness" >&2
+    exit 1
+  }
+  ;;
 polytoken)
   POLYTOKEN_BIN=$(fm_polytoken_binary) || {
     echo "error: polytoken executable not found; install Polytoken CLI or select a different verified harness" >&2
@@ -3128,6 +3259,12 @@ if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   POLYTOKEN_MODEL_REF=$(fm_polytoken_launch_ref "$POLYTOKEN_BIN" "$MODEL" "$EFFORT") || exit 1
 elif [ "$HARNESS" = polytoken ]; then
   POLYTOKEN_MODEL_REF=$(fm_polytoken_model_ref "$POLYTOKEN_BIN" "$MODEL" "$EFFORT") || exit 1
+fi
+if [ "$HARNESS" = kiro ]; then
+  kiro_model_validate "$KIRO_BIN" "$MODEL" || exit 1
+  if [ "$RAW_LAUNCH" -eq 0 ]; then
+    kiro_hook_path_validate "$STATE" "$ID" || exit 1
+  fi
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
@@ -3349,7 +3486,7 @@ model_flag_for_harness() {
     [ "$oc_major" = 1 ] || return 0
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
-  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | cortex)
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | cortex | kiro)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   # polytoken encodes reasoning effort inside the model reference, so the
@@ -3407,6 +3544,14 @@ effort_flag_for_harness() {
     # omitted rather than passed as known-bad values (record-and-omit).
     case "$effort" in
     low | medium | high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+    esac
+    ;;
+  kiro)
+    # kiro-cli 2.21.4 --effort accepts the full shared vocabulary
+    # (low|medium|high|xhigh|max, per `kiro-cli chat --help`), so every level
+    # passes through.
+    case "$effort" in
+    low | medium | high | xhigh | max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
     esac
     ;;
   commandcode)
@@ -4033,6 +4178,26 @@ if [ "$KIND" = ship ]; then
     echo "error: forge mismatch for $ID: $PROJ_NAME is registered forge=$STANDING_FORGE but $SOURCE_BRIEF records forge=$BRIEF_FORGE; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $forge_scaffold, then re-fill those two subsections, so the worker's publication matches the project's forge" >&2
     exit 1
   fi
+  # The registered PR-text binding is read the same way: a brief that disagrees
+  # would hand the pipeline's pr step the text a person owns, or the worker text
+  # the pipeline owns. direct-PR already leaves the text to the worker, so a
+  # conditional-policy project's direct-PR task expects none.
+  if ! STANDING_PR=$("$FM_ROOT/bin/fm-project-mode.sh" --pr "$PROJ_NAME" 2>/dev/null); then
+    "$FM_ROOT/bin/fm-project-mode.sh" --pr "$PROJ_NAME" >/dev/null || true
+    echo "error: $ID cannot launch: the registry entry for $PROJ_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and spawn again" >&2
+    exit 1
+  fi
+  [ -n "$STANDING_PR" ] || STANDING_PR=auto
+  [ "$MODE" = no-mistakes ] || STANDING_PR=auto
+  BRIEF_PR=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]pr=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  [ -n "$BRIEF_PR" ] || BRIEF_PR=auto
+  if [ "$BRIEF_PR" != "$STANDING_PR" ]; then
+    pr_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE"
+    [ "$STANDING_FORGE" = none ] || pr_scaffold="$pr_scaffold --forge $STANDING_FORGE"
+    [ "$STANDING_PR" = auto ] || pr_scaffold="$pr_scaffold --pr $STANDING_PR"
+    echo "error: PR-text mismatch for $ID: $PROJ_NAME is registered pr=$STANDING_PR but $SOURCE_BRIEF records pr=$BRIEF_PR; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $pr_scaffold, then re-fill those two subsections, so the worker owns the PR text exactly when the project says so" >&2
+    exit 1
+  fi
   # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
   # the captain's decision of 2026-09-15: a Code-Review+2 is a positive
   # attributed claim that a named human approved, and firstmate must not
@@ -4286,8 +4451,32 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
-freshen_spawn_worktree_base() { # <worktree> [<base-branch>]; 2 when the worktree is not clean
-  local worktree=$1 base=${2:-} default target expected actual status
+# The opt-in half of the base rule the header owns: return 0 and set
+# SPAWN_PRIMARY_BASE_REV when <project>'s own <default> should be this fresh
+# slot's base instead of origin's tip <origin-rev>. A pool slot shares the
+# primary checkout's object store, so reading that commit fetches nothing, and a
+# commit the slot cannot read keeps origin's tip.
+SPAWN_PRIMARY_BASE_REV=
+spawn_base_from_primary_checkout() { # <worktree> <project> <default> <origin-rev> <mode>
+  local worktree=$1 project=$2 default=$3 origin_rev=$4 mode=$5 primary_rev ahead behind
+  SPAWN_PRIMARY_BASE_REV=
+  if [ -z "$project" ] || fm_mode_publishes "$mode"; then
+    return 1
+  fi
+  primary_rev=$(git -C "$project" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null) || return 1
+  ahead=$(git -C "$worktree" rev-list --count "$origin_rev..$primary_rev" 2>/dev/null) || return 1
+  behind=$(git -C "$worktree" rev-list --count "$primary_rev..$origin_rev" 2>/dev/null) || return 1
+  [ "$ahead" -gt 0 ] || return 1
+  if [ "$behind" -eq 0 ]; then
+    SPAWN_PRIMARY_BASE_REV=$primary_rev
+    return 0
+  fi
+  echo "note: pooled worktree '$worktree': $default in the primary checkout has diverged from origin/$default (ahead by $ahead, behind by $behind); starting from origin's tip" >&2
+  return 1
+}
+
+freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 when the worktree is not clean
+  local worktree=$1 base=${2:-} project=${3:-} mode=${4:-} default target expected reset_ref actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -4332,7 +4521,14 @@ freshen_spawn_worktree_base() { # <worktree> [<base-branch>]; 2 when the worktre
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+  reset_ref=$target
+  if [ -z "$base" ] && [ -e "$CONFIG/spawn-base-primary-checkout" ] \
+    && spawn_base_from_primary_checkout "$worktree" "$project" "$default" "$expected" "$mode"; then
+    target="$default in the primary checkout"
+    expected=$SPAWN_PRIMARY_BASE_REV
+    reset_ref=$expected
+  fi
+  if ! git -C "$worktree" reset --hard "$reset_ref" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -4878,6 +5074,11 @@ EOF
     fi
     T="$TERN_SESSION_ID:$TERN_BLOCK_ID"
     ;;
+  hc)
+    HC_SES=$(fm_backend_hc_container_ensure) || exit 1
+    HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS") || exit 1
+    T="$HC_SES:$HC_TERMINAL"
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -4952,7 +5153,7 @@ EOF
       [ -n "$WT" ] || { echo "error: treehouse get --lease did not report a worktree for $ID" >&2; exit 1; }
       validate_spawn_worktree "treehouse get --lease" "$WT (leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS)"
       T3CODE_LEASED=1
-      freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || {
+      freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || {
         if [ "$?" -eq 2 ]; then
           T3CODE_LEASED=0
           echo "error: $WT stays leased to $ID; once inspected, release it with 'treehouse return --force $WT' from $PROJ_ABS" >&2
@@ -4999,6 +5200,7 @@ spawn_send_text_line() { # <target> <text>
   rex) fm_backend_rex_send_text_line "$1" "$2" "$W" ;;
   t3code) fm_backend_t3code_send_literal "$1" "$2" ;;
   tern) fm_backend_tern_send_text_line "$1" "$2" "$W" ;;
+  hc) fm_backend_hc_send_text_line "$1" "$2" "$W" ;;
   esac
 }
 spawn_current_path() { # <target>
@@ -5010,6 +5212,7 @@ spawn_current_path() { # <target>
   paseo) fm_backend_paseo_current_path "$1" "$W" ;;
   rex) fm_backend_rex_current_path "$1" "$W" ;;
   tern) fm_backend_tern_current_path "$1" "$W" ;;
+  hc) fm_backend_hc_current_path "$1" "$W" ;;
   esac
 }
 spawn_send_literal() { # <target> <text>
@@ -5023,8 +5226,13 @@ spawn_send_literal() { # <target> <text>
   rex) fm_backend_rex_send_literal "$1" "$2" "$W" ;;
   t3code) fm_backend_t3code_send_literal "$1" "$2" ;;
   tern) fm_backend_tern_send_literal "$1" "$2" "$W" ;;
+  # hc has no paste without submit, and its keys cannot type the launch line's
+  # `+` or `_`, so the line is pasted and submitted here and the Enter that
+  # follows it is consumed below (docs/hc-backend.md "Limits").
+  hc) fm_backend_hc_send_text_line "$1" "$2" "$W" && SPAWN_HC_LINE_SUBMITTED=1 ;;
   esac
 }
+SPAWN_HC_LINE_SUBMITTED=0
 spawn_send_key() { # <target> <key>
   case "$BACKEND" in
   tmux) fm_backend_tmux_send_key "$1" "$2" ;;
@@ -5036,6 +5244,13 @@ spawn_send_key() { # <target> <key>
   rex) fm_backend_rex_send_key "$1" "$2" "$W" ;;
   t3code) fm_backend_t3code_send_literal "$1" "$2" ;;
   tern) fm_backend_tern_send_key "$1" "$2" "$W" ;;
+  hc)
+    if [ "$2" = Enter ] && [ "$SPAWN_HC_LINE_SUBMITTED" = 1 ]; then
+      SPAWN_HC_LINE_SUBMITTED=0
+    else
+      fm_backend_hc_send_key "$1" "$2" "$W"
+    fi
+    ;;
   esac
 }
 
@@ -5458,10 +5673,29 @@ EOF
   return 1
 }
 
+# Rewrite <meta> into <out> without the <owned keys>, placing <line>... ahead
+# of the first pr= line so the PR region stays the record's tail that
+# fm_pr_metadata_identity_parse requires.
+spawn_meta_rewrite_before_pr() {  # <meta> <out> <owned keys> <line>...
+  local meta=$1 out=$2 keys=$3
+  shift 3
+  FM_SPAWN_META_LINES=$(printf '%s\n' "$@") awk -F= -v keys="$keys" '
+    BEGIN {
+      n = split(keys, k, " ")
+      for (i = 1; i <= n; i++) owned[k[i]] = 1
+      lines = ENVIRON["FM_SPAWN_META_LINES"]
+    }
+    $1 in owned { next }
+    !placed && $1 == "pr" { print lines; placed = 1 }
+    { print }
+    END { if (!placed) print lines }
+  ' "$meta" >"$out"
+}
+
 # Bind the discovered session into task metadata (the control verbs' durable
 # address), in the same locked-filter-and-publish shape spawn_record_traceparent
 # uses: an idempotent rewrite that drops any prior polytoken_* binding before
-# appending the fresh one.
+# writing the fresh one ahead of any PR region.
 spawn_record_polytoken_session() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
   if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -5472,12 +5706,9 @@ spawn_record_polytoken_session() {
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.polytoken.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "polytoken_session" && $1 != "polytoken_port" && $1 != "polytoken_credential"' "$meta" >"$SPAWN_META_TMP" ||
-    ! {
-      echo "polytoken_session=$POLYTOKEN_SESSION_ID"
-      echo "polytoken_port=$POLYTOKEN_SESSION_PORT"
-      echo "polytoken_credential=$POLYTOKEN_SESSION_CREDENTIAL"
-    } >>"$SPAWN_META_TMP" ||
+    ! spawn_meta_rewrite_before_pr "$meta" "$SPAWN_META_TMP" "polytoken_session polytoken_port polytoken_credential" \
+      "polytoken_session=$POLYTOKEN_SESSION_ID" "polytoken_port=$POLYTOKEN_SESSION_PORT" \
+      "polytoken_credential=$POLYTOKEN_SESSION_CREDENTIAL" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
@@ -5631,7 +5862,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
-  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || exit 1
+  freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
@@ -5657,14 +5888,13 @@ spawn_assert_agent_worktree
 # temp root, no retired relaunch wiring and no busy record exists yet to strand,
 # so the refusal names the endpoint the same way they do and leaves nothing else
 # behind.
-# agy gates a fresh worktree behind its own folder-trust dialog and honours a
-# trustedWorkspaces entry written ahead of launch (bin/fm-agy-trust.sh), so the
-# same pre-registration removes the dialog for it. Unlike claude's dialog, agy's
-# preselects the safe answer, so a failed registration is not fatal here: the
-# post-launch gate (agy_wait_for_working) answers the dialog itself and, on a
-# path that was not pre-registered, refuses to count a busy turn as ready until
-# it has done so. agy is crewmate/scout only (refused above for secondmate), so
-# only the worktree shape applies.
+# agy gates a fresh worktree or secondmate home behind its own folder-trust
+# dialog and honours a trustedWorkspaces entry written ahead of launch
+# (bin/fm-agy-trust.sh), so the same pre-registration removes the dialog for it.
+# Unlike claude's dialog, agy's preselects the safe answer, so a failed
+# registration is not fatal here: the post-launch gate (agy_wait_for_working)
+# answers the dialog itself and, on a path that was not pre-registered, refuses
+# to count a busy turn as ready until it has done so.
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
@@ -5679,12 +5909,15 @@ claude*)
   fi
   ;;
 agy)
-  if [ "$KIND" != secondmate ]; then
-    if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
-      AGY_TRUST_PREREGISTERED=1
-    else
-      echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
-    fi
+  if [ "$KIND" = secondmate ]; then
+    spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+  else
+    spawn_trust_args=("$WT" "$PROJ_ABS")
+  fi
+  if "$FM_ROOT/bin/fm-agy-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+    AGY_TRUST_PREREGISTERED=1
+  else
+    echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
   fi
   ;;
 esac
@@ -5943,7 +6176,7 @@ BUSY_GEN=
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin | commandcode | polytoken | cortex)
+  gemini | devin | commandcode | polytoken | cortex | kiro)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -6072,6 +6305,69 @@ BUSY_GEN=
       g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
       cat >"$STATE_REAL/$ID.gemini-settings.json" <<EOF
 {"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
+EOF
+    fi
+    ;;
+  kiro)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      # Semantic busy-state hooks (bin/fm-busy-lib.sh): the V2 agent-config
+      # userPromptSubmit hook opens a turn and the stop hook closes it, with the
+      # stop hook also keeping the turn-ended NOTIFICATION touch for the watcher.
+      # Verified live on kiro-cli 2.21.4 as a clean per-turn pair in both the
+      # non-interactive run and the interactive TUI (userPromptSubmit fired on
+      # submit, stop fired at turn end). Like Claude's Stop hook, kiro's stop
+      # does NOT fire on a manual Escape interrupt, so fm-control preserves the
+      # adapter-owned record there (fm_control_interrupt_ack_source is none). kiro
+      # V2 exposes no verified StopFailure/SessionEnd equivalent, so an abnormal
+      # turn end leaves the record busy until the next userPromptSubmit re-opens
+      # it, and the supervisor reads that record as provably working. Nothing
+      # rescues it: the rendered `Kiro is working` footer is a delivery guard
+      # only (bin/fm-composer-lib.sh), never a worker state source.
+      #
+      # These are written into a FIRSTMATE-OWNED per-task agent config under
+      # state/<id>.kiro-home/agents/, reached by relocating KIRO_HOME onto that
+      # home on the launch command, never into the worktree's own .kiro/ - that
+      # dir belongs to the project, and --agent is name-only so a config path is
+      # not an option. The same per-task home carries a settings/cli.json seeding
+      # chat.disableTrustAllConfirmation, which suppresses --trust-all-tools's
+      # otherwise blocking confirmation modal (verified on AL2: the modal is the
+      # only blocker there, and auth stays in the XDG data dir unaffected by
+      # KIRO_HOME; macOS auth location is unestablished, docs/verification/kiro.md).
+      #
+      # Each hook command is a single-token absolute path to a generated script
+      # under the same per-task home, so the hooks behave identically whether
+      # kiro hands the command to a shell or splits it into argv - a vendor fact
+      # nothing here has to depend on. The redirect, the refused-event tolerance
+      # (|| true) and the turn-end touch all live inside the scripts, where the
+      # interpreter is fixed by their own shebang, so a stale-gen writer still
+      # cannot break kiro's lifecycle. No stdout contract applies.
+      #
+      # A raw launch command carries no KIRO_HOME and no --agent, so neither hook
+      # could ever fire; arming and writing the config anyway would seed a busy
+      # record nothing can clear. The gemini arm above skips both for the same
+      # reason, and for the same reason claude does not: its hooks land in the
+      # worktree, which a raw claude launch still reads.
+      KIRO_HOME_DIR="$STATE_REAL/$ID.kiro-home"
+      mkdir -p "$KIRO_HOME_DIR/agents" "$KIRO_HOME_DIR/settings" "$KIRO_HOME_DIR/hooks"
+      printf '{"chat.disableTrustAllConfirmation":true}\n' >"$KIRO_HOME_DIR/settings/cli.json"
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source kiro-hook"
+      k_submit="$KIRO_HOME_DIR/hooks/user-prompt-submit"
+      k_stop="$KIRO_HOME_DIR/hooks/stop"
+      cat >"$k_submit" <<EOF
+#!/bin/sh
+$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true
+exit 0
+EOF
+      cat >"$k_stop" <<EOF
+#!/bin/sh
+touch $(shell_quote "$TURNEND")
+$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true
+exit 0
+EOF
+      chmod +x "$k_submit" "$k_stop"
+      cat >"$KIRO_HOME_DIR/agents/firstmate.json" <<EOF
+{"name":"firstmate","description":"Firstmate per-task crewmate agent (busy-state and turn-end hooks)","tools":["*"],"allowedTools":["*"],"hooks":{"userPromptSubmit":[{"command":"$(json_escape "$k_submit")"}],"stop":[{"command":"$(json_escape "$k_stop")"}]}}
 EOF
     fi
     ;;
@@ -6243,9 +6539,19 @@ EOF
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
     # loaded from inside the project (verified live), but an explicit -e path
     # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+    pi_stream_monitoring=false
+    if [ "$(fm_busy_stream_seconds "${FM_STREAM_SILENT_MAX_SECS:-}")" -gt 0 ]; then
+      pi_stream_version=$(fm_run_timed 5 "$PI_BIN" --version 2>/dev/null || true)
+      if fm_busy_pi_stream_version_supported "$pi_stream_version"; then
+        pi_stream_monitoring=true
+      else
+        echo "warning: $HARNESS model-stream observation unavailable for version ${pi_stream_version:-unknown}; verified version: 1.2.0; existing busy bound remains active" >&2
+      fi
+    fi
     cat >"$STATE/$ID.pi-ext.ts" <<EOF
-// Firstmate semantic busy-state events + turn-end notification; written by
-// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Firstmate semantic busy-state events, turn-end notification, and - when this
+// worker was launched with opted-in stream observation - foreground model-stream
+// evidence; written by fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 // Semantic state: "agent_start" -> busy when a low-level agent run begins;
 // "agent_settled" -> idle only when ctx.isIdle() confirms Pi will not
 // continue automatically - auto-retries, auto-compaction retries, tool
@@ -6257,6 +6563,7 @@ EOF
 import { execFile } from "node:child_process";
 import { appendFileSync } from "node:fs";
 const notifyTurnEnd = $busy_notify_turnend;
+const streamMonitoring = $pi_stream_monitoring;
 const excludeTools = "$EXCLUDE_TOOLS".split(",").filter(Boolean);
 const excludeFile = $(perl -MJSON::PP -MEncode=decode_utf8 -e 'print encode_json(decode_utf8($ARGV[0]))' -- "$CONFIG/crew-exclude-tools");
 const statusFile = $(perl -MJSON::PP -MEncode=decode_utf8 -e 'print encode_json(decode_utf8($ARGV[0]))' -- "$STATE/$ID.status");
@@ -6269,6 +6576,63 @@ const busyEvent = (state: string, event: string) =>
   });
 export default function (pi: any) {
   let checkedExclusions = false;
+  let request = 0;
+  let activeRequest = 0;
+  let lastStreamProgress = -Infinity;
+  let lastContent = "";
+  let streamWrites: Promise<void> = Promise.resolve();
+  const streamEvent = (operation: string, current: number) => {
+    streamWrites = streamWrites.then(() => new Promise<void>((resolve) => {
+      execFile("bash", [
+        "-c", '. "\$1"; shift; fm_exec_timed 5 1 "\$@"', "fm-stream-observation",
+        "$FM_ROOT/bin/fm-timeout-lib.sh", "$FM_ROOT/bin/fm-busy-event.sh",
+        "stream", "$STATE_REAL", "$ID", operation,
+        "--gen", "$BUSY_GEN", "--request", String(current),
+      ], (error) => {
+        if (error) console.error("Firstmate model-stream observation write failed; inspect worker instrumentation.");
+        resolve();
+      });
+    }));
+    return streamWrites;
+  };
+  const closeStream = () => {
+    const current = activeRequest;
+    activeRequest = 0;
+    return current ? streamEvent("close", current) : streamWrites;
+  };
+  if (streamMonitoring) {
+    // Foreground context excludes Pi's background provider/cache-warming calls.
+    pi.on("context", () => {
+      request = Math.max(request + 1, Date.now());
+      activeRequest = request;
+      lastStreamProgress = -Infinity;
+      lastContent = "";
+      return streamEvent("open", request);
+    });
+    pi.on("message_update", (event: any) => {
+      if (!activeRequest || event.message?.role !== "assistant") return streamWrites;
+      const now = Date.now();
+      if (now - lastStreamProgress < 1000) return streamWrites;
+      const content = (event.message.content || []).map((part: any) => {
+        if (part.type === "text" && part.text) return ["text", part.text];
+        if (part.type === "thinking" && (part.thinking || part.thinkingSignature)) {
+          return ["thinking", part.thinking || "", part.thinkingSignature || ""];
+        }
+        if (part.type === "toolCall" && part.name) return ["toolCall", part.name, part.arguments];
+        return null;
+      }).filter(Boolean);
+      if (!content.length) return streamWrites;
+      const signature = JSON.stringify(content);
+      if (signature === lastContent) return streamWrites;
+      lastContent = signature;
+      lastStreamProgress = now;
+      return streamEvent("progress", activeRequest);
+    });
+    pi.on("message_end", (event: any) => {
+      if (event.message?.role === "assistant") return closeStream();
+    });
+    pi.on("tool_execution_start", closeStream);
+  }
   pi.on("agent_start", async () => {
     await busyEvent("busy", "agent-start");
     // Verify only this worker's registry, never connect servers from Firstmate.
@@ -6284,8 +6648,9 @@ export default function (pi: any) {
       checkedExclusions = true;
     }
   });
-  pi.on("agent_settled", (_event: any, ctx: any) => {
+  pi.on("agent_settled", async (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    await closeStream();
     return busyEvent("idle", "agent-settled");
   });
   pi.on("turn_end", () => { if (notifyTurnEnd) execFile("touch", ["$TURNEND"]); });
@@ -6605,7 +6970,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -6692,15 +7057,21 @@ preserve_relaunch_meta() {
     echo "tern_tab_id=$TERN_TAB_ID"
     echo "tern_block_id=$TERN_BLOCK_ID"
   fi
+  if [ "$BACKEND" = hc ]; then
+    echo "hc_session=$HC_SES"
+    echo "hc_terminal=$HC_TERMINAL"
+  fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
-  fi
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+  # Preserved lines go last so an armed pr= identity block stays last, as
+  # fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh) requires.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    preserve_relaunch_meta
   fi
 } >"$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
@@ -6900,6 +7271,10 @@ polytoken)
   LAUNCH=${LAUNCH//__POLYTOKENSESSIONS__/"$(shell_quote "$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")")"}
   LAUNCH=${LAUNCH//__POLYTOKENFACETS__/"$(shell_quote "$WT/.polytoken/facets")"}
   ;;
+kiro)
+  LAUNCH=${LAUNCH//__KIROBIN__/"$(shell_quote "$KIRO_BIN")"}
+  LAUNCH=${LAUNCH//__KIROHOME__/"$(shell_quote "$STATE_REAL/$ID.kiro-home")"}
+  ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 # A record-backed launch brief is published into the state dir of the pane
@@ -6927,7 +7302,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | kiro)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -6967,7 +7342,7 @@ if [ "$KIND" = secondmate ]; then
   # receive extension to match fm_supervision_model's own table, so their pull
   # guard tolerates the extension hand-off exactly as a Pi primary does.
   case "$HARNESS" in
-  claude | cursor) supervision_model=autoarm ;;
+  claude | cursor | agy) supervision_model=autoarm ;;
   pi | pi-signed | omp) supervision_model=extension ;;
   *) supervision_model=persistent ;;
   esac
@@ -7072,8 +7447,8 @@ spawn_record_traceparent() {
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "traceparent"' "$meta" >"$SPAWN_META_TMP" ||
-    ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >>"$SPAWN_META_TMP" ||
+    ! spawn_meta_rewrite_before_pr "$meta" "$SPAWN_META_TMP" traceparent \
+      "traceparent=$SPAWN_TRACEPARENT" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
@@ -7175,6 +7550,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
     TERM_PROGRAM REX_SESSION REX_BLOCK REX_SERVER REX_BIN_DIR \
     TERN_IDENTITY TERN_PANE TERN_PANE_SOCKET TERN_WINDOW_KEY TERN_WINDOW_SOCKET \
+    HC_SESSION HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE \
     FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
     $LAUNCH_ENV_FORWARD_NAMES; do
     if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then

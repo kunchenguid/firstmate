@@ -40,6 +40,7 @@ For unattended seeded-secondmate launches, `../../../bin/fm-spawn.sh --help` own
 `../../../bin/fm-spawn.sh` keeps the worker turn-end extension in `state/`, outside the worktree, because project-local extension files worsen the trust gate and pollute the project.
 The extension listens for Pi's `turn_end` event, not `agent_end`, so supervision is notified after each completed turn rather than only when the whole run exits.
 Native-harness progress uses the separate generation-bound marker owned by `../../../bin/fm-busy-event.sh`; it never fabricates Pi turn completion.
+Optional foreground model-stream observation is version-gated separately; `../../../docs/configuration.md` (Environment variables) owns activation and `../../../docs/verification/runtime-backends.md` (Pi worker model-stream observation) owns the real-Pi evidence.
 Pi sets `PI_CODING_AGENT=true` for its children as its harness-detection marker.
 
 ## Primary integration

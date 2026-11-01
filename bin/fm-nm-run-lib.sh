@@ -202,6 +202,31 @@ fm_nm_run_status_class() {  # <status_word>
   esac
 }
 
+# 0 when the status identity with $3 is newer than the same-branch candidate
+# run with $2; 2 means same-head ULIDs share a creation timestamp. The runs
+# ledger $6 is read only for different heads.
+fm_nm_run_is_newer_than() {  # <branch> <candidate-id> <reported-id> <candidate-head> <reported-head> <runs-list>
+  local branch=$1 selected_id=$2 reported_id=$3 selected_head=$4 reported_head=$5 runs=$6 first_match
+  if [ -n "$selected_head" ] && [ "${selected_head:0:7}" = "${reported_head:0:7}" ]; then
+    [[ "$selected_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ && "$reported_id" =~ ^[0-9A-HJKMNP-TV-Z]{26}$ ]] || return 1
+    [ "${selected_id:0:10}" = "${reported_id:0:10}" ] && return 2
+    [[ "${reported_id:0:10}" > "${selected_id:0:10}" ]] && return 0
+    return 1
+  fi
+  [ -n "$selected_head" ] && [ -n "$reported_head" ] \
+    && [ "${selected_head:0:7}" != "${reported_head:0:7}" ] || return 1
+  first_match=$(printf '%s\n' "$runs" | awk -v branch="$branch" \
+    -v selected="${selected_head:0:7}" -v reported="${reported_head:0:7}" '
+    $2 == branch {
+      if (index($3, selected) == 1) { selected_count++; if (first == "") first = "selected" }
+      else if (index($3, reported) == 1) { reported_count++; if (first == "") first = "reported" }
+    }
+    END {
+      if (selected_count == 1 && reported_count == 1) print first
+    }')
+  [ "$first_match" = reported ]
+}
+
 # Select from a complete `no-mistakes axi` overview with the existing awk
 # toolchain. A capped overview requires an optional Python 3 sqlite3 reader
 # for a read-only same-branch query of the state database fm_nm_state_db

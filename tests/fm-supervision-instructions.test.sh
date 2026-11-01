@@ -58,7 +58,7 @@ test_supervision_host_protocol_on_every_arm_owner() {
   home="$TMP_ROOT/host-owners-home"
   config="$TMP_ROOT/host-owners-config"
   mkdir -p "$home/state" "$config"
-  for harness in claude cursor opencode omp grok codex; do
+  for harness in claude cursor agy opencode omp grok codex; do
     : > "$config/supervision-host-off"
     plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
     assert_not_contains "$plain" "Supervision host" "$harness: a home opted out by config/supervision-host-off rendered the host protocol"
@@ -253,6 +253,16 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_not_contains "$out" "is broken" "claude recovery line claimed failure before verification"
   assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line must not create a repeatable manual arm loop"
 
+  out=$("$RENDER" --harness agy)
+  assert_contains "$out" "primary harness: agy" "agy heading missing"
+  assert_contains "$out" "Mode: Antigravity Stop-hook-owned supervision." "agy mode line missing"
+  assert_contains "$out" "bin/fm-turnend-guard-agy.sh" "agy block lost the Stop-hook park script name"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "bin/fm-turnend-guard-agy.sh" "agy ordinary-wake line lost the Stop-hook park script name"
+  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "agy ordinary-wake line must not call the manual arm"
+  out=$("$RENDER" --harness agy --repair-line)
+  assert_contains "$out" "Stop-hook park" "agy recovery line lost its Stop-hook park guidance"
+
   out=$("$RENDER" --harness grok)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "re-arm" "grok ordinary-wake line does not tell the model to re-arm"
@@ -332,6 +342,35 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_literal_paths_in_rendered_snippets() {
+  local name home harness out quoted_config
+  for name in normal 'R&D "double" '\''single'\'' home'; do
+    home="$TMP_ROOT/$name"
+    mkdir -p "$home/config" "$home/state"
+    : > "$home/config/supervision-host-off"
+    quoted_config="'$(printf '%s' "$home/config/x-mode.env" | sed "s/'/'\\\\''/g")'"
+    for harness in pi pi-signed omp codex grok cursor opencode claude; do
+      out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$RENDER" --harness "$harness" --x-mode 1)
+      assert_not_contains "$out" '__FM_' "$harness: literal path leaked a placeholder"
+      case "$harness" in
+        pi|pi-signed)
+          assert_contains "$out" "$home/.pi/extensions/fm-primary-pi-watch.ts" "Pi watch path changed"
+          assert_contains "$out" "$home/.pi/extensions/fm-primary-turnend-guard.ts" "Pi turn-end path changed"
+          ;;
+        omp)
+          assert_contains "$out" "$home/.omp/extensions/fm-primary-omp-watch.ts" "omp watch path changed"
+          assert_contains "$out" "$home/.omp/extensions/fm-primary-turnend-guard.ts" "omp turn-end path changed"
+          ;;
+        grok)
+          assert_contains "$out" "[ -f $quoted_config ] && . $quoted_config; exec bin/fm-watch-arm.sh" "quoted config path changed"
+          ;;
+      esac
+    done
+  done
+  pass "snippets preserve literal ampersands, quotes and spaces in paths across primary harnesses"
+}
+
+test_literal_paths_in_rendered_snippets
 test_supervision_host_protocol_on_a_claude_home_unless_off
 test_supervision_host_protocol_on_every_arm_owner
 test_selected_harness_block_only

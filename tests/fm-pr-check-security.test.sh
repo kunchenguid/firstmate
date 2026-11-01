@@ -850,13 +850,14 @@ SH
 
   for id in _noncanonical aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
     dir=$(make_case "legacy-teardown-${id:0:12}")
+    # This record also exercises the PR merge entrypoint below.
     fm_write_meta "$dir/home/state/$id.meta" \
       "window=firstmate:fm-$id" \
       "endpoint_task_id=$id" \
       "worktree=$dir/wt" \
       "project=$dir/project" \
       'kind=ship' \
-      'mode=local-only'
+      'mode=no-mistakes'
     cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -2634,8 +2635,9 @@ test_self_merge_and_poll_publish_one_outcome() {
     || fail "merge-outcome-uncommitted: could not arm merge poll"
   cat >"$dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
-case " $* " in
-  *pr-poll-merge-notified*) exit 1 ;;
+# Reject only the marker commit, not pid.tmp publication inside its lock.
+case "${!#}" in
+  *.pr-poll-merge-notified) exit 1 ;;
 esac
 exec "$FM_TEST_REAL_MV" "$@"
 SH
@@ -3329,7 +3331,7 @@ test_teardown_cannot_race_authority_consumption() {
     "worktree=$dir/wt" \
     "project=$dir/project" \
     'kind=ship' \
-    'mode=local-only' \
+    'mode=no-mistakes' \
     'yolo=on'
   write_away_record "$dir"
   run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
