@@ -15,6 +15,11 @@ All artifact records were cross-checked against the corresponding job's markers.
 This covered all 24 parallel and 201 serial members at that refresh; an existing live-capability skip is a portable-runner measurement, not a timing claim for the unavailable live integration.
 Observed maxima provide conservative packing weights, not an upper bound on future durations.
 
+The serial table was refreshed again on 2026-11-01 from run [41340713659](https://github.com/kunchenguid/firstmate/actions/runs/41340713659) (the complete green lane) and run [41355222466](https://github.com/kunchenguid/firstmate/actions/runs/41355222466) (its ten completed shards plus the completed `FM_TEST_END` markers of its serial-9 shard, which was cancelled at the 30-minute cap after that shard outgrew its packed estimate).
+All 279 portable serial members now carry a measured hint, none on the default.
+That refresh replaced every row of `portable_serial_weight_hints`, so the per-file hint values quoted below record the provenance of earlier refreshes rather than the current table; read the current values from the runner or from `--check-coverage`.
+The refreshed lane no longer fits the 1200000 ms packing target in eleven or twelve shards (twelve still modeled about 1220 seconds), so the portable serial split grew to thirteen shards, whose largest models about 1126 seconds.
+
 Two serial-5 jobs were cancelled at their 30-minute cap and uploaded no artifact.
 Their completed log markers supplement the complete runs, but a cancelled job's wall time is only a lower bound and its unfinished or never-started scripts have no completed sample.
 A failed script's duration is excluded even when its lane uploaded an artifact.
@@ -131,7 +136,7 @@ No fast mode, path skips, or paid runner provisioning is part of this layout.
 
 The longer-term performance objective remains a complete green run under fifteen minutes including start delay, but the three watch-triage members still sum to about 26 minutes of CI test time.
 The immediate packing target is the runner's modeled script budget, not a claim that more shards alone can make an indivisible script faster.
-The layout uses sixteen long-lived Linux jobs (eleven serial, two parallel, Herdr, two lint), plus short checks and macOS; insufficient shared account capacity can erase the packing gain.
+The layout uses eighteen long-lived Linux jobs (thirteen serial, two parallel, Herdr, two lint), plus short checks and macOS; insufficient shared account capacity can erase the packing gain.
 Compare complete before/after runs, preserve cancelled and partial-run evidence, and measure a representative normal-run sample before claiming a P95 improvement.
 The workflow retains per-PR supersession and keeps only the newest of close main pushes' runs, without changing the compliance workflow's event semantics.
 
