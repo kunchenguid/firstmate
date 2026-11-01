@@ -255,7 +255,7 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
   fi
   BASELINE_TRAIN=0
   case $BASELINE in
-    *$'\nontrain') BASELINE_TRAIN=1 ;;
+    *ontrain) BASELINE_TRAIN=1 ;;
   esac
   case $BASELINE in
     'degraded head='*|'degraded pipeline='*)
@@ -326,7 +326,8 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
     fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
       "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || rm -f -- "$STATE/$ID.pr-poll-train"
   elif [ "$BASELINE" = train=on ]; then
-    :
+    fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || exit 1
   else
     rm -f -- "$STATE/$ID.pr-poll-train"
   fi
