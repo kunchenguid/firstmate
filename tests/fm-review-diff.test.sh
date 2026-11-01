@@ -9,6 +9,9 @@
 #   (b) pr= without pr_head= -> fetch refs/pull/<n>/head and diff that
 #       (a GitLab merge-request pr= fetches refs/merge-requests/<iid>/head, the
 #       ref GitLab keeps for every merge request, exactly the same way)
+#   (b2) a GitLab merge-request pr= whose worktree origin names a DIFFERENT
+#       project -> the fresh head of that other project's same-numbered merge
+#       request is not fetched; the offline fallbacks apply
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
@@ -226,6 +229,13 @@ test_gitlab_mr_meta_fetches_merge_request_head() {
     case_dir=$(make_case "$label")
     stale_and_pr_commits "$case_dir"
     stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+    # The origin remote names the same project the recorded URL names - the
+    # raw configured URL carries that identity while the insteadOf rewrite
+    # keeps transport on the local bare repo - so the fresh merge request head
+    # is fetched from the project the URL names.
+    git -C "$case_dir/wt" remote set-url origin "https://gitlab.example/$project_path.git"
+    git -C "$case_dir/wt" config "url.$case_dir/origin.git.insteadOf" \
+      "https://gitlab.example/$project_path.git"
     git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/merge-requests/7/head"
     write_task_meta "$case_dir" \
       "pr=https://gitlab.example/$project_path/-/merge_requests/7" \
@@ -245,6 +255,32 @@ gitlab-mr-head-pull-segment|acme/pull/project
 gitlab-mr-head-pulls-segment|acme/pulls/project
 ROWS
   pass "fm-review-diff fetches refs/merge-requests/<iid>/head for a GitLab merge request"
+}
+
+test_gitlab_mr_meta_from_other_project_origin_is_not_fetched() {
+  local case_dir out stale_sha
+  case_dir=$(make_case gitlab-mr-other-project-origin)
+  stale_and_pr_commits "$case_dir"
+  stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+  # The recorded URL names group/subgroup/project while the origin remote
+  # names a different project on the same host, whose same-numbered merge
+  # request head holds the newer content: that fresh head must not be fetched,
+  # because it belongs to a merge request the URL never named.
+  git -C "$case_dir/wt" remote set-url origin https://gitlab.example/other/project.git
+  git -C "$case_dir/wt" config "url.$case_dir/origin.git.insteadOf" \
+    https://gitlab.example/other/project.git
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/merge-requests/7/head"
+  write_task_meta "$case_dir" \
+    "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7" \
+    "pr_head=$stale_sha"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+stale-local' \
+    "gitlab-mr-other-project-origin: review must fall back to the recorded pr_head, not another project's fresh head"
+  assert_not_contains "$out" '+pr-fixed' \
+    "gitlab-mr-other-project-origin: another project's same-numbered merge request head was fetched and reviewed"
+  pass "fm-review-diff never fetches another project's merge request head for a recorded GitLab URL"
 }
 
 test_pr_meta_fetches_pull_head_without_recorded_sha() {
@@ -606,6 +642,7 @@ test_opted_in_base_branch_stays_on_origin() {
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_gitlab_mr_meta_fetches_merge_request_head
+test_gitlab_mr_meta_from_other_project_origin_is_not_fetched
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning

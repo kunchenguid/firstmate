@@ -402,6 +402,18 @@ SH
   chmod +x "$case_dir/fakebin/glab"
 }
 
+# Bind the case's origin remote to the GitLab project the recorded pr= URL
+# names, while transport still reaches the local bare repo: the raw configured
+# URL carries the identity the landed-work proof binds
+# (fm_pr_gitlab_origin_matches reads exactly that, never the insteadOf-expanded
+# transport), and the url.<bare>.insteadOf rewrite keeps every fetch and push
+# hermetic. Args: case_dir origin-url-spelling
+bind_gitlab_origin() {
+  local case_dir=$1 origin_url=$2
+  git -C "$case_dir/wt" remote set-url origin "$origin_url"
+  git -C "$case_dir/wt" config "url.$case_dir/origin.git.insteadOf" "$origin_url"
+}
+
 append_pr_meta_for_current_head() {
   local case_dir=$1 head
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -999,23 +1011,34 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
 }
 
 test_gitlab_mr_merged_lands_the_worktree() {
-  local case_dir rc
-  case_dir=$(make_case gitlab-mr-merged)
-  write_meta "$case_dir" no-mistakes ship
-  wt_commit_file "$case_dir" feature.txt hello "add feature"
-  printf '%s\n' 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
-    >> "$case_dir/state/task-x1.meta"
-  git -C "$case_dir/wt" push -q origin "HEAD:refs/merge-requests/7/head"
-  add_glab_mr_state "$case_dir" merged
+  local spelling case_dir rc
+  # Both spellings of one project - the https URL the MR was recorded through
+  # and the scp-like ssh form the clone may carry - must resolve to the same
+  # host and project, so the MR-merged proof holds under either origin.
+  for spelling in https ssh; do
+    case_dir=$(make_case "gitlab-mr-merged-$spelling")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    printf '%s\n' 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
+      >> "$case_dir/state/task-x1.meta"
+    if [ "$spelling" = https ]; then
+      bind_gitlab_origin "$case_dir" https://gitlab.example/group/subgroup/project.git
+    else
+      bind_gitlab_origin "$case_dir" git@gitlab.example:group/subgroup/project.git
+    fi
+    git -C "$case_dir/wt" push -q origin "HEAD:refs/merge-requests/7/head"
+    add_glab_mr_state "$case_dir" merged
 
-  set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
 
-  expect_code 0 "$rc" "gitlab-mr-merged: teardown should succeed when the merge request is merged"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-merged: teardown printed a REFUSED line"
-  pass "a merged GitLab merge request with its head ref lands the worktree"
+    expect_code 0 "$rc" "gitlab-mr-merged-$spelling: teardown should succeed when the merge request is merged"
+    ! grep -q REFUSED "$case_dir/stderr" \
+      || fail "gitlab-mr-merged-$spelling: teardown printed a REFUSED line"
+  done
+  pass "a merged GitLab merge request with its head ref lands the worktree under either origin spelling"
 }
 
 test_gitlab_mr_open_refuses() {
@@ -1025,6 +1048,7 @@ test_gitlab_mr_open_refuses() {
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   printf '%s\n' 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
     >> "$case_dir/state/task-x1.meta"
+  bind_gitlab_origin "$case_dir" https://gitlab.example/group/subgroup/project.git
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   # An open merge request's head ref always holds the worker's pushed HEAD, so
   # the merged state is all that separates this in-flight task from a discard.
@@ -1049,6 +1073,7 @@ test_gitlab_mr_merged_with_later_local_commit_refuses() {
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   printf '%s\n' 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
     >> "$case_dir/state/task-x1.meta"
+  bind_gitlab_origin "$case_dir" https://gitlab.example/group/subgroup/project.git
   git -C "$case_dir/wt" push -q origin "HEAD:refs/merge-requests/7/head"
   wt_commit_file "$case_dir" later.txt local-only "local follow-up"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -1065,9 +1090,39 @@ test_gitlab_mr_merged_with_later_local_commit_refuses() {
   pass "merged GitLab merge request does not allow teardown after a later local commit"
 }
 
+test_gitlab_mr_url_and_origin_naming_different_projects_refuses() {
+  local case_dir rc local_head
+  case_dir=$(make_case gitlab-mr-cross-project)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # The recorded URL names group/subgroup/project, whose merge request 7 the
+  # glab read reports merged, while the worktree's origin names a different
+  # project on the same host whose own same-numbered merge request head
+  # contains the worktree HEAD. Without the identity binding, the merged state
+  # of the one authorizes cleanup of the other's unlanded work.
+  printf '%s\n' 'pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7' \
+    >> "$case_dir/state/task-x1.meta"
+  bind_gitlab_origin "$case_dir" https://gitlab.example/other/project.git
+  git -C "$case_dir/wt" push -q origin "HEAD:refs/merge-requests/7/head"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_glab_mr_state "$case_dir" merged
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "gitlab-mr-cross-project: teardown must refuse when the recorded URL and origin name different projects"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "gitlab-mr-cross-project: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" gitlab-mr-cross-project "$local_head"
+  pass "a merged merge request in one project cannot authorize cleanup through another project's same-numbered head"
+}
+
 test_teardown_closes_a_gitlab_task_with_its_mr_url_as_a_note() {
   local case_dir out real_tasks_axi mr_url=https://gitlab.com/example-group/example-project/-/merge_requests/1
-  case_dir=$(make_case tasks-axi-close-gitlab)
+  case_dir=$(make_case tasks-axi-close-gitlab-mr-note)
   write_meta "$case_dir" no-mistakes ship
   printf 'pr=%s\n' "$mr_url" >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
@@ -6329,6 +6384,7 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_gitlab_mr_merged_lands_the_worktree
 test_gitlab_mr_open_refuses
 test_gitlab_mr_merged_with_later_local_commit_refuses
+test_gitlab_mr_url_and_origin_naming_different_projects_refuses
 test_teardown_closes_a_gitlab_task_with_its_mr_url_as_a_note
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch

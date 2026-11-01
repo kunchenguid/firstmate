@@ -68,7 +68,11 @@
 # A recorded GitLab merge-request pr= takes its own proof: the merged state is
 # read through fm_pr_gitlab_read_record (plain glab) and its head fetched from
 # refs/merge-requests/<iid>/head, the ref GitLab keeps for every merge request
-# including a merged one, with the same containment checks.
+# including a merged one, with the same containment checks. Both identities are
+# bound first: the worktree's origin remote must resolve to the same GitLab
+# host and project the recorded URL names (fm_pr_gitlab_origin_matches), so a
+# merged merge request in one project can never authorize cleanup through a
+# same-numbered merge request of another project the origin happens to serve.
 # A forge lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # A merge-tree option or execution error reports the content-landed proof as
@@ -1723,13 +1727,17 @@ fetch_merge_request_head() {  # <iid>
 # contained in its head? The state comes from fm_pr_gitlab_read_record,
 # addressed through the parsed URL identity and never through a configured
 # default host, and the head from refs/merge-requests/<iid>/head on the
-# worktree's origin remote. Returns non-zero when the merge request is not
-# merged, the current work is not contained in its head, or any read fails -
+# worktree's origin remote - trusted only after fm_pr_gitlab_origin_matches
+# binds that remote to the same host and project the URL names, because the
+# fetch is addressed by merge request number alone. Returns non-zero when the
+# merge request is not merged, the origin names another project, the current
+# work is not contained in its head, or any read fails -
 # the caller falls back to the content check.
 gitlab_mr_is_merged() {
   local head current landed=0
   fm_pr_url_parse "$PR_URL" || return 1
   [ "$FM_PR_PROVIDER" = gitlab ] || return 1
+  fm_pr_gitlab_origin_matches "$WT" "$FM_PR_HOST" "$FM_PR_PATH" || return 1
   fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
   [ "$FM_PR_RECORD_MERGED" = true ] || return 1
   head=$(fetch_merge_request_head "$FM_PR_NUMBER") || return 1

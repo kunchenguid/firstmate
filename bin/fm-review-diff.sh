@@ -32,7 +32,13 @@
 # neither PR head can be resolved, fall back to the local branch with a warning.
 # A Gerrit change exposes no comparable ref and records no pr_head, so a task
 # recording one always takes that warning path;
-# docs/architecture.md owns that fallback. Without pr=, compare the task's
+# docs/architecture.md owns that fallback. The GitLab merge-request head is
+# fetched only after the worktree's origin remote resolves to the same GitLab
+# host and project the recorded URL names (fm_pr_gitlab_origin_matches in
+# bin/fm-pr-lib.sh), so a fresh review head always comes from the project the
+# URL names and never from a same-numbered merge request of another project
+# the origin happens to serve; a mismatch counts the head as unavailable and
+# the offline fallbacks below apply. Without pr=, compare the task's
 # immutable ship branch recorded in state/<id>.meta ("fm/<id>" for records
 # created before that field existed), or the worktree's checked-out branch when
 # that branch does not exist in the worktree. A recorded branch that is not a
@@ -48,6 +54,10 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# fm_pr_url_parse and fm_pr_gitlab_origin_matches bind a recorded GitLab
+# merge-request URL to the origin remote its head is fetched from.
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -158,7 +168,15 @@ resolve_pr_head() {
   if [ -n "$n" ]; then
     case "$pr_url" in
       *"/-/merge_requests/"*)
-        resolved=$(fetch_review_head "refs/merge-requests/$n/head" "refs/fm-review/mr/$n/head") || resolved=
+        # The fresh head must come from the project the recorded URL names:
+        # origin is fetched by merge request number alone, so its head is
+        # trusted only when the remote resolves to that URL's host and project.
+        # A mismatch leaves the head unresolved, so the offline fallbacks apply
+        # rather than reviewing another project's same-numbered merge request.
+        if fm_pr_url_parse "$pr_url" && [ "$FM_PR_PROVIDER" = gitlab ] \
+          && fm_pr_gitlab_origin_matches "$WT" "$FM_PR_HOST" "$FM_PR_PATH"; then
+          resolved=$(fetch_review_head "refs/merge-requests/$n/head" "refs/fm-review/mr/$n/head") || resolved=
+        fi
         ;;
       *)
         resolved=$(fetch_review_head "refs/pull/$n/head" "refs/fm-review/pull/$n/head") || resolved=

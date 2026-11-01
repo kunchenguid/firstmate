@@ -348,6 +348,76 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+# Does a worktree's origin remote name the same GitLab host and project a
+# parsed merge-request URL named? Both readers of refs/merge-requests/<iid>/head
+# (bin/fm-teardown.sh's landed-work proof and bin/fm-review-diff.sh's fresh
+# review head) fetch that ref from the worktree's origin remote addressed by
+# merge request number alone, while the merged state is read through the
+# recorded URL's host, path, and number, so the two reads describe one merge
+# request only when the origin remote names that URL's project too: otherwise
+# a merged merge request in one project could authorize cleanup of, or review
+# against, a same-numbered merge request of another project. The raw
+# configured URL is read rather than `git remote get-url`, because that
+# expands url.<base>.insteadOf rewrites, and a rewrite says where the same
+# project is fetched from, not which project origin names. Every spelling of
+# one project compares equal: https:// and ssh:// forms (scheme, userinfo,
+# and port stripped or folded, scheme and host case-insensitively) and the
+# scp-like [user@]host:path form, with the conventional trailing ".git"
+# removed; the project path itself stays case-sensitive. A URL that names no
+# host and project - a local path, file://, an unparsable value - never
+# matches.
+fm_pr_gitlab_origin_matches() {  # <worktree> <host> <path>
+  local wt=$1 want_host=$2 want_path=$3 raw scheme authority ohost opath
+  local LC_ALL=C
+  [ -n "$wt" ] && [ -n "$want_host" ] && [ -n "$want_path" ] || return 1
+  raw=$(git -C "$wt" config --get remote.origin.url 2>/dev/null) || return 1
+  [ -n "$raw" ] || return 1
+  scheme=${raw%%://*}
+  if [ "$scheme" != "$raw" ]; then
+    case "$(printf '%s' "$scheme" | tr '[:upper:]' '[:lower:]')" in
+      https|http|ssh|git) ;;
+      *) return 1 ;;
+    esac
+    raw=${raw#*://}
+    authority=${raw%%/*}
+    [ -n "$authority" ] || return 1
+    case "$authority" in
+      *@*) authority=${authority##*@} ;;
+    esac
+    ohost=${authority%%:*}
+    opath=${raw#*/}
+    [ "$opath" != "$raw" ] || return 1
+  else
+    # scp-like [user@]host:path: no "/" may precede the ":" that separates
+    # host from path, and a user, when present, is the part before it.
+    authority=${raw%%:*}
+    case "$authority" in
+      ''|*/) return 1 ;;
+    esac
+    case "$authority" in
+      *@*) ohost=${authority##*@} ;;
+      *) ohost=$authority ;;
+    esac
+    opath=${raw#*:}
+  fi
+  [ -n "$ohost" ] && [ -n "$opath" ] || return 1
+  ohost=$(printf '%s' "$ohost" | tr '[:upper:]' '[:lower:]')
+  opath=${opath#/}
+  while :; do
+    case "$opath" in
+      ''|/) return 1 ;;
+      */) opath=${opath%/} ;;
+      *) break ;;
+    esac
+  done
+  case "$opath" in
+    *.git) opath=${opath%.git} ;;
+  esac
+  [ -n "$opath" ] || return 1
+  [ "$ohost" = "$(printf '%s' "$want_host" | tr '[:upper:]' '[:lower:]')" ] \
+    && [ "$opath" = "$want_path" ]
+}
+
 # Resolve the PR number for a task copy's branch via gh-axi, run inside that
 # copy so gh-axi resolves the copy's own repository. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup
