@@ -854,6 +854,21 @@ def validate_committed_against_sources(
             fail("committed archive differs from current sources")
 
 
+def wait_for_test_revalidation_release() -> None:
+    release = os.environ.get("FM_RECORD_EXPORT_TEST_REVALIDATION_RELEASE")
+    if not release:
+        return
+    waiting = f"{release}.waiting"
+    try:
+        waiting_fd = os.open(waiting, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(waiting_fd)
+    while not os.path.exists(release):
+        time.sleep(0.01)
+
+
 def revalidate_archive_sources(state_fd: int, task: str, sources: list[ArchiveSource], entries: list[dict[str, object]]) -> None:
     current = collect_archive_sources(state_fd, task)
     try:
@@ -1027,6 +1042,7 @@ def archive_task(home: str, config: str, data: str, state: str, task: str) -> No
                         fail("record export archive task directory changed before publication")
                     if existing_fd >= 0:
                         remove_tree_at(task_fd, spawn_gen)
+                    wait_for_test_revalidation_release()
                     revalidate_archive_sources(state_fd, task, sources, entries)
                     os.rename(stage_name, spawn_gen, src_dir_fd=task_fd, dst_dir_fd=task_fd)
                     os.fsync(task_fd)
