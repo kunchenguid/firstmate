@@ -317,7 +317,7 @@ SH
     "bootstrap did not report an In-flight row without a task record"
   assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: missing,record' \
     "bootstrap truncated a comma-containing in-flight ID"
-  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: nested/task' \\
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: nested/task' \
     "bootstrap matched a nested metadata path as a top-level record"
   assert_contains "$out" 'RECORD_HYGIENE: metadata has no tab: no-window' \
     "bootstrap did not report metadata without a tab independently of endpoint state"
