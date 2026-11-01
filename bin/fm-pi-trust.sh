@@ -76,12 +76,11 @@
 # never to auto-trust project folders, so this spawn does not pre-register trust;
 # Pi renders no dialog at all under that policy, and the worker launches without
 # the project settings, project extensions, and project skills it would
-# otherwise load. An absent setting or `"ask"`
-# writes this worktree's true entry, which is what replaces the interactive
-# confirmation; `"always"` writes nothing because Pi trusts on its own, and the
-# report says the policy already trusts the directory instead of claiming this
-# script wrote it. An unreadable or malformed settings.json is refused loudly
-# naming that root, never read as `"never"`.
+# otherwise load. An absent setting or `"ask"` writes this worktree's true entry,
+# which is what replaces the interactive confirmation; `"always"` writes nothing
+# because Pi trusts on its own, and the report says the policy already trusts the
+# directory instead of claiming this script wrote it. An unreadable or malformed
+# settings.json is refused loudly naming that root, never read as `"never"`.
 #
 # THE SCOPE TEST IS THE SAFETY PROPERTY and mirrors bin/fm-agy-trust.sh and
 # bin/fm-claude-trust.sh: <worktree> must be a LINKED git worktree - its own git

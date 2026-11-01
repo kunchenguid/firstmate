@@ -580,7 +580,7 @@ Portable launch-command coverage lives in `tests/fm-spawn-dispatch-profile.test.
 ## Pi worker-worktree project trust
 
 [`bin/fm-pi-trust.sh`](../../bin/fm-pi-trust.sh) owns the worker-worktree registration mechanics, and [`pi.md`](../../.agents/skills/harness-adapters/references/harness/pi.md#operating-facts) owns the operating facts.
-A crewmate or scout spawn registers one absolute worktree path before launch, because a fresh pooled slot is a new path to Pi every time and the dialog otherwise parks an unattended worker indefinitely.
+A crewmate or scout spawn registers one absolute worktree path before launch whenever Pi's own policy needs an entry, because a fresh pooled slot is a new path to Pi every time and the dialog otherwise parks an unattended worker indefinitely.
 
 Verified 2026-10-20 on pi 0.84.2 (package 0.84.2) through the default-on live guard (disposable `HOME` and `PI_CODING_AGENT_DIR` only; never `~/.pi`); the `defaultProjectTrust` shapes below were added to that same guard and run against the same package.
 The guard drives the installed package's own `ProjectTrustStore` and `resolveProjectTrusted`, which are what the TUI consults before it renders the dialog. It asserts the verdict flips from untrusted to trusted because `bin/fm-pi-trust.sh` wrote the entry, then seeds the three ancestor shapes the script itself now resolves - an inherited trust, an inherited decline, and a nearer `null` above a trust - and asserts the installed package resolves each one the same way. It then drives the three `defaultProjectTrust` shapes through the same resolver: `never` with no saved entry declines, a saved `true` still outranks `never`, and `always` trusts with no saved entry.
