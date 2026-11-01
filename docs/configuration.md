@@ -2151,7 +2151,7 @@ An absent required tool with an automated install path reports `MISSING:` with i
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 
-When `treehouse`, `jq`, and the Treehouse state directory are available, bootstrap also emits `TREEHOUSE_POOL_REPORT:` findings for unregistered or old unowned slots, duplicate project pools, and empty test pools.
+When the Treehouse state directory and `jq` are available, bootstrap also emits `TREEHOUSE_POOL_REPORT:` findings for unregistered or old unowned slots, duplicate project pools, and empty test pools; the `treehouse` executable is not required for this read-only scan.
 The scan is read-only; pruning or other pool cleanup remains an explicit operator action.
 
 **Project refresh at startup**
