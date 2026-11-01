@@ -531,14 +531,15 @@ fm_backlog_pr_note_label() {  # <url>
 }
 
 # The pending-close record is a line-oriented file holding one `arg=` line per
-# flag, and a `--note` value is prose that lands in the task body, so without one
-# shared encoding the reader could not tell the value's own spaces from the
-# record's structure. The writer encodes every `--note` value and every reader
-# decodes it, so a replay reproduces the note byte for byte. The accepted byte
-# set is the one firstmate's own notes use - a sentence over letters, digits, and
-# the punctuation below - and validation requires that re-encoding the decoded
-# value reproduces the recorded text, so a value outside it is refused rather
-# than silently altered.
+# flag, and a `--note` value is prose that lands in the task body, so the value's
+# own bytes have to survive that line. Only the bytes the record cannot express
+# are refused - a newline or a control byte would end the line, a leading dash
+# would read as a flag - while every printable byte is carried, escaped only
+# where the encoding itself needs it: `%` and the space. Ordinary punctuation in
+# prose is therefore storable, not a refusal that would turn a legitimate
+# destructive teardown into an error. Every reader decodes the value it reads, and
+# validation requires that re-encoding the decoded value reproduces the recorded
+# text, so a value is never silently altered.
 #
 # The bound is the `--pr` bound the validator below enforces (2048) plus the
 # fixed prose a completion note composes around that link ("Delivered, merge not
@@ -556,6 +557,7 @@ FM_BACKLOG_DOWNGRADE_LINKS=
 FM_BACKLOG_DOWNGRADE_NOTE=
 fm_backlog_note_encode() {  # <text>
   local text=$1 out='' ch encoded i=0
+  local LC_ALL=C
   [ -n "$text" ] || return 1
   [ "${#text}" -le "$FM_BACKLOG_NOTE_MAX" ] || return 1
   case "$text" in -*) return 1 ;; esac
@@ -563,8 +565,8 @@ fm_backlog_note_encode() {  # <text>
     ch=${text:$i:1}
     case "$ch" in
       ' ') encoded=%20 ;;
-      [A-Za-z0-9]) encoded=$ch ;;
-      "/"|":"|"?"|"&"|"="|"_"|"."|"+"|"@"|","|"-") encoded=$ch ;;
+      '%') encoded=%25 ;;
+      [[:print:]]) encoded=$ch ;;
       *) return 1 ;;
     esac
     out=$out$encoded
@@ -584,6 +586,7 @@ fm_backlog_note_decode() {  # <encoded-note>
         encoded=${encoded#*%}
         case "$encoded" in
           20*) out="$out "; encoded=${encoded#20} ;;
+          25*) out="$out%"; encoded=${encoded#25} ;;
           *) return 1 ;;
         esac
         ;;
@@ -1130,9 +1133,27 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   if [ "$pr_args" = 0 ]; then
     fm_backlog_pr_link_note "$data" "$id" "this retention read no merge" || return 1
     note=$FM_BACKLOG_DOWNGRADE_NOTE
-    if [ -n "$note" ] \
-       && ! fm_backlog_text_names_links "$deliverable" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
-      deliverable="${deliverable:+$deliverable; }$note"
+    # A previous attempt may already have recorded this sentence as its own body
+    # line, in which case the deliverable does not repeat it: the retention
+    # records only what the note does not already say, and a retry converges
+    # instead of writing a second, shorter deliverable line.
+    if [ -n "$note" ]; then
+      # A note an earlier attempt (or the downgrade that composed it) already
+      # recorded as its own body line is not repeated here: the retention records
+      # only what the body does not already say, so a retry converges instead of
+      # writing a second, shorter deliverable line.
+      case $'\n'"$FM_BACKLOG_ROW_BODY"$'\n' in
+        *$'\n'"$note"$'\n'*)
+          case "$deliverable" in
+            "$note") deliverable='' ;;
+            *"; $note") deliverable=${deliverable%%"; $note"} ;;
+          esac
+          ;;
+        *)
+          ! fm_backlog_text_names_links "$deliverable" "$FM_BACKLOG_DOWNGRADE_LINKS" \
+            && deliverable="${deliverable:+$deliverable; }$note"
+          ;;
+      esac
     fi
     [ -z "$FM_BACKLOG_DOWNGRADE_LINKS" ] || strip_after=1
   fi

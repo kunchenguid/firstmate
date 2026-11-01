@@ -1170,6 +1170,39 @@ test_teardown_close_without_a_merge_clears_an_earlier_pr_link() {
   pass "teardown clears an earlier pull-request link when the close records no merge"
 }
 
+test_teardown_records_a_renderer_accepted_link_as_an_unconfirmed_note() {
+  local case_dir out url=https://github.com/o--o/repo/pull/7
+  # tasks-axi's own classifier accepts a pull-request link this script's parser
+  # refuses (a repeated hyphen in the owner) and renders it as "merged", so the
+  # `pr` shape may not be passed on the parser's say-so alone: the link is
+  # recorded as a note, which keeps the URL and claims no merge.
+  case_dir=$(make_case tasks-axi-renderer-accepted-link)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a link the renderer accepts failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left the item at $(backlog_row_state "$case_dir"): $out"
+  assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
+    "a link the gate could not classify was recorded as a merge nobody read"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "body: \"Delivered, merge not confirmed because its pull request state could not be read: $url. The link is a historical record whose merge was not verified in this run\"" >/dev/null \
+    || fail "the renderer-accepted link was not kept as an unconfirmed note"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F "links: \"pr:$url\"" >/dev/null \
+    && fail "the unconfirmed close passed the link as a pr argument that renders as merged"
+  assert_grep '(done ' "$case_dir/data/backlog.md" \
+    "the completed item did not record its completion"
+  pass "teardown keeps a renderer-accepted but unparseable link as an unconfirmed note"
+}
+
 test_teardown_records_a_long_but_recordable_pr_link_as_its_unconfirmed_note() {
   local case_dir out url host owner repo head
   # A self-hosted Forgejo pull-request URL can exceed the old 300-byte note
@@ -6444,6 +6477,7 @@ test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_close_never_claims_a_merge_it_did_not_read
+test_teardown_records_a_renderer_accepted_link_as_an_unconfirmed_note
 test_teardown_close_without_a_merge_clears_an_earlier_pr_link
 test_teardown_close_keeps_the_link_when_the_close_itself_fails
 test_teardown_verified_close_drops_another_link_no_run_verified

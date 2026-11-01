@@ -2059,6 +2059,91 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
 }
 
+# External review: the retained-note guard asked fm_backlog_text_names_links
+# whether the deliverable already keeps the links about to leave the title, and
+# that predicate answered "no" when there were no links left at all, so a reused
+# recorded sentence was appended a second time. A pre-fix retention record is the
+# shape that reaches it: it carries the link and no verified-merge stamp.
+test_recovery_replays_a_retained_link_note_once() {
+  local case_dir home id url out body count
+  id=atomic-heal-retain-note-once-b18
+  url=https://github.com/example/repo/pull/18
+  case_dir=$(make_home heal-retain-note-once)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi update "$id" --pr "$url" --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not attach the retained pull-request link"
+  tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
+    --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not hold the retained row"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-retain-note\ncleanup_incomplete=0\nmode=retain\narg=--pr\narg=%s\n' \
+    "$id" "$home/data" "$url" > "$home/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  body=$(tasks-axi show "$id" --full --file "$(backlog_of "$case_dir")" \
+    | sed -n 's/^  body: *//p' | head -1)
+  count=$(printf '%s' "$body" | grep -o 'Historical record:' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] \
+    || fail "the replayed retention recorded its historical-record note $count times: $body ($out)"
+  case "$body" in
+    *"$url"*) ;;
+    *) fail "the replayed retention lost the pull-request link: $body" ;;
+  esac
+  pass "a replayed retention records its historical note exactly once"
+}
+
+# The pending-close record must carry ordinary punctuation instead of refusing
+# it: a note holding such characters used to make the record unstorable, which
+# turned a legitimate destructive teardown into a refusal. Only bytes the record
+# cannot express - a line break - stay refused.
+test_note_codec_carries_punctuation_and_refuses_line_breaks() {
+  local case_dir home id text encoded
+  id=atomic-note-codec-b19
+  case_dir=$(make_home note-codec-punctuation)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  text="Delivered, it's (not) merged: #1 at 50% *pending*!"
+
+  encoded=$(
+    set -u
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT"
+    export FM_HOME FM_ROOT_OVERRIDE
+    . "$ROOT/bin/fm-tasks-axi-lib.sh"
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_note_encode "$text" || exit 1
+    printf '\n'
+    [ "$(fm_backlog_note_decode "$(fm_backlog_note_encode "$text")")" = "$text" ] || exit 2
+    [ "$(fm_backlog_note_encode "$(fm_backlog_note_decode "$(fm_backlog_note_encode "$text")")")" \
+      = "$(fm_backlog_note_encode "$text")" ] || exit 3
+  ) || fail "a note holding ordinary punctuation did not round-trip byte for byte"
+
+  (
+    set -u
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT"
+    export FM_HOME FM_ROOT_OVERRIDE
+    . "$ROOT/bin/fm-tasks-axi-lib.sh"
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_close_marker_write "$home/state" "$id" "$home/data" spawn-codec --note "$text" \
+      || exit 1
+    [ "$(sed -n 's/^arg=//p' "$home/state/$id.backlog-close" | tail -1)" = "$(fm_backlog_note_encode "$text")" ] \
+      || exit 2
+  ) || fail "a note holding ordinary punctuation could not be staged as a pending-close record"
+
+  (
+    set -u
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT"
+    export FM_HOME FM_ROOT_OVERRIDE
+    . "$ROOT/bin/fm-tasks-axi-lib.sh"
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_note_encode "$(printf 'line one\nline two')" >/dev/null 2>&1 && exit 1
+    fm_backlog_close_marker_write "$home/state" "$id" "$home/data" spawn-codec --note "$(printf 'line one\nline two')" \
+      >/dev/null 2>&1 && exit 2
+    exit 0
+  ) || fail "a note holding a line break is still accepted by the pending-close record"
+  pass "the pending-close record carries punctuation and still refuses a line break"
+}
+
 # External review P1 "Interrupted retries lose extra links": the downgrade used to
 # take the links off the title before its note was durable, so a failed body write
 # cost every link the pending record did not itself carry. The note names every
@@ -3496,6 +3581,8 @@ test_recovery_replays_a_verified_merge_as_a_merge
 test_recovery_replays_a_failed_close_without_duplicating_its_note
 test_recovery_keeps_a_retained_url_until_its_note_is_durable
 test_recovery_keeps_one_deliverable_line_when_the_reopen_fails
+test_recovery_replays_a_retained_link_note_once
+test_note_codec_carries_punctuation_and_refuses_line_breaks
 test_recovery_replays_a_close_whose_merge_was_never_confirmed
 test_recovery_replays_a_long_unconfirmed_note
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
