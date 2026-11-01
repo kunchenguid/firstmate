@@ -280,7 +280,7 @@ case "${1:-}" in
   mv) echo 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
   list)
     case " $* " in *' --fields id '*) echo 'unsupported extra field: id' >&2; exit 2 ;; esac
-    printf 'count: 1\ntasks[1]{id}:\n  missing-record\n'
+    printf 'count: 2\ntasks[1]{id}:\n  missing-record\ntasks[2]{id}:\n  "missing,record",extra\n'
     ;;
 esac
 SH
@@ -313,6 +313,10 @@ SH
     "bootstrap did not report an old orphan status log"
   assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: missing-record' \
     "bootstrap did not report an In-flight row without a task record"
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: missing,record' \
+    "bootstrap truncated a comma-containing in-flight ID"
+  assert_contains "$out" 'RECORD_HYGIENE: metadata has no tab: no-window' \
+    "bootstrap did not report metadata without a tab independently of endpoint state"
   assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
     "bootstrap did not report duplicate PR references"
   assert_contains "$out" 'RECORD_HYGIENE: metadata has no endpoint: no-tab' \
