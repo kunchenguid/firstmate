@@ -1088,10 +1088,16 @@ test_firstmate_records_never_count_as_worker_state() {
   assert_equals unknown "$(rex_env "$PUSH_DIR" "fm_backend_busy_state rex '$PUSH_T'")" "a Firstmate record must not decide busy state"
   res=$(push_wait 1)
   assert_equals "1|" "$res" "the level reconcile must ignore a Firstmate record"
+  printf '{"records":[{"state":"working","app":"firstmate-grok","title":"fm-t1","owner":{"pid":4242}}]}\n' \
+    >"$PUSH_DIR/fake/status/${PUSH_BID#block:}.json"
+  assert_equals unknown "$(rex_env "$PUSH_DIR" "fm_backend_busy_state rex '$PUSH_T'")" "the status bridge's own root record must not decide busy state"
   rm -f "$PUSH_DIR/fake/status/${PUSH_BID#block:}.json"
   rex_event "$PUSH_BID" blocked question firstmate 4242 "Needs your decision" >"$PUSH_DIR/fake/events"
   res=$(push_wait 1)
   assert_equals "1|" "$res" "a streamed Firstmate record must never escalate"
+  rex_event "$PUSH_BID" blocked question firstmate-grok 4242 "Needs your decision" >"$PUSH_DIR/fake/events"
+  res=$(push_wait 1)
+  assert_equals "1|" "$res" "a streamed status-bridge record must never escalate"
   rex_event "$PUSH_BID" blocked question claude-code 4242 "Continue?" >"$PUSH_DIR/fake/events"
   res=$(push_wait 1)
   [ "${res%%|*}" = 0 ] || fail "the harness's own blocked edge must still escalate, got $res"
