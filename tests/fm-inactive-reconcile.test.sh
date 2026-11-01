@@ -306,6 +306,20 @@ SH
   pass 'a ready status with missing kind defaults to ship, auto-arms, detects a merge, and cleans its sandbox lane'
 }
 
+test_pr_watch_arm_timeout_names_timeout() {
+  make_world arm-timeout
+  write_child "$MAIN" child 'done: PR https://github.com/owner/repo/pull/1 checks green'
+  cat > "$WORLD/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+sleep 5
+SH
+  chmod +x "$WORLD/fakebin/gh"
+  run_reconcile "$MAIN"
+  grep -Fq 'PR merge watch could not be armed for task child (https://github.com/owner/repo/pull/1): timed out after 3s' \
+    "$MAIN/state/.wake-queue" || fail 'PR watch timeout notice did not explain the timeout'
+  pass 'PR watch arming timeout notice names the timeout'
+}
+
 test_scout_does_not_arm_ready_pr_watch() {
   local url='https://github.com/owner/repo/pull/1'
   make_world scout-ready-watch
@@ -1169,6 +1183,7 @@ test_main_direct_terminal_presentation_receipt
 test_slow_pr_watch_does_not_starve_ledger_or_later_children
 test_main_home_arms_ready_pr_watch
 test_scout_does_not_arm_ready_pr_watch
+test_pr_watch_arm_timeout_names_timeout
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_local_done_head_is_pinned_before_parent_delivery
