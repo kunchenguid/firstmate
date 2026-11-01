@@ -1274,6 +1274,78 @@ EOF
   pass "a deferred captain call leaves the live Captain's Call until its date and stays answerable"
 }
 
+test_reason_and_append_round_trip_a_held_reason() {
+  local home reason got shown
+  home=$(make_home append)
+  reason=$'Pick "a" or b/c, not \\/ (see åäö)\nsecond line'
+  run_captain "$home" hold sample-append --title "Append sample" \
+    --reason "$reason" --repo sample --until 2030-01-02 >/dev/null \
+    || fail "could not hold the sample call"
+  got=$(run_captain "$home" reason sample-append) || fail "reason did not print the held reason"
+  [ "$got" = "$reason" ] || fail "reason did not read back exactly: $got"
+
+  printf 'Svar: "ja" via a/b\\/c\nråd: ändra ö\n\n' > "$home/add.txt"
+  run_captain "$home" append sample-append --text-file "$home/add.txt" >/dev/null \
+    || fail "append refused a valid text file"
+  got=$(run_captain "$home" reason sample-append) || fail "reason failed after append"
+  [ "$got" = "$reason"$'\n''Svar: "ja" via a/b\/c'$'\n''råd: ändra ö' ] \
+    || fail "append did not add the new text after the old reason: $got"
+  printf 'Tredje.\n' > "$home/add2.txt"
+  run_captain "$home" append sample-append --text-file "$home/add2.txt" >/dev/null \
+    || fail "a second append failed"
+  got=$(run_captain "$home" reason sample-append)
+  case "$got" in
+    *'råd: ändra ö'$'\n''Tredje.') : ;;
+    *) fail "a second append lost text: $got" ;;
+  esac
+
+  shown=$(tasks_in "$home" show sample-append --full)
+  assert_contains "$shown" "hold_kind: captain" "append lost the hold kind"
+  assert_contains "$shown" "hold_until: 2030-01-02" "append lost the --until date"
+  assert_contains "$(cat "$home/data/backlog.md")" "Captain hold set:" "append lost the hold-set stamp"
+
+  run_captain "$home" hold sample-expired --title "Expired sample" \
+    --reason "old reason" --repo sample --until 2020-01-01 >/dev/null \
+    || fail "could not hold the expired sample call"
+  run_captain "$home" append sample-expired --text-file "$home/add2.txt" >/dev/null \
+    || fail "append refused a hold whose --until date has passed"
+  [ "$(run_captain "$home" reason sample-expired)" = $'old reason\nTredje.' ] \
+    || fail "an expired hold lost its reason"
+  assert_contains "$(tasks_in "$home" show sample-expired --full)" "hold_until: 2020-01-01" \
+    "append lost the expired --until date"
+
+  tasks_in "$home" add sample-kindless "Kindless" --repo sample >/dev/null \
+    || fail "could not add the kindless sample task"
+  tasks_in "$home" hold sample-kindless --reason "start later" --until 2030-01-01 >/dev/null \
+    || fail "could not hold the kindless sample task"
+  run_captain "$home" append sample-kindless --text-file "$home/add2.txt" >/dev/null \
+    || fail "append refused a hold without a kind"
+  [ "$(run_captain "$home" reason sample-kindless)" = $'start later\nTredje.' ] \
+    || fail "append did not extend a hold without a kind"
+  shown=$(tasks_in "$home" show sample-kindless --full)
+  assert_not_contains "$shown" "hold_kind: captain" "append promoted a hold without a kind to a captain call"
+  assert_contains "$shown" "hold_until: 2030-01-01" "append lost the --until date of a hold without a kind"
+
+  : > "$home/empty.txt"
+  if run_captain "$home" append sample-append --text-file "$home/empty.txt" >/dev/null 2>&1; then
+    fail "append accepted an empty text file"
+  fi
+  if run_captain "$home" append sample-append --text-file "$home/missing.txt" >/dev/null 2>&1; then
+    fail "append accepted a missing text file"
+  fi
+  tasks_in "$home" add sample-plain "Plain" --repo sample >/dev/null || fail "could not add a plain task"
+  if run_captain "$home" append sample-plain --text-file "$home/add.txt" >/dev/null 2>&1; then
+    fail "append accepted a task that is not held"
+  fi
+  if run_captain "$home" reason sample-plain >/dev/null 2>&1; then
+    fail "reason accepted a task that is not held"
+  fi
+  if run_captain "$home" reason sample-absent >/dev/null 2>&1; then
+    fail "reason accepted an absent task"
+  fi
+  pass "reason and append read and extend a held reason without hand encoding"
+}
+
 # The recorded-answer guard survives an out-of-band close: a bare tasks-axi done
 # fails verify until answer records the captain's word, and an ordinary finished
 # task can never be dressed up as an answered captain call.
@@ -5121,6 +5193,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
+test_reason_and_append_round_trip_a_held_reason
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
 test_normal_answers_retire_pending_reconcile_requests
