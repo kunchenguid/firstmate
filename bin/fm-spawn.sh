@@ -3958,11 +3958,69 @@ if [ "$KIND" = secondmate ]; then
       propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" ||
       echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   fi
-  if [ -f "$PROJ_ABS/data/charter.md" ]; then
-    BRIEF="$PROJ_ABS/data/charter.md"
-  else
-    BRIEF="$DATA/$ID/brief.md"
+  # The identity owner is this home's OWN charter copy, checked here at the
+  # launch boundary: a secondmate must never resolve its role from the primary
+  # contract (AGENTS.md) or from a silent substitution to a charter living
+  # outside its home. A symlinked charter or one whose resolved path leaves the
+  # home is refused before any present/MISSING verdict and never read. The
+  # check's result is carried into the overlay instead of being assumed, so a
+  # home whose copy is missing is named as such rather than looking identical to
+  # a seeded one.
+  SECOND_MATE_CHARTER="$PROJ_ABS/data/charter.md"
+  SECOND_MATE_CHARTER_STATE=missing
+  if [ -L "$SECOND_MATE_CHARTER" ]; then
+    SECOND_MATE_CHARTER_STATE=unsafe
+  elif [ -f "$SECOND_MATE_CHARTER" ]; then
+    second_mate_charter_dir=$(cd "$PROJ_ABS/data" 2>/dev/null && pwd -P) || second_mate_charter_dir=
+    if [ -n "$second_mate_charter_dir" ] \
+      && path_is_ancestor_of "$PROJ_ABS" "$second_mate_charter_dir/charter.md"; then
+      SECOND_MATE_CHARTER_STATE=present
+    else
+      SECOND_MATE_CHARTER_STATE=unsafe
+    fi
+  elif [ -e "$SECOND_MATE_CHARTER" ]; then
+    SECOND_MATE_CHARTER_STATE=unsafe
   fi
+  if [ "$SECOND_MATE_CHARTER_STATE" != present ] && [ ! -f "$DATA/$ID/brief.md" ]; then
+    echo "error: secondmate $ID has no usable charter: $SECOND_MATE_CHARTER is $SECOND_MATE_CHARTER_STATE and the parent copy $DATA/$ID/brief.md is absent; seed the home with bin/fm-home-seed.sh, or place the charter at $PROJ_ABS/data/charter.md" >&2
+    exit 1
+  fi
+  # Deterministic role identity at the launch boundary. This overlay states the
+  # role, the absolute home, and the charter path before any charter text. It
+  # scopes the boundary to the PRIMARY home's startup, never to this home's own
+  # startup: bin/fm-session-start.sh runs the home-scoped startup for a marked
+  # secondmate home, which is what takes this home's lock and arms its watcher,
+  # so forbidding it outright would leave a restarted secondmate inert.
+  SECOND_MATE_LAUNCH_BRIEF="$DATA/$ID/secondmate-launch-brief.md"
+  mkdir -p "$DATA/$ID"
+  {
+    printf 'You are a secondmate, not the primary Firstmate. Your home is %s. Your charter is %s.\n' "$PROJ_ABS" "$SECOND_MATE_CHARTER"
+    case "$SECOND_MATE_CHARTER_STATE" in
+      present)
+        printf 'CHARTER: present at %s (this home own copy).\n' "$SECOND_MATE_CHARTER"
+        ;;
+      unsafe)
+        printf 'CHARTER: UNSAFE at %s: it is a symlink or does not resolve inside this home. Do NOT read it, do NOT infer any role from AGENTS.md, and do NOT run startup as the primary home; report the unsafe charter to your parent Firstmate and wait for it to be seeded.\n\n' "$SECOND_MATE_CHARTER"
+        ;;
+      *)
+        printf 'CHARTER: MISSING at %s. Do NOT infer any role from AGENTS.md and do NOT run startup as the primary home; report the missing charter to your parent Firstmate and wait for it to be seeded.\n\n' "$SECOND_MATE_CHARTER"
+        ;;
+    esac
+    printf 'Run startup only for your own home: bin/fm-session-start.sh in your home takes your own home session lock and reconciles your own home durable records from disk, and your own watcher arms once that lock is held.\n'
+    printf 'Never run startup against the primary home, never take the primary home helm, never run the primary home mutating fleet sweeps, and never address the captain; report only through your parent Firstmate.\n\n'
+    if [ "$SECOND_MATE_CHARTER_STATE" = present ]; then
+      cat -- "$SECOND_MATE_CHARTER"
+    elif [ -f "$DATA/$ID/brief.md" ]; then
+      # Recovery only, and never silent: the parent copy is labelled as such and
+      # does not turn an unseeded home into a primary-looking one.
+      printf 'CHARTER FALLBACK: this home has no usable local copy; the parent copy follows and belongs to this home only until it is seeded.\n\n'
+      cat -- "$DATA/$ID/brief.md"
+    fi
+  } >"$SECOND_MATE_LAUNCH_BRIEF" || {
+    echo "error: could not prepare secondmate launch instructions for $ID" >&2
+    exit 1
+  }
+  BRIEF="$SECOND_MATE_LAUNCH_BRIEF"
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
@@ -7285,8 +7343,12 @@ case "$LAUNCH" in
     secondmate) brief_opstate="$PROJ_ABS/state" ;;
     *) brief_opstate=$STATE ;;
   esac
+  brief_publish_error="could not publish the launch brief for $ID as an operational-inbox record under $brief_opstate; $HARNESS strips the typed operational marker, so the worker was not launched"
+  if [ "$KIND" = secondmate ]; then
+    brief_publish_error="could not publish secondmate launch instructions for $ID"
+  fi
   brief_doorbell=$(FM_STATE_OVERRIDE="$brief_opstate" "$FM_ROOT/bin/fm-operational-input.sh" record launch-brief <"$BRIEF") || {
-    echo "error: could not publish the launch brief for $ID as an operational-inbox record under $brief_opstate; $HARNESS strips the typed operational marker, so the worker was not launched" >&2
+    echo "error: $brief_publish_error" >&2
     exit 1
   }
   LAUNCH=${LAUNCH//__BRIEFDOORBELL__/"$(shell_quote "$brief_doorbell")"}
