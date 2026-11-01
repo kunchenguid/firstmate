@@ -350,12 +350,19 @@ run_reach() { # <home> <memory-file> <destination>
 # shared entry into such a skill deletes it for the secondmate: --reach must say
 # removal and name that home. The same skill is reachable for an entry of the
 # primary's own data/captain.md, which no other home reads, and a destination
-# inside the secondmate's home is out of the primary's own reach.
+# inside the secondmate's home is out of the primary's own reach. A move that
+# stays in data/captain-shared.md, the surface every inheriting home (local or
+# remote) loads as its copy, reaches every reader, so the shared-surface
+# exception can actually occur.
 test_reach_reports_a_home_local_shared_relocation_as_a_removal() {
   local primary secondmate out rc
   primary=$(new_primary reach)
   secondmate=$(new_home reach-secondmate)
-  local_record reach-secondmate "$secondmate" > "$primary/data/secondmates.md"
+  {
+    local_record reach-secondmate "$secondmate"
+    remote_record reach-remote remote.example /srv/firstmate /srv/homes/reach-remote
+  } > "$primary/data/secondmates.md"
+  printf '%s\n' '- a shared captain preference' > "$primary/data/captain-shared.md"
 
   set +e
   out=$(run_reach "$primary" data/captain-shared.md .agents/skills/shared-pref/SKILL.md)
@@ -367,7 +374,26 @@ test_reach_reports_a_home_local_shared_relocation_as_a_removal() {
   assert_contains "$out" "reader=reach-secondmate placement=local home=$secondmate reachable=no" \
     "the inheriting secondmate was not named as losing the entry"
   assert_contains "$out" 'reach=removal' "the relocation was not reported as a removal"
+  assert_contains "$out" "reader=reach-remote placement=remote home=remote.example:/srv/homes/reach-remote reachable=no" \
+    "the remote inheriting secondmate was not named as losing the entry"
   assert_not_contains "$out" 'reach=reversible' "a removal was also reported as reversible"
+
+  set +e
+  out=$(run_reach "$primary" data/captain-shared.md data/captain-shared.md)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a move within the shared file was refused although every inheriting home loads it"
+  assert_contains "$out" "reader=reach-secondmate placement=local home=$secondmate reachable=yes" \
+    "the local inheriting secondmate did not reach the shared surface"
+  assert_contains "$out" "reader=reach-remote placement=remote home=remote.example:/srv/homes/reach-remote reachable=yes" \
+    "the remote inheriting secondmate did not reach the shared surface"
+  assert_contains "$out" 'reach=reversible' "a shared-to-shared move was not reported as reversible"
+
+  set +e
+  out=$(run_reach "$primary" data/captain-shared.md data/memory-archive.md)
+  rc=$?
+  set -e
+  expect_code 4 "$rc" "archiving a shared entry into the primary-only archive was reported reachable"
 
   set +e
   out=$(run_reach "$primary" data/captain.md .agents/skills/own-pref/SKILL.md)
@@ -389,7 +415,7 @@ test_reach_reports_a_home_local_shared_relocation_as_a_removal() {
   set -e
   expect_code 1 "$rc" "a secondmate home relocated a primary-owned shared entry"
   assert_contains "$out" 'primary-owned' "the secondmate refusal did not name the primary owner"
-  pass "--reach reports a shared-file move to a home-local skill as a removal for the inheriting homes"
+  pass "--reach reports a shared-to-shared move as reachable and a shared move to home-local storage as a removal"
 }
 
 test_no_cascade_without_secondmates_or_from_a_secondmate_home() {
