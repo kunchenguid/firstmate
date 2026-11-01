@@ -7,9 +7,9 @@
 # the self-describing doorbell line, and the watcher's re-ring ladder policy.
 # bin/fm-send.sh writes and rings locally, the host-local remote steer leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) writes idempotently and rings
-# on the remote host, bin/fm-watch.sh polls and re-rings, and the brief
-# scaffold (bin/fm-brief.sh) tells the worker how to read and acknowledge;
-# none of them restates the format.
+# on the remote host, bin/fm-task-job-lib.sh delivers task-job completions,
+# bin/fm-watch.sh polls and re-rings, and the brief scaffold (bin/fm-brief.sh)
+# tells the worker how to read and acknowledge; none of them restates the format.
 #
 # Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
 # payload moves to the filesystem, which is reliable; the backend endpoint carries
@@ -23,16 +23,17 @@
 # into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
-#   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
+#   <task>.inbox/NNN.msg       one durable record, numeric sequence, atomic rename
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
-#                              (the session and the away daemon)
-#   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
+#   <task>.inbox/.ring-state   current oldest steer's "<msg>\t<count>\t<epoch>"
 #   <task>.inbox/.busy-state   consecutive busy deferrals: "<msg>\t<count>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
 #   <task>.inbox/.retry-ring   name of a fire-and-forget record still owed its
 #                              one retry ring (fm_task_inbox_mark_retry)
+#   <task>.inbox/jobs/         task-job records whose completions arrive here as
+#                              hold-aware records (bin/fm-task-job-lib.sh owns them)
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
@@ -40,6 +41,8 @@
 #   body-terminator=1          present on records written with a synthetic final newline
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
 #                              (it still gets one retry ring; see below)
+#   delivery=hold-aware        a task-job completion outside the steer ladder
+#                              (see "Hold-aware records" below)
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
@@ -49,7 +52,7 @@
 # lifetime even if every doorbell is duplicated. Concurrent writers serialize
 # on .seq.lock; the worst racing outcome is ordering, never loss.
 #
-# Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
+# Steer re-ring ladder (fm_task_inbox_due_action): an unhandled steer older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect another draft in a proven pending
 # composer; an unsubmitted copy of this doorbell is retried. After
@@ -81,6 +84,9 @@
 # ladder rings the same inbox, so the retry waits behind it, and an
 # acknowledged record drops its mark. The remote steer leg has no watcher
 # ladder and owes no retry.
+#
+# Hold-aware records follow the independent per-job delivery contract in
+# bin/fm-task-job-lib.sh and never enter the steer ladder.
 #
 # Inbox names containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.
@@ -215,7 +221,9 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
       *$'\n') : ;;
       *) printf 'body-terminator=1\n' ;;
     esac
-    [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
+    case "$delivery_mode" in
+      fire-and-forget|hold-aware) printf 'delivery=%s\n' "$delivery_mode" ;;
+    esac
     printf -- '--\n'
     case "$text" in
       *$'\n') printf '%s' "$text" ;;
@@ -429,7 +437,10 @@ fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
   [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
 }
 
-fm_task_inbox_is_fire_and_forget() {  # <record-path>
+# The record's delivery mode (empty for an ordinary record), reading the
+# handled/ copy when the record was acknowledged meanwhile; fails when neither
+# exists.
+fm_task_inbox_delivery_mode() {  # <record-path>
   local rec=$1
   if [ ! -f "$rec" ]; then
     rec="${rec%/*}/handled/${rec##*/}"
@@ -437,18 +448,25 @@ fm_task_inbox_is_fire_and_forget() {  # <record-path>
   fi
   awk '
     $0 == "--" { exit }
-    $0 == "delivery=fire-and-forget" { found=1 }
-    END { exit(found ? 0 : 1) }
+    index($0, "delivery=") == 1 { mode = substr($0, 10) }
+    END { printf "%s", mode }
   ' "$rec"
 }
 
-# Oldest escalation-tracked unhandled record, or fail when none is due.
+fm_task_inbox_is_fire_and_forget() {  # <record-path>
+  [ "$(fm_task_inbox_delivery_mode "$1" 2>/dev/null)" = fire-and-forget ]
+}
+
+# Oldest escalation-tracked unhandled steer, or fail when none exists.
 fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
-  local dir best='' best_n=0 f n
+  local dir best='' best_n=0 f n mode
   dir=$(fm_task_inbox_dir "$1" "$2")
   for f in "$dir"/*.msg; do
     [ -e "$f" ] || continue
-    fm_task_inbox_is_fire_and_forget "$f" && continue
+    mode=$(fm_task_inbox_delivery_mode "$f" 2>/dev/null) || continue
+    case "$mode" in
+      fire-and-forget|hold-aware) continue ;;
+    esac
     n=$(fm_task_inbox_seq_of "${f##*/}") || continue
     if [ -z "$best" ] || [ "$n" -lt "$best_n" ]; then
       best=$f
@@ -506,22 +524,22 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   fi
   base=${oldest##*/}
   grace=$(fm_task_inbox_grace_secs)
-  if [ "$(fm_path_age "$oldest")" -lt "$grace" ]; then
-    printf 'quiet'
-    return 0
-  fi
   count=0
   last=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)
   IFS=$(printf '\t') read -r rec_base count last <<EOF
 $ladder
 EOF
-  if [ -n "$rec_base" ] && [ "$rec_base" != "$base" ]; then
+  if [ "$rec_base" != "$base" ]; then
     count=0
     last=0
   fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  if [ "$(fm_path_age "$oldest")" -lt "$grace" ]; then
+    printf 'quiet'
+    return 0
+  fi
   if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ]; then
     printf 'quiet'
     return 0

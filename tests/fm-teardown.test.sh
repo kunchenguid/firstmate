@@ -1830,7 +1830,7 @@ SH
 }
 
 test_forced_secondmate_child_scout_nested_clone_returns_clean() {
-  local case_dir home child_wt rc
+  local case_dir home child_wt rc out jobdir runner child
   case_dir=$(make_case secondmate-child-nested-clean)
   write_meta "$case_dir" local-only secondmate
   home="$case_dir/secondmate-home"
@@ -1845,14 +1845,34 @@ test_forced_secondmate_child_scout_nested_clone_returns_clean() {
     "worktree=$child_wt" \
     "project=$case_dir/project" \
     "kind=scout" \
-    "mode=local-only"
+    "mode=local-only" \
+    "spawn_gen=child-job-gen"
   seed_nested_clone_and_scratch "$case_dir" "$child_wt"
   add_treehouse_clean_fd "$case_dir"
+  mkdir -p "$case_dir/job-scratch"
+  out=$(cd "$case_dir/job-scratch" && FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_TASK_INBOX="$home/state/child-scout.inbox" PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-task-job.sh" start --timeout 120 -- sleep 60) || fail "could not start child task job: $out"
+  jobdir="$home/state/child-scout.inbox/jobs/$(printf '%s\n' "$out" | sed -n 's/^job: //p')"
+  runner=$(sed -n 's/^pid=//p' "$jobdir/runner")
+  child=$(sed -n 's/^pid=//p' "$jobdir/child")
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/endpoint.log"
+exit 0
+SH
 
   rc=0
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_TASK_JOB_KILL_GRACE_SECS=1 run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
   expect_code 0 "$rc" "secondmate-child-nested-clean: forced secondmate teardown should succeed"
+  ! kill -0 "$runner" 2>/dev/null || fail "forced teardown left the child job runner alive"
+  ! kill -0 "$child" 2>/dev/null || fail "forced teardown left the child command alive"
+  assert_absent "$home" "forced teardown retained the retired secondmate home"
+  assert_no_grep 'send-keys' "$case_dir/endpoint.log" "forced teardown rang a completion"
+  FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    bash -c '. "$1/bin/fm-task-job-lib.sh"; fm_task_job_reconcile "$2/state" child-scout' _ "$ROOT" "$home"
+  assert_absent "$home/state/child-scout.inbox" "recovery recreated the retired child's inbox"
   [ -z "$(git -C "$child_wt" status --porcelain --untracked-files=all)" ] \
     || fail "secondmate-child-nested-clean: untracked entries remain: $(git -C "$child_wt" status --porcelain --untracked-files=all)"
   assert_absent "$child_wt/scratch-clone" "secondmate-child-nested-clean: nested clone survived return"

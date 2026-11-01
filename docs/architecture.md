@@ -247,6 +247,7 @@ On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, the record 
 `fm-send.sh` delivers every remote text steer and ordinary local text steer as a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
 The doorbell line is a shell no-op for pane backends and is never delivered to an endpoint classified as dead or missing; that record surfaces once for recovery instead of walking the re-ring ladder (`bin/fm-task-inbox-lib.sh` header).
 The [`fm-send.sh` header](../bin/fm-send.sh) owns the local-only direct-submit plane and its pane-specific timing; [T3 native delivery](t3code-backend.md#current-lifecycle-and-safety) owns its request-id retry policy.
+Completions from commands launched as task jobs use this inbox under the contract in [`fm-task-job-lib.sh`](../bin/fm-task-job-lib.sh), which also states the process-group limit on what a job's deadline and cleanup can stop, with usage owned by [`fm-task-job.sh`](../bin/fm-task-job.sh).
 
 Text for a worker to read and commands that drive a worker's process are separate planes.
 `fm-send.sh` is the data plane and always routing-marks a `kind=secondmate` target, which is right for a message and wrong for a lifecycle command, because a marked exit command arrives as chat the agent reasons about instead of executing.

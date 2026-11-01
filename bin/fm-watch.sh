@@ -277,6 +277,10 @@ WATCH_HOME_EXISTED=0
 # (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# Task-job recovery (fm_task_job_reconcile in the pane loop below):
+# bin/fm-task-job-lib.sh owns recovery and completion delivery.
+# shellcheck source=bin/fm-task-job-lib.sh
+. "$SCRIPT_DIR/fm-task-job-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
 # attended and the afk session; bin/fm-afk-contract.sh owns its schema and its
 # away-or-quiet reading, which is all this watcher reads (away_record_present
@@ -709,6 +713,97 @@ inbox_steer_check() {  # <window> <task>
       wake "$reason"
       ;;
   esac
+}
+
+task_job_check() {  # <window> <task>
+  local w=$1 task=$2 root dir action verb rec count busy backend tail40 reason ring_rc lock held=
+  TASK_JOB_WAKE_REASON=
+  root=$(fm_task_job_root "$STATE" "$task")
+  [ -d "$root" ] || return 0
+  for dir in "$root"/*; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    action=$(fm_task_job_due_action "$dir") || continue
+    verb=${action%% *}
+    [ "$verb" != quiet ] || continue
+    if [ -z "$held" ]; then
+      if fm_task_job_task_held "$STATE" "$task"; then held=yes; else held=no; fi
+    fi
+    [ "$held" != yes ] || continue
+    count=${action##* }
+    rec=${action#* }
+    rec=${rec% *}
+    reason=
+    backend=$(window_backend "$w")
+    case "$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)" in
+      dead|missing)
+        reason="stale: $w (task job ${dir##*/}: completion $rec is unhandled and the worker's agent has exited or its endpoint is missing; recover the worker)"
+        verb=escalate
+        ;;
+    esac
+    if [ "$verb" = ring ]; then
+      watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || WATCHER_CAPTURE=
+      tail40=$WATCHER_CAPTURE
+      if inbox_steer_busy "$w" "$backend" "$task" "$tail40"; then
+        busy=$(fm_meta_get "$dir/busy" count)
+        case "$busy" in ''|*[!0-9]*) busy=0 ;; esac
+        busy=$((busy + 1))
+        if ! fm_task_job_write_record "$dir/busy" "count=$busy" 2>/dev/null; then
+          [ -d "$dir" ] || continue
+          echo "error: task-job busy bookkeeping failed: $dir/busy" >&2
+          return 1
+        fi
+        [ "$busy" -ge "$(fm_task_inbox_busy_max)" ] || continue
+        reason="stale: $w (task job ${dir##*/}: completion $rec is unhandled after $busy busy-deferred doorbells; inspect the worker)"
+        verb=escalate
+      else
+        if ! rm -f "$dir/busy" 2>/dev/null; then
+          [ -d "$dir" ] || continue
+          echo "error: task-job busy bookkeeping could not be reset: $dir/busy" >&2
+          return 1
+        fi
+        ring_rc=0
+        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+        if [ "$ring_rc" -eq 3 ]; then
+          reason="stale: $w (task job ${dir##*/}: completion $rec is unhandled and its endpoint is unavailable; recover the worker)"
+          verb=escalate
+        else
+          if ! fm_task_job_write_record "$dir/delivery" "count=$((count + 1))" "last=$(date +%s)" 2>/dev/null; then
+            [ -d "$dir" ] || continue
+            echo "error: task-job delivery bookkeeping failed: $dir/delivery" >&2
+            return 1
+          fi
+          triage_log "task-job delivery attempt: $task ${dir##*/} result=$ring_rc"
+        fi
+      fi
+    fi
+    if [ "$verb" = escalate ] && [ -f "$rec" ] && [ -d "$dir" ]; then
+      lock=$(fm_meta_lock_path "$STATE/$task.meta") || return 1
+      if ! fm_lock_acquire_wait "$lock"; then
+        [ -d "$dir" ] || continue
+        return 1
+      fi
+      if [ ! -d "$dir" ] || [ ! -f "$rec" ]; then
+        fm_lock_release "$lock" || return 1
+        continue
+      fi
+      reason=${reason:-"stale: $w (task job ${dir##*/}: completion $rec still unhandled after $count doorbell delivery attempts; inspect the worker)"}
+      if ! fm_wake_append stale "$w" "$reason" 2>/dev/null; then
+        fm_lock_release "$lock" || return 1
+        [ -d "$dir" ] || continue
+        echo "error: cannot queue escalation for task job ${dir##*/}" >&2
+        exit 1
+      fi
+      if ! fm_task_job_write_record "$dir/escalated" "record=${rec##*/}" 2>/dev/null; then
+        fm_lock_release "$lock" || return 1
+        [ -d "$dir" ] || continue
+        echo "error: task-job escalation bookkeeping failed: $dir/escalated" >&2
+        exit 1
+      fi
+      fm_lock_release "$lock" || return 1
+      [ -d "$dir" ] || continue
+      TASK_JOB_WAKE_REASON=$reason
+    fi
+  done
 }
 
 # 0 (benign/absorb) if EVERY task in a no-verb "signal:" wake has positive work
@@ -4243,8 +4338,14 @@ EOF
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
-    # exemption below, because a mate's steers land in an inbox too.
-    [ -z "$task" ] || inbox_steer_check "$w" "$task"
+    # exemption below, because a mate's steers land in an inbox too. Task-job
+    # recovery runs first, then completions and steers advance independently.
+    if [ -n "$task" ]; then
+      fm_task_job_reconcile "$STATE" "$task" || true
+      task_job_check "$w" "$task" || exit 1
+      inbox_steer_check "$w" "$task"
+      [ -z "$TASK_JOB_WAKE_REASON" ] || wake "$TASK_JOB_WAKE_REASON"
+    fi
     key=$(window_key "$w")
     last=$(status_declared_wait_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then

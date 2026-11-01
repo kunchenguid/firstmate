@@ -3467,6 +3467,10 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
+    if [ -d "$sub_state/$child_id.inbox/jobs" ]; then
+      "$SCRIPT_DIR/fm-task-job.sh" stop-all "$sub_state" "$child_id" \
+        || { echo "error: could not stop every task job of child $child_id; retaining its worktree and records" >&2; return 1; }
+    fi
     if [ -n "$child_t" ]; then
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
@@ -3739,6 +3743,11 @@ if [ "$BACKEND" = herdr ]; then
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+fi
+
+if [ -d "$STATE/$ID.inbox/jobs" ]; then
+  "$SCRIPT_DIR/fm-task-job.sh" stop-all "$STATE" "$ID" \
+    || { echo "error: could not stop every task job of $ID; retaining its worktree and records" >&2; exit 1; }
 fi
 
 BACKLOG_CLOSED=0
@@ -4108,7 +4117,10 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 rm -rf "$STATE/$ID.kiro-home"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
-# leftover unhandled steer here is moot rather than unlanded work.
+# leftover unhandled steer here is moot rather than unlanded work. Its jobs/
+# directory records task jobs that run detached from the closed endpoint, so
+# any still running are stopped first rather than left orphaned
+# (bin/fm-task-job-lib.sh).
 # state/<id>.git-hooks is the spawn-owned commit-msg strip directory, left
 # read-only by its installer, and state/<id>.push-guard is a forge=external
 # task's read-only push guard record (bin/fm-git-push-guard.sh).
