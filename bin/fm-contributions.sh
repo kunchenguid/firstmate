@@ -242,7 +242,7 @@ read_saved() {
   # Validate records in bounded jq batches: one process per file outgrows the
   # watcher's check timeout, and one process for all files outgrows ARG_MAX.
   [ "${#files[@]}" -gt 0 ] || { printf '[]\n' > "$TMP/saved.json"; return 0; }
-  local batch=${FM_CONTRIBUTIONS_READ_BATCH:-100} start n=0
+  local batch=100 start n=0
   local -a args=() part=()
   for ((start = 0; start < ${#files[@]}; start += batch)); do
     part=("${tasks[@]:start:batch}")

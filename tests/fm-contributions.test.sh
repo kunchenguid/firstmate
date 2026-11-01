@@ -1408,20 +1408,20 @@ test_record_without_trailing_newline_does_not_join_its_neighbour() {
 }
 
 test_records_beyond_one_read_batch_are_all_read() {
-  local home name n=0 actual real_jq
+  local home n actual real_jq
   home=$(new_home read-batches)
-  for name in alpha beta gamma delta epsilon; do
-    n=$((n + 1))
-    mkdir -p "$home/data/$name"
-    jq -n --arg task "$name" --arg url "https://github.com/o/r/pull/$n" --arg token "t$n" \
+  for n in $(seq 1 101); do
+    mkdir -p "$home/data/task$n"
+    jq -n --arg task "task$n" --arg url "https://github.com/o/r/pull/$n" --arg token "t$n" \
       '{schema:"fm-contributions.v1",task:$task,records:[{url:$url,kind:"pr",checked_at:null,error:null,
-        pending:[{token:$token}],seen:[],verdict:null,observation:null}]}' > "$home/data/$name/contributions.json"
+        pending:[{token:$token}],seen:[],verdict:null,observation:null}]}' > "$home/data/task$n/contributions.json"
   done
   real_jq=$(command -v jq)
-  printf '#!/bin/sh\nn=0\nfor a; do [ "$a" = --rawfile ] && n=$((n + 1)); done\n[ "$n" -le 2 ] || { echo "jq given $n record files" >&2; exit 99; }\nexec %s "$@"\n' "$real_jq" > "$home/fakebin/jq"
+  printf '#!/bin/sh\nn=0\nfor a; do [ "$a" = --rawfile ] && n=$((n + 1)); done\n[ "$n" -le 100 ] || { echo "jq given $n record files" >&2; exit 99; }\nexec %s "$@"\n' "$real_jq" > "$home/fakebin/jq"
   chmod +x "$home/fakebin/jq"
-  actual=$(with_home "$home" env FM_CONTRIBUTIONS_READ_BATCH=2 "$ROOT/bin/fm-contributions.sh" pending | jq -c '[.[].task] | sort')     || fail 'records spanning several read batches made pending unreadable'
-  [ "$actual" = '["alpha","beta","delta","epsilon","gamma"]' ] || fail "records spanning read batches named tasks $actual"
+  actual=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq 'length') \
+    || fail 'records spanning several read batches made pending unreadable'
+  [ "$actual" = 101 ] || fail "records spanning read batches yielded $actual pending tasks, expected 101"
   pass 'records beyond one read batch are all read'
 }
 
