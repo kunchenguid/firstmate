@@ -951,6 +951,109 @@ SH
   pass "a verified close keeps its merge and notes any other link no run verified"
 }
 
+test_teardown_close_keeps_every_link_it_downgrades() {
+  local case_dir out
+  local older=https://github.com/example/repo/pull/9
+  local current=https://github.com/example/repo/pull/90
+  # The row carries two pull-request links and the completion note names only
+  # the longer URL. A guard that matches any link, or matches by substring,
+  # skips the note that names both and the strip then removes both from the
+  # title, so the older URL would survive nowhere on the row.
+  case_dir=$(make_case tasks-axi-close-two-unverified-links)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$current" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  tasks-axi update task-x1 --pr "$older" --file "$case_dir/data/backlog.md" >/dev/null
+  tasks-axi update task-x1 --pr "$current" --file "$case_dir/data/backlog.md" >/dev/null
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *"state,mergedAt,url"*) printf '%s\t%s\t%s\n' 'OPEN' '' "${3:-}" ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of two unverified links failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left the item at $(backlog_row_state "$case_dir"): $out"
+  assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
+    "two still-open pull requests were recorded as a merge"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F 'links: none' >/dev/null \
+    || fail "the close kept a structured link no run verified"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "Historical record: $older, $current" >/dev/null \
+    || fail "the close dropped an unverified link instead of noting every one"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | sed -n 's/^  title: //p' | grep -F 'pull/' >/dev/null \
+    && fail "the close left an unverified link on the title"
+  pass "a close notes every unverified link before stripping the title"
+}
+
+test_teardown_retain_keeps_every_link_it_downgrades() {
+  local case_dir out
+  local older=https://github.com/example/repo/pull/9
+  local current=https://github.com/example/repo/pull/90
+  case_dir=$(make_case tasks-axi-retain-two-unverified-links)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$current" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  tasks-axi update task-x1 --pr "$older" --file "$case_dir/data/backlog.md" >/dev/null
+  tasks-axi update task-x1 --pr "$current" --file "$case_dir/data/backlog.md" >/dev/null
+  tasks-axi hold task-x1 --reason "captain merge approval pending" --kind captain \
+    --file "$case_dir/data/backlog.md" >/dev/null \
+    || fail "could not hold the two-link fixture for the captain"
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *"state,mergedAt,url"*) printf '%s\t%s\t%s\n' 'OPEN' '' "${3:-}" ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "retention of two unverified links failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "queued" ] \
+    || fail "teardown left the held row at $(backlog_row_state "$case_dir"): $out"
+  assert_no_grep '(merged ' "$case_dir/data/backlog.md" \
+    "a retained row with two open pull requests rendered as a merge"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F 'links: none' >/dev/null \
+    || fail "the retained row kept a structured link no run verified"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "Historical record: $older, $current" >/dev/null \
+    || fail "the retention dropped an unverified link instead of noting every one"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | sed -n 's/^  title: //p' | grep -F 'pull/' >/dev/null \
+    && fail "the retained row left an unverified link on the title"
+  pass "a retention notes every unverified link before stripping the title"
+}
+
 test_teardown_records_the_merge_the_forge_confirms() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close-merged-pr)
@@ -6347,6 +6450,8 @@ test_teardown_verified_close_drops_another_link_no_run_verified
 test_teardown_records_the_merge_the_forge_confirms
 test_teardown_close_states_an_unreadable_pr_without_claiming_a_merge
 test_teardown_retain_never_claims_a_merge_it_did_not_read
+test_teardown_close_keeps_every_link_it_downgrades
+test_teardown_retain_keeps_every_link_it_downgrades
 test_teardown_records_a_long_but_recordable_pr_link_as_its_unconfirmed_note
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note

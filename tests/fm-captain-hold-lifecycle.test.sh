@@ -3838,6 +3838,43 @@ EOF
   pass "a retried answer to a legacy record records its note once"
 }
 
+test_answer_keeps_every_link_it_downgrades() {
+  local home id show older current
+  home=$(make_home answer-two-unverified-links)
+  id=sample-answer-two-unverified
+  older=https://github.com/sample/sample/pull/9
+  current=https://github.com/sample/sample/pull/90
+  tasks_in "$home" add "$id" "Ship the two unverified links" --kind ship --repo sample >/dev/null \
+    || fail "could not create the two-link answer fixture"
+  tasks_in "$home" update "$id" --pr "$older" >/dev/null \
+    || fail "could not attach the first unverified link"
+  tasks_in "$home" update "$id" --pr "$current" >/dev/null \
+    || fail "could not attach the second unverified link"
+  run_captain "$home" hold "$id" --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the two-link answer fixture"
+  # The retained record's note names only the longer URL, so a guard that
+  # matches any link would skip the note that names both before the title loses
+  # them.
+  printf 'id=%s\ndata=%s\nspawn_gen=fixture-%s\ncleanup_incomplete=0\nmode=retain\narg=--note\narg=%s\n' \
+    "$id" "$home/data" "$id" "$current" > "$home/state/$id.backlog-close"
+
+  printf 'Proceed without merging.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer the two-link row"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered two-link row is gone"
+  assert_contains "$show" "state: done" "the answer did not close the two-link row"
+  assert_contains "$show" 'links: none' \
+    "the answer kept a structured link no run verified"
+  assert_contains "$show" "Historical record: $older, $current" \
+    "the answer dropped an unverified link instead of noting every one"
+  tasks_in "$home" show "$id" | sed -n 's/^  title: //p' | head -1 \
+    | grep -F 'pull/' >/dev/null \
+    && fail "the answer left an unverified link on the title"
+  assert_no_grep '(merged ' "$home/data/backlog.md" \
+    "the answered two-link row rendered as a merge nobody read"
+  pass "an answer notes every unverified link before stripping the title"
+}
+
 test_answer_records_the_note_a_retained_record_carried() {
   local home id pr show
   home=$(make_home answer-retained-note)
@@ -5621,6 +5658,7 @@ test_answer_keeps_a_merge_after_the_retention_landed
 test_answer_survives_a_failed_close_without_losing_the_link
 test_answer_ignores_a_merge_fact_for_another_link
 test_answer_keeps_only_the_link_it_verified
+test_answer_keeps_every_link_it_downgrades
 test_answer_records_an_interrupted_downgrade_note_once
 test_answer_records_a_composed_note_once
 test_answer_records_the_note_a_retained_record_carried

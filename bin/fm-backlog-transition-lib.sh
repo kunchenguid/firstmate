@@ -660,7 +660,7 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
     if [ -n "$sentence" ]; then
       if [ -z "$body_line" ]; then
         body_line=$sentence
-      elif ! fm_backlog_text_names_link "$body_line" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
+      elif ! fm_backlog_text_names_links "$body_line" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
         body_line="$body_line; $sentence"
       fi
     fi
@@ -1020,18 +1020,34 @@ fm_backlog_merge_fact_remove() {  # <state-dir> <id>
   return 0
 }
 
-# Succeeds when <text> already names one of the links in <newline-separated-links>.
-# A caller whose own note keeps the link does not need the downgrade sentence
-# repeated beside it.
-fm_backlog_text_names_link() {  # <text> <newline-separated-links>
-  local text=$1 link
+# Succeeds when <text> names every one of the links in <newline-separated-links>,
+# compared as whole URLs. A caller may strip all those links from the title, so
+# proceeding on a partial match would drop the URL it did not write to the body.
+# An empty link list names nothing.
+fm_backlog_text_names_links() {  # <text> <newline-separated-links>
+  local text=$1 link token found seen=0
+  local -a words=()
+  local IFS=$' \t\n,;()<>"\''
+  text=${text//$'\n'/ }
+  read -r -a words <<<"$text" || :
   while IFS= read -r link; do
     [ -n "$link" ] || continue
-    case "$text" in *"$link"*) return 0 ;; esac
+    seen=1
+    found=0
+    for token in "${words[@]+"${words[@]}"}"; do
+      while :; do
+        case "$token" in
+          *[.:!?]) token=${token%?} ;;
+          *) break ;;
+        esac
+      done
+      [ "$token" = "$link" ] && { found=1; break; }
+    done
+    [ "$found" = 1 ] || return 1
   done <<EOF
 $2
 EOF
-  return 1
+  [ "$seen" = 1 ]
 }
 
 fm_backlog_row_artifact_supported() {
@@ -1092,7 +1108,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     fm_backlog_pr_link_note "$data" "$id" "this retention read no merge" || return 1
     note=$FM_BACKLOG_DOWNGRADE_NOTE
     if [ -n "$note" ] \
-       && ! fm_backlog_text_names_link "$deliverable" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
+       && ! fm_backlog_text_names_links "$deliverable" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
       deliverable="${deliverable:+$deliverable; }$note"
     fi
     [ -z "$FM_BACKLOG_DOWNGRADE_LINKS" ] || strip_after=1
