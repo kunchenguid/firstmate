@@ -1599,6 +1599,19 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
   '
 }
 
+# Remove this process's pending-reply decision snapshot directories under
+# $TMPDIR. fm_pending_reply_tick names its cache dir with the owning pid so an
+# interruption mid-tick still leaves the directory findable by this cleanup,
+# which the watcher's exit cleanup calls.
+fm_pending_reply_decision_cache_cleanup() {
+  local d
+  for d in "${TMPDIR:-/tmp}"/fm-pending-reply-decisions."$$".*; do
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    rm -f "$d/"*
+    rmdir "$d"
+  done
+}
+
 # Scan every pending record for this parent state. Safe to call every poll.
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks. Records are
@@ -1630,7 +1643,7 @@ fm_pending_reply_tick() {  # <state-dir>
     selected+=("$rec")
   done < <(_fm_pending_reply_select_needing_work ${records[@]+"${records[@]}"})
   if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
-    _fm_pending_reply_decision_cache_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-pending-reply-decisions.XXXXXX") \
+    _fm_pending_reply_decision_cache_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-pending-reply-decisions.$$.XXXXXX") \
       || _fm_pending_reply_decision_cache_dir=
   fi
   for rec in ${selected[@]+"${selected[@]}"}; do
