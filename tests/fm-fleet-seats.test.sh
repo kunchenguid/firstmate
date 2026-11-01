@@ -1457,11 +1457,10 @@ test_exact_counting_across_route_changes() {
   pass "same-pool handoffs keep one seat, cross-pool candidates need destination capacity, and counting follows the current policy"
 }
 
-test_managed_records_and_legacy_import() {
-  local home="$TMP_ROOT/managed/primary" out st name
+test_managed_records() {
+  local home="$TMP_ROOT/managed/primary" out
   make_home "$home"
   pools "$home" 1
-  st=$(cd "$home/state" && pwd -P)
   new_holder
   out=$(reserve "$home" t pool-model-a 2>&1) || fail "initial reservation: $out"
   seats "$home" release t --generation g-t --reason prelaunch >/dev/null || fail "release"
@@ -1478,19 +1477,7 @@ test_managed_records_and_legacy_import() {
   expect_code 5 "$?" "a malformed holder record"
   rm -f "$home/state/fleet-seats/holders/broken.json"
 
-  # A v1 reservation imports once, conservatively, and counts exactly once
-  # beside its own task record.
-  name=$(printf '%s\t%s' "$st" legacy | cksum | tr -s ' ' '-' | cut -d- -f1-2)
-  mkdir -p "$home/state/fleet-seats/.shared"
-  printf 'state=%s\ntask=legacy\nmodel=pool-model-a\npid=999999\npid_identity=\nnonce=\npolicy=\nhold=\nat=1\n' "$st" \
-    > "$home/state/fleet-seats/.shared/$name.seat"
-  task_record "$home" legacy pool-model-a ship "spawn_gen=g-legacy"
-  out=$(reserve "$home" other3 pool-model-a 2>&1)
-  expect_code 4 "$?" "a new holder beside an imported legacy reservation"
-  assert_contains "$out" "(1 of 1" "the legacy reservation and its record counted twice"
-  assert_absent "$home/state/fleet-seats/.shared/$name.seat" "the imported v1 record was not retired"
-  assert_equals v1 "$(seats "$home" show legacy | jq -r '.incarnations[0].legacy.source')" "the import lost its provenance"
-  pass "managed records follow the ledger, conflicts and malformed ledgers refuse, and v1 reservations import once"
+  pass "managed records follow the ledger and conflicting or malformed ledgers refuse"
 }
 
 test_cleanup_releases_only_its_generation() {
@@ -1696,11 +1683,22 @@ test_remote_host_supervisor_adoption_and_accounting() {
   # supervisor is counted once, not once per accounting surface, and the remote
   # it names is not charged that same seat again out of its own allowance.
   task_record "$R_ROOT" theshop pool-model-a secondmate \
-    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s\nremote_spawn_gen=host.1' "$ROOT" "$R_REMOTE")"
+    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s' "$ROOT" "$R_REMOTE")"
   pools "$R_ROOT" 2
+  serve_remotes >/dev/null || fail "capacity-change serve failed"
+  task_record "$R_ROOT" theshop pool-model-a secondmate \
+    "$(printf 'remote_host=another-host\nremote_root=%s\nhome=%s' "$ROOT" "$R_REMOTE")"
+  new_holder
+  out=$(reserve "$R_ROOT" wrong-route pool-model-a 2>&1)
+  expect_code 4 "$?" "an unmatched generationless parent record lost its charge: $out"
+  task_record "$R_ROOT" theshop pool-model-a secondmate \
+    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s' "$ROOT" "$R_REMOTE")"
   out=$(serve_remotes 2>&1)
   assert_contains "$out" "served theshop" "a parent-recorded supervisor blocked serving"
   assert_equals 1 "$(used_seats "$R_ROOT")" "the parent record and the certificate counted one supervisor twice"
+  new_holder
+  out=$(reserve "$R_ROOT" local-spare pool-model-a 2>&1) || fail "generationless parent blocked a free local seat: $out"
+  seats "$R_ROOT" release local-spare --generation g-local-spare --reason prelaunch >/dev/null || fail "release local spare"
   remote_reserve_bg remote-worker-2 pool-model-a "$dir/remote-worker-2"
   serve_remotes >/dev/null 2>&1 || fail "allowance serve with a parent-recorded supervisor failed"
   wait "$BG_PID"
@@ -1936,49 +1934,6 @@ SH
     assert_equals reserved "$(lifecycle_of "$home" "sm$n" "g$n")" "rotation released an uncertain candidate"
   done
   pass "bounded reconciliation rotates across watcher ticks and retains every uncertain launch"
-}
-
-test_legacy_routes_support_recovery_and_retain_invalid_endpoints() {
-  local base="$TMP_ROOT/legacy-routes" home fakebin st name out shape
-  fakebin=$(endpoint_fakebin "$base/tmux")
-  for shape in valid invalid; do
-    home="$base/$shape"
-    make_home "$home"
-    pools "$home" 1
-    st=$(cd "$home/state" && pwd -P)
-    task_record "$home" sm pool-model-a secondmate "spawn_gen=legacy-gen
-window=firstmate:fm-sm
-endpoint_task_id=sm
-worktree=$home
-project=$home"
-    [ "$shape" != invalid ] || printf 'endpoint_task_id=another\n' >> "$st/sm.meta"
-    name=$(printf '%s\t%s' "$st" sm | cksum | tr -s ' ' '-' | cut -d- -f1-2)
-    mkdir -p "$st/fleet-seats/legacy"
-    printf 'state=%s\ntask=sm\nmodel=pool-model-a\npid=99999999\npid_identity=\n' "$st" > "$st/fleet-seats/legacy/$name.seat"
-    new_holder
-    out=$(reserve "$home" other pool-model-a 2>&1)
-    expect_code 4 "$?" "a contender beside an imported legacy route: $out"
-    assert_absent "$st/fleet-seats/legacy/$name.seat" "legacy import did not consume its source"
-    if [ "$shape" = invalid ]; then
-      assert_equals true "$(seats "$home" show sm | jq 'all(.incarnations[]; .route == null and .startup_confirmed == false)')" "invalid endpoint metadata became a trusted route"
-      out=$(PATH="$fakebin:$PATH" seats "$home" reclaim sm --generation legacy-gen 2>&1)
-      expect_code 3 "$?" "invalid legacy route was reclaimed: $out"
-      assert_equals reserved "$(lifecycle_of "$home" sm legacy-gen)" "invalid legacy evidence freed its seat"
-    else
-      assert_equals true "$(seats "$home" show sm | jq 'any(.incarnations[]; .route.placement == "local" and .route.spawn_gen == .generation and .route.target == "firstmate:fm-sm")')" "import discarded the exact local route"
-      printf 'fm-sm\n' > "$base/tmux/endpoint/windows"
-      printf 'claude\n' > "$base/tmux/endpoint/command"
-      out=$(PATH="$fakebin:$PATH" seats "$home" confirm sm --generation legacy-gen 2>&1)
-      expect_code 3 "$?" "legacy confirmation without socket identity: $out"
-      printf 'bash\n' > "$base/tmux/endpoint/command"
-      out=$(PATH="$fakebin:$PATH" seats "$home" reclaim sm --generation legacy-gen 2>&1)
-      expect_code 3 "$?" "legacy recovery without socket identity: $out"
-      assert_equals reserved "$(lifecycle_of "$home" sm legacy-gen)" "unproven legacy ownership freed its seat"
-      out=$(reserve "$home" other pool-model-a 2>&1)
-      expect_code 4 "$?" "legacy recovery returned unverified capacity: $out"
-    fi
-  done
-  pass "legacy routes without socket ownership and invalid endpoints stay counted"
 }
 
 test_rex_absence_uses_matching_metadata() {
@@ -2302,7 +2257,7 @@ if [ "$#" -gt 0 ]; then
       test_remote_host_supervisor_adoption_and_accounting) "$focused_test" ;;
       test_policy_requires_one_object) "$focused_test" ;;
       test_reservation_uses_one_policy_snapshot) "$focused_test" ;;
-      test_remote_descendants_prevent_incomplete_certificates|test_generationless_predecessor_stays_counted|test_remote_without_pools_confirms_unpooled_models|test_managed_records_and_legacy_import|test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_legacy_routes_support_recovery_and_retain_invalid_endpoints|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
+      test_remote_descendants_prevent_incomplete_certificates|test_generationless_predecessor_stays_counted|test_remote_without_pools_confirms_unpooled_models|test_managed_records|test_empty_delivered_policy_and_bounded_startup|test_live_and_dead_routes_require_creation_server|test_metadata_free_rex_routes_prove_destruction|test_nested_remote_serve_uses_registry_owner|test_rex_absence_uses_matching_metadata|test_spawn_refuses_a_full_pool_before_any_record|test_nested_secondmate_records_share_capacity|test_remote_descendants_use_one_authority|test_orphan_secondmates_cannot_become_authorities|test_a_marked_home_inherits_its_root_authority|test_reconciliation_distinguishes_matching_and_reused_owner_pids|test_bounded_reconciliation_progresses_past_uncertain_holders|test_cleanup_releases_only_its_generation|test_confirmed_missing_and_policy_removal|test_spawn_holds_a_seat_until_cleanup|test_buffered_supervisor_launch_keeps_its_seat|test_proven_cancellation_frees_a_buffered_launch|test_unconfirmed_replacement_retains_predecessor) "$focused_test" ;;
       *) fail "unknown focused test: $focused_test" ;;
     esac
   done
@@ -2344,7 +2299,7 @@ test_collection_never_waits_on_task_locks
 test_serve_epochs_fence_lost_and_late_responses
 test_pool_grammar_is_uniform
 test_exact_counting_across_route_changes
-test_managed_records_and_legacy_import
+test_managed_records
 test_cleanup_releases_only_its_generation
 
 test_confirmed_missing_and_policy_removal
@@ -2361,7 +2316,6 @@ test_terminal_holders_survive_opt_out_readmission
 test_bounded_reconciliation_progresses_past_uncertain_holders
 test_reconciliation_distinguishes_matching_and_reused_owner_pids
 
-test_legacy_routes_support_recovery_and_retain_invalid_endpoints
 
 test_nested_remote_serve_uses_registry_owner
 

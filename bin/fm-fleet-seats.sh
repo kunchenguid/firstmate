@@ -43,14 +43,14 @@
 #   {schema, state_dir, task, revision, incarnations: [{generation,
 #    previous_generation, kind, model, policy_digest_at_reserve, lifecycle,
 #    launch_phase, owner_pid, owner_pid_identity, route, startup_confirmed,
-#    disposition, [legacy], [requested_model]}]}
+#    disposition, [requested_model]}]}
 # Every state is per holder + generation. lifecycle is reserved | confirmed
 # (both count) | released | reclaimed (neither counts); launch_phase refines
 # reserved as prepared -> dispatching -> started, with unknown for a
-# conservatively imported record. revision increases on every atomic mutation.
+# conservatively retained record. revision increases on every atomic mutation.
 # Pools are never storage directories: a pool's count is the number of
 # distinct holder keys with a nonterminal incarnation whose model the CURRENT
-# policy maps to that pool (a null model - an imported unresolved legacy model
+# policy maps to that pool (a null model - an unresolved model
 # - occupies every pool). Two generations of one holder in one pool count once;
 # an old and a candidate generation in different pools count in both until the
 # old one is terminal.
@@ -194,7 +194,7 @@
 # spawn_gen, operation, [socket_path]} with placement local|remote and remote-only
 # fields null locally. Local tmux dispatch captures the current server's absolute
 # socket_path itself; confirmation and stop/destruction evidence use that socket.
-# Without it, including on legacy imports, the route reads unreadable and stays
+# Without it, the route reads unreadable and stays
 # counted rather than observing a same-named endpoint on another server.
 # A host disposition response is the
 # fm-remote-seat-operation.v2 object bin/fm-remote-secondmate-control.sh prints.
@@ -526,83 +526,6 @@ ledger_scan() {
   done
 }
 
-# --- legacy v1 import ------------------------------------------------------------
-
-# import_legacy_v1: convert every v1 <ledger>/<pool>/*.seat reservation into a
-# conservatively counted v2 holder once, under the ledger lock. A v2 record
-# already present for the key takes precedence. The source is deleted only
-# after the imported record reads back with its key and model.
-import_legacy_v1() {
-  local f st task model pid identity fp gen meta meta_gen route kind json host root home backend target reg
-  for f in "$LEDGER"/*/*.seat "$LEDGER"/.[!.]*/*.seat "$LEDGER"/..?*/*.seat; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    st=$(record_field "$f" state)
-    task=$(record_field "$f" task)
-    model=$(record_field "$f" model)
-    pid=$(record_field "$f" pid)
-    identity=$(record_field "$f" pid_identity)
-    if [ -z "$st" ] || ! id_ok "$task"; then
-      LEDGER_ERROR="legacy seat record $f is unreadable"
-      return 1
-    fi
-    holder_load "$st" "$task" || { LEDGER_ERROR="holder record for $task is malformed"; return 1; }
-    if [ -n "$HOLDER_JSON" ]; then
-      rm -f "$f" || return 1
-      continue
-    fi
-    fp=$(cksum < "$f" | tr -s ' ' '-' | cut -d- -f1-2)
-    gen="v1-$fp"
-    meta="$st/$task.meta"
-    meta_gen=
-    route=null
-    kind=ship
-    if [ -f "$meta" ] && [ ! -L "$meta" ]; then
-      cp "$meta" "$TMPD/legacy.meta" || return 1
-      meta="$TMPD/legacy.meta"
-      meta_gen=$(meta_generation "$meta")
-      kind=$(record_field "$meta" kind)
-      case "$kind" in ship|scout|secondmate) ;; *) kind=ship ;; esac
-      if [ "$(normalize_model "$(record_field "$meta" model)")" = "$(normalize_model "$model")" ] && gen_ok "$meta_gen"; then
-        gen=$meta_gen
-        host=$(fm_backend_meta_exact_value "$meta" remote_host 2>/dev/null || true)
-        if [ -n "$host" ] && [ "$kind" = secondmate ]; then
-          root=$(fm_backend_meta_exact_value "$meta" remote_root 2>/dev/null || true)
-          home=$(fm_backend_meta_exact_value "$meta" home 2>/dev/null || true)
-          backend=$(fm_backend_meta_exact_value "$meta" remote_backend 2>/dev/null || true)
-          target=$(fm_backend_meta_exact_value "$meta" remote_target 2>/dev/null || true)
-          reg="${st%/state}/data/secondmates.md"
-          [ "$st" != "$CALLER_STATE" ] || reg="$DATA/secondmates.md"
-          if [ "$backend" = herdr ] && secondmate_registry_line_for_id "$reg" "$task" \
-            && [ "$SECONDMATE_REGISTRY_REMOTE" = 1 ] && [ "$SECONDMATE_REGISTRY_HOST" = "$host" ] \
-            && [ "$SECONDMATE_REGISTRY_ROOT" = "$root" ] && [ "$SECONDMATE_REGISTRY_HOME" = "$home" ] \
-            && [ "$(fm_backend_meta_exact_value "$meta" window 2>/dev/null || true)" = "remote:$task" ] \
-            && [ "$(fm_backend_meta_exact_value "$meta" endpoint_task_id 2>/dev/null || true)" = "$task" ]; then
-            route=$(jq -cn --arg b "$backend" --arg t "$target" --arg h "$home" --arg host "$host" --arg r "$root" --arg g "$gen" \
-              '{placement:"remote", backend:$b, target:(if $t == "" then null else $t end), home:$h, host:$host, remote_root:$r, spawn_gen:$g, operation:$g}') || return 1
-          fi
-        elif [ -z "$host" ] && fm_backend_validate_task_endpoint "$meta" "$task" >/dev/null 2>&1; then
-          home=$(record_field "$meta" home)
-          route=$(jq -cn --arg b "$FM_BACKEND_VALIDATED_BACKEND" --arg t "$FM_BACKEND_VALIDATED_TARGET" --arg h "$home" --arg g "$gen" --arg server "$(record_field "$meta" t3_server)" \
-            '{placement:"local", backend:$b, target:$t, home:(if $h == "" then null else $h end), host:null, remote_root:null, spawn_gen:$g, operation:null, server_identity:$server}') || return 1
-        fi
-      fi
-    fi
-    json=$(jq -cn --arg s "$st" --arg t "$task" --arg g "$gen" --arg m "$model" \
-      --arg k "$kind" --arg p "$pid" --arg i "$identity" --arg fp "$fp" --argjson r "$route" \
-      --arg schema "$HOLDER_SCHEMA" '{schema: $schema, state_dir: $s, task: $t, revision: 1,
-        incarnations: [{generation: $g, previous_generation: null, kind: $k,
-          model: (if $m == "" then null else $m end), policy_digest_at_reserve: null,
-          lifecycle: "reserved", launch_phase: "unknown",
-          owner_pid: (if ($p | test("^[0-9]+$")) then ($p | tonumber) else null end),
-          owner_pid_identity: $i, route: $r, startup_confirmed: false, disposition: null,
-          legacy: {source: "v1", fingerprint: $fp}}]}') || return 1
-    holder_publish "$json" || return 1
-    holder_load "$st" "$task" || return 1
-    [ "$(inc_get "$gen" '.model // ""')" = "$(normalize_model "$model")" ] || { LEDGER_ERROR="imported seat for $task did not read back"; return 1; }
-    rm -f "$f" || return 1
-  done
-}
-
 # --- task records ---------------------------------------------------------------
 
 meta_generation() {  # <meta>
@@ -611,6 +534,34 @@ meta_generation() {  # <meta>
   [ -n "$g" ] || g=$(record_field "$1" remote_spawn_gen)
   [ -n "$g" ] || g=$(record_field "$1" spawn_gen)
   printf '%s' "$g"
+}
+
+accounting_generation() {
+  local meta=$1 gen id route host root home owner owner_state
+  gen=$(meta_generation "$meta")
+  if [ -n "$gen" ]; then
+    printf '%s' "$gen"
+    return
+  fi
+  [ "$(record_field "$meta" kind)" = secondmate ] || return 0
+  id=${meta##*/}
+  id=${id%.meta}
+  route=$(awk -F '\t' -v id="$id" '$1 == id { print; exit }' "$TMPD/remote-routes")
+  [ -n "$route" ] || return 0
+  IFS=$'\t' read -r _ host root home <<<"$route"
+  owner=$(awk -F '\t' -v id="$id" '$1 == id { print $2; exit }' "$TMPD/remote-owners")
+  owner_state=$owner/state
+  [ "$owner" != "$ROOT_HOME" ] || owner_state=$ROOT_STATE
+  [ "$meta" = "$owner_state/$id.meta" ] || return 0
+  [ "$(record_field "$meta" remote_host)" = "$host" ] \
+    && [ "$(record_field "$meta" remote_root)" = "$root" ] \
+    && [ "$(record_field "$meta" home)" = "$home" ] || return 0
+  remote_confirmed "$id" || return 0
+  jq -r --arg s "$home/state/parent-route" --arg t "$id" \
+    --arg m "$(normalize_model "$(record_field "$meta" model)")" '
+    [.holders[] | select(.state_dir == $s and .task == $t
+      and (.model // "") == $m)]
+    | if length == 1 then .[0].generation else empty end' "$CERT_FILE"
 }
 
 # meta_state <meta> <models-file>: "pooled", "other", "absent", or "unreadable"
@@ -662,7 +613,7 @@ meta_state() {
 # evidence of that agent, so it stays counted here.
 remote_route_is() {
   local id=$1 meta=$2 route host root home
-  [ -n "$(meta_generation "$meta")" ] || return 1
+  [ -n "$(accounting_generation "$meta")" ] || return 1
   route=$(awk -F '\t' -v id="$id" '$1 == id { print; exit }' "$TMPD/remote-routes" 2>/dev/null) || return 1
   [ -n "$route" ] || return 1
   IFS=$'\t' read -r _ host root home <<<"$route"
@@ -690,7 +641,7 @@ pooled_records() {
     id=${meta##*/}
     id=${id%.meta}
     id_ok "$id" || continue
-    gen=$(meta_generation "$meta")
+    gen=$(accounting_generation "$meta")
     if [ -n "$gen" ] && awk -F '\t' -v s="$home_state" -v t="$id" '$1 == s && $2 == t { found = 1 } END { exit !found }' "$TMPD/ledger"; then
       if awk -F '\t' -v s="$home_state" -v t="$id" -v g="$gen" \
           '$1 == s && $2 == t && $3 == g { found = 1 } END { exit !found }' "$TMPD/ledger"; then
@@ -1700,7 +1651,6 @@ fi
 
 if [ "$CMD" = reconcile ]; then
   lock_or_refuse "$LOCK"
-  import_legacy_v1 || unavailable "${LEDGER_ERROR:-the legacy seat records cannot be imported}"
   ledger_scan || unavailable "${LEDGER_ERROR:-the seat ledger cannot be read}"
   unlock
   awk -F '\t' -v tick="$(($(date +%s) / 30))" '
@@ -1836,7 +1786,6 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
     { cp "$TMPD/delivered" "$DELIVERED.tmp.$$" && mv -f "$DELIVERED.tmp.$$" "$DELIVERED"; } || unavailable "cannot store the delivered policy"
     POLICY=$DELIVERED
     DIGEST=$DIGEST_ARG
-    import_legacy_v1 || unavailable "${LEDGER_ERROR:-the legacy seat records cannot be imported}"
     # Reject requests the delivered policy no longer supports.
     for f in "$REQDIR"/*.req; do
       [ -f "$f" ] || continue
@@ -2089,7 +2038,6 @@ if [ "$CMD" = serve-remotes ]; then
     fi
     POOLS=$TMPD/policy
     DIGEST=$(policy_digest "$POOLS")
-    import_legacy_v1 || unavailable "${LEDGER_ERROR:-the legacy seat records cannot be imported}"
     # The serve epoch: a stable issuer plus a per-remote sequence, persisted
     # before dispatch and reconciled with every surviving certificate.
     ISSUER_FILE=$LEDGER/issuer
@@ -2199,7 +2147,6 @@ mkdir -p "$LEDGER/holders" 2>/dev/null || unavailable "cannot create $LEDGER/hol
 lock_or_refuse "$LOCK"
 [ -e "$DECLARATION" ] && validate_pools "$DECLARATION" && [ "$(policy_digest "$DECLARATION")" = "$DIGEST" ] \
   || unavailable "the fleet seat policy changed before the reservation was decided"
-import_legacy_v1 || unavailable "${LEDGER_ERROR:-the legacy seat records cannot be imported}"
 load_or_refuse
 
 if [ -z "$POOL_LINE" ]; then
