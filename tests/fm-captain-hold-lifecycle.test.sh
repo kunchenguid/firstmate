@@ -979,7 +979,8 @@ test_release_is_attended_only() {
   home=$(make_home release-attended)
   tasks_in "$home" add sample-widget "Ship the sample widget" --kind ship --repo sample >/dev/null \
     || fail "could not create the held work item"
-  run_captain "$home" hold sample-widget --reason "captain go needed before shipping" >/dev/null \
+  run_captain "$home" hold sample-widget --class merge-or-landing-outside-authority \
+    --reason "captain go needed before shipping" >/dev/null \
     || fail "could not hold the work item for the captain"
   printf 'Not urgent; ship it as planned.\n' > "$home/go.txt"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" enter \
@@ -1002,11 +1003,11 @@ test_release_is_attended_only() {
   show=$(tasks_in "$home" show sample-widget --full)
   assert_contains "$show" "held: yes" "the intake lifted the hold while away"
 
-  run_captain "$home" hold sample-question --title "Pick the widget colour" \
-    --reason "captain must pick the colour" --repo sample >/dev/null \
+  run_captain "$home" hold sample-question --title "Approve the widget parts spend" --class money \
+    --reason "captain must approve the parts spend" --repo sample >/dev/null \
     || fail "could not hold the question for the captain"
-  printf 'Blue.\n' > "$home/blue.txt"
-  run_captain "$home" answer sample-question --decision-file "$home/blue.txt" >/dev/null \
+  printf 'Approved.\n' > "$home/approve.txt"
+  run_captain "$home" answer sample-question --decision-file "$home/approve.txt" >/dev/null \
     || fail "a closing answer was refused while away"
   show=$(tasks_in "$home" show sample-question --full)
   assert_contains "$show" "state: done" "a closing answer while away did not close the question"
@@ -1027,7 +1028,8 @@ test_release_is_attended_only() {
   assert_contains "$show" "held: no" "an attended release kept the hold"
   assert_contains "$show" "Resolution mode: released" "an attended release recorded no release"
 
-  run_captain "$home" hold sample-widget --reason "second captain go needed" >/dev/null \
+  run_captain "$home" hold sample-widget --class merge-or-landing-outside-authority \
+    --reason "second captain go needed" >/dev/null \
     || fail "could not re-hold the released work item"
   printf 'quiet\n%s\n' "$(date +%s)" > "$home/state/.afk"
   FM_AFK_MODE=quiet FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
@@ -1049,7 +1051,8 @@ test_release_rechecks_away_after_waiting_on_task_lock() {
   home=$(make_home release-race)
   tasks_in "$home" add sample-widget "Ship the sample widget" --kind ship --repo sample >/dev/null \
     || fail "could not create the held work item"
-  run_captain "$home" hold sample-widget --reason "captain go needed before shipping" >/dev/null \
+  run_captain "$home" hold sample-widget --class merge-or-landing-outside-authority \
+    --reason "captain go needed before shipping" >/dev/null \
     || fail "could not hold the work item for the captain"
   printf 'Ship it.\n' > "$home/go-race.txt"
 
@@ -5097,7 +5100,8 @@ EOF
 # A captain hold must declare which of the captain's categories it belongs to.
 # A missing or invented class is refused before anything is written, every
 # listed class is accepted, the class is recorded and projected for Bearings,
-# a re-hold replaces it, and the captain's own "later" pairs with --until.
+# a re-hold replaces it, the captain's own "later" requires --until, and a
+# deferred call of any other class keeps its own class alongside its date.
 test_hold_requires_a_known_class() {
   local home id cls out err show before after snap
   home=$(make_home typed-hold)
@@ -5115,10 +5119,6 @@ test_hold_requires_a_known_class() {
     fail "hold accepted an invented class"
   fi
   assert_grep 'unknown --class reversible-route-pick' "$home/bad-class.err" "an invented class was not named"
-  if run_captain "$home" hold sample-typed-work --class money --until 2099-01-01 --reason "captain must decide" \
-      >/dev/null 2> "$home/until-class.err"; then
-    fail "hold accepted a deferral date on a class that is not the captain's own later"
-  fi
   if run_captain "$home" hold sample-typed-work --class deferred-by-captain --reason "captain said later" \
       >/dev/null 2> "$home/deferred-no-until.err"; then
     fail "hold accepted the captain's later without its date"
@@ -5156,17 +5156,27 @@ EOF
 
   run_captain "$home" hold sample-typed-work --class physical-or-credential --reason "needs his login" >/dev/null \
     || fail "hold refused a classed hold on an existing work item"
-  run_captain "$home" hold sample-typed-work --class deferred-by-captain --until 2099-02-01 \
-    --reason "captain said revisit in February" >/dev/null \
-    || fail "re-hold refused the captain's later"
+  run_captain "$home" hold sample-typed-work --class money --until 2099-02-01 \
+    --reason "captain will approve the spend in February" >/dev/null \
+    || fail "re-hold refused a deferral date on a money call"
   show=$(tasks_in "$home" show sample-typed-work --full) || fail "the re-held work item is missing"
-  assert_contains "$show" "Captain hold class: deferred-by-captain" "a re-hold did not record its new class"
+  assert_contains "$show" "Captain hold class: money" "a deferred money call lost its class"
   assert_not_contains "$show" "Captain hold class: physical-or-credential" "a re-hold kept a stale class line"
+  for when in 2099-01-15T12:00:00Z:dated 2099-03-01T12:00:00Z:live; do
+    snap=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_PROJECTS_OVERRIDE="$home/projects" FM_SNAPSHOT_NOW="${when%:*}" \
+      "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed at ${when%:*}"
+    printf '%s' "$snap" | jq -e --arg bucket "${when##*:}" '
+      [.backlog.records[] | select(.id == "sample-typed-work")][0]
+      | .hold_class == "money" and .hold_until == "2099-02-01" and .hold_bucket == $bucket' >/dev/null \
+      || fail "a deferred money call did not show money with its due date at ${when%:*}: $snap"
+  done
 
   snap=$(run_bearings "$home" --all-decisions) || fail "bearings could not read the typed holds"
   printf '%s\n' "$snap" | jq -e '
     [.. | objects | select(.verb? == "captain-hold" and .key? == "sample-class-money")][0].class == "money"
-    and ([.. | objects | select(.verb? == "captain-hold" and .key? == "sample-typed-work")][0].class == "deferred-by-captain")' >/dev/null \
+    and ([.. | objects | select(.verb? == "captain-hold" and .key? == "sample-typed-work")][0].class == "money")' >/dev/null \
     || fail "bearings did not carry each hold's class: $snap"
   pass "a captain hold requires a known class, records it, and Bearings carries it"
 }
