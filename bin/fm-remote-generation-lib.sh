@@ -57,6 +57,16 @@ fm_remote_generation_resolve() {
   return 1
 }
 
+# fm_remote_launch_predecessor <ledger-json> <host> <root> <home>: the
+# generation the host's own route record names, which a new launch replaces.
+# A bound route target proves the candidate reached that host, so a launch that
+# was cancelled after dispatch, or that started and died, displaces the older
+# confirmed generation even though it never confirmed a startup. A launch that
+# never reached the host keeps a null target, so a prelaunch refusal and an
+# unsubmitted cancellation cannot displace it, and a stopped predecessor stays
+# the host's record until its successor's own route proves otherwise. The
+# route's shipped spawn_gen wins over the ledger generation because it is the
+# identity the host stores. Prints "-" when this home holds no such generation.
 fm_remote_launch_predecessor() {
   printf '%s\n' "$1" | jq -r --arg host "$2" --arg root "$3" --arg home "$4" '
     [.incarnations[]?

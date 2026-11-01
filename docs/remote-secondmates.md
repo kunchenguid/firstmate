@@ -652,6 +652,7 @@ Move a live remote second mate onto a newly pinned harness, model, or effort wit
 The [fleet seat contract](configuration.md#fleet-seat-pools-configfleet-seats) owns the parent-accounting prerequisite, including nested remote routes.
 [`bin/fm-secondmate-restart.sh`](../bin/fm-secondmate-restart.sh)'s header owns persistence-gated restart and the re-read fallback when the original incarnation cannot safely be replaced.
 A remote mate provisioned before `remote_spawn_gen` was recorded stays nudge-only during updates until one manual relaunch through `bin/fm-remote-secondmate-relaunch.sh` writes that generation into the primary's record.
+A relaunch replaces the generation the host's own record names, so a replacement that reached the host but was cancelled before it confirmed a startup still becomes the predecessor, while a launch that never reached the host leaves the older generation in place.
 The wrapper's header and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh)'s header own the operation token and host outcome mechanics.
 
 ### Firstmate code convergence

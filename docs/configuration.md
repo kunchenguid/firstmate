@@ -2148,6 +2148,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - A remote secondmate's own seat is parent-owned in the shared root ledger: an initial launch or relaunch reserves its generation before the host's launch or relaunch operation, and the host reports one outcome bound to that generation.
 - A host refusal before launch releases only the new candidate and leaves the old agent's seat alone.
 - A confirmed start counts the model the host actually runs, reports any mismatch with the requested model, and survives a failed update of the primary's own record.
+  A launch that found a supervisor already running on another model counts that supervisor's own generation on the model it actually runs, proven by the receipt that observed it; the model the launch asked for never takes a seat.
 - A lost reply or an unknown outcome keeps the candidate counted until the primary's watcher reads the host's outcome for that generation; a missing or mismatched receipt stays unknown and never permits the token to repeat lifecycle effects.
 - An unresolved received operation stays unknown after an adoption write fails; validation errors never replace an earlier operation's receipt with a prelaunch refusal.
 - While seat pools are configured, a host refuses a supervisor launch or relaunch that did not come through the primary's accounting.
