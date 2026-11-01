@@ -1170,9 +1170,9 @@ record_note() {
         echo
         inbox_q=$(printf '%s' "$STATE/$ID.inbox" | sed "s/'/'\\\\''/g")
         echo "First, check your instruction inbox: list it with"
-        echo "\`find '$inbox_q' -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V\`, act on"
-        echo "each message in numeric order, then mv each handled file into"
-        echo "'$inbox_q/handled/'. A steer sent before the relaunch survives there."
+        echo "\`find '$inbox_q' -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V\`."
+        echo "Follow the brief's inbox procedure for read receipts and completed handling"
+        echo "in numeric order. A steer sent before the relaunch survives there."
         echo
         printf '%s\n' "$NOTE"
       } >> "$RELAUNCH_BRIEF" \
