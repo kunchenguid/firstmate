@@ -211,8 +211,10 @@ fm_backend_is_known() {  # <name>
 # ${HC_SESSION:-default} endpoint (fm_backend_detect_hc_core_sock) - and
 # require it already live, because the adapter's container_ensure STARTS
 # a missing core: detection never autostarts one. Both also require a
-# usable hc toolchain: an executable FM_HC_BIN, or herdr-core/hc on PATH
-# reporting `hc x.y.z` (other tools ship an `hc` name), plus jq. A live app
+# usable hc toolchain: the adapter's own version gate (an executable
+# FM_HC_BIN, or herdr-core/hc on PATH reporting `hc x.y.z` at or above its
+# verified minimum - other tools ship an `hc` name and an older core would
+# only fail the spawn's container check later), plus jq. A live app
 # candidate failing either is NOT a detection: the probe records
 # app-terminal-unusable, app-window-unusable, or app-window-no-core in
 # FM_BACKEND_DETECT_SIGNAL so fm_backend_resolve can say why it did not switch.
@@ -315,35 +317,19 @@ fm_backend_herdr_app_window_live() {
   fm_backend_unix_sock_live "$sock"
 }
 
-# fm_backend_detect_hc_bin: the herdr-core binary the adapter would resolve
-# (bin/backends/hc.sh fm_backend_hc_bin): executable FM_HC_BIN wins, else
-# `herdr-core` on PATH, else the `hc` alias.
-fm_backend_detect_hc_bin() {
-  local bin
-  if [ -n "${FM_HC_BIN:-}" ]; then
-    [ -x "$FM_HC_BIN" ] || return 1
-    printf '%s' "$FM_HC_BIN"
-    return 0
-  fi
-  bin=$(command -v herdr-core 2>/dev/null || command -v hc 2>/dev/null) || return 1
-  [ -n "$bin" ] || return 1
-  printf '%s' "$bin"
-}
-
-# fm_backend_detect_hc_usable: an hc selection can only succeed when a
-# self-identifying herdr-core binary resolves (`<bin> --version` reports
-# `hc x.y.z` - unrelated tools ship an `hc` name) and jq is present, since
-# every adapter surface parses hc's JSON. Checking here keeps a detected app
-# signal from silently steering a spawn that the adapter's own gates would
-# only refuse later.
+# fm_backend_detect_hc_usable: an hc selection can only succeed when the
+# adapter's own binary gate passes - fm_backend_hc_version_check
+# (bin/backends/hc.sh, loaded through fm_backend_source exactly as spawn
+# loads it) resolves FM_HC_BIN or herdr-core/hc on PATH and requires a
+# self-identifying `hc x.y.z` at or above FM_BACKEND_HC_MIN_VERSION, since
+# unrelated tools ship an `hc` name and an older core would only be refused
+# by the spawn's container gate later - plus jq, which every adapter
+# surface needs. Checking here keeps a detected app signal from silently
+# steering a spawn into an hc the adapter would abort on.
 fm_backend_detect_hc_usable() {
-  local bin
   command -v jq >/dev/null 2>&1 || return 1
-  bin=$(fm_backend_detect_hc_bin) || return 1
-  case "$("$bin" --version 2>/dev/null)" in
-    'hc '[0-9]*.[0-9]*.[0-9]*) return 0 ;;
-  esac
-  return 1
+  fm_backend_source hc >/dev/null 2>&1 || return 1
+  fm_backend_hc_version_check >/dev/null 2>&1
 }
 
 # fm_backend_detect_hc_core_sock: the socket of the core the hc adapter
@@ -369,10 +355,11 @@ fm_backend_detect_hc_core_sock() {
 # carries a non-empty herdr.space label, the exact condition the app uses to
 # show a terminal in the window. The caller has already proven
 # HC_TERMINAL_SOCKET live (a bare `hc get` against a missing socket starts a
-# core) and the toolchain usable. A get failure or empty label is a miss.
+# core) and the toolchain usable, which also sourced the adapter, so
+# fm_backend_hc_bin is available here. A get failure or empty label is a miss.
 fm_backend_detect_herdr_app_terminal() {
   local bin space
-  bin=$(fm_backend_detect_hc_bin) || return 1
+  bin=$(fm_backend_hc_bin) || return 1
   # `env -u HC_SESSION` lets the pinned socket alone name the endpoint; an
   # inherited session could point at another core.
   space=$(env -u HC_SESSION HC_SOCKET="$HC_TERMINAL_SOCKET" "$bin" get "$HC_TERMINAL_ID" --json 2>/dev/null \
@@ -546,7 +533,7 @@ fm_backend_resolve() {
     esac
     return 0
   fi
-  toolchain="no usable hc toolchain (an executable FM_HC_BIN, or herdr-core/hc on PATH reporting 'hc x.y.z', and jq)"
+  toolchain="no usable hc toolchain (an executable FM_HC_BIN, or herdr-core/hc on PATH reporting 'hc x.y.z' at or above the verified minimum ${FM_BACKEND_HC_MIN_VERSION:-version}, and jq)"
   case "$FM_BACKEND_DETECT_SIGNAL" in
     app-terminal-unusable)
       echo "NOTICE: running in a live hc terminal (${HC_SESSION:-default}:${HC_TERMINAL_ID:-?}) but $toolchain can verify a Herdr app projection; staying on the default backend. See docs/hc-backend.md." >&2

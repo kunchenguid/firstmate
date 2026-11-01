@@ -584,13 +584,13 @@ test_backend_detect_herdr_app() {
   # AF_UNIX paths cap near 104 bytes; deep tmp roots overflow them, so every
   # bound socket lives under a short /tmp dir.
   sockdir=$(mktemp -d /tmp/fm-be.XXXXXX) || fail "mktemp for the socket dir failed"
-  # A fake herdr-core: --version self-identifies as hc; `get` echoes the record
-  # in $FM_FAKE_HC_GET. Every other call fails, so detection plumbing is all
-  # this stub can ever answer.
+  # A fake herdr-core: --version self-identifies as `hc $FM_FAKE_HC_VERSION`
+  # (9.9.9 default); `get` echoes the record in $FM_FAKE_HC_GET. Every other
+  # call fails, so detection plumbing is all this stub can ever answer.
   cat > "$fb/herdr-core" <<'SH'
 #!/bin/sh
 case "${1:-}" in
-  --version) printf 'hc 9.9.9\n' ;;
+  --version) printf 'hc %s\n' "${FM_FAKE_HC_VERSION:-9.9.9}" ;;
   get) printf '%s\n' "${FM_FAKE_HC_GET:-{\}}" ;;
   *) exit 3 ;;
 esac
@@ -660,6 +660,13 @@ SH
     HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" FM_HC_BIN=/nonexistent/hc fm_backend_detect \
     || [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-terminal-unusable ]) \
     || fail "a live terminal with no usable hc must stay undetected with signal app-terminal-unusable, got '$out'"
+  # A self-identifying binary BELOW the adapter's verified minimum is equally
+  # unusable: the spawn's container gate would only refuse it later.
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$fb:$PATH" XDG_RUNTIME_DIR="$run" \
+    FM_FAKE_HC_VERSION=0.1.13 FM_FAKE_HC_GET='{"labels":{"herdr.space":"fm-app"}}' \
+    HC_TERMINAL_ID=t2 HC_TERMINAL_SOCKET="$sock" fm_backend_detect \
+    || [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-terminal-unusable ]) \
+    || fail "a live terminal with a below-minimum hc must stay undetected with signal app-terminal-unusable, got '$out'"
   kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
 
   # --- earlier surface markers still win over the app signals --------------
@@ -728,6 +735,10 @@ SH
     HERDR_APP_HOME="$apphome" FM_HC_BIN=/nonexistent/hc fm_backend_detect \
     || [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-window-unusable ]) \
     || fail "a live window with no usable hc must stay undetected with signal app-window-unusable, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID HC_TERMINAL_ID HC_TERMINAL_SOCKET; PATH="$fb:$PATH" \
+    FM_FAKE_HC_VERSION=0.1.13 HERDR_APP_HOME="$apphome" fm_backend_detect \
+    || [ "${FM_BACKEND_DETECT_SIGNAL:-}" = app-window-unusable ]) \
+    || fail "a live window with a below-minimum hc must stay undetected with signal app-window-unusable, got '$out'"
   kill "$lpid" 2>/dev/null; wait "$lpid" 2>/dev/null
   rm -rf "$sockdir"
 
@@ -750,7 +761,7 @@ test_backend_name_herdr_app() {
   cat > "$fb/herdr-core" <<'SH'
 #!/bin/sh
 case "${1:-}" in
-  --version) printf 'hc 9.9.9\n' ;;
+  --version) printf 'hc %s\n' "${FM_FAKE_HC_VERSION:-9.9.9}" ;;
   get) printf '%s\n' "${FM_FAKE_HC_GET:-{\}}" ;;
   *) exit 3 ;;
 esac
