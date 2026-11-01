@@ -286,6 +286,12 @@ case " $* " in
           printf '%s\n' '[{"cars":[{"merge_request":{"iid":7}}]}]'
         fi
         ;;
+      *merge_requests/*)
+        [ "${FM_TEST_GLAB_RECHECK_FAIL:-0}" = 0 ] || exit 1
+        state=${FM_TEST_GLAB_STATE:-opened}
+        [ -z "${FM_TEST_GLAB_STATE_AFTER:-}" ] || [ ! -e "$FM_TEST_GLAB_LOG.train" ] || state=$FM_TEST_GLAB_STATE_AFTER
+        printf '%s\n' "{\"state\":\"$state\"}"
+        ;;
       *pipelines/77/jobs*)
         # A child pipeline in another project is served only under that
         # project's own path.
@@ -2898,6 +2904,16 @@ EOF
   rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_TRAIN=gone FM_TEST_GLAB_TRAINS='[]' run_poll "$dir")
   [ "$out" = merged ] || fail "a merged MR missing from the active train list was not reported as merged: $out"
+  rm -f "$dir/glab.log.train"
+  : > "$dir/glab.log"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=merged FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ "$out" = merged ] || fail "a merge between the initial MR read and a missing train car was not reported as merged: $out"
+  [ "$(grep -F -c 'api projects/group%2Fsubgroup%2Fproject/merge_requests/7' "$dir/glab.log")" -eq 1 ] \
+    || fail "the missing-car path did not make exactly one bounded MR-state recheck"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=closed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ -z "$out" ] || fail "a closed MR was reported as a train drop: $out"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_RECHECK_FAIL=1 FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
+  [ -z "$out" ] || fail "an unreadable MR recheck was reported as a train drop: $out"
   rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=fail run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a failed merge-train read"
