@@ -146,7 +146,11 @@
 # supervisor whose generation a retained reservation proves is
 # parent-accounted, while one no reservation proves is adopted into the serve
 # certificate, so pools can be enabled around a pre-pool or unrecorded
-# supervisor without losing its occupancy.
+# supervisor without losing its occupancy. A reservation claimed under another
+# operation's token is proven by that operation's receipt, which binds the
+# generation and the model the host found already running; the model the
+# reservation asked for is never compared, because the request is not what
+# runs.
 #
 # EXPLICIT MODELS. While any pool is configured, every launch needs a verified
 # explicit model. A harness default or raw launch command cannot prove its
@@ -1358,6 +1362,9 @@ apply_remote_disposition() {
       ;;
     cancelled)
       case "$(inc_get "$GEN" .lifecycle)" in reserved) ;; *) refuse "generation $GEN of $TASK is not a pending candidate" ;; esac
+      # A dispatched candidate that reached the host is now what that host
+      # records, so keep its bound route: a later launch replaces this
+      # generation rather than an older one (bin/fm-remote-generation-lib.sh).
       if [ "$route" != null ]; then
         holder_mutate '(.incarnations[] | select(.generation == $g)).route = $r' \
           --arg g "$GEN" --argjson r "$route" || unavailable "cannot record $TASK's cancelled route"
