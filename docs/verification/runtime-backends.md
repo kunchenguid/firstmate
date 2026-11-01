@@ -2196,6 +2196,27 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+### Already-absent worktree removal
+
+Verified on 2026-10-28 with fake Orca JSON responses and disposable task fixtures through the real teardown executable.
+No live Orca workspace was used.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-backend-orca.test.sh
+bash bin/fm-test-run.sh tests/fm-teardown-endpoint-safety.test.sh
+```
+
+The focused cases report:
+
+```text
+ok - fm-teardown.sh backend=orca: only force plus an absent path accepts structured selector_not_found
+ok - fm_backend_orca_remove_worktree: preserves stdout JSON on nonzero exit
+ok - fm-teardown: an Orca close its missing CLI never attempted refuses even under --force, keeping the record naming the terminal
+```
+
+The removal fixture prints its JSON body before exiting nonzero.
+It verifies metadata and backlog cleanup only on forced removal with an absent path, and runs startup close-marker replay to verify refused removals preserve metadata and backlog state without a pending close marker.
+
 ### Orca environment source
 
 The environment source was verified on 2026-10-14 on macOS 15.6.1 with tmux 3.6a, Bash 5.3.20, Bash 3.2.57, and zsh 5.9.
