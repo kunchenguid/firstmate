@@ -1356,32 +1356,52 @@ test_watcher_self_evicts_on_lock_takeover() {
   pass "watcher self-evicts when the lock pid no longer names it"
 }
 
-# A stopping watcher joins its backgrounded watch-tick hook run before it gives
-# up its lock, so no hook run overlaps the next watcher's
-# (docs/configuration.md "Lifecycle hooks").
-test_watcher_joins_hook_runs_before_exit() {
-  local dir state fakebin out pid i
-  dir=$(make_case hook-join)
+# A stopping watcher never waits on its detached watch-tick hook run, and a
+# successor watcher skips a run its predecessor left going, so no hook run
+# overlaps the next watcher's (docs/configuration.md "Lifecycle hooks").
+test_watcher_hook_runs_never_overlap_a_handoff() {
+  local dir state fakebin pid i rc=0
+  dir=$(make_case hook-handoff)
   state="$dir/state"
   fakebin="$dir/fakebin"
-  out="$dir/watch.out"
   mkdir -p "$dir/hooks/watch-tick.d"
-  printf '#!/bin/sh\n[ -e "%s/hook-started" ] && exit 0\n: > "%s/hook-started"\nsleep 2\n: > "%s/hook-done"\n' \
-    "$dir" "$dir" "$dir" > "$dir/hooks/watch-tick.d/10-slow"
+  cat > "$dir/hooks/watch-tick.d/10-slow" <<SH
+#!/bin/sh
+[ -e "$dir/running" ] && : > "$dir/overlap"
+: > "$dir/running"
+: > "$dir/hook-started"
+sleep 8
+rm -f "$dir/running"
+: > "$dir/hook-done"
+SH
   chmod +x "$dir/hooks/watch-tick.d/10-slow"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/first.out" 2>&1 &
   pid=$!
   i=0
   while [ "$i" -lt 80 ] && [ ! -e "$dir/hook-started" ]; do
     sleep 0.1
     i=$((i + 1))
   done
-  [ -e "$dir/hook-started" ] || { kill -TERM "$pid" 2>/dev/null; wait_for_exit "$pid" 60 || true; fail "the watch-tick hook never ran"; }
+  [ -e "$dir/hook-started" ] || { wait_for_exit "$pid" 1 || true; fail "the watch-tick hook never ran: $(cat "$dir/first.out")"; }
   kill -TERM "$pid" 2>/dev/null || true
-  wait_for_exit "$pid" 60 || true
-  [ -e "$dir/hook-done" ] || fail "the watcher exited while its watch-tick hook run was still in flight"
-  pass "watcher joins an in-flight watch-tick hook run before it exits"
+  # The stop command's own deadline is five seconds; the hook runs for eight.
+  wait_for_exit "$pid" 50 || rc=$?
+  [ "$rc" -ne 124 ] || fail "the stopping watcher did not exit within the stop deadline while its hook ran"
+  [ ! -e "$dir/hook-done" ] || fail "the stopping watcher waited for its watch-tick hook run"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/second.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 120 ] && [ ! -e "$dir/hook-done" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 20 || true
+  [ -e "$dir/hook-done" ] || fail "the predecessor's watch-tick hook run never finished"
+  [ ! -e "$dir/overlap" ] || fail "the successor watcher started a watch-tick hook run while its predecessor's was still going"
+  pass "watcher hook runs never overlap a handoff, and a stop never waits on one"
 }
 
 test_watcher_exits_on_state_teardown_during_startup() {
@@ -2418,7 +2438,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
-test_watcher_joins_hook_runs_before_exit
+test_watcher_hook_runs_never_overlap_a_handoff
 test_watcher_exits_on_state_teardown_during_startup
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher

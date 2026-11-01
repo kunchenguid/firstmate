@@ -3643,11 +3643,6 @@ watcher_cleanup() {
   # Join any interrupted owner creation/publication before the release sweep:
   # a child must not publish a lock or staging directory after we removed ours.
   fm_lock_wait_pending_mutation
-  # Join backgrounded watch-tick and heartbeat hook runs before this watcher
-  # gives up its lock, so no run overlaps the next watcher's. bin/fm-hooks.sh
-  # bounds each hook by FM_HOOK_TIMEOUT, so this wait is bounded too.
-  [ -z "${WATCH_TICK_HOOK_PID:-}" ] || wait "$WATCH_TICK_HOOK_PID" 2>/dev/null || true
-  [ -z "${HEARTBEAT_HOOK_PID:-}" ] || wait "$HEARTBEAT_HOOK_PID" 2>/dev/null || true
   pr_poll_publish_release || cleanup_status=1
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -3852,14 +3847,17 @@ resurface_after_downtime() {
 # Present, the hooks run detached with no tie to this watcher's output, so a
 # slow hook never delays a poll or holds a wake open; each event has at most
 # one run in flight, and a run still going when the next is due is skipped.
-# Their output and failures go to state/.fm-hooks.log.
+# The in-flight run's pid lives in state/.fm-hook-<event>.pid rather than in
+# this process, so a successor watcher also skips a run its predecessor left
+# going and a stopping watcher never waits on one. Their output and failures go
+# to state/.fm-hooks.log.
 # shellcheck source=bin/fm-hooks-lib.sh
 . "$SCRIPT_DIR/fm-hooks-lib.sh"
 WATCH_TICK_CYCLE=0
-WATCH_TICK_HOOK_PID=
-HEARTBEAT_HOOK_PID=
-watch_hook_idle() {  # <pid-or-empty>
-  [ -z "$1" ] || ! kill -0 "$1" 2>/dev/null
+watch_hook_idle() {  # <event>
+  local pid=
+  { read -r pid < "$STATE/.fm-hook-$1.pid"; } 2>/dev/null || return 0
+  [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null
 }
 
 while :; do
@@ -3914,10 +3912,10 @@ while :; do
   [ ! -e "$CONFIG/herdr-project-groups" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync || true
   if fm_hooks_present watch-tick; then
     WATCH_TICK_CYCLE=$((WATCH_TICK_CYCLE + 1))
-    if watch_hook_idle "$WATCH_TICK_HOOK_PID"; then
+    if watch_hook_idle watch-tick; then
       fm_hooks_emit watch-tick home="$FM_HOME" cycle:="$WATCH_TICK_CYCLE" watcher_pid:="$WATCHER_PID" \
         </dev/null >>"$STATE/.fm-hooks.log" 2>&1 &
-      WATCH_TICK_HOOK_PID=$!
+      printf '%s\n' "$!" > "$STATE/.fm-hook-watch-tick.pid" 2>/dev/null || true
     fi
   fi
   # Opt-in Rex attention marks, validation progress, and tint (docs/rex-backend.md
@@ -4524,9 +4522,9 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
-    if fm_hooks_present heartbeat && watch_hook_idle "$HEARTBEAT_HOOK_PID"; then
+    if fm_hooks_present heartbeat && watch_hook_idle heartbeat; then
       fm_hooks_emit heartbeat home="$FM_HOME" </dev/null >>"$STATE/.fm-hooks.log" 2>&1 &
-      HEARTBEAT_HOOK_PID=$!
+      printf '%s\n' "$!" > "$STATE/.fm-hook-heartbeat.pid" 2>/dev/null || true
     fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the

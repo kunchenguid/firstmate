@@ -319,6 +319,27 @@ test_park_runs_turn_end_hooks_on_a_normal_stop() {
   pass "cursor park: turn-end hooks run on a normal stop and hold it at most once"
 }
 
+# A refusing turn-end hook on a newer stop still claims the baton first, so an
+# older park still parked stands down instead of delivering a later follow-up.
+test_park_turn_end_hook_refusal_supersedes_an_older_park() {
+  local dir out before after
+  dir=$(make_primary_dir "$TMP_ROOT/park-turn-end-supersede")
+  write_arm_fixture "$dir" actionable
+  run_park "$dir" >/dev/null
+  before=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$dir/state/.cursor-park-owner" 2>/dev/null)
+  [ -n "$before" ] || fail "the first stop did not claim the park"
+  mkdir -p "$dir/hooks/turn-end.d"
+  printf '#!/bin/sh\necho "finish the owed reply first" >&2\nexit 1\n' > "$dir/hooks/turn-end.d/10-owed"
+  chmod +x "$dir/hooks/turn-end.d/10-owed"
+  out=$(run_park "$dir")
+  [ "$(kind_of_followup "$out")" = turn-end-guard ] \
+    || fail "the hook refusal must arrive as this stop's follow-up, got: $out"
+  after=$(sed -n 's/^seq=\([0-9][0-9]*\) .*/\1/p' "$dir/state/.cursor-park-owner" 2>/dev/null)
+  [ "$after" = "$((before + 1))" ] \
+    || fail "a refusing stop must claim the park before its follow-up so an older park stands down (seq $before -> $after)"
+  pass "cursor park: a turn-end hook refusal claims the park first, superseding an older park"
+}
+
 test_park_never_exits_two() {
   local dir status
   dir=$(make_primary_dir "$TMP_ROOT/park-exit")
@@ -929,6 +950,7 @@ test_cd_guard_renders_cursor_deny
 test_park_silent_when_nothing_in_flight
 test_park_delivers_actionable_wake_as_followup
 test_park_runs_turn_end_hooks_on_a_normal_stop
+test_park_turn_end_hook_refusal_supersedes_an_older_park
 test_park_never_exits_two
 test_park_repair_nag_is_bounded
 test_park_repair_nag_requires_a_persisted_budget
