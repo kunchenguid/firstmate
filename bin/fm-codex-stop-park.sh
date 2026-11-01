@@ -131,6 +131,21 @@ record() {
 
 fallback() { printf '%s\n' "$SESSION" > "$FALLBACK"; }
 
+# The home no longer needs a watcher. A final result queued as the last source
+# finished (for example an exhausted-quota alert) still needs its model turn.
+settle_idle() {
+  if [ -s "$STATE/.wake-queue" ]; then
+    record delivering || exit 1
+    if deliver 'Firstmate watcher wake: a final result is queued. Run bin/fm-wake-drain.sh first. Handle every presented wake, open decision and unread status, then run its exact WAKE_ACK_REQUIRED command. Supervision has ended; do not run a foreground checkpoint.'; then
+      record delivered
+      exit 0
+    fi
+    record delivery-failed; fallback; exit 1
+  fi
+  record idle
+  exit 0
+}
+
 deliver() {
   local message=$1
   fm_session_lock_owned_by_self "$STATE" && registered || return 1
@@ -246,7 +261,8 @@ OUT=$(mktemp "$STATE/.codex-park-output.XXXXXX") || exit 1
 attempt=0
 while [ "$attempt" -lt 2 ]; do
   registered && fm_session_lock_owned_by_self "$STATE" || exit 0
-  if [ -e "$STATE/.afk" ] || ! fm_supervision_needed "$STATE"; then record idle; exit 0; fi
+  if [ -e "$STATE/.afk" ]; then record idle; exit 0; fi
+  fm_supervision_needed "$STATE" || settle_idle
   arm=("$SCRIPT_DIR/fm-watch-arm.sh")
   if fm_supervision_host_enabled "$CONFIG" codex; then
     arm=("$SCRIPT_DIR/fm-supervision-host.sh" park)
@@ -260,10 +276,11 @@ while [ "$attempt" -lt 2 ]; do
   record waiting || exit 1
   while fm_pid_alive "$CHILD"; do
     if [ -e "$STATE/.afk" ] || ! fm_session_lock_owned_by_self "$STATE" \
-      || ! registered || ! fm_supervision_needed "$STATE"; then
+      || ! registered; then
       record idle
       exit 0
     fi
+    fm_supervision_needed "$STATE" || settle_idle
     sleep 1
   done
   wait "$CHILD"; rc=$?
