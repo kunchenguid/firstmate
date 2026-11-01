@@ -238,6 +238,13 @@ phase_teardown() {
   ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$HOME_DIR") \
     || fail "could not seed leftover resolved pending-reply"
   leftover_rec="$HOME_DIR/state/pending-replies/$leftover"
+  FM_HOME="$HOME_DIR" bash -c '
+    . "$1"
+    fm_pending_reply_store_undelivered_text "$2/state" "$3" "unconfirmed request body"
+  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$HOME_DIR" "$leftover" \
+    || fail "could not seed saved undelivered text"
+  assert_present "$HOME_DIR/state/pending-replies/.undelivered-text-$leftover" \
+    "undelivered text seed was not saved"
   # Settle every parent pending-reply for this mate (earlier send/handoff
   # phases leave open records) so non-forced retirement mirrors a clean
   # captain-approved close rather than hitting the unresolved-reply refuse.
@@ -327,6 +334,8 @@ phase_teardown() {
   assert_absent "$HOME_DIR/state/.secondmate-liveness-design.lock" \
     "teardown left the liveness lock it took to retire relaunch state"
   assert_absent "$leftover_rec" "teardown left a resolved pending-reply for the retired secondmate"
+  assert_absent "$HOME_DIR/state/pending-replies/.undelivered-text-$leftover" \
+    "teardown left the saved undelivered request text of the retired secondmate"
   assert_no_grep '- design ' "$HOME_DIR/data/secondmates.md" "teardown did not remove the registry route"
   # The parent's source projects are untouched (no write through a parent home).
   assert_present "$HOME_DIR/projects/alpha" "teardown disturbed a parent project"
