@@ -15,7 +15,7 @@
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
+#        fm-brief.sh <task-id> [<repo-name>] --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -603,7 +603,12 @@ fi
 exit 0
 fi
 
-REPO=${POS[1]}
+# A scout needs no repository; a ship brief names the one it delivers into.
+REPO=${POS[1]:-}
+if [ "$KIND" = ship ] && [ -z "$REPO" ]; then
+  echo "error: ship briefs require a repository: fm-brief.sh <task-id> <repo-name> --mode <mode>" >&2
+  exit 1
+fi
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")

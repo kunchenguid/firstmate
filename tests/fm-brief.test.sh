@@ -26,6 +26,28 @@ mkdir -p "$BRIEF_HOME/data"
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
 # is a weak guard on its own; test_no_heredoc_in_command_substitution and the
 # macos-stock-bash CI job carry the real cross-version enforcement.
+test_repository_positional_is_scout_optional_and_ship_required() {
+  local home out rc
+  home="$TMP_ROOT/repo-positional-home"
+  mkdir -p "$home/data"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" scout-no-repo --scout 2>&1); rc=$?
+  expect_code 0 "$rc" "scout scaffold without a repository must succeed (got: $out)"
+  [ -f "$home/data/scout-no-repo/brief.md" ] || fail "scout scaffold without a repository wrote no brief"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ship-no-repo --mode direct-PR 2>&1); rc=$?
+  expect_code 1 "$rc" "ship scaffold without a repository must refuse (got: $out)"
+  case "$out" in
+    *"ship briefs require a repository"*) ;;
+    *) fail "ship scaffold without a repository gave no clear refusal: $out" ;;
+  esac
+  case "$out" in
+    *"unbound variable"*) fail "ship scaffold without a repository crashed: $out" ;;
+  esac
+  [ ! -e "$home/data/ship-no-repo/brief.md" ] || fail "refused ship scaffold wrote a brief"
+  pass "fm-brief.sh: repository positional is optional for scouts and required for ships"
+}
+
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -1732,3 +1754,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_repository_positional_is_scout_optional_and_ship_required
