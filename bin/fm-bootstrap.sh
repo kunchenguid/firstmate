@@ -1559,7 +1559,7 @@ detect_local_tools() {
 }
 
 treehouse_pool_report() {
-  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool records slot repo common created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} duplicate duplicate_reported seen_pair i now
+  local root=${TREEHOUSE_ROOT:-$HOME/.treehouse} state pool records slot repo slot_root identity created_at slot_leased lease_epoch age_days owner_live pool_has_owner pool_count=0 threshold=${FM_POOL_ORPHAN_DAYS:-30} duplicate duplicate_reported seen_pair i now
   local -a seen_repos=() seen_pools=()
   [ -d "$root" ] && command -v jq >/dev/null 2>&1 || return 0
   case "$threshold" in ''|*[!0-9]*) threshold=30 ;; esac
@@ -1583,8 +1583,9 @@ treehouse_pool_report() {
         continue
       fi
       repo=$(git -C "$slot" rev-parse --show-toplevel 2>/dev/null) || repo=
-      common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=
-      [ -n "$common" ] && repo=$common
+      slot_root=$(cd -P -- "$slot" 2>/dev/null && pwd -P) || slot_root=
+      repo=$(cd -P -- "$repo" 2>/dev/null && pwd -P) || repo=
+      [ "$repo" = "$slot_root" ] || repo=
       if [ -e "${slot%/*}/.fm-slot-owner" ] || [ -e "$slot/.fm-slot-owner" ] || [ "$owner_live" -eq 1 ] || [ "$slot_leased" = true ]; then
         pool_has_owner=1
       fi
@@ -1595,11 +1596,12 @@ treehouse_pool_report() {
         continue
       fi
       if [ -n "$repo" ]; then
-        repo=$(cd -P -- "$repo" 2>/dev/null && pwd -P) || repo=
+        identity=$(git -C "$slot" remote get-url origin 2>/dev/null) || identity=$repo
+        [ -n "$identity" ] || identity=$repo
         duplicate=0
         seen_pair=0
         for ((i = 0; i < ${#seen_repos[@]}; i++)); do
-          if [ "${seen_repos[$i]}" = "$repo" ]; then
+          if [ "${seen_repos[$i]}" = "$identity" ]; then
             if [ "${seen_pools[$i]}" = "$pool" ]; then
               seen_pair=1
             else
@@ -1609,12 +1611,12 @@ treehouse_pool_report() {
         done
         if [ "$duplicate" -eq 1 ]; then
           if [ "$duplicate_reported" -eq 0 ]; then
-            echo "TREEHOUSE_POOL_REPORT: duplicate-clone pool $pool (project $repo)"
+            echo "TREEHOUSE_POOL_REPORT: duplicate-clone pool $pool (project $identity)"
             duplicate_reported=1
           fi
         fi
         if [ "$seen_pair" -eq 0 ]; then
-          seen_repos+=("$repo")
+          seen_repos+=("$identity")
           seen_pools+=("$pool")
         fi
       fi
