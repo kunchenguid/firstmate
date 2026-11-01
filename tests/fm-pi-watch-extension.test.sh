@@ -494,8 +494,13 @@ try {
     await new Promise(r=>setTimeout(r,10));
   }
   assert.ok(Date.now()-statSync(`${state}/.last-watcher-beat`).mtimeMs<1000,"replacement beacon is not fresh");
-  const recovered=await tool.execute();
-  assert.equal(recovered.details.state,"healthy");
+  let recovered;
+  for(let i=0;i<400;i++) {
+    recovered=await tool.execute();
+    if(recovered.details.state==="healthy") break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  assert.equal(recovered.details.state,"healthy","a slow retire must still settle on a healthy replacement");
   await new Promise(r=>setTimeout(r,100));
   assert.ok(!messages.some((message)=>/could not retire the arm/.test(message)),`a slow retire produced a false failure alarm: ${messages.join(" | ")}`);
   assert.equal(readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n").length,2,"a slow retire must not churn extra arms");
