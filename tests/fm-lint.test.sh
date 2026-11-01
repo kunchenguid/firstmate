@@ -1220,6 +1220,90 @@ test_rejects_direct_beads_cli_in_explicit_core_path() {
   pass "fm-lint.sh enforces backend purity for explicit core paths"
 }
 
+# doctor_inventory_repo <tmp>: a fixture repo whose bootstrap prints KNOWN: and,
+# through a sourced library, LIBLINE:, with an inventory that maps both.
+doctor_inventory_repo() {
+  local tmp=$1 repo="$1/repo"
+  mkdir -p "$repo/bin/backends" "$repo/docs" "$repo/tests"
+  cp "$LINT" "$repo/bin/fm-lint.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/bin/fm-lint-workflows.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/bin/backends/noop.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/tests/noop.test.sh"
+  cat > "$repo/bin/fm-bootstrap.sh" <<'SH'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-emit-lib.sh"
+# echo "COMMENTED: a comment is not a printed line"
+echo "STDERR_ONLY: diagnostics" >&2
+printf '%s\n' "FILE_ONLY" >> "$SCRIPT_DIR/record"
+echo "KNOWN: a mapped line"
+SH
+  cat > "$repo/bin/fm-emit-lib.sh" <<'SH'
+#!/usr/bin/env bash
+emit_lib_line() { printf 'LIBLINE: %s\n' "$1"; }
+SH
+  cat > "$repo/bin/fm-owner.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$repo/bin/fm-lint.sh" "$repo/bin/fm-lint-workflows.sh" "$repo/bin/fm-bootstrap.sh" "$repo/bin/fm-owner.sh"
+  cat > "$repo/docs/doctor-checks.json" <<'JSON'
+{
+  "version": 1,
+  "emitters": ["bin/fm-bootstrap.sh"],
+  "areas": ["tools"],
+  "sources": {"bootstrap": {"command": ["bin/fm-bootstrap.sh"], "env": {"FM_BOOTSTRAP_DETECT_ONLY": "1"}, "timeout": 5}},
+  "checks": [
+    {"id": "tools/known", "area": "tools", "kind": "line", "prefix": "KNOWN", "phase": "local", "source": "bootstrap", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "x"},
+    {"id": "tools/lib", "area": "tools", "kind": "line", "prefix": "LIBLINE", "phase": "local", "source": "bootstrap", "severity": "warn", "owner": "bin/fm-owner.sh", "fix": "x"}
+  ]
+}
+JSON
+}
+
+# run_doctor_inventory_lint <tmp> <fakebin>: full CI-mode lint of the fixture
+# repo; sets LINT_OUT and LINT_RC.
+run_doctor_inventory_lint() {
+  LINT_RC=0
+  LINT_OUT=$(cd "$1/repo" && CI=true PATH="$2:$PATH" ./bin/fm-lint.sh 2>&1) || LINT_RC=$?
+}
+
+test_doctor_inventory_drift() {
+  local tmp fakebin inventory
+  tmp=$(fm_test_tmproot fm-lint-doctor-inventory)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_shellcheck "$fakebin" "$tmp/shellcheck.log"
+  doctor_inventory_repo "$tmp"
+  inventory="$tmp/repo/docs/doctor-checks.json"
+
+  run_doctor_inventory_lint "$tmp" "$fakebin"
+  [ "$LINT_RC" -eq 0 ] || fail "a fully mapped inventory failed lint"$'\n'"$LINT_OUT"
+
+  jq 'del(.checks[1])' "$inventory" > "$tmp/inv" && mv "$tmp/inv" "$inventory"
+  run_doctor_inventory_lint "$tmp" "$fakebin"
+  [ "$LINT_RC" -ne 0 ] || fail "an unmapped prefix from a sourced library passed lint"
+  assert_contains "$LINT_OUT" "bin/fm-emit-lib.sh:2: prints LIBLINE, which docs/doctor-checks.json does not map" \
+    "lint did not name the unmapped prefix and where it is printed"
+
+  jq '.notLines = ["LIBLINE"]' "$inventory" > "$tmp/inv" && mv "$tmp/inv" "$inventory"
+  run_doctor_inventory_lint "$tmp" "$fakebin"
+  [ "$LINT_RC" -eq 0 ] || fail "a notLines literal still failed lint"$'\n'"$LINT_OUT"
+
+  jq '.checks += [{"id": "tools/gone", "area": "tools", "kind": "line", "prefix": "GONE", "phase": "local", "source": "bootstrap", "severity": "warn", "owner": "bin/fm-bootstrap.sh", "fix": "x"}]' \
+    "$inventory" > "$tmp/inv" && mv "$tmp/inv" "$inventory"
+  run_doctor_inventory_lint "$tmp" "$fakebin"
+  [ "$LINT_RC" -ne 0 ] || fail "an inventory prefix no emitter prints passed lint"
+  assert_contains "$LINT_OUT" "maps GONE, which no emitter prints" "lint did not name the stale inventory prefix"
+
+  jq 'del(.checks[] | select(.prefix == "GONE")) | .checks[0].owner = "bin/fm-missing-owner.sh"' \
+    "$inventory" > "$tmp/inv" && mv "$tmp/inv" "$inventory"
+  run_doctor_inventory_lint "$tmp" "$fakebin"
+  [ "$LINT_RC" -ne 0 ] || fail "a missing owner command passed lint"
+  assert_contains "$LINT_OUT" "owner bin/fm-missing-owner.sh does not exist or is not executable" \
+    "lint did not name the missing owner"
+  pass "fm-lint.sh keeps docs/doctor-checks.json in step with what bootstrap and its libraries print"
+}
+
 test_ignores_ambient_shellcheck_opts() {
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): ambient options regression check"
@@ -2045,6 +2129,7 @@ test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_rejects_direct_beads_cli_invocations
 test_rejects_direct_beads_cli_in_explicit_core_path
+test_doctor_inventory_drift
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete

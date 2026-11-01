@@ -20,6 +20,14 @@
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
+#                 "CONFIG_REREAD: secondmate <id>: send failed: <reason>",
+#                 "NETWORK_CHECKS: <what did not complete>",
+#                 "TOOL_PROVENANCE: <tool> resolves to <path>, not the pinned <prefix>; ..."
+#                 (or "<tool> is pinned ... but not on PATH", or
+#                 "invalid config/tool-provenance line <n> - <reason>"),
+#                 "NO_MISTAKES_AGENTS: <config> agent: lists <name>, but <binary> is not installed; ...",
+#                 "CLAUDE_PERMISSIONS: Claude auto mode is on (<file>) but no Bash(...bin/fm-*...) allow rule ...",
+#                 "HERDR_LAUNCHER: <why the launcher pane is unusable> - <consequence>; <fix>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
@@ -70,6 +78,29 @@
 #          upgrade recommendation for synchronous reply acceptance.
 #          tasks-axi feature probes remain a separate defense-in-depth check, and
 #          a build failing one is OUTDATED like a below-floor build.
+#          TOOL_PROVENANCE compares each tool pinned in the optional, local
+#          config/tool-provenance with where PATH actually resolves it, so a
+#          plain reinstall that silently replaces a locally patched build
+#          (same version, same flags) is reported; detect_tool_provenance owns
+#          the check and docs/configuration.md "Tool provenance pins" the format.
+#          NO_MISTAKES_AGENTS reports each agent named in no-mistakes' `agent:`
+#          setting (the global config.yaml and this repo's .no-mistakes.yaml)
+#          whose executable does not resolve, because no-mistakes silently
+#          skips a missing fallback agent. It runs in every home, secondmate
+#          homes included, because the no-mistakes install is a per-host fact;
+#          detect_no_mistakes_agents owns the parsing and name mapping.
+#          CLAUDE_PERMISSIONS reports, in a primary home whose own harness is
+#          claude, Claude settings that turn auto mode on with no allow rule for
+#          firstmate's bin/fm-* scripts, which the auto-mode classifier can then
+#          refuse; it reports a rule's presence only, never that auto mode works.
+#          detect_claude_permissions owns the settings layers it reads.
+#          HERDR_LAUNCHER runs the read-only launcher-identity proof that every
+#          herdr spawn runs (bin/backends/herdr.sh
+#          fm_backend_herdr_launcher_identity) when the backend is herdr and
+#          this process carries HERDR_PANE_ID, so pane ids left stale by a
+#          primary relaunch are reported at session start instead of at the
+#          first spawn. It is bounded by FM_BOOTSTRAP_HERDR_LAUNCHER_TIMEOUT
+#          (default 5 seconds).
 #          tasks-axi and quota-axi are essential bootstrap tools.
 #          A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
@@ -1590,6 +1621,177 @@ detect_local_config() {
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+  detect_tool_provenance
+  detect_no_mistakes_agents
+  detect_claude_permissions
+  detect_herdr_launcher
+}
+
+# Herdr launcher pane. The identity proof only reads (pane get, tab get,
+# workspace list, session list), but a wedged Herdr server could hold it, so it
+# runs in a bounded child that sources the adapter itself.
+detect_herdr_launcher() {
+  local bound rc=0 err reason consequence="every spawn from this session will refuse"
+  [ "$BACKEND" = herdr ] && [ -n "${HERDR_PANE_ID:-}" ] || return 0
+  command -v herdr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
+  bound=${FM_BOOTSTRAP_HERDR_LAUNCHER_TIMEOUT:-5}
+  case "$bound" in ''|*[!0-9]*|0) bound=5 ;; esac
+  __fm_timing_stamp=$(fm_timing_now_ms)
+  # shellcheck disable=SC2016 # The bounded child expands its own arguments.
+  err=$(fm_run_timed "$bound" bash -c '
+    . "$1/fm-backend.sh" && fm_backend_source herdr || { echo "error: the herdr adapter could not be loaded" >&2; exit 1; }
+    fm_backend_herdr_launcher_identity "$(fm_backend_herdr_session)"
+  ' _ "$SCRIPT_DIR" 2>&1 >/dev/null) || rc=$?
+  fm_timing_record phase herdr-launcher "$__fm_timing_stamp"
+  case "$rc" in 0 | 2) return 0 ;; esac
+  if fm_timed_out "$rc"; then
+    reason="herdr launcher pane '$HERDR_PANE_ID' could not be confirmed within ${bound}s"
+    consequence="a spawn from this session may stall or refuse"
+  else
+    reason=$(printf '%s\n' "$err" | sed -n 's/^error: //p' | head -1)
+    reason=${reason%%; refusing *}
+    [ -n "$reason" ] || reason="herdr launcher pane '$HERDR_PANE_ID' could not be verified (exit $rc)"
+  fi
+  echo "HERDR_LAUNCHER: $reason - $consequence; find the live pane with herdr pane list --workspace <workspace> and pass corrected HERDR_PANE_ID, HERDR_WORKSPACE_ID, and HERDR_TAB_ID on the spawn command line, or relaunch the primary inside herdr"
+}
+
+# Claude auto mode without an allow rule for firstmate's own scripts. Settings
+# layers, highest precedence first: <FM_ROOT>/.claude/settings.local.json,
+# <FM_ROOT>/.claude/settings.json, then the user file
+# (FM_BOOTSTRAP_CLAUDE_USER_SETTINGS, else $CLAUDE_CONFIG_DIR or ~/.claude,
+# /settings.json). The first layer that sets permissions.defaultMode decides the
+# mode; an allow entry in any layer must be Bash(bin/fm-*:*) or
+# Bash(<FM_ROOT>/bin/fm-*:*) to cover this checkout's whole script family.
+# A single-script rule or another checkout's absolute rule does not count.
+# A --permission-mode flag on the primary's command line is invisible here.
+# Primary homes only, and only when fm-harness.sh resolves this process's own
+# harness to claude; jq is required and its absence keeps the check silent.
+detect_claude_permissions() {
+  local user_settings file mode="" mode_file="" rule=0 harness
+  [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ] && return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  user_settings=${FM_BOOTSTRAP_CLAUDE_USER_SETTINGS:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json}
+  set -- "$FM_ROOT/.claude/settings.local.json" "$FM_ROOT/.claude/settings.json" "$user_settings"
+  [ -f "$1" ] || [ -f "$2" ] || [ -f "$3" ] || return 0
+  harness=$(fm_run_timed 5 "$SCRIPT_DIR/fm-harness.sh" 2>/dev/null) || return 0
+  [ "$harness" = claude ] || return 0
+  for file in "$@"; do
+    [ -f "$file" ] && [ -r "$file" ] || continue
+    if ! jq -e 'type == "object"' "$file" >/dev/null 2>&1; then
+      echo "CLAUDE_PERMISSIONS: $file is not a valid JSON settings object, so Claude may ignore the permissions it holds"
+      continue
+    fi
+    if [ -z "$mode_file" ]; then
+      mode=$(jq -r '.permissions.defaultMode? // empty | strings' "$file" 2>/dev/null)
+      [ -z "$mode" ] || mode_file=$file
+    fi
+    jq -e --arg root "$FM_ROOT" '[.permissions.allow? // [] | .[]? | strings
+      | select(. == "Bash(" + $root + "/bin/fm-*:*)"
+          or . == "Bash(bin/fm-*:*)")] | length > 0' \
+      "$file" >/dev/null 2>&1 && rule=1
+  done
+  [ "$mode" = auto ] && [ "$rule" -eq 0 ] || return 0
+  echo "CLAUDE_PERMISSIONS: Claude auto mode is on ($mode_file) but no Bash(...bin/fm-*...) allow rule is in any Claude settings layer, so the auto-mode classifier may refuse firstmate's own scripts - add Bash($FM_ROOT/bin/fm-*:*) to $FM_ROOT/.claude/settings.local.json (a present rule does not prove the classifier honors it)"
+}
+
+# no-mistakes agent list. no-mistakes has no read-only config dump, and its own
+# `doctor` makes network calls, so this reads the `agent:` setting itself (a
+# scalar, a [flow, list], or a block list) from the global config - in
+# FM_BOOTSTRAP_NO_MISTAKES_HOME, else NM_HOME, else ~/.no-mistakes - and from this
+# repo's .no-mistakes.yaml. The name-to-executable map below MIRRORS the agent
+# options no-mistakes documents in its generated config.yaml; `no-mistakes
+# doctor` stays the authoritative view and is what the fix hint names.
+no_mistakes_agent_binaries() {  # <agent-name> <acpx-path>
+  case "$1" in
+    auto) return 1 ;;
+    rovodev) printf '%s\n' acli ;;
+    cursor) printf '%s\n' cursor-agent "${2:-acpx}" ;;
+    acp:*) printf '%s\n' "${2:-acpx}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+detect_no_mistakes_agents() {
+  local nm_home config acpx agent binary
+  nm_home=${FM_BOOTSTRAP_NO_MISTAKES_HOME:-${NM_HOME:-$HOME/.no-mistakes}}
+  for config in "$nm_home/config.yaml" "$FM_ROOT/.no-mistakes.yaml"; do
+    [ -f "$config" ] && [ -r "$config" ] || continue
+    acpx=$(LC_ALL=C awk '/^acpx_path:/ {
+        v = $0; sub(/[[:space:]]+#.*$/, "", v); sub(/^acpx_path:[[:space:]]*/, "", v)
+        gsub(/^["'"'"']|["'"'"']$/, "", v); print v; exit }' "$config" 2>/dev/null)
+    while IFS= read -r agent; do
+      [ -n "$agent" ] || continue
+      while IFS= read -r binary; do
+        [ -n "$binary" ] || continue
+        case "$binary" in
+          /*) [ -x "$binary" ] && continue ;;
+          *) command -v "$binary" >/dev/null 2>&1 && continue ;;
+        esac
+        echo "NO_MISTAKES_AGENTS: $config agent: lists $agent, but $binary is not installed; no-mistakes silently skips a missing fallback agent - install it or drop it from the list (no-mistakes doctor is the authoritative view)"
+      done < <(no_mistakes_agent_binaries "$agent" "$acpx")
+    done < <(LC_ALL=C awk '
+      function clean(x) {
+        sub(/[[:space:]]+#.*$/, "", x)
+        gsub(/^[[:space:]"'"'"']+|[[:space:]"'"'"']+$/, "", x)
+        return x
+      }
+      /^agent:/ {
+        v = $0; sub(/[[:space:]]+#.*$/, "", v); sub(/^agent:[[:space:]]*/, "", v)
+        if (v != "") {
+          gsub(/[][]/, "", v)
+          n = split(v, parts, ",")
+          for (i = 1; i <= n; i++) { x = clean(parts[i]); if (x != "") print x }
+          exit
+        }
+        block = 1
+        next
+      }
+      block && /^[[:space:]]*-/ { x = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", x); x = clean(x); if (x != "") print x; next }
+      block && /^[[:space:]]*(#.*)?$/ { next }
+      block { exit }
+    ' "$config" 2>/dev/null)
+  done
+}
+
+# Tool provenance pins: config/tool-provenance lines "<tool> <expected-prefix>",
+# where <expected-prefix> is an absolute path that the fully resolved executable
+# (every symlink followed) must start with. A local read plus one path
+# resolution per pinned tool; it never runs the tool.
+detect_tool_provenance() {
+  local file="$CONFIG/tool-provenance" n=0 line tool prefix extra found resolved
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line=${line%%#*}
+    read -r tool prefix extra <<EOF
+$line
+EOF
+    [ -n "$tool" ] || continue
+    if [ -z "$prefix" ] || [ -n "$extra" ]; then
+      echo "TOOL_PROVENANCE: invalid config/tool-provenance line $n - expected '<tool> <absolute-path-prefix>'"
+      continue
+    fi
+    case "$prefix" in
+      /*) ;;
+      *)
+        echo "TOOL_PROVENANCE: invalid config/tool-provenance line $n - '$prefix' is not an absolute path"
+        continue
+        ;;
+    esac
+    if ! found=$(command -v "$tool" 2>/dev/null) || [ -z "$found" ]; then
+      echo "TOOL_PROVENANCE: $tool is pinned in config/tool-provenance but not on PATH"
+      continue
+    fi
+    resolved=$(readlink -f "$found" 2>/dev/null) || resolved=""
+    if [ -z "$resolved" ]; then
+      # shellcheck disable=SC2016 # Perl, not the shell, expands $ARGV.
+      resolved=$(perl -MCwd=realpath -e 'my $r = realpath($ARGV[0]); print $r if defined $r' "$found" 2>/dev/null) || resolved=""
+    fi
+    case "$resolved" in
+      "$prefix"*) ;;
+      *) echo "TOOL_PROVENANCE: $tool resolves to ${resolved:-$found}, not the pinned $prefix; a reinstall may have replaced the pinned build - restore it, or remove the pin once the upstream release carries what it needs" ;;
+    esac
+  done < "$file"
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,
