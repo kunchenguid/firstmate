@@ -106,7 +106,9 @@
 # has no away mode). Others (zellij, orca, cmux, paseo, tern) have no verified
 # non-visible-launch primitive here yet and refuse loudly. On rex the daemon
 # runs in a dedicated Rex session of its own, so the captain's session gains no
-# tab and keeps its focus.
+# tab and keeps its focus. A terminal record written before the creation server
+# was recorded refuses until FM_AFK_LEGACY_REX_SERVER names the endpoint this
+# home reaches; the launch adopts that server only when it matches.
 #
 # Test seam: FM_AFK_LAUNCH_ENTRY overrides the command run in the created
 # terminal (default bin/fm-afk-start.sh), so a topology test can run a harmless

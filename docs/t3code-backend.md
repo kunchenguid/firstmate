@@ -173,7 +173,9 @@ When the thread id is known, the helper archives it and reports its id and wheth
 An unproven launch-brief outcome (a lost reply or a T3 error that can follow a commit) means the brief may already be running, so spawn keeps the task record, lease, and thread, never resends the brief itself, and exits nonzero with the thread to inspect.
 An identical brief resend follows the [ordinary-send retention window above](#current-lifecycle-and-safety); verify delivery in T3 Code before resending after that window.
 Before returning a retained slot by hand, prove both the archive with no active run and the end of its provider and worktree-owned processes, as teardown does above.
-The kill is idempotent, so an already archived thread, or one the verified server no longer has, is the end state, and an unreachable or gate-refused server refuses the teardown rather than returning a slot a live thread still points at.
+The kill is idempotent, so an already archived thread, or one the creation server no longer has, is the end state, and an unreachable or gate-refused server refuses the teardown rather than returning a slot a live thread still points at.
+The record binds its thread to the server it was created on in `t3_server`, and every later read, close, and absence proof runs against that server: a credential that now names another server reads `unreadable` and refuses cleanup instead of acting on a different server's thread.
+A record written before that field existed adopts the selected server only when the thread is positively present there; without that proof teardown preserves the task and its worktree, and only `--force` authorizes cleanup through the selected server, whose gate [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns.
 Archiving keeps the transcript visible in T3 Code; this backend never deletes a thread.
 The `fm-` project of a torn-down secondmate home stays in T3 Code pointing at the removed directory until the operator deletes it there, because deleting a nonempty project takes the archived thread's transcript with it.
 
