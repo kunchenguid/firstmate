@@ -1426,6 +1426,8 @@ test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
     || fail "away-mode marker is not bound to the status-log identity"
   [ "$offset" = "$(log_size "$statusf")" ] \
     || fail "away-mode marker does not point to the exact blocked-line end"
+  [ "$(status_seen_offset "$state" "$task")" = "$offset" ] \
+    || fail "away-mode overdue event was not recorded as reported through its own line"
   [ "$(grep -cF "stale: $win (paused " "$state/.subsuper-escalations")" -eq 1 ] \
     || fail "away-mode overdue recheck did not queue exactly one stale escalation"
   status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \

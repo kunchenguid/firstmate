@@ -1385,7 +1385,7 @@ EOF
 }
 
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size overdue_marker overdue_task
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size identity seen_identity overdue_marker overdue_task
   now=$(_now)
   for overdue_marker in "$state"/.paused-overdue-*; do
     [ -f "$overdue_marker" ] || continue
@@ -1525,7 +1525,10 @@ housekeeping() {  # <state>
           identity=$(stat -c '%d %i' "$state/$task.status" 2>/dev/null)
         fi
         printf '%s:%s\n' "$identity" "$size" > "$overdue_marker"
-        escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release)" || true
+        if escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release)"; then
+          seen_identity=$(_fm_open_decisions_file_ident "$state/$task.status") || seen_identity=
+          [ -n "$seen_identity" ] && mark_status_seen "$state" "$task" "$size" "$seen_identity" || true
+        fi
         _now > "$marker"
       fi
       continue
