@@ -794,7 +794,8 @@ printf 'run other-branch\n'
 SH
   cat > "$fakebin/tail" <<'SH'
 #!/usr/bin/env bash
-if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then printf '%s\n' tail >> "$FM_STATUS_EXTERNAL_CALLS"; exit 97; fi
+printf '%s\n' tail >> "$FM_STATUS_ALL_CALLS"
+case " $* " in *" $FM_CLAIM_STATUS_FILE "*) printf '%s\n' tail >> "$FM_STATUS_EXTERNAL_CALLS" ;; esac
 exec "$FM_REAL_TAIL" "$@"
 SH
   for command in stat wc grep sed git date awk cut; do
@@ -802,7 +803,8 @@ SH
     export "FM_REAL_$command"
     cat > "$fakebin/$command" <<'SH'
 #!/usr/bin/env bash
-if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then printf '%s\n' "${0##*/}" >> "$FM_STATUS_EXTERNAL_CALLS"; exit 97; fi
+printf '%s\n' "${0##*/}" >> "$FM_STATUS_ALL_CALLS"
+case " $* " in *" $FM_CLAIM_STATUS_FILE "*) printf '%s\n' "${0##*/}" >> "$FM_STATUS_EXTERNAL_CALLS" ;; esac
 real_var=FM_REAL_${0##*/}
 eval 'real_path=${'"$real_var"'}'
 exec "$real_path" "$@"
@@ -811,7 +813,8 @@ SH
   done
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then printf '%s\n' no-mistakes >> "$FM_STATUS_EXTERNAL_CALLS"; exit 97; fi
+printf '%s\n' no-mistakes >> "$FM_STATUS_ALL_CALLS"
+case " $* " in *" $FM_CLAIM_STATUS_FILE "*) printf '%s\n' no-mistakes >> "$FM_STATUS_EXTERNAL_CALLS" ;; esac
 case " $* " in *' runs '*) printf 'run other-branch\n' ;; *) exec "$FM_REAL_NM" "$@" ;; esac
 SH
   FM_REAL_NM=$(command -v no-mistakes)
@@ -820,7 +823,8 @@ SH
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   real_tail=$(command -v tail)
   export FM_CLAIM_STATUS_FILE="$status_file" FM_STATUS_TAIL_CALLS="$reads" FM_STATUS_EXTERNAL_CALLS="$reads"
-  export FM_STATUS_COUNT_SENTINEL="$dir/count-external"
+  FM_STATUS_ALL_CALLS="$dir/all-external-calls"
+  export FM_STATUS_ALL_CALLS
   FM_REAL_COMMAND_DIR=$(dirname "$(command -v grep)")
   FM_REAL_TAIL=$(command -v tail)
   export FM_REAL_COMMAND_DIR FM_REAL_TAIL
@@ -831,9 +835,8 @@ SH
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "incremental watcher exited before its first cycle"; }
   [ -s "$cursor" ] || { reap "$pid"; fail "watcher did not create the byte-offset cursor"; }
   : > "$reads"
-  : > "$FM_STATUS_COUNT_SENTINEL"
+  : > "$FM_STATUS_ALL_CALLS"
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "incremental watcher exited on an unchanged log"; }
-  rm -f "$FM_STATUS_COUNT_SENTINEL"
   if [ -s "$reads" ]; then
     reap "$pid"
     fail "unchanged status log invoked external commands: $(cat "$reads")"
