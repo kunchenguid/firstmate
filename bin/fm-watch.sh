@@ -3990,61 +3990,47 @@ while :; do
     marker="$STATE/.claimed-run-$task"
     seen="$STATE/.claimed-run-seen-$task"
     cursor="$STATE/.claimed-run-cursor-$task"
-    if [ -f "$cursor" ] && [ ! "$f" -nt "$cursor" ]; then
-      read -r dev ino size cursor_claim < "$cursor"
-      [ -n "$cursor_claim" ] || cursor_claim=
-      claim=$cursor_claim
-      stat_result=
-    else
-      stat_result=$(stat_devino_size "$f") || continue
-      read -r dev ino size <<EOF
-$stat_result
-EOF
-      case "$dev" in ''|*[!0-9]*) continue ;; esac
-      case "$ino" in ''|*[!0-9]*) continue ;; esac
-      case "$size" in ''|*[!0-9]*) continue ;; esac
-    fi
     cursor_dev=
     cursor_ino=
     cursor_size=
     cursor_claim=
     if [ -f "$cursor" ]; then
       read -r cursor_dev cursor_ino cursor_size cursor_claim < "$cursor"
-      case "$cursor_dev" in ''|*[!0-9]*) cursor_dev= ;; esac
-      case "$cursor_ino" in ''|*[!0-9]*) cursor_ino= ;; esac
-      case "$cursor_size" in ''|*[!0-9]*) cursor_size= ;; esac
-      case "$cursor_claim" in ''|*[!0-9]*) cursor_claim= ;; esac
-      if [ -z "$cursor_dev" ] || [ -z "$cursor_ino" ] || [ -z "$cursor_size" ]; then
-        cursor_dev=
-        cursor_ino=
-        cursor_size=
+      case "$cursor_dev:$cursor_ino:$cursor_size" in *[!0-9:]*|'') cursor_dev= ;; esac
+    fi
+    if [ -n "$cursor_dev" ] && [ ! "$f" -nt "$cursor" ]; then
+      dev=$cursor_dev; ino=$cursor_ino; size=$cursor_size
+      offset=$cursor_size; claim=$cursor_claim; stat_result=
+    else
+      stat_result=$(stat_devino_size "$f") || continue
+      read -r dev ino size <<EOF
+$stat_result
+EOF
+      case "$dev:$ino:$size" in *[!0-9:]*|'') continue ;; esac
+      offset=0
+      if [ "$cursor_dev:$cursor_ino" = "$dev:$ino" ] && [ -n "$cursor_size" ] && [ "$size" -ge "$cursor_size" ]; then
+        offset=$cursor_size
+      elif [ -n "$cursor_dev" ]; then
+        rm -f "$marker" "$seen"
         cursor_claim=
       fi
+      claim=$cursor_claim
     fi
-    offset=0
-    if [ "$cursor_dev:$cursor_ino" = "$dev:$ino" ] && [ -n "$cursor_size" ] && [ "$size" -ge "$cursor_size" ]; then
-      offset=$cursor_size
-    elif [ -n "$cursor_dev" ]; then
-      rm -f "$marker" "$seen"
-      cursor_claim=
-    fi
-    claim=$cursor_claim
     if [ -n "$stat_result" ]; then
       if [ "$size" -gt "$offset" ]; then
         appended=$(tail -c +"$((offset + 1))" "$f"; printf '\001') || continue
         appended=${appended%$'\001'}
-        incomplete=${appended##*$'\n'}
-        complete=${appended%"$incomplete"}
         consumed=0
-        while IFS= read -r line; do
+        while [[ "$appended" == *$'\n'* ]]; do
+          line=${appended%%$'\n'*}
+          appended=${appended#*$'\n'}
           consumed=$((consumed + ${#line} + 1))
           status_line_verb "$line" line_verb
           status_line_note "$line" line_note
           if [ "$line_verb" = working ] && [ "$line_note" = 'validation started' ]; then
-            line_end=$((offset + consumed))
-            claim=$line_end
+            claim=$((offset + consumed))
           fi
-        done <<< "$complete"
+        done
         offset=$((offset + consumed))
       fi
       cursor_claim=$claim
@@ -4068,7 +4054,6 @@ EOF
     [ -n "$recorded_claim" ] && [ "$recorded_branch" = "$branch" ] || continue
     if [ "$(sed -n '1p' "$seen" 2>/dev/null || true)" = "$branch:$recorded_claim" ]; then
       rm -f "$marker"
-      printf '%s %s %s\n' "$dev" "$ino" "$size" > "$cursor"
       continue
     fi
     case "$stamp" in ''|*[!0-9]*) rm -f "$marker"; continue ;; esac
@@ -4078,12 +4063,10 @@ EOF
       fm_wake_append check "claimed-run-$task" "check: validation claim has no run for $branch (worker reported validation started)" || return 1
       printf '%s\n' "$branch:$recorded_claim" > "$seen"
       rm -f "$marker"
-      printf '%s %s %s\n' "$dev" "$ino" "$size" > "$cursor"
       wake "check: validation claim has no run for $branch (worker reported validation started)"
     else
       printf '%s\n' "$branch:$recorded_claim" > "$seen"
       rm -f "$marker"
-      printf '%s %s %s\n' "$dev" "$ino" "$size" > "$cursor"
     fi
   done
   }
