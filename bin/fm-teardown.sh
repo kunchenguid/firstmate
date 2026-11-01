@@ -307,6 +307,15 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
+#     The lsof scan is bounded through fm_run_timed (bin/fm-timeout-lib.sh)
+#     with FM_TEARDOWN_LSOF_TIMEOUT seconds (default 10), so an unreadable
+#     mount (e.g. a root-only docker overlay) can wedge the scan for at most
+#     that bound instead of hanging teardown. A scan that cannot finish
+#     within the bound - or any other lsof failure - is a refusal before
+#     destructive cleanup, never a silently incomplete scan. lsof -b (avoid
+#     kernel blocks) is deliberately NOT used: it can skip a process whose
+#     cwd cannot be stat()ed, and a missed leaked process is more dangerous
+#     than a loud refusal.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -405,6 +414,8 @@ done
 unset _teardown_source
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # Pending replies load the shared backend dispatcher and status classifier.
@@ -2297,11 +2308,21 @@ conclude_task_no_mistakes_run() {  # <worktree>
 # -d cwd` scan (never the recursive +D file-tree walk, which lsof itself
 # documents as slow). Never $$ (this script's own pid). Empty output when
 # nothing matches; failure means the scan could not establish a safe result.
+# The scan runs through fm_run_timed so a hang on an unreadable mount cannot
+# wedge teardown: a scan that misses the bound is a failure (REFUSED), never
+# a silently incomplete scan, which is why lsof -b (skip-blocking) is not used.
+# A non-positive bound is not a bound (fm-timeout-lib.sh): timeout 0 and perl
+# alarm 0 both turn the deadline off, and a padded zero such as 00 is still
+# zero, so the digit test alone would let the very hang this bound prevents
+# back in. Compare arithmetically, tolerating a value too large to compare.
+LSOF_CWD_SCAN_TIMEOUT=${FM_TEARDOWN_LSOF_TIMEOUT:-10}
+case "$LSOF_CWD_SCAN_TIMEOUT" in ''|*[!0-9]*) LSOF_CWD_SCAN_TIMEOUT=10 ;; esac
+[ "$LSOF_CWD_SCAN_TIMEOUT" -gt 0 ] 2>/dev/null || LSOF_CWD_SCAN_TIMEOUT=10
 pids_with_cwd_under() {  # <dir>
   local dir=$1 out pid path line
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   dir=$(cd "$dir" && pwd -P) || return 1
-  out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
+  out=$(fm_run_timed "$LSOF_CWD_SCAN_TIMEOUT" lsof -a -d cwd -Fpn 2>/dev/null) || return 1
   [ -n "$out" ] || return 0
   pid=
   while IFS= read -r line; do
