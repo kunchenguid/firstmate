@@ -496,6 +496,12 @@ __FM_BEARINGS_BOARD_DATA__
       top.appendChild(badge("solid", "decision"));
       top.appendChild(el("span", "bb-decision__repo", item.repo));
     }
+    /* the captain-hold class the call claims, so a wrong category shows at a glance */
+    if (typeof item["class"] === "string" && item["class"].length > 0) {
+      top.appendChild(item.class_unrecognized === true
+        ? badge("warn", item["class"] + " - unrecognized class")
+        : badge("info", item["class"]));
+    }
     pad.appendChild(top);
 
     pad.appendChild(el("h3", "bb-decision__title", item.title));

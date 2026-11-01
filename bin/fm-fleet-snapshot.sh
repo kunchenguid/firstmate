@@ -22,7 +22,9 @@
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
 #     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
-#     and hold_bucket fields.
+#     and hold_bucket fields, plus hold_class: the class bin/fm-captain-hold.sh
+#     recorded on the body's `Captain hold class:` line, or null for a hold
+#     recorded before classes existed.
 #     Repeated blocker tokens remain ordered; a blocker resolves only when its
 #     structured record is Done, and missing ids stay open.
 #     There is no separate decision type: any captain-held task is the same
@@ -114,6 +116,17 @@
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,
 # without worker observations or cross-home collection, for the home-local poll.
+# --captain-calls prints every unanswered undated captain hold in this home -
+# the backlog records whose hold_bucket is "live" or "aged", so a hold never
+# drops off for having waited long - as
+# {count,aged,calls:[{id,title,class,aged,since}],secondmates_uncounted}, where
+# since is an aged hold's YYYY-MM-DD hold date and secondmates_uncounted says a
+# secondmate is registered (or the registry is unreadable) whose holds are not
+# counted. It reads only the backlog and the local registry table, so a
+# per-turn reader (bin/fm-waiting-on-you.sh) stays cheap. Only the markdown
+# backlog is read: when the home's tasks-axi backend is another one (Beads, for
+# example), it prints {count:null,uncounted_backend:<backend>} instead, so a
+# reader never mistakes holds it cannot see for none.
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
@@ -234,6 +247,7 @@ usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
        fm-fleet-snapshot.sh --secondmate-home-summary
+       fm-fleet-snapshot.sh --captain-calls
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
@@ -241,6 +255,12 @@ refreshes only its parent-side remote-summary cache as an observational side eff
 
 --contribution-input emits the canonical local backlog/tasks ownership pair only,
 without worker observations or cross-home collection.
+
+--captain-calls emits this home's unanswered undated captain holds, live and
+aged, as {count,aged,calls:[{id,title,class,aged,since}],secondmates_uncounted},
+from the backlog parse and the local secondmate registry table alone. When the
+home's tasks-axi backend is not markdown it emits
+{count:null,uncounted_backend:<backend>} instead of a count.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -291,6 +311,7 @@ case "${1:---json}" in
   --json) ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   --contribution-input) OUTPUT_MODE=contribution-input ;;
+  --captain-calls) OUTPUT_MODE=captain-calls ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -499,6 +520,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
              hold_kind:metadata($rest; "hold-kind"),
              hold_until:metadata($rest; "hold-until"),
              hold_set:null,
+             hold_class:null,
              blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
              blocked_by_ids:blocked_by_ids($rest),
              blocked_reason:blocked_reason($rest),
@@ -535,6 +557,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records |= map(
         if (.body_lines | length) > 0 then
           .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+          | .hold_class = ([.body_lines[] | cap(.; "^Captain hold class:[[:space:]]*(?<v>[a-z][a-z-]{0,63})$") | select(. != null)][0] // null)
           | .local_note = (.local_note
               // (if any(.body_lines[];
                     test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
@@ -1007,6 +1030,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
             reason:(.hold_reason | trunc(160)),
+            class:(.hold_class // null),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
             hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
@@ -1121,6 +1145,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
+          hold_class:(.hold_class // null),
           hold_bucket:(.hold_bucket // null),
           hold_age_days:(.hold_age_days // null),
           captain_actionable:(.captain_actionable // false),
@@ -1975,6 +2000,29 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+if [ "$OUTPUT_MODE" = captain-calls ]; then
+  # shellcheck source=bin/fm-tasks-axi-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+  CAPTAIN_CALL_DATA=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) || CAPTAIN_CALL_DATA=$DATA
+  CAPTAIN_CALL_BACKEND=$(fm_tasks_axi_backend_resolve "$(dirname -- "$CAPTAIN_CALL_DATA")") \
+    || { echo "fm-fleet-snapshot: backlog backend could not be resolved" >&2; exit 1; }
+  if [ "$CAPTAIN_CALL_BACKEND" != markdown ]; then
+    jq -cn --arg backend "$CAPTAIN_CALL_BACKEND" '{count:null,uncounted_backend:$backend}' \
+      || { echo "fm-fleet-snapshot: captain-call projection failed" >&2; exit 1; }
+    exit 0
+  fi
+  CAPTAIN_CALL_REGISTRY=$(registry_secondmates_json) || { echo "fm-fleet-snapshot: secondmate registry read failed" >&2; exit 1; }
+  printf '%s\n' "$BACKLOG_JSON" | jq -c --argjson registry "$CAPTAIN_CALL_REGISTRY" '
+    [.records[]? | select(.structured and (.hold_bucket == "live" or .hold_bucket == "aged"))
+     | (.hold_bucket == "aged") as $aged
+     | {id, title, class:(.hold_class // null), aged:$aged,
+        since:(if $aged then ((.hold_set // .since // "")[:10] | select(test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))) // null else null end)}]
+    | {count:length, aged:(map(select(.aged)) | length), calls:.,
+       secondmates_uncounted:($registry.present and ($registry.available != true or ($registry.records | length) > 0))}' \
+    || { echo "fm-fleet-snapshot: captain-call projection failed" >&2; exit 1; }
+  exit 0
+fi
 contribution_tasks_json() {
   local meta id merge_authority
   for meta in "$STATE"/*.meta; do

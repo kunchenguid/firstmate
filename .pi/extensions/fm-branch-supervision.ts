@@ -195,13 +195,20 @@ const PROCESSING_INSTRUCTION =
   "Each outcome says what was true when it was recorded and how long ago, so check the task's current state first. " +
   "An abbreviated line is incomplete: read the full outcome before acting on, relaying, or acknowledging it, using that line's lookup --seqs command. " +
   "First sort the outcomes by that current state into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished. " +
+  "An outcome marked main to act is firstmate's own work, not a captain call: act on it yourself and never present it to the captain as a question. " +
   "Your reply to the captain covers only the still-open outcomes: give the captain a visible response where one is due, answer or escalate a decision, or act on a blocker or failure. " +
   "Write that reply as if the settled outcomes had never been listed: leave them out entirely, without naming them, summarizing them, or saying they are settled, because checking them is all the processing they need. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
-type Verdict = "routine" | "captain";
+type Verdict = "routine" | "main" | "captain";
+// An acted-on verdict (main or captain) is delivered, presented, and
+// acknowledged identically; only captain is a captain call
+// (bin/fm-branch-outcome.sh owns the store contract).
+function actedOn(verdict: Verdict): boolean {
+  return verdict === "main" || verdict === "captain";
+}
 type LockOwnership = "owned" | "other" | "missing";
 type OutcomeRow = {
   seq: number;
@@ -508,7 +515,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   const row = value as Record<string, unknown>;
   if (typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1) return null;
   if (typeof row.task !== "string" || !row.task) return null;
-  if (row.verdict !== "routine" && row.verdict !== "captain") return null;
+  if (row.verdict !== "routine" && row.verdict !== "main" && row.verdict !== "captain") return null;
   if (typeof row.summary !== "string" || !row.summary) return null;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
   const silent = row.silent === true;
@@ -994,7 +1001,7 @@ export default function (pi: ExtensionAPI) {
   // mark-read finds the same record and advances the cursor without appending
   // a duplicate. A conflicting record for one sequence fails closed.
   function ensureVisibleCaptainOutcome(row: OutcomeRow): boolean {
-    if (!currentMainSession || row.verdict !== "captain") return false;
+    if (!currentMainSession || !actedOn(row.verdict)) return false;
     let matching = false;
     for (const entry of currentMainSession.getEntries()) {
       if (entry.type !== "custom" || entry.customType !== VISIBLE_OUTCOME_ENTRY_TYPE) continue;
@@ -1046,7 +1053,7 @@ export default function (pi: ExtensionAPI) {
       try {
         const parsed = JSON.parse(line);
         const outcome = parseOutcomeRow(parsed);
-        const recordedAgo = outcome?.verdict === "captain" ? (parsed as { recordedAgo?: unknown }).recordedAgo : undefined;
+        const recordedAgo = outcome && actedOn(outcome.verdict) ? (parsed as { recordedAgo?: unknown }).recordedAgo : undefined;
         if (outcome && typeof recordedAgo === "string" && /^[0-9]+[mhd]$/.test(recordedAgo)) row = { ...outcome, recordedAgo };
       } catch {
         row = null;
@@ -1069,7 +1076,7 @@ export default function (pi: ExtensionAPI) {
   async function processingRequestInput(rows: UnprocessedOutcome[]): Promise<string> {
     const through = rows[rows.length - 1].seq;
     const listed = rows
-      .map((row) => `[seq ${row.seq}, recorded ${row.recordedAgo} ago] ${row.task}: ${row.summary}`)
+      .map((row) => `[seq ${row.seq}, recorded ${row.recordedAgo} ago${row.verdict === "main" ? ", main to act, not a captain call" : ""}] ${row.task}: ${row.summary}`)
       .join("\n");
     const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
     try {
@@ -1192,7 +1199,7 @@ export default function (pi: ExtensionAPI) {
         // representation for routine delivery, which changes the delivery
         // contract rather than this ordering, so it is deliberately not done
         // here.
-        if (row.verdict === "captain") {
+        if (actedOn(row.verdict)) {
           if (!ensureVisibleCaptainOutcome(row)) return false;
         } else {
           deliverRoutineOutcome(row);
@@ -1216,12 +1223,12 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks an eligible no-change outcome.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict main or captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it, and only captain is a call for the captain; routine notes render unless silent marks an eligible no-change outcome.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
-        verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
+        verdict: Type.Union([Type.Literal("routine"), Type.Literal("main"), Type.Literal("captain")], {
           description:
-            "Use captain or routine exactly as the \"Verdict: routine or captain\" section of your system prompt decides; that section is the one owner of the rule.",
+            "Use routine, main, or captain exactly as the \"Verdict: routine, main, or captain\" section of your system prompt decides; that section is the one owner of the rule.",
         }),
         summary: Type.String({
           description:
@@ -1229,7 +1236,7 @@ export default function (pi: ExtensionAPI) {
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
         silent: Type.Optional(Type.Boolean({
-          description: "True only for an eligible routine no-change outcome; captain outcomes are never silent, and actions, state changes, or new results stay rendered",
+          description: "True only for an eligible routine no-change outcome; main and captain outcomes are never silent, and actions, state changes, or new results stay rendered",
         })),
       }),
       execute: async (_toolCallId, params) => {
@@ -1238,9 +1245,9 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "main" && verdictRaw !== "captain")) {
           return {
-            content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
+            content: [{ type: "text", text: "invalid report: task, verdict (routine|main|captain), and summary are required" }],
             details: undefined,
             isError: true,
           };
@@ -2427,8 +2434,8 @@ ${context.command}
         const open = remaining === null
           ? "the remaining outcomes could not be read"
           : remaining.length === 0
-            ? "no captain outcome remains unprocessed"
-            : `${remaining.length} newer captain outcome(s) remain unprocessed (seq ${remaining.map((row) => row.seq).join(", ")}) and will be presented again`;
+            ? "no main or captain outcome remains unprocessed"
+            : `${remaining.length} newer main or captain outcome(s) remain unprocessed (seq ${remaining.map((row) => row.seq).join(", ")}) and will be presented again`;
         return {
           content: [{ type: "text", text: `processed through seq ${through}; ${open}` }],
           details: undefined,
@@ -2443,9 +2450,11 @@ ${context.command}
   // acknowledge it.
   pi.registerEntryRenderer?.(VISIBLE_OUTCOME_ENTRY_TYPE, (entry, _options, theme) => {
     const record = parseVisibleOutcomeRecord(entry.data);
-    if (!record || record.verdict !== "captain") return undefined;
+    if (!record || !actedOn(record.verdict)) return undefined;
+    // A main entry says so, so firstmate's own work never reads as a captain call.
+    const forMain = record.verdict === "main" ? " [firstmate to act, not a captain call]" : "";
     return new Text(
-      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` [seq ${record.seq}] ${record.task}: ${record.summary}`)}`,
+      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` [seq ${record.seq}]${forMain} ${record.task}: ${record.summary}`)}`,
       1,
       0,
     );

@@ -903,6 +903,16 @@ const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
 if (captainRendered.text !== "⚓ [seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review") {
   throw new Error(`captain renderer changed the exact visible outcome: ${captainRendered.text}`);
 }
+// A main outcome is firstmate's to act on: its entry says so, so it never
+// reads as a call for the captain.
+const mainRendered = entryRenderers.get("fm-branch-visible-outcome")(
+  { ...captainEntries[0], data: { ...captainEntries[0].data, seq: 4, task: "task-10", verdict: "main", summary: "local branch ready to land" } },
+  { expanded: false },
+  renderTheme,
+);
+if (!mainRendered || mainRendered.text !== "⚓ [seq 4] [firstmate to act, not a captain call] task-10: local branch ready to land") {
+  throw new Error(`main renderer did not mark the outcome as firstmate's: ${mainRendered && mainRendered.text}`);
+}
 process.exit(0);
 EOF
   status=$?
@@ -1014,7 +1024,7 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
   if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
   const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
   const verdictDescription = report.parameters.properties.verdict.description;
-  if (!verdictDescription.includes("Verdict: routine or captain") ||
+  if (!verdictDescription.includes("Verdict: routine, main, or captain") ||
       !verdictDescription.includes("one owner of the rule") ||
       verdictDescription.includes("unconditionally")) {
     throw new Error(`branch provider received conflicting verdict semantics: ${verdictDescription}`);
@@ -1332,14 +1342,23 @@ await finish(priorResult);
 // acknowledged one, so the first reconciliation presents it again for
 // processing instead of adopting it as processed.
 const legacy = Number(outcomeScript(["append", "--task", "legacy", "--verdict", "captain", "--summary", "delivered before processing existed"]));
-outcomeScript(["mark-read", "--through", String(legacy)]);
+// A main row in the same batch is firstmate's own work: the request main's
+// model reads marks it so, as the visible entry does, so it never reads as a
+// captain call.
+const legacyMain = Number(outcomeScript(["append", "--task", "landing", "--verdict", "main", "--summary", "local branch ready to land"]));
+outcomeScript(["mark-read", "--through", String(legacyMain)]);
 mainEntries.push({ type: "custom", customType: "fm-branch-visible-outcome", data: { version: 1, seq: legacy, task: "legacy", verdict: "captain", summary: "delivered before processing existed", silent: false } });
+mainEntries.push({ type: "custom", customType: "fm-branch-visible-outcome", data: { version: 1, seq: legacyMain, task: "landing", verdict: "main", summary: "local branch ready to land", silent: false } });
 await fire("session_start", {}, defaultSessionCtx);
 if (requests().length !== 1 || !requests()[0].message.content.includes(`[seq ${legacy}, recorded 0m ago] legacy: delivered before processing existed`)) {
   throw new Error(`a delivered but unacknowledged row was not presented again for processing: ${JSON.stringify(sentToMain)}`);
 }
-if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([legacy])) throw new Error("the first reconciliation adopted a delivered row as processed");
-outcomeScript(["mark-processed", "--through", String(legacy)]);
+if (!requests()[0].message.content.includes(`[seq ${legacyMain}, recorded 0m ago, main to act, not a captain call] landing: local branch ready to land`)
+  || !requests()[0].message.content.includes("An outcome marked main to act is firstmate's own work, not a captain call")) {
+  throw new Error(`the processing request framed a main row as a captain item: ${requests()[0].message.content}`);
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([legacy, legacyMain])) throw new Error("the first reconciliation adopted a delivered row as processed");
+outcomeScript(["mark-processed", "--through", String(legacyMain)]);
 requestsFloor = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process").length;
 
 // A routine outcome never opens a processing turn. Keep the scripted prompt

@@ -92,6 +92,12 @@ test_report_after_the_return_is_queued_for_main() {
     "a report after the return must say it is queued for main"
   assert_re $'\tcheck\tsupervision-host-return:2\tcheck: supervision-host outcome 2 for alpha \\[captain\\] was recorded after the captain returned.*relay it to the captain: PR ready for review$' \
     "$state/.wake-queue" "the late outcome must be a durable check wake for main"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" --task alpha --verdict main --summary 'local branch ready to land' 2>&1); rc=$?
+  expect_code 0 "$rc" "a main report after the return must be recorded"
+  assert_contains "$out" "recorded seq 3 [main]; the captain has returned, so it is queued for MAIN to act on" \
+    "a main report after the return must be queued for main to act on, not to relay"
+  assert_re $'\tcheck\tsupervision-host-return:3\tcheck: supervision-host outcome 3 for alpha \\[main\\] was recorded after the captain returned.*act on it yourself, it is not a captain call: local branch ready to land$' \
+    "$state/.wake-queue" "a late main outcome was queued as a relay to the captain"
   queue_before=$(cat "$state/.wake-queue")
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
     --task alpha --verdict routine --summary 'still building; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
@@ -270,7 +276,7 @@ test_branch_outcomes_collapse_repeated_captain_outcomes_per_task() {
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-1 --verdict captain --summary 'task-1 changed again' >/dev/null \
     || fail "fixture: could not record the later task-1 outcome"
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "BRANCH OUTCOMES: 3 newer captain outcome(s) are held back (byte cap); they follow on the next drain once these are acknowledged" \
+  assert_contains "$drained" "BRANCH OUTCOMES: 3 newer outcome(s) to act on are held back (byte cap); they follow on the next drain once these are acknowledged" \
     "the section must count every held-back captain row"
   assert_contains "$drained" "[seq 5, recorded 0m ago] task-1: task-1 $pad" "the first task must show its newest outcome the acknowledgement covers"
   assert_not_contains "$drained" "task-1 changed again" "a row after a held-back one must wait, since the acknowledgement cannot cover it"
@@ -585,11 +591,106 @@ test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair() {
   pass "drain: an outcome the host drain presented but main never acknowledged survives an outcome index repair"
 }
 
+# 31 October 2026: most branch outcomes said captain while meaning "main must
+# act", and that is how firstmate's own questions reached the captain as his.
+# A main outcome is stored, presented, and acknowledged like a captain one, but
+# its drain line says it is firstmate's to act on, and it is never counted as a
+# captain call.
+test_a_main_outcome_reaches_main_without_counting_as_a_captain_call() {
+  local home drained seq rows
+  home="$TMP_ROOT/drain-main-verdict"
+  mkdir -p "$home/state" "$home/config"
+  seq=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict main \
+    --summary 'local branch ready to land') || fail "the store refused a main outcome"
+  [ "$seq" = 1 ] || fail "the main outcome got seq $seq"
+  if FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict main --silent true \
+      --summary 'still nothing new' >/dev/null 2>&1; then
+    fail "the store accepted a silent main outcome"
+  fi
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task token --verdict captain \
+    --summary 'needs the captain to sign in' >/dev/null || fail "fixture: could not record a captain outcome"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" "[seq 1, recorded 0m ago, main to act, not a captain call] landing: local branch ready to land" \
+    "the drain did not present the main outcome as firstmate's to act on"
+  assert_contains "$drained" "[seq 2, recorded 0m ago] token: needs the captain to sign in" \
+    "the drain changed how a captain outcome reads"
+  rows=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed | jq -r '"\(.seq):\(.verdict)"' | tr '\n' ' ')
+  assert_equals "$rows" "1:main 2:captain " "a presented main outcome did not wait for main's acknowledgement"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 1 >/dev/null \
+    || fail "main could not acknowledge a main outcome"
+  rows=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed | jq -r '"\(.seq):\(.verdict)"' | tr '\n' ' ')
+  assert_equals "$rows" "2:captain " "acknowledging the main outcome did not leave only the captain outcome open"
+  pass "a main outcome reaches main like a captain outcome, labelled as firstmate's to act on"
+}
+
+# One line per task keeps the newest summary. When a task's newer main row
+# collapses an older captain row, the captain's own question must stay on
+# screen as its own row, ahead of the newer result: otherwise main would
+# acknowledge the login request through --through without ever reading it, and
+# it would never reach the captain. Only a task whose collapsed rows are all
+# main is labelled firstmate's alone.
+test_a_main_row_collapsing_a_captain_row_keeps_the_captain_question() {
+  local home drained
+  home="$TMP_ROOT/drain-main-over-captain"
+  mkdir -p "$home/state" "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task login --verdict captain \
+    --summary "needs the captain's login" >/dev/null || fail "fixture: could not record a captain outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict main \
+    --summary 'checks are running' >/dev/null || fail "fixture: could not record a main outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task login --verdict main \
+    --summary 'PR ready' >/dev/null || fail "fixture: could not record a main outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task landing --verdict main \
+    --summary 'local branch ready to land' >/dev/null || fail "fixture: could not record a main outcome"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" "[seq 1, captain call, recorded 0m ago] login: needs the captain's login
+[seq 3, newest of 2 for this task, recorded 0m ago] login: PR ready" \
+    "a main row that collapsed a captain row hid the captain's question or put it after the newer result"
+  assert_not_contains "$drained" "truncated" "rows that fit their caps were reported as truncated"
+  assert_not_contains "$drained" "main to act, not a captain call] login:" \
+    "a task carrying a captain row was labelled main's alone"
+  assert_contains "$drained" "[seq 4, newest of 2 for this task, recorded 0m ago, main to act, not a captain call] landing: local branch ready to land" \
+    "a task whose collapsed rows are all main lost its main label"
+  pass "a main row that collapses a captain row keeps the captain's question as its own row first"
+}
+
+# The out-of-order case: an older captain question long enough to fill a line
+# on its own, then a newer ready-to-land result for the same task. Squeezed
+# onto one capped line, the question would push the result off the screen
+# while the acknowledgement still covered it. As two rows, each under its own
+# 599-byte cap, both survive; the cut row ends in the truncation marker, and
+# the acknowledgement names it by seq with the lookup that reads it in full.
+test_a_long_captain_question_does_not_evict_the_newer_result() {
+  local home drained question
+  home="$TMP_ROOT/drain-long-question"
+  mkdir -p "$home/state" "$home/config"
+  question="needs the captain's login $(printf 'x%.0s' $(seq 1 700))"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task login --verdict captain \
+    --summary "$question" >/dev/null || fail "fixture: could not record a captain outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task login --verdict main \
+    --summary 'PR ready to land' >/dev/null || fail "fixture: could not record a main outcome"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_re "^\[seq 1, captain call, recorded 0m ago\] login: needs the captain's login x+ \[truncated\]\$" <(printf '%s\n' "$drained") \
+    "the long captain question was not shown as its own cut row"
+  assert_contains "$drained" "[seq 2, newest of 2 for this task, recorded 0m ago] login: PR ready to land" \
+    "the newer ready-to-land result was pushed off the screen by the long question"
+  printf '%s\n' "$drained" | LC_ALL=C awk '/^\[seq [0-9]+[^]]*\] login:/ && length($0) > 599 { bad = 1 } END { exit bad }' \
+    || fail "a row exceeded its own 599-byte cap: $drained"
+  assert_contains "$drained" "BRANCH OUTCOMES: 1 row(s) above were truncated (seq 1); read them in full with bin/fm-branch-outcome.sh lookup --seqs 1 before acknowledging" \
+    "the acknowledgement did not name the truncated row"
+  assert_contains "$drained" "mark-processed --through 2;" "the acknowledgement did not cover both rows"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" lookup --seqs 1 | grep -qF "$question" \
+    || fail "the named lookup did not return the full question"
+  pass "a long captain question and a newer result both survive as rows, and the truncated one is named"
+}
+
 fm_test_run \
   test_report_surface_enforces_actor_turn_and_scope \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
   test_branch_outcomes_only_on_a_host_home_off_pi \
+  test_a_main_row_collapsing_a_captain_row_keeps_the_captain_question \
+  test_a_long_captain_question_does_not_evict_the_newer_result \
+  test_a_main_outcome_reaches_main_without_counting_as_a_captain_call \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_collapse_repeated_captain_outcomes_per_task \
   test_branch_outcomes_present_a_long_away_window_once \

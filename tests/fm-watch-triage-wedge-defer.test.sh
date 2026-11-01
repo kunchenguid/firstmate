@@ -238,7 +238,7 @@ backlog_hold_wedge_fixture() {  # <name> <status-age-secs> [<wedge-timer-age-sec
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
   (cd "$dir" && tasks-axi add wedge 'stuck at a captain-only dialog' --file data/backlog.md) >/dev/null 2>&1 \
     || return 1
-  run_hold "$dir" hold wedge --reason 'awaiting the captain on the dialog' || return 1
+  run_hold "$dir" hold wedge --class product-or-scope-expansion --reason 'awaiting the captain on the dialog' || return 1
   printf '%s\n' "$dir"
 }
 

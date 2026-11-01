@@ -144,7 +144,7 @@ test_attended_captain_outcome_reaches_main_through_branch_outcomes() {
   watcher_live "$home" && fail "the host left its successor cycle running when it woke main"
 
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "BRANCH OUTCOMES (captain outcomes the supervision session recorded for you" "main's drain must present the captain outcome"
+  assert_contains "$drained" "BRANCH OUTCOMES (outcomes the supervision session recorded for you to act on" "main's drain must present the captain outcome"
   assert_contains "$drained" "[seq 1, recorded " "the section must carry the outcome's row and when it was recorded"
   assert_contains "$drained" " ago] demo: stub escalated: " "the section must carry the outcome's task and summary"
   assert_contains "$drained" "run bin/fm-branch-outcome.sh mark-processed --through 1" "the section must print its exact acknowledgement"
@@ -197,7 +197,7 @@ test_quiet_record_without_its_daemon_is_a_present_captain() {
   assert_re '^supervision-host: branch-outcome: .*\(store rows 1\); run bin/fm-wake-drain.sh' "$home/host.out" \
     "the exit must name the captain outcome's store row for the present captain"
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "BRANCH OUTCOMES (captain outcomes the supervision session recorded for you" "main's drain must present the captain outcome beside a quiet record"
+  assert_contains "$drained" "BRANCH OUTCOMES (outcomes the supervision session recorded for you to act on" "main's drain must present the captain outcome beside a quiet record"
   assert_contains "$drained" " ago] demo: stub escalated: " "the section must carry the outcome"
   [ -f "$home/state/.afk-contract" ] || fail "the host must leave quiet mode's record in place"
 

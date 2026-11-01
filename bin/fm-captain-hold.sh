@@ -20,8 +20,9 @@
 # and secondmate-home ownership aligned with the work that discovered the call.
 #
 # Usage:
-#   fm-captain-hold.sh hold <task-id> --reason <reason> \
+#   fm-captain-hold.sh hold <task-id> --class <class> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#   fm-captain-hold.sh classes
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -55,7 +56,35 @@
 # readers decode them (bin/fm-hold-reason-lib.sh owns the encoding).
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
-# card.
+# card. It pairs with any class: a deferred call keeps its own class, because
+# the deferral says when, not what kind of call it is.
+#
+# TYPED HOLDS. `--class` is required and must name one entry of the closed
+# vocabulary `classes` prints, which mirrors the captain's own authority list:
+#   money                              real money
+#   permanent-removal                  permanently removing something he owns
+#   merge-or-landing-outside-authority merging or landing beyond standing authority
+#   exploit-kernel-security-flash      boot-time exploit, kernel modules, global
+#                                      security settings, flashing
+#   physical-or-credential             his body, his credential, or his login
+#   product-or-scope-expansion         a genuine product or scope expansion
+#   destructive-irreversible-security  destructive, irreversible, or security-sensitive
+#   discard-unlanded                   discarding unlanded work
+#   design-pick                        a product or architecture call that
+#                                      accepted intent does not settle
+#   repeated-finding-ruling            the third same-theme finding, where
+#                                      incremental corrections are propping up
+#                                      an abstraction he should decide whether
+#                                      to keep
+#   deferred-by-captain                a call whose only nature is his own
+#                                      "later"; requires --until
+# A missing or unknown class is refused before anything is written. If no class
+# fits, it is not a captain call: it is firstmate's to decide. There is
+# deliberately no class for reversible work and no catch-all, so a reversible
+# call cannot be held for the captain at all. The class is
+# recorded on a `Captain hold class:` body line, replaced on every re-hold,
+# which bin/fm-fleet-snapshot.sh projects as hold_class and Bearings renders.
+# A hold recorded before classes existed has no such line and projects null.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -292,6 +321,24 @@ usage() {
 fail() {
   printf 'fm-captain-hold: %s\n' "$*" >&2
   exit 1
+}
+
+# The closed captain-hold class vocabulary. This list is the one owner;
+# `classes` prints it for every other consumer.
+CAPTAIN_HOLD_CLASSES='money
+permanent-removal
+merge-or-landing-outside-authority
+exploit-kernel-security-flash
+physical-or-credential
+product-or-scope-expansion
+destructive-irreversible-security
+discard-unlanded
+design-pick
+repeated-finding-ruling
+deferred-by-captain'
+
+captain_hold_class_known() {  # <class>
+  printf '%s\n' "$CAPTAIN_HOLD_CLASSES" | grep -Fqx -- "$1"
 }
 
 validate_slug() {  # <label> <value>
@@ -837,6 +884,32 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
   rm -f -- "$tmp"
 }
 
+# The class a hold was recorded with lives on its own body line directly under
+# the hold-set stamp, replacing any class an earlier hold of this task left.
+body_hold_class() {  # <decoded-task-body>
+  printf '%s\n' "$1" | sed -n 's/^Captain hold class: \(.*\)$/\1/p' | head -1
+}
+
+write_hold_class() {  # <task-id> <shown-body> <class>
+  local id=$1 body=$2 class=$3 stamp rest new_body tmp
+  body=$(decode_shown_value "$body") || return 1
+  stamp=$(printf '%s\n' "$body" | sed -n 1p)
+  [ -n "$(body_hold_set_timestamp "$body")" ] || return 1
+  [ "$(body_hold_class "$body")" != "$class" ] || return 0
+  rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold class: /' \
+    | awk 'NF || started { started = 1; print }')
+  new_body=$(printf '%s\nCaptain hold class: %s' "$stamp" "$class")
+  if [ -n "$rest" ]; then
+    new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
+  fi
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-class.XXXXXX") || return 1
+  if ! printf '%s\n' "$new_body" > "$tmp" || ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
+}
+
 # The origin a hold was recorded for lives in the held task's own body, on a
 # line of its own, so `complete` can tell a call held for this origin from one
 # held for another. Omitting --origin leaves any existing association intact.
@@ -1083,7 +1156,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
+  local id=${1:-} title='' reason='' repo='' origin='' until='' class='' class_set=0 show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
@@ -1094,11 +1167,19 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --class) shift; class=${1:-}; class_set=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
+  [ "$class_set" = 1 ] && [ -n "$class" ] \
+    || fail "--class is required: name which of the captain's categories this call belongs to ($(printf '%s' "$CAPTAIN_HOLD_CLASSES" | tr '\n' ',' | sed 's/,/, /g')); if no class fits, it is not a captain call and is firstmate's to decide"
+  captain_hold_class_known "$class" \
+    || fail "unknown --class $class: the captain-hold classes are $(printf '%s' "$CAPTAIN_HOLD_CLASSES" | tr '\n' ',' | sed 's/,/, /g'); if no class fits, it is not a captain call and is firstmate's to decide"
+  if [ "$class" = deferred-by-captain ] && [ -z "$until" ]; then
+    fail "--class deferred-by-captain records the captain's own later and requires --until YYYY-MM-DD"
+  fi
   [ -n "$reason" ] || fail "reason must not be empty"
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
@@ -1168,6 +1249,11 @@ command_hold() {
   task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id did not retain its hold-set stamp"
+  if ! write_hold_class "$id" "$(show_field "$show" body)" "$class"; then
+    restore_hold_body "$id" "$original_body" || true
+    fail "could not record the hold class on $id"
+  fi
+  task_show_or_fail "$id" "task $id disappeared while recording its hold class"
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$stored_reason" --kind captain --until "$until" >/dev/null \
       || hold_status=$?
@@ -2260,6 +2346,7 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
 
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
+  classes) shift; [ "$#" -eq 0 ] || { usage >&2; exit 2; }; printf '%s\n' "$CAPTAIN_HOLD_CLASSES" ;;
   answer) shift; command_answer "$@" ;;
   answers) shift; command_answers "$@" ;;
   reconcile-requests) shift; command_reconcile_requests "$@" ;;

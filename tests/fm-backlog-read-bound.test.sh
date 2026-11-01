@@ -199,7 +199,7 @@ PATH="$CAPTAIN_FAKEBIN:$BASE_PATH" FM_HOME="$CAPTAIN" \
   FM_STATE_OVERRIDE="$CAPTAIN/state" FM_DATA_OVERRIDE="$CAPTAIN/data" \
   FM_CONFIG_OVERRIDE="$CAPTAIN/config" FM_BACKLOG_ROW_TIMEOUT_SECS="$BOUND_SECS" \
   FM_TEST_TASKS_AXI_ADD_LOG="$ADD_LOG" \
-  "$ROOT/bin/fm-captain-hold.sh" hold wedged-hold --title 'Wedged hold' --reason 'backend wedged' \
+  "$ROOT/bin/fm-captain-hold.sh" hold wedged-hold --title 'Wedged hold' --class product-or-scope-expansion --reason 'backend wedged' \
   > "$HOLD_OUT" 2>&1 || HOLD_STATUS=$?
 
 [ "$HOLD_STATUS" -ne 0 ] \

@@ -5,7 +5,7 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//     charted:[{title,sub,badges,pickable}], calls:[{title,badges}], empty, more, error }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -27,6 +27,12 @@ class Node {
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      remove: (c) => { this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" "); },
+      toggle: (c, on) => {
+        const want = on === undefined ? !this.classList.contains(c) : Boolean(on);
+        if (want) this.classList.add(c); else this.classList.remove(c);
+        return want;
+      },
     };
   }
   get textContent() {
@@ -111,6 +117,16 @@ const rowsOf = (container) =>
 const uw = byId.get("bb-underway") || new Node("div");
 const underway = rowsOf(uw);
 
+const deck = byId.get("bb-call") || new Node("div");
+const calls = deck.children.map((card) => {
+  const pad = card.children.find((c) => c.className.includes("bb-decision__pad"));
+  const top = pad?.children.find((c) => c.className.includes("bb-decision__top"));
+  return {
+    title: pad?.children.find((c) => c.className.includes("bb-decision__title"))?.textContent ?? "",
+    badges: top ? badgesOf(top) : [],
+  };
+});
+
 const ch = byId.get("bb-charted") || new Node("div");
 const charted = rowsOf(ch);
 // A fail-closed render replaces the page body instead of the board sections, so
@@ -123,4 +139,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, underway, charted, calls, empty, more, error: errorText }) + "\n");

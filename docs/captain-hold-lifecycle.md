@@ -49,12 +49,13 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 The `hold` subcommand is the mandatory captain-hold creation path.
 It works in this order:
 
-1. It uses an existing task, or creates one when nothing exists to hold.
-2. It records the task's UTC hold-set timestamp as the leading line of the task body.
-3. It invokes the underlying tasks-axi hold operation.
-4. It verifies the captain-hold annotations and timestamp.
-5. In a secondmate home, it publishes the verified hold to the parent channel.
-6. When `--origin` is supplied, it records the origin on the task, replacing any previous association only after the backend hold succeeds.
+1. It refuses a missing or unknown `--class` before anything is written; the closed vocabulary is what `bin/fm-captain-hold.sh classes` prints, and it has no class for reversible work.
+2. It uses an existing task, or creates one when nothing exists to hold.
+3. It records the task's UTC hold-set timestamp as the leading line of the task body, then the class on a `Captain hold class:` line replacing any earlier one.
+4. It invokes the underlying tasks-axi hold operation.
+5. It verifies the captain-hold annotations and timestamp.
+6. In a secondmate home, it publishes the verified hold to the parent channel.
+7. When `--origin` is supplied, it records the origin on the task, replacing any previous association only after the backend hold succeeds.
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
@@ -63,7 +64,7 @@ Repeat and edge cases:
 - Retries of an active hold preserve its hold-set timestamp.
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
-- `--until` stores the captain's own deferral date through tasks-axi's date gate.
+- `--until` stores the captain's own deferral date through tasks-axi's date gate, and pairs with any class: a deferred call keeps its own class, and `--class deferred-by-captain` (which requires `--until`) is only for a call whose sole nature is the captain's own later.
 - `--origin` resolves the backend origin identity before writing the hold-set stamp.
   The association lives on its own `Captain hold origin:` body line; [completion inventory checks](#recording-a-reviewed-inventory-complete) own how it is verified.
   The ordering above prevents an interrupted or refused backend hold from publishing the new association, even when an old captain hold is still active or date-expired.
@@ -387,6 +388,9 @@ No captain hold can fall through them and none can match two, which is what keep
 Existing undated holds without a hold-set stamp fall back to the task's `since` date.
 That aging is a projection safety net only.
 The durable deferral remains re-holding with `--until`.
+
+Each structured row also carries `hold_class`, read from the body's `Captain hold class:` line that `hold` writes, or null for a hold recorded before classes existed; Bearings passes it through as each captain-hold decision's `class` and the board renders it on the card.
+The class is self-attested and never changes the bucket.
 
 The fleet snapshot's secondmate-home summary classifies an actionable captain hold as `captain_decision`.
 It preserves every captain hold in the bounded queued inventory of the owning home.

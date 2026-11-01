@@ -25,6 +25,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 | Claude's Stop auto-arm cooperation, block budget, and fail-open | [Claude cooperative mode](#claude-cooperative-mode) |
 | Cursor's parked hook | [Cursor park](#cursor-park) |
 | Antigravity's parked hook | [Antigravity park](#antigravity-park) |
+| What the "Waiting on you" line shows and where | [Waiting-on-you line](#waiting-on-you-line) |
 | Known gaps | [Compatibility limits](#compatibility-limits) |
 | Tests and live evidence | [Regression coverage](#regression-coverage) |
 
@@ -558,6 +559,18 @@ Each invocation publishes a unique claim in `state/.agy-park-owner` and yields c
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
 That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it always points to the active harness protocol rather than embedding another repair command.
 
+## Waiting-on-you line
+
+A Claude or Pi primary turn end also shows a "Waiting on you" line with the count and titles of this home's unanswered undated captain holds, aged ones included and marked, and a zero included, so a claim that nothing waits on the captain can be contradicted on sight.
+`bin/fm-waiting-on-you.sh` owns its content, shape, and scope.
+It is display only: it never blocks or follows up a turn, and it is independent of the guard predicate above.
+Only the two surfaces below render it.
+
+| Harness | Where the line appears |
+| --- | --- |
+| Claude | A `Stop` hook in `.claude/settings.json` running `bin/fm-waiting-on-you.sh --claude`, whose `systemMessage` Claude Code shows after the turn |
+| Pi | The `agent_settled` handler in `.pi/extensions/fm-primary-turnend-guard.ts` refreshes a persistent footer status keyed `fm-waiting-on-you` |
+
 ## Compatibility limits
 
 - Child crewmate and scout worktrees are outside scope.
@@ -577,6 +590,10 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - If `jq` is removed after installation, the hook remains silent and exits 0, turn-end wakes stop, and Kimi crews fall back to idle detection.
 - Unreadable hook input remains fail-open.
 - No harness adapter uses a shell ampersand to manufacture supervision.
+- The waiting-on-you line is rendered only by the Claude `Stop` hook and the Pi footer.
+  Every other primary adapter gets neither the line nor a captain-hold follow-up yet: this guard's stderr follow-up fires only for blind supervision and never mentions captain holds.
+- The waiting-on-you line counts only holds in the markdown backlog.
+  A home on another tasks-axi backend, such as Beads, shows `Waiting on you: unknown` with a not-counted note instead of a count; reading holds through tasks-axi for every backend is a follow-up.
 
 ## Regression coverage
 
