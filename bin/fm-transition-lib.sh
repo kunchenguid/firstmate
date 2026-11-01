@@ -35,6 +35,8 @@
 #      or the task's cleanup, so exactly one wake fires per ->blocked edge and a
 #      reconnect level-reconcile never re-delivers a still-blocked pane. Each
 #      backend passes its own marker prefix so the two never collide.
+#      Opted-in watched panes dedupe by the last actionable status, allowing
+#      blocked -> done without an intervening working edge.
 #
 # The split is what keeps the escalation general rather than a herdr blocked
 # hack: a backend contributes only a wire->record normalizer and a stream
@@ -89,6 +91,7 @@ fm_transition_detail()       { fm_transition_field "$1" 6; }
 #                waiting on the human (a permission/trust dialog, an interactive
 #                menu, a wedged prompt) - the cases that write no status file
 #                and otherwise sit until the stale-pane wedge timer.
+#                The explicit watched-done context also makes done actionable.
 #   absorb     - do NOT wake, but CLEAR this pane's per-pane escalation dedupe
 #                marker so a later `->blocked` edge re-escalates. `working`
 #                (a crew resumed/started a turn) is the clearing edge.
@@ -97,6 +100,7 @@ fm_transition_detail()       { fm_transition_field "$1" 6; }
 #                `idle`/`done` blip transiently between tool calls, so
 #                fast-pathing them would be a false-positive firehose - they are
 #                already covered by the debounced signal/stale machinery.
+#                Only operator watches may opt into the watched-done context.
 #   rescan     - the endpoint is `gone` (its program exited or its pane closed):
 #                end the wait now so the watcher's poll cycle reconciles that
 #                task at once through its own liveness checks. Never a wake by
@@ -108,13 +112,16 @@ fm_transition_detail()       { fm_transition_field "$1" 6; }
 # Consumers act on `actionable`, mutate dedupe state on `absorb`, end the wait
 # on `rescan`, and ignore `defer`/`fallback` on the fast path. Subscribing to ALL statuses (not just
 # `blocked`) is deliberate: `working`/`idle`/`done` carry the dedupe-clear and
-# reconnect/level-reconcile state; only THIS policy makes `blocked` the sole
-# immediate action.
-fm_transition_policy() {  # <to_status> -> actionable|absorb|defer|rescan|fallback
+# reconnect/level-reconcile state; only THIS policy chooses immediate actions.
+# The optional context defaults to task; only watched-done opts into done.
+fm_transition_policy() {  # <to_status> [task|watched|watched-done] -> action
   case "$1" in
     blocked) printf 'actionable' ;;
     working) printf 'absorb' ;;
-    idle|done) printf 'defer' ;;
+    done)
+      if [ "${2:-task}" = watched-done ]; then printf 'actionable'; else printf 'defer'; fi
+      ;;
+    idle) printf 'defer' ;;
     gone) printf 'rescan' ;;
     *) printf 'fallback' ;;
   esac
@@ -136,14 +143,15 @@ fm_transition_marker() {  # <state_dir> <prefix> <window>
 # returns 3 with no output. `defer`, `fallback`, and an already-marked
 # `actionable` return 1 with no output. <session> reconstructs the window
 # ("<session>:<pane_id>") for the marker key.
-fm_transition_apply() {  # <state_dir> <prefix> <session> <record>
-  local state=$1 prefix=$2 session=$3 record=$4 pane_id marker
+fm_transition_apply() {  # <state_dir> <prefix> <session> <record> [context]
+  local state=$1 prefix=$2 session=$3 record=$4 context=${5:-task} pane_id marker status
   pane_id=$(fm_transition_pane_id "$record")
   [ -n "$pane_id" ] || return 1
   marker=$(fm_transition_marker "$state" "$prefix" "$session:$pane_id")
-  case "$(fm_transition_policy "$(fm_transition_to_status "$record")")" in
+  status=$(fm_transition_to_status "$record")
+  case "$(fm_transition_policy "$status" "$context")" in
     actionable)
-      if [ ! -e "$marker" ]; then
+      if [ ! -e "$marker" ] || { [ "$context" = watched-done ] && [ "$(cat "$marker")" != "$status" ]; }; then
         printf '%s' "$record"
         return 0
       fi
@@ -162,7 +170,7 @@ fm_transition_commit() {  # <state_dir> <prefix> <session> <record>
   local pane_id
   pane_id=$(fm_transition_pane_id "$4")
   [ -n "$pane_id" ] || return 1
-  : > "$(fm_transition_marker "$1" "$2" "$3:$pane_id")"
+  fm_transition_to_status "$4" > "$(fm_transition_marker "$1" "$2" "$3:$pane_id")"
 }
 
 fm_transition_clear() {  # <state_dir> <prefix> <window>

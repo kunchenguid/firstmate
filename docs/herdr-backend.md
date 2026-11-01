@@ -899,6 +899,7 @@ The portable halves are pinned by `tests/fm-backend-herdr.test.sh` (the read, ag
 Protocol 16 can subscribe to `pane.agent_status_changed` over one bounded Unix-socket reader.
 `bin/fm-transition-lib.sh` owns the backend-neutral transition vocabulary and policy.
 The Herdr adapter subscribes before reconciling current levels, buffers edges during reconciliation, and returns fresh blocked transitions for this home's panes.
+Operator sessions without task metadata use the [watched-pane registry](configuration.md#operator-owned-herdr-pane-watches-statewatched-panes).
 
 The watcher maps the pane back to the task and skips these:
 

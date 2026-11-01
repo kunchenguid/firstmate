@@ -49,6 +49,9 @@ pass "fm_transition_record tolerates empty workspace/from/agent/detail fields"
 [ "$(fm_transition_policy working)" = "absorb" ] || fail "working must be absorb"
 [ "$(fm_transition_policy idle)" = "defer" ] || fail "idle must be defer"
 [ "$(fm_transition_policy "done")" = "defer" ] || fail "done must be defer"
+[ "$(fm_transition_policy "done" watched-done)" = actionable ] || fail "opted-in watched panes must notify on done"
+[ "$(fm_transition_policy "done" watched)" = defer ] || fail "watched panes must opt into done"
+[ "$(fm_transition_policy blocked watched-done)" = actionable ] || fail "watched blocked must remain actionable"
 [ "$(fm_transition_policy gone)" = "rescan" ] || fail "gone must be rescan"
 [ "$(fm_transition_policy unknown)" = "fallback" ] || fail "unknown must be fallback"
 [ "$(fm_transition_policy "")" = "fallback" ] || fail "empty status must be fallback"
@@ -80,5 +83,20 @@ RC=0; fm_transition_apply "$DEDUPE" .x-escalated- s1 "$(fm_transition_record p2 
 RC=0; fm_transition_apply "$DEDUPE" .x-escalated- s1 "$(fm_transition_record p2 "" "" idle agent)" || RC=$?
 [ "$RC" = 1 ] || fail "an idle edge must return 1, got $RC"
 pass "fm_transition_apply/_commit/_clear: one hit per blocked edge, cleared by working or cleanup, prefix-scoped, gone rescans"
+
+FINISHED=$(fm_transition_record p2 "" "" "done" agent)
+fm_transition_commit "$DEDUPE" .x-escalated- s1 "$BLOCKED"
+fm_transition_apply "$DEDUPE" .x-escalated- s1 "$FINISHED" watched-done >/dev/null \
+  || fail "opted-in done after blocked must notify without working"
+fm_transition_commit "$DEDUPE" .x-escalated- s1 "$FINISHED"
+fm_transition_apply "$DEDUPE" .x-escalated- s1 "$FINISHED" watched-done >/dev/null \
+  && fail "repeated done must be deduped"
+fm_transition_apply "$DEDUPE" .x-escalated- s1 "$FINISHED" >/dev/null \
+  && fail "ordinary tasks must still defer done"
+fm_transition_apply "$DEDUPE" .x-escalated- s1 "$BLOCKED" >/dev/null \
+  && fail "ordinary task marker existence must still dedupe"
+fm_transition_apply "$DEDUPE" .x-escalated- s1 "$BLOCKED" watched-done >/dev/null \
+  || fail "new blocked state after watched done must notify"
+pass "watched-done dedupes each actionable status while ordinary task policy is unchanged"
 
 echo "# fm-transition-lib.test.sh: all assertions passed"
