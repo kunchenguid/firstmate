@@ -2864,10 +2864,11 @@ start_check_started() {  # <id> <meta> <epoch>
 }
 
 # The wake reason for a launch with no start proof, classified from one fresh
-# capture: a recorded launch dialog (fm_busy_launch_prompt_name owns the table
-# and whether Enter accepts it), an exited agent, a brief left unsubmitted in
-# the composer, or no signal at all. The dialog match only sharpens the wording;
-# a vendor rewording degrades it to the generic reason and never silences it.
+# capture: an exited agent or a vanished endpoint, a recorded launch dialog
+# (fm_busy_launch_prompt_name owns the table and whether Enter accepts it), a
+# brief left unsubmitted in the composer, or no signal at all. The dialog match
+# only sharpens the wording; a vendor rewording degrades it to the generic
+# reason and never silences it.
 # Sets START_CHECK_REASON, and START_CHECK_TAIL to the capture for the stale
 # marker; both are globals so the caller keeps the capture without a subshell.
 START_CHECK_REASON=
@@ -2882,18 +2883,9 @@ start_check_reason() {  # <id> <meta> <harness> <age>
   if watcher_capture "$backend" "$target" 40 "$(window_label "$target")"; then
     START_CHECK_TAIL=$WATCHER_CAPTURE
   fi
-  if [ -n "$START_CHECK_TAIL" ] \
-    && row=$(printf '%s' "$START_CHECK_TAIL" | fm_busy_launch_prompt_name "$harness"); then
-    name=${row%%$'\t'*}
-    if [ "${row#*$'\t'}" = enter ]; then
-      printf -v START_CHECK_REASON '%s; on screen: %s); accept: %s %q %q --key Enter' "$head" "$name" "$home" \
-        "$SCRIPT_DIR/fm-send.sh" "$id"
-    else
-      printf -v START_CHECK_REASON '%s; on screen: %s); no key accepts it: answer it in endpoint %s as the harness reference describes' \
-        "$head" "$name" "$target"
-    fi
-    return 0
-  fi
+  # The agent's own state outranks the screen: a dialog the agent painted
+  # before it died stays in the captured scrollback, and Enter there would go
+  # to a bare shell.
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null)" in
     dead)
       # A ship or scout relaunch must tell the replacement what happened; a
@@ -2915,6 +2907,18 @@ start_check_reason() {  # <id> <meta> <harness> <age>
       return 0
       ;;
   esac
+  if [ -n "$START_CHECK_TAIL" ] \
+    && row=$(printf '%s' "$START_CHECK_TAIL" | fm_busy_launch_prompt_name "$harness"); then
+    name=${row%%$'\t'*}
+    if [ "${row#*$'\t'}" = enter ]; then
+      printf -v START_CHECK_REASON '%s; on screen: %s); accept: %s %q %q --key Enter' "$head" "$name" "$home" \
+        "$SCRIPT_DIR/fm-send.sh" "$id"
+    else
+      printf -v START_CHECK_REASON '%s; on screen: %s); no key accepts it: answer it in endpoint %s as the harness reference describes' \
+        "$head" "$name" "$target"
+    fi
+    return 0
+  fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$(window_label "$target")" 2>/dev/null) || cstate=unknown
   if [ "$cstate" = pending ]; then
     printf -v START_CHECK_REASON '%s; instructions typed but not submitted); submit: %s %q %q --key Enter' "$head" "$home" \
