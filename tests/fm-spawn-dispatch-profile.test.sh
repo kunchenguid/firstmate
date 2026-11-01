@@ -621,15 +621,17 @@ test_raw_launch_trailing_separator_or_comment_keeps_disarm() {
     launch=$(cat "$LAUNCH_LOG")
     agentbin="$CASE_DIR/agentbin"
     mkdir -p "$agentbin"
-    # shellcheck disable=SC2016 # The stand-in agent expands the launch's inbox export.
-    printf '#!/bin/sh\necho WORKER-RAN\n: > "${FM_TASK_INBOX%%/*}/.osc7501watch-no-tty"\n' > "$agentbin/custom-agent"
+    cat > "$agentbin/custom-agent" <<'SH'
+#!/bin/sh
+: > "${FM_TASK_INBOX%/*}/.osc7501watch-no-tty" && echo WORKER-RAN
+SH
     chmod +x "$agentbin/custom-agent"
     printf 'onn\n' > "$HOME_DIR/config/osc7501-status"
     result=$(cd "$CASE_DIR" && isolated_pane_env PATH="$agentbin:$PATH" FM_OSC7501_TTY=no-tty \
       /bin/sh -c "$launch" 2>&1)
     status=$?
     expect_code 0 "$status" "staged launch for raw '$raw' failed: $result"
-    assert_contains "$result" WORKER-RAN "staged launch for raw '$raw' never started the worker"
+    assert_contains "$result" WORKER-RAN "staged launch for raw '$raw' never started the worker or planted its pidfile"
     assert_contains "$result" 'osc7501-status: unknown value' "staged launch hid the reporter config warning"
     [ ! -e "$HOME_DIR/state/.osc7501watch-no-tty" ] \
       || fail "staged launch for raw '$raw' skipped the reporter disarm"
