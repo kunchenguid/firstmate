@@ -998,6 +998,38 @@ assert_no_grep 'rex server start' "$CASE_STATE/rexfake/log" "--fix restarted an 
 [ "$(cat "$CASE_STATE/rexfake/exit-empty")" = true ] || fail "--fix changed the answering rex server's shape"
 pass "--fix never stops an answering exit-empty rex server and reports the operator restart"
 
+# Readiness contract: only a successful whoami with boolean false proves
+# persistence. Reject unreadable settings and false-like/missing values; the
+# captain's refusal decision is the oracle, not the fake's default settings.
+new_case Linux no-herdr
+install_case_rex
+touch "$CASE_STATE/rexfake/whoami-fail"
+doctor --backend rex --fix
+expect_code 1 "$DOCTOR_RC" "unreadable rex settings were reported ready"
+assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "unreadable whoami was not a human gap"
+assert_contains "$DOCTOR_OUT" 'action: rex-server:' "unreadable whoami omitted the human action"
+assert_not_contains "$DOCTOR_OUT" 'check rex-server=ok:' "unreadable whoami claimed persistence"
+rm "$CASE_STATE/rexfake/whoami-fail"
+: > "$CASE_STATE/rexfake/log"
+doctor --backend rex
+expect_code 0 "$DOCTOR_RC" "explicit boolean false was not ready"
+[ "$(grep -c 'whoami --json' "$CASE_STATE/rexfake/log")" -eq 1 ] \
+  || fail "successful readiness did not read whoami exactly once"
+for settings in '{}' '{"exit_empty":null}' '{"exit_empty":"false"}' '{"exit_empty":0}' invalid trailing; do
+  case "$settings" in
+    invalid) printf 'invalid' > "$CASE_STATE/rexfake/whoami.json" ;;
+    trailing) printf '{"endpoint":"unix:///fake/rex.sock","exit_empty":false} invalid' > "$CASE_STATE/rexfake/whoami.json" ;;
+    *) printf '%s' "$settings" | jq '. + {endpoint:"unix:///fake/rex.sock"}' > "$CASE_STATE/rexfake/whoami.json" ;;
+  esac
+  : > "$CASE_STATE/rexfake/log"
+  doctor --backend rex
+  expect_code 1 "$DOCTOR_RC" "unverified persistence settings were reported ready: $settings"
+  assert_contains "$DOCTOR_OUT" 'check rex-server=human:' "invalid settings were not a human gap"
+  [ "$(grep -c 'whoami --json' "$CASE_STATE/rexfake/log")" -eq 1 ] \
+    || fail "readiness did not read whoami exactly once"
+done
+pass "unreadable, missing, and malformed rex persistence settings require human action"
+
 # A rex CLI below the verified API floor is a human gap, as is a server one.
 new_case Darwin no-herdr gui
 install_case_rex

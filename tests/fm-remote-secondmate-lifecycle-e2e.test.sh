@@ -1635,6 +1635,37 @@ assert_contains "$BOOT_REX_RESTARTED" 'secondmate ios relaunched after remote en
   || fail "the rex secondmate relaunched onto the restarted server did not read alive"
 pass "remote rex control-plane probes never start a stopped server, and recovery follows a persistent start"
 
+# Retirement contract: neither close nor home deletion is authorized without
+# an answering server whose identity matches the launch record. Exercise both
+# ordinary and forced retirement; observing only a refusal would miss a close
+# that happened before the refusal.
+cp "$REX_FAKE/state.json" "$TMP_ROOT/rex-before-refused-retire.json"
+for server_failure in repointed unreadable unreachable; do
+  case "$server_failure" in
+    repointed) printf 'unix:///other/rex.sock\n' > "$REX_FAKE/endpoint" ;;
+    unreadable) touch "$REX_FAKE/whoami-fail" ;;
+    unreachable) touch "$REX_FAKE/unreachable" ;;
+  esac
+  for retire_force in '' --force; do
+    : > "$REX_FAKE/log"
+    if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios ${retire_force:+"$retire_force"} \
+      > "$TMP_ROOT/rex-refused-retire.out" 2>&1; then
+      fail "rex retirement accepted $server_failure server ($retire_force)"
+    fi
+    assert_present "$REMOTE_HOME" "refused rex retirement deleted the home"
+    assert_grep 'restore access to the recorded Rex server' "$TMP_ROOT/rex-refused-retire.out" \
+      "refused rex retirement omitted the human action"
+    assert_no_grep 'block close' "$REX_FAKE/log" "refused rex retirement attempted to close the block"
+    cmp -s "$TMP_ROOT/rex-before-refused-retire.json" "$REX_FAKE/state.json" \
+      || fail "refused rex retirement changed running sessions"
+  done
+  printf 'unix://%s/rex.sock\n' "$REX_FAKE" > "$REX_FAKE/endpoint"
+  rm -f "$REX_FAKE/whoami-fail" "$REX_FAKE/unreachable"
+done
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the rex agent did not survive refused retirement"
+pass "rex retirement refuses server drift and unreadable or unreachable identity without closing or deleting"
+
 mv -f "$TMP_ROOT/remote-ios-before-rex.meta" "$remote_route_meta"
 mv -f "$TMP_ROOT/parent-ios-before-rex.meta" "$PARENT/state/ios.meta"
 pass "a remote secondmate may run on rex with strict route validation both ways"

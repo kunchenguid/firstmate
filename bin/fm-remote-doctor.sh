@@ -686,7 +686,7 @@ check_rex() {
 }
 
 check_rex_server() {
-  local status endpoint exit_empty server_api
+  local status whoami endpoint exit_empty server_api
   if ! rex_bin >/dev/null || ! command -v jq >/dev/null 2>&1; then
     record rex-server "human: rex server status cannot be read without both rex and jq on the runtime PATH" \
       "install the missing tool reported above, then rerun this command"
@@ -710,7 +710,12 @@ check_rex_server() {
       "update Rex on that account, then rerun this command"
     return 0
   fi
-  endpoint=$(rex_whoami_json | jq -r '.endpoint // empty' 2>/dev/null)
+  if ! whoami=$(rex_whoami_json); then
+    record rex-server "human: the rex server's settings could not be read" \
+      "run 'rex whoami --json' on that account and report the failure"
+    return 0
+  fi
+  endpoint=$(printf '%s' "$whoami" | jq -r '.endpoint // empty' 2>/dev/null) || endpoint=
   case "$endpoint" in
     unix://*) ;;
     '')
@@ -724,10 +729,15 @@ check_rex_server() {
       return 0
       ;;
   esac
-  exit_empty=$(rex_whoami_json | jq -r '.exit_empty // empty' 2>/dev/null)
+  exit_empty=$(printf '%s' "$whoami" | jq -r '.exit_empty | select(type == "boolean")' 2>/dev/null) || exit_empty=
   if [ "$exit_empty" = true ]; then
     record rex-server "human: the rex server at $endpoint exits when empty, so a second mate's session would not survive an idle stretch" \
       "at a time when nothing runs on that account's rex server, run 'rex server stop' and then 'rex server start' there to bring it back as a persistent server, then rerun this command; Firstmate never stops an answering server, because that ends every process in its sessions"
+    return 0
+  fi
+  if [ "$exit_empty" != false ]; then
+    record rex-server "human: the rex server at $endpoint reports no explicit boolean exit_empty=false; persistence is unproven" \
+      "run 'rex whoami --json' on that account and resolve the missing or malformed exit_empty setting, then rerun this command"
     return 0
   fi
   record rex-server "ok: persistent rex server on $endpoint (API revision $server_api)"

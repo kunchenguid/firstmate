@@ -512,11 +512,18 @@ cmd_update() {
 }
 
 cmd_retire() {
-  local id=$1 force=${2:-}
+  local id=$1 force=${2:-} recorded_server current_server
   validate_id "$id"
   validate_home "$id"
   [ -z "$force" ] || [ "$force" = --force ] || usage
   remote_endpoint_require "$id"
+  if [ "$REMOTE_ENDPOINT_BACKEND" = rex ]; then
+    recorded_server=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" rex_server)
+    if ! fm_backend_source rex || ! current_server=$(fm_backend_rex_server_endpoint) \
+      || [ "$current_server" != "$recorded_server" ]; then
+      die "cannot prove access to the recorded Rex server '$recorded_server'; restore access to the recorded Rex server on this account, then retry retirement; refusing block close and home deletion"
+    fi
+  fi
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" "$SCRIPT_DIR/fm-guard.sh" || true
   if [ -n "$force" ]; then

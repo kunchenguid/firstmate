@@ -120,6 +120,8 @@ done
 p0=${pos[0]:-}; p1=${pos[1]:-}
 case "$cmd:$sub" in
   whoami:)
+    [ ! -f "$D/whoami-fail" ] || exit 1
+    if [ -f "$D/whoami.json" ]; then cat "$D/whoami.json"; exit 0; fi
     printf '{"endpoint":"%s","principal":"peer","exit_empty":%s}\n' \
       "$(cat "$D/endpoint" 2>/dev/null || printf '%s' "${FM_REX_FAKE_ENDPOINT:-unix:///fake/rex.sock}")" \
       "$(cat "$D/exit-empty" 2>/dev/null || printf 'false')" ;;
