@@ -797,7 +797,7 @@ SH
 if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then printf '%s\n' tail >> "$FM_STATUS_EXTERNAL_CALLS"; exit 97; fi
 exec "$FM_REAL_TAIL" "$@"
 SH
-  for command in stat wc grep sed git; do
+  for command in stat wc grep sed git date awk cut; do
     eval "FM_REAL_$command=\$(command -v $command)"
     export "FM_REAL_$command"
     cat > "$fakebin/$command" <<'SH'

@@ -3982,9 +3982,9 @@ while :; do
     local file=$1 offset=$2 discarded next
     exec 8< "$file" || return 0
     if [ "$offset" -gt 0 ]; then
-      IFS= read -rN "$offset" discarded <&8 || { exec 8<&-; return 0; }
+      IFS= read -r -d '' -n "$offset" discarded <&8 || { exec 8<&-; return 0; }
     fi
-    IFS= read -rN 1 next <&8
+    IFS= read -r -d '' -n 1 next <&8
     local result=$?
     exec 8<&-
     [ "$result" -eq 0 ]
