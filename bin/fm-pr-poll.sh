@@ -339,14 +339,15 @@ case "$provider" in
           # A merge can remove the car between the initial MR read and the
           # train-list read. Recheck once, with the same hard read bound, so
           # stale open state cannot turn a merge into a drop wake.
-          current=$(gitlab_detail_read "projects/$enc/merge_requests/$number" 2>/dev/null) || exit 0
+          current=$(gitlab_detail_read "projects/$enc/merge_requests/$number" 2>/dev/null) || current=
           current_state=$(printf '%s' "$current" | jq -er '
             if type == "object" and (.state | type) == "string" then .state
             else error("invalid merge request record")
-            end' 2>/dev/null) || exit 0
+            end' 2>/dev/null) || current_state=unknown
           case $current_state in
             merged) printf '%s\n' merged; exit 0 ;;
-            opened|locked) ;;
+            closed) exit 0 ;;
+            opened|locked|unknown) ;;
             *) exit 0 ;;
           esac
           line="degraded train=dropped url=$url"

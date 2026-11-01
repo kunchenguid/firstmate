@@ -2921,7 +2921,8 @@ EOF
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=closed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
   [ -z "$out" ] || fail "a closed MR was reported as a train drop: $out"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_RECHECK_FAIL=1 FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
-  [ -z "$out" ] || fail "an unreadable MR recheck was reported as a train drop: $out"
+  [ "$out" = "degraded train=dropped url=$url reason=mergeable pipeline_url=https://gitlab.example/group/subgroup/project/-/pipelines/941" ] \
+    || fail "an unreadable MR recheck discarded the confirmed train drop: $out"
   rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_TRAIN=fail run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a failed merge-train read"
