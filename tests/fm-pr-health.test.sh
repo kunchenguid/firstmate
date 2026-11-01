@@ -43,11 +43,19 @@ model() {
 }
 case "$1 $2" in
   'api graphql')
-    n=
-    for arg in "$@"; do case "$arg" in number=*) n=${arg#number=} ;; esac; done
+    n= suite_cursor=
+    for arg in "$@"; do case "$arg" in number=*) n=${arg#number=} ;; suiteCursor=*) suite_cursor=${arg#suiteCursor=} ;; esac; done
+    if [ -n "$suite_cursor" ]; then
+      # A later check-suite page: suites_page2, endless when suites_truncated.
+      model "$n" | jq '{data:{repository:{pullRequest:{headRefOid:(.graphql_head // .head),
+        commits:{nodes:[{commit:{oid:(.graphql_head // .head),checkSuites:{
+          pageInfo:{hasNextPage:(.suites_truncated // false),endCursor:"s3"},
+          nodes:[(.suites_page2 // [])[] | {conclusion,app:{slug:"github-actions"},workflowRun:{workflow:{name}}}]}}}]}}}}}'
+      exit 0
+    fi
     model "$n" | jq '[{data:{repository:{pullRequest:{
       headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},reviewDecision:(if has("reviewDecision") then .reviewDecision else "APPROVED" end),
-      commits:{nodes:[{commit:{oid:(.graphql_head // .head),checkSuites:{pageInfo:{hasNextPage:(.suites_truncated // false)},nodes:[(.suites // [])[]
+      commits:{nodes:[{commit:{oid:(.graphql_head // .head),checkSuites:{pageInfo:{hasNextPage:((.suites_truncated // false) or .suites_page2 != null),endCursor:"s2"},nodes:[(.suites // [])[]
         | {conclusion,app:{slug:"github-actions"},workflowRun:{workflow:{name}}}]}}}]},
       reviewRequests:{nodes:[range(.requests) | {requestedReviewer:{__typename:"User"}}]},
       latestReviews:{nodes:[range(.reviews) | {author:{__typename:"User",login:"reviewer"}}]},
@@ -69,6 +77,15 @@ case "$1 $2" in
   'api repos/o/r') printf '{"permissions":{"push":false}}\n' ;;
   'api repos/o/r/pulls/'*)
     rest=${2#repos/o/r/pulls/}
+    if [ -f "$FORGE/interrupt-$rest" ]; then
+      # Stop the whole pass mid-read, as a check timeout would.
+      rm -f "$FORGE/interrupt-$rest"
+      p=$$
+      while p=$(ps -o ppid= -p "$p" | tr -d ' ') && [ -n "$p" ] && [ "$p" -gt 1 ]; do
+        ps -o command= -p "$p" | grep -q 'fm-pr-health.sh poll' && { kill -TERM "$p"; break; }
+      done
+      exit 1
+    fi
     case "$rest" in
       *[!0-9]*) printf '[[]]\n' ;;
       *) model "$rest" | jq '{state:(if .state == "open" then "open" else "closed" end),
@@ -675,21 +692,35 @@ test_pending_reviewer_without_review_decision_is_recorded() {
   pass 'pending review requests imply recorded human approval'
 }
 
-test_truncated_check_suites_are_retried() {
+test_check_suites_beyond_the_first_page_are_read() {
   local home
-  home=$(new_home truncated-check-suites)
+  home=$(new_home paged-check-suites)
   task "$home" ship1 pr=https://github.com/o/r/pull/46
   pr "$home" 46 "$HEAD_A" "$BASE_1" true false
-  set_pr "$home" 46 '.suites = [{name:"CI",conclusion:"ACTION_REQUIRED"}] | .suites_truncated = true'
+  set_pr "$home" 46 '.suites = [{name:"Lint",conclusion:"SUCCESS"}] | .suites_page2 = [{name:"CI",conclusion:"ACTION_REQUIRED"}]'
   arm "$home"
-  expect_silent "$home" 'an incomplete suite connection must not emit an incomplete result'
-  jq -e '.prs["https://github.com/o/r/pull/46"] == null' "$home/state/pr-health.json" >/dev/null \
-    || fail 'a truncated suite list was accepted as complete'
-  set_pr "$home" 46 '.suites_truncated = false'
-  expect_silent "$home" 'the unsettled read must retry when the suite list is complete'
+  expect_silent "$home" 'a maintainer-gated suite on a later page must not wake the task'
   jq -e '.prs["https://github.com/o/r/pull/46"].maintainer_gated | any(.[]; .name == "CI")' \
+    "$home/state/pr-health.json" >/dev/null || fail 'an ACTION_REQUIRED suite on page 2 was not recorded'
+  grep -q 'suiteCursor=s2' "$home/forge/calls.log" || fail "the second suite page was never read: $(cat "$home/forge/calls.log")"
+  pass 'check suites beyond the first page are read and classified'
+}
+
+test_endless_check_suite_pages_stay_unsettled() {
+  local home
+  home=$(new_home endless-check-suites)
+  task "$home" ship1 pr=https://github.com/o/r/pull/48
+  pr "$home" 48 "$HEAD_A" "$BASE_1" false false
+  set_pr "$home" 48 '.suites = [{name:"CI",conclusion:"ACTION_REQUIRED"}] | .suites_truncated = true'
+  arm "$home"
+  expect_silent "$home" 'a suite list beyond the page bound must not emit an incomplete result'
+  jq -e '.prs["https://github.com/o/r/pull/48"] == null' "$home/state/pr-health.json" >/dev/null \
+    || fail 'a suite list beyond the page bound was accepted as complete'
+  set_pr "$home" 48 '.suites_truncated = false'
+  expect_one "$home" 'pull/48 conflicts with its base' 'the unsettled read must be retried once the list completes'
+  jq -e '.prs["https://github.com/o/r/pull/48"].maintainer_gated | any(.[]; .name == "CI")' \
     "$home/state/pr-health.json" >/dev/null || fail 'the retried ACTION_REQUIRED suite was not recorded'
-  pass 'truncated suite connections are retried before classification'
+  pass 'a check-suite list beyond the page bound stays unsettled and is retried'
 }
 
 test_notifications_drive_reads_with_the_poll_as_fallback() {
@@ -773,6 +804,39 @@ test_full_notification_page_forces_a_sweep_and_advances() {
   pass 'a full notification page forces a full read and still advances the cursor'
 }
 
+test_unknown_mergeability_is_reread_but_a_conflict_is_not() {
+  local home before
+  home=$(new_home mergeability-retry)
+  task "$home" ship1 pr=https://github.com/o/r/pull/43
+  pr "$home" 43 "$HEAD_A" "$BASE_1" null false
+  feed "$home"
+  arm "$home"
+  expect_silent "$home" 'the first pass reads the PR with unknown mergeability'
+  set_pr "$home" 43 '.mergeable = false'
+  expect_one "$home" 'pull/43 conflicts with its base' 'unknown mergeability must be read again on the next pass'
+  before=$(reads "$home" 43)
+  expect_silent "$home" 'a reported conflict with an unchanged feed must stay quiet'
+  [ "$(reads "$home" 43)" = "$before" ] || fail 'a confirmed conflict kept being re-read with an unchanged feed'
+  pass 'unknown mergeability is re-read next pass while a confirmed conflict is not'
+}
+
+test_interrupted_pass_keeps_events_pending() {
+  local home
+  home=$(new_home interrupted-pass)
+  task "$home" ship1 pr=https://github.com/o/r/pull/44
+  pr "$home" 44 "$HEAD_A" "$BASE_1" true false
+  feed "$home"
+  arm "$home"
+  expect_silent "$home" 'the first pass is quiet'
+  set_pr "$home" 44 '.reviewDecision = "CHANGES_REQUESTED"'
+  notify "$home" o/r 44 2026-11-01T00:04:00Z comment
+  : > "$home/forge/interrupt-44"
+  with_home "$home" bash "$home/state/pr-health.check.sh" >/dev/null 2>&1 || true
+  [ ! -e "$home/forge/interrupt-44" ] || fail 'the interrupting read never ran'
+  expect_one "$home" 'pull/44 author must act' 'an event cut off by an interrupted pass must be read on the next pass'
+  pass 'an interrupted pass leaves its notified PRs pending'
+}
+
 test_failed_event_read_is_retried() {
   local home
   home=$(new_home notification-retry)
@@ -791,8 +855,8 @@ test_failed_event_read_is_retried() {
 
 failures=0
 for test_name in test_maintainer_author_and_approval_states_are_distinct \
-  test_pending_reviewer_without_review_decision_is_recorded test_truncated_check_suites_are_retried test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
-  test_failed_event_read_is_retried test_full_notification_page_forces_a_sweep_and_advances \
+  test_pending_reviewer_without_review_decision_is_recorded test_check_suites_beyond_the_first_page_are_read test_endless_check_suite_pages_stay_unsettled test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
+  test_failed_event_read_is_retried test_unknown_mergeability_is_reread_but_a_conflict_is_not test_interrupted_pass_keeps_events_pending test_full_notification_page_forces_a_sweep_and_advances \
   test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \
   test_reported_failure_does_not_hide_a_later_required_failure \

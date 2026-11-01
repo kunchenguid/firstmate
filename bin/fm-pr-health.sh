@@ -143,14 +143,20 @@ gh_read() { # deadline args... : one bounded forge read
   fm_run_timed "$left" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
 }
 
-PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String,$suiteCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
+PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
 headRefOid
 reviewDecision
 reviewRequests(first:100){nodes{requestedReviewer{__typename}}}
-commits(last:1){nodes{commit{oid checkSuites(first:100,after:$suiteCursor){pageInfo{hasNextPage endCursor} nodes{conclusion app{slug} workflowRun{workflow{name}}}}}}}
+commits(last:1){nodes{commit{oid checkSuites(first:100){pageInfo{hasNextPage endCursor} nodes{conclusion app{slug} workflowRun{workflow{name}}}}}}}
 statusCheckRollup{contexts(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{__typename
 ... on CheckRun{name status conclusion startedAt isRequired(pullRequestNumber:$number)}
 ... on StatusContext{context state createdAt isRequired(pullRequestNumber:$number)}}}}}}}'
+
+# Later pages of the head commit's check suites, read after PR_QUERY.
+SUITE_QUERY='query($owner:String!,$repo:String!,$number:Int!,$suiteCursor:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){
+headRefOid
+commits(last:1){nodes{commit{oid checkSuites(first:100,after:$suiteCursor){pageInfo{hasNextPage endCursor} nodes{conclusion app{slug} workflowRun{workflow{name}}}}}}}}}}'
+SUITE_PAGES=10 # ponytail: 1000 suites per head; a longer list leaves the read unsettled, raise the bound if one appears
 
 # The fingerprint step: previous fingerprint plus one REST and one GraphQL
 # read -> {fp, lines}. A null result means the reads disagree and nothing moves.
@@ -203,13 +209,13 @@ STEP='
     end'
 
 read_pr() { # url deadline output-directory -> rest.json gql.json
-  local url=$1 deadline=$2 out=$3 number owner repo rest_rc=0 gql_rc=0 suite_cursor= pages=1
+  local url=$1 deadline=$2 out=$3 number owner repo rest_rc=0 gql_rc=0 cursor page
   fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 1
   number=$FM_PR_NUMBER
   owner=${FM_PR_PATH%%/*}; repo=${FM_PR_PATH#*/}
   gh_read "$deadline" api "repos/$owner/$repo/pulls/$number" > "$out/rest.json" 2>/dev/null &
   local rest_pid=$!
-  gh_read "$deadline" api graphql --paginate --slurp -F "owner=$owner" -F "repo=$repo" -F "number=$number" -F "suiteCursor=" \
+  gh_read "$deadline" api graphql --paginate --slurp -F "owner=$owner" -F "repo=$repo" -F "number=$number" \
     -f "query=$PR_QUERY" > "$out/pages.json" 2>/dev/null &
   local gql_pid=$!
   wait "$rest_pid" || rest_rc=$?
@@ -222,7 +228,23 @@ read_pr() { # url deadline output-directory -> rest.json gql.json
     | select(all($pages[]; .headRefOid == $pages[0].headRefOid))
     | select(($pages[-1].statusCheckRollup.contexts.pageInfo.hasNextPage // false) == false)
     | {data:{repository:{pullRequest:($pages[0] + {statusCheckRollup:{contexts:{nodes:
-        [$pages[] | .statusCheckRollup.contexts.nodes[]?]}}})}}}' "$out/pages.json" > "$out/gql.json"
+        [$pages[] | .statusCheckRollup.contexts.nodes[]?]}}})}}}' "$out/pages.json" > "$out/gql.json" || return 1
+  # Follow the suite connection so a hold beyond the first 100 suites is seen.
+  for page in $(seq 2 "$SUITE_PAGES") last; do
+    cursor=$(jq -r '.data.repository.pullRequest.commits.nodes[0].commit.checkSuites.pageInfo
+      | select(.hasNextPage == true) | .endCursor // ""' "$out/gql.json")
+    [ -n "$cursor" ] || return 0
+    [ "$page" != last ] || return 1
+    gh_read "$deadline" api graphql -F "owner=$owner" -F "repo=$repo" -F "number=$number" -f "suiteCursor=$cursor" \
+      -f "query=$SUITE_QUERY" > "$out/suites.json" 2>/dev/null || return 1
+    jq -e --slurpfile more "$out/suites.json" '
+      ($more[0].data.repository.pullRequest // null) as $m
+      | select($m != null and $more[0].errors == null and $m.headRefOid == .data.repository.pullRequest.headRefOid)
+      | ($m.commits.nodes[0].commit.checkSuites) as $next
+      | .data.repository.pullRequest.commits.nodes[0].commit.checkSuites
+          |= {pageInfo:$next.pageInfo, nodes:(.nodes + $next.nodes)}' "$out/gql.json" > "$out/gql.next" || return 1
+    mv "$out/gql.next" "$out/gql.json"
+  done
 }
 
 lookup_branch_pr() { # worktree branch deadline -> url
