@@ -137,9 +137,10 @@
 # and it counts unless it is proven parked - held for the captain (its declared
 # wait is a captain-held line), or read by bin/fm-crew-state.sh, the
 # current-state owner, as paused (a declared external wait such as an upstream
-# merge), parked (awaiting a decision), done or failed (finished, awaiting
-# landing or cleanup), blocked (awaiting firstmate), or unknown with no live
-# endpoint (its worker copy or endpoint is gone). Working lanes count, and so
+# merge), parked (awaiting a decision), done (finished, awaiting landing or
+# cleanup), blocked (awaiting firstmate), or unknown with no live endpoint (its
+# worker copy or endpoint is gone). Working lanes count, failed lanes count
+# (a failed run's worker may be fixing it before a new run starts), and so
 # does every lane the reader could not settle - one still starting, an
 # unreadable endpoint, a read that timed out - so an unverified lane can never
 # let the cap overshoot. A parked lane that resumes can briefly put the home
@@ -231,7 +232,7 @@ fm_afk_contract_lane_verdict() {  # <state-dir> <task-id>
     paused) printf 'not counted - paused, a declared external wait\n' ;;
     parked) printf 'not counted - parked, awaiting a decision\n' ;;
     done) printf 'not counted - done, awaiting landing or cleanup\n' ;;
-    failed) printf 'not counted - failed, awaiting firstmate\n' ;;
+    failed) printf 'counted - failed run, its worker may be fixing it (%s)\n' "${source:-unknown source}" ;;
     blocked) printf 'not counted - blocked, awaiting firstmate\n' ;;
     *)
       case "$source:$detail" in

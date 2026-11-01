@@ -615,7 +615,7 @@ Each relocated script keeps its own gate, enforcing exactly what a script can ch
 | `bin/fm-pr-merge.sh` | Merges any pull request green at its live head, synchronously, under the record lock, and refuses `--allow-red`, `--allow-missing`, and `--allow-no-pipeline` while away, so the green gate is absolute in this posture; which pull request the words meant is the branch's reading. |
 | `bin/fm-spawn.sh` | Dispatches only queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it; refuses a fresh ordinary spawn for either actor once as many of the home's ordinary task lanes are doing work as the record's spend cap, and names the lanes it counted (relaunches and secondmates exempt; `bin/fm-afk-contract.sh` "SPEND CAP" owns which lanes count). |
 | `bin/fm-send.sh --resolve-key` | Answers a decision the words pre-answer, or one `ask-user-authority`'s judgment (carried verbatim in the branch prompt) lets firstmate decide. |
-| `bin/fm-merge-local.sh` | Lands, for either actor, only a local-only task whose recorded merge posture is yolo=on, through the same guarded fast-forward as attended; refuses every other task while away, so a landing whose posture needs the captain's word waits for the return. |
+| `bin/fm-merge-local.sh` | Lands, for either actor, a local-only task whose recorded merge posture is yolo=on, through the same guarded fast-forward as attended; any other task lands only for main with `--attended-override`, passed for an explicit captain instruction naming that landing, which the branch is refused because it cannot hear the captain, and with no such word it waits for the return. |
 
 The merge-authority record and the outcome row's summary are the audit trail.
 The return brief renders the words verbatim beside that account.
@@ -665,7 +665,7 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 - Leases, guards, and non-branch-home invariance.
 - The away relocation: only under a valid live record, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors counting only lanes doing work and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
 
-`tests/fm-merge-local.test.sh` covers away local landing: a yolo-on task lands for either actor, and any other task waits for the captain.
+`tests/fm-merge-local.test.sh` covers away local landing: a yolo-on task lands for either actor, any other task lands only for main with `--attended-override`, and without it waits for the captain.
 
 `tests/fm-afk-return.test.sh` covers the ordered cleanup-due section, its durable merge-marker requirement, and exclusion of both a done task without durable merge evidence and a persistent secondmate carrying that evidence.
 

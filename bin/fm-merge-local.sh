@@ -9,8 +9,8 @@
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
 # rule #1 "never run state-changing git in projects/", and it is narrow: it only
 # runs for mode=local-only tasks, only after the captain approves (or yolo=on
-# auto-approves; while away only yolo=on, per the away gate below), and only as
-# a clean fast-forward. A diverged branch needs a
+# auto-approves; while away, per the away gate below), and only as a clean
+# fast-forward. A diverged branch needs a
 # rebase and a new task/approval record under bin/fm-dod-lib.sh's head-latching
 # contract before landing. See AGENTS.md prime directives,
 # project management, and task lifecycle.
@@ -22,7 +22,11 @@
 # A per-checkout lock in the project's Git directory serializes different
 # tasks across the checks, checkout update, ref transaction, and rollback.
 # tests/fm-merge-local.test.sh covers pinned-head landing and race refusals.
-# Usage: fm-merge-local.sh <task-id>
+# Usage: fm-merge-local.sh <task-id> [--attended-override]
+#   --attended-override: pass only for an explicit captain instruction naming
+#   this landing. While away it lets main land a task whose recorded merge
+#   posture is not yolo=on; the supervision branch is refused it, because it
+#   cannot hear the captain. It skips no other check.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +39,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
-if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
+ATTENDED_OVERRIDE=false
+if [ "$#" -eq 2 ] && [ "$2" = --attended-override ]; then
+  ATTENDED_OVERRIDE=true
+elif [ "$#" -ne 1 ]; then
+  echo "error: invalid local merge request" >&2
+  exit 2
+fi
+if ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
 fi
@@ -65,15 +76,22 @@ fm_lease_forbid_branch "local-only landing (fm-merge-local)" --away-relocated
 # Away gate: the away posture never approves less than the standing authority
 # the captain already granted, and never more. While an away record exists (a
 # quiet-mode record is a present captain, so its landings stay attended:
-# bin/fm-afk-contract.sh mode) the captain cannot approve a landing, so this
-# lands only a task whose recorded merge posture is yolo=on - firstmate's
-# standing authority to land green, in-scope work - and refuses one whose
-# posture needs the captain's word for each landing, which waits for the return.
-# An unreadable record refuses rather than being skipped. Rechecked under the
-# task locks, after the record is read and before the fast-forward, so a record
-# archived meanwhile restores the attended role partition for the branch.
+# bin/fm-afk-contract.sh mode) a task whose recorded merge posture is yolo=on -
+# firstmate's standing authority to land green, in-scope work - lands for
+# either actor. Any other task lands only for main with --attended-override,
+# passed for an explicit captain instruction naming this landing, as
+# bin/fm-pr-merge.sh's attended override; with no such word it waits for the
+# return. The supervision branch is refused the override in every posture,
+# because it cannot hear the captain. An unreadable record refuses rather than
+# being skipped. Rechecked under the task locks, after the record is read and
+# before the fast-forward, so a record archived meanwhile restores the
+# attended role partition for the branch.
 merge_local_require_away_standing_authority() {
   fm_lease_forbid_branch "local-only landing (fm-merge-local)" --away-relocated
+  if [ "$ATTENDED_OVERRIDE" = true ] && [ "$(fm_lease_actor)" = branch ]; then
+    echo "error: local merge refused - --attended-override carries an explicit captain instruction, which the supervision branch cannot hear; nothing was landed" >&2
+    exit 1
+  fi
   [ -f "$STATE/.afk-contract" ] || return 0
   if ! FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1; then
     echo "error: local merge refused - the away-posture record could not be read; nothing was landed" >&2
@@ -81,7 +99,8 @@ merge_local_require_away_standing_authority() {
   fi
   fm_afk_contract_away_present "$STATE" || return 0
   [ "$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2-)" = on ] && return 0
-  echo "error: local merge refused while away - task $ID's recorded merge posture is not yolo=on, so its landing waits for the captain's word at their return; nothing was landed" >&2
+  [ "$ATTENDED_OVERRIDE" = true ] && return 0
+  echo "error: local merge refused while away - task $ID's recorded merge posture is not yolo=on, so its landing waits for the captain's word; pass --attended-override only for an explicit captain instruction naming this landing; nothing was landed" >&2
   exit 1
 }
 

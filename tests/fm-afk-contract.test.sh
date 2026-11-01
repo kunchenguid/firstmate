@@ -740,11 +740,12 @@ test_live_workers_counts_only_lanes_doing_work() {
   lane "$home" blocked "state: blocked · source: status-log · need the daemon touched"
   lane "$home" failed "state: failed · source: run-step · tests failed"
   out=$(contract "$home" live-workers --explain)
-  [ "$(printf '%s\n' "$out" | tail -1)" = 3 ] || fail "the mixed fleet miscounted: $out"
+  [ "$(printf '%s\n' "$out" | tail -1)" = 4 ] || fail "the mixed fleet miscounted: $out"
   assert_contains "$out" 'starting: counted' 'a starting lane was not counted'
   assert_contains "$out" 'no-answer: counted' 'an unanswered state read was not counted'
   assert_contains "$out" 'gone: not counted - no live endpoint' 'a dead endpoint was counted'
   assert_contains "$out" 'blocked: not counted - blocked' 'a blocked lane was counted'
+  assert_contains "$out" 'failed: counted' 'a failed lane was not counted'
 
   # With the real current-state reader, a record whose worker copy is gone is
   # not a live endpoint.
@@ -755,9 +756,25 @@ test_live_workers_counts_only_lanes_doing_work() {
   pass "live-workers counts only lanes doing work: eight parked records count zero, eight working lanes count eight, and unverified lanes still count"
 }
 
+# A failed run is not a parked lane: bin/fm-crew-state.sh reads `failed` from
+# the run alone, while the worker may already be fixing it. Counting it as
+# parked would let a fresh spawn through a cap the busy lane already fills.
+test_live_workers_counts_a_failed_lane_as_work() {
+  local home
+  home=$(make_home live-failed)
+  lane "$home" fixing-1 "state: failed · source: run-step · tests failed"
+  lane "$home" fixing-2 "state: failed · source: run-step · lint failed"
+  lane "$home" waiting "state: paused · source: status-log · waiting on upstream review" \
+    'paused [at=1793430000]: waiting on upstream review of https://github.com/o/r/pull/9'
+  [ "$(contract "$home" live-workers)" = 2 ] \
+    || fail "failed lanes were not counted as work: $(contract "$home" live-workers --explain)"
+  pass "live-workers counts a failed lane as work, so a failed run cannot admit an extra spawn"
+}
+
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_live_workers_counts_only_lanes_doing_work
+test_live_workers_counts_a_failed_lane_as_work
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
 test_entry_without_spend_records_the_live_worker_count_never_below_the_floor
 test_retired_two_step_entry_is_refused_by_name
