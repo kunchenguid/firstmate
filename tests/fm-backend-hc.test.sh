@@ -137,8 +137,9 @@ test_create_task_is_independent_labeled_and_refuses_duplicates() {
 }
 
 # hc 0.1.15 starts a core from a plain `hc get`, so a view refuses every hc call
-# at the one boundary they share: endpoint-state reads say unreadable, the
-# presence check fails, and kill refuses, so nothing closes a live task there.
+# before the binary runs, including the version probe and the hello handshake
+# that do not go through fm_backend_hc_cli: endpoint-state reads say unreadable,
+# the presence check fails, and kill refuses, so nothing closes a live task there.
 test_view_refuses_every_hc_call() {
   setup_case view
   local out rc=0 tag state
@@ -165,6 +166,10 @@ test_view_refuses_every_hc_call() {
   expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_capture fmtest:t1 10 fm-a1'
   expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_send_key fmtest:t1 Enter fm-a1'
   expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_send_text_line fmtest:t1 hello fm-a1'
+  assert_equals send-failed "$(hc_shell 'FM_VIEW=1 fm_backend_hc_send_text_submit fmtest:t1 hello 3 0.1 0 fm-a1' 2>/dev/null)" \
+    "send_text_submit must report a failed send inside a view"
+  expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_version_check'
+  expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_hello fmtest'
   expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_kill fmtest:t1 "" fm-a1'
   expect_refused hc_shell 'FM_VIEW=1 fm_backend_hc_create_task fmtest fm-a2 /proj'
   assert_absent "$D/log" "hc was invoked inside a view"
