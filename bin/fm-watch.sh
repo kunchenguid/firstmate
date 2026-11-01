@@ -241,6 +241,7 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+. "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
 # Only for the arm-time check on FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS below;
 # the per-cycle reconcile itself runs as a separate process.
 # shellcheck source=bin/fm-procevent-lib.sh
@@ -4496,6 +4497,11 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    hygiene_report=$(FM_BOOTSTRAP_DETECT_ONLY=1 record_hygiene_report)
+    if [ -n "$hygiene_report" ] && ! cmp -s <(printf '%s\n' "$hygiene_report") "$STATE/.record-hygiene-last"; then
+      printf '%s\n' "$hygiene_report" > "$STATE/.record-hygiene-last"
+      wake "record hygiene: $hygiene_report"
+    fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
