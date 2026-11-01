@@ -273,13 +273,24 @@ test_gitlab_mr_meta_from_other_project_origin_is_not_fetched() {
   write_task_meta "$case_dir" \
     "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7" \
     "pr_head=$stale_sha"
+  # Advance the local branch past the recorded head: with the fresh fetch
+  # refused, the offline fallback must prefer the recorded pr_head over the
+  # moved local branch, and reach it without a set -u crash (a declared-but-
+  # unset resolved crashed the mismatch arm before the fallback ran).
+  printf 'stale-local-2\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "local branch moved past the recorded head"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
   assert_contains "$out" '+stale-local' \
     "gitlab-mr-other-project-origin: review must fall back to the recorded pr_head, not another project's fresh head"
+  assert_not_contains "$out" '+stale-local-2' \
+    "gitlab-mr-other-project-origin: the moved local branch was reviewed instead of the recorded pr_head"
   assert_not_contains "$out" '+pr-fixed' \
     "gitlab-mr-other-project-origin: another project's same-numbered merge request head was fetched and reviewed"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'unbound variable' \
+    "gitlab-mr-other-project-origin: the origin-mismatch arm crashed under set -u instead of falling back"
   pass "fm-review-diff never fetches another project's merge request head for a recorded GitLab URL"
 }
 

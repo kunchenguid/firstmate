@@ -163,7 +163,11 @@ fetch_review_head() {  # <remote-ref> <local-ref>
 }
 
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
+  # resolved starts empty, not merely declared: under set -u a declared-but-
+  # unset local reads as unbound, and the GitLab mismatch arm below assigns it
+  # only when the origin remote resolves to the URL's project, so an unset
+  # start would crash this function on the very path that must fall back.
+  local pr_url=$1 recorded_head=$2 n resolved=
   n=$(pr_number_from_target "$pr_url") || true
   if [ -n "$n" ]; then
     case "$pr_url" in
