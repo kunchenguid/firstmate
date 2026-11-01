@@ -1001,6 +1001,7 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 The optional local, gitignored `config/open-decision-reminders` presence flag enables a default-off watcher backstop for unanswered keyed `needs-decision` and `blocked` records.
 On each poll, the watcher queues at most one `check: open decision overdue: <task> key=<key> age=<seconds>s` wake for the oldest eligible overdue key, independently of pane state or supervision-branch classification.
+The reminder is recorded at that point but delivered as the cycle's wake only after the rest of the cycle has run, so it never keeps process-event reconciliation, checks, or scans from running.
 Declared `paused:` waits and tasks already held for the captain are exempt.
 Resolving a key stops its reminders, and a later opening starts a new reminder episode.
 Only explicit keys with valid source `[at=<epoch>]` timestamps can be aged.
