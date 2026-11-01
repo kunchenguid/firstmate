@@ -286,8 +286,8 @@ An ordinary presentation drain bounds both its initial queue-lock acquire and it
 
 | Lock with a live holder | Drain result |
 | --- | --- |
-| Initial queue lock | One PID-naming advisory, and the whole drain is skipped before any claim or mutation. |
-| Status-presentation lock | One such advisory after raw wake presentation, and status annotations, sections, and cursors are left retriable on the next drain. |
+| Initial queue lock | One advisory naming the holder's PID, command, and running time, and the whole drain is skipped before any claim or mutation. |
+| Status-presentation lock | One PID-naming advisory after raw wake presentation, and status annotations, sections, and cursors are left retriable on the next drain. |
 
 Acknowledgement invocations and every other mutation-critical queue-lock acquire retain blocking semantics, so acknowledgement atomicity is unchanged.
 
