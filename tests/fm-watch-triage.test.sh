@@ -794,11 +794,7 @@ printf 'run other-branch\n'
 SH
   cat > "$fakebin/tail" <<'SH'
 #!/usr/bin/env bash
-if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then
-  for arg in "$@"; do
-    [ "$arg" != "$FM_CLAIM_STATUS_FILE" ] || { printf 'tail\n' >> "$FM_STATUS_EXTERNAL_CALLS"; exit 99; }
-  done
-fi
+[ ! -e "$FM_STATUS_COUNT_SENTINEL" ] || printf '%s\n' tail >> "$FM_STATUS_EXTERNAL_CALLS"
 exec "$FM_REAL_TAIL" "$@"
 SH
   for command in stat wc grep sed date git; do
@@ -806,11 +802,7 @@ SH
     export "FM_REAL_$command"
     cat > "$fakebin/$command" <<'SH'
 #!/usr/bin/env bash
-if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then
-  for arg in "$@"; do
-    [ "$arg" != "$FM_CLAIM_STATUS_FILE" ] || { printf '%s\n' "${0##*/}" >> "$FM_STATUS_EXTERNAL_CALLS"; exit 99; }
-  done
-fi
+[ ! -e "$FM_STATUS_COUNT_SENTINEL" ] || printf '%s\n' "${0##*/}" >> "$FM_STATUS_EXTERNAL_CALLS"
 real_var=FM_REAL_${0##*/}
 eval 'real_path=${'"$real_var"'}'
 exec "$real_path" "$@"
@@ -819,11 +811,8 @@ SH
   done
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-case " $* " in *' runs '*)
-  if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then printf 'no-mistakes\n' >> "$FM_STATUS_EXTERNAL_CALLS"; exit 99; fi
-  printf 'run other-branch\n';;
-*) exec "$FM_REAL_NM" "$@";;
-esac
+[ ! -e "$FM_STATUS_COUNT_SENTINEL" ] || printf '%s\n' no-mistakes >> "$FM_STATUS_EXTERNAL_CALLS"
+case " $* " in *' runs '*) printf 'run other-branch\n' ;; *) exec "$FM_REAL_NM" "$@" ;; esac
 SH
   FM_REAL_NM=$(command -v no-mistakes)
   export FM_REAL_NM
@@ -845,12 +834,49 @@ SH
   : > "$FM_STATUS_COUNT_SENTINEL"
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "incremental watcher exited on an unchanged log"; }
   rm -f "$FM_STATUS_COUNT_SENTINEL"
-  [ ! -s "$reads" ] || { reap "$pid"; fail "unchanged status log invoked external readers: $(cat "$reads")"; }
+  if grep -Eq '^(tail|stat|no-mistakes)$' "$reads"; then
+    reap "$pid"
+    fail "unchanged status log invoked external claimed-run readers: $(cat "$reads")"
+  fi
   printf 'working [at=1234567890]: validation started\n' >> "$status_file"
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "appended validation claim was not detected"; }
   [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "appended claim did not produce exactly one wake: $(cat "$out")"
   unset FM_EXPECT_BRANCH FM_FAKE_CREW_STATE FM_CLAIM_STATUS_FILE FM_STATUS_TAIL_CALLS FM_REAL_TAIL
   pass "unchanged status logs are skipped and appended validation claims are detected once"
+}
+
+test_claimed_run_shrink_resets_cursor() {
+  local dir state fakebin out wt status_file cursor old_size pid long_line
+  dir=$(make_case claimed-run-shrink); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; wt="$dir/worktree"; status_file="$state/claim.status"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  printf 'worktree=%s\n' "$wt" > "$state/claim.meta"
+  long_line=$(printf '%200s' '')
+  printf 'working: preparing validation %s\n' "$long_line" > "$status_file"
+  printf 'v2\t%s\t%s@%s' "$(status_observed_signature "$status_file")" \
+    "$(size_of "$status_file")" "$(_fm_open_decisions_file_ident "$status_file")" \
+    > "$state/.seen-claim_status"
+  cursor="$state/.claimed-run-cursor-claim"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'run other-branch\n'
+SH
+  chmod +x "$fakebin/no-mistakes"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_CLAIMED_RUN_DELAY=0 FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "shrink watcher exited before its first cycle"; }
+  read -r _ _ old_size _ < "$cursor"
+  printf 'working [at=1234567890]: validation started\n' > "$status_file"
+  [ "$(size_of "$status_file")" -lt "$old_size" ] || { reap "$pid"; fail "shrink fixture did not reduce the status log"; }
+  touch -r "$cursor" "$status_file"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "claim after same-tick shrink was not detected"; }
+  [ "$(grep -c 'validation claim has no run' "$out")" -eq 1 ] || fail "shrunken log claim did not produce exactly one wake: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a truncated status log resets its cursor and redetects a validation claim"
 }
 
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
@@ -5452,6 +5478,7 @@ fm_test_run \
   test_secondmate_status_routine_absorbed_routed_surfaced_classifier \
   test_claimed_run_outcomes \
   test_claimed_run_incremental_log \
+  test_claimed_run_shrink_resets_cursor \
   test_provably_working_signal_absorbed \
   test_turn_ended_provably_working_absorbed \
   test_turn_ended_not_working_surfaced \
