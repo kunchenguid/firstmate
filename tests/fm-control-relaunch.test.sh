@@ -201,7 +201,7 @@ new_case() {
 # add_ship_task <case-dir> <id> [harness] [session]
 add_ship_task() {
   local dir=$1 id=$2 harness=${3:-claude} ses=${4:-fmses}
-  local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
+  local home="$dir/home" proj="$dir/proj" wt=${5:-"$dir/wt"}
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
@@ -2352,6 +2352,65 @@ test_spawn_relaunch_refuses_contradicting_flags() {
   pass "fm-spawn --relaunch: every identity axis comes from the record, and a contradicting flag refuses"
 }
 
+test_spawn_relaunch_checks_slot_claim() {
+  local dir out rc marker lock holder i=0 wt
+  dir=$(new_case slotclaim rl-slotclaim)
+  wt="$dir/pool/slot/repo"
+  mkdir -p "$dir/pool/slot"
+  printf '{}\n' > "$dir/pool/treehouse-state.json"
+  add_ship_task "$dir" rl-slotclaim claude fmses "$wt"
+  printf 'zsh' > "$dir/fake/command"
+  marker="$dir/pool/slot/.fm-slot-owner"
+  printf 'task=new-owner\nhome=%s\n' "$dir/home" > "$marker"
+  out=$(run_spawn "$dir" rl-slotclaim --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunch must not adopt another task's slot"
+  assert_contains "$out" "claimed by task new-owner" "refusal names the current owner"
+  [ ! -s "$dir/fake/keys" ] || fail "refused adoption must not send terminal input"
+  : > "$marker"
+  out=$(run_spawn "$dir" rl-slotclaim --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunch must not adopt a slot with an unreadable claim"
+  assert_contains "$out" "unreadable slot claim" "refusal identifies unverifiable ownership"
+  [ ! -s "$dir/fake/keys" ] || fail "unverifiable ownership must not send terminal input"
+  printf 'task=rl-slotclaim\nhome=%s\n' "$dir/other-home" > "$marker"
+  out=$(run_spawn "$dir" rl-slotclaim --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a matching task id from another home must not own the slot"
+  assert_contains "$out" "another Firstmate home" "refusal identifies the home mismatch"
+  [ ! -s "$dir/fake/keys" ] || fail "a foreign home claim must not send terminal input"
+  printf 'task=rl-slotclaim\nhome=%s\n' "$dir/home" > "$marker"
+  lock=$(
+    FM_HOME="$dir/home"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_treehouse_project_lock_path "$dir/proj"
+  )
+  (
+    FM_HOME="$dir/home"
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    : > "$dir/lock-ready"
+    sleep 30
+  ) &
+  holder=$!
+  while [ ! -e "$dir/lock-ready" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/lock-ready" ] || { kill "$holder" 2>/dev/null; fail "could not stage the Treehouse project lock"; }
+  out=$(run_spawn "$dir" rl-slotclaim --relaunch --harness claude); rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 1 "$rc" "relaunch must serialize with slot reassignment"
+  assert_contains "$out" "another Treehouse slot allocation or return" "refusal identifies project-lock contention"
+  [ ! -s "$dir/fake/keys" ] || fail "project-lock contention must not send terminal input"
+  out=$(run_spawn "$dir" rl-slotclaim --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "the task's own home claim must allow relaunch: $out"
+  printf 'zsh' > "$dir/fake/command"
+  : > "$dir/fake/keys"
+  rm "$marker"
+  out=$(run_spawn "$dir" rl-slotclaim --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "legacy absent claims must still allow relaunch: $out"
+  pass "recorded-worktree adoption verifies claim identity and serializes reassignment"
+}
+
 test_spawn_relaunch_refuses_an_unrecorded_task() {
   local dir out rc
   dir=$(new_case norecord rl17)
@@ -3083,6 +3142,7 @@ test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
+test_spawn_relaunch_checks_slot_claim
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_tmux_refuses_a_window_missing_from_its_session

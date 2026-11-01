@@ -451,13 +451,10 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     on the verified server, while an unreachable server reads `unreadable`.
 #     The proof re-reads the thread, but exit and relaunch refuse before it:
 #     V2 has no session stop and a thread cannot host a replacement.
-#   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
-#     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
-#     carry the endpoint's socket identity - so a different but running server
-#     would answer "not anywhere" about a window it was never able to see.
-#     There is no read available here that closes that gap, so tmux always
-#     returns `unproven` and both verbs refuse. tmux is left exactly as
-#     deadlocked as it was before this change - no worse - but deliberately.
+#   tmux reclaim remains unsupported here. New records may carry tmux_server
+#     for teardown's narrower shared-slot collision proof, but legacy records
+#     do not, and this control-plane contract remains uniformly fail-closed for
+#     both shapes rather than granting only newer tasks a rebind path.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
@@ -467,7 +464,7 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
     tmux)
-      printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity, and a server-wide window inventory only describes the tmux server this process addresses, so a window absent from it may still be alive on another'
+      printf 'unproven\ttmux control-plane reclaim remains unsupported; legacy task records carry no endpoint socket identity, so this path stays uniformly fail-closed rather than trusting whichever server the current process addresses'
       ;;
     herdr)
       # Start the RECORDED session's server (only the server - nothing is

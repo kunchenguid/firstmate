@@ -99,6 +99,30 @@ fm_backend_tmux_container_ensure() {
   fi
 }
 
+# The exact socket path of the tmux server this client addresses. Persisting
+# this beside a task endpoint lets safety-critical readers query that server
+# rather than whichever server their own environment happens to select.
+fm_backend_tmux_server_identity() {
+  local socket
+  socket=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || return 1
+  case "$socket" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$socket" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  printf '%s' "$socket"
+}
+
+# Classify an endpoint on one recorded tmux server only. The subshell keeps the
+# socket-bound tmux wrapper from leaking into any later backend operation.
+fm_backend_tmux_agent_state_on_server() {  # <socket-path> <target>
+  local server=$1 target=$2
+  (
+    tmux() { command tmux -S "$server" "$@"; }
+    fm_backend_tmux_agent_state "$target"
+  )
+}
+
 # fm_backend_tmux_create_task: create the task's window in <proj-abs>,
 # refusing an existing <window-name> in <session>. Mirrors fm-spawn.sh's
 # duplicate-check-then-new-window sequence, including the exact error text
