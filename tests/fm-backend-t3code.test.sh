@@ -2414,8 +2414,8 @@ test_answer_script_reads_and_answers_questions() {
   assert_contains "$out" "Ship it?" "the question's content is listed"
   out=$(run_answer "$id" req-q1 '{"q1":"yes"}'); rc=$?
   expect_code 0 "$rc" "answering: $out"
-  [ "$(t3_fake_calls t3_pending_request_respond | tail -1)" = "{\"threadId\":\"$thread\",\"requestId\":\"req-q1\",\"answers\":{\"q1\":\"yes\"}}" ] \
-    || fail "the answer must reach t3_pending_request_respond, got '$(t3_fake_calls t3_pending_request_respond)'"
+  [ "$(t3_fake_calls t3_pending_request | tail -1)" = "{\"action\":\"respond\",\"threadId\":\"$thread\",\"requestId\":\"req-q1\",\"answers\":{\"q1\":\"yes\"}}" ] \
+    || fail "the answer must reach t3_pending_request respond, got '$(t3_fake_calls t3_pending_request)'"
   fm_write_meta "$CTRL_STATE/tmuxtask.meta" "window=s:w" "kind=ship"
   out=$(run_answer tmuxtask); rc=$?
   expect_code 1 "$rc" "a non-T3 task has no pending requests to answer"
