@@ -1062,8 +1062,11 @@ export default function (pi: ExtensionAPI) {
     healthRepairs.add(armChild);
     healthReplacementArms.add(armChild);
     if (!(await retireArm(armChild))) {
+      // A SIGTERMed arm can take longer than armRetireTimeoutMs to close on a
+      // loaded host. Hand the slow exit to the close handler's bounded retry
+      // instead of waking main with a replacement failure that is not one.
       healthReplacementArms.delete(armChild);
-      surfaceFailure(owner, `watcher: FAILED - Pi extension could not retire the arm for an identity-verified unhealthy watcher within ${armRetireTimeoutMs}ms`);
+      appendExtensionLog(`health monitor retire=timeout arm=${armChild.pid ?? "none"} wait=${armRetireTimeoutMs}ms`);
       return;
     }
     if (!generationIsLive(owner)) return;

@@ -443,6 +443,71 @@ EOF
   pass "Pi health monitor replaces a wedged watcher without another tool call"
 }
 
+test_pi_health_monitor_tolerates_a_slow_retire() {
+  local repo home out status
+  repo="$TMP_ROOT/pi-health-slow-retire-root"
+  home="$TMP_ROOT/pi-health-slow-retire-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_watch_identity_fixture "$repo"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "$FM_HOME/starts"
+# A loaded host can take longer than the bounded retire wait to close a
+# SIGTERMed arm. The close path still owns the bounded re-arm.
+trap 'sleep 0.4; exit 0' TERM INT
+. "$FM_ROOT_OVERRIDE/bin/fm-test-watch-identity.sh"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while [ ! -e "$FM_HOME/stop" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_PI_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=50 FM_WATCH_REARM_RETRY_BASE_MS=10 FM_WATCH_REARM_RETRY_MAX_MS=20 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { existsSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const realSetInterval=globalThis.setInterval;
+globalThis.setInterval=(callback,_ms,...args)=>realSetInterval(callback,20,...args);
+const messages=[];
+let tool;
+const handlers=new Map();
+const pi={on(event,handler){handlers.set(event,handler);},registerCommand(){},registerTool(candidate){if(candidate.name==="fm_watch_arm_pi") tool=candidate;},sendUserMessage:async(message)=>{messages.push(message);}};
+const state=`${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`,`${process.pid}\n`);
+const mod=await import(pathToFileURL(process.env.PLUGIN).href);mod.default(pi);
+try {
+  await handlers.get("session_start")({});
+  for(let i=0;i<300 && !existsSync(`${state}/.last-watcher-beat`);i++) await new Promise(r=>setTimeout(r,10));
+  const oldPid=readFileSync(`${state}/.watch.lock/pid`,"utf8").trim();
+  const stale=new Date(Date.now()-1200_000);
+  utimesSync(`${state}/.last-watcher-beat`,stale,stale);
+  for(let i=0;i<500;i++) {
+    const starts=existsSync(`${process.env.FM_HOME}/starts`) ? readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n") : [];
+    if(starts.length===2 && readFileSync(`${state}/.watch.lock/pid`,"utf8").trim()!==oldPid) break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  const starts=readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n");
+  assert.equal(starts.length,2,"a slow retire must still produce exactly one replacement");
+  assert.notEqual(readFileSync(`${state}/.watch.lock/pid`,"utf8").trim(),oldPid,"replacement must own a new watcher process");
+  for(let i=0;i<200;i++) {
+    const age=Date.now()-statSync(`${state}/.last-watcher-beat`).mtimeMs;
+    if(age<1000) break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  assert.ok(Date.now()-statSync(`${state}/.last-watcher-beat`).mtimeMs<1000,"replacement beacon is not fresh");
+  const recovered=await tool.execute();
+  assert.equal(recovered.details.state,"healthy");
+  await new Promise(r=>setTimeout(r,100));
+  assert.ok(!messages.some((message)=>/could not retire the arm/.test(message)),`a slow retire produced a false failure alarm: ${messages.join(" | ")}`);
+  assert.equal(readFileSync(`${process.env.FM_HOME}/starts`,"utf8").trim().split("\n").length,2,"a slow retire must not churn extra arms");
+} finally { writeFileSync(`${process.env.FM_HOME}/stop`,"stop\n"); }
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi health monitor must not alarm while a slow retire still re-arms: $out"
+  [ -z "$out" ] || fail "Pi health slow-retire test printed output: $out"
+  pass "Pi health monitor tolerates a slow retire without a false failure alarm"
+}
+
 test_pi_unready_arm_has_bounded_start_grace() {
   local repo home out status
   repo="$TMP_ROOT/pi-unready-grace-root"
@@ -5907,6 +5972,7 @@ test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_health_monitor_replaces_a_wedged_watcher
+test_pi_health_monitor_tolerates_a_slow_retire
 test_pi_unready_arm_has_bounded_start_grace
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
