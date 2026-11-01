@@ -58,7 +58,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-procinfo.py`         | Read one pid's ppid, comm, and args through macOS kernel syscalls when the `ps` binary cannot execute |
 | `fm-claude-stop-autoarm.sh` | Claude Stop `asyncRewake` hook owning tokenless watcher continuity with single-flight exit-2 rewake (docs/watcher-continuity.md) |
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
-| `fm-waiting-on-you.sh`   | The "Waiting on you" line every primary turn end shows: the count and titles of live captain holds (docs/turnend-guard.md) |
+| `fm-waiting-on-you.sh`   | The "Waiting on you" line a Claude or Pi primary turn end shows: the count and titles of unanswered captain holds (docs/turnend-guard.md) |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
 | `fm-kimi-turnend-hook.sh` | Surgically install or remove Kimi's guarded global crew turn-end hook                |
 | `fm-arm-pretool-check.sh` | Stable PreToolUse transport for the watcher-arm command policy (docs/arm-pretool-check.md) |

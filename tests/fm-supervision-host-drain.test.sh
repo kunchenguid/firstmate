@@ -92,6 +92,12 @@ test_report_after_the_return_is_queued_for_main() {
     "a report after the return must say it is queued for main"
   assert_re $'\tcheck\tsupervision-host-return:2\tcheck: supervision-host outcome 2 for alpha \\[captain\\] was recorded after the captain returned.*relay it to the captain: PR ready for review$' \
     "$state/.wake-queue" "the late outcome must be a durable check wake for main"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" --task alpha --verdict main --summary 'local branch ready to land' 2>&1); rc=$?
+  expect_code 0 "$rc" "a main report after the return must be recorded"
+  assert_contains "$out" "recorded seq 3 [main]; the captain has returned, so it is queued for MAIN to act on" \
+    "a main report after the return must be queued for main to act on, not to relay"
+  assert_re $'\tcheck\tsupervision-host-return:3\tcheck: supervision-host outcome 3 for alpha \\[main\\] was recorded after the captain returned.*act on it yourself, it is not a captain call: local branch ready to land$' \
+    "$state/.wake-queue" "a late main outcome was queued as a relay to the captain"
   queue_before=$(cat "$state/.wake-queue")
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
     --task alpha --verdict routine --summary 'still building; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
