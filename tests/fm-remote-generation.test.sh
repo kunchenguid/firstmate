@@ -48,4 +48,19 @@ rm "$FM_ROUTE_FIXTURE"
 fm_remote_generation_resolve retire
 assert_equals legacy "$FM_REMOTE_GENERATION" 'retirement retry retains fence'
 if fm_remote_generation_resolve; then fail 'relaunch accepted unavailable host identity'; fi
+# A home that never reserved a seat reads back empty. That is the ordinary
+# uncapped case, so resolution must fall through to the host route without a
+# JSON decoder the caller does not otherwise use.
+: > "$FM_GENERATION_FIXTURE"
+printf 'schema=fm-remote-secondmate-control.v1\nbackend=herdr\nspawn_gen=uncapped\ntarget=session:p3\n' > "$FM_ROUTE_FIXTURE"
+NOJQ="$TMP/no-jq"
+mkdir -p "$NOJQ"
+printf '#!/usr/bin/env bash\nexit 127\n' > "$NOJQ/jq"
+chmod +x "$NOJQ/jq"
+if ! PATH="$NOJQ:$PATH" fm_remote_generation_resolve; then
+  fail 'an absent seat ledger needed a JSON decoder to resolve the host route'
+fi
+assert_equals uncapped "$FM_REMOTE_GENERATION" 'an absent seat ledger resolved no generation'
+assert_equals session:p3 "$(fm_meta_get "$META" remote_target)" 'an absent seat ledger lost the host target'
+rm -f "$FM_ROUTE_FIXTURE"
 printf 'remote generation regressions passed\n'
