@@ -33,6 +33,8 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -753,6 +755,36 @@ cap_outcome_line() {  # <line> <max-bytes>
   OUTCOME_LINE_BYTES=${#OUTCOME_LINE}
 }
 
+# Lifecycle intake hooks (docs/configuration.md "Lifecycle hooks"): each
+# presented captain inbox note is offered to the installed intake hooks after
+# the queue lock is released, and the merged JSON object they print is
+# appended as `INTAKE <wake-key>: <object>`. A note presented again before its wake is
+# acknowledged is offered again, so hooks key their own work by item_key.
+# Absent hooks/intake.d this is one directory test; hook failures never change
+# the drain's exit status.
+print_intake_hooks() {  # <deduped-raw-rows>
+  local rows=${1:-} kind key id out line
+  fm_hooks_present intake || return 0
+  [ -n "$rows" ] || return 0
+  while IFS=$'\t' read -r _ _ kind key _; do
+    [ "$kind" = check ] || continue
+    case "$key" in inbox:*) ;; *) continue ;; esac
+    id=${key#inbox:}
+    case "$id" in '' | *[!A-Za-z0-9._-]*) continue ;; esac
+    out=$(fm_hooks_emit intake item_key="$key" surface=inbox place=captain-inbox \
+      text_file="$STATE/inbox/$id.note") || true
+    [ -n "$out" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf 'INTAKE %s: %s\n' "$key" "$line"
+    done <<EOF_INTAKE
+$out
+EOF_INTAKE
+  done <<EOF_ROWS
+$rows
+EOF_ROWS
+}
+
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
@@ -1087,6 +1119,7 @@ fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
+! fm_hooks_present intake || print_intake_hooks "$RAW_ROWS" || true
 
 (print_status_presentation "$RAW_ROWS") || true
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1

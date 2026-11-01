@@ -14,6 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
+| External modules at lifecycle points | [Lifecycle hooks](#lifecycle-hooks-hooks) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -111,6 +112,8 @@ Each effective `FM_HOME` contains private operational directories.
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
+
+`hooks/` holds optional executable [lifecycle hooks](#lifecycle-hooks-hooks) in one `<event>.d/` folder per event.
 
 `projects/` holds local project clones.
 Firstmate reads these clones, but changes them only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
@@ -2679,6 +2682,45 @@ The session-start digest separately prints a "Public commitments" subsection fro
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind restart recovery, failed terminal outcomes, retained-loop disposition, and the relay-disabled zero-overhead guarantee.
 
+## Lifecycle hooks (hooks/)
+
+Firstmate calls installed lifecycle hooks at fixed points, so an external module or plugin attaches by dropping an executable into a folder instead of editing Firstmate's scripts.
+The optional, gitignored `hooks/` directory in the operational home holds one `<event>.d/` folder per event, filled by hand or by a module's installer.
+No hooks ship with Firstmate.
+With no event folder in either configured location, each call point is a silent no-op.
+[`bin/fm-hooks-lib.sh`](../bin/fm-hooks-lib.sh) owns where hooks live, and `bin/fm-hooks.sh --help` owns run order, timeouts, output, the run mirror, and exit status.
+
+Hooks receive the event's JSON payload on stdin, the event name in `FM_HOOK_EVENT`, and `FM_HOME`.
+Hooks can run inside the calling script's locks, such as spawn's capacity lock, the merge control lock, and teardown's task record lock, so a hook must not call back into Firstmate commands for the same task.
+
+| Event | Called from | Payload keys | Effect |
+| --- | --- | --- | --- |
+| `session-start` | `bin/fm-session-start.sh`, after the closing reminder, in locked and read-only sessions | `home`, `harness`, `source`, `read_only`, `reemit` | Stdout is appended to the digest under `ADD-ON HOOKS (session-start)` |
+| `intake` | `bin/fm-wake-drain.sh`, for each presented captain inbox note, after the queue lock is released | `item_key`, `surface`, `place`, `text_file` | The merged output is printed as `INTAKE <item_key>: <object>`; a note presented again before its wake is acknowledged is offered again |
+| `pre-spawn` | `bin/fm-spawn.sh`, for a fresh launch, after launch gates and harness resolution and before any account, trust, worktree, endpoint, or record | `task_id`, `kind`, `project`, `project_dir`, `brief_file`, `harness`, `model`, `effort`, `mode`, `yolo` | Refusal exits 3 and a runner error exits 2, with nothing launched; output is ignored |
+| `post-spawn` | `bin/fm-spawn.sh`, after a fresh launch's verified start | `task_id`, `kind`, `endpoint`, `worktree`, `harness` | Ignored |
+| `watch-tick` | `bin/fm-watch.sh`, every poll cycle | `home`, `cycle`, `watcher_pid` | Ignored; runs detached with at most one run in flight, output in `state/.fm-hooks.log`; `state/.fm-hook-<event>.pid` binds the PID to its process identity so a successor skips a still-running predecessor hook without mistaking a reused PID for that run; watcher shutdown never waits for hook completion |
+| `heartbeat` | `bin/fm-watch.sh`, at each heartbeat scan | `home` | Ignored; runs detached like `watch-tick` |
+| `turn-end` | `bin/fm-turnend-guard.sh`, for a primary session, before the supervision check; on Cursor and Antigravity, their stop adapters on every normal stop, before any park | `session`, `transcript_path`, `home` | Refusal blocks the stop once with the reason (a follow-up on Cursor, a continue decision on Antigravity); skips a stop-hook continuation when the shared guard receives `stop_hook_active` or `stopHookActive` as `true` (including Claude), Cursor receives `loop_count` above 0, or Antigravity receives the same session's next normal stop after a hook hold, recorded in `state/.turnend-hook-held` and retired by a cancelled or failed stop |
+| `pre-merge` | `bin/fm-pr-merge.sh`, after request validation, before anything is recorded or sent to the forge | `task_id`, `pr_url`, `provider` | Refusal exits 3 with nothing merged or recorded |
+| `post-merge` | `bin/fm-merge-outcome-lib.sh`, once per newly recorded merge, from `bin/fm-pr-merge.sh` after a forge-confirmed merge or from `bin/fm-watch.sh` when a merge poll sees a queued or external merge land | `task_id`, `pr_url`, `sha` (the merged head, empty when detected by the poll), `provider` | Ignored |
+| `teardown` | `bin/fm-teardown.sh`, after the landed-work checks and before the task record is removed, including `--force` | `task_id`, `kind`, `worktree`, `endpoint`, `forced` | Ignored |
+| `prompt-submit` | `bin/fm-dialog-hooks.sh`, from the tracked Claude `UserPromptSubmit` registration, for a primary session | `session_id`, `prompt_id`, `prompt`, `harness`, `home` | Ignored and never printed, so nothing reaches the model; failures go to `state/.fm-hooks.log` |
+| `stop` | `bin/fm-dialog-hooks.sh`, from the tracked Claude `Stop` registration, for a primary session, every stop | `session_id`, `prompt_id`, `last_assistant_message`, `stop_hook_active`, `transcript_path`, `harness`, `home` | Ignored like `prompt-submit`; never holds the stop |
+
+`bin/fm-hooks.sh --help` defines the JSON output merge and conflict policy for `pre-spawn` and `intake`.
+Firstmate reads no key of the merged `pre-spawn` object, so a hook cannot change the harness, model, project, account, or delivery contract.
+Pre-spawn hooks run before Firstmate's own later launch checks, so a spawn a hook accepted can still be refused; `post-spawn` is the confirmation that a worker started.
+A relaunch keeps the task's original admission, so neither spawn event runs for `--relaunch`.
+A remote secondmate launch runs the hooks of the home on the host that launches it.
+
+`prompt-submit` and `stop` carry the primary's dialog, the submitted prompt and the turn's final assistant message as said, so a module such as a supervision host can follow it.
+Only Claude primaries call them, beside and independent of the [supervision host's dialog mirror](supervision-host.md#the-dialog-mirror); Cursor payloads, crewmate worktrees, and other harnesses emit nothing.
+Missing harness fields are `null`, except `stop_hook_active`, which is `true` only when the harness sends the boolean `true` and otherwise is `false`.
+Their hooks run before the prompt or stop proceeds, so keep them fast; the tracked Claude registrations also impose a 30-second limit on each entire call.
+The call point requires an event folder even when `FM_HOOK_MIRROR` is set; direct runner calls can mirror dialog events without any folder (see `bin/fm-hooks.sh --help`).
+Tests: [`tests/fm-hooks.test.sh`](../tests/fm-hooks.test.sh) and the pre-spawn cases in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
+
 ## Trusted external process-event adapters (config/extensions.d)
 
 A home can explicitly enable a trusted external `process-event-adapter/1` package without adding package code to Firstmate.
@@ -3229,6 +3271,12 @@ FM_BACKEND_TERN_CTL_TIMEOUT=5  # tern-only: seconds bounding each tern ctl call 
 FM_BACKEND_TERN_SUBMIT_POLLS=6  # tern-only: native-state samples across each Enter confirmation budget
 FM_BACKEND_TERN_SUBMIT_MIN_SLEEP=0.6  # tern-only: minimum per-Enter confirmation budget before polling native state after an idle baseline
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
+FM_HOOK_TIMEOUT=10       # seconds bounding each lifecycle hook (bin/fm-hooks.sh); invalid or 0 falls back to 10; see "Lifecycle hooks"
+FM_HOOK_LOG=             # optional file that also receives each ignored lifecycle hook failure, one UTC-stamped line each
+FM_HOOKS_EXTRA_DIR=      # optional second lifecycle hook folder parent searched after the home's hooks/ (bin/fm-hooks-lib.sh)
+FM_HOOK_MERGE_CONFLICT=first  # pre-spawn hook output clash: first keeps the earlier hook's value, refuse refuses the spawn (bin/fm-hooks.sh)
+FM_HOOK_MIRROR=          # optional JSONL file receiving one digest-only line per lifecycle hook run (bin/fm-hooks.sh)
+FM_HOOK_MIRROR_TEXT=     # 1 adds capped dialog text to prompt-submit and stop mirror lines (bin/fm-hooks.sh)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest; each line is capped by bin/fm-line-cap-lib.sh
 FM_SESSION_START_QUEUED_LIMIT=20   # plain queued backlog rows in the session-start digest; in-flight, held, and blocked rows are never bounded and done rows are never listed
 FM_SESSION_START_ENDPOINT_TIMEOUT=10   # seconds bounding each per-task endpoint liveness read in the session-start digest (bin/fm-session-start.sh); nonpositive or invalid values fall back to 10; a read that hits the bound or dies becomes that task's own `endpoint: error` line and the digest continues

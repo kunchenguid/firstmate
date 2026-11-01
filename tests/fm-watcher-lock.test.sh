@@ -1356,6 +1356,79 @@ test_watcher_self_evicts_on_lock_takeover() {
   pass "watcher self-evicts when the lock pid no longer names it"
 }
 
+# A stopping watcher never waits on its detached watch-tick hook run, and a
+# successor watcher skips a run its predecessor left going, so no hook run
+# overlaps the next watcher's (docs/configuration.md "Lifecycle hooks").
+test_watcher_hook_runs_never_overlap_a_handoff() {
+  local dir state fakebin pid i rc=0
+  dir=$(make_case hook-handoff)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$dir/hooks/watch-tick.d"
+  cat > "$dir/hooks/watch-tick.d/10-slow" <<SH
+#!/bin/sh
+[ -e "$dir/running" ] && : > "$dir/overlap"
+: > "$dir/running"
+: > "$dir/hook-started"
+sleep 8
+rm -f "$dir/running"
+: > "$dir/hook-done"
+SH
+  chmod +x "$dir/hooks/watch-tick.d/10-slow"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/first.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$dir/hook-started" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/hook-started" ] || { wait_for_exit "$pid" 1 || true; fail "the watch-tick hook never ran: $(cat "$dir/first.out")"; }
+  kill -TERM "$pid" 2>/dev/null || true
+  # The stop command's own deadline is five seconds; the hook runs for eight.
+  wait_for_exit "$pid" 50 || rc=$?
+  [ "$rc" -ne 124 ] || fail "the stopping watcher did not exit within the stop deadline while its hook ran"
+  [ ! -e "$dir/hook-done" ] || fail "the stopping watcher waited for its watch-tick hook run"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/second.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 120 ] && [ ! -e "$dir/hook-done" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 20 || true
+  [ -e "$dir/hook-done" ] || fail "the predecessor's watch-tick hook run never finished"
+  [ ! -e "$dir/overlap" ] || fail "the successor watcher started a watch-tick hook run while its predecessor's was still going"
+  pass "watcher hook runs never overlap a handoff, and a stop never waits on one"
+}
+
+# A finished run's marker whose pid now names an unrelated live process is not
+# that run, so the watcher still runs its hooks after pid reuse.
+test_watcher_hook_marker_ignores_a_reused_pid() {
+  local dir state fakebin pid i
+  dir=$(make_case hook-pid-reuse)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$dir/hooks/watch-tick.d" "$state"
+  printf '#!/bin/sh\n: > "%s/hook-ran"\n' "$dir" > "$dir/hooks/watch-tick.d/10-mark"
+  chmod +x "$dir/hooks/watch-tick.d/10-mark"
+  printf '%s linux-starttime=1 cmdline-hex=00\n' "$$" > "$state/.fm-hook-watch-tick.pid"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$dir/hook-ran" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+  wait_for_exit "$pid" 20 || true
+  [ -e "$dir/hook-ran" ] || fail "a stale hook marker naming a reused live pid suppressed the watch-tick hook: $(cat "$dir/watch.out")"
+  pass "watcher hook markers are bound to the run's process identity, not a reused pid"
+}
+
 test_watcher_exits_on_state_teardown_during_startup() {
   # A state directory torn down and recreated at the same path just after the
   # watcher claimed its lock - before the main loop - is still a teardown: the
@@ -2390,6 +2463,8 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
+test_watcher_hook_runs_never_overlap_a_handoff
+test_watcher_hook_marker_ignores_a_reused_pid
 test_watcher_exits_on_state_teardown_during_startup
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher

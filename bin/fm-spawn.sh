@@ -12,6 +12,10 @@
 #   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
 #   instructions and the recorded task delivery cannot drift apart; a brief
 #   scaffolded before that line existed warns once and launches on the flag.
+#   Installed pre-spawn lifecycle hooks run for every fresh launch (never a
+#   --relaunch): a refusal exits 3 and a runner error exits 2, with nothing
+#   launched; post-spawn hooks run after a verified start
+#   (docs/configuration.md "Lifecycle hooks").
 #   The project's forge IS read from data/projects.md, because it is the
 #   captain's confirmed project fact rather than a per-task choice: a spawn
 #   refuses a brief whose `forge=` disagrees with the registered binding in
@@ -926,6 +930,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-kimi-trust-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -3272,6 +3278,38 @@ fi
 # trust registration below writes the store the worker will actually read.
 RAW_COMMAND=
 [ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
+# Lifecycle pre-spawn hooks (docs/configuration.md "Lifecycle hooks"): with no
+# hooks/pre-spawn.d folder this is one directory test and nothing else changes.
+# They run for fresh launches only, once the harness and any pinned account are
+# resolved and before any account, trust, worktree, endpoint, or record is
+# touched; a --relaunch (and its --preflight probe) reuses the task's original
+# admission. A refusal stops the spawn with the hook's reason; anything the
+# hooks print is ignored, so a hook cannot change the launch.
+if [ "$RELAUNCH" -eq 0 ] && fm_hooks_present pre-spawn; then
+  pre_spawn_project=${PROJ%/}
+  pre_spawn_brief="$DATA/$ID/brief.md"
+  if [ "$KIND" = secondmate ]; then
+    pre_spawn_project=${FIRSTMATE_HOME%/}
+    [ ! -f "$FIRSTMATE_HOME/data/charter.md" ] || pre_spawn_brief="$FIRSTMATE_HOME/data/charter.md"
+  fi
+  pre_spawn_rc=0
+  fm_hooks_emit pre-spawn task_id="$ID" kind="$KIND" \
+    project="${pre_spawn_project##*/}" project_dir="$pre_spawn_project" \
+    brief_file="$pre_spawn_brief" harness="$HARNESS" model="$MODEL" effort="$EFFORT" \
+    mode="$MODE" yolo="$YOLO" >/dev/null || pre_spawn_rc=$?
+  case "$pre_spawn_rc" in
+  0) ;;
+  3)
+    echo "error: a pre-spawn hook refused $ID (reason above); nothing was launched" >&2
+    exit 3
+    ;;
+  *)
+    echo "error: pre-spawn hooks could not run for $ID (exit $pre_spawn_rc); refusing rather than launching unchecked" >&2
+    exit 2
+    ;;
+  esac
+fi
+
 WORKER_ACCOUNT_MATE=
 [ "$KIND" != secondmate ] || WORKER_ACCOUNT_MATE=$ID
 WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND" "$WORKER_ACCOUNT_MATE") || exit 1
@@ -7864,4 +7902,8 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
+# Lifecycle post-spawn hooks (docs/configuration.md "Lifecycle hooks"): only a
+# verified fresh launch reaches here; a hook failure never changes the outcome.
+[ "$RELAUNCH" -eq 1 ] || fm_hooks_emit post-spawn task_id="$ID" kind="$KIND" endpoint="$META_WINDOW" \
+  worktree="$WT" harness="$HARNESS" >/dev/null || true
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

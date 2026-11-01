@@ -2699,6 +2699,40 @@ EOF
 
 # --- fleet-state digest: no in-flight tasks ----------------------------------
 
+# Installed session-start lifecycle hooks (docs/configuration.md "Lifecycle
+# hooks") append their stdout after the closing reminder; with none installed
+# the digest has no hook section and its stage list is unchanged.
+test_session_start_appends_lifecycle_hook_output() {
+  local rec root home fakebin out tail_line
+  rec=$(new_world lifecycle-hooks)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" 'ADD-ON HOOKS' "a home without hooks printed a hook section"
+
+  mkdir -p "$home/hooks/session-start.d"
+  printf '#!/bin/sh\ncat > "%s/payload.json"\necho "memory: 3 open threads for this home"\n' "$home" \
+    > "$home/hooks/session-start.d/10-context"
+  printf '#!/bin/sh\necho "partial context"; exit 4\n' > "$home/hooks/session-start.d/20-broken"
+  chmod +x "$home/hooks/session-start.d/10-context" "$home/hooks/session-start.d/20-broken"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>/dev/null)
+  assert_contains "$out" 'ADD-ON HOOKS (session-start)' "the hook section is missing"
+  assert_contains "$out" 'memory: 3 open threads for this home' "the hook output is missing"
+  assert_contains "$out" 'partial context' "a failing hook's output was dropped"
+  tail_line=$(printf '%s\n' "$out" | grep -n 'ADD-ON HOOKS' | cut -d: -f1)
+  [ "$tail_line" -gt "$(printf '%s\n' "$out" | grep -n '^NEXT STEP$' | cut -d: -f1)" ] \
+    || fail "the hook section is not after the closing reminder"
+  assert_contains "$(printf '%s\n' "$out" | tail -n 3)" 'The digest above is complete for this session start.' \
+    "the digest no longer ends with its completion line"
+  jq -e --arg home "$home" '.home == $home and .read_only == false and .reemit == false and (.harness | length) > 0' \
+    "$home/payload.json" >/dev/null || fail "session-start payload is wrong: $(cat "$home/payload.json")"
+  pass "session-start hook output is appended to the digest after the closing reminder"
+}
+
 test_fleet_digest_empty_fleet() {
   local rec root home fakebin out
   rec=$(new_world empty-fleet)
@@ -3132,6 +3166,7 @@ test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
+test_session_start_appends_lifecycle_hook_output
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_next_step_quiet_mode_delegates_to_daemon

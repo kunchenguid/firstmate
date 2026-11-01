@@ -3842,6 +3842,40 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+# Lifecycle watch-tick and heartbeat hooks (docs/configuration.md "Lifecycle
+# hooks"). Absent hooks/<event>.d each costs one directory test per cycle.
+# Present, the hooks run detached with no tie to this watcher's output, so a
+# slow hook never delays a poll or holds a wake open; each event has at most
+# one run in flight, and a run still going when the next is due is skipped.
+# The in-flight run's pid and process identity live in
+# state/.fm-hook-<event>.pid rather than in this process, so a successor
+# watcher also skips a run its predecessor left going, a reused pid never reads
+# as that run, and a stopping watcher never waits on one. Stop signals are
+# deferred from launch until the pid and identity are published
+# (run_check_capture), so a stop can never leave a run going unrecorded; the
+# identity is read in a subshell so no command substitution runs in this shell
+# inside that window. Their output and failures go to state/.fm-hooks.log.
+# shellcheck source=bin/fm-hooks-lib.sh
+. "$SCRIPT_DIR/fm-hooks-lib.sh"
+WATCH_TICK_CYCLE=0
+WATCH_HOOK_SIGNAL_PENDING=
+watch_hook_idle() {  # <event>
+  local pid='' identity=''
+  { read -r pid identity < "$STATE/.fm-hook-$1.pid"; } 2>/dev/null || return 0
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 0
+  [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" != "$identity" ]
+}
+watch_hook_launch() {  # <event> [key=value | key:=json]...
+  local marker="$STATE/.fm-hook-$1.pid" pid
+  WATCH_HOOK_SIGNAL_PENDING=
+  trap 'WATCH_HOOK_SIGNAL_PENDING=1' HUP INT TERM
+  fm_hooks_emit "$@" </dev/null >>"$STATE/.fm-hooks.log" 2>&1 &
+  pid=$!
+  ( printf '%s ' "$pid"; fm_pid_identity "$pid" 2>/dev/null || echo ) > "$marker" 2>/dev/null || true
+  watcher_stop_signals
+  [ -z "$WATCH_HOOK_SIGNAL_PENDING" ] || exit 1
+}
+
 while :; do
   # Home-gone exit: a deleted home, state directory, or code root means this
   # watcher's world is gone (a torn-down temporary home or a discarded
@@ -3892,6 +3926,12 @@ while :; do
   # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups"):
   # display-only tags and agents view, never a wake. Off costs one file test.
   [ ! -e "$CONFIG/herdr-project-groups" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync || true
+  if fm_hooks_present watch-tick; then
+    WATCH_TICK_CYCLE=$((WATCH_TICK_CYCLE + 1))
+    if watch_hook_idle watch-tick; then
+      watch_hook_launch watch-tick home="$FM_HOME" cycle:="$WATCH_TICK_CYCLE" watcher_pid:="$WATCHER_PID"
+    fi
+  fi
   # Opt-in Rex attention marks, validation progress, and tint (docs/rex-backend.md
   # "Attention marks"): display and desktop notification only, never a wake.
   # Off (no config file and no cached record) costs two file tests and a glob.
@@ -4496,6 +4536,9 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    if fm_hooks_present heartbeat && watch_hook_idle heartbeat; then
+      watch_hook_launch heartbeat home="$FM_HOME"
+    fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
