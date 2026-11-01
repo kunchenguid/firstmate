@@ -397,6 +397,7 @@ for _teardown_source in \
   fm-cursor-lib.sh \
   fm-nm-run-lib.sh \
   fm-wake-lib.sh \
+  fm-sol-cap-lib.sh \
   fm-path-lib.sh \
   fm-lease-lib.sh
 do
@@ -546,6 +547,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-sol-cap-lib.sh
+. "$SCRIPT_DIR/fm-sol-cap-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -685,6 +688,8 @@ TEARDOWN_LEGACY_RETAINED_STAMP=
 TEARDOWN_LEGACY_PRESTAMP_SIZE=0
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
+SOL_ENDPOINT_STOPPED=0
+TEARDOWN_SOL_CLAIM=0
 TEARDOWN_WINDOWLESS=0
 TEARDOWN_WINDOWLESS_SHAPE=0
 TEARDOWN_WINDOW_COUNT=$(LC_ALL=C grep -c '^window=' "$META" 2>/dev/null || true)
@@ -1191,6 +1196,7 @@ remote_secondmate_teardown() {
     fi
     return "$rc"
   fi
+  fm_sol_cap_promote "$ID" remove "$STATE" || return 1
   if [ "$rc" -eq "$TEARDOWN_LOST_SLOT_EXIT" ]; then
     printf '%s\n' "$out" | grep -E '^(warning: treehouse return left pool slot |  )' >&2 || true
   fi
@@ -3420,10 +3426,10 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # would die there having removed nothing while this message claimed otherwise.
 # The T3 site refuses under --force because stop and archive must succeed before
 # its worktree or home can be released (see the native cleanup site below).
-# The two forced secondmate child sites refuse because that path is only ever
-# reached under --force, so honoring force would delete the refusal rather
-# than override it, and would contradict the adjacent Herdr child gate that
-# stops forced cleanup for this same hazard.
+# The forced secondmate child close sites refuse because that path is only
+# ever reached under --force, so honoring force would delete the refusal
+# rather than override it, and would contradict the adjacent Herdr child
+# gate that stops forced cleanup for this same hazard.
 #
 # What is retained is this run's records, not a durable guarantee: a task
 # carrying a backlog transition already wrote its pending-close marker, and the
@@ -3445,7 +3451,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot
+  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot child_owned
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3468,6 +3474,16 @@ cleanup_firstmate_home_children() {
       fi
     fi
     if [ -n "$child_t" ]; then
+      # A child that holds a capped session occupancy may release it only
+      # after a CONFIRMED close: an ordinary best-effort close can report
+      # success while the worker survives, and releasing the occupancy then
+      # would hand the same capacity to another worker.
+      child_owned=0
+      fm_sol_cap_has_owned_occupancy "$child_id" "$sub_state" || child_owned=$?
+      if [ "$child_owned" -eq 2 ]; then
+        echo "error: the Sol ceiling declaration could not be read, so child $child_id's capped occupancy can neither be confirmed nor released" >&2
+        return 1
+      fi
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
         if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
@@ -3479,6 +3495,18 @@ cleanup_firstmate_home_children() {
           echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
           return 1
         fi
+      elif [ "$child_owned" -eq 0 ]; then
+        # Zellij titles and Rex session labels are scoped by the owning home
+        # tag, so forced secondmate cleanup must verify a child endpoint as
+        # that child home, not the parent: a Rex descendant retired under the
+        # parent's home leaves its emptied per-home session behind.
+        child_home=$home
+        if [ "$child_backend" = rex ] && [ "$child_kind" = secondmate ]; then
+          child_home=$(meta_value "$child_meta" home)
+          [ -n "$child_home" ] || child_home=$child_wt
+        fi
+        ( unset FM_ROOT_OVERRIDE; FM_HOME=$child_home FM_ROOT=$child_home STATE="$child_home/state" fm_backend_kill_confirmed "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) \
+          || { echo "error: child $child_id's endpoint $child_t could not be confirmed gone, so its capped occupancy is retained" >&2; return 1; }
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
@@ -3497,6 +3525,7 @@ cleanup_firstmate_home_children() {
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
+      fm_sol_cap_promote "$child_id" remove "$sub_state" || return 1
     fi
     teardown_export_records "$sub_state" "$child_id" || return 1
     if [ "$child_kind" = secondmate ]; then
@@ -3857,7 +3886,35 @@ if [ "$BACKEND" = t3code ]; then
     echo "error: could not stop and archive T3 thread $T for $ID; start T3 Code (or archive the thread there) and re-run teardown" >&2
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
+  SOL_ENDPOINT_STOPPED=1
 fi
+# Whether this task holds a capped session occupancy that only a CONFIRMED
+# endpoint close may release. The capped-session guard reads the captain's
+# own declaration here, so a task that holds no capped occupancy keeps this
+# teardown's close behavior exactly as it was, and a malformed declaration
+# stops the cleanup loudly instead of releasing occupancy it cannot
+# classify.
+teardown_sol_claim_held() {  # <task-id> <state-dir>
+  local id=$1 state=$2 owned
+  owned=0
+  fm_sol_cap_has_owned_occupancy "$id" "$state" || owned=$?
+  case "$owned" in
+    0)
+      TEARDOWN_SOL_CLAIM=1
+      return 0
+      ;;
+    1)
+      TEARDOWN_SOL_CLAIM=0
+      return 0
+      ;;
+    *)
+      echo "error: the Sol ceiling declaration could not be read, so $id's capped occupancy can neither be confirmed nor released" >&2
+      return 1
+      ;;
+  esac
+}
+
+teardown_sol_claim_held "$ID" "$STATE" || exit 1
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -3877,8 +3934,14 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     remove_harness_worktree_wiring "$WT"
   fi
   if [ -n "$T_ORCA" ]; then
-    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
-      || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+    if [ "$TEARDOWN_SOL_CLAIM" = 1 ]; then
+      fm_backend_kill_confirmed "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+        || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+    else
+      fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+        || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+    fi
+    SOL_ENDPOINT_STOPPED=1
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
@@ -3986,9 +4049,12 @@ elif [ "$BACKEND" = herdr ]; then
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
 elif [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
-  ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
-    fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
-    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+  if ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
+    fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ); then
+    SOL_ENDPOINT_STOPPED=1
+  else
+    endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+  fi
 elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
   # (bin/fm-rex-marks.sh), so a pane the close cannot reach is not left showing
@@ -3996,8 +4062,19 @@ elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$TEARDOWN_WINDOWLE
   if [ "$BACKEND" = rex ] && { [ -e "$STATE/.rex-mark-$ID" ] || [ -e "$STATE/.rex-progress-$ID" ] || [ -e "$STATE/.rex-tint-$ID" ]; }; then
     FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" clear "$ID" >/dev/null 2>&1 || true
   fi
-  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
-    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+  if [ "$TEARDOWN_SOL_CLAIM" = 1 ]; then
+    # A capped session's occupancy is released only after the endpoint is
+    # confirmed gone; an unconfirmed close retains it.
+    if fm_backend_kill_confirmed "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID"; then
+      SOL_ENDPOINT_STOPPED=1
+    else
+      endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+    fi
+  elif fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID"; then
+    SOL_ENDPOINT_STOPPED=1
+  else
+    endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
+  fi
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
@@ -4025,6 +4102,10 @@ if [ "$BACKEND" = herdr ]; then
     echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
     exit 1
   fi
+  SOL_ENDPOINT_STOPPED=1
+fi
+if [ "$SOL_ENDPOINT_STOPPED" = 1 ]; then
+  fm_sol_cap_promote "$ID" remove "$STATE" || exit 1
 fi
 if [ "$KIND" != secondmate ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \

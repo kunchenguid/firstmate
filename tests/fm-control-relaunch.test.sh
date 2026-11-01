@@ -35,6 +35,9 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
+# Preserve the real timer before fixture PATHs install a no-op sleep.
+export FM_TEST_REAL_SLEEP
+FM_TEST_REAL_SLEEP=$(command -v sleep)
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
@@ -94,7 +97,7 @@ case "${1:-}" in
         'export GOTMPDIR='*)
           if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
             : > "$FM_FAKE_TRACE_PREPARE"
-            while [ ! -e "$FM_FAKE_TRACE_RELEASE" ]; do /bin/sleep 0.01; done
+            while [ ! -e "$FM_FAKE_TRACE_RELEASE" ]; do "$FM_TEST_REAL_SLEEP" 0.01; done
           fi
           ;;
         'export TRACEPARENT='*)
@@ -111,7 +114,7 @@ case "${1:-}" in
         *pane_current_path*)
           if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
             : > "$FM_FAKE_CWD_RACE_READY"
-            /bin/sleep 1
+            "$FM_TEST_REAL_SLEEP" 1
           fi
           cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
@@ -312,7 +315,7 @@ if [ -n "${FM_FAKE_META_WRITER_TARGET:-}" ] \
    && [ "$target_path" = "$FM_FAKE_META_WRITER_TARGET" ] \
    && grep -q '^x_request=' "$source_path" 2>/dev/null; then
   : > "$FM_FAKE_META_WRITER_READY"
-  while [ ! -e "$FM_FAKE_META_WRITER_RELEASE" ]; do /bin/sleep 0.01; done
+  while [ ! -e "$FM_FAKE_META_WRITER_RELEASE" ]; do "$FM_TEST_REAL_SLEEP" 0.01; done
 fi
 exec "$FM_REAL_MV" "$@"
 SH
@@ -553,7 +556,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
   while [ ! -e "$prepare" ] && [ "$i" -lt 500 ]; do
-    /bin/sleep 0.01
+    "$FM_TEST_REAL_SLEEP" 0.01
     i=$((i + 1))
   done
   [ -e "$prepare" ] || {
@@ -572,7 +575,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
   link_pid=$!
   i=0
   while [ ! -e "$waiting" ] && [ "$i" -lt 500 ]; do
-    /bin/sleep 0.01
+    "$FM_TEST_REAL_SLEEP" 0.01
     i=$((i + 1))
   done
   [ -e "$waiting" ] && [ ! -e "$ready" ] || {
@@ -585,7 +588,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
   : > "$launch_release"
   i=0
   while [ ! -e "$ready" ] && [ "$i" -lt 500 ]; do
-    /bin/sleep 0.01
+    "$FM_TEST_REAL_SLEEP" 0.01
     i=$((i + 1))
   done
   [ -e "$ready" ] || {
@@ -917,6 +920,16 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" rl6 model)" = opus ] || fail "the model should carry across a same-harness relaunch"
   [ "$(meta_field "$dir" rl6 effort)" = high ] || fail "the effort should carry across a same-harness relaunch"
+  mkdir -p "$dir/home/config"
+  printf '{"rules":[{"use":{"model":"gpt-6.1-sol"}}]}\n' > "$dir/home/config/crew-dispatch.json"
+  printf 'max=4\nmodels=gpt-6.1-sol\n' > "$dir/home/config/sol-cap"
+  sed 's/^model=opus$/model=gpt-6.1-sol/' "$dir/home/state/rl6.meta" > "$dir/home/state/rl6.meta.tmp"
+  mv "$dir/home/state/rl6.meta.tmp" "$dir/home/state/rl6.meta"
+  printf 'rl6\tgpt-6.1-sol\t1\t0\n' > "$dir/home/state/sol-sessions.tsv"
+  out=$(run_control "$dir" rl6 relaunch --harness claude --model default --note "clear the previous model"); rc=$?
+  expect_code 0 "$rc" "a model-clearing relaunch failed: $out"
+  [ "$(meta_field "$dir" rl6 model)" = default ] || fail "replacement did not clear the model"
+  [ "$(awk -F'\t' '$1 == "rl6" {print $4}' "$dir/home/state/sol-sessions.tsv")" != 0 ] || fail "cleared model retained live Sol occupancy"
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 
@@ -1862,7 +1875,7 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
       > "$dir/control.out" &
   control_pid=$!
   while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
-    /bin/sleep 0.01
+    "$FM_TEST_REAL_SLEEP" 0.01
     i=$((i + 1))
   done
   [ -e "$dir/cwd-race-ready" ] || {

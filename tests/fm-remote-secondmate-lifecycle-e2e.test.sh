@@ -1315,7 +1315,9 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
-watch_deadline=$((SECONDS + watch_relaunch_timeout + 30))
+# Allow the watcher's spawn bound plus probing, wake publication, and EXIT
+# cleanup; a 30-second test deadline races a successful remote launch.
+watch_deadline=$((SECONDS + watch_relaunch_timeout + 60))
 while kill -0 "$watch_pid" 2>/dev/null && [ "$SECONDS" -lt "$watch_deadline" ]; do
   sleep 0.1
 done
