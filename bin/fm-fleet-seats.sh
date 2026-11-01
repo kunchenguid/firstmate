@@ -1358,6 +1358,10 @@ apply_remote_disposition() {
       ;;
     cancelled)
       case "$(inc_get "$GEN" .lifecycle)" in reserved) ;; *) refuse "generation $GEN of $TASK is not a pending candidate" ;; esac
+      if [ "$route" != null ]; then
+        holder_mutate '(.incarnations[] | select(.generation == $g)).route = $r' \
+          --arg g "$GEN" --argjson r "$route" || unavailable "cannot record $TASK's cancelled route"
+      fi
       set_terminal "$GEN" released cancelled reconcile-remote || unavailable "cannot release $TASK's cancelled candidate"
       release_stopped_predecessor
       echo "fleet-seats: released id=$TASK generation=$GEN reason=cancelled"
