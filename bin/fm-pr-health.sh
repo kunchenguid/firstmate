@@ -33,8 +33,9 @@
 # the fallback sweep every FALLBACK_SECONDS, because a base moving into
 # conflict or another app's failing check raises no notification. A
 # notification on a PR this home does not own is ignored without a read.
-# It prints one line per new condition, all in one check output, so one wake.
-# Each line names who must act; only "author must act" asks the owning task to:
+# It prints one line per new author action, conflict, or failing check, so one
+# wake. Maintainer-gated CI and missing required reviews are recorded in
+# state/pr-health.json for fleet review, but never printed to the wake channel.
 #   - conflict: REST mergeable is false. Null (UNKNOWN) is neither clean nor
 #     conflicting and never clears an already reported condition.
 #   - failing checks: a required context failed (a check run concluded other
@@ -50,10 +51,9 @@
 #   - author must act: reviewDecision CHANGES_REQUESTED, or an explicit
 #     maintainer label pending-contributor-action, waiting-on-author,
 #     waiting-for-author or awaiting-author, with any "namespace:" prefix.
-# A conflict, a missing approval and an author action each wake once per
-# latest commit, even if the base moves or the condition clears and returns.
-# A failing or maintainer-gated check wakes once per latest commit and check
-# (suite: workflow) name: a check that newly fails at an already reported
+# A conflict and author action each wake once per latest commit; a missing
+# approval is recorded once per latest commit. A failing check wakes once per
+# latest commit and check (suite: workflow) name: a check that newly fails at an already reported
 # commit wakes once more, a name already reported there never repeats, and the
 # line names only the new ones. The conditions have independent histories.
 # A merged or closed PR is final and never read again. A failed or timed-out
@@ -195,11 +195,7 @@ STEP='
            (select($conflict_new)
             | "pr-health: \($url) conflicts with its base \($where) (task \($owners))"),
            (select($checks_new)
-            | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))"),
-           (select(($new_gated | length) > 0)
-            | "pr-health: \($url) waits on the maintainer to approve CI \($where): nothing has run for \($new_gated[:3] | join(", ")), so the PR is not green; no author action (task \($owners))"),
-           (select($approval_new)
-            | "pr-health: \($url) needs human approval \($where): a required review is not yet given; no author action (task \($owners))")])}
+            | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))")])}
     end'
 
 read_pr() { # url deadline output-directory -> rest.json gql.json

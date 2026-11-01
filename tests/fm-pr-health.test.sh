@@ -639,13 +639,15 @@ test_maintainer_author_and_approval_states_are_distinct() {
   set_pr "$home" 40 '.checks = [{name:"Review bot",conclusion:"SUCCESS",required:false}]
     | .suites = [{name:"CI",conclusion:"ACTION_REQUIRED"},{name:"Lint",conclusion:"SUCCESS"}]'
   arm "$home"
-  expect_one "$home" '^pr-health: https://github.com/o/r/pull/40 waits on the maintainer to approve CI at latest commit aaaaaaa: nothing has run for CI, so the PR is not green; no author action .*ship1' \
-    'an ACTION_REQUIRED check suite must read as maintainer-gated, not green'
-  expect_silent "$home" 'a maintainer-gated suite must not repeat'
+  expect_silent "$home" 'an ACTION_REQUIRED suite must not wake the task'
+  jq -e --arg head "$HEAD_A" '.prs["https://github.com/o/r/pull/40"].maintainer_gated | any(.[]; .head == $head and .name == "CI")' \
+    "$home/state/pr-health.json" >/dev/null || fail 'maintainer-gated CI was not recorded for fleet review'
+  expect_silent "$home" 'a maintainer-gated suite must not repeat or wake'
   set_pr "$home" 40 '.reviewDecision = "REVIEW_REQUIRED"'
-  expect_one "$home" 'needs human approval at latest commit aaaaaaa: a required review is not yet given; no author action' \
-    'a missing required review must be its own state'
-  expect_silent "$home" 'a required review must not repeat'
+  expect_silent "$home" 'a required review must not wake the task'
+  jq -e --arg head "$HEAD_A" '.prs["https://github.com/o/r/pull/40"].needs_approval | index($head) != null' \
+    "$home/state/pr-health.json" >/dev/null || fail 'missing required review was not recorded for fleet review'
+  expect_silent "$home" 'a required review must not repeat or wake'
   set_pr "$home" 40 '.reviewDecision = "CHANGES_REQUESTED"'
   expect_one "$home" 'author must act at latest commit aaaaaaa: changes requested \(task ship1\)$' \
     'a requested change must ask the author to act'
@@ -688,8 +690,10 @@ test_notifications_drive_reads_with_the_poll_as_fallback() {
   jq '.notifications.swept_at = 0' "$home/state/pr-health.json" > "$home/state/pr-health.next" \
     && mv "$home/state/pr-health.next" "$home/state/pr-health.json"
   before=$(reads "$home" 41)
-  expect_one "$home" 'pull/41 needs human approval' 'the fallback sweep must still read every owned PR'
+  expect_silent "$home" 'the fallback sweep must not wake for missing approval'
   [ "$(reads "$home" 41)" = $((before + 1)) ] || fail 'the fallback sweep did not read the owned PR'
+  jq -e --arg head "$HEAD_A" '.prs["https://github.com/o/r/pull/41"].needs_approval | index($head) != null' \
+    "$home/state/pr-health.json" >/dev/null || fail 'fallback sweep did not record missing approval'
   pass 'notifications trigger reads of owned PRs, unchanged feeds read nothing, the poll stays the fallback'
 }
 
