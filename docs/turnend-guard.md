@@ -592,6 +592,8 @@ Only the two surfaces below render it.
 - No harness adapter uses a shell ampersand to manufacture supervision.
 - The waiting-on-you line is rendered only by the Claude `Stop` hook and the Pi footer.
   Every other primary adapter gets neither the line nor a captain-hold follow-up yet: this guard's stderr follow-up fires only for blind supervision and never mentions captain holds.
+- The waiting-on-you line counts only holds in the markdown backlog.
+  A home on another tasks-axi backend, such as Beads, shows `Waiting on you: unknown` with a not-counted note instead of a count; reading holds through tasks-axi for every backend is a follow-up.
 
 ## Regression coverage
 

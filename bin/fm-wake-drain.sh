@@ -586,8 +586,11 @@ EOF
 # captain (bin/fm-afk-contract.sh AWAY OR QUIET). Bounded, and silent when
 # nothing is new or unprocessed.
 #   - Acted-on outcomes (verdict main or captain, bin/fm-branch-outcome.sh)
-#     come first and never wait behind routine ones; a line whose newest row
-#     is verdict main says so, so a main outcome never reads as a captain call.
+#     come first and never wait behind routine ones; a line whose collapsed
+#     rows are all verdict main says so, so a main outcome never reads as a
+#     captain call, and a line whose newest row is main but which collapses a
+#     captain row says it includes a captain call, so that call is not
+#     acknowledged as main's alone.
 #     The rest of this paragraph says "captain" for both. Every
 #     unprocessed captain row is presented on every drain until main
 #     acknowledges it, collapsed to one line per task: the task's newest
@@ -642,9 +645,10 @@ print_branch_outcomes_section() {
   if ! through=$(printf '%s\n' "$rows" | jq -s 'map(select(.unread) | .seq) | max // 0' 2>/dev/null) \
     || ! captain=$(printf '%s\n' "$rows" | jq -rs '
       map(select(.verdict != "routine")) | sort_by(.seq)
-      | reduce .[] as $r ({count: {}, lines: []};
+      | reduce .[] as $r ({count: {}, captain: {}, lines: []};
           .count[$r.task] += 1
-          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago\(if $r.verdict == "main" then ", main to act, not a captain call" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
+          | .captain[$r.task] = (.captain[$r.task] == true or $r.verdict != "main")
+          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago\(if .captain[$r.task] | not then ", main to act, not a captain call" elif $r.verdict == "main" then ", includes a captain call" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
       | .lines[]' 2>/dev/null) \
     || ! routine=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "routine" and .silent != true)) | sort_by(.seq) | reverse | .[]
       | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \

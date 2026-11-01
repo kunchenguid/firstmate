@@ -123,7 +123,10 @@
 # since is an aged hold's YYYY-MM-DD hold date and secondmates_uncounted says a
 # secondmate is registered (or the registry is unreadable) whose holds are not
 # counted. It reads only the backlog and the local registry table, so a
-# per-turn reader (bin/fm-waiting-on-you.sh) stays cheap.
+# per-turn reader (bin/fm-waiting-on-you.sh) stays cheap. Only the markdown
+# backlog is read: when the home's tasks-axi backend is another one (Beads, for
+# example), it prints {count:null,uncounted_backend:<backend>} instead, so a
+# reader never mistakes holds it cannot see for none.
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
@@ -255,7 +258,9 @@ without worker observations or cross-home collection.
 
 --captain-calls emits this home's unanswered undated captain holds, live and
 aged, as {count,aged,calls:[{id,title,class,aged,since}],secondmates_uncounted},
-from the backlog parse and the local secondmate registry table alone.
+from the backlog parse and the local secondmate registry table alone. When the
+home's tasks-axi backend is not markdown it emits
+{count:null,uncounted_backend:<backend>} instead of a count.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -1996,6 +2001,17 @@ scout_report_lines() {
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 if [ "$OUTPUT_MODE" = captain-calls ]; then
+  # shellcheck source=bin/fm-tasks-axi-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+  CAPTAIN_CALL_DATA=$(CDPATH='' cd -- "$DATA" 2>/dev/null && pwd -P) || CAPTAIN_CALL_DATA=$DATA
+  CAPTAIN_CALL_BACKEND=$(fm_tasks_axi_backend_resolve "$(dirname -- "$CAPTAIN_CALL_DATA")") \
+    || { echo "fm-fleet-snapshot: backlog backend could not be resolved" >&2; exit 1; }
+  if [ "$CAPTAIN_CALL_BACKEND" != markdown ]; then
+    jq -cn --arg backend "$CAPTAIN_CALL_BACKEND" '{count:null,uncounted_backend:$backend}' \
+      || { echo "fm-fleet-snapshot: captain-call projection failed" >&2; exit 1; }
+    exit 0
+  fi
   CAPTAIN_CALL_REGISTRY=$(registry_secondmates_json) || { echo "fm-fleet-snapshot: secondmate registry read failed" >&2; exit 1; }
   printf '%s\n' "$BACKLOG_JSON" | jq -c --argjson registry "$CAPTAIN_CALL_REGISTRY" '
     [.records[]? | select(.structured and (.hold_bucket == "live" or .hold_bucket == "aged"))
