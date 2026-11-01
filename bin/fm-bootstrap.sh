@@ -1606,8 +1606,8 @@ record_hygiene_report() {
     id=${id%.meta}
     [ "$(fm_meta_get "$file" kind)" = secondmate ] && continue
     [ -n "$(fm_meta_get "$file" remote_host)" ] && continue
-    backend=$(fm_meta_get "$file" backend)
-    target=$(fm_meta_get "$file" window)
+    backend=$(fm_backend_of_meta "$file")
+    target=$(fm_backend_target_of_meta "$file")
     if [ -z "$backend" ] || [ -z "$target" ]; then
       echo "RECORD_HYGIENE: metadata has no endpoint: $id"
     else
