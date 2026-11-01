@@ -672,7 +672,7 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
     # again would duplicate the line, so this close owes nothing for it.
     fm_backlog_row_title_body "$data" "$id" || return 1
     case $'\n'"$FM_BACKLOG_ROW_BODY"$'\n' in
-      *$'\n'"$note_text"$'\n'*) drop_note=1 ;;
+      *$'\n'"$note_text"$'\n'*|*$'\n'"$note_text"'; '*) drop_note=1 ;;
     esac
   fi
   if [ "$drop_note" = 1 ]; then
@@ -1051,7 +1051,7 @@ fm_backlog_row_artifact_supported() {
 # fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
   local data authorized_data=$1 id=$2 previous_arg=''
-  local arg deliverable='' line body new_body tmp pr_args=0 note
+  local arg deliverable='' line body new_body tmp pr_args=0 note strip_after=0
   local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
@@ -1084,15 +1084,17 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   # earlier one on the row: the captain's later answer closes the row, and
   # tasks-axi renders a closed row carrying such a link as merged. The link moves
   # into the deliverable line, which is the body record this retention already
-  # writes, so nothing is lost. Callers pass `--pr` only for a merge they read
-  # from the forge in the same run.
+  # writes, so nothing is lost - and it is written before the title loses the
+  # link, so a failed write cannot cost the URL. Callers pass `--pr` only for a
+  # merge they read from the forge in the same run.
   if [ "$pr_args" = 0 ]; then
-    fm_backlog_pr_link_downgrade "$data" "$id" "this retention read no merge" || return 1
+    fm_backlog_pr_link_note "$data" "$id" "this retention read no merge" || return 1
     note=$FM_BACKLOG_DOWNGRADE_NOTE
     if [ -n "$note" ] \
        && ! fm_backlog_text_names_link "$deliverable" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
       deliverable="${deliverable:+$deliverable; }$note"
     fi
+    [ -z "$FM_BACKLOG_DOWNGRADE_LINKS" ] || strip_after=1
   fi
   if [ -n "$deliverable" ]; then
     fm_backlog_row_title_body "$data" "$id" || return 1
@@ -1122,6 +1124,9 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   fi
   if [ "${#row_args[@]}" -gt 0 ]; then
     fm_backlog_mutate "$authorized_data" update "$id" "${row_args[@]}" || return 1
+  fi
+  if [ "$strip_after" = 1 ]; then
+    fm_backlog_pr_title_strip "$data" "$id" || return 1
   fi
   fm_backlog_mutate "$authorized_data" reopen "$id"
 }

@@ -1325,7 +1325,10 @@ close_answered() {  # <task-id> <release-0-or-1>
     RETAINED_CLOSE_ARGS=(--pr "$FM_BACKLOG_MERGE_FACT_URL")
   fi
   if [ "${RETAINED_CLOSE_ARGS[0]-}" = --pr ]; then
-    if ! tasks_axi "done" "$id" --pr "${RETAINED_CLOSE_ARGS[1]}" >/dev/null; then
+    # The close boundary keeps the verified link and takes any other one off the
+    # title into a body note, so the closed row renders merged only for the PR
+    # this run read.
+    if ! fm_backlog_done "$DATA" "$id" --pr "${RETAINED_CLOSE_ARGS[1]}" >/dev/null; then
       return 1
     fi
     fm_backlog_merge_fact_remove "$STATE" "$id"
@@ -1344,8 +1347,13 @@ close_answered() {  # <task-id> <release-0-or-1>
     recorded=$note
   elif [ -n "$note" ] \
        && ! fm_backlog_text_names_link "$recorded" "$FM_BACKLOG_DOWNGRADE_LINKS"; then
-    # The recorded note keeps a different link, or none, so this close records both.
-    recorded="$recorded; $note"
+    # The recorded note keeps a different link, or none, so this close records
+    # both - unless it already says this, which is what an interrupted earlier
+    # attempt leaves behind.
+    case $recorded in
+      *"$note"*) ;;
+      *) recorded="$recorded; $note" ;;
+    esac
   fi
   if [ -n "$recorded" ]; then
     fm_backlog_body_append_line "$DATA" "$id" "$recorded" \
