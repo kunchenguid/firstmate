@@ -19,26 +19,35 @@
 #      backend=herdr (old herdr has no protocol support) and backend=t3code
 #      (no task tty) never report
 #   4. the harness must not already report natively: Claude Code >= 2.1.295
-#      and Pi >= 1.1.0 send their own records (herdr discussions #5073/#5106,
-#      verified 2026-10-30), so a firstmate record would only fight theirs
+#      and Pi >= 1.1.0 (herdr discussions #5073/#5106, verified 2026-10-30),
+#      codex-cli >= 0.163.0 (openai/codex#52725, first released in
+#      rust-v0.163.0, verified 2026-11-01), and Grok >= 1.0.67 and Muse Code
+#      >= 1.4.11 (the lowest versions verified reporting on Rex,
+#      docs/verification/runtime-backends.md) send their own root records;
+#      a terminal keeps one root record per pane, so a firstmate record would
+#      only replace theirs
 #
 # When all of that holds, arm daemonizes `watch`, which polls firstmate's own
-# durable signals for the task and emits records to /dev/tty:
+# durable signals for the task and emits records to /dev/tty. Every record
+# needs known activity first: fm_busy_classify (bin/fm-busy-lib.sh owns every
+# source: the busy-state record, Cursor's transcript / Muse's session log, or
+# the rendered pane fm-backend.sh captures for Grok/Rovo/Agy) must read busy
+# or idle. Then, in order:
 #
 #   an open keyed needs-decision or blocked in state/<id>.status
 #   (bin/fm-classify-lib.sh owns the fold):
 #     needs-decision/held -> blocked kind=question
 #     blocked             -> blocked kind=permission (kind=auth when the note
 #                            names a credential)
-#   otherwise the task's activity as fm_busy_classify reads it
-#   (bin/fm-busy-lib.sh owns every source: the busy-state record, Cursor's
-#   transcript / Muse's session log, or the rendered pane fm-backend.sh
-#   captures for Grok/Rovo/Agy): busy -> working
+#   otherwise busy -> working
 #   otherwise the latest status line, when it is terminal:
 #     failed              -> error
 #     done                -> done ("PR ready" when the note has a URL)
-#   otherwise idle activity -> idle, and unknown activity holds the last record
+#   otherwise idle
 #   A paused declaration has no separate mapping; activity decides as above.
+#   Unknown activity emits nothing and never heartbeats: a record the watcher
+#   is still showing is parked at idle once, so no stale claim outlives the
+#   evidence for it.
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
@@ -219,14 +228,16 @@ EOF
 }
 
 # osc_native <harness> <agent-bin>: 0 when the launched agent reports
-# OSC 7501 itself at the probed version. An unprobed or failed probe reads as
-# not native: coverage wins, and two writers on one record only ever produce
-# the newer state.
+# OSC 7501 itself at the probed version (floors: the header's gate 4). An
+# unprobed or failed probe reads as not native.
 osc_native() {
   local floor ver
   case "$1" in
     claude) floor=2.1.295 ;;
     pi | pi-signed) floor=1.1.0 ;;
+    codex) floor=0.163.0 ;;
+    grok) floor=1.0.67 ;;
+    muse) floor=1.4.11 ;;
     *) return 1 ;;
   esac
   ver=$(osc_probe_version "${2:-$1}") || return 1
@@ -247,17 +258,20 @@ osc_load_libs() {
   LIBS_LOADED=1
 }
 
-# osc_plan sets W_STATE, W_KIND, W_MSG; returns 1 when nothing should be
-# emitted (no signal yet, or the activity is unknown). An empty harness means
-# no live agent, so activity is not read; backend and target let the classifier
-# reach a harness whose only activity source is its rendered pane.
+# osc_plan sets W_STATE, W_KIND, W_MSG; returns 1, emitting nothing, when the
+# activity is unknown. An empty harness means no live agent, which reads as
+# idle; backend and target let the classifier reach a harness whose only
+# activity source is its rendered pane.
 osc_plan() { # <task> <kind> <state> <harness> [backend] [target]
-  local task=$1 kind=$2 state_dir=$3 file line verb note held act=
+  local task=$1 kind=$2 state_dir=$3 file line verb note held act=idle
   file="$state_dir/$task.status"
   W_STATE=
   W_KIND=
   W_MSG=
   osc_load_libs || return 1
+  [ -z "$4" ] || act=$(fm_busy_classify "${5:-}" "${6:-}" "$4" "$task" "$state_dir" 2>/dev/null) || act=
+  act=${act%% *}
+  case "$act" in busy | idle) ;; *) return 1 ;; esac
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   line=$(status_open_decisions "$file" "$kind" 2>/dev/null | tail -n 1)
   verb=$(printf '%s' "$line" | cut -f2)
@@ -277,8 +291,7 @@ osc_plan() { # <task> <kind> <state> <harness> [backend] [target]
       return 0
       ;;
   esac
-  [ -z "$4" ] || act=$(fm_busy_classify "${5:-}" "${6:-}" "$4" "$task" "$state_dir" 2>/dev/null) || act=
-  if [ "${act%% *}" = busy ]; then
+  if [ "$act" = busy ]; then
     W_STATE=working
     return 0
   fi
@@ -301,7 +314,6 @@ osc_plan() { # <task> <kind> <state> <harness> [backend] [target]
       return 0
       ;;
   esac
-  [ "${act%% *}" = idle ] || return 1
   W_STATE=idle
 }
 
@@ -314,7 +326,7 @@ osc_final() {
   if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" '' && { [ "$W_STATE" = 'done' ] || [ "$W_STATE" = error ]; }; then
     printf '%s' "$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")" >&3 2>/dev/null
   else
-    printf '%s' "$(osc_seq idle '' '' '' "$WATCH_TITLE" '')" >&3 2>/dev/null
+    printf '%s' "$WATCH_IDLE" >&3 2>/dev/null
   fi
 }
 
@@ -349,6 +361,7 @@ osc_watch() { # --task --kind --state --harness --parent
   FM_OSC_APP="firstmate-$WATCH_HARNESS"
   FM_OSC_APP="${FM_OSC_APP:0:$FM_OSC7501_APP_MAX}"
   WATCH_TITLE="fm-$WATCH_TASK"
+  WATCH_IDLE=$(osc_seq idle '' '' '' "$WATCH_TITLE" '')
   local dev=${FM_OSC7501_TTY:-/dev/tty} hb=0 hb_ticks last='' seq
   exec 3>>"$dev" 2>/dev/null || exit 0
   osc_load_libs || exit 0
@@ -374,6 +387,9 @@ osc_watch() { # --task --kind --state --harness --parent
           hb=0
         fi
       fi
+    elif [ -n "$last" ]; then
+      [ "$last" = "$WATCH_IDLE" ] || printf '%s' "$WATCH_IDLE" >&3 2>/dev/null
+      last=''
     fi
     sleep "$FM_OSC7501_INTERVAL" 2>/dev/null &
     wait $! 2>/dev/null
