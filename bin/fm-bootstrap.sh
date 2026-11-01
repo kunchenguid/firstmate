@@ -18,6 +18,9 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
+#                 "STOP_AUTOARM: Claude Stop auto-arm failure episode still open:
+#                 state/<marker> (age <age>)[, ...]; <consequence> until a
+#                 verified healthy watcher clears it",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -54,6 +57,9 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A STOP_AUTOARM line names each Claude Stop auto-arm failure-episode
+#          marker still present (.claude-autoarm-failure-alarmed,
+#          .claude-autoarm-failure-notified) and its age; it only reads them.
 #          A present-but-below-floor tool is OUTDATED, never MISSING: its line
 #          carries the installed version (or "unparseable") and the tool's own
 #          upgrade command, which runs no first-install-only step such as
@@ -1590,6 +1596,7 @@ detect_local_config() {
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+  detect_stop_autoarm_failure_episode
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,
@@ -1657,6 +1664,47 @@ detect_home_summary_publication() {
   else
     echo "HOME_SUMMARY: state/home-summary.json has not been republished since $since; $failures failed attempt(s) recorded in state/.home-summary-refresh.log, last: $last"
   fi
+}
+
+# A Claude Stop auto-arm failure episode stays open while either empty marker
+# exists, and only a verified healthy watcher clears it (fm_failure_episode_reset
+# in bin/fm-wake-lib.sh). The episode's one notice prints only in the session
+# that opened it, so say so at every session start while a marker remains,
+# naming each marker and its age. Read-only: the markers are never changed here.
+detect_stop_autoarm_failure_episode() {
+  local name path mtime now age found='' consequence os
+  [ -e "$STATE/.claude-autoarm-failure-alarmed" ] \
+    || [ -e "$STATE/.claude-autoarm-failure-notified" ] || return 0
+  now=$(date +%s)
+  os=$(uname)
+  for name in .claude-autoarm-failure-alarmed .claude-autoarm-failure-notified; do
+    path="$STATE/$name"
+    [ -e "$path" ] || continue
+    if [ "$os" = Darwin ]; then
+      mtime=$(/usr/bin/stat -f %m "$path" 2>/dev/null) || mtime=
+    else
+      mtime=$(stat -c %Y "$path" 2>/dev/null) || mtime=
+    fi
+    case "$mtime" in
+      ''|*[!0-9]*) age=unknown ;;
+      *)
+        age=$(( now - mtime ))
+        [ "$age" -ge 0 ] || age=0
+        if [ "$age" -ge 86400 ]; then age=$(printf '%dd%02dh' $((age / 86400)) $(((age % 86400) / 3600)))
+        elif [ "$age" -ge 3600 ]; then age=$(printf '%dh%02dm' $((age / 3600)) $(((age % 3600) / 60)))
+        elif [ "$age" -ge 60 ]; then age=$(printf '%dm' $((age / 60)))
+        else age=$(printf '%ds' "$age"); fi
+        ;;
+    esac
+    found="${found:+$found, }state/$name (age $age)"
+  done
+  [ -n "$found" ] || return 0
+  if [ -e "$STATE/.claude-autoarm-failure-alarmed" ]; then
+    consequence='the Stop auto-arm delivers no automatic continuation, including wake handoffs,'
+  else
+    consequence='later Stop auto-arm failures in this episode print no notice'
+  fi
+  echo "STOP_AUTOARM: Claude Stop auto-arm failure episode still open: $found; $consequence until a verified healthy watcher clears it"
 }
 
 # The order below is the order the diagnostics have always printed in, so a
