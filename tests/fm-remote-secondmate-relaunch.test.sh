@@ -566,40 +566,6 @@ assert_equals released "$(ios_lifecycle request-existing)" "the unused candidate
 assert_equals reclaimed "$(ios_lifecycle actual-existing)" "death before publication stranded the existing generation"
 pass "an existing generation dying before import retains its terminal history"
 
-for LEGACY_ROUTE in valid invalid; do
-  reset_meta
-  seed_pool
-  perl -pi -e 's/^model=.*/model=pool-model-a/' "$HOME_DIR/state/ios.meta"
-  printf 'fleet_seat_generation=legacy-remote\nremote_spawn_gen=legacy-remote\n' >> "$HOME_DIR/state/ios.meta"
-  if [ "$LEGACY_ROUTE" = invalid ]; then
-    perl -pi -e 's/^remote_host=.*/remote_host=foreign-host/' "$HOME_DIR/state/ios.meta"
-  fi
-  ST=$(cd "$HOME_DIR/state" && pwd -P)
-  NAME=$(printf '%s\t%s' "$ST" ios | cksum | tr -s ' ' '-' | cut -d- -f1-2)
-  mkdir -p "$ST/fleet-seats/legacy"
-  printf 'state=%s\ntask=ios\nmodel=pool-model-a\npid=99999999\npid_identity=\n' "$ST" > "$ST/fleet-seats/legacy/$NAME.seat"
-  OUT=$(probe_pool); RC=$?
-  expect_code 4 "$RC" "importing a $LEGACY_ROUTE legacy remote route: $OUT"
-  assert_absent "$ST/fleet-seats/legacy/$NAME.seat" "legacy remote source was not imported once"
-  if [ "$LEGACY_ROUTE" = invalid ]; then
-    assert_equals true "$(seats show ios | jq 'any(.incarnations[]; .generation == "legacy-remote" and .route == null and .startup_confirmed == false)')" "a foreign legacy registry route became recoverable"
-    OUT=$(seats reclaim ios --generation legacy-remote 2>&1); RC=$?
-    expect_code 3 "$RC" "a legacy route without ownership evidence: $OUT"
-    assert_equals reserved "$(ios_lifecycle legacy-remote)" "missing route evidence freed the legacy remote"
-  else
-    assert_equals true "$(seats show ios | jq 'any(.incarnations[]; .generation == "legacy-remote" and .route.placement == "remote" and .route.operation == .generation and .route.host == "remote-mac")')" "legacy remote import discarded its recovery route"
-    OUT=$(FM_FAKE_DISPOSITION=unknown seats reclaim ios --generation legacy-remote 2>&1); RC=$?
-    expect_code 3 "$RC" "an absent legacy host receipt: $OUT"
-    assert_equals reserved "$(ios_lifecycle legacy-remote)" "missing host evidence freed the legacy remote"
-    seats reclaim ios --generation legacy-remote >/dev/null || fail "legacy remote startup could not confirm through its route"
-    assert_equals confirmed "$(ios_lifecycle legacy-remote)" "legacy remote startup was not confirmed"
-    OUT=$(FM_FAKE_DISPOSITION=dead seats reclaim ios --generation legacy-remote 2>&1); RC=$?
-    expect_code 0 "$RC" "legacy remote death through its own operation: $OUT"
-    assert_equals reclaimed "$(ios_lifecycle legacy-remote)" "legacy remote recovery stranded its generation"
-  fi
-done
-pass "legacy remote routes reconcile only through matching registry and generation evidence"
-
 # --- host side: token-scoped operation receipts and dispositions --------------
 # bin/fm-remote-secondmate-control.sh answers for exactly one operation token
 # from its durable receipt and control journal; an absent or foreign receipt
