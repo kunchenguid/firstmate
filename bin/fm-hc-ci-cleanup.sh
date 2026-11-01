@@ -7,15 +7,15 @@
 #   1. match the guarded fm-hclab-* name pattern under the lab root,
 #   2. were not present in the pre-suite snapshot (job-proven ownership).
 #
-# A herdr-core lab session is an owned directory holding scratch XDG roots
-# plus one socket file under the lab socket dir (bin/fm-hc-lab.sh owns the
-# layout). Stopping runs `hc server stop` under that session's own pinned
-# env, then the session directory and socket file are removed. Real user
-# core state under ~/.local/state/herdr-core is never touched: it lives
-# outside the lab root and no path this script computes can reach it.
+# bin/fm-hc-lab.sh owns the session directory and socket layout.
+# Cleanup requests `hc server stop` under the session's own pinned env, then
+# sweeps its session-marked processes before removing its directory and sockets.
+# Unlike normal lab teardown, this job-end fallback does not verify the fleet
+# tripwire, so it is not evidence that real-core state stayed unchanged.
 #
-# Missing herdr-core is a no-op (exit 0) so portable jobs can call this
-# harmlessly; destructive failures for known lab leftovers exit non-zero.
+# A missing binary skips only the stop request; process and file cleanup
+# still run. Surviving session processes or directory-removal failures exit
+# non-zero.
 #
 # Usage:
 #   fm-hc-ci-cleanup.sh snapshot <path>

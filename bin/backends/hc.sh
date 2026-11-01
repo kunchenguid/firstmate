@@ -370,9 +370,9 @@ fm_backend_hc_composer_state() {  # <target> [expected-label] -> empty|pending|p
 # started:null once the bounded wait times out; the send still typed and
 # entered, so the verdict falls back to the composer screen, and only a
 # proven pending composer gets Enter retries through the shared loop. A
-# blocked terminal refuses with exit 9 before typing - a hard stop, never
-# forced. The other structured refusals (3 not_found, 11 finished) and any
-# other failure are send-failed.
+# blocked terminal refuses with exit 9 before typing - unknown, with a
+# diagnostic and no retries, never forced. The other structured refusals
+# (3 not_found, 11 finished) and any other failure are send-failed.
 fm_backend_hc_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected=${6:-}
   local wait_secs out rc started wait_status verdict

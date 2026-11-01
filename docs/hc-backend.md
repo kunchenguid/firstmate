@@ -4,16 +4,17 @@ hc is an experimental session-provider backend for herdr-core, the terminal core
 It provides task terminals while Treehouse continues to provide git worktrees, the same split tmux uses.
 herdr-core is not Herdr 1: the `herdr` backend ([`herdr-backend.md`](herdr-backend.md)) talks to the `herdr` multiplexer, and the two share no socket, id space, or CLI.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared selection and metadata semantics.
-The adapter header in `bin/backends/hc.sh` owns design decisions and measured CLI facts; this page is the operator-facing mirror and must not contradict it.
+This page owns operator setup and supported limits; the adapter header in `bin/backends/hc.sh` explains implementation decisions.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#hc) records what was exercised against a real core.
 
 ## Setup
 
 Prerequisites:
 
-- `herdr-core` on `PATH` under its own name or the `hc` alias, at version 0.1.14 or later (the adapter's verified floor; the gate refuses anything older, misnamed, or speaking another protocol generation).
+- Herdr Core at version 0.1.14 or later, self-identifying as `hc x.y.z`, and a core speaking protocol generation 1.
+  Binary resolution uses an executable `FM_HC_BIN` override first, then `herdr-core` on `PATH`, then the `hc` alias.
   `hc` starts its own core on first use.
-  `bin/fm-install-hc.sh <dir>` installs the pinned, checksum-verified build, and `FM_HC_BIN` pins a specific binary for tests and labs.
+  [`bin/fm-install-hc.sh`](../bin/fm-install-hc.sh) owns installation usage and the checksum-verified release pin; updates remain operator-run.
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
@@ -61,7 +62,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Capture | `hc read --lines <n>` |
 | Visible capture | `hc read --lines 0` |
 | Send a line and submit | `hc send` |
-| Submit with confirmation | `hc send --wait`, the started turn is the native proof |
+| Submit with confirmation | `hc send --wait`; see submit safety under Limits |
 | Named key | `hc keys` |
 | Current path | `hc get`, the foreground process's `cwd` |
 | Busy state | `hc get`, native `status.state` (`working` is busy) |
@@ -72,7 +73,9 @@ An input, capture, or close that carries the task label refuses a terminal whose
 
 - `hc send` always presses Enter, so hc cannot type without submitting.
   `bin/fm-spawn.sh` pastes and submits the spawn launch line with `hc send` and consumes the Enter that follows it.
-- Submitting a message is one `hc send --wait`: a started turn or a still-working wait confirms it natively, a terminal that never reports status falls back to the composer screen, and a blocked terminal (exit 9) is a hard stop that is never forced.
+- Submitting a message uses one bounded `hc send --wait`.
+  A started turn or a still-working wait confirms it natively; otherwise the adapter falls back to the composer screen, with Enter retries only for a proven pending composer.
+  A blocked terminal (exit 9) returns `unknown` without typing or retrying and is never forced.
 - hc reports one foreground process per terminal.
   When that process is a launcher, the adapter also reads the rest of its process group from `ps`, which works only for terminals on the local machine.
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.

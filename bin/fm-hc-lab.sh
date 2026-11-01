@@ -19,6 +19,9 @@
 # Session names must begin with "fm-hclab-" and can never be "default".
 # The name command sanitizes the label, caps it at 16 characters, and appends
 # process/random suffixes to keep generated paths short.
+# Mutating commands require non-symlink, operator-owned lab/socket roots
+# without group/other write access; new roots are created mode 0700.
+# Provision creates its session directory exclusively, never adopting one.
 #
 # The run command rejects caller-supplied --session/--socket flags, a leading
 # option before the hc subcommand, the `server` lifecycle subcommand (guarded
@@ -26,16 +29,17 @@
 # guards).
 #
 # Provision snapshots the REAL user core state - the file inventory of
-# ${XDG_STATE_HOME:-$HOME/.local/state}/herdr-core and, when present,
-# $XDG_RUNTIME_DIR/herdr-core - as a fleet tripwire, recorded inside the
+# ${XDG_STATE_HOME:-$HOME/.local/state}/herdr-core, /run/user/$UID/herdr-core,
+# and, when set, $XDG_RUNTIME_DIR/herdr-core - as a fleet tripwire, recorded inside the
 # session's own lab directory as fleet-state.txt plus the resolved root list
 # in fleet-roots.txt (recorded once, so a caller that repoints XDG for its own
 # children cannot shift what the tripwire watches). The snapshot is file
 # metadata only (never an `hc` call: hc auto-starts a stopped core on
 # contact, which would itself disturb the state being verified). Teardown
-# stops the lab server, removes ONLY the session's lab directory, and
-# requires the snapshot to be byte-identical afterward; a changed real core
-# state is a hard tripwire failure, never a cleanup warning.
+# stops the lab server and sweeps session processes, then requires a complete,
+# byte-identical snapshot before removing the session directory and sockets.
+# Failed reads or changed real-core metadata refuse verification and retain
+# the lab directory for inspection, never reducing the failure to a warning.
 set -u
 
 fm_hclab_error() {
