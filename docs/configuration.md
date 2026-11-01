@@ -431,7 +431,7 @@ Compacting while the cache is still warm reads the old context at the read price
 The feature is off when the file is absent.
 The file is local to each home and is not inherited.
 The host reads it at every check, so creating or removing it needs no restart.
-It acts only on a home that runs the [supervision host](#supervision-host-configsupervision-host) beside a Claude primary, because the host's park is the primary's idle episode.
+It acts only on a home that runs the [supervision host](#supervision-host-configsupervision-host) beside a Claude primary, because the host's park schedules the checks.
 
 The file may be empty or hold these lines, each optional:
 
@@ -444,7 +444,9 @@ Context size is the last request's `input + cache_read + cache_creation` usage i
 A session is compacted when all of these hold:
 
 - The home opted in.
-- The session has been idle for `idle-seconds`: the primary since its turn ended, the engine conversation since its last handled turn.
+- The session has been idle for `idle-seconds`: the primary since the latest timestamped entry in its transcript, the engine conversation since its last handled turn.
+  The primary's idle age comes from its transcript rather than the park, because the captain can keep talking to the primary directly while the host stays parked.
+  An unreadable transcript timestamp defers the compaction.
 - Its context is at least `min-context-tokens`.
 - It was not already compacted in this idle episode.
   The host remembers a primary compaction for one park.
@@ -453,6 +455,7 @@ A session is compacted when all of these hold:
   An abandoned compaction is not recorded, so a later check retries it.
 - For the primary, the agent reads idle and the composer reads provably empty.
   A busy agent, a non-empty composer, or an unproven state defers the compaction; nothing is typed.
+  A new transcript entry that appears during those checks also defers it.
 
 The primary receives `/compact` through the backend's verified submit primitive (`fm_backend_send_text_submit`), the one the away-mode daemon injects through.
 The engine conversation receives `/compact` as one resumed, bounded headless turn.
