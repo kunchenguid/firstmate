@@ -384,6 +384,11 @@ case "$provider" in
         [ -z "$detail" ] || line="$line jobs=$detail"
         [ "${#line}" -le 2000 ] || exit 0
         printf '%s\n' "$line"
+        if [ "$unknown" -eq 3 ]; then
+          baseline_car=$(GITLAB_HOST=$host glab api "projects/$enc/merge_trains/merge_requests/$number" 2>/dev/null) || baseline_car=
+          printf '%s' "$baseline_car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1 \
+            && printf '%s\n' ontrain
+        fi
         ;;
     esac
     ;;

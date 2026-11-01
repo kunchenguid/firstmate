@@ -253,12 +253,16 @@ if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
     fi
     exit 1
   fi
+  BASELINE_TRAIN=0
+  case $BASELINE in
+    *$'\nontrain') BASELINE_TRAIN=1 ;;
+  esac
   case $BASELINE in
     'degraded head='*|'degraded pipeline='*)
       BASELINE=${BASELINE#degraded }
       BASELINE=${BASELINE%% *}
       ;;
-    ontrain) BASELINE=train=on ;;
+    *ontrain) BASELINE=train=on ;;
     *) BASELINE= ;;
   esac
 fi
@@ -312,9 +316,19 @@ fi
 # Commit the baseline only after the replacement poll is safely published;
 # the control lock prevents a watcher from observing an intermediate pair.
 if [ "${FM_PR_CHECK_MERGE:-}" != 1 ]; then
-  if [ -z "$BASELINE" ] || ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+  if [ -n "$BASELINE" ] && ! fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
       "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" "$BASELINE"; then
-    rm -f -- "$STATE/$ID.pr-poll-degraded" "$STATE/$ID.pr-poll-train"
+    rm -f -- "$STATE/$ID.pr-poll-degraded"
+  elif [ -z "$BASELINE" ]; then
+    rm -f -- "$STATE/$ID.pr-poll-degraded"
+  fi
+  if [ "${BASELINE_TRAIN:-0}" = 1 ]; then
+    fm_pr_poll_degraded_mark_notified "$STATE" "$ID" \
+      "$PROVIDER" "$HOST" "$PROJECT_PATH" "$NUMBER" train=on || rm -f -- "$STATE/$ID.pr-poll-train"
+  elif [ "$BASELINE" = train=on ]; then
+    :
+  else
+    rm -f -- "$STATE/$ID.pr-poll-train"
   fi
 fi
 if [ "$CONTROL_LOCK_HELD" = 1 ]; then
