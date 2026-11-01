@@ -1693,17 +1693,22 @@ test_remote_host_supervisor_adoption_and_accounting() {
   expect_code 4 "$(cat "$dir/remote-worker.rc")" "a remote worker was granted over adopted occupancy: $(cat "$dir/remote-worker.out")"
 
   # The parent's own record of the same generation supersedes adoption: the
-  # supervisor is counted once, not once per accounting surface.
-  task_record "$R_ROOT" theshop pool-model-a secondmate "$(printf 'remote_host=theshop\nremote_spawn_gen=host.1')"
+  # supervisor is counted once, not once per accounting surface, and the remote
+  # it names is not charged that same seat again out of its own allowance.
+  task_record "$R_ROOT" theshop pool-model-a secondmate \
+    "$(printf 'remote_host=shop-host\nremote_root=%s\nhome=%s\nremote_spawn_gen=host.1' "$ROOT" "$R_REMOTE")"
   pools "$R_ROOT" 2
   out=$(serve_remotes 2>&1)
   assert_contains "$out" "served theshop" "a parent-recorded supervisor blocked serving"
-  new_holder
-  out=$(reserve "$R_ROOT" contender pool-model-a 2>&1)
-  expect_code 0 "$?" "the parent record and the certificate counted one supervisor twice: $out"
+  assert_equals 1 "$(used_seats "$R_ROOT")" "the parent record and the certificate counted one supervisor twice"
+  remote_reserve_bg remote-worker-2 pool-model-a "$dir/remote-worker-2"
+  serve_remotes >/dev/null 2>&1 || fail "allowance serve with a parent-recorded supervisor failed"
+  wait "$BG_PID"
+  expect_code 0 "$(cat "$dir/remote-worker-2.rc")" \
+    "the parent record and the host count spent one seat twice: $(cat "$dir/remote-worker-2.out")"
   new_holder
   out=$(reserve "$R_ROOT" contender-2 pool-model-a 2>&1)
-  expect_code 4 "$?" "capacity with one adopted supervisor and one holder"
+  expect_code 4 "$?" "the adopted supervisor and the granted remote worker did not fill the pool: $out"
 
   # A reservation bound through an observing operation's receipt proves the
   # generation it adopted, and a default-model spelling normalizes to the
