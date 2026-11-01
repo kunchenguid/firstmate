@@ -1042,6 +1042,11 @@ SIGNALS
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_no_grep '`paused: {why}`' "$brief" \
       "$kind brief still instructs the default paused status"
+    if [ "$kind" != secondmate ]; then
+      # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+      assert_grep 'full URL in the `awaiting:` line and end your turn' "$brief" \
+        "$kind brief did not teach the parkable external wait with the configured pause verb"
+    fi
     assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
     assert_grep 'even when the answer is what started that work' "$brief" \

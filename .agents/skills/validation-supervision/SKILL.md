@@ -30,3 +30,4 @@ Judge validation by the resolved state line from [`bin/fm-crew-state.sh`](../../
 Workers parked at approval or fix-review must follow the active gate help.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+A run that waits only on a maintainer to approve fork CI is an external wait: park the worker under `ship-landing`'s rule, because the run keeps monitoring CI without its session.
