@@ -120,15 +120,15 @@ The session-lock and primary-harness walks accept an exact harness script run by
 The portable regressions exercise real native and Bun-named processes, including lock acquisition and an inherited `CLAUDECODE=1` marker:
 
 ```sh
-rtk bash tests/fm-omp-harness.test.sh
-rtk bash tests/fm-session-lock-ancestry.test.sh
+bash tests/fm-omp-harness.test.sh
+bash tests/fm-session-lock-ancestry.test.sh
 ```
 
 Both suites passed.
 The live guard ran against the real Bun-hosted OMP with the same inherited marker:
 
 ```sh
-FM_OMP_LIVE_E2E=1 FM_OMP_LIVE_KEEP=1 FM_OMP_LIVE_MODEL='kimi-cn/kimi-k3.1-pro' rtk bash tests/fm-omp-primary-live-e2e.test.sh
+FM_OMP_LIVE_E2E=1 FM_OMP_LIVE_KEEP=1 FM_OMP_LIVE_MODEL='kimi-cn/kimi-k3.1-pro' bash tests/fm-omp-primary-live-e2e.test.sh
 ```
 
 Observed output:
