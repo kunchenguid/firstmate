@@ -161,7 +161,6 @@ const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
 // bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
 // SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
-const armHealthCheckMs = positiveInteger("FM_PI_WATCH_HEALTH_CHECK_MS", 30_000);
 const armReadyTimeoutMs = positiveInteger(
   "FM_PI_ARM_READY_TIMEOUT_MS",
   process.platform === "win32" ? 35000 : 12000,
@@ -1300,7 +1299,7 @@ export default function (pi: ExtensionAPI) {
       const result = startArm(owner);
       appendExtensionLog(`health monitor state=${result.state ?? "failed"} arm=${armChild.pid ?? "none"}`);
       if (result.state === "unhealthy") surfaceFailure(owner, result.message);
-    }, armHealthCheckMs);
+    }, 30_000);
     owner.healthTimer.unref();
   }
 
