@@ -646,6 +646,18 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "tests/fixtures/fm-brief/absent-scout.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief/absent-secondmate.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief/absent-ship.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "tests/captures/kimi-code-2.3.0/README.md",
       "audience": "maintainer-verification"
     },
