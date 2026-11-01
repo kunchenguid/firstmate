@@ -780,15 +780,17 @@ do_exit() {
     dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
     refuse_blocking_prompt "$dialog"
   fi
-  case "$composer_state" in
-    empty) ;;
-    pending)
-      die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
-      ;;
-    *)
-      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
-      ;;
-  esac
+  if [ "$HARNESS" != "pig" ] && [ "$cmd" != "C-c" ]; then
+    case "$composer_state" in
+      empty) ;;
+      pending)
+        die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
+        ;;
+      *)
+        die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+        ;;
+    esac
+  fi
   # The submit verdict is NOT the postcondition here: a successful exit command
   # destroys the composer the verdict is read from, so a post-exit read can
   # legitimately report anything. Only a hard transport failure aborts; the
