@@ -20,10 +20,21 @@
 # No PR outside that set is ever read, so another home's PR is dropped without
 # a forge read or a wake.
 #
-# Per owned open PR, poll reads the REST single-PR endpoint, which GitHub
-# documents as starting the mergeability computation, and one GraphQL read for
-# the head's complete, paginated check rollup with each context's isRequired.
-# It prints one line per new condition, all in one check output, so one wake:
+# Per owned open PR it reads, poll reads the REST single-PR endpoint, which
+# GitHub documents as starting the mergeability computation, and one GraphQL
+# read for the head's complete, paginated check rollup with each context's
+# isRequired, the review decision, and the head commit's check suites.
+# Which PRs a pass reads is event-driven: each pass first makes one conditional
+# read of the GitHub notifications feed (If-Modified-Since its saved
+# Last-Modified; GitHub answers an unchanged feed with a 304 that costs no rate
+# limit) and reads the owned PRs with new notification activity, PRs never
+# read, and PRs whose last read did not settle. Every owned PR is read when the
+# feed is unavailable, answers a full page, or was first read this pass, and as
+# the fallback sweep every FALLBACK_SECONDS, because a base moving into
+# conflict or another app's failing check raises no notification. A
+# notification on a PR this home does not own is ignored without a read.
+# It prints one line per new condition, all in one check output, so one wake.
+# Each line names who must act; only "author must act" asks the owning task to:
 #   - conflict: REST mergeable is false. Null (UNKNOWN) is neither clean nor
 #     conflicting and never clears an already reported condition.
 #   - failing checks: a required context failed (a check run concluded other
@@ -32,11 +43,19 @@
 #     matching fm-pr-state.sh for unprotected stacked bases. Each name is judged
 #     by its newest run (latest_checks in fm-contributions.jq), because GitHub
 #     keeps a cancelled run beside the passing rerun that replaced it.
-# A conflict wakes once per latest commit, even if the base moves or the
-# condition clears and returns. A failing check wakes once per latest commit
-# and check name: a check that newly fails at an already reported commit wakes
-# once more, a name already reported there never repeats, and the line names
-# only the newly failing checks. The two conditions have independent histories.
+#   - maintainer must approve CI: a check suite on the head concluded
+#     ACTION_REQUIRED, GitHub's hold on an outside contributor's workflows.
+#     Nothing ran, so the PR is not green even when its rollup is.
+#   - needs human approval: reviewDecision REVIEW_REQUIRED on a non-draft PR.
+#   - author must act: reviewDecision CHANGES_REQUESTED, or an explicit
+#     maintainer label pending-contributor-action, waiting-on-author,
+#     waiting-for-author or awaiting-author, with any "namespace:" prefix.
+# A conflict, a missing approval and an author action each wake once per
+# latest commit, even if the base moves or the condition clears and returns.
+# A failing or maintainer-gated check wakes once per latest commit and check
+# (suite: workflow) name: a check that newly fails at an already reported
+# commit wakes once more, a name already reported there never repeats, and the
+# line names only the new ones. The conditions have independent histories.
 # A merged or closed PR is final and never read again. A failed or timed-out
 # read, or a latest commit that differs between the two reads, leaves the PR's
 # fingerprint untouched and prints nothing; fm-contributions.sh reports forge
@@ -44,7 +63,9 @@
 # minus 5 seconds after the pass starts, and each read is capped at 5 seconds.
 # Branch discovery and owned-PR reads each fan out in one concurrent wave;
 # there is no rotating PR backlog or serial network wait per PR.
-# Fingerprints are fm-pr-health.v1 in state/pr-health.json, written by rename
+# Fingerprints and the notifications cursor (Last-Modified, newest seen
+# updated_at, unsettled PRs, last full sweep) are fm-pr-health.v1 in
+# state/pr-health.json, written by rename
 # under state/.pr-health.lock; a pass that finds the lock held exits silently.
 # A line is printed before its fingerprint is saved, so a pass killed between
 # the two repeats one wake rather than losing it. An unreadable fingerprint
@@ -122,6 +143,7 @@ gh_read() { # deadline args... : one bounded forge read
 PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
 headRefOid
 reviewDecision
+commits(last:1){nodes{commit{oid checkSuites(first:100){nodes{conclusion app{slug} workflowRun{workflow{name}}}}}}}
 statusCheckRollup{contexts(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{__typename
 ... on CheckRun{name status conclusion startedAt isRequired(pullRequestNumber:$number)}
 ... on StatusContext{context state createdAt isRequired(pullRequestNumber:$number)}}}}}}}'
@@ -132,15 +154,15 @@ STEP='
   $rest[0] as $r | ($gql[0].data.repository.pullRequest // null) as $g
   | ($prev[0] // {}) as $p
   | if $r.merged_at != null or $r.state == "closed" then {fp:($p + {final:true}),lines:[]}
-    elif $g == null or $g.headRefOid != $r.head.sha then null
+    elif $g == null or $g.headRefOid != $r.head.sha
+      or (($g.commits.nodes[0].commit.oid // $r.head.sha) != $r.head.sha) then null
     else
       $r.head.sha as $head
       | ($tasks | join(", ")) as $owners
       | ($g.statusCheckRollup // null) as $roll
       | [$roll.contexts.nodes[]? | if .__typename == "CheckRun"
           then {name, started_at:.startedAt, required:(.isRequired == true),
-                maintainer_gated:(.status == "COMPLETED" and .conclusion == "ACTION_REQUIRED"),
-                failing:(.status == "COMPLETED" and .conclusion != null and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED","ACTION_REQUIRED") | not))}
+                failing:(.status == "COMPLETED" and .conclusion != null and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED") | not))}
           else {name:.context, started_at:.createdAt, required:(.isRequired == true),
                 failing:(.state | IN("FAILURE","ERROR"))} end]
         | latest_checks as $ctx
@@ -148,32 +170,36 @@ STEP='
       | ([$ctx[] | select(.failing and (.required or ($has_required | not))) | .name] | unique) as $failing
       | ($p.conflicts // []) as $conflicts | ($p.checks // []) as $checks
       | ($p.maintainer_gated // []) as $gated
-      | (($g.reviewDecision == "REVIEW_REQUIRED") or (($r.requested_reviewers // []) | length > 0)) as $needs_approval
-      | (($p.needs_approval // []) | index($head) | not) as $approval_new
-      | ($g.reviewDecision == "CHANGES_REQUESTED") as $author_action
-      | (($p.author_action // []) | index($head) | not) as $author_action_new
+      | ([$g.commits.nodes[0].commit.checkSuites.nodes[]? | select(.conclusion == "ACTION_REQUIRED")
+          | .workflowRun.workflow.name // .app.slug // "check suite"] | unique) as $gated_now
+      | [$gated_now[] | select(. as $name | any($gated[]; .head == $head and .name == $name) | not)] as $new_gated
+      | ([($r.labels // [])[] | .name | select(ascii_downcase | sub("^[^:]*:"; "")
+          | IN("pending-contributor-action","waiting-on-author","waiting-for-author","awaiting-author"))]) as $author_labels
+      | ([if $g.reviewDecision == "CHANGES_REQUESTED" then "changes requested" else empty end]
+          + [$author_labels[] | "maintainer marked it \(.)"]) as $author_reasons
+      | (($author_reasons | length) > 0 and (($p.author_action // []) | index($head) | not)) as $author_new
+      | ($g.reviewDecision == "REVIEW_REQUIRED" and $r.draft != true
+          and (($p.needs_approval // []) | index($head) | not)) as $approval_new
       | ($r.mergeable == false and ($conflicts | index($head) | not)) as $conflict_new
-      | [$ctx[] | select(.maintainer_gated)
-          | . as $check | select([$gated[] | select(.head == $head and .name == $check.name)] | length == 0)] as $new_gated
       | [$failing[] | select(. as $name | any($checks[]; .head == $head and .name == $name) | not)] as $new_failing
       | (($new_failing | length) > 0) as $checks_new
       | ("at latest commit " + $head[:7]) as $where
       | {fp:{conflicts:($conflicts + if $conflict_new then [$head] else [] end),
              checks:($checks + [$new_failing[] | {head:$head,name:.}]),
-             maintainer_gated:($gated + [$new_gated[] | {head:$head,name:.name}]),
-             needs_approval:($p.needs_approval // [] | if $needs_approval and $approval_new then . + [$head] else . end),
-             author_action:($p.author_action // [] | if $author_action and $author_action_new then . + [$head] else . end)},
+             maintainer_gated:($gated + [$new_gated[] | {head:$head,name:.}]),
+             needs_approval:(($p.needs_approval // []) + if $approval_new then [$head] else [] end),
+             author_action:(($p.author_action // []) + if $author_new then [$head] else [] end)},
          lines:([
-           (select($author_action and $author_action_new)
-            | "pr-health: \\($url) author must act \\($where) (task \\($owners))"),
-           (select($approval_new and $needs_approval)
-            | "pr-health: \($url) needs human approval \($where) (task \($owners))"),
+           (select($author_new)
+            | "pr-health: \($url) author must act \($where): \($author_reasons | join("; ")) (task \($owners))"),
            (select($conflict_new)
             | "pr-health: \($url) conflicts with its base \($where) (task \($owners))"),
-           (select(($new_gated | length) > 0)
-            | "pr-health: \($url) maintainer must approve CI \($where): \($new_gated[:3] | map(.name) | join(", ")) (task \($owners))"),
            (select($checks_new)
-            | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))")])}
+            | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))"),
+           (select(($new_gated | length) > 0)
+            | "pr-health: \($url) waits on the maintainer to approve CI \($where): nothing has run for \($new_gated[:3] | join(", ")), so the PR is not green; no author action (task \($owners))"),
+           (select($approval_new)
+            | "pr-health: \($url) needs human approval \($where): a required review is not yet given; no author action (task \($owners))")])}
     end'
 
 read_pr() { # url deadline output-directory -> rest.json gql.json
@@ -265,8 +291,43 @@ enroll_new() { # deadline : enroll recorded and branch PRs not yet durably owned
   done < <(sort -u "$TMP/enroll.tsv")
 }
 
+# Owned PRs with new GitHub notification activity -> $TMP/events. Sets
+# NOTIFY_OK=1 only when the feed proved it holds every new event (a 304, or a
+# 200 short of a full page), so the caller may skip the fallback full sweep.
+FALLBACK_SECONDS=900 # ponytail: fixed fallback sweep; make it a config value if a home needs a faster unattended sweep
+read_notifications() { # deadline
+  local lm since status next_lm next_since
+  local args=(api -i)
+  NOTIFY_OK=0
+  : > "$TMP/events"
+  lm=$(jq -r '.notifications.last_modified // ""' "$TMP/health.json")
+  since=$(jq -r '.notifications.since // ""' "$TMP/health.json")
+  [ -z "$lm" ] || args+=(-H "If-Modified-Since: $lm")
+  args+=("notifications?all=true&per_page=50${since:+&since=$since}")
+  # gh exits non-zero on 304, so the status line, not the exit code, decides.
+  gh_read "$1" "${args[@]}" 2>/dev/null | tr -d '\r' > "$TMP/notify.txt" || true
+  status=$(sed -n '1s/^HTTP\/[0-9.]* \([0-9][0-9]*\).*/\1/p' "$TMP/notify.txt")
+  case "$status" in
+    304) NOTIFY_OK=1; return 0 ;;
+    200) ;;
+    4*) jq 'del(.notifications)' "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"; return 0 ;;
+    *) return 0 ;;
+  esac
+  next_lm=$(sed -n '1,/^$/s/^[Ll]ast-[Mm]odified: //p' "$TMP/notify.txt")
+  sed '1,/^$/d' "$TMP/notify.txt" > "$TMP/notify.json"
+  jq -e 'type == "array"' "$TMP/notify.json" >/dev/null 2>&1 || return 0
+  next_since=$(jq -r --arg since "$since" '[.[].updated_at | strings] + [$since] | max' "$TMP/notify.json")
+  jq -r --arg since "$since" '.[] | select(.subject.type == "PullRequest" and (.updated_at // "") > $since)
+    | .subject.url // "" | capture("^https://api[.]github[.]com/repos/(?<path>[^/]+/[^/]+)/pulls/(?<n>[1-9][0-9]*)$")
+    | "https://github.com/\(.path)/pull/\(.n)"' "$TMP/notify.json" | sort -u > "$TMP/events"
+  jq --arg lm "$next_lm" --arg since "$next_since" '.notifications = ((.notifications // {}) + {last_modified:$lm,since:$since})' \
+    "$TMP/health.json" > "$TMP/next.json" && mv "$TMP/next.json" "$TMP/health.json"
+  # The first read only sets the cursor, and a full page may hide older events.
+  [ -z "$lm" ] || [ "$(jq length "$TMP/notify.json")" -ge 50 ] || NOTIFY_OK=1
+}
+
 poll() {
-  local deadline timeout url step pid index=0 read_dir
+  local deadline timeout url step pid index=0 read_dir now full
   local pids=()
   flag_on || exit 0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail 'state directory unavailable'
@@ -281,7 +342,10 @@ poll() {
   LOCK_HELD=1
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-pr-health.XXXXXX")
   if [ -e "$HEALTH" ] && ! jq -e '.schema == "fm-pr-health.v1" and (.prs | type == "object") and (.branches | type == "object")
-    and all(.prs[]; ((.conflicts // []) | type == "array") and ((.checks // []) | type == "array" and all(.[]; type == "object")))' \
+    and all(.prs[]; ((.conflicts // []) | type == "array") and ((.checks // []) | type == "array" and all(.[]; type == "object")))
+    and ((.notifications // {}) | type == "object" and ((.last_modified // "") | type == "string")
+      and ((.since // "") | type == "string") and ((.swept_at // 0) | type == "number")
+      and ((.pending // []) | type == "array" and all(.[]; type == "string")))' \
     "$HEALTH" > /dev/null 2>&1; then
     printf 'pr-health: unreadable fingerprint record replaced; conditions already reported may wake once more\n'
     rm -f -- "$HEALTH"
@@ -305,7 +369,20 @@ poll() {
   save_health "$TMP/next.json"
   cp "$TMP/next.json" "$TMP/health.json"
   jq -r --slurpfile health "$TMP/health.json" '
-    .[] | select(.final | not) | select(($health[0].prs[.url].final // false) | not) | .url' "$TMP/owned.json" > "$TMP/urls"
+    .[] | select(.final | not) | select(($health[0].prs[.url].final // false) | not) | .url' "$TMP/owned.json" > "$TMP/owned-urls"
+  # Event-driven reads: a notification, a PR never read, or one whose last read
+  # did not settle. Every owned PR is read when the feed is unavailable or the
+  # fallback sweep is due.
+  NOTIFY_OK=0
+  : > "$TMP/events"
+  ! grep -q '^https://github[.]com/' "$TMP/owned-urls" || read_notifications "$deadline"
+  now=$(date +%s)
+  full=true
+  [ "$NOTIFY_OK" = 0 ] || [ $((now - $(jq -r '.notifications.swept_at // 0' "$TMP/health.json"))) -ge "$FALLBACK_SECONDS" ] || full=false
+  jq -R -r --argjson full "$full" --slurpfile health "$TMP/health.json" --rawfile events "$TMP/events" '
+    ($events | split("\n")) as $events | ($health[0].notifications.pending // []) as $pending
+    | select($full or $health[0].prs[.] == null or IN($events[]) or IN($pending[]))' "$TMP/owned-urls" > "$TMP/urls"
+  : > "$TMP/unsettled"
   while IFS= read -r url; do
     index=$((index + 1))
     read_dir="$TMP/read-$index"
@@ -320,13 +397,14 @@ poll() {
   while IFS= read -r url; do
     index=$((index + 1))
     read_dir="$TMP/read-$index"
-    [ -f "$read_dir/ok" ] || continue
+    [ -f "$read_dir/ok" ] || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
     jq -L "$SCRIPT_DIR" -n --arg url "$url" --slurpfile rest "$read_dir/rest.json" --slurpfile gql "$read_dir/gql.json" \
       --slurpfile prev <(jq --arg url "$url" '.prs[$url] // {}' "$TMP/health.json") \
       --argjson tasks "$(jq -c --arg url "$url" '[.[] | select(.url == $url) | .tasks[]] | unique' "$TMP/owned.json")" \
-      "include \"fm-contributions\"; $STEP" > "$TMP/step.json" 2>/dev/null || continue
+      "include \"fm-contributions\"; $STEP" > "$TMP/step.json" 2>/dev/null \
+      || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
     step=$(cat "$TMP/step.json")
-    [ "$step" != null ] || continue
+    [ "$step" != null ] || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
     jq -r '.lines[]' "$TMP/step.json"
     jq --arg url "$url" --slurpfile step "$TMP/step.json" '.prs[$url] = $step[0].fp' "$TMP/health.json" > "$TMP/next.json"
     if ! cmp -s "$TMP/next.json" "$TMP/health.json"; then
@@ -334,6 +412,12 @@ poll() {
       cp "$TMP/next.json" "$TMP/health.json"
     fi
   done < "$TMP/urls"
+  jq --argjson full "$full" --argjson now "$now" --rawfile unsettled "$TMP/unsettled" '
+    if has("notifications") then
+      .notifications.pending = ($unsettled | split("\n") | map(select(length > 0)))
+      | if $full then .notifications.swept_at = $now else . end
+    else . end' "$TMP/health.json" > "$TMP/next.json"
+  cmp -s "$TMP/next.json" "$HEALTH" || save_health "$TMP/next.json"
 }
 
 arm() {

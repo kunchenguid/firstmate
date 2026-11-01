@@ -47,6 +47,8 @@ case "$1 $2" in
     for arg in "$@"; do case "$arg" in number=*) n=${arg#number=} ;; esac; done
     model "$n" | jq '[{data:{repository:{pullRequest:{
       headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},reviewDecision:(.reviewDecision // "APPROVED"),
+      commits:{nodes:[{commit:{oid:(.graphql_head // .head),checkSuites:{nodes:[(.suites // [])[]
+        | {conclusion,app:{slug:"github-actions"},workflowRun:{workflow:{name}}}]}}}]},
       reviewRequests:{nodes:[range(.requests) | {requestedReviewer:{__typename:"User"}}]},
       latestReviews:{nodes:[range(.reviews) | {author:{__typename:"User",login:"reviewer"}}]},
       statusCheckRollup:(if (.checks | length) == 0 then null else {
@@ -72,8 +74,16 @@ case "$1 $2" in
       *) model "$rest" | jq '{state:(if .state == "open" then "open" else "closed" end),
            merged_at:(if .state == "merged" then "2026-10-21T00:00:00Z" else null end),
            user:{login:"author"},draft,mergeable,head:{sha:.head},
-           base:{sha:"0000000000000000000000000000000000000000"},requested_reviewers:(.requested_reviewers // [])}' ;;
+           base:{sha:"0000000000000000000000000000000000000000"},labels:[(.labels // [])[] | {name:.}]}' ;;
     esac ;;
+  'api -i')
+    # The notifications feed, when a case serves one: 304 while unchanged.
+    [ -f "$FORGE/notifications.json" ] || exit 1
+    lm=$(cat "$FORGE/notifications-lm")
+    case "$*" in *"If-Modified-Since: $lm"*) printf 'HTTP/2.0 304 Not Modified\r\n\r\n'; exit 1 ;; esac
+    since=$(printf '%s\n' "$@" | sed -n 's/.*[?&]since=\([^&]*\).*/\1/p')
+    printf 'HTTP/2.0 200 OK\r\nLast-Modified: %s\r\n\r\n' "$lm"
+    jq --arg since "$since" '[.[] | select(.updated_at >= $since)]' "$FORGE/notifications.json" ;;
   'api repos/o/r/issues/'*) printf '[[]]\n' ;;
   'api repos/o/r/commits/'*)
     case "$2" in *check-runs*) printf '[{"check_runs":[]}]\n' ;; *) printf '[[]]\n' ;; esac ;;
@@ -602,26 +612,107 @@ test_all_owned_pr_reads_start_in_one_wave() {
   pass 'all owned PR reads start in one wave without rotating a backlog'
 }
 
-test_action_required_and_review_required_are_distinct() {
+feed() { # home : serve an empty notifications feed
+  printf '[]\n' > "$1/forge/notifications.json"
+  printf 'Sun, 01 Nov 2026 00:00:00 GMT\n' > "$1/forge/notifications-lm"
+}
+
+notify() { # home owner/repo number updated-at reason : one new notification
+  jq --arg url "https://api.github.com/repos/$2/pulls/$3" --arg at "$4" --arg reason "$5" \
+    '. + [{reason:$reason,updated_at:$at,subject:{type:"PullRequest",url:$url}}]' \
+    "$1/forge/notifications.json" > "$1/forge/notifications.next"
+  mv "$1/forge/notifications.next" "$1/forge/notifications.json"
+  printf 'Sun, 01 Nov 2026 00:00:%02d GMT\n' "$(grep -c . "$1/forge/calls.log")" > "$1/forge/notifications-lm"
+}
+
+reads() { # home number -> REST reads of that PR so far
+  grep -c "pulls/$2\$" "$1/forge/calls.log"
+}
+
+test_maintainer_author_and_approval_states_are_distinct() {
   local home
   home=$(new_home approval-states)
   task "$home" ship1 pr=https://github.com/o/r/pull/40
   pr "$home" 40 "$HEAD_A" "$BASE_1" true false
-  set_pr "$home" 40 '.checks = [{name:"Actions",conclusion:"ACTION_REQUIRED",required:true}]'
+  # A fork PR whose workflows await approval: only an app check ran, so the
+  # check rollup is green while the Actions suites have run nothing.
+  set_pr "$home" 40 '.checks = [{name:"Review bot",conclusion:"SUCCESS",required:false}]
+    | .suites = [{name:"CI",conclusion:"ACTION_REQUIRED"},{name:"Lint",conclusion:"SUCCESS"}]'
   arm "$home"
-  expect_one "$home" 'maintainer must approve CI' 'ACTION_REQUIRED must be maintainer-gated'
-  expect_silent "$home" 'a maintainer-gated check must not repeat'
-  set_pr "$home" 40 '.reviewDecision = "REVIEW_REQUIRED" | .checks = []'
-  expect_one "$home" 'needs human approval' 'a required review must be distinct'
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/40 waits on the maintainer to approve CI at latest commit aaaaaaa: nothing has run for CI, so the PR is not green; no author action .*ship1' \
+    'an ACTION_REQUIRED check suite must read as maintainer-gated, not green'
+  expect_silent "$home" 'a maintainer-gated suite must not repeat'
+  set_pr "$home" 40 '.reviewDecision = "REVIEW_REQUIRED"'
+  expect_one "$home" 'needs human approval at latest commit aaaaaaa: a required review is not yet given; no author action' \
+    'a missing required review must be its own state'
   expect_silent "$home" 'a required review must not repeat'
   set_pr "$home" 40 '.reviewDecision = "CHANGES_REQUESTED"'
-  expect_one "$home" 'author must act' 'a requested change must alert the author'
+  expect_one "$home" 'author must act at latest commit aaaaaaa: changes requested \(task ship1\)$' \
+    'a requested change must ask the author to act'
   expect_silent "$home" 'an unchanged requested change must not repeat'
-  pass 'maintainer-gated CI and required review states notify distinctly once'
+  set_pr "$home" 40 ".head = \"$HEAD_B\" | .suites = [] | .reviewDecision = \"REVIEW_REQUIRED\" | .draft = true"
+  expect_silent "$home" 'a draft awaiting review must not ask for approval'
+  set_pr "$home" 40 '.labels = ["wheelhouse:pending-contributor-action"]'
+  expect_one "$home" 'author must act at latest commit bbbbbbb: maintainer marked it wheelhouse:pending-contributor-action' \
+    'an explicit maintainer waiting-on-author label must ask the author to act'
+  set_pr "$home" 40 '.labels = ["needs-triage"]'
+  expect_silent "$home" 'an unrelated label is not a maintainer disposition'
+  pass 'maintainer-gated CI, required approval and author action notify distinctly once'
+}
+
+test_notifications_drive_reads_with_the_poll_as_fallback() {
+  local home before
+  home=$(new_home notification-events)
+  task "$home" ship1 pr=https://github.com/o/r/pull/41
+  pr "$home" 41 "$HEAD_A" "$BASE_1" true false
+  feed "$home"
+  arm "$home"
+  expect_silent "$home" 'the first pass reads every owned PR and sets the feed cursor'
+  [ "$(reads "$home" 41)" = 1 ] || fail "the first pass must read the owned PR: $(cat "$home/forge/calls.log")"
+  set_pr "$home" 41 '.reviewDecision = "CHANGES_REQUESTED"'
+  expect_silent "$home" 'an unchanged feed must not read the PR before the fallback sweep'
+  grep -q 'If-Modified-Since: Sun, 01 Nov 2026 00:00:00 GMT' "$home/forge/calls.log" \
+    || fail "the feed must be read conditionally: $(cat "$home/forge/calls.log")"
+  [ "$(reads "$home" 41)" = 1 ] || fail 'an unchanged feed read the PR'
+  notify "$home" o/r 99 2026-11-01T00:01:00Z author
+  expect_silent "$home" "another home's PR notification must not wake this home"
+  if grep -E 'pulls/99$|number=99( |$)' "$home/forge/calls.log" >/dev/null; then
+    fail "a notification made this home read a PR it does not own: $(cat "$home/forge/calls.log")"
+  fi
+  [ "$(reads "$home" 41)" = 1 ] || fail 'an unrelated notification read the owned PR'
+  notify "$home" o/r 41 2026-11-01T00:02:00Z author
+  expect_one "$home" 'pull/41 author must act at latest commit aaaaaaa: changes requested' \
+    'a notification on the owned PR must read it at once'
+  set_pr "$home" 41 '.reviewDecision = "REVIEW_REQUIRED"'
+  expect_silent "$home" 'an already seen notification must not trigger another read'
+  jq '.notifications.swept_at = 0' "$home/state/pr-health.json" > "$home/state/pr-health.next" \
+    && mv "$home/state/pr-health.next" "$home/state/pr-health.json"
+  before=$(reads "$home" 41)
+  expect_one "$home" 'pull/41 needs human approval' 'the fallback sweep must still read every owned PR'
+  [ "$(reads "$home" 41)" = $((before + 1)) ] || fail 'the fallback sweep did not read the owned PR'
+  pass 'notifications trigger reads of owned PRs, unchanged feeds read nothing, the poll stays the fallback'
+}
+
+test_failed_event_read_is_retried() {
+  local home
+  home=$(new_home notification-retry)
+  task "$home" ship1 pr=https://github.com/o/r/pull/42
+  pr "$home" 42 "$HEAD_A" "$BASE_1" true false
+  feed "$home"
+  arm "$home"
+  expect_silent "$home" 'the first pass is quiet'
+  set_pr "$home" 42 ".graphql_head = \"$HEAD_B\" | .reviewDecision = \"CHANGES_REQUESTED\""
+  notify "$home" o/r 42 2026-11-01T00:03:00Z comment
+  expect_silent "$home" 'reads that disagree on the latest commit must wait'
+  set_pr "$home" 42 'del(.graphql_head)'
+  expect_one "$home" 'pull/42 author must act' 'an unsettled event read must be retried without a new notification'
+  pass 'an event read that did not settle is retried on the next pass'
 }
 
 failures=0
-for test_name in test_action_required_and_review_required_are_distinct test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
+for test_name in test_maintainer_author_and_approval_states_are_distinct \
+  test_notifications_drive_reads_with_the_poll_as_fallback test_failed_event_read_is_retried \
+  test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \
   test_reported_failure_does_not_hide_a_later_required_failure \
   test_replaced_cancelled_run_is_not_failing test_latest_commit_moving_between_reads_waits \
