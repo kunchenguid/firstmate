@@ -767,7 +767,7 @@ The receipt prevents accidental publication through supported paths; it proves c
 ## Waiting worker spends no turns (config/wait-no-turns)
 
 The optional local, gitignored `config/wait-no-turns` presence flag opts this home into keeping a waiting worker from spending turns until it is answered.
-With it present, ship and scout briefs gain the `# Waiting` section and the foreground no-mistakes drive text, every brief's inbox section keeps the natural-checkpoint check and adds that a waiting worker does not poll or list its inbox because a waiting instruction rings, a pending-reply recovery waits while that mate has its own open decision or blocker, and a fire-and-forget steer whose doorbell did not land gets one later ring.
+With it present, ship and scout briefs gain the `# Waiting` section and the foreground no-mistakes drive text, every brief's inbox section keeps the natural-checkpoint check and adds that a waiting worker does not poll or list its inbox because a waiting instruction rings, and a fire-and-forget steer whose doorbell did not land gets one later ring. A pending-reply recovery waits while that mate has its own open decision or blocker; after `FM_PENDING_REPLY_HOLD_MAX_SECS` it escalates the hold itself on the parent status channel, without sending anything to the mate. Once the blocker closes, the owed recovery remains eligible.
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
@@ -3373,6 +3373,7 @@ FM_SEND_RETRIES=3       # fm-send typed-plane Enter-retry attempts after typing 
 FM_SEND_SLEEP=0.4       # seconds between fm-send typed-plane submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful typed-plane submit; 0 disables
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after the request turn completes without a correlated parent report before its one recovery repost is eligible, and after the recovery turn completes before the missed-report escalation is eligible; never counted from delivery
+FM_PENDING_REPLY_HOLD_MAX_SECS=7200   # seconds a reply-bearing request may stay held behind the mate's own open decision under config/wait-no-turns before the parent escalates the HOLD itself (one blocked line naming the decision keys, nothing sent to the mate, so the no-turns rule still holds)
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor endpoint backend override; see "Away-mode supervisor backend" for supported backends and detection
 FM_SUPERVISOR_TARGET=              # optional supervisor endpoint target override; tmux uses the exact forms owned by fm_backend_target_exists in bin/fm-backend.sh, herdr uses <session>:<pane-id>, t3code uses the thread id, otherwise auto-detected
