@@ -1157,6 +1157,19 @@ An earlier `sleep 60` chained ahead of a status check was refused before executi
 The blocking foreground `until` loop is therefore the wait a Claude Code worker may use, and it is what the brief names, because the refusal's own `run_in_background` suggestion is the one shape a waiting worker must not take: a backgrounded call returns at once and so does not wait at all.
 The brief's portable regression is `tests/fm-brief.test.sh`; rerun these commands after upgrading any of the three harnesses and update the numbers in the brief when they move.
 
+## Backgrounded no-mistakes drive detach
+
+The current drive policy is owned by [Waiting worker spends no turns](../configuration.md#waiting-worker-spends-no-turns-configwait-no-turns); `bin/fm-dod-lib.sh` owns the generated worker instructions.
+The portable regression is `bash tests/fm-nm-drive-detach.test.sh`.
+It executes Bash detach shapes against a stub drive and separately checks the generated brief as an instruction contract; it requires neither Pi nor the shared no-mistakes daemon.
+The observed Pi/Grok worker incident involved detached drive calls returning before the parked gate was available to the worker.
+The earlier 2026-10-21 macOS arm64 smoke queried Pi 1.3.0 only for its version and executed Bash, so it was not a real Pi end-to-end result.
+On 2026-10-21 UTC, Pi 1.3.0 with the existing `xai/grok-4.6` login completed a bounded positive continuation smoke in an isolated fixture using the generated drive instruction and a test-only Bash stand-in.
+The command used `pi --offline --no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-session --tools bash --provider xai --model grok-4.6 --thinking low --mode json -p` with a single prompt to execute `bash ./drive.sh`, wait for its result, and report its marker.
+The stand-in slept three seconds; the actual Bash tool returned `SMOKE_GATE_READY 2026-10-21T22:12:12Z` after 3.080 seconds, and Pi reported that same marker without another user or supervisor message before exiting successfully after 5.457 seconds.
+The JSON tool result and subsequent assistant report are retained with private test evidence.
+This proves foreground tool-result continuation in that bounded Pi smoke, not autonomous continuation of a real no-mistakes run or a detached background notification; the shared daemon and real runs were untouched.
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.
