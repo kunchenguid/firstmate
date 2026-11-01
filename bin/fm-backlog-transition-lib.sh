@@ -547,10 +547,11 @@ fm_backlog_pr_note_label() {  # <url>
 # URL unstageable, turning cleanup of otherwise landed work into a refusal even
 # though the link itself is acceptable.
 FM_BACKLOG_NOTE_MAX=2400
-# Set by fm_backlog_pr_link_downgrade: the links it moved off the title, one per
-# line, and the sentence that keeps them in the body. They are globals rather
-# than printed output because a caller runs in the same shell and needs the link
-# list to tell whether its own note already names them.
+# Set by fm_backlog_pr_link_note, and through it by fm_backlog_pr_link_downgrade:
+# the unverified pull request links a caller may take off the title, one per line,
+# and the sentence that keeps them in the body. They are globals rather than
+# printed output because a caller runs in the same shell and needs the link list
+# to tell whether its own note already names them.
 FM_BACKLOG_DOWNGRADE_LINKS=
 FM_BACKLOG_DOWNGRADE_NOTE=
 fm_backlog_note_encode() {  # <text>
@@ -755,14 +756,6 @@ fm_backlog_title_split_pr_links() {  # <title>
   FM_BACKLOG_TITLE_PROSE=$(printf '%s' "$out" | tr -s ' ' | sed 's/^ *//;s/ *$//')
 }
 
-# Take this row's pull request links off its title and set the note that keeps
-# them in the body. tasks-axi renders any closed row whose title carries such a
-# link as "merged", and no flag or configuration overrides that renderer, so an
-# unverified link cannot stay on the title: the URL moves into the body note
-# instead, which keeps the delivery traceable without claiming a merge no run
-# read. Links passed as further arguments are recorded too, so a close replaying
-# a recorded link names it even when it never reached the title. Sets
-# FM_BACKLOG_DOWNGRADE_NOTE to empty when there is no link to record.
 # Read this row's title and body into FM_BACKLOG_ROW_TITLE and
 # FM_BACKLOG_ROW_BODY, decoded, so a caller can decide what a change needs before
 # it changes anything.
@@ -801,9 +794,12 @@ fm_backlog_row_title_body() {  # <data-dir> <id>
 
 # Set the note that keeps this row's unverified pull request links in the body.
 # It reads the row but changes nothing, so a caller can record the note durably
-# before it takes the link off the title. A note an interrupted earlier attempt
-# already wrote is reused, so a retry rebuilds the same record from the body
-# instead of losing the URL with the title it no longer carries.
+# before it takes the link off the title. Links passed as further arguments are
+# recorded too, so a close replaying a recorded link names it even when it never
+# reached the title, and the note is empty when there is no link to record. A
+# note an interrupted earlier attempt already wrote is reused, so a retry
+# rebuilds the same record from the body instead of losing the URL with the title
+# it no longer carries.
 FM_BACKLOG_PR_LINK_EXCLUDE=
 fm_backlog_pr_link_note() {  # <data-dir> <id> <reason> [url...]
   local data=$1 id=$2 reason=$3 url collected='' skip seen recorded

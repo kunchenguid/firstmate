@@ -1,16 +1,10 @@
-# Teardown merge-claim change: rigor disclosure and per-item reconciliation
-
-## Rigor disclosure (read this before trusting the change)
-
-1. **This change has not been through an independent code review.** The reason is mechanical, not a choice to save effort: this repository's `no-mistakes` review step enforces an absolute 30-minute wall clock, and it killed the review analyzer pass repeatedly on this same task (three runs, the last two at the review step, each reported by the tool itself as `step review failed: agent fix reached its absolute wall-clock limit after 30m0s`).
-2. **What stands in for that review here**: the per-item reconciliation table below (each behavior the change claims, where the code enforces it, which test pins it, and the result) plus a full local run of the three suites this change touches - `tests/fm-teardown.test.sh` 149/149, `tests/fm-backlog-atomicity.test.sh` 106/106, `tests/fm-captain-hold-lifecycle.test.sh` 71/71, all with zero failures, on the commit that added this file (`5f976b49`). Later review rounds added tests to those suites, so the delivered head's totals are larger; run the suites to audit it.
-3. **That is not equivalent to external review.** A reviewer who has not written this code will still find policy and ordering questions this table cannot answer, and CI on the pull request is the only mechanical gate that has run against the delivered head.
+# Teardown merge-claim change: per-item reconciliation
 
 ## What the change does
 
 A backlog row closed by `tasks-axi` renders as `(merged <date>)` whenever its title carries a pull-request link, and no flag or configuration overrides that renderer.
 Cleanup used to pass the recorded link unconditionally, so a still-open pull request produced a ledger line claiming a merge that never happened.
-Now a merge is recorded only when the run that writes the record read it from the forge, and every other shape records a completion that keeps the link in the body note.
+Now a merge is recorded only when some run read it from the forge and left that verified fact on the pending-close record or the row's durable merge record, and every other shape records a completion that keeps the link in the body note.
 
 ## Per-item reconciliation
 
