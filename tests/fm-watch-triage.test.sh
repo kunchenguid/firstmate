@@ -797,8 +797,6 @@ SH
 if [ -e "$FM_STATUS_COUNT_SENTINEL" ]; then printf '%s\n' tail >> "$FM_STATUS_EXTERNAL_CALLS"; exit 97; fi
 exec "$FM_REAL_TAIL" "$@"
 SH
-  # Date calls occur elsewhere in every watcher cycle; this fixture can only
-  # attribute tail reads to claimed_run_tick without instrumenting function scope.
   for command in stat wc grep sed git; do
     eval "FM_REAL_$command=\$(command -v $command)"
     export "FM_REAL_$command"
