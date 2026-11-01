@@ -143,13 +143,28 @@ $tail"
   [ -z "$tail_out" ] || printf '%s' "$tail" > "$tail_out"
 }
 
+# expect_name: the start check's wording comes from the same table, so the
+# real capture must also name its dialog with the recorded accept kind (Enter
+# only where the affirmative option is preselected).
+expect_name() {  # <harness> <tail-file> <accept-regex>
+  local row
+  row=$(fm_busy_launch_prompt_name "$1" < "$2") \
+    || fail "$1: the real capture matched no named launch dialog"
+  printf '%s' "${row#*$'\t'}" | grep -qxE "$3" \
+    || fail "$1: named '${row%%$'\t'*}' with accept '${row#*$'\t'}', expected accept matching '$3'"
+  note "$1 names: ${row%%$'\t'*} (accept=${row#*$'\t'})"
+}
+
 CLAUDE_BIN=$(command -v claude 2>/dev/null || true)
 if [ -x "${CLAUDE_BIN:-}" ]; then
   VERSION_OUT=$("$CLAUDE_BIN" --version 2>&1) || fail "claude --version failed: $VERSION_OUT"
   note "live claude version: $VERSION_OUT"
+  CLAUDE_TAIL_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-launch-prompt-claude-tail.XXXXXX") || fail "claude: could not create the tail capture file"
+  LABS+=("$CLAUDE_TAIL_FILE")
   check_harness claude fm-lp-claude-$$ '' '' \
-    'Is this a project you created or one you trust' '' \
+    'Is this a project you created or one you trust' "$CLAUDE_TAIL_FILE" \
     "$CLAUDE_BIN" --dangerously-skip-permissions hello
+  expect_name claude "$CLAUDE_TAIL_FILE" none
   pass "claude: a real launch parked on its own rendered trust dialog surfaces through the watcher gate"
 else
   note "claude not installed - launch-prompt signature not checked"
@@ -182,6 +197,7 @@ if [ -x "${PI_BIN:-}" ]; then
     [ "$out" = "unknown launch-prompt" ] \
       || fail "$h: the same real Pi trust-dialog capture classified '$out', expected 'unknown launch-prompt'"
   done
+  for h in pi pi-signed omp; do expect_name "$h" "$PI_TAIL_FILE" enter; done
   pass "pi, pi-signed, omp: a real Pi-engine launch parked on its own rendered trust dialog surfaces through the watcher gate"
 else
   note "pi not installed - launch-prompt signature not checked"
@@ -191,9 +207,12 @@ GEMINI_BIN=$(command -v gemini 2>/dev/null || true)
 if [ -x "${GEMINI_BIN:-}" ]; then
   VERSION_OUT=$("$GEMINI_BIN" --version 2>&1) || fail "gemini --version failed: $VERSION_OUT"
   note "live gemini version: $VERSION_OUT"
+  GEMINI_TAIL_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-launch-prompt-gemini-tail.XXXXXX") || fail "gemini: could not create the tail capture file"
+  LABS+=("$GEMINI_TAIL_FILE")
   check_harness gemini fm-lp-gemini-$$ '' '' \
-    'How would you like to authenticate for this project|Do you trust the files in this folder|Enter Gemini API Key' '' \
+    'How would you like to authenticate for this project|Do you trust the files in this folder|Enter Gemini API Key' "$GEMINI_TAIL_FILE" \
     env GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_API_KEY= "$GEMINI_BIN" -y hello
+  expect_name gemini "$GEMINI_TAIL_FILE" 'enter|none'
   pass "gemini: a real launch parked on its own rendered auth or trust dialog surfaces through the watcher gate"
 else
   note "gemini not installed - launch-prompt signature not checked"
