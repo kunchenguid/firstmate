@@ -301,7 +301,7 @@ exit 0
 SH
   cat > "$fakebin/orca" <<'SH'
 #!/usr/bin/env bash
-[ "${1:-}" = terminal ] && [ "${2:-}" = read && [ "${4:-}" = --terminal ] && [ "${5:-}" = orca-endpoint ] || exit 1
+[ "${1:-}" = terminal ] && [ "${2:-}" = read ] && [ "${3:-}" = --terminal ] && [ "${4:-}" = orca-endpoint ] || exit 1
 printf '%s\n' '{"ok":true,"result":{"tail":[]}}'
 SH
   chmod +x "$fakebin/orca"
@@ -323,6 +323,8 @@ SH
     "bootstrap did not resolve an implicit tmux backend target"
   assert_not_contains "$out" 'metadata has no endpoint: orca-terminal' \
     "bootstrap did not resolve the Orca terminal target"
+  assert_not_contains "$out" 'metadata endpoint could not be verified: orca-terminal' \
+    "healthy Orca endpoint was reported as unverifiable"
   assert_not_contains "$out" 'linked' "bootstrap read symlinked metadata"
   [ -f "$case_dir/home/data/orphan/status.log" ] || fail "bootstrap did not archive the orphan status log"
   [ ! -e "$case_dir/home/state/orphan.status" ] || fail "archived orphan status log remained in state"
