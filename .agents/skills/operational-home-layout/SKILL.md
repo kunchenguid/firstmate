@@ -160,7 +160,8 @@ state/               runtime records and signals; gitignored
   .secondmate-relaunch-<id> .secondmate-relaunch-bound-<id>   durable relaunch history and parked-bound state; never touch (bin/fm-secondmate-liveness-lib.sh owns the ledger contract)
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   lane-capacity.json  this home's published lane facts, refreshed only while config/lane-capacity exists; written only by bin/fm-capacity.sh --publish, whose header owns the document
-  .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
+  .last-watcher-beat watcher liveness beacon, touched at every proven-progress point inside a cycle (including while absorbing benign wakes); guard scripts read it
+  .last-cycle-turnover marks cycle turnover for TEST SYNCHRONIZATION, touched exactly once per cycle immediately before the terminal wait; no production code reads it today, and it exists only because the liveness beacon above deliberately no longer implies a completed cycle. If supervision should ever depend on cycle turnover, that is a new decision and must not be inferred from this file's presence; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```
