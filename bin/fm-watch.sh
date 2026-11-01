@@ -2715,12 +2715,12 @@ pause_state_class() {  # <window> <task>
   last=$(status_declared_wait_line "$statusf")
   recheck_file="$STATE/.paused-rechecked-$key"
   if status_is_paused_or_captain_held "$last"; then
-    local mtime now age until undated_max
+    local mtime now age undated_max
     mtime=$(stat_mtime "$statusf"); now=$(date +%s)
     case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
     age=$(( now - mtime ))
-    if until=$(status_paused_until "$last"); then
-      [ "$now" -gt "$(( until + PAUSE_RESURFACE_SECS ))" ] && { printf 'paused'; return; }
+    if status_is_paused "$last"; then
+      status_pause_is_overdue "$last" "$age" "$now" && { printf 'paused'; return; }
     else
       undated_max=$PAUSE_UNDATED_MAX_SECS
       case "$undated_max" in ''|*[!0-9]*) undated_max=$FM_PAUSE_UNDATED_MAX_SECS_DEFAULT ;; esac
