@@ -681,6 +681,7 @@ Ship branch: $branch
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Before starting that validation run, append \`working [at=<epoch>]: validation started\` to the status file so Firstmate can verify that the run exists for this branch.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
 ${nm_base}
 EOF
