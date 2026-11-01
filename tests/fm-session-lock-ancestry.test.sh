@@ -94,6 +94,60 @@ SH
   pass "session-lock: a version-named Claude Code session is identified from its install path and argv[0]"
 }
 
+# Several installed harnesses launch through a JS runtime binary - omp runs as
+# `bun /Users/u/.bun/bin/omp` - so the runtime's own name identifies nothing and
+# the script arguments must be examined. Anchored harness names such as ^omp$
+# can never match a whole argument line, so the per-argument path-component
+# check is what finds the harness there.
+write_bun_omp_ps() {  # <fakebin> <args-line>
+  cat > "$1/ps" <<SH
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) field=\$2; shift 2 ;;
+    -p) pid=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$pid:\$field" in
+  800:comm=*) printf '%s\n' 'bun' ;;
+  800:args=*) printf '%s\n' '$2' ;;
+  800:ppid=*) printf '%s\n' 1 ;;
+  *:comm=*) printf '%s\n' bash ;;
+  *:args=*) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  *:ppid=*) printf '%s\n' 800 ;;
+esac
+SH
+  chmod +x "$1/ps"
+}
+
+test_runtime_launched_omp_session_is_identified() {
+  local dir fakebin got
+  dir="$TMP_ROOT/bun-launched-omp"
+  fakebin=$(fm_fakebin "$dir")
+  write_bun_omp_ps "$fakebin" 'bun /Users/u/.bun/bin/omp'
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the bun-launched omp session was not found in the ancestry at all"
+  [ "$got" = 800 ] || fail "ancestry resolved '$got', expected the bun-launched omp pid 800"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 800' \
+    || fail "a live bun-launched omp session was not recognized as a harness"
+  lib_eval "$fakebin" 'fm_harness_process_matches bun "bun /Users/u/.bun/bin/omp"; [ "$FM_HARNESS_IS_CLAUDE" = 0 ]' \
+    || fail "omp was misidentified as a Claude process"
+  pass "session-lock: an omp session launched through bun is identified from its script path"
+}
+
+test_ordinary_bun_process_is_not_a_harness() {
+  local dir fakebin
+  dir="$TMP_ROOT/bun-ordinary"
+  fakebin=$(fm_fakebin "$dir")
+  write_bun_omp_ps "$fakebin" 'bun --watch src/index.ts'
+  lib_eval "$fakebin" '! fm_harness_process_matches bun "bun --watch src/index.ts"' \
+    || fail "an ordinary bun dev process was treated as a harness"
+  pass "session-lock: an ordinary bun process is not a harness process"
+}
+
 # A harness that is pid 1 of its own PID namespace - a container, or the
 # `codex sandbox` this shape was verified in - used to be invisible: the walk
 # stopped as soon as the NEXT pid was 1, so the one process that identifies the
@@ -1565,6 +1619,8 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
 }
 
 test_version_named_session_is_identified_on_both_platforms
+test_runtime_launched_omp_session_is_identified
+test_ordinary_bun_process_is_not_a_harness
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
