@@ -27,12 +27,15 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
    The smallest downstream changes needed to keep that behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within scope even when they touch files not named at intake.
    Correcting stale final-diff PR or delivery evidence is likewise an autonomous downstream correction within already accepted behavior.
 3. Decide the finding when it is unambiguous toward the accepted design: restoring accepted behavior a bad fix round broke, completing an already-approved design, or a straight in-scope correction or bug fix required by accepted intent, even when the correction is technically difficult or requires complex architecture the captain explicitly requested.
-4. Escalate only genuinely ambiguous findings:
+4. When the captain has already answered a decision on the same task and the new finding is the same theme, apply that recorded answer instead of escalating again.
+   Fix with the chosen remedy, or decline as already ruled, and cite the earlier answer in the decision.
+   Still escalate when the new finding asks for something that answer did not cover, or when the choice is destructive, irreversible, or security-sensitive.
+5. Escalate only genuinely ambiguous findings:
    - a Fix that would materially expand the contract by adding a new guarantee, threat model, subsystem, abstraction, compatibility surface, state machine, continuous-monitoring requirement, generalized framework, or broader architecture not required by the accepted intent
    - a product or architecture call not settled by accepted intent
-   - repeated same-theme findings when incremental corrections are preserving a questionable abstraction rather than closing independent defects
+   - repeated same-theme findings when incremental corrections are preserving a questionable abstraction rather than closing independent defects, except when a recorded answer on that task already covers the finding
    - destructive, irreversible, and genuinely security-sensitive choices, which always escalate under the stronger existing captain boundary
-5. Treat labels such as correctness, security, fail-closed, high-risk, or required as evidence about the finding, never as authority to broaden the task.
+6. Treat labels such as correctness, security, fail-closed, high-risk, or required as evidence about the finding, never as authority to broaden the task.
 
 ## Captain-facing escalation
 
@@ -50,6 +53,6 @@ Do not relay reviewer labels or gate output as if they settled the decision.
 
 - Fixing a concrete defect that violates an original acceptance criterion is firstmate's to decide, regardless of implementation difficulty.
 - Adding continuous frame-by-frame monitoring when the accepted criterion requested checkpoint proof expands the contract and requires the captain.
-- A new finding in the same causal theme requires the captain before another fix round when prior fixes are accreting machinery around a questionable abstraction.
+- A new finding in the same causal theme requires the captain before another fix round when prior fixes are accreting machinery around a questionable abstraction, except when a recorded answer on that task already covers the finding.
 - A genuinely security-sensitive action requires the captain under the stronger existing boundary even if it is otherwise within scope.
 - Complex architecture explicitly requested by the captain stays within scope and does not escalate merely because it is complex.
