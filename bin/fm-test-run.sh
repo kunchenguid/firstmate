@@ -921,6 +921,7 @@ tests/fm-tangle-guard.test.sh 8501
 tests/fm-task-delivery.test.sh 32789
 tests/fm-task-inbox.test.sh 31965
 tests/fm-tasks-axi.test.sh 2293
+tests/fm-tasks-axi-summary-refresh.test.sh 4187
 tests/fm-teardown-endpoint-safety.test.sh 40851
 tests/fm-teardown.test.sh 202132
 tests/fm-test-fixture-cleanup.test.sh 866
