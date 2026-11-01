@@ -3477,11 +3477,19 @@ test_registered_poll_survives_template_update_and_relaunch() {
     dir=$(make_case "registered-poll-$scenario")
     state="$dir/home/state"
     historical_poll="$dir/historical-fm-pr-poll.sh"
-    cp "$POLL" "$historical_poll"
-    if [ "$scenario" != relaunch ]; then
+    if [ "$scenario" = relaunch ]; then
+      cp "$POLL" "$historical_poll"
+    else
       # An older generation may contain different code. It must never execute:
       # the watcher dispatches the current repository poll with validated data.
-      printf '\nprintf "sidecar-executed\\n" > "%s"\n' "$dir/sidecar-executed" >> "$historical_poll"
+      # The stub's whole body is reachable, so a mistaken execution of the
+      # registered copy writes the marker, reports a non-merged result, and
+      # reaches no forge instead of passing on the current poll's behaviour.
+      cat > "$historical_poll" <<SH
+#!/usr/bin/env bash
+printf 'historical poll executed\\n' > '$dir/sidecar-executed'
+printf 'historical-generation\\n'
+SH
     fi
     write_poll_meta "$state" task-a https://github.com/o/r/pull/1
     seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$historical_poll"
