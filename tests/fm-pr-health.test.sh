@@ -80,10 +80,8 @@ case "$1 $2" in
     if [ -f "$FORGE/interrupt-$rest" ]; then
       # Stop the whole pass mid-read, as a check timeout would.
       rm -f "$FORGE/interrupt-$rest"
-      p=$$
-      while p=$(ps -o ppid= -p "$p" | tr -d ' ') && [ -n "$p" ] && [ "$p" -gt 1 ]; do
-        ps -o command= -p "$p" | grep -q 'fm-pr-health.sh poll' && { kill -TERM "$p"; break; }
-      done
+      poll_pid=$(cat "$FORGE/main-poll-pid")
+      kill -TERM "$poll_pid"
       exit 1
     fi
     case "$rest" in
@@ -835,7 +833,12 @@ test_interrupted_pass_keeps_events_pending() {
   set_pr "$home" 44 '.reviewDecision = "CHANGES_REQUESTED"'
   notify "$home" o/r 44 2026-11-01T00:04:00Z comment
   : > "$home/forge/interrupt-44"
-  with_home "$home" bash "$home/state/pr-health.check.sh" >/dev/null 2>&1 || true
+  with_home "$home" bash "$home/state/pr-health.check.sh" > "$home/poll.out" 2>&1 &
+  poll_pid=$!
+  printf '%s\n' "$poll_pid" > "$home/forge/main-poll-pid"
+  poll_rc=0
+  wait "$poll_pid" || poll_rc=$?
+  [ "$poll_rc" -ne 0 ] || fail 'the main poll completed normally after the fake read interrupted it'
   [ ! -e "$home/forge/interrupt-44" ] || fail 'the interrupting read never ran'
   expect_one "$home" 'pull/44 author must act' 'an event cut off by an interrupted pass must be read on the next pass'
   pass 'an interrupted pass leaves its notified PRs pending'
