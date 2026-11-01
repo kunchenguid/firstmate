@@ -2176,6 +2176,58 @@ SH
   pass "a failed retention keeps its URL on the row for the retry"
 }
 
+test_recovery_keeps_one_deliverable_line_when_the_reopen_fails() {
+  local case_dir id out url real_tasks_axi body
+  id=atomic-heal-retain-reopen-b18
+  url=https://github.com/example/repo/pull/18
+  case_dir=$(make_home heal-retain-reopen)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi update "$id" --pr "$url" --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not attach the retained pull-request link"
+  tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
+    --file "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "could not hold the retained row"
+  # A retention whose completion is a note naming no link: the deliverable line
+  # composes that note with the row's unverified link.
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-retain-reopen\ncleanup_incomplete=0\nmode=retain\narg=--note\narg=local%%20main\n' \
+    "$id" "$(home_of "$case_dir")/data" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = reopen ] && [ "\${2:-}" = $id ] \
+   && [ ! -e "$case_dir/reopen-failed-once" ]; then
+  : > "$case_dir/reopen-failed-once" || exit 93
+  exit 92
+fi
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_bootstrap "$case_dir")
+  assert_present "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a failed reopen discarded its pending record: $out"
+
+  rm -f "$case_dir/fakebin/tasks-axi"
+  out=$(run_bootstrap "$case_dir") || fail "session start could not finish the retention: $out"
+  [ "$(row_state "$case_dir" "$id")" = "queued" ] \
+    || fail "the retried retention left the row at $(row_state "$case_dir" "$id"): $out"
+  body=$(tasks-axi show "$id" --file "$(backlog_of "$case_dir")" --full \
+    | sed -n 's/^  body: //p' | head -1)
+  [ "$(printf '%s' "$body" | grep -o 'Deliverable of the finished work:' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the retried retention wrote a second deliverable line: $body"
+  [ "$(printf '%s' "$body" | grep -o "$url" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the retried retention dropped or duplicated the pull-request URL: $body"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" \
+    | grep -F "links: \"pr:$url\"" >/dev/null \
+    && fail "the retried retention left the unverified link on the title"
+  assert_no_grep '(merged ' "$(backlog_of "$case_dir")" \
+    "a retention nobody verified rendered as a merge"
+  pass "a failed reopen keeps one deliverable line for the retry"
+}
+
 test_recovery_replays_a_close_whose_merge_was_never_confirmed() {
   local case_dir id out url=https://github.com/example/repo/pull/7
   id=atomic-heal-unconfirmed-b9
@@ -3359,6 +3411,7 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_replays_a_verified_merge_as_a_merge
 test_recovery_replays_a_failed_close_without_duplicating_its_note
 test_recovery_keeps_a_retained_url_until_its_note_is_durable
+test_recovery_keeps_one_deliverable_line_when_the_reopen_fails
 test_recovery_replays_a_close_whose_merge_was_never_confirmed
 test_recovery_replays_a_long_unconfirmed_note
 test_recovery_replays_a_gerrit_close_with_its_change_url_as_a_note
