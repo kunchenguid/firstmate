@@ -3540,11 +3540,27 @@ effort_flag_for_harness() {
     esac
     ;;
   agy)
-    # agy 1.2.0 --effort accepts exactly low|medium|high, so xhigh and max are
-    # omitted rather than passed as known-bad values (record-and-omit).
+    # agy 1.4.2 scopes --effort to the model (verified live). An unaccepted
+    # pair exits print mode, and the interactive TUI silently runs the brief on
+    # the configured default model instead. The default model and a bare gemini id accept
+    # low|medium|high; an id that carries its effort as a suffix
+    # (gemini-3.8-flash-low, gpt-oss-120b-medium) accepts only that same value
+    # and rejects any other as a conflict; the Claude models reject --effort
+    # outright. --help lists xhigh and max, but no model on 1.4.2 accepts
+    # either. Every other pair, and any unverified model, keeps the model's
+    # own effort (record-and-omit).
     case "$effort" in
-    low | medium | high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
+    low | medium | high) ;;
+    *) return 0 ;;
     esac
+    case "$model" in
+    gemini-*-low | gemini-*-medium | gemini-*-high | gpt-oss-*-low | gpt-oss-*-medium | gpt-oss-*-high)
+      [ "${model##*-}" = "$effort" ] || return 0
+      ;;
+    "" | default | gemini-*) ;;
+    *) return 0 ;;
+    esac
+    printf -- '--effort %s ' "$(shell_quote "$effort")"
     ;;
   kiro)
     # kiro-cli 2.21.4 --effort accepts the full shared vocabulary
