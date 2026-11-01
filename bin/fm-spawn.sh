@@ -7853,6 +7853,30 @@ if [ "$T3CODE_LAUNCH_UNCONFIRMED" = 1 ]; then
   exit 1
 fi
 
+# Arm the watcher's one-shot start check (bin/fm-watch.sh start_check_tick
+# owns the record format and the wake) for every launch that reaches here
+# without proof the brief started. kimi, rovo, OpenCode 2, agy, and polytoken
+# already proved it in their own post-launch gates above, a T3 Code launch
+# carries its own unconfirmed-delivery path, and a raw launch command carries
+# no adapter wiring that could ever post the proof. A relaunch rewrites the
+# record with the replacement's generation, or removes an earlier one.
+START_PENDING="$STATE/$ID.start-pending"
+case "$HARNESS" in
+kimi* | rovo* | agy | polytoken) START_CHECK=0 ;;
+opencode) START_CHECK=1; [ "$OPENCODE_MAJOR" -lt 2 ] || START_CHECK=0 ;;
+*) START_CHECK=1 ;;
+esac
+[ "$BACKEND" != t3code ] && [ "$RAW_LAUNCH" -eq 0 ] || START_CHECK=0
+if [ "$START_CHECK" -eq 1 ]; then
+  if ! { printf '%s %s %s\n' "$(date +%s)" "${BUSY_GEN:--}" "$HARNESS" >"$START_PENDING.tmp.$$" \
+    && mv -f "$START_PENDING.tmp.$$" "$START_PENDING"; }; then
+    rm -f "$START_PENDING.tmp.$$"
+    echo "warning: could not arm the start check for $ID; inspect the worker yourself in about two minutes" >&2
+  fi
+else
+  rm -f "$START_PENDING"
+fi
+
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 SPAWN_ACCOUNT=

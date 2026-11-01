@@ -127,6 +127,13 @@
 #                          opt-in config/open-decision-reminders record-age
 #                          backstop, independent of pane and branch state;
 #                          open_decision_reminder_tick owns its bounded repeats
+#   check: start <id>: no start signal <n>s after spawn (harness=<h>[; <cause>]); <command>
+#                          a launch fm-spawn.sh could not prove started still has
+#                          no start proof FM_START_CHECK_SECS (default 120) after
+#                          spawn: one wake per launch naming a recognized launch
+#                          dialog, an exited agent, or an unsubmitted brief, and
+#                          the command that clears it; the stale path stays quiet
+#                          for that pane meanwhile (start_check_tick)
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -2808,6 +2815,141 @@ EOF
   fi
 }
 
+# One-shot start check. bin/fm-spawn.sh writes STATE/<id>.start-pending as
+# `<spawn-epoch> <busy-gen or -> <harness>` for every launch it could not prove
+# started (its header names the exempt harnesses). Each poll this tick reads
+# only those records, so a quiet fleet pays one glob. A record is removed
+# silently when its task record is gone or belongs to another busy generation,
+# or as soon as start_check_started finds a start proof. A record still without
+# proof START_CHECK_SECS after spawn queues exactly one `check: start` wake that
+# names what is on screen and the command that clears it, and is removed only
+# after that append succeeded, so a crash in between can repeat the wake once
+# but never lose it. Nothing here presses a key: the supervisor accepts a
+# folder-trust dialog for its own worker under the harness-adapters trust
+# rules. At most one wake is queued per poll, like the reminder tick above.
+START_CHECK_SECS=${FM_START_CHECK_SECS:-120}
+case "$START_CHECK_SECS" in ''|0*|*[!0-9]*) START_CHECK_SECS=120 ;; esac
+START_CHECK_WAKE=
+
+# 0 when <id> shows positive evidence it began its brief after <epoch>: a status
+# line or completed turn written since spawn, a busy verdict from anything but
+# the spawn's own seed, or an idle verdict that only a running worker can have
+# produced (a hook-written record, or a settled Muse or Cursor session). Idle
+# from the rendered-text fallbacks proves nothing, since a parked dialog renders
+# no busy footer either. Codex has no semantic source, so its rendered busy
+# footer counts.
+start_check_started() {  # <id> <meta> <epoch>
+  local id=$1 meta=$2 epoch=$3 f m verdict backend target
+  for f in "$STATE/$id.status" "$STATE/$id.turn-ended"; do
+    m=$(stat_mtime "$f") || continue
+    [ "$m" -gt "$epoch" ] && return 0
+  done
+  verdict=$(fm_busy_classify_meta "$meta" "$id" "$STATE")
+  case "$verdict" in
+    'busy fm-spawn') ;;
+    busy\ *) return 0 ;;
+    idle\ fm-spawn | idle\ fm-interrupt | idle\ fm-recovery | idle\ *-regex) ;;
+    idle\ *) return 0 ;;
+  esac
+  case "$(fm_meta_get "$meta" harness)" in
+    codex*)
+      backend=$(fm_backend_of_meta "$meta")
+      target=$(fm_backend_target_of_meta "$meta")
+      watcher_capture "$backend" "$target" 40 "$(window_label "$target")" || return 1
+      printf '%s' "$WATCHER_CAPTURE" | grep -v '^[[:space:]]*$' | tail -6 \
+        | fm_busy_lines_match codex && return 0
+      ;;
+  esac
+  return 1
+}
+
+# The wake reason for a launch with no start proof, classified from one fresh
+# capture: a recorded launch dialog (fm_busy_launch_prompt_name owns the table
+# and whether Enter accepts it), an exited agent, a brief left unsubmitted in
+# the composer, or no signal at all. The dialog match only sharpens the wording;
+# a vendor rewording degrades it to the generic reason and never silences it.
+# Sets START_CHECK_REASON, and START_CHECK_TAIL to the capture for the stale
+# marker; both are globals so the caller keeps the capture without a subshell.
+START_CHECK_REASON=
+START_CHECK_TAIL=
+start_check_reason() {  # <id> <meta> <harness> <age>
+  local id=$1 meta=$2 harness=$3 age=$4 backend target home row name cstate head
+  backend=$(fm_backend_of_meta "$meta")
+  target=$(fm_backend_target_of_meta "$meta")
+  home="FM_HOME=$(printf '%q' "$FM_HOME")"
+  head="check: start $id: no start signal ${age}s after spawn (harness=$harness"
+  START_CHECK_TAIL=
+  if watcher_capture "$backend" "$target" 40 "$(window_label "$target")"; then
+    START_CHECK_TAIL=$WATCHER_CAPTURE
+  fi
+  if [ -n "$START_CHECK_TAIL" ] \
+    && row=$(printf '%s' "$START_CHECK_TAIL" | fm_busy_launch_prompt_name "$harness"); then
+    name=${row%%$'\t'*}
+    if [ "${row#*$'\t'}" = enter ]; then
+      printf -v START_CHECK_REASON '%s; on screen: %s); accept: %s %q %q --key Enter' "$head" "$name" "$home" \
+        "$SCRIPT_DIR/fm-send.sh" "$id"
+    else
+      printf -v START_CHECK_REASON '%s; on screen: %s); no key accepts it: answer it in endpoint %s as the harness reference describes' \
+        "$head" "$name" "$target"
+    fi
+    return 0
+  fi
+  if [ "$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null)" = dead ]; then
+    printf -v START_CHECK_REASON '%s; worker exited before starting); relaunch: %s %q %q relaunch' "$head" "$home" \
+      "$SCRIPT_DIR/fm-control.sh" "$id"
+    return 0
+  fi
+  cstate=$(fm_backend_composer_state "$backend" "$target" "$(window_label "$target")" 2>/dev/null) || cstate=unknown
+  if [ "$cstate" = pending ]; then
+    printf -v START_CHECK_REASON '%s; instructions typed but not submitted); submit: %s %q %q --key Enter' "$head" "$home" \
+      "$SCRIPT_DIR/fm-send.sh" "$id"
+    return 0
+  fi
+  printf -v START_CHECK_REASON '%s); inspect: %s %q %q' "$head" "$home" "$SCRIPT_DIR/fm-crew-state.sh" "$id"
+}
+
+start_check_tick() {  # [now-epoch], for deterministic clock callers
+  local now=${1:-} f id epoch gen harness meta mgen reason target
+  START_CHECK_WAKE=
+  for f in "$STATE"/*.start-pending; do
+    [ -f "$f" ] || continue
+    id=${f##*/}
+    id=${id%.start-pending}
+    epoch=; gen=; harness=
+    read -r epoch gen harness _ < "$f" || true
+    meta="$STATE/$id.meta"
+    case "$epoch" in ''|*[!0-9]*) rm -f -- "$f"; continue ;; esac
+    if [ ! -f "$meta" ]; then
+      rm -f -- "$f"
+      continue
+    fi
+    mgen=$(fm_meta_get "$meta" busy_gen)
+    if [ "${mgen:--}" != "$gen" ]; then
+      rm -f -- "$f"
+      continue
+    fi
+    if start_check_started "$id" "$meta" "$epoch"; then
+      rm -f -- "$f"
+      triage_log "start check: $id started"
+      continue
+    fi
+    [ -n "$now" ] || fm_epoch_seconds_to now
+    [ "$((now - epoch))" -ge "$START_CHECK_SECS" ] || continue
+    [ -z "$START_CHECK_WAKE" ] || continue
+    start_check_reason "$id" "$meta" "$harness" "$((now - epoch))"
+    reason=$START_CHECK_REASON
+    fm_wake_append check "start:$id" "$reason" || return 1
+    rm -f -- "$f"
+    # The stale backbone absorbed this parked pane while the record stood; mark
+    # the screen this wake already named so it does not re-surface as stale.
+    target=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$target" ] && [ -n "$START_CHECK_TAIL" ]; then
+      printf '%s' "$START_CHECK_TAIL" | hash_pane > "$STATE/.stale-$(window_key "$target")"
+    fi
+    START_CHECK_WAKE=$reason
+  done
+}
+
 # The identity a re-surface throttle is bound to: the task's whole status-log
 # signature. Any new status event - a replacement wait, a fresh delivery, a
 # blocker - changes it and so starts its own window instead of inheriting the
@@ -3928,6 +4070,12 @@ while :; do
   }
   [ -z "$OPEN_DECISION_REMINDER" ] || wake "$OPEN_DECISION_REMINDER"
 
+  start_check_tick || {
+    echo 'watcher: start check failed' >&2
+    exit 1
+  }
+  [ -z "$START_CHECK_WAKE" ] || wake "$START_CHECK_WAKE"
+
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
   # is also what unsticks that mate's foreign wake queue. The tick's single
@@ -4286,7 +4434,13 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ "$kind" = secondmate ]; then
+        if [ -n "$task" ] && [ -e "$STATE/$task.start-pending" ]; then
+          # A launch with no start proof yet belongs to start_check_tick, which
+          # ran earlier this poll and wakes once with a named reason at its
+          # deadline; a bare stale here would be a second, vaguer wake.
+          printf '%s' "$h" > "$sf"
+          triage_log "absorbed stale (start check pending): $w"
+        elif [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
