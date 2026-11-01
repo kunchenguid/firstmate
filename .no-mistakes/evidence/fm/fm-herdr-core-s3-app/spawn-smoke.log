@@ -1,0 +1,124 @@
+lab core session fm-hclab-s ready (server pid 72843)
+worker appdets1 (t2) labels:
+fm-firstmate-8b91dc43
+firstmate-8b91dc43-fm-appdets1
+fm-appdets1
+firstmate-8b91dc43
+
+--- appdets1 spawn output ---
+spawned appdets1 harness=sh kind=ship mode=no-mistakes yolo=off window=fm-hclab-s:t2 worktree={run-worktree}/.live-test/home/.treehouse/scratch-project-2128ce/1/scratch-project
+NOTICE: auto-detected a Herdr-app-projected terminal (fm-hclab-s:t1 carries a herdr.space label) - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/data/appdets1/launch-brief.md records no ship branch; defaulting to legacy branch fm/appdets1
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/data/appdets1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+window=fm-hclab-s:t2
+endpoint_task_id=appdets1
+worktree={run-worktree}/.live-test/home/.treehouse/scratch-project-2128ce/1/scratch-project
+project={run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/scratch-project
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=fm/appdets1
+tasktmp=/tmp/fm-appdets1
+model=default
+effort=default
+spawn_gen=s1793535406.73358.25767
+backend=hc
+backend_detect=app-terminal
+hc_session=fm-hclab-s
+hc_terminal=t2
+ok - app-terminal: spawn env claiming a herdr.space-labeled terminal auto-selects hc, notices, records backend_detect=app-terminal, and labels the worker
+worker appdetw1 (t3) labels:
+fm-firstmate-8b91dc43
+firstmate-8b91dc43-fm-appdetw1
+fm-appdetw1
+firstmate-8b91dc43
+
+--- appdetw1 spawn output ---
+spawned appdetw1 harness=sh kind=ship mode=no-mistakes yolo=off window=fm-hclab-s:t3 worktree={run-worktree}/.live-test/home/.treehouse/scratch-project-2128ce/1/scratch-project
+NOTICE: auto-detected a live Herdr app window (~/.no-mistakes/evidence/01M6BF92S5VA9MF5NGKG3RB8MN/app.bKWVKB/herdr-app.sock) over the running hc session 'fm-hclab-s' - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/data/appdetw1/launch-brief.md records no ship branch; defaulting to legacy branch fm/appdetw1
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/data/appdetw1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+window=fm-hclab-s:t3
+endpoint_task_id=appdetw1
+worktree={run-worktree}/.live-test/home/.treehouse/scratch-project-2128ce/1/scratch-project
+project={run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/scratch-project
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=fm/appdetw1
+tasktmp=/tmp/fm-appdetw1
+model=default
+effort=default
+spawn_gen=s1793535423.88679.30407
+backend=hc
+backend_detect=app-window
+hc_session=fm-hclab-s
+hc_terminal=t3
+ok - app-window: a live herdr-app.sock under the resolved app home auto-selects hc with backend_detect=app-window
+ok - app-window: a live window over a session with no running core keeps the default and starts nothing
+
+--- appdetc1 spawn output ---
+spawned appdetc1 harness=sh kind=ship mode=no-mistakes yolo=off window=fm-hclab-s:t5 worktree={run-worktree}/.live-test/home/.treehouse/scratch-project-2128ce/1/scratch-project
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/data/appdetc1/launch-brief.md records no ship branch; defaulting to legacy branch fm/appdetc1
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/data/appdetc1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+window=fm-hclab-s:t5
+endpoint_task_id=appdetc1
+worktree={run-worktree}/.live-test/home/.treehouse/scratch-project-2128ce/1/scratch-project
+project={run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/scratch-project
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=fm/appdetc1
+tasktmp=/tmp/fm-appdetc1
+model=default
+effort=default
+spawn_gen=s1793535439.97407.14092
+backend=hc
+hc_session=fm-hclab-s
+hc_terminal=t5
+ok - explicit: config/backend=hc wins over the app signals and records no detection provenance
+
+--- appdetcli1 spawn output ---
+spawned appdetcli1 harness=sh kind=ship mode=no-mistakes yolo=off window=fm-hclab-s:t6 worktree={run-worktree}/.live-test/home/.treehouse/scratch-project-2128ce/1/scratch-project
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/data/appdetcli1/launch-brief.md records no ship branch; defaulting to legacy branch fm/appdetcli1
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/data/appdetcli1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+window=fm-hclab-s:t6
+endpoint_task_id=appdetcli1
+worktree={run-worktree}/.live-test/home/.treehouse/scratch-project-2128ce/1/scratch-project
+project={run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/scratch-project
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=fm/appdetcli1
+tasktmp=/tmp/fm-appdetcli1
+model=default
+effort=default
+spawn_gen=s1793535454.8189.899
+backend=hc
+hc_session=fm-hclab-s
+hc_terminal=t6
+ok - explicit --backend hc overrides config/backend=tmux and app signals without detection metadata
+
+--- appdettmux1 spawn output ---
+spawned appdettmux1 harness=sh kind=ship mode=no-mistakes yolo=off window=primary:fm-appdettmux1 worktree={run-worktree}/.live-test/home/.treehouse/scratch-project-2128ce/1/scratch-project
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/data/appdettmux1/launch-brief.md records no ship branch; defaulting to legacy branch fm/appdettmux1
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/data/appdettmux1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+window=primary:fm-appdettmux1
+endpoint_task_id=appdettmux1
+worktree={run-worktree}/.live-test/home/.treehouse/scratch-project-2128ce/1/scratch-project
+project={run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.oZ7LZR/scratch-project
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+branch=fm/appdettmux1
+tasktmp=/tmp/fm-appdettmux1
+model=default
+effort=default
+spawn_gen=s1793535469.20539.20232
+ok - default tmux spawn retains metadata without backend or backend_detect and stays silent
+FM_TEST_COMPLETE

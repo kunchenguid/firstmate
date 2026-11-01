@@ -1,0 +1,5 @@
+{"error":{"hint":"use a shorter HC_SESSION (or socket in the config)","kind":"usage","message":"the socket path for session \"fm-hclab-a-42078-29994\" is too long here (109 bytes; this system allows 103)"}}
+{"error":{"hint":"see `hc ls --all`","kind":"not_found","message":"no terminal \"t3\""}}
+{"error":{"hint":"see `hc ls --all`","kind":"not_found","message":"no terminal \"t2\""}}
+{"error":{"hint":"see `hc ls --all`","kind":"not_found","message":"no terminal \"t3\""}}
+{"error":{"hint":"see `hc ls --all`","kind":"not_found","message":"no terminal \"t5\""}}

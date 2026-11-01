@@ -1,0 +1,38 @@
+ok - fm_backend_name: FM_BACKEND env > config/backend > default tmux
+ok - T3 requires explicit backend selection even with a configured server
+ok - fm_backend_detect: no markers -> undetected, HERDR_ENV=1 -> herdr, $TMUX -> tmux, CMUX_WORKSPACE_ID -> cmux, nested combinations resolve innermost-first
+ok - fm_backend_detect: falls back to __CFBundleIdentifier=com.cmuxterm.app when CMUX_WORKSPACE_ID is absent (signal bundle-id; foreign bundle ids rejected)
+ok - fm_backend_detect: the cmux fallback signals are macOS-only (inert on a non-Darwin uname)
+ok - fm_backend_detect: an inherited cmux bundle id never outranks $TMUX or HERDR_ENV (tmux/herdr-inside-cmux false positive absorbed)
+ok - fm_backend_detect: ancestry fallback matches the lsappinfo-resolved (bundle-id) cmux app pid in the parent chain
+ok - fm_backend_detect: ancestry fallback matches a bundle-shaped cmux comm path at any install location when lsappinfo cannot resolve a pid
+ok - fm_backend_detect: ancestry fallback stops undetected at launchd (a reparented tmux server never reaches cmux)
+ok - fm_backend_name: a fallback-detected cmux prints a NOTICE naming the fallback signal; the primary-marker notice is unchanged
+ok - fm_backend_name: verified Herdr and tmux stay silent while experimental cmux remains loud
+ok - fm_backend_detect/fm_backend_name: paseo is never auto-detected from PASEO_* markers or its bundle id (tmux default stays silent); only FM_BACKEND or config/backend select it
+ok - fm_backend_detect/fm_backend_name: TERM_PROGRAM=rex + REX_BLOCK -> rex (silent); nested tmux/herdr win; REX_BLOCK alone never selects rex; explicit config wins
+ok - fm_backend_detect: app-terminal (live spawn core + herdr.space label) and app-window (live herdr-app.sock over a running spawn core) select hc; another core, a stopped core, dead/stale/missing evidence, and unusable toolchains never switch
+ok - fm_backend_name: a live app window over a running core resolves hc with a loud signal-named notice; explicit settings win silently; an unusable toolchain or a stopped spawn core keeps the default and says why
+ok - fm_backend_detect/fm_backend_name: tern is never auto-detected from TERM_PROGRAM/TERN_PANE (tmux default stays silent, a nested tmux or herdr still detects itself); only FM_BACKEND or config/backend select it
+ok - fm_backend dispatch tables: tern requires tern+jq+treehouse, has visible capture, declares no push stream
+ok - fm_backend_name: an explicit FM_BACKEND or config/backend setting always wins over runtime auto-detection, including an ambient cmux marker
+ok - fm_backend_validate: implemented adapters accepted, unknown and blocked codex-app backends refused loudly
+ok - zsh: fm_backend_source recognizes known backends and rejects unknown ones
+ok - zsh: fm_backend_source keeps PATH intact while loading a backend adapter
+ok - bash: fm_backend_source recognizes known backends and rejects unknown ones
+ok - fm_backend_source: missing adapter fails before lifecycle continuation
+ok - fm_backend_source: unreadable adapter fails before lifecycle continuation
+ok - fm_backend_validate_spawn: all implemented lifecycle backends are spawn-supported
+ok - fm_meta_get / fm_backend_of_meta: read last key=value and default backend to tmux
+ok - fm_backend_resolve_selector: session:window literal, exact task id first, legacy fm-<id> label fallback, ad hoc bare name via tmux list-windows
+ok - fm_backend_of_selector: exact task ids, legacy fm-<id> labels, and matching explicit targets inherit metadata backend
+ok - fm-send.sh: explicit tmux targets are verified; text types once and submits with Enter
+ok - fm-peek.sh: capture-pane invocation and output are byte-identical old vs new
+ok - fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal
+ok - fm-teardown.sh: treehouse return remains compatible while tmux cleanup uses exact selectors
+ok - fm-spawn.sh --backend bogus is refused loudly
+ok - fm-spawn.sh --backend codex-app is refused
+ok - fm-spawn.sh honors FM_BACKEND and refuses an unimplemented value loudly
+ok - fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)
+ok - fm-spawn.sh: explicit --backend tmux wins over an ambient HERDR_ENV=1 auto-detect marker
+ok - fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end

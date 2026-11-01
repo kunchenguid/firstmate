@@ -1,0 +1,50 @@
+lab core session fm-hclab-s ready (server pid 95669)
+{"hidden_finished":0,"terminals":[{"address":"t1","agent":"zsh","cwd":"{run-worktree}","state":"live","turn":0},{"address":"t2","agent":"zsh","cwd":"{run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.GHJQWk/scratch-project","state":"live","turn":0}]}
+This is the Z Shell configuration function for new users,
+zsh-newuser-install.
+You are seeing this message because you have no zsh startup files
+(the files .zshenv, .zprofile, .zshrc, .zlogin in the directory
+~).  This function can help you with a few settings that should
+make your use of the shell easier.
+
+You can:
+
+(q)  Quit and do nothing.  The function will be run again next time.
+
+(0)  Exit, creating the file ~/.zshrc containing just a comment.
+     That will prevent this function being run again.
+
+(1)  Continue to the main menu.
+
+--- Type one of the keys in parentheses ---
+This is the Z Shell configuration function for new users,
+zsh-newuser-install.
+You are seeing this message because you have no zsh startup files
+(the files .zshenv, .zprofile, .zshrc, .zlogin in the directory
+~).  This function can help you with a few settings that should
+make your use of the shell easier.
+
+You can:
+
+(q)  Quit and do nothing.  The function will be run again next time.
+
+(0)  Exit, creating the file ~/.zshrc containing just a comment.
+     That will prevent this function being run again.
+
+(1)  Continue to the main menu.
+
+--- Type one of the keys in parentheses --- treehouse get
+Aborting.
+The function will be run again next time.  To prevent this, execute:
+  touch ~/.zshrc
+kunchen@Kuns-Mac-mini:{run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.GHJQWk/scratch-project/ > reehouse get
+zsh: command not found: reehouse
+kunchen@Kuns-Mac-mini:{run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.GHJQWk/scratch-project/ >
+not ok - fm-spawn.sh under the app-terminal signal failed
+--- stdout ---
+
+--- stderr ---
+NOTICE: auto-detected a Herdr-app-projected terminal (fm-hclab-s:t1 carries a herdr.space label) - spawning into the EXPERIMENTAL hc backend with Herdr app presentation (herdr.space/herdr.tab labels). Set config/backend or pass --backend <name> to opt out.
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.GHJQWk/data/appdets1/launch-brief.md records no ship branch; defaulting to legacy branch fm/appdets1
+warning: {run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.GHJQWk/data/appdets1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+error: treehouse get did not enter an isolated worktree within 60s (last seen '{run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.GHJQWk/scratch-project': it is the spawning project itself; spawning project '{run-worktree}/.live-test/tmp/fm-backend-hc-appdetect.GHJQWk/scratch-project'); inspect window fm-hclab-s:t2
