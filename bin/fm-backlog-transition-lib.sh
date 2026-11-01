@@ -42,10 +42,10 @@
 # with it the completion links, so a process killed between the two halves would
 # leave nothing to reconstruct the close from. It writes
 # `state/<id>.backlog-close` first, and removes it once the close lands.
-# The writer and replay share one complete-record validator, and teardown stages
-# that record before destructive cleanup, so it never publishes or acts on a close
-# replay would reject. The validator pins the data path to this home's configured
-# root before any recovery mutation, then re-runs exactly that close.
+# The writer and replay share one complete-record validator, so teardown never
+# publishes or acts on a close replay would reject. The validator pins the data
+# path to this home's configured root before any recovery mutation, then re-runs
+# exactly that close.
 # `tasks-axi done` on an already-closed task backfills links
 # without moving the close date, so replay is idempotent. Spawn needs no marker:
 # it publishes the meta first, so a crash

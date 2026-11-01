@@ -175,7 +175,7 @@ It remains on the appropriate Captain's Call or Charted Next decision surface in
 
 ### Interrupted cleanup
 
-Teardown already stages a pending-close record before destructive cleanup.
+[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns when teardown publishes its pending-close record.
 That record carries the retention intent as a `mode=retain` line.
 An interrupted cleanup therefore replays the retention at the next session start through the same record, validator, and lock as an ordinary close, and never closes the row.
 

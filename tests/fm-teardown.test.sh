@@ -5945,8 +5945,134 @@ test_status_archive_nested_secondmate_children() {
   pass "forced secondmate retirement preserves two descendant levels and refuses linked child directories"
 }
 
+# A fake lsof marks the first reaper scan and writes the worker's last change
+# after the initial landed-work proof. No real endpoint or pool is touched.
+test_work_written_at_reap_boundary_is_preserved() {
+  local backend change case_dir rc before kind replay_rc failed=0
+  for backend in orca tmux; do
+    for change in reap-refusal tracked untracked commit clean force scout; do
+      (
+      case_dir=$(make_case "post-reap-$backend-$change")
+      kind=ship
+      [ "$change" != scout ] || kind=scout
+      write_meta "$case_dir" no-mistakes "$kind"
+      wt_commit_file "$case_dir" worker.txt baseline
+      add_fork_with_pushed_branch "$case_dir"
+      before=$(git -C "$case_dir/wt" rev-parse HEAD)
+      seed_backlog_in_flight "$case_dir" "$kind"
+      mkdir -p "$case_dir/data/task-x1" "$case_dir/state/task-x1.inbox"
+      printf 'report\n' > "$case_dir/data/task-x1/report.md"
+      printf 'working: retained history\n' > "$case_dir/state/task-x1.status"
+      printf 'retained steer\n' > "$case_dir/state/task-x1.inbox/001.msg"
+      printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$case_dir/state/task-x1.meta"
+      if [ "$backend" = orca ]; then
+        sed 's/^window=.*/window=fm-task-x1/' "$case_dir/state/task-x1.meta" > "$case_dir/meta-new"
+        mv "$case_dir/meta-new" "$case_dir/state/task-x1.meta"
+        printf 'backend=orca\nterminal=term-test\norca_worktree_id=wt-test::/orca/wt-test\n' >> "$case_dir/state/task-x1.meta"
+      fi
+      cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+if [ ! -e "$FM_REAP_CASE/reap-boundary" ]; then
+  : > "$FM_REAP_CASE/reap-boundary"
+  case "$FM_REAP_CHANGE" in
+    reap-refusal|tracked|force|scout) printf 'late edit\n' > "$FM_REAP_CASE/wt/worker.txt" ;;
+    untracked) printf 'late file\n' > "$FM_REAP_CASE/wt/late.txt" ;;
+    commit)
+      printf 'late commit\n' > "$FM_REAP_CASE/wt/worker.txt"
+      "$REAL_GIT_FOR_TEST" -C "$FM_REAP_CASE/wt" add worker.txt
+      "$REAL_GIT_FOR_TEST" -C "$FM_REAP_CASE/wt" commit -qm 'late worker commit' || exit 2
+      ;;
+  esac
+fi
+[ "$FM_REAP_CHANGE" != reap-refusal ] || exit 1
+exit 0
+SH
+      cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'return\n' >> "$FM_REAP_CASE/removal.log"
+exit 0
+SH
+      cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'worktree show')
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-test::/orca/wt-test","path":"%s"}}}\n' "$FM_REAP_CASE/wt" ;;
+  'worktree rm')
+    printf 'remove\n' >> "$FM_REAP_CASE/removal.log"
+    printf '{"ok":true,"result":{}}\n' ;;
+  'terminal close') printf '{"ok":true,"result":{}}\n' ;;
+  *) printf '{"ok":true,"result":{}}\n' ;;
+esac
+SH
+      chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse" "$case_dir/fakebin/orca"
+      rc=0
+      if [ "$change" = force ]; then
+        FM_HOME="$case_dir" FM_REAP_CASE="$case_dir" FM_REAP_CHANGE="$change" \
+          run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      else
+        FM_HOME="$case_dir" FM_REAP_CASE="$case_dir" FM_REAP_CHANGE="$change" \
+          run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      fi
+      assert_present "$case_dir/reap-boundary" "$backend/$change: did not reach the reaper: $(cat "$case_dir/stderr")"
+      case "$change" in
+        reap-refusal|tracked|untracked|commit)
+          expect_code 1 "$rc" "$backend/$change: late work must refuse teardown"
+          assert_grep REFUSED "$case_dir/stderr" "$backend/$change: refusal missing"
+          if [ "$change" = reap-refusal ]; then
+            assert_grep 'lsof failed' "$case_dir/stderr" "$backend/$change: reaper refusal missing"
+          fi
+          assert_absent "$case_dir/removal.log" "$backend/$change: returned or removed late work"
+          [ "$(git -C "$case_dir/wt" symbolic-ref --short HEAD)" = fm/task-x1 ] \
+            || fail "$backend/$change: task branch was detached or deleted"
+          if [ "$change" = commit ]; then
+            [ "$(git -C "$case_dir/wt" rev-parse HEAD)" != "$before" ] \
+              || fail "$backend/$change: late commit missing"
+            assert_grep 'late commit' "$case_dir/wt/worker.txt" "$backend/$change: late bytes missing"
+          elif [ "$change" = tracked ] || [ "$change" = reap-refusal ]; then
+            assert_grep 'late edit' "$case_dir/wt/worker.txt" "$backend/$change: late edit missing"
+          else
+            assert_grep 'late file' "$case_dir/wt/late.txt" "$backend/$change: late file missing"
+          fi
+          # Startup replay must not consume the retained task through a close
+          # marker prepared before the second proof refused.
+          replay_rc=0
+          FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+            . "$1/bin/fm-tasks-axi-lib.sh"
+            . "$1/bin/fm-backlog-transition-lib.sh"
+            fm_backlog_close_marker_replay "$2/state" "$2/state/task-x1.backlog-close" "$2/data" || {
+              printf "replay failed: %s\n" "$FM_BACKLOG_TRANSITION_ERROR" >&2
+              exit 1
+            }
+          ' _ "$ROOT" "$case_dir" || replay_rc=$?
+          if [ "$change" = reap-refusal ]; then
+            printf '%s: teardown_exit=%s replay_exit=%s metadata_after_replay=%s backlog_after_replay=%s\n' \
+              "$backend/$change" "$rc" "$replay_rc" \
+              "$(if [ -f "$case_dir/state/task-x1.meta" ]; then printf retained; else printf missing; fi)" \
+              "$(backlog_row_state "$case_dir")"
+          fi
+          expect_code 0 "$replay_rc" "$backend/$change: replay failed"
+          assert_present "$case_dir/state/task-x1.meta" "$backend/$change: metadata lost"
+          assert_present "$case_dir/state/task-x1.status" "$backend/$change: status lost"
+          assert_present "$case_dir/state/task-x1.inbox/001.msg" "$backend/$change: inbox lost"
+          [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+            || fail "$backend/$change: backlog closed despite retained work"
+          ;;
+        *)
+          expect_code 0 "$rc" "$backend/$change: authorized teardown should complete: $(cat "$case_dir/stderr")"
+          assert_present "$case_dir/removal.log" "$backend/$change: removal missing"
+          assert_absent "$case_dir/state/task-x1.meta" "$backend/$change: cleanup incomplete"
+          ;;
+      esac
+      ) || failed=$((failed + 1))
+    done
+  done
+  [ "$failed" -eq 0 ] || fail "$failed post-reap boundary cases failed"
+  pass "post-reap proof retains late work and retry records on ordinary and Orca paths, preserving clean/force/scout behavior"
+}
+
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
+test_work_written_at_reap_boundary_is_preserved
 test_status_archive_opt_in
 test_record_export_config_absent_never_reads_the_exporter
 test_record_export_unopted_symlinked_config_does_not_block_teardown
