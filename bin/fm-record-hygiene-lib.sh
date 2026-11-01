@@ -99,7 +99,11 @@ record_hygiene_report() {
       return 0
     fi
     while IFS= read -r id; do
-      [ -n "$id" ] && [ ! -e "$STATE/$id.meta" ] && echo "RECORD_HYGIENE: In-flight backlog row without metadata: $id"
+      [ -n "$id" ] || continue
+      case "$id" in
+        */*) echo "RECORD_HYGIENE: In-flight backlog row without metadata: $id" ;;
+        *) [ -f "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] || echo "RECORD_HYGIENE: In-flight backlog row without metadata: $id" ;;
+      esac
     done < <(printf '%s\n' "$output" | awk '
       /^tasks\[[0-9][0-9]*\]\{/ { rows=1; next }
       rows && /^[[:space:]]/ {

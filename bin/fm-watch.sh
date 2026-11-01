@@ -4519,8 +4519,7 @@ EOF
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
     if [ -e "$hygiene_running" ]; then
       hygiene_owner=$(cat "$hygiene_running" 2>/dev/null || true)
-      hygiene_pid=${hygiene_owner%% *}
-      hygiene_started=${hygiene_owner#* }
+      IFS=$'\t' read -r hygiene_pid hygiene_started <<< "$hygiene_owner"
       hygiene_live_start=''
       case "$hygiene_pid" in ''|*[!0-9]*) ;; *)
         kill -0 "$hygiene_pid" 2>/dev/null && hygiene_live_start=$(ps -o lstart= -p "$hygiene_pid" 2>/dev/null | sed 's/^[[:space:]]*//') ;;
@@ -4555,7 +4554,7 @@ EOF
       ) >/dev/null 2>&1 &
       hygiene_worker=$!
       hygiene_started=$(ps -o lstart= -p "$hygiene_worker" 2>/dev/null | sed 's/^[[:space:]]*//')
-      printf '%s %s\n' "$hygiene_worker" "$hygiene_started" > "$hygiene_running"
+      printf '%s\t%s\n' "$hygiene_worker" "$hygiene_started" > "$hygiene_running"
     fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the

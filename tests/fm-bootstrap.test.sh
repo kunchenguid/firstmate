@@ -280,11 +280,13 @@ case "${1:-}" in
   mv) echo 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
   list)
     case " $* " in *' --fields id '*) echo 'unsupported extra field: id' >&2; exit 2 ;; esac
-    printf 'count: 2\ntasks[1]{id}:\n  missing-record\ntasks[2]{id}:\n  "missing,record",extra\n'
+    printf 'count: 3\ntasks[1]{id}:\n  missing-record\ntasks[2]{id}:\n  "missing,record",extra\ntasks[3]{id}:\n  nested/task\n'
     ;;
 esac
 SH
   chmod +x "$fakebin/tasks-axi"
+  mkdir -p "$case_dir/home/state/nested"
+  printf '%s\n' 'kind=ship' > "$case_dir/home/state/nested/task.meta"
   printf '%s\n' 'failed [at=1]: fixture orphan' > "$case_dir/home/state/orphan.status"
   touch -t 202001010000 "$case_dir/home/state/orphan.status"
   printf '%s\n' 'pr=https://example.test/pull/42' > "$case_dir/home/state/first.meta"
@@ -315,6 +317,8 @@ SH
     "bootstrap did not report an In-flight row without a task record"
   assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: missing,record' \
     "bootstrap truncated a comma-containing in-flight ID"
+  assert_contains "$out" 'RECORD_HYGIENE: In-flight backlog row without metadata: nested/task' \\
+    "bootstrap matched a nested metadata path as a top-level record"
   assert_contains "$out" 'RECORD_HYGIENE: metadata has no tab: no-window' \
     "bootstrap did not report metadata without a tab independently of endpoint state"
   assert_contains "$out" 'RECORD_HYGIENE: duplicate PR https://example.test/pull/42 in records: first, second' \
