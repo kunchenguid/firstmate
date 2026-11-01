@@ -2357,7 +2357,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
   # now", and an unreachable endpoint can still hold the live agent this
   # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - and only HERDR and REX can prove it:
+  # inferred from a failed read - and only HERDR and REX can prove it (tmux and
+  # hc refuse):
   #   herdr - the recorded session's server is started, and the recorded pane is
   #           RE-READ through that session's own socket. `dead` means the pane
   #           survived the restart and is adopted after all; `alive` means the
@@ -2375,6 +2376,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #           from "on a server I cannot see". A tmux `missing` therefore stays
   #           as deadlocked as it was before this change - deliberately, and
   #           with the reason stated rather than guessed past.
+  #   hc    - REFUSES, always, for the same reason: the record holds only
+  #           hc_session and hc_terminal, and a fresh core or another runtime
+  #           dir answers not_found, so a missing or finished terminal is
+  #           never proof the agent is gone.
   # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
   # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
   # owns that vocabulary). The proof itself lives in one place for the whole
