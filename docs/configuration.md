@@ -698,7 +698,7 @@ Selecting any other supervisor backend, including `zellij`, `orca`, `cmux`, or `
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
-When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
+When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a rate-limited alarm.
 Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-line flash, it attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
 
 ### Channels and overrides
@@ -706,11 +706,11 @@ Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-li
 `config/wedge-alarm` (local, gitignored) lists channel directives, one per non-empty, non-comment line; every listed non-`off` channel fires, best-effort.
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with a single directive.
 
-Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
-An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisely so a wedged away-mode primary is never silent, and it fires at most once per max-defer window after a genuine wedge.
+Channel directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
+An absent file means `auto`, i.e. default-on on macOS: the alarm exists so a wedged away-mode primary stays visible, and it fires at most once per max-defer window after a genuine wedge.
 
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
-See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
+See [`wedge-alarm.md`](wedge-alarm.md) for the channel and sound-preference reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
@@ -2335,7 +2335,11 @@ This section is the single owner of the canonical schema.
 <window-id>:<percent>
 ```
 
-One directive per non-empty, non-comment line, split on the last colon so a per-model window id such as `model:fable` still parses.
+An optional `sound:off` directive requests a silent Notification Center banner; without it the existing system-default sound behavior is unchanged.
+`sound:off` alone does not enable the warner without a threshold.
+Append the preference without opening an editor with `printf '\nsound:off\n' >> "${FM_HOME:-.}/config/usage-warner"`; delete that line to restore sound.
+
+One threshold directive per non-empty, non-comment line, split on the last colon so a per-model window id such as `model:fable` still parses.
 `<window-id>` is exactly the `id` field `quota-axi`'s own `--json` output already uses.
 `<percent>` is how much of that window has been CONSUMED, a whole number from 1 to 100, compared against the window's own `percentUsed`: `seven_day:90` warns once the weekly window is 90% used, with 10% of it left.
 See [`usage-warner.md`](usage-warner.md) for the full behaviour reference and [`docs/examples/usage-warner`](examples/usage-warner) for a starting point to copy into local `config/usage-warner`.
