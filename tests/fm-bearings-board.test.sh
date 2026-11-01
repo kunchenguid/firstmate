@@ -731,6 +731,10 @@ test_every_decision_card_carries_the_reconcile_choice() {
         and ([.options[] | select(.value == "reconcile") | .label | length > 0] | all)] | all)
   ' >/dev/null || fail "a decision card was published without the reconcile choice"
   extract_payload "$board" | jq -e '
+    [.captains_call[] | select(.type == "decision")
+      | .options[] | select(.value == "reconcile") | .hint | startswith("Not an answer")] | all
+  ' >/dev/null || fail "the reconcile choice does not tell the captain it is not an answer"
+  extract_payload "$board" | jq -e '
     ([.captains_call[] | select(.type != "decision")
       | .options[] | select(.value == "reconcile")] | length) == 0
   ' >/dev/null || fail "reconcile was injected into a non-decision card"

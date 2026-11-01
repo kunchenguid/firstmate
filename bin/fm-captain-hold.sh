@@ -33,8 +33,8 @@
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
-#   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
-#   fm-captain-hold.sh reconcile note <task-id> --note-file <path>
+#   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path> [--captain-note-handled]
+#   fm-captain-hold.sh reconcile note <task-id> --note-file <path> [--captain-note-handled]
 #
 # `hold` places an existing task under an active captain hold, or creates the
 # task first when no work item exists to hold (--title required to create; the
@@ -111,15 +111,21 @@
 # visibly refuses it, and never passes it to `answer`, so no channel and no
 # card-declared mode can turn it into a close, release, or request. A separate
 # `reconcile-requests` intake verifies a captured source's binding before it
-# records a durable request under `state/reconcile-requests/`.
+# records a durable request under `state/reconcile-requests/`. A note the
+# captain typed with the selection is kept on that request as its captain note,
+# apart from the provenance, and is never parsed.
 #
 # `reconcile` is the verify-then-decide half. Both outcomes require the pending
 # request created by the captain's board selection. `close` is the moot outcome:
 # it requires the evidence that made the call moot, writes a `reconciled` resolution record
 # under a `Reconciliation evidence:` label so it can never read as the
 # captain's words, and closes the task. `note` is the still-active outcome: it
-# appends one dated `Captain hold reconciled:` note and leaves the hold in
-# place. A normal answer also retires the request because the call is settled.
+# appends one dated `Captain hold reconciled:` note, carrying any captain note
+# under a `Captain note:` label, and leaves the hold in place. While a request
+# carries a captain note, both outcomes refuse and print those words unless
+# `--captain-note-handled` states that the invoking agent already acted on
+# them; words that decide the call go through `answer` instead. A normal
+# answer also retires the request because the call is settled.
 # `list` is the read-only enumeration.
 # docs/captain-hold-lifecycle.md owns the semantics.
 #
@@ -1679,21 +1685,37 @@ RECONCILE_VALUE=reconcile
 
 reconcile_request_path() { printf '%s/%s.request\n' "$RECONCILE_DIR" "$1"; }
 
-# Idempotent per task: a repeated reconcile keeps the one request and its
-# original timestamp, so a re-delivered board answer never resets the clock on
-# an obligation that is already open.
-reconcile_request_record() {  # <task-id> <provenance>
-  local id=$1 source=$2 path tmp
+# Idempotent per task: a repeated reconcile keeps the one request with its
+# original timestamp and provenance, so a re-delivered board answer never resets
+# the clock on an obligation that is already open. Captain words that arrive on
+# a later selection are still added to that request's captain note.
+reconcile_request_record() {  # <task-id> <provenance> [<captain-note>]; sets RECONCILE_RECORDED
+  local id=$1 source=$2 note path tmp stored=''
+  note=$(sanitize_field "${3:-}")
   path=$(reconcile_request_path "$id")
-  [ ! -e "$path" ] || return 0
+  RECONCILE_RECORDED=created
+  if [ -e "$path" ]; then
+    RECONCILE_RECORDED=unchanged
+    [ -n "$note" ] || return 0
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    stored=$(sed -n 's/^note=//p' "$path" | head -1)
+    case "; $stored; " in *"; $note; "*) return 0 ;; esac
+    RECONCILE_RECORDED=updated
+  fi
   (umask 077; mkdir -p "$RECONCILE_DIR") || return 1
   [ -d "$RECONCILE_DIR" ] && [ ! -L "$RECONCILE_DIR" ] || return 1
   tmp=$(umask 077; mktemp "$RECONCILE_DIR/.request.XXXXXX") || return 1
   if {
-    printf 'schema=%s\n' "$RECONCILE_SCHEMA"
-    printf 'task=%s\n' "$id"
-    printf 'requested=%s\n' "${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-    printf 'source=%s\n' "$(sanitize_reconcile_provenance "$source")"
+    if [ "$RECONCILE_RECORDED" = updated ]; then
+      grep -v '^note=' "$path"
+      printf 'note=%s\n' "${stored:+$stored; }$note"
+    else
+      printf 'schema=%s\n' "$RECONCILE_SCHEMA"
+      printf 'task=%s\n' "$id"
+      printf 'requested=%s\n' "${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+      printf 'source=%s\n' "$(sanitize_reconcile_provenance "$source")"
+      [ -z "$note" ] || printf 'note=%s\n' "$note"
+    fi
   } > "$tmp" && chmod 0600 "$tmp" && mv -f -- "$tmp" "$path"; then
     return 0
   fi
@@ -1701,7 +1723,7 @@ reconcile_request_record() {  # <task-id> <provenance>
   return 1
 }
 
-reconcile_request_read() {  # <task-id>; sets RECONCILE_REQUESTED/RECONCILE_SOURCE
+reconcile_request_read() {  # <task-id>; sets RECONCILE_REQUESTED/RECONCILE_SOURCE/RECONCILE_NOTE
   local id=$1 path schema task
   path=$(reconcile_request_path "$id")
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -1711,6 +1733,16 @@ reconcile_request_read() {  # <task-id>; sets RECONCILE_REQUESTED/RECONCILE_SOUR
   [ "$task" = "$id" ] || fail "reconcile request names a different task: $path"
   RECONCILE_REQUESTED=$(sed -n 's/^requested=//p' "$path" | head -1)
   RECONCILE_SOURCE=$(sed -n 's/^source=//p' "$path" | head -1)
+  RECONCILE_NOTE=$(sed -n 's/^note=//p' "$path" | head -1)
+}
+
+# Reconcile is never the captain's answer, yet the words typed beside it are
+# theirs, so neither non-answer outcome may retire them unread. No prose is
+# interpreted here: the invoking agent records deciding words through `answer`,
+# or states with the flag that it acted on them some other way.
+reconcile_captain_note_gate() {  # <task-id> <handled 0|1>; after reconcile_request_read
+  [ -n "$RECONCILE_NOTE" ] && [ "$2" != 1 ] || return 0
+  fail "task $1's reconcile request carries the captain's own words: \"$RECONCILE_NOTE\". Reconcile is never their answer: when these words decide the call, record them with answer $1 --decision-file <path> (add --release for gated work), which also retires this request; otherwise act on them and reply to the captain, then retry with --captain-note-handled"
 }
 
 reconcile_request_retire() {  # <task-id>
@@ -1729,7 +1761,7 @@ publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
 }
 
 command_reconcile_requests() {
-  local source_id='' source='' origin row id note provenance show show_status=0 created=0 skipped=0 tab=$'\t'
+  local source_id='' source='' origin row id note show show_status=0 created=0 updated=0 unchanged=0 skipped=0 tab=$'\t'
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source-id) shift; source_id=${1:-} ;;
@@ -1771,11 +1803,12 @@ command_reconcile_requests() {
       printf 'refused: %s (not held for the captain)\n' "$id"
       skipped=$((skipped + 1))
     else
-      provenance=$source
-      [ -z "$note" ] || provenance="$source; captain note: $(sanitize_field "$note")"
-      if reconcile_request_record "$id" "$provenance"; then
-        printf 'reconcile: %s\n' "$id"
-        created=$((created + 1))
+      if reconcile_request_record "$id" "$source" "$note"; then
+        case "$RECONCILE_RECORDED" in
+          created) printf 'reconcile: %s\n' "$id"; created=$((created + 1)) ;;
+          updated) printf 'reconcile: %s (captain note added to the pending request)\n' "$id"; updated=$((updated + 1)) ;;
+          *) printf 'reconcile: %s (already pending)\n' "$id"; unchanged=$((unchanged + 1)) ;;
+        esac
       else
         printf 'refused: %s (cannot record the reconcile request)\n' "$id"
         skipped=$((skipped + 1))
@@ -1783,7 +1816,7 @@ command_reconcile_requests() {
     fi
     release_task_control_lock || fail "cannot release task control for $id"
   done
-  printf 'reconcile-requests: created=%s skipped=%s\n' "$created" "$skipped"
+  printf 'reconcile-requests: created=%s updated=%s unchanged=%s skipped=%s\n' "$created" "$updated" "$unchanged" "$skipped"
   [ "$skipped" -eq 0 ]
 }
 
@@ -1808,8 +1841,11 @@ reconcile_list() {
     id=${path##*/}; id=${id%.request}
     RECONCILE_REQUESTED=''
     RECONCILE_SOURCE=''
+    RECONCILE_NOTE=''
     reconcile_request_read "$id" || continue
-    printf '%s\trequested=%s\tsource=%s\n' "$id" "$RECONCILE_REQUESTED" "$RECONCILE_SOURCE"
+    printf '%s\trequested=%s\tsource=%s' "$id" "$RECONCILE_REQUESTED" "$RECONCILE_SOURCE"
+    [ -z "$RECONCILE_NOTE" ] || printf '\tcaptain_note=%s' "$RECONCILE_NOTE"
+    printf '\n'
     count=$((count + 1))
   done
   printf 'reconcile-requests: %s\n' "$count"
@@ -1818,12 +1854,13 @@ reconcile_list() {
 # The moot outcome. The evidence is what closes the call, and the `reconciled`
 # resolution mode is what keeps the record from claiming the captain answered.
 reconcile_close() {
-  local id=${1:-} evidence_file='' show state hold_kind body occurrence recorded_mode
+  local id=${1:-} evidence_file='' note_handled=0 show state hold_kind body occurrence recorded_mode
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --evidence-file) shift; evidence_file=${1:-} ;;
+      --captain-note-handled) note_handled=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -1834,6 +1871,7 @@ reconcile_close() {
   acquire_task_control_lock "$id"
   reconcile_request_read "$id" \
     || fail "task $id has no pending board-created reconcile request"
+  reconcile_captain_note_gate "$id" "$note_handled"
   require_tasks_axi
   task_show_or_fail "$id" "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
   state=$(show_field "$show" state)
@@ -1884,12 +1922,13 @@ reconcile_close() {
 # The still-active outcome. The hold survives, so the call stays the captain's
 # and stays on Captain's Call, now carrying what the re-check found.
 reconcile_note() {
-  local id=${1:-} note_file='' note show body stamp tmp note_digest marker
+  local id=${1:-} note_file='' note_handled=0 note show body stamp tmp note_digest marker captain_note=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --note-file) shift; note_file=${1:-} ;;
+      --captain-note-handled) note_handled=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -1904,6 +1943,7 @@ reconcile_note() {
   acquire_task_control_lock "$id"
   reconcile_request_read "$id" \
     || fail "task $id has no pending board-created reconcile request"
+  reconcile_captain_note_gate "$id" "$note_handled"
   require_tasks_axi
   command_open "$id" \
     || fail "task $id is not an open captain call; a note cannot keep a closed call open"
@@ -1924,7 +1964,8 @@ reconcile_note() {
   stamp=${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-note.XXXXXX") \
     || fail "cannot stage the reconcile note"
-  if ! printf '%s\n\nCaptain hold reconciled: %s\n%s\n%s\n' "$body" "$stamp" "$marker" "$note" > "$tmp"; then
+  [ -z "$RECONCILE_NOTE" ] || captain_note="Captain note: $RECONCILE_NOTE"$'\n'
+  if ! printf '%s\n\nCaptain hold reconciled: %s\n%s\n%s%s\n' "$body" "$stamp" "$marker" "$captain_note" "$note" > "$tmp"; then
     rm -f -- "$tmp"
     fail "cannot stage the reconcile note for $id"
   fi
