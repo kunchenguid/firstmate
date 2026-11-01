@@ -2058,7 +2058,12 @@ SH
   # lock as its own session's however the test itself is launched.
   cat > "$dir/stop-driver.sh" <<'SH'
 i=$1 variant=$2
+# Each Stop is a new fake-claude pid, as a real Stop is a new hook process.
+# The session lock sidecar is what makes those Stops the same session, so an
+# interrupted episode can still exhaust its budget instead of resetting.
+export CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=sess-claude-mode CLAUDE_PID=$$
 printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+printf '%s\n' "$CLAUDE_CODE_SESSION_ID" > "$FM_HOME/state/.lock-session"
 printf '{"session_id":"sess-claude-mode","stop_hook_active":false}\n' \
   | FM_CLAUDE_AUTOARM_ATTEMPTS=1 "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/auto-$i.out" 2>&1 &
 auto_pid=$!
