@@ -1385,7 +1385,7 @@ EOF
 }
 
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size identity seen_identity overdue_marker overdue_task
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size identity seen_identity overdue_marker overdue_task pending_record pending_rc
   now=$(_now)
   for overdue_marker in "$state"/.paused-overdue-*; do
     [ -f "$overdue_marker" ] || continue
@@ -1526,8 +1526,13 @@ housekeeping() {  # <state>
         fi
         printf '%s:%s\n' "$identity" "$size" > "$overdue_marker"
         if escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release)"; then
-          seen_identity=$(_fm_open_decisions_file_ident "$state/$task.status") || seen_identity=
-          [ -n "$seen_identity" ] && mark_status_seen "$state" "$task" "$size" "$seen_identity" || true
+          pending_record=$(status_span_first_actionable_record "$state/$task.status" \
+            "$(status_seen_offset "$state" "$task")" '' '' "paused-overdue-$task")
+          pending_rc=$?
+          if [ "$pending_rc" -eq 1 ]; then
+            seen_identity=$(_fm_open_decisions_file_ident "$state/$task.status") || seen_identity=
+            [ -n "$seen_identity" ] && mark_status_seen "$state" "$task" "$size" "$seen_identity" || true
+          fi
         fi
         _now > "$marker"
       fi
@@ -1597,7 +1602,8 @@ housekeeping() {  # <state>
       [ "$f" = "$exclude" ] && continue
       task=$(basename "$f"); task="${task%.status}"
       record=$(status_span_first_actionable_record "$f" \
-        "$(status_seen_offset "$state" "$task")")
+        "$(status_seen_offset "$state" "$task")" '' '' \
+        "$( [ -f "$state/.paused-overdue-$task" ] && printf 'paused-overdue-%s' "$task" )")
       rc=$?
       if [ "$rc" -eq 2 ]; then
         ident=$(status_observed_signature "$f")
