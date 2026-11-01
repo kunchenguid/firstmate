@@ -1350,7 +1350,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
 #     the block below and escalate what it finds; that block owns its file set.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1472,17 +1472,21 @@ housekeeping() {  # <state>
       overdue_marker="$state/.paused-overdue-$task"
       if [ ! -e "$overdue_marker" ]; then
         blocked_line="blocked [key=paused-overdue-$task]: paused ${status_age}s, wait overdue - decide or release"
-        if fm_wake_status_append_self_announced "$state" "$state/$task.status" "$blocked_line"; then
-          if [ "$(uname)" = Darwin ]; then
-            identity=$(/usr/bin/stat -f '%d %i' "$state/$task.status" 2>/dev/null)
-          else
-            identity=$(stat -c '%d %i' "$state/$task.status" 2>/dev/null)
-          fi
-          size=$(_fm_status_file_size "$state/$task.status") || size=0
-          printf '%s:%s\n' "$identity" "$size" > "$overdue_marker"
-          escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release)" || true
-          _now > "$marker"
+        fm_wake_status_append_self_announced "$state" "$state/$task.status" "$blocked_line"; append_rc=$?
+        [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || continue
+        size=$(LC_ALL=C awk -v target="$blocked_line" '
+          { end = offset + length($0) + 1; if ($0 == target) found = end; offset = end }
+          END { if (found) print found; else exit 1 }
+        ' "$state/$task.status") || continue
+        case "$size" in ''|*[!0-9]*) continue ;; esac
+        if [ "$(uname)" = Darwin ]; then
+          identity=$(/usr/bin/stat -f '%d %i' "$state/$task.status" 2>/dev/null)
+        else
+          identity=$(stat -c '%d %i' "$state/$task.status" 2>/dev/null)
         fi
+        printf '%s:%s\n' "$identity" "$size" > "$overdue_marker"
+        escalate_add "$state" "stale: $win (paused ${status_age}s, wait overdue - decide or release)" || true
+        _now > "$marker"
       fi
       continue
     fi
