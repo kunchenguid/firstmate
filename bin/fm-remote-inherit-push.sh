@@ -2,11 +2,17 @@
 # Push the declared inherited-material allowlist to one remote secondmate route.
 # Usage: fm-remote-inherit-push.sh <secondmate-id> <generation>
 #
-# The item set is derived from the ONE declared owner
-# (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh), the same declaration
-# the receiving bin/fm-remote-inherit.sh enforces, so the two implementations in
-# one code revision cannot drift silently. Different local and remote revisions
-# fail closed as documented by that owner. FM_CONFIG_INHERIT_LIVE=1 marks a live
+# The item set is fm_config_inherit_remote_items from the ONE declared owner
+# (bin/fm-config-inherit-lib.sh), the same declaration the receiving
+# bin/fm-remote-inherit.sh enforces, so the two implementations in one code
+# revision cannot drift silently; machine-local items are never offered to
+# another machine. When the remote code root is older and refuses an item with
+# the receiver's cross-revision refusal line, that item is reported on stderr as
+# a skipped-item warning and the push continues, because that refusal happens
+# before the receiver reads, locks, or writes anything; for an item the primary
+# does not have, the same refusal is reported as unchanged instead. Every other failure
+# stops the push with the remote's stderr and exit status unchanged, including
+# exit 255 for unknown completion. FM_CONFIG_INHERIT_LIVE=1 marks a live
 # convergence push into an already-running home and skips session-scoped items,
 # exactly as the local propagation path does. Every item is validated and
 # snapshotted locally before any is sent; the sends then overlap up to
@@ -48,7 +54,7 @@ EMPTY="$TMP/empty"
 : > "$EMPTY"
 EMPTY_HASH=$(sha256_file "$EMPTY") || die "cannot hash empty inheritance payload"
 
-ITEMS=$(fm_config_inherit_items)
+ITEMS=$(fm_config_inherit_remote_items)
 # Phase 1 is local: every item is classified, validated, and snapshotted in
 # allowlist order before anything is sent, so a refusal here leaves the remote
 # home untouched. PLAN holds one record per item: skip, put, or absent.
@@ -115,6 +121,13 @@ send_item() {  # <n>
   if [ "$plan" = put ]; then
     "$SCRIPT_DIR/fm-on.sh" --stdin "$ID" fm-remote-inherit.sh put "$rel" "$bytes" "$hash" "$GENERATION" \
       < "$TMP/item.$n.snapshot" > "$TMP/item.$n.out" 2> "$TMP/item.$n.err" || rc=$?
+    # An older remote code root that does not declare this path refuses it before
+    # any read, lock, or write: version skew, so skip the item and keep going.
+    if [ "$rc" = 1 ] && grep -Fxq -- "error: path is not inherited material: $rel" "$TMP/item.$n.err"; then
+      : > "$TMP/item.$n.out"
+      printf '%s\n' "fm-remote-inherit-push: warning: skipped $rel for remote secondmate $ID: the Firstmate code root on that host predates it and does not declare it inherited material, so nothing was written; updating Firstmate on that host converges it" > "$TMP/item.$n.err"
+      rc=0
+    fi
   else
     "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh absent "$rel" 0 "$EMPTY_HASH" "$GENERATION" \
       < /dev/null > "$TMP/item.$n.out" 2> "$TMP/item.$n.err" || rc=$?
