@@ -83,7 +83,7 @@ A second mate's stale wake is a liveness event: report it even when it presents 
 
 # Verdict: routine or captain
 
-Report verdict captain for the finished result of work the captain requested, even when that result is healthy.
+Report verdict captain for the finished result of work the captain requested, even when that result is healthy. This includes a meaningful completion, an actionable failure or blocker, or a failure to start; these outcomes must open MAIN processing and are never routine merely because no new choice is required.
 A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine.
 Set silent true for a task-level routine outcome only when it says the worker is still busy, nothing new has happened since the last outcome, and no action was taken.
 Any routine outcome reporting an action, state change, or new result stays rendered; captain outcomes are never silent.
@@ -92,6 +92,7 @@ Also report verdict captain for:
 - work ready for review - include the PR's full https:// URL when the task's ready status or `pr=` metadata holds one, otherwise only the identifier you actually have;
 - a decision only the captain can make, including every ask-user finding from a validation gate;
 - a real blocker or failure after the playbook is exhausted;
+- a fresh consequential review finding on requested work, even while the worker keeps fixing it;
 - a needed credential or login;
 - anything destructive, irreversible, or security-sensitive.
 Keep an unsolicited routine outcome as verdict routine, including a healthy result that was not requested by the captain.
