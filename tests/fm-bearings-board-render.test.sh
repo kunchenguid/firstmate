@@ -288,7 +288,7 @@ test_a_decision_card_badges_its_captain_hold_class() {
   require_listener_reached_poll "$home"
   out=$(node "$HARNESS" "$home/.lavish/bearings-board.html") || fail "the built board could not be rendered"
   printf '%s' "$out" | jq -e '
-    (.calls | length) == 2
+    .error == "" and (.calls | length) == 2
       and (.calls[] | select(.title == "Spend on the rental") | [.badges[] | .text] | index("money") != null)
       and (.calls[] | select(.title == "Legacy unclassed call") | [.badges[] | .text] == ["decision"])
   ' >/dev/null || fail "a decision card did not badge its captain-hold class: $out"
