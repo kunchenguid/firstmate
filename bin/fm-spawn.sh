@@ -336,6 +336,11 @@
 #   behavior suite from the repository primary checkout while that marker is
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
+#   Every ship or scout also receives `TMPDIR`, `TMP`, and `TEMP` pointing at
+#   /tmp/fm-<id>/tmp on that same channel, so the mktemp scratch its tools leave
+#   behind is removed with the per-task temp root at teardown. A secondmate keeps
+#   the ambient temp directory; the comment above the root's creation owns why
+#   this broad knob is safe.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch (or uses --base-branch, described
@@ -437,11 +442,13 @@
 #   keeps env -i and the operational floor, replaces destination expansion of
 #   allowlisted names with the snapshotted values, and sets
 #   GIT_CONFIG_NOSYSTEM=1 so a system credential helper cannot answer for the
-#   worker. Values are shell-quoted only in the owner-only staged launch file,
-#   never terminal input, and the pane deletes that file as sourcing starts,
-#   before the worker executes; a deletion failure refuses the worker launch and
-#   keeps the interactive shell, even with errexit set (a Bash 3.2 or dash
-#   errexit pane still exits if spawn reclaims the file in the instant between
+#   worker. For a ship or scout, the task's TMPDIR, TMP, and TEMP are then
+#   assigned again, so an allowlisted temp name cannot move its scratch out of
+#   /tmp/fm-<id>/tmp. Values are shell-quoted only in the owner-only staged
+#   launch file, never terminal input, and the pane deletes that file as
+#   sourcing starts, before the worker executes; a deletion failure refuses the
+#   worker launch and keeps the interactive shell, even with errexit set (a
+#   Bash 3.2 or dash errexit pane still exits if spawn reclaims the file in the instant between
 #   the pane's existence check and its source). Spawn waits up to 30
 #   seconds for that deletion; if the pane never ran the command or could not
 #   delete the file, or HUP, INT or TERM interrupts spawn first, spawn removes
@@ -5922,11 +5929,30 @@ agy)
   ;;
 esac
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/ and, for
+# ship and scout workers, general scratch nested at tmp/. Go won't create
+# GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
+# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp lives alongside
+# and teardown cleans one deterministic path.
+# TMPDIR, TMP, and TEMP are routed into tmp/ so the mktemp scratch that worker
+# tools and tests leave behind is removed with the root instead of accumulating
+# in the shared /tmp until it runs out of inodes. That knob is broad, so it is
+# bounded as follows:
+# - Task workers only. A secondmate runs a whole home that outlives any task,
+#   so its temp stays in the shared /tmp and is never tied to one task's cleanup.
+# - Short path. /tmp/fm-<id>/tmp is only a few bytes longer than the root, so a
+#   Unix socket made under TMPDIR stays well inside the 104-byte sun_path limit
+#   for any realistic task id; the subdirectory is deliberately named tmp, not
+#   a longer descriptive name.
+# - Shared /tmp stays reachable. Only the three variables move; a tool that
+#   must rendezvous through the shared /tmp (the tmux server socket derives
+#   from TMUX_TMPDIR, not TMPDIR) still reaches it by absolute path.
+# - Ownership. The root is a real 0700 directory owned by this user, and tmp/
+#   itself is either created fresh under that root or, when it already exists,
+#   must pass the same private-directory test before export. Nobody else can
+#   plant a path inside tmp/ - it is more private than the shared /tmp it
+#   replaces. Cleanup stays a rm of that one recorded root; the worktree and
+#   its unlanded work are never under it.
 # The root is private (0700) because its path is predictable under a shared
 # /tmp: a root that already exists is reused only as a real directory owned by
 # this user and writable by nobody else, then tightened, so no other local user
@@ -5944,6 +5970,18 @@ else
   fi
 fi
 mkdir -p "$TASK_TMP/gotmp"
+TASK_GENERAL_TMP=
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  TASK_GENERAL_TMP="$TASK_TMP/tmp"
+  if ! (umask 077 && mkdir "$TASK_GENERAL_TMP") 2>/dev/null; then
+    if [ -L "$TASK_GENERAL_TMP" ] || [ ! -d "$TASK_GENERAL_TMP" ] || [ ! -O "$TASK_GENERAL_TMP" ] ||
+      [ -n "$(find "$TASK_GENERAL_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
+      ! chmod 700 "$TASK_GENERAL_TMP"; then
+      echo "error: task scratch directory $TASK_GENERAL_TMP already exists and is not a private directory owned by this user; refusing to export it; inspect and remove it, then retry" >&2
+      exit 1
+    fi
+  fi
+fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -7477,6 +7515,9 @@ if [ "$BACKEND" = t3code ]; then
   if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     T3CODE_ENV+=("FM_TASK_ID=$ID")
   fi
+  if [ -n "$TASK_GENERAL_TMP" ]; then
+    T3CODE_ENV+=("TMPDIR=$TASK_GENERAL_TMP" "TMP=$TASK_GENERAL_TMP" "TEMP=$TASK_GENERAL_TMP")
+  fi
   if [ -n "$SPAWN_TRACEPARENT" ] && spawn_record_traceparent; then
     T3CODE_ENV+=("TRACEPARENT=$SPAWN_TRACEPARENT")
   fi
@@ -7502,6 +7543,11 @@ else
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Task workers also get general scratch under the same root (see the per-task
+# temp root comment above); the launch-env floor forwards these three names.
+if [ -n "$TASK_GENERAL_TMP" ]; then
+  spawn_send_text_line "$T" "export TMPDIR=$TASK_GENERAL_TMP TMP=$TASK_GENERAL_TMP TEMP=$TASK_GENERAL_TMP"
+fi
 # Export the compact-adviser kill switch into the pane shell through the same
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.
@@ -7566,6 +7612,11 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   done
   if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $ORCA_LAUNCH_ENV_ARGS GIT_CONFIG_NOSYSTEM=1"
+  fi
+  # An Orca source can override allowlisted names after env -i, so pin the task
+  # scratch path again for ship and scout workers after those sourced assignments.
+  if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ] && [ -n "$TASK_GENERAL_TMP" ]; then
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX TMPDIR=$TASK_GENERAL_TMP TMP=$TASK_GENERAL_TMP TEMP=$TASK_GENERAL_TMP"
   fi
   # COMPACT_ADVISER_DISABLE is retained by the floor loop above, which forwards
   # whatever the pane export set, and then pinned here to the one value Firstmate
