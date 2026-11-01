@@ -2875,8 +2875,8 @@ start_check_started() {  # <id> <meta> <epoch>
     [ "$m" -ge "$epoch" ] && return 0
   done
   if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
-    start_check_remote "$id" start-proof || return 1
-    start_check_verdict_proves "$(printf '%s' "$WATCHER_CAPTURE" | head -1)"
+    start_check_remote "$id" observe || return 1
+    [ "$(printf '%s' "$WATCHER_CAPTURE" | head -1)" = busy ]
     return
   fi
   start_check_verdict_proves "$(fm_busy_classify_meta "$meta" "$id" "$STATE")" && return 0

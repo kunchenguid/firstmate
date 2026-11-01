@@ -919,8 +919,8 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 grep -Eq '^[0-9]+ - codex$' "$PARENT/state/ios.start-pending" \
   || fail "remote spawn did not arm the parent's start check: $(cat "$PARENT/state/ios.start-pending" 2>&1)"
 assert_absent "$REMOTE_HOME/state/parent-route/ios.start-pending" "the remote host armed its own start check"
-[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh start-proof ios)" = 'unknown codex-unverified' ] \
-  || fail "the start-proof verb did not answer through the route"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
+  || fail "the existing observe verb did not answer through the route"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"

@@ -1330,19 +1330,16 @@ fi
 # now so no path can publish a record the watcher would discard as malformed.
 # FM_SPAWN_NO_START_CHECK=1 disables arming for a spawn whose watcher lives in
 # another home (bin/fm-remote-secondmate-control.sh sets it).
-# With `try`, a held meta lock is not waited for: the remote secondmate path
-# publishes after releasing its route locks, and a retirement can hold the meta
-# lock while it waits on those same route locks. The record is still replaced
-# by an atomic rename, and a remote record's proof is read live through the
-# route, so the watcher judges whichever worker is there now.
+# Remote publication waits briefly for the meta lock, then uses atomic rename
+# even if contention remains; it must not drop the wake after a successful launch.
 spawn_arm_start_check() {  # <id> <enabled 0|1> <epoch> <busy-gen|-> <harness> [wait|try]
   local id=$1 enabled=$2 epoch=${3:-} gen=$4 harness=$5 how=${6:-wait} record lock locked=1 rc=0
   record="$STATE/$id.start-pending"
   [ "${FM_SPAWN_NO_START_CHECK:-0}" != 1 ] || enabled=0
   [ -n "$epoch" ] || epoch=$(date +%s)
   lock=$(fm_meta_lock_path "$STATE/$id.meta") || return 1
-  if [ "$how" = try ]; then
-    fm_lock_try_acquire "$lock" || locked=0
+  if [ "$how" = remote ]; then
+    fm_lock_acquire_wait_max "$lock" 3 || locked=0
   else
     fm_lock_acquire_wait "$lock"
   fi
@@ -1697,8 +1694,8 @@ spawn_remote_secondmate() {
   # its start in its own remote spawn gate. The parent record carries no busy
   # generation, so it is armed with `-`.
   case "$harness" in
-  kimi*) spawn_arm_start_check "$id" 0 "$remote_start_epoch" - "$harness" try || true ;;
-  *) spawn_arm_start_check "$id" 1 "$remote_start_epoch" - "$harness" try || true ;;
+  kimi*) spawn_arm_start_check "$id" 0 "$remote_start_epoch" - "$harness" remote || true ;;
+  *) spawn_arm_start_check "$id" 1 "$remote_start_epoch" - "$harness" remote || true ;;
   esac
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null; then

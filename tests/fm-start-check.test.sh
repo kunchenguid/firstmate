@@ -350,7 +350,7 @@ remote_tick() {  # <proof> <state> <capture> <rc>: tick once with a stubbed rout
     WATCHER_CAPTURE=
     [ "$REMOTE_RC" = 0 ] || return "$REMOTE_RC"
     case "$2" in
-      start-proof) WATCHER_CAPTURE=$REMOTE_PROOF ;;
+      observe) WATCHER_CAPTURE=$REMOTE_PROOF ;;
       state) WATCHER_CAPTURE=$REMOTE_STATE ;;
       capture) WATCHER_CAPTURE=$REMOTE_CAPTURE ;;
     esac
@@ -367,11 +367,11 @@ test_remote_secondmate_reads_route() {
   local real
   real=$(declare -f start_check_remote)
   arm_remote r1
-  remote_tick 'idle pi-ext' alive '' 0 || fail "tick failed"; eval "$real"
+  remote_tick busy alive '' 0 || fail "tick failed"; eval "$real"
   [ ! -e "$STATE/r1.start-pending" ] || fail "a remote hook-written record did not count as proof"
   [ "$(count_wakes)" = 0 ] || fail "a started remote mate woke"
   arm_remote r2
-  remote_tick 'busy fm-spawn' alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  remote_tick idle alive "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
   case "$START_CHECK_WAKE" in
     "check: start r2: no start signal 200s after spawn (harness=pi; on screen on remote-mac: Pi project-trust dialog \"Trust project folder?\"); accept: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-send.sh r2 --key Enter") ;;
     *) fail "unexpected remote dialog reason: $START_CHECK_WAKE" ;;
@@ -383,7 +383,7 @@ test_remote_secondmate_reads_route() {
     *) fail "an unreachable host did not wake generically: $START_CHECK_WAKE" ;;
   esac
   arm_remote r4
-  remote_tick 'busy fm-spawn' missing "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
+  remote_tick idle missing "$PI_DIALOG" 0 || fail "tick failed"; eval "$real"
   case "$START_CHECK_WAKE" in
     *"remote worker on remote-mac exited or its endpoint is gone before starting); recover it per secondmate-provisioning after: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-crew-state.sh r4") ;;
     *) fail "a vanished remote endpoint was not sent to recovery: $START_CHECK_WAKE" ;;
