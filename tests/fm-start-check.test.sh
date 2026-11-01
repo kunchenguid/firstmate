@@ -72,6 +72,16 @@ open_pane() {  # <window> <text>
   sleep 0.3
 }
 
+# A pane that printed <text> and then left a bare shell in the foreground, the
+# way an agent that died mid-launch leaves its endpoint.
+open_shell_pane() {  # <window> <text>
+  local f="$TMP_ROOT/pane-$1.txt"
+  printf '%s\n' "$2" > "$f"
+  tmux new-window -d -t "$SESSION" -n "$1" "cat '$f'; exec sh" 2>/dev/null \
+    || tmux new-session -d -s "$SESSION" -n "$1" "cat '$f'; exec sh" || fail "tmux shell window $1"
+  sleep 0.3
+}
+
 # <id> recorded on window <id> with <harness>; an armed busy seed for the
 # harnesses fm-spawn arms, and a start-pending record spawned at <epoch>.
 arm_task() {  # <id> <harness> <epoch>
@@ -162,13 +172,14 @@ test_claude_dialog_has_no_key() {
 
 test_dead_agent_names_relaunch() {
   reset_state
-  # The pane outlives its agent and returns to a shell: the endpoint is there,
-  # the agent is not, which is the one state relaunch accepts.
-  open_pane d1 "pi exited"
-  tmux respawn-pane -k -t "$SESSION:d1" "exec sh" || fail "fixture: respawn shell pane"
-  sleep 0.3
+  # The agent died while its trust dialog was painted, so the pane keeps that
+  # text above a bare shell: the endpoint is there, the agent is not (the one
+  # state relaunch accepts), and the leftover dialog must not win.
+  open_shell_pane d1 "$PI_DIALOG"
   arm_task d1 pi 1000
   [ "$(fm_backend_agent_state tmux "$SESSION:d1")" = dead ] || fail "fixture: a shell-only pane is not dead"
+  tmux capture-pane -p -t "$SESSION:d1" -S -40 | fm_busy_launch_prompt_parked pi \
+    || fail "fixture: the leftover dialog text is not on screen"
   start_check_tick 1200 || fail "tick failed"
   case "$START_CHECK_WAKE" in
     *"harness=pi; worker exited before starting); relaunch: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-control.sh d1 relaunch --note '"*"'") ;;
@@ -176,9 +187,7 @@ test_dead_agent_names_relaunch() {
   esac
   # A secondmate relaunch takes no note.
   reset_state
-  open_pane d2 "pi exited"
-  tmux respawn-pane -k -t "$SESSION:d2" "exec sh" || fail "fixture: respawn shell pane"
-  sleep 0.3
+  open_shell_pane d2 "pi exited"
   arm_task d2 pi 1000
   printf 'kind=secondmate\n' >> "$STATE/d2.meta"
   start_check_tick 1200 || fail "tick failed"
