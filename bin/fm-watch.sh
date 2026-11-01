@@ -4090,6 +4090,16 @@ EOF
           fi
           wake "$reason"
         fi
+        if [ "$is_pr_poll" -eq 1 ] && [[ "$out" == checks\ * ]]; then
+          checks_rc=0
+          fm_pr_poll_notify_checks "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out" "$reason" || checks_rc=$?
+          pr_poll_control_release || exit 1
+          case "$checks_rc" in
+            0) touch "$STATE/.last-check"; wake "$reason" ;;
+            2) continue ;;
+            *) exit 1 ;;
+          esac
+        fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
         touch "$STATE/.last-check"
