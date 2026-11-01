@@ -18,9 +18,10 @@
 # exact URL.
 #
 # Registered poll generations bind to their original hashes and file objects,
-# so a repository template update does not invalidate an armed poll. Consumers
-# execute the current repository poll with validated data, never state-file code.
-# Control relaunch metadata may follow the preserved PR identity fields.
+# so a repository template update does not invalidate an armed poll. The watcher
+# executes the current repository poll with validated data, never the registered
+# state-file copy. Control relaunch metadata may follow the preserved PR identity
+# fields.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
