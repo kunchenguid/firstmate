@@ -1,15 +1,17 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Verified against Pi 0.81.1, 0.82.0, and 0.84.4, which expose built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons, agent_start and
-// agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
+// The baseline is verified against Pi 0.81.1, 0.82.0, and 0.84.4, which expose built-in
+// ToolDefinitions, per-slot renderers, renderShell: "self", session_start replacement
+// reasons, agent_start and agent_settled, ExtensionUIContext.setToolsExpanded(),
+// setWorkingVisible(), setWidget()
 // with a disposable component factory, and setHiddenThinkingLabel().
 // ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
 // installs. The focused tests pin those assumptions but never reject a
 // newer Pi solely for its version. The collapsed-thinking, operational-user, and
 // queued-operational presentation adapters probe the exact API they patch and degrade
 // independently with a diagnostic (see installCalmPresentationAdapter below) if a future
-// Pi removes it; Pi still exposes no global renderer for arbitrary built-in or custom rows.
+// Pi removes it. Pi's renderer-only resolver and the named codemode adapter are verified
+// on Pi 1.4.0, but that resolver is not a global transcript filter.
 // docs/configuration.md owns the home-local Calm preference contract.
 //
 // Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
@@ -91,6 +93,26 @@ type StandardShellState = {
   shell?: Box;
   call?: Component;
   result?: Component;
+};
+
+const refreshCodemodeShell = (
+  state: StandardShellState,
+  theme: RenderTheme<any, any, any>,
+  context: RenderContext<any, any, any>,
+): Box => {
+  const background = context.isPartial
+    ? (text: string) => theme.bg("toolPendingBg", text)
+    : context.isError
+      ? (text: string) => theme.bg("toolErrorBg", text)
+      : (text: string) => theme.bg("toolSuccessBg", text);
+  const shell = state.shell ?? new Box(context.outputPad, 1, background);
+  state.shell = shell;
+  shell.setBgFn(background);
+  shell.setPaddingX(context.outputPad);
+  shell.clear();
+  if (state.call) shell.addChild(state.call);
+  if (state.result) shell.addChild(state.result);
+  return shell;
 };
 
 const extensionFile = fileURLToPath(import.meta.url);
@@ -227,6 +249,58 @@ export default function (pi: ExtensionAPI) {
   const repaintCalmToolRows = (): void => {
     for (const invalidate of calmToolRowRepaints.values()) invalidate();
   };
+
+  // Codemode is a Pi extension tool rather than one of Calm's registered tools.
+  // Use Pi's renderer-only resolver so its execution and result data stay untouched.
+  // Self-rendering hides the whole row; Calm-off uses Pi's default padded shell around
+  // the original components, and stock export rendering delegates directly to Pi.
+  installCalmPresentationAdapter("codemode-tool-row", () => {
+    if (typeof pi.registerToolRenderer !== "function") {
+      throw new Error("ExtensionAPI.registerToolRenderer is unavailable");
+    }
+    pi.registerToolRenderer((toolName, next) => {
+      if (toolName !== "codemode") return next();
+
+      const original = next();
+      const shells = new WeakMap<object, StandardShellState>();
+      const shellFor = (context: RenderContext<any, any, any>): StandardShellState => {
+        const rowState = context.state as object;
+        rememberCalmToolRow(rowState, context.invalidate);
+        let state = shells.get(rowState);
+        if (!state) {
+          state = {};
+          shells.set(rowState, state);
+        }
+        return state;
+      };
+      return {
+        renderShell: "self",
+        renderCall(args, theme, context) {
+          const state = shellFor(context);
+          const call = original?.renderCall?.(args, theme, {
+            ...context,
+            lastComponent: state.call,
+          });
+          if (exportRendering) return call ?? new Container();
+          state.call = call;
+          if (calmPresentationHides("assistant-tool-call")) return new Container();
+          return refreshCodemodeShell(state, theme, context);
+        },
+        renderResult(result, options, theme, context) {
+          const state = shellFor(context);
+          const renderedResult = original?.renderResult?.(result, options, theme, {
+            ...context,
+            lastComponent: state.result,
+          });
+          if (exportRendering) return renderedResult ?? new Container();
+          state.result = renderedResult;
+          if (calmPresentationHides("tool-result")) return new Container();
+          refreshCodemodeShell(state, theme, context);
+          return new Container();
+        },
+      };
+    });
+  });
 
   function wrapBuiltIn<TParams extends TSchema, TDetails, TState>(
     factory: DefinitionFactory<TParams, TDetails, TState>,

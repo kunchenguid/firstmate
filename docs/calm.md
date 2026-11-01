@@ -67,6 +67,7 @@ Calm hides these rows:
 - Collapsed thinking labels.
 - The mid-turn assistant working-note blocks governed by the [shared preservation rule](#shared-preservation-rule-for-assistant-text) above.
 - The shells for the Pi built-in tool names Calm owns.
+- Pi's `codemode` tool call and result shells through the named tool-renderer resolver.
 - Firstmate-owned tool shells listed in the [Pi tool audit](calm-mode-feasibility.md#firstmate-pi-tool-audit).
 - Canonically classified Firstmate operational user rows.
 
@@ -99,6 +100,7 @@ Input delivery, ordering, model context, session storage, diagnostics, and `/exp
 Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
 Legacy operational custom messages remain in session data and Pi's sidebar tree; depending on the Pi version, the main HTML transcript either omits them or includes them as rows hidden by default.
 Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
+Calm hides only `codemode`'s outer call and result presentation; execution, nested calls, saved messages, and exported HTML remain unchanged, with Pi's original renderer used for export.
 
 ### What stays visible on Pi
 
@@ -110,7 +112,7 @@ These rows remain visible:
 - User-bash rows.
 - Skill and summary rows.
 - Generic status notices.
-- Other arbitrary custom-tool or extension rows.
+- Other arbitrary custom-tool or extension rows, except the supported Pi `codemode` renderer.
 
 These are supported-API boundaries rather than hidden-content failures.
 
@@ -121,7 +123,7 @@ These are supported-API boundaries rather than hidden-content failures.
 Calm has no numeric Pi version minimum or maximum.
 It never refuses Pi solely because its version is newer than a previously verified version.
 
-When Calm loads, the collapsed-thinking, operational-user-row, and queued-operational-row presentation adapters probe the exact Pi API seam they patch.
+When Calm loads, the collapsed-thinking, operational-user-row, queued-operational-row, and `codemode` tool-row presentation adapters probe the exact Pi API seam they patch.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter.
 `/calm`, the other adapters, and unrelated Pi extensions remain available.
 
