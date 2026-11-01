@@ -4799,14 +4799,18 @@ else
   case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
-    T="$SES:$W"
+    # The window is home-scoped (fm-<hometag>-<id>) so another home sharing this
+    # tmux session cannot hold the same name and refuse this create; the
+    # persisted window= handle carries that scoped name.
+    W_TMUX=$(fm_backend_tmux_scoped_window "$W")
+    T="$SES:$W_TMUX"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's
-    # non-default tmux config cannot rename the window away from fm-<id> once
+    # non-default tmux config cannot rename the window away from its task name once
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W_TMUX" "$PROJ_ABS") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)

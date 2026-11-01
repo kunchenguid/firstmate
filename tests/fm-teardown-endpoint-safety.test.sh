@@ -460,6 +460,39 @@ test_orca_composite_worktree_id_validates() {
   pass "cleanup identity: an Orca record's real composite worktree id validates while a separatorless or newline-carrying id refuses"
 }
 
+test_tmux_home_scoped_endpoints_validate_only_real_home_tags() {
+  local dir id window
+  dir=$(make_case tmux-home-scoped)
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+
+  # Any home's tag validates, so a parent home can validate a child home's
+  # endpoint, and the target is handed back unchanged.
+  id=tmux-scoped
+  for window in "firstmate:fm-firstmate-0badf00d-$id" "firstmate:fm-2ndmate-ops-deadbeef-$id"; do
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=$window" "worktree=$dir/worktree" "project=$dir/project"
+    fm_backend_validate_task_endpoint "$dir/home/state/$id.meta" "$id" \
+      || fail "valid home-scoped tmux endpoint '$window' refused"
+    [ "$FM_BACKEND_VALIDATED_TARGET" = "$window" ] \
+      || fail "tmux validation changed the home-scoped identity '$window'"
+  done
+
+  # Only a real home tag may sit between fm- and the id: task ios-ui's own
+  # fm-ios-ui window, a tag without its home hash, an empty tag, and a tag of
+  # an unknown shape never pass as task ui's window.
+  for window in firstmate:fm-ios-ui firstmate:fm-firstmate-ui firstmate:fm--ui \
+    firstmate:fm-other-0badf00d-ui firstmate:fm-firstmate-0BADF00D-ui \
+    firstmate:fm-firstmate-0badf00d-ios-ui; do
+    fm_write_meta "$dir/home/state/ui.meta" \
+      "window=$window" "worktree=$dir/worktree" "project=$dir/project"
+    if fm_backend_validate_task_endpoint "$dir/home/state/ui.meta" ui 2>/dev/null; then
+      fail "tmux window '$window' validated as task ui's endpoint"
+    fi
+  done
+  pass "cleanup identity: home-scoped tmux windows validate for any home's tag and refuse every other task's window"
+}
+
 test_tmux_empty_target_refuses_without_invocation() {
   local dir rc
   dir=$(make_case direct-empty)
@@ -1610,6 +1643,7 @@ test_non_pool_teardown_ignores_task_set_lock
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
 test_orca_composite_worktree_id_validates
+test_tmux_home_scoped_endpoints_validate_only_real_home_tags
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
 test_isolated_tmux_invalid_and_valid_cleanup

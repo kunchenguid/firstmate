@@ -1081,7 +1081,7 @@ test_polytoken_existing_project_hook_layer_refuses() {
     "the refusal must not leave a mirrored config dir in state"
   [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
     || fail "the refusal must leave the worktree clean: $(git -C "$WT_DIR" status --porcelain)"
-  grep -q "^kill-window .*fm-$id" "$CASE_DIR/tmux-calls.log" \
+  grep -q "^kill-window .*$(fm_test_expected_tmux_window "$id" "$HOME_DIR")" "$CASE_DIR/tmux-calls.log" \
     || fail "the refusal must close the window it opened so its slot returns to the pool"
   assert_absent "$HOME_DIR/state/$id.meta" "the refusal must not leave a task record"
   pass "fm-spawn: a project's own polytoken hook layer is refused, not clobbered"

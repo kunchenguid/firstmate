@@ -816,6 +816,29 @@ test_stale_transient_self_records_marker() {
   pass "transient stale self-handles and records a persistence marker"
 }
 
+test_live_window_fallback_reaches_only_this_homes_windows() {
+  local dir state
+  dir=$(make_supercase live-window-home-scope)
+  state="$dir/state"
+  (
+    own="fm-$(fm_backend_hometag)-scoped-a"
+    foreign="fm-firstmate-0badf00d-scoped-b"
+    # The daemon's live fallback lists every window on the tmux server, which
+    # other homes' task windows share.
+    tmux() { printf '%s\n' "firstmate:$own" "firstmate:$foreign" "firstmate:fm-legacy-c"; }
+    [ "$(window_to_task "firstmate:$own" "$state")" = scoped-a ] \
+      || fail "this home's scoped window did not resolve to its task id"
+    [ "$(window_for_task scoped-a "$state")" = "firstmate:$own" ] \
+      || fail "the live fallback did not find this home's scoped window"
+    if window_for_task scoped-b "$state" >/dev/null; then
+      fail "the live fallback reached another home's scoped window"
+    fi
+    [ "$(window_for_task legacy-c "$state")" = "firstmate:fm-legacy-c" ] \
+      || fail "the live fallback lost a window named before home scoping"
+  ) || fail "live-window fallback subshell failed"
+  pass "the live window fallback resolves this home's scoped and bare windows, never another home's"
+}
+
 test_stale_diagnostic_wedge_survives_busy_housekeeping() {
   local case_name dir state fakebin key task win pane reason status_line action_log
   for case_name in working prior-terminal paused; do
@@ -3458,6 +3481,7 @@ test_classify_check_and_unknown_escalate
 test_unknown_wake_ack_suppresses_handled_identity
 test_unknown_wake_ack_failure_still_clears_delivered_digest
 test_stale_transient_self_records_marker
+test_live_window_fallback_reaches_only_this_homes_windows
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_enriched_wedge_under_worker_blocker_follows_its_flag

@@ -307,7 +307,7 @@ case "${1:-}" in
         exit 0 ;;
       unreadable) exit 1 ;;
       *)
-        [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1
+        [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' "${FM_TEST_LIVE_WINDOW:-fm-sm1}"
         [ ! -s "$windows" ] || cat "$windows"
         exit 0 ;;
     esac
@@ -459,15 +459,18 @@ test_sweep_serializes_distinct_secondmate_relaunches() {
 # other backend on its existing best-effort kill: a tmux close that fails is
 # still followed by the guarded spawn, exactly as before.
 test_sweep_keeps_tmux_best_effort_kill_when_close_fails() {
-  local w fb tmuxfb log out
+  local w fb tmuxfb log out window
   w=$(new_world sweep-dead-close-fails)
-  add_sm_home "$w" sm1 firstmate:fm-sm1
+  # The surviving window carries the home-scoped name a current spawn records,
+  # so the respawn that follows the failed close collides with it.
+  window=$(fm_test_expected_tmux_window sm1 "$w/home")
+  add_sm_home "$w" sm1 "firstmate:$window"
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
 
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_TEST_FAIL_KILL=1)
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_TEST_FAIL_KILL=1 FM_TEST_LIVE_WINDOW="$window")
 
-  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" "the close is attempted"
+  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=$window" "the close is attempted"
   assert_not_contains "$out" "could not prove the old" "a non-T3 close failure must not take the T3-only refusal path"
   assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after confirmed agent absence on existing endpoint" \
     "the guarded spawn still runs after a failed tmux close, as before"

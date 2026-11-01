@@ -457,8 +457,9 @@ fm_backend_target_of_meta() {  # <meta-file>
 # from its durable metadata before any runtime command or cleanup mutation.
 # The validation binds the exact task id, selected backend, target, project,
 # and worktree. New non-tmux records carry endpoint_task_id because their
-# opaque runtime ids do not encode the task label. Legacy tmux records remain
-# valid only when their window name itself is exactly fm-<task-id>.
+# opaque runtime ids do not encode the task label. A tmux record stays valid
+# on its window name alone, which must name that task in any home
+# (fm_backend_tmux_task_window_valid).
 # On success, sets FM_BACKEND_VALIDATED_BACKEND and
 # FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
@@ -601,8 +602,9 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     tmux)
       session=${window%%:*}
       pane=${window#*:}
-      if [ "$pane" = "$window" ] || [ "$pane" != "fm-$id" ] \
-        || [ -z "$session" ]; then
+      if [ "$pane" = "$window" ] || [ -z "$session" ] \
+        || ! fm_backend_source tmux \
+        || ! fm_backend_tmux_task_window_valid "$pane" "$id"; then
         echo "REFUSED: tmux endpoint '$window' is malformed or does not belong to task $id; preserving task state." >&2
         return 1
       fi
@@ -871,7 +873,7 @@ fm_backend_source() {  # <name>
   # word-split an unquoted expansion, so a space-separated string is one path.
   case "$name" in
     tmux)
-      set -- fm-tmux-lib.sh fm-composer-lib.sh fm-cursor-lib.sh fm-session-lock-lib.sh fm-agent-process-lib.sh fm-gemini-lib.sh
+      set -- fm-backend-hometag-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-cursor-lib.sh fm-session-lock-lib.sh fm-agent-process-lib.sh fm-gemini-lib.sh
       ;;
     herdr)
       set -- fm-composer-lib.sh fm-transition-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh

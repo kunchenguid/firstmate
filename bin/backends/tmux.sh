@@ -24,6 +24,47 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-backend-hometag-lib.sh"
+
+# fm_backend_tmux_scoped_window: the actual window name a NEW task's window is
+# created with - the caller-facing "fm-<id>" label, home-tagged as
+# "fm-<hometag>-<id>" (mirrors bin/backends/zellij.sh's
+# fm_backend_zellij_scoped_title). Every home that is not run inside its own
+# tmux session shares the one "firstmate" container session, and
+# fm_backend_tmux_create_task refuses a name that session already holds, so a
+# bare "fm-<id>" would let one home's task block another home's same-id task
+# from starting.
+# Callers record the returned name, and every later read resolves it from that
+# record.
+fm_backend_tmux_scoped_window() {  # <fm-task-label>
+  local label=$1 rest
+  case "$label" in
+    fm-*) rest=${label#fm-} ;;
+    *) rest=$label ;;
+  esac
+  printf 'fm-%s-%s' "$(fm_backend_hometag)" "$rest"
+}
+
+# fm_backend_tmux_task_window_valid: whether <window-name> is task <task-id>'s
+# window in ANY home - the home-scoped "fm-<hometag>-<id>" that
+# fm_backend_tmux_scoped_window creates, or the bare "fm-<id>" that a window
+# created before home scoping still carries. The tag is checked for shape, not
+# compared with this home's own, because a parent home validates a child home's
+# endpoints; the shape check is what keeps task ios-ui's "fm-ios-ui" from
+# passing as task ui's window.
+fm_backend_tmux_task_window_valid() {  # <window-name> <task-id>
+  local name=$1 id=$2 tag
+  [ -n "$id" ] || return 1
+  [ "$name" = "fm-$id" ] && return 0
+  case "$name" in
+    fm-?*-"$id") ;;
+    *) return 1 ;;
+  esac
+  tag=${name#fm-}
+  tag=${tag%-"$id"}
+  fm_backend_hometag_valid "$tag"
+}
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -110,8 +151,9 @@ fm_backend_tmux_container_ensure() {
 #     at the next free index by targeting the session with a trailing colon
 #     ("$ses:"), so a non-default base-index (e.g. base-index 1) cannot collide.
 #   - PIN the window name by disabling automatic-rename and allow-rename on the
-#     new window: the captain's tmux may rename the window away from fm-<id> once
-#     treehouse cd's into the worktree, which would break name-based targeting.
+#     new window: the captain's tmux may rename the window away from its task
+#     name once treehouse cd's into the worktree, which would break name-based
+#     targeting.
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id

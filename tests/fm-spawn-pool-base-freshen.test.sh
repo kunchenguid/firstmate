@@ -832,12 +832,13 @@ SH
 # second task each land on a slot of their own. The refusal here is a polytoken
 # launch into a project that tracks its own .polytoken/hooks.json.
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task() {
-  local rec id other out status slot_root world claim1 claim2
+  local rec id other out status slot_root world claim1 claim2 window
   id='pool-refused-retry-r1'
   other='pool-refused-second-r1'
   rm -rf "/tmp/fm-$id" "/tmp/fm-$other"
   rec=$(make_case refused-retry "$id")
   read_case_record "$rec"
+  window=$(fm_test_expected_tmux_window "$id" "$HOME_DIR")
   fm_test_spawn_brief "$HOME_DIR" "$other"
   mkdir -p "$CASE_DIR/publisher/.polytoken"
   printf '[]\n' > "$CASE_DIR/publisher/.polytoken/hooks.json"
@@ -868,8 +869,8 @@ SH
   [ "$status" -ne 0 ] || fail "a polytoken launch into a project with its own hook layer should refuse"
   assert_contains "$out" "not firstmate's to clobber" "the refusal message changed"$'\n'"$out"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused launch published a task record"
-  [ ! -e "$world/fm-$id.id" ] \
-    || fail "the refused launch left its window open, still leasing $(cat "$world/fm-$id.path")"
+  [ ! -e "$world/$window.id" ] \
+    || fail "the refused launch left its window open, still leasing $(cat "$world/$window.path")"
   [ ! -e "$claim1" ] && [ ! -e "$claim2" ] || fail "the refused launch left a slot claim behind"
   [ ! -e "/tmp/fm-$id" ] || fail "the refused launch left its task temp root behind"
 
@@ -896,11 +897,12 @@ SH
 # retry may already be reusing, while still closing the window and returning
 # the slot.
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock() {
-  local rec id out status slot_root world holder_pid
+  local rec id out status slot_root world holder_pid window
   id='pool-refused-contended-r1'
   rm -rf "/tmp/fm-$id"
   rec=$(make_case refused-contended "$id")
   read_case_record "$rec"
+  window=$(fm_test_expected_tmux_window "$id" "$HOME_DIR")
   mkdir -p "$CASE_DIR/publisher/.polytoken"
   printf '[]\n' > "$CASE_DIR/publisher/.polytoken/hooks.json"
   git -C "$CASE_DIR/publisher" add .polytoken/hooks.json
@@ -945,7 +947,7 @@ SH
   assert_contains "$out" "another spawn of $id holds its spawn lock" \
     "the abort did not report skipping its per-id cleanup"$'\n'"$out"
   [ -d "/tmp/fm-$id" ] || fail "the abort removed the task temp root while another spawn held the per-id lock"
-  [ ! -e "$world/fm-$id.id" ] || fail "the contended abort left its window open"
+  [ ! -e "$world/$window.id" ] || fail "the contended abort left its window open"
   [ ! -e "$slot_root/1/.fm-slot-owner" ] || fail "the contended abort left its slot claim behind"
   rm -rf "/tmp/fm-$id"
   pass "a refused polytoken launch leaves its per-id paths alone while another spawn holds the per-id lock"
@@ -955,10 +957,11 @@ SH
 # pre-publication claim is dropped under the allocation lock, but the window
 # it opened, and with it the slot's lease, stays for the operator to inspect.
 test_non_polytoken_refused_launch_keeps_its_window() {
-  local rec id out status slot_root world
+  local rec id out status slot_root world window
   id='pool-refused-codex-r1'
   rec=$(make_originless_case refused-codex "$id")
   read_case_record "$rec"
+  window=$(fm_test_expected_tmux_window "$id" "$HOME_DIR")
   slot_root="$CASE_DIR/slots"
   mkdir -p "$slot_root/1"
   git -C "$PROJECT_DIR" worktree move "$POOL_DIR" "$slot_root/1/project"
@@ -973,7 +976,7 @@ test_non_polytoken_refused_launch_keeps_its_window() {
   [ "$status" -ne 0 ] || fail "a codex launch on a slot with an unusable origin should refuse"
   assert_contains "$out" "could not fetch origin" "the codex refusal message changed"$'\n'"$out"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused codex launch published a task record"
-  [ -e "$world/fm-$id.id" ] || fail "a non-polytoken refusal closed its window, unlike main"
+  [ -e "$world/$window.id" ] || fail "a non-polytoken refusal closed its window, unlike main"
   [ ! -e "$slot_root/1/.fm-slot-owner" ] || fail "the refused codex launch left its slot claim"
   pass "a non-polytoken launch refused after its slot claim keeps main's abort behavior"
 }
@@ -1007,10 +1010,11 @@ SH
 # keeps main's `Inspect target <window>`, and a fresh polytoken spawn, whose
 # window is closed on exit, names the worktree and says so instead.
 test_treehouse_isolation_refusal_points_at_what_survives() {
-  local rec id out status
+  local rec id out status window
   id='pool-isolation-codex-r1'
   rec=$(make_case isolation-codex "$id")
   read_case_record "$rec"
+  window=$(fm_test_expected_tmux_window "$id" "$HOME_DIR")
   fm_test_fake_sleep_noop "$FAKEBIN_DIR"
   install_isolation_flip_git "$FAKEBIN_DIR" "$POOL_DIR"
   out=$(run_spawn "$id" --harness codex --mode no-mistakes --yolo off)
@@ -1018,7 +1022,7 @@ test_treehouse_isolation_refusal_points_at_what_survives() {
   [ "$status" -ne 0 ] || fail "a codex spawn whose slot stopped being isolated should refuse"
   assert_contains "$out" "treehouse get did not yield an isolated worktree" \
     "the codex spawn did not refuse on the post-poll isolation check"$'\n'"$out"
-  assert_contains "$out" "refusing to launch to avoid tangling the primary checkout. Inspect target firstmate:fm-$id" \
+  assert_contains "$out" "refusing to launch to avoid tangling the primary checkout. Inspect target firstmate:$window" \
     "a non-polytoken isolation refusal must keep main's window pointer"$'\n'"$out"
   assert_not_contains "$out" "is closed on exit" \
     "a non-polytoken isolation refusal must not claim its window was closed"
@@ -1026,6 +1030,7 @@ test_treehouse_isolation_refusal_points_at_what_survives() {
   id='pool-isolation-polytoken-r1'
   rec=$(make_case isolation-polytoken "$id")
   read_case_record "$rec"
+  window=$(fm_test_expected_tmux_window "$id" "$HOME_DIR")
   fm_test_fake_sleep_noop "$FAKEBIN_DIR"
   install_isolation_flip_git "$FAKEBIN_DIR" "$POOL_DIR"
   cat > "$FAKEBIN_DIR/polytoken" <<'SH'
@@ -1041,9 +1046,9 @@ SH
   [ "$status" -ne 0 ] || fail "a polytoken spawn whose slot stopped being isolated should refuse"
   assert_contains "$out" "treehouse get did not yield an isolated worktree" \
     "the polytoken spawn did not refuse on the post-poll isolation check"$'\n'"$out"
-  assert_contains "$out" "pool (window firstmate:fm-$id is closed on exit" \
+  assert_contains "$out" "pool (window firstmate:$window is closed on exit" \
     "a fresh polytoken isolation refusal must name the worktree and the closed window"$'\n'"$out"
-  assert_not_contains "$out" "Inspect target firstmate:fm-$id" \
+  assert_not_contains "$out" "Inspect target firstmate:$window" \
     "a fresh polytoken isolation refusal must not point at its closed window"
   rm -rf "/tmp/fm-$id" "/tmp/fm-$id+"*
   pass "the treehouse-get isolation refusal points only at what survives the abort"

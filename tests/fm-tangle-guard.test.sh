@@ -215,7 +215,7 @@ test_spawn_isolation_abort() {
 #     tmux appends at the next free index instead of the active window index, which
 #     collides under base-index 1;
 #   - the window id is captured (-P -F #{window_id}) and automatic-rename/allow-rename
-#     are disabled so the fm-<id> name survives treehouse cd'ing into the worktree;
+#     are disabled so the task window name survives treehouse cd'ing into the worktree;
 #   - the treehouse-get send-keys and the worktree wait loop target that stable
 #     window id, never the (possibly-renamed) name - a lost name would let
 #     display-message fall back to the active client's window and misread firstmate's
@@ -282,7 +282,7 @@ test_spawn_tmux_window_construction() {
   assert_contains "$out" "spawned rec-win-gg7" "recording spawn did not report success"
 
   # Bug 1 fix: append-form window creation (trailing colon on the session target).
-  assert_grep "new-window -dP -F #{window_id} -t firstmate: -n fm-rec-win-gg7" "$rec" \
+  assert_grep "new-window -dP -F #{window_id} -t firstmate: -n $(fm_test_expected_tmux_window rec-win-gg7 "$home")" "$rec" \
     "new-window must append at the session (trailing colon) and capture the window id"
   assert_no_grep "new-window -dP -F #{window_id} -t firstmate -n" "$rec" \
     "new-window must not target the bare session name (collides under base-index 1)"
