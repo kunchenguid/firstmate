@@ -110,10 +110,10 @@ def session_lock_text(path):
 PAYLOAD = json.dumps({"session_id": "synthetic-second", "stop_hook_active": True})
 
 
-def guard(env, label, prefix=""):
+def guard(env, label, prefix="", flag="--claude", payload=PAYLOAD):
     process = run(
         env,
-        prefix + "printf '%s\\n' '" + PAYLOAD + "' | \"$FM_ROOT_OVERRIDE/bin/fm-turnend-guard.sh\" --claude",
+        prefix + "printf '%s\\n' '" + payload + "' | \"$FM_ROOT_OVERRIDE/bin/fm-turnend-guard.sh\" " + flag,
     )
     print(label, "rc=" + str(process.returncode), "stdout=" + repr(process.stdout), "stderr=" + repr(process.stderr), flush=True)
     return process
@@ -188,6 +188,17 @@ try:
         require("cannot and should not arm or repair" in result.stdout, "diagnostic did not explain the safe ownership boundary")
     require(not (root / "state/.turnend-claude-blocks").exists(), "foreign-owner guard must not consume its block budget")
     print("FIXED repeated non-owner Stops: all five ended safely", flush=True)
+
+    # Pi runs the guard with --pi and a stop_hook_active=false payload; the
+    # same foreign live owner must end its turn instead of re-blocking.
+    pi_payload = json.dumps({"stop_hook_active": False})
+    for number in range(1, 4):
+        pi_result = guard(env, f"nonowner pi stop {number}", flag="--pi", payload=pi_payload)
+        require(pi_result.returncode == 0, f"foreign-owner Pi Stop {number} must end safely")
+        require("TURN WOULD END BLIND" not in pi_result.stderr and not pi_result.stderr.strip(), "foreign-owner Pi Stop must not emit a block banner")
+        require("SUPERVISION IS OWNED BY ANOTHER LIVE SESSION" in pi_result.stdout, "foreign-owner Pi Stop lost its clear diagnostic")
+        require("cannot and should not arm or repair" in pi_result.stdout, "Pi diagnostic did not explain the safe ownership boundary")
+    print("FIXED Pi non-owner Stops end safely", flush=True)
 
     beat.touch()
     fresh = guard(env, "fresh-beat-only counterfactual")
