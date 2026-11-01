@@ -1086,6 +1086,31 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds declare a validation-round pause once, then hold it"
 }
 
+test_ship_and_scout_bound_pause_declarations_to_long_waits() {
+  local home kind id brief
+  home="$TMP_ROOT/long-wait-pause-home"
+  mkdir -p "$home/data" "$home/config"
+  : > "$home/config/wait-no-turns"
+
+  for kind in ship scout; do
+    id="brief-long-wait-pause-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'Declare only a wait expected to last more than about 15 minutes, once per wait and with an `until`' "$brief" \
+      "$kind brief did not bound pause declarations to long waits declared once with an until"
+    assert_grep 'never declare one per test, build, or rerun' "$brief" \
+      "$kind brief did not forbid a pause declaration per short rerun"
+    assert_grep 'Skip the declaration when the hold is expected to end within about 15 minutes' "$brief" \
+      "$kind brief's Waiting section did not exempt short holds from the declaration"
+  done
+  pass "fm-brief.sh: ship and scout scaffolds declare a pause only for waits over about 15 minutes"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -1715,6 +1740,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_ship_and_scout_bound_pause_declarations_to_long_waits
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_completion_write_exception_is_task_scoped
 test_scout_and_secondmate_scaffold
