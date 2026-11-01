@@ -3024,7 +3024,7 @@ case "$ARG3" in
     case "$word" in
       [A-Za-z_]*=*) continue ;;
       -u|--unset|-C|--chdir) raw_skip_next=1; continue ;;
-      -S|--split-string) continue ;;
+      -S|--split-string) raw_skip_next=1; continue ;;
     esac
     word=${word#\"}
     word=${word#\'}
@@ -3072,11 +3072,19 @@ if [ "$RAW_LAUNCH" -eq 1 ]; then
   case "$HARNESS" in
     bash|sh|dash|zsh|ksh)
       shell_seen=0
+      raw_shell_skip_next=0
       for word in $LAUNCH; do
+        if [ "$raw_shell_skip_next" -eq 1 ]; then
+          raw_shell_skip_next=0
+          continue
+        fi
         if [ "$shell_seen" -eq 1 ] && raw_shell_has_c_flag "$word"; then
           RAW_SHELL_C=1
           break
         fi
+        case "$word" in
+          -u|--unset|-C|--chdir|-S|--split-string) raw_shell_skip_next=1; continue ;;
+        esac
         case "$(basename -- "$word")" in
           bash|sh|dash|zsh|ksh) shell_seen=1 ;;
         esac
