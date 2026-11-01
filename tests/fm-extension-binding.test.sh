@@ -2610,8 +2610,20 @@ symlinked_result=$(first_result "$H_EXAMPLE" example-symlinked) \
   || fail "a home reached through a symlinked ancestor captured no external result"
 assert_grep 'build 43 completed successfully' "$symlinked_result" \
   "the symlinked-ancestor home did not preserve external evidence"
+assert_absent "$H_EXAMPLE/state/procevent/example-symlinked.source" \
+  "a terminal external result in a symlinked-ancestor home did not retire its source"
+symlinked_spelled_result="$H_EXAMPLE_SYMLINKED/state/procevent-inbox/${symlinked_result##*/}"
+assert_contains "$(FM_HOME="$H_EXAMPLE_SYMLINKED" "$PROCEVENT" classify "$symlinked_spelled_result")" "file-signal" \
+  "a result named through the symlinked-ancestor spelling did not classify"
+mkdir "$HOMES/example-outside"
+for sidecar in result adapter extension; do
+  cp "${symlinked_result%.result}.$sidecar" "$HOMES/example-outside/example-symlinked.1.$sidecar"
+  chmod 0600 "$HOMES/example-outside/example-symlinked.1.$sidecar"
+done
+expect_failure "directly inside" env FM_HOME="$H_EXAMPLE_SYMLINKED" \
+  "$PROCEVENT" classify "$TMP_ROOT/homes-through-symlink/example-outside/example-symlinked.1.result"
 FM_HOME="$H_EXAMPLE_SYMLINKED" "$PROCEVENT" retire example-symlinked --if-owner "$symlinked_token" >/dev/null
-pass "a home reached through a symlinked ancestor captures external evidence normally"
+pass "a home reached through a symlinked ancestor captures, classifies, and retires external evidence normally"
 
 P_HANDSHAKE_ORPHAN="$PACKAGES/handshake-orphan"
 P_HANDSHAKE_RECOVER="$PACKAGES/handshake-recover"
