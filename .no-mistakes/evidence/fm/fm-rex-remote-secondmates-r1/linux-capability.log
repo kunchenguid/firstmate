@@ -1,0 +1,16 @@
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image [1s]
+[1/6] Fetching image 66% (3 of 4 blobs, 17.7/26.8 MB, 5 KB/s) [2s]
+[2/6] Unpacking image [2s]
+[2/6] Unpacking image for platform linux/arm64 [2s]
+[2/6] Unpacking image for platform linux/arm64 100% (4,221 of 4,221 entries, 92.7/92.7 MB, 1 KB/s) [3s]
+[3/6] Fetching kernel [3s]
+[4/6] Fetching init image [3s]
+[5/6] Unpacking init image [3s]
+[6/6] Starting container [3s]
+[6/6] Starting container [4s]
+Linux fm-lab-rex-01m6 6.18.35 #1 SMP Mon Jun 15 12:55:27 UTC 2026 aarch64 GNU/Linux
+/usr/bin/bash
+install-rex.sh
+tmp

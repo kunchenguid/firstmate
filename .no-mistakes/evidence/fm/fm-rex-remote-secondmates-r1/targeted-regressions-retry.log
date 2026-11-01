@@ -1,0 +1,75 @@
+FM_TEST_BEGIN 2026-11-01T07:55:15Z tests/fm-secondmate-liveness.test.sh family=secondmate expected_gate_skip=none
+ok - fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable
+ok - fm_backend_tmux_agent_state: rejects malformed targets before probing tmux
+ok - fm_backend_herdr_agent_state: preserves missing/no-agent/live/unknown husk behavior
+ok - fm_backend_agent_state: routes tmux/Herdr and keeps Zellij unverified
+ok - sweep: a confirmed-dead secondmate endpoint is killed and respawned
+ok - sweep: secondmate recovery resolves its durable account despite a different ambient login
+ok - sweep: distinct secondmate relaunches serialize across the task-set lock
+ok - sweep: a tmux secondmate whose close fails keeps the existing best-effort kill and guarded spawn
+ok - sweep: an already-live secondmate is untouched and distinguishable in verbose diagnostics
+ok - sweep: an authoritatively missing Pi secondmate window is relaunched
+ok - sweep: an authoritatively missing pi-signed secondmate window is relaunched
+ok - sweep: an existing ambiguous Pi process prevents duplicate recovery
+ok - sweep: transient target unreadability never licenses recovery
+ok - sweep: failed relaunch diagnostics distinguish a confidently missing endpoint
+ok - sweep: an unverified harness blocks recovery with a concrete diagnostic
+ok - sweep: idempotent by construction - a live secondmate is never re-touched on a later run
+ok - sweep: skipped entirely under FM_BOOTSTRAP_DETECT_ONLY=1, exactly like the other mutating sweeps
+ok - sweep: a silent no-op with no kind=secondmate meta present (a secondmate home's own natural scoping)
+ok - sweep: a mate mid-episode under the shared liveness lock is skipped entirely
+ok - relaunch: the spawn timeout bounds the lock wait before touching the endpoint
+ok - sweep: an unreadable or unwritable relaunch ledger refuses to kill or spawn
+ok - poll probe: remote states map to the same contract as local, one call each
+ok - poll probe: unreachable or inconclusive remote reads preserve the route
+ok - full probe: a live rex route stays alive through the rex readiness gate
+ok - full probe: remote backend drift is reported, never migrated
+ok - full probe: rex readiness gaps and unreachable hosts stay explicit
+ok - full probe: a record without remote_backend stays a herdr route
+# all fm-secondmate-liveness tests passed
+FM_TEST_END 2026-11-01T07:56:03Z tests/fm-secondmate-liveness.test.sh exit=0 duration_ms=47333 gate_skip=false
+FM_TEST_BEGIN 2026-11-01T07:56:03Z tests/fm-backend-rex.test.sh family=rex expected_gate_skip=optional-binary
+ok - fm_backend_rex_bin: REX_BIN_DIR, then PATH, then the server bundle path
+ok - Rex spawn refuses an endpoint whose server locality is unproven before creating sessions or tabs
+ok - fm_backend_rex_version_check: accepts API revision 5 and refuses an older CLI, older server, or missing CLI
+ok - fm_backend_rex_parse_target: <session-uuid>:<block-uuid> only, prefixes restored
+ok - fm_backend_rex_create_task: one per-home session created once then adopted, one tab per task, scoped block label, 200x50
+warning: could not move the respawned Rex secondmate tab window:00000009-0000-7000-8000-000000000009 to the first position
+ok - fm_backend_rex_create_task: confirmed launcher session gets the tab focus-safe; unconfirmed claims refuse; nested tmux and other-home use the per-home session
+ok - fm_backend_rex_create_task: refuses an unreadable inventory, ambiguous per-home sessions, and duplicates; a gone session returns 2
+ok - fm_backend_rex_create_task_in_session: closes a bare-shell husk carrying the task label, refuses over a live one
+ok - fm_backend_rex_create_task reclaim: the fallback placement closes a bare-shell husk, refuses a live one, and spawn still refuses duplicates
+ok - rex capture: CR stripped and tailed; viewport derived from the last size.rows styled rows, implicit empty bottom row restored
+ok - fm_backend_composer_state rex: the composer holding the cursor decides; a cursor outside any composer falls back to the cursorless read
+ok - fm_backend_agent_state rex: alive/dead/ambiguous from the process view, missing on not-found, unreadable without starting a server
+ok - fm_backend_agent_state rex: a harness below a shell foreground is alive and its records are trusted; a bare shell stays dead
+ok - fm_backend_busy_state rex: OSC 7501 records count only while their owner is the foreground process or an ancestor
+ok - fm_backend_rex_current_path: the foreground process cwd
+ok - rex input: literal text after --, no call for empty input, verified key names only, line submit
+ok - fm_backend_kill rex: closes exactly its tab, treats a gone block as done, retires the emptied per-home session
+ok - fm_backend_kill rex: never kills a session this home does not own, even when it is empty
+ok - fm_backend_kill rex: refuses success unless the block is proven gone
+ok - fm-teardown rex: retiring a secondmate closes its crew and its own tab and retires its per-home session
+ok - fm_backend_rex_endpoint_absence_recheck: proof only from the recorded server; missing/dead/unproven
+ok - fm_control_endpoint_absence_verdict rex: gone only on a not-found from the recorded server
+ok - fm-control exit on rex: a stopped server goes through the recorded-server absence proof, and refuses when it cannot prove absence
+ok - fm_backend_rex_list_live: home-scoped blocks only, nothing when unreachable
+ok - fm_backend_events_capable rex: API revision 5 on both ends, read without starting a server
+ok - fm_backend_wait_transition rex: a trusted blocked edge returns its record with Rex's app, kind, and message
+ok - fm_backend_wait_transition rex: a blocked edge counts only while its owner is the foreground process or an ancestor
+ok - fm_backend_wait_transition rex: level reconcile returns a blocked block once; working and cleanup clear the marker
+ok - fm_backend_wait_transition rex: a watched block's exit or close ends the wait at once for an immediate poll
+ok - fm_backend_wait_transition rex: a reader that cannot start or ends early falls back to polling
+ok - rex: a mark, progress record, tint, and wedge alert are each one small terminal write of Firstmate's own app=firstmate record
+ok - rex: mark_read reports only Firstmate's record and fails on an unreadable pane
+ok - rex: Firstmate's own program-status records never count as the worker's busy state or blocked edge
+ok - rex: attention marks are off unless config/rex-status-marks turns them on
+ok - rex: the marks producer plans from status, writes once, repairs without re-notifying, clears on resolve, and honors off
+ok - rex: clearing a task removes its mark, tint, and caches
+ok - rex: validation progress reads captured no-mistakes status by column name
+FM_TEST_END 2026-11-01T07:56:38Z tests/fm-backend-rex.test.sh exit=0 duration_ms=35500 gate_skip=false
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=82982
+FM_TEST_SUMMARY_FAMILY family=rex count=1 duration_ms=35500 failed=0
+FM_TEST_SUMMARY_FAMILY family=secondmate count=1 duration_ms=47333 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-secondmate-liveness.test.sh duration_ms=47333
+FM_TEST_SLOWEST rank=2 script=tests/fm-backend-rex.test.sh duration_ms=35500

@@ -1,0 +1,58 @@
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[2/6] Unpacking image [0s]
+[3/6] Fetching kernel [0s]
+[4/6] Fetching init image [0s]
+[5/6] Unpacking init image [0s]
+[6/6] Starting container [0s]
+[6/6] Starting container [0s]
+
+=== Versions ===
+rex 0.1.0-preview.12
+commit: e6592f74969959db77f1f84261901ef599a025cf
+built: 2026-10-30T16:31:44Z
+api: revision 8 (supports 0 to 8)
+codex-cli 0.166.0
+
+=== Start isolated persistent personal server ===
+Rex server running at unix:///tmp/fm-rex-runtime/rex/server.sock (pid 35)
+{
+  "endpoint": "unix:///tmp/fm-rex-runtime/rex/server.sock",
+  "pid": 35,
+  "instance_id": "5b5fdfdf-8b28-43cd-a660-e486cde14fe1",
+  "host_id": "43702f78-2be3-4f25-9e16-b0673a68c339",
+  "started_at": "2026-11-01T08:00:44.152463416Z",
+  "rex_version": "0.1.0-preview.12",
+  "api_revision": 8,
+  "exit_empty": false,
+  "session_count": 0,
+  "log_path": "/work/.test-live/account/.local/state/rex/servers/5a8865c9d755f10a30c0f9f0f01178285cd89656e106097cbc863e723426f918.log",
+  "tailscale": {
+    "state": "disabled",
+    "allow_tailnet_members": false
+  },
+  "you": {
+    "kind": "peer",
+    "transport": "unix",
+    "display": "uid 0",
+    "remote_addr": "@",
+    "uid": 0,
+    "gid": 0,
+    "pid": 46
+  }
+}
+
+=== Create real Codex endpoint for remote read-only contract ===
+{
+  "session_id": "session:01a19620-08ba-7012-bab8-343a5348866e",
+  "initial_windows": [
+    {
+      "window_id": "window:01a19620-08c0-70cc-a721-14afbc6ac69a",
+      "block_ids": [
+        "block:01a19620-08ba-748f-9029-b597aa67c14d"
+      ],
+      "revision": 1
+    }
+  ]
+}
+Rex server stopped.

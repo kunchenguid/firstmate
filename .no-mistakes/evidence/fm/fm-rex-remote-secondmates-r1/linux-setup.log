@@ -1,0 +1,41 @@
+[0/6] [0s]
+[1/6] Fetching image [0s]
+[1/6] Fetching image (1 of 2 blobs) [1s]
+[1/6] Fetching image 9% (3 of 11 blobs, 37.1/381.1 MB, 29.2 MB/s) [2s]
+[1/6] Fetching image 38% (6 of 11 blobs, 148.1/381.1 MB, 111.0 MB/s) [3s]
+[1/6] Fetching image 68% (8 of 11 blobs, 259.6/381.1 MB, 111.5 MB/s) [4s]
+[1/6] Fetching image 96% (10 of 11 blobs, 369.7/381.1 MB, 110.1 MB/s) [5s]
+[2/6] Unpacking image [5s]
+[2/6] Unpacking image for platform linux/arm64 [5s]
+[2/6] Unpacking image for platform linux/arm64 [6s]
+[2/6] Unpacking image for platform linux/arm64 32% (14,631 of 34,119 entries, 352.2 MB/1.05 GB, 470 bytes/s) [7s]
+[2/6] Unpacking image for platform linux/arm64 81% (26,648 of 34,119 entries, 878.7 MB/1.05 GB, 428.3 MB/s) [8s]
+[2/6] Unpacking image for platform linux/arm64 100% (34,119 of 34,119 entries, 1.05/1.05 GB, 549.1 MB/s) [9s]
+[3/6] Fetching kernel [9s]
+[4/6] Fetching init image [9s]
+[5/6] Unpacking init image [9s]
+[6/6] Starting container [9s]
+[6/6] Starting container [10s]
+Linux fm-lab-rex-01m6 6.18.35 #1 SMP Mon Jun 15 12:55:27 UTC 2026 aarch64 GNU/Linux
+/usr/bin/git
+/usr/bin/curl
+/usr/bin/python3
+rex 0.1.0-preview.12
+commit: e6592f74969959db77f1f84261901ef599a025cf
+built: 2026-10-30T16:31:44Z
+api: revision 8 (supports 0 to 8)
+jq-1.8.1
+npm error code ENOENT
+npm error syscall mkdir
+npm error path /root/.npm
+npm error errno ENOENT
+npm error enoent Invalid response body while trying to fetch https://registry.npmjs.org/@openai%2fcodex: ENOENT: no such file or directory, mkdir '/root/.npm'
+npm error enoent This is related to npm not being able to find a file.
+npm error enoent
+npm notice
+npm notice New major version of npm available! 10.9.9 -> 12.2.1
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.1
+npm notice To update run: npm install -g npm@12.2.1
+npm notice
+npm error Log files were not written due to an error writing to the directory: /root/.npm/_logs
+npm error You can rerun the command with `--loglevel=verbose` to see the logs in your terminal

@@ -1,0 +1,75 @@
+FM_TEST_BEGIN 2026-11-01T07:54:02Z tests/fm-secondmate-liveness.test.sh family=secondmate expected_gate_skip=none
+FM_TEST_BEGIN 2026-11-01T07:54:02Z tests/fm-remote-doctor.test.sh family=secondmate expected_gate_skip=none
+ok - fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable
+ok - fm_backend_tmux_agent_state: rejects malformed targets before probing tmux
+ok - fm_backend_herdr_agent_state: preserves missing/no-agent/live/unknown husk behavior
+ok - fm_backend_agent_state: routes tmux/Herdr and keeps Zellij unverified
+not ok - a confirmed-dead secondmate should actually be relaunched (missing: 'new-window')
+--- output ---
+kill-window -t =firstmate:=fm-sm1
+FM_TEST_END 2026-11-01T07:54:08Z tests/fm-secondmate-liveness.test.sh exit=1 duration_ms=5562 gate_skip=false
+ok - a missing session backend is a human gap that --fix never claims to close
+ok - an absent launch agent is a fixable gap and the read-only run changes nothing
+ok - --fix installs the dedicated fm-remote launch agent without touching default
+ok - --fix is idempotent once the host is ready
+ok - a loaded and running launch agent must match the complete owned contract
+ok - a failed reload leaves stale effective launch-agent state unready
+ok - a launch agent outside the Aqua session scope is rewritten in place
+ok - launchd failures are reported and delayed server readiness is awaited
+ok - a session served outside the Aqua login session is fixable and --fix retakes it through launchd
+ok - human gaps are reported with their operator step and never claimed as fixed
+ok - a bash Directory Services login shell is rendered with -l -c
+ok - custom Directory Services shell paths remain valid plist arguments
+ok - shell resolution bounds Directory Services and uses executable SHELL and POSIX fallbacks
+ok - repeated repair reuses one resolved login shell and remains a no-op
+ok - a non-darwin host skips launch agents and starts its herdr server directly
+ok - omp alone satisfies the remote harness requirement
+ok - --fix creates only owned version-manager wrappers and never clobbers an operator file
+ok - doctor refreshes stale worker identity before probing tools
+ok - the entrypoint symlink is recreated when absent and never overwritten when operator-owned
+ok - a rex-verified host checks rex, its persistent server, and the backend-independent worker
+ok - backend resolution keeps herdr the default on a host offering both
+ok - backend resolution falls to rex when herdr is absent
+ok - --fix starts a missing rex server as the persistent shape
+ok - --fix never stops an answering exit-empty rex server and reports the operator restart
+ok - a rex CLI or server below the verified API floor is a human gap
+ok - a rex endpoint that is not a local unix socket is a human gap
+ok - an explicit rex request needs the CLI on PATH, and --backend rejects unknown backends
+ok - a Linux host verifies rex without any Aqua-specific requirement
+FM_TEST_END 2026-11-01T07:54:36Z tests/fm-remote-doctor.test.sh exit=0 duration_ms=34024 gate_skip=false
+FM_TEST_BEGIN 2026-11-01T07:54:36Z tests/fm-backend-rex.test.sh family=rex expected_gate_skip=optional-binary
+ok - fm_backend_rex_bin: REX_BIN_DIR, then PATH, then the server bundle path
+ok - Rex spawn refuses an endpoint whose server locality is unproven before creating sessions or tabs
+ok - fm_backend_rex_version_check: accepts API revision 5 and refuses an older CLI, older server, or missing CLI
+ok - fm_backend_rex_parse_target: <session-uuid>:<block-uuid> only, prefixes restored
+ok - fm_backend_rex_create_task: one per-home session created once then adopted, one tab per task, scoped block label, 200x50
+warning: could not move the respawned Rex secondmate tab window:00000009-0000-7000-8000-000000000009 to the first position
+ok - fm_backend_rex_create_task: confirmed launcher session gets the tab focus-safe; unconfirmed claims refuse; nested tmux and other-home use the per-home session
+ok - fm_backend_rex_create_task: refuses an unreadable inventory, ambiguous per-home sessions, and duplicates; a gone session returns 2
+ok - fm_backend_rex_create_task_in_session: closes a bare-shell husk carrying the task label, refuses over a live one
+ok - fm_backend_rex_create_task reclaim: the fallback placement closes a bare-shell husk, refuses a live one, and spawn still refuses duplicates
+ok - rex capture: CR stripped and tailed; viewport derived from the last size.rows styled rows, implicit empty bottom row restored
+ok - fm_backend_composer_state rex: the composer holding the cursor decides; a cursor outside any composer falls back to the cursorless read
+ok - fm_backend_agent_state rex: alive/dead/ambiguous from the process view, missing on not-found, unreadable without starting a server
+ok - fm_backend_agent_state rex: a harness below a shell foreground is alive and its records are trusted; a bare shell stays dead
+ok - fm_backend_busy_state rex: OSC 7501 records count only while their owner is the foreground process or an ancestor
+ok - fm_backend_rex_current_path: the foreground process cwd
+ok - rex input: literal text after --, no call for empty input, verified key names only, line submit
+ok - fm_backend_kill rex: closes exactly its tab, treats a gone block as done, retires the emptied per-home session
+ok - fm_backend_kill rex: never kills a session this home does not own, even when it is empty
+ok - fm_backend_kill rex: refuses success unless the block is proven gone
+not ok - teardown of a rex secondmate must succeed: ●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e {run-worktree}/.pi/extensions/fm-primary-turnend-guard.ts -e {run-worktree}/.pi/extensions/fm-primary-pi-watch.ts if the extensions are not loaded.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REFUSED: unsafe secondmate home removal target {run-worktree}/.test-live/tmp/fm-backend-rex-tests.PB5Rcf/teardown-secondmate/mate is inside the firstmate repo: expected exit 0, got 1
+FM_TEST_END 2026-11-01T07:54:55Z tests/fm-backend-rex.test.sh exit=1 duration_ms=18912 gate_skip=false
+FM_TEST_SUMMARY total=3 failed=2 skipped_gate=0 duration_ms=53269
+FM_TEST_SUMMARY_FAMILY family=rex count=1 duration_ms=18912 failed=1
+FM_TEST_SUMMARY_FAMILY family=secondmate count=2 duration_ms=39586 failed=1
+FM_TEST_SLOWEST rank=1 script=tests/fm-remote-doctor.test.sh duration_ms=34024
+FM_TEST_SLOWEST rank=2 script=tests/fm-backend-rex.test.sh duration_ms=18912
+FM_TEST_SLOWEST rank=3 script=tests/fm-secondmate-liveness.test.sh duration_ms=5562
