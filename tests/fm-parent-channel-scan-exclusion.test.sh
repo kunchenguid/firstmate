@@ -297,10 +297,18 @@ test_record_hygiene_skips_remote_parent_channel() {
   mkdir -p "$dir/home/data"
   out=$(FM_TEST_LIB_SOURCED=1 FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
     bash -c '
-      . "$1/bin/fm-bootstrap.sh" >/dev/null 2>&1 || true
-      . "$1/bin/fm-record-hygiene-lib.sh"
-      STATE="$2/state"; DATA="$2/data"; SCRIPT_DIR="$1/bin"
-      record_hygiene_report
+      SCRIPT_DIR="$1/bin"; STATE="$2/state"; DATA="$2/data"
+      # shellcheck source=bin/fm-classify-lib.sh
+      . "$SCRIPT_DIR/fm-classify-lib.sh"
+      # shellcheck source=bin/fm-tasks-axi-lib.sh
+      . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+      # shellcheck source=bin/fm-backend.sh
+      . "$SCRIPT_DIR/fm-backend.sh"
+      # shellcheck source=bin/fm-timeout-lib.sh
+      . "$SCRIPT_DIR/fm-timeout-lib.sh"
+      # shellcheck source=bin/fm-record-hygiene-lib.sh
+      . "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
+      FM_BOOTSTRAP_DETECT_ONLY=1 record_hygiene_report
     ' _ "$ROOT" "$dir/home") || fail "record hygiene scan failed"
   case "$out" in *parent-replies*) fail "remote parent channel was reported: $out" ;; esac
   [ -f "$dir/home/state/parent-replies.status" ] || fail "remote parent channel was archived"
