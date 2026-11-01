@@ -2,7 +2,7 @@
 # tests/fm-wake-queue.test.sh - wake-queue losslessness (the queue safety matrix):
 # concurrent append/drain, bounded structural enrichment and presentation-lock
 # waits, interruption safety, signal catch-up while no watcher runs, stale/check enqueue-before-suppressor
-# ordering, atomic double-drain, duplicate collapse, and liveness assertion.
+# ordering, one sweep queuing every printing check, atomic double-drain, duplicate collapse, and liveness assertion.
 # Nothing is lost and nothing is double-consumed. General watcher/lock liveness
 # lives in fm-watcher-lock.test.sh; daemon classification/injection in
 # fm-daemon.test.sh.
@@ -268,6 +268,44 @@ SH
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/1' >/dev/null || fail "check wake was not queued"
   [ -e "$state/.last-check" ] || fail "check cadence marker was not written after queue append"
   pass "registered custom check output is queued before cadence suppression"
+}
+
+# A check that prints used to wake and exit the sweep, so every later check
+# waited for the next interval and could be starved for good. One sweep must
+# queue every printing check and still run a quiet check between them.
+test_one_sweep_queues_every_printing_check() {
+  local dir state fakebin out drain_out early late quiet marker rows
+  dir=$(make_case sweep-all-checks)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  marker="$dir/quiet-ran"
+  early="$state/a-news.check.sh"
+  quiet="$state/b-quiet.check.sh"
+  late="$state/c-news.check.sh"
+  printf '#!/usr/bin/env bash\nprintf "memory-low\\n"\n' > "$early"
+  printf '#!/usr/bin/env bash\nprintf "ran\\n" > %q\n' "$marker" > "$quiet"
+  printf '#!/usr/bin/env bash\nprintf "disk-full\\n"\n' > "$late"
+  chmod 0700 "$early" "$quiet" "$late"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" a-news >/dev/null \
+    || fail "could not register the early printing check"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" b-quiet >/dev/null \
+    || fail "could not register the quiet check"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" c-news >/dev/null \
+    || fail "could not register the later printing check"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not exit after one check sweep"
+  [ -f "$marker" ] || fail "the quiet check between two printing checks did not run"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the check sweep failed"
+  grep -F "$(printf '\tcheck\t%s\t' "$early")" "$drain_out" | grep -F 'memory-low' >/dev/null \
+    || fail "the early printing check was not queued in the sweep"
+  grep -F "$(printf '\tcheck\t%s\t' "$late")" "$drain_out" | grep -F 'disk-full' >/dev/null \
+    || fail "the later printing check was not queued in the same sweep"
+  rows=$(awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$drain_out")
+  [ "$rows" -eq 2 ] || fail "the sweep queued $rows check rows; expected the two printing checks"
+  [ -e "$state/.last-check" ] || fail "the sweep did not stamp the check cadence once it finished"
+  pass "one sweep queues every printing check and still runs a quiet check"
 }
 
 test_atomic_double_drain() {
@@ -3765,6 +3803,7 @@ test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
+test_one_sweep_queues_every_printing_check
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
