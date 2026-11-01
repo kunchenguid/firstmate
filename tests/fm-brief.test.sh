@@ -1050,6 +1050,43 @@ SIGNALS
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_no_mistakes_brief_limits_fixround_scope() {
+  local home id brief
+  home="$TMP_ROOT/fixround-scope-home"
+  mkdir -p "$home/data"
+
+  id="brief-fixround-scope"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "no-mistakes brief was not scaffolded"
+  assert_grep "On every response to a review, test, or CI finding, including when you relay a decision, the instructions you pass the pipeline must include both of these limits:" "$brief" \
+    "no-mistakes brief does not require the fix-round limits on a gate response"
+  assert_grep "A fix round must not commit a file the PR did not already change, except for the smallest downstream change needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate." "$brief" \
+    "no-mistakes brief dropped the unrelated-file limit or its downstream exception"
+  assert_grep "A CI fix that cannot reproduce the failure must not edit tests." "$brief" \
+    "no-mistakes brief does not forbid editing tests for an unreproduced CI failure"
+
+  id="brief-fixround-scope-gerrit"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --forge gerrit --shape squash >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "A fix round must not commit a file the PR did not already change, except for the smallest downstream change needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate." "$brief" \
+    "gerrit no-mistakes brief dropped the fix-round file limit"
+  assert_grep "A CI fix that cannot reproduce the failure must not edit tests." "$brief" \
+    "gerrit no-mistakes brief dropped the unreproduced-CI test limit"
+
+  for id in brief-fixround-direct brief-fixround-scout; do
+    if [ "$id" = brief-fixround-scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+    fi
+    assert_no_grep "A fix round must not commit a file the PR did not already change" \
+      "$home/data/$id/brief.md" \
+      "$id scaffold carried the no-mistakes fix-round limit"
+  done
+  pass "fm-brief.sh: no-mistakes briefs limit fix-round files and unreproduced CI test edits"
+}
+
 test_ship_and_scout_teach_validation_round_pause() {
   local home kind id brief
   home="$TMP_ROOT/validation-round-pause-home"
@@ -1714,6 +1751,7 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_no_mistakes_brief_limits_fixround_scope
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_completion_write_exception_is_task_scoped
