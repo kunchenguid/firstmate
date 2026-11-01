@@ -375,6 +375,70 @@ EOF
   done
 }
 
+# When Orca source mode supplies allowlisted variables from a tmux session, the
+# task scratch path must still win for ship and scout workers even if the source
+# tries to supply ambient TMPDIR/TMP/TEMP values.
+test_orca_source_pins_task_tmp_after_allowlisted_source_values() {
+  local case_dir home id=orca-tasktmp-source fb out status staged result pane_shell
+  case_dir="$TMP_ROOT/$id"
+  home="$case_dir/home"
+  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects"
+  touch "$home/state/.last-watcher-beat"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  printf 'scoped-source\n' > "$home/config/launch-env-tmux-session"
+  printf 'TMPDIR\nTMP\nTEMP\n' > "$home/config/launch-env-allowlist"
+  fm_git_init_commit "$case_dir/project"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Verify the Orca source mode keeps task temp inside the task root.
+
+## Firstmate spec
+Exercise only the launch environment under Orca source mode.
+EOF
+  cat > "$case_dir/probe.sh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${TMPDIR-unset}" "${TMP-unset}" "${TEMP-unset}"
+EOF
+  python3 - "$case_dir/source.json" <<'PY'
+import json,sys
+with open(sys.argv[1], 'w') as f:
+ json.dump({'TMPDIR':'/ambient-shared-tmp', 'TMP':'/ambient-shared-tmp', 'TEMP':'/ambient-shared-tmp'}, f)
+PY
+  fb=$(make_orca_fakebin "$case_dir")
+  cat > "$fb/tmux" <<'EOF'
+#!/usr/bin/env python3
+import json,os,sys
+if sys.argv[1:5] != ['-u','show-environment','-t','=scoped-source']: sys.exit(2)
+with open(os.environ['FM_TEST_ORCA_DIR']+'/source.json') as f: data=json.load(f)
+names=[sys.argv[5]] if len(sys.argv)>5 else data
+for name in names:
+ if name not in data: sys.exit(1)
+ print(name+'='+data[name])
+EOF
+  chmod +x "$fb/tmux"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$case_dir/user-home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_TEST_ORCA_DIR="$case_dir" \
+    FM_TEST_ORCA_LOG="$case_dir/terminal.log" FM_TEST_ORCA_CONSUME=1 \
+    PATH="$fb:$PATH" "$SPAWN" "$id" "$case_dir/project" \
+    --mode direct-PR --yolo off --backend orca --harness "/bin/sh '$case_dir/probe.sh'" 2>&1)
+  expect_code 0 "$?" "Orca source-mode spawn should succeed: $out"
+  staged=$(sed -n "s/^[^']*'\([^']*\/launch\.[^'\/]*\.sh\)'.*$/\1/p" "$case_dir/terminal.log" | tail -1)
+  [ -f "$staged.copy" ] || fail "Orca did not stage the launch file for the source-mode temp check"
+  for pane_shell in /bin/sh /bin/bash /bin/zsh; do
+    [ -x "$pane_shell" ] || continue
+    cp "$staged.copy" "$staged" || fail "could not restage the Orca launch file for $pane_shell"
+    result=$(env -i HOME="$case_dir/user-home" PATH="$PATH" TERM=xterm \
+      TMPDIR=/personal-tmp TMP=/personal-tmp TEMP=/personal-tmp \
+      "$pane_shell" -c ". '$staged'") || fail "Orca source-mode temp launch failed in $pane_shell"
+    [ "$result" = $'/tmp/fm-orca-tasktmp-source/tmp\n/tmp/fm-orca-tasktmp-source/tmp\n/tmp/fm-orca-tasktmp-source/tmp' ] \
+      || fail "Orca source mode let allowlisted or ambient temp values override the task scratch in $pane_shell"$'\n'"actual: $result"
+  done
+  pass "Orca source mode pins TMPDIR, TMP, and TEMP to the task scratch after allowlisted source values"
+}
+
 # A spawn that fails after Orca accepted the launch leaves the terminal open,
 # and that pane may still be about to source the launch file, so abort cleanup
 # must not delete it out from under the pending source. The fake Orca accepts
@@ -870,6 +934,7 @@ PY
 
 test_orca_source_preserves_values_without_utf8_locale
 test_orca_launch_uses_controlled_tmux_environment
+test_orca_source_pins_task_tmp_after_allowlisted_source_values
 test_orca_allowlist_without_source_warns
 test_orca_spawn_waits_for_a_slow_pane_before_a_later_failure
 test_orca_unrun_launch_file_is_reclaimed

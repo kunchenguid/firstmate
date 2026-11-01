@@ -5945,9 +5945,10 @@ esac
 # - Shared /tmp stays reachable. Only the three variables move; a tool that
 #   must rendezvous through the shared /tmp (the tmux server socket derives
 #   from TMUX_TMPDIR, not TMPDIR) still reaches it by absolute path.
-# - Ownership. The private-root checks below run before tmp/ exists and cover
-#   it: the root is a real 0700 directory owned by this user, so nobody else
-#   can plant a path inside tmp/ - it is more private than the shared /tmp it
+# - Ownership. The root is a real 0700 directory owned by this user, and tmp/
+#   itself is either created fresh under that root or, when it already exists,
+#   must pass the same private-directory test before export. Nobody else can
+#   plant a path inside tmp/ - it is more private than the shared /tmp it
 #   replaces. Cleanup stays a rm of that one recorded root; the worktree and
 #   its unlanded work are never under it.
 # The root is private (0700) because its path is predictable under a shared
@@ -5970,10 +5971,14 @@ mkdir -p "$TASK_TMP/gotmp"
 TASK_GENERAL_TMP=
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   TASK_GENERAL_TMP="$TASK_TMP/tmp"
-  (umask 077 && mkdir -p "$TASK_GENERAL_TMP") || {
-    echo "error: could not create the task scratch directory $TASK_GENERAL_TMP" >&2
-    exit 1
-  }
+  if ! (umask 077 && mkdir "$TASK_GENERAL_TMP") 2>/dev/null; then
+    if [ -L "$TASK_GENERAL_TMP" ] || [ ! -d "$TASK_GENERAL_TMP" ] || [ ! -O "$TASK_GENERAL_TMP" ] ||
+      [ -n "$(find "$TASK_GENERAL_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
+      ! chmod 700 "$TASK_GENERAL_TMP"; then
+      echo "error: task scratch directory $TASK_GENERAL_TMP already exists and is not a private directory owned by this user; refusing to export it; inspect and remove it, then retry" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # Per-harness turn-end hook where enabled: a file that touches
@@ -7605,6 +7610,11 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   done
   if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $ORCA_LAUNCH_ENV_ARGS GIT_CONFIG_NOSYSTEM=1"
+  fi
+  # An Orca source can override allowlisted names after env -i, so pin the task
+  # scratch path again for ship and scout workers after those sourced assignments.
+  if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ] && [ -n "$TASK_GENERAL_TMP" ]; then
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX TMPDIR=$TASK_GENERAL_TMP TMP=$TASK_GENERAL_TMP TEMP=$TASK_GENERAL_TMP"
   fi
   # COMPACT_ADVISER_DISABLE is retained by the floor loop above, which forwards
   # whatever the pane export set, and then pinned here to the one value Firstmate
