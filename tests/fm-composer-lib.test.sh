@@ -208,7 +208,7 @@ test_matrix_claude_named_session_titled_rule() {
   # A multiword session name renders the same way, at the same width.
   multi='────────────────── Andrew Chen ─'
   assert_screen "multiword named claude idle on herdr" empty "$CAPS_STYLED" \
-    "${idle/"$titled"/"$multi"}" '' "$claude_idle"
+    "${idle/"$titled"/$multi}" '' "$claude_idle"
   assert_screen "multiword named claude typed on herdr" pending "$CAPS_STYLED" \
     "transcript line"$'\n'"$multi"$'\n'"❯ fix the login bug"$'\n'"$rule" '' "$claude_idle"
   # Claude's prompt suggestion is dim ghost text, not input.
@@ -1066,6 +1066,54 @@ test_matrix_opencode_leftbar_abs_cwd_furniture() {
   pass "matrix: opencode's absolute cwd rail on a wide pane reads empty busy and idle; typed text stays pending"
 }
 
+test_matrix_opencode_v2_autoaccept_footer() {
+  # Real OpenCode 2.1.4, captured live on 2026-10-26 through `tmux
+  # capture-pane -e` at 80x24 from a scratch worker pane with one completed
+  # turn above the composer (fixtures/opencode-2.1.4-composer/, the full
+  # visible pane exactly as fm_tmux_composer_capture feeds it). OpenCode 2
+  # renders the agent's autoaccept state as an `auto` cell between the mode
+  # word and the separator (`Build auto · DeepSeek Flash Latest Fireworks
+  # AI`), so the 1.x footer regex `^(Build|Plan) ·` stopped matching the
+  # rail's last row, that row counted as typed text, and every idle v2 worker
+  # pane read `pending` - the verdict that skips every fm-send doorbell and
+  # refuses every fm-control.sh exit. The cursor parks on a blank rail row
+  # (row 18) inside the left-bar run either way.
+  local idle typed noauto composer out
+  idle=$(<"$ROOT/tests/fixtures/opencode-2.1.4-composer/opencode-2.1.4-idle-auto.ansi")
+  typed=$(<"$ROOT/tests/fixtures/opencode-2.1.4-composer/opencode-2.1.4-typed-auto.ansi")
+  noauto=$(<"$ROOT/tests/fixtures/opencode-2.1.4-composer/opencode-2.1.4-idle-noauto.ansi")
+  assert_screen "opencode 2.1.4 idle autoaccept footer on tmux" empty "$CAPS_TMUX" "$idle" 18
+  assert_screen "opencode 2.1.4 idle non-autoaccept footer on tmux" empty "$CAPS_TMUX" "$noauto" 18
+  assert_screen "opencode 2.1.4 typed composer above the autoaccept footer" \
+    pending "$CAPS_TMUX" "$typed" 18
+  # Cursorless profiles: the full pane's status rail below the floor row makes
+  # the left-bar candidate stale (the same strict staleness the 1.18.31 full
+  # pane shows), so the composer tail ending at the floor row pins the
+  # furniture verdict there.
+  composer=$(printf '%s\n' "$idle" | sed -n '18,22p')
+  assert_screen "opencode 2.1.4 autoaccept footer on herdr" empty "$CAPS_STYLED" "$composer"
+  assert_screen "opencode 2.1.4 autoaccept footer on zellij" empty "$CAPS_STYLED_NOID" "$composer"
+  assert_screen "opencode 2.1.4 autoaccept footer on cmux/orca" empty "$CAPS_PLAIN" "$composer"
+  # Signal separation: the widened footer regex must be the only reason the
+  # idle autoaccept pane reads empty; overriding it puts the false `pending`
+  # straight back on the same bytes.
+  out=$(FM_COMPOSER_LEFTBAR_FOOTER_RE='^NEVER-MATCHES$' \
+    fm_composer_classify_screen "$CAPS_TMUX" "$idle" 18)
+  [ "$out" = pending ] \
+    || fail "the 2.1.4 autoaccept footer exemption must be the only reason the idle pane reads empty, got '$out'"
+  # The extractor reads the same run with the same rule, so a classified-empty
+  # pane must not hand back the footer as composer text, and a typed pane must
+  # hand back only the typed row (the zellij append proof).
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$composer")
+  [ -z "$out" ] \
+    || fail "the 2.1.4 autoaccept footer must not be extracted as composer text, got '$out'"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" \
+    "$(printf '%s\n' "$typed" | sed -n '18,22p')")
+  [ "$out" = 'fix the flaky test' ] \
+    || fail "extracting above the 2.1.4 autoaccept footer must yield only the typed row, got '$out'"
+  pass "matrix: opencode 2.1.4's autoaccept footer reads empty on tmux and typed text stays pending"
+}
+
 test_matrix_grok_titled_bottom_border() {
   # Grok 1.0.5 widened its titled BOTTOM border three columns past the top and
   # content rows. This is the idle capture from issue #3436; Herdr has no
@@ -1604,6 +1652,7 @@ test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
+test_matrix_opencode_v2_autoaccept_footer
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
 test_matrix_grok_144_approval_titled_bottom_border

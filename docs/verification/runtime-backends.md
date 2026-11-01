@@ -892,6 +892,58 @@ The portable half lives in `test_matrix_opencode_leftbar_signals` in `tests/fm-c
 The same bytes on a plain backend read `unknown` in both states, because opencode 1.19.0 also draws a de-emphasised `~/.treehouse/fm001-b8697d/1/fm001:fm/` row inside the box that survives an unstyled capture, so the strict posture keeps deferring rather than reading `empty` there.
 Overriding `FM_COMPOSER_LEFTBAR_FOOTER_RE` to a pattern that cannot match puts the false `pending` straight back on the captured idle pane, which pins the exemption as the load-bearing signal rather than an incidental pass.
 `fm_composer_extract_selected_content` applies the same rule to the same run, so the classified-empty pane hands back no composer text and the typed pane hands back only `fix the doorbell skip`; zellij's append proof (`fm_backend_zellij_composer_observed_append` in `bin/backends/zellij.sh`) requires the extracted text to equal the prior content plus the typed text, so a footer leaking into that read fails the send instead of confirming one.
+
+### 2026-10-26 opencode 2.1.4 autoaccept qualifier in the mode/footer row
+
+Verified on 2026-10-26 on macOS arm64 (Darwin 25.6.0) against an installed opencode 2.1.4 running as a Firstmate worker in a tmux 3.7c pane, read through `fm_tmux_composer_state` (`bin/fm-tmux-lib.sh`) with the tmux capability descriptor (`styled=1`, `cursor=1`, `identity=1`, `rows=0`).
+The captain upgraded the fleet to OpenCode v2 and every idle v2 worker pane misread `pending`: `bin/fm-control.sh exit` refused with "composer visibly holds pending text" on a visibly empty composer, `fm_task_inbox_ring` skipped every doorbell so steers sat undelivered in the inbox, and workers could be neither exited nor relaunched.
+
+OpenCode 2 kept the 1.x left-bar composer shape and its last-row mode/model line, but the TUI now renders the agent's autoaccept state as an `auto` cell between the mode word and the separator - `Build auto · GLM 5.3 Flash Fireworks AI` (byte-verified from the live worker pane).
+`FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT`'s `^(Build|Plan)[[:space:]]+·` requires the separator to follow the mode word directly, so the rail's last row counted as typed text and `_fm_composer_classify_leftbar` answered `pending` on an empty composer.
+The observed failing geometry: an 80x24 pane with one completed turn above the composer, the left-bar run on rows 17-20, the cursor parked on the blank rail row 18 inside that run - reproduced byte-for-byte on a scratch pane owned by the fix.
+The TUI source (anomalyco/opencode `packages/tui/src/component/prompt/metadata.tsx` at dev, fetched 2026-10-26) confirms the row is `[agent] [auto] [· model provider] [· variant] [limit]` where the `auto` cell renders exactly when the launch's permission mode is autoaccept (`PermissionMode` is `"prompt" | "autoaccept"`, no other qualifier exists) and the layout may drop cells to fit width - so the widened pattern admits only the captured `auto` cell and keeps the unanchored tail that already absorbed the 1.x effort and branch suffixes.
+
+The fix widens the one owning default to `^(Build|Plan)([[:space:]]+auto)?[[:space:]]+·[[:space:]]+`, leaving v1's `Build · <model>` shape matched exactly as before.
+The live half is `tests/fm-composer-matrix-live-e2e.test.sh`'s new token-free `opencode-auto` arm, which launches a real `opencode --standalone --auto` idle pane and requires `empty` through the real `fm_tmux_composer_state`:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+```text
+before: not ok - opencode-auto (opencode v2.1.4): idle composer never classified empty (last verdict: pending)
+after:  ok - opencode-auto (opencode v2.1.4): real idle composer classifies empty
+        ok - opencode-auto (opencode v2.1.4): the same idle pane read cursorless is not pending (verdict: unknown)
+```
+
+The "before" line was produced with the old regex forced back through `FM_COMPOSER_LEFTBAR_FOOTER_RE` on the same branch and the same pane, which is the divergence proof that the new arm carries the coverage: the pre-existing bare `opencode` arm stays green either way because a fresh no-flag pane still renders `Build ·`.
+That run's `claude` and `claude-named` arms failed on the disposable worktree's untrusted-folder dialog, which the guard's header states it correctly refuses to confirm, and codex, pi, grok, kimi, muse, and zellij were reported absent rather than verified.
+
+The operational consequence was proven end to end on a scratch pane I owned, against the real adapter stack on that exact failing shape (one completed turn, autoaccept, cursor on the blank rail row 18):
+
+```text
+fm_backend_composer_state tmux -> empty   (fm-control.sh's exit gate passes)
+fm_pane_input_pending           -> false  (the doorbell no longer skips)
+fm_task_inbox_ring tmux         -> rc 0, doorbell line delivered and received
+Ctrl-C after the gate           -> TUI exited, pane gone
+```
+
+The portable half lives in `test_matrix_opencode_v2_autoaccept_footer` in `tests/fm-composer-lib.test.sh`, carrying three real 80x24 captures in `tests/fixtures/opencode-2.1.4-composer/` (idle autoaccept, typed autoaccept, idle without autoaccept; each the full visible pane with its real cursor row 18).
+The idle autoaccept pane reads `empty` on tmux and, on the composer tail cropped to end at its floor row, on herdr, zellij, and cmux/orca; a typed `fix the flaky test` above the same footer reads `pending` on tmux; every styled assertion is re-run under `LC_ALL=C`.
+Overriding `FM_COMPOSER_LEFTBAR_FOOTER_RE` to a pattern that cannot match puts the false `pending` straight back on the captured idle pane, pinning the widened regex as the load-bearing signal, and `fm_composer_extract_selected_content` hands back no composer text for the idle pane and only `fix the flaky test` for the typed pane.
+On the full-pane cursorless read both v2 captures answer `unknown` rather than `empty`, because opencode 2 draws a status rail below the composer's floor row and the strict staleness rule refuses the left-bar candidate - the same deferral the 1.18.31 full pane shows, and a safe one.
+After an OpenCode upgrade, rerun the live guard's `opencode-auto` arm and refresh this record: the `auto` cell's exact rendering is pinned to observed releases, and the TUI source that names it is a vendor surface a release can move.
+
+Follow-up live validation on 2026-10-27 was driven externally by the supervising firstmate, not by the pipeline run, against real opencode 2.1.4 panes read through `fm_backend_composer_state` (`bin/fm-backend.sh`) sourced from this worktree.
+The parked worker pane `firstmate:fm-firstmate-nomistakes-reraise-7800`, idle and rendering the autoaccept cell, read `empty`, an idle scratch tmux pane without the cell read `empty`, and text typed above the footer read `pending`.
+
+```sh
+. bin/fm-backend.sh
+fm_backend_composer_state tmux firstmate:fm-firstmate-nomistakes-reraise-7800   # empty - idle, autoaccept cell present
+fm_backend_composer_state tmux <firstmate scratch idle pane, no autoaccept>     # empty
+fm_backend_composer_state tmux <pane with typed text above the footer>          # pending
+```
+
 ### Grok approval-titled bottom border
 
 Recorded 2026-10-01; the shape was first observed on Grok 1.0.44 on 2026-09-29, on an idle composer the classifier then read as `unknown`. The classifier update was exercised again on 2026-10-15 against Grok 1.0.62; see the live-validation evidence below.

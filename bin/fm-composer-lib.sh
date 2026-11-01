@@ -641,15 +641,23 @@ FM_COMPOSER_HINTED_IDLE_RE_DEFAULT='^ask a question or describe a task ↵$'
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
 # text, and only the run's LAST row is ever matched against it.
+# OpenCode 2 renders the agent's autoaccept state as a second cell between the
+# mode word and the separator ("Build auto · GLM 5.3 Flash Fireworks AI",
+# verified live on opencode 2.1.4, 2026-10-26, from a firstmate tmux worker
+# pane and reproduced token-free on a fresh `opencode --auto` launch; the TUI
+# source renders the cell exactly when the launch's permission mode is
+# autoaccept, and no other qualifier exists - PermissionMode is
+# "prompt"|"autoaccept"). The optional `auto` cell is admitted between the
+# mode word and the separator; every other shape stays excluded.
 # The pattern stays deliberately narrow: the space after the separator is
 # required (`[[:space:]]+`, never `[[:space:]]*`), and it admits no mode word
 # beyond opencode's own Build/Plan pair, because this exemption is the one
 # path that can turn a row holding typed text into `empty`, and `empty` is the
-# verdict that authorizes typing into a live session. Widening it to admit a
-# colour that ghost stripping currently reaches (for example a differently
-# dimmed mode cell) belongs with a fresh live capture in
+# verdict that authorizes typing into a live session. Widening it beyond the
+# captured mode cells (for example a differently dimmed cell or a third mode
+# word) belongs with a fresh live capture in
 # docs/verification/runtime-backends.md, not with a regex edit.
-FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
+FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)([[:space:]]+auto)?[[:space:]]+·[[:space:]]+'
 # Claude draws its permission-mode hint on its own row directly below the
 # composer (` ⏵⏵ bypass permissions on (shift+tab to cycle)`, ` ⏵⏵ accept edits
 # on`, ` ⏸ plan mode on`; verified live through Herdr on claude 2.1.236). The

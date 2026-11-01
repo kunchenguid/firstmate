@@ -175,6 +175,23 @@ for h in claude codex opencode pi grok kimi muse; do
     note "harness absent, not verified here: $h"
   fi
 done
+# OpenCode 2 renders the agent's autoaccept state as an `auto` cell between
+# the mode word and the model separator (`Build auto · <model> <provider>`),
+# a cell 1.x never drew; the footer regex that missed it made every idle v2
+# pane read `pending` (fixed 2026-10-26). This token-free variant catches a
+# recurrence without submitting a prompt. Only a detected OpenCode 2 takes
+# --auto: 1.x has no such flag. --standalone keeps the pane off the shared
+# background service so the pane's own env governs it.
+if command -v opencode >/dev/null 2>&1; then
+  oc_major=$(opencode --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 | cut -d. -f1)
+  if [ "${oc_major:-1}" -ge 2 ]; then
+    check_harness_idle_empty opencode-auto opencode --standalone --auto
+  else
+    note "opencode $oc_major.x installed, the 2.x autoaccept shape not verified here"
+  fi
+else
+  note "harness absent, not verified here: opencode-auto"
+fi
 # A named claude session (`claude -n <name>`) right-aligns that name in the
 # rule above its composer; the cursorless read must still prove it empty, or
 # away-mode delivery to a named primary on a cursorless backend defers forever.
