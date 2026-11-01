@@ -1164,6 +1164,34 @@ ROWS
   pass "fm-brief.sh: scout Lavish hosting follows the bootstrap lavish-axi floor"
 }
 
+# The opt-in config/lavish-off flag withholds the Lavish review loop even from a
+# compatible lavish-axi, and its absence leaves the offer in place.
+test_scout_lavish_off_switch_asks_for_text_report() {
+  local base case_dir fakebin brief setting
+  local hosting='use the lavish-axi rule'
+  local switched_off='Lavish is turned off for this home (config/lavish-off)'
+  base=$(fm_test_base_path_sans "${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" lavish-axi)
+  for setting in off on; do
+    case_dir="$TMP_ROOT/scout-lavish-switch-$setting"
+    mkdir -p "$case_dir/home/data" "$case_dir/home/config"
+    [ "$setting" = on ] || : > "$case_dir/home/config/lavish-off"
+    fakebin=$(fm_fakebin "$case_dir")
+    fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.2.0
+    PATH="$fakebin:$base" FM_HOME="$case_dir/home" \
+      "$ROOT/bin/fm-brief.sh" scout-lavish alpha --scout >/dev/null \
+      || fail "lavish $setting: scout scaffold failed"
+    brief="$case_dir/home/data/scout-lavish/brief.md"
+    if [ "$setting" = off ]; then
+      assert_grep "$switched_off" "$brief" "config/lavish-off did not ask the scout for a text report"
+      assert_no_grep "$hosting" "$brief" "config/lavish-off still offered the Lavish review loop"
+    else
+      assert_grep "$hosting" "$brief" "an absent config/lavish-off withheld the Lavish review loop"
+      assert_no_grep "$switched_off" "$brief" "an absent config/lavish-off reported Lavish turned off"
+    fi
+  done
+  pass "fm-brief.sh: config/lavish-off switches scout briefs to the text-report contract"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -1720,6 +1748,7 @@ test_scout_completion_write_exception_is_task_scoped
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
 test_inbox_listing_command_is_safe_on_empty_inbox
+test_scout_lavish_off_switch_asks_for_text_report
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
 test_inbox_guidance_explains_marked_body_terminator
