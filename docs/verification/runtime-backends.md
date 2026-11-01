@@ -601,6 +601,22 @@ ok - gemini: a real launch parked on its own rendered auth or trust dialog surfa
 # checked 3 launch-prompt signature(s) against real installed binaries
 ```
 
+The same guard also requires each real capture to name its dialog with the accept kind the watcher's spawn start check prints, where Enter is offered only for a dialog whose preselected option is the affirmative one.
+Re-verified 2026-11-01 on Claude Code 2.1.316 and pi 0.87.1 on macOS; gemini was not installed on that machine.
+
+```
+# live claude version: 2.1.316 (Claude Code)
+# claude names: Claude workspace-trust dialog (accept=none)
+ok - claude: a real launch parked on its own rendered trust dialog surfaces through the watcher gate
+# live pi version: 0.87.1
+# pi names: Pi project-trust dialog "Trust project folder?" (accept=enter)
+# pi-signed names: Pi project-trust dialog "Trust project folder?" (accept=enter)
+# omp names: Pi project-trust dialog "Trust project folder?" (accept=enter)
+ok - pi, pi-signed, omp: a real Pi-engine launch parked on its own rendered trust dialog surfaces through the watcher gate
+# gemini not installed - launch-prompt signature not checked
+# checked 2 launch-prompt signature(s) against real installed binaries
+```
+
 Claude, launched `--dangerously-skip-permissions` into a brand-new worktree under the operator's own already-onboarded config (the shape a real crewmate spawn produces):
 
 ```

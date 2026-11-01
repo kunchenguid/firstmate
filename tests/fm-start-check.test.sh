@@ -24,7 +24,12 @@ mkdir -p "$LAB_HOME"
 LAB_TMUX_DIR=$("$ROOT/bin/fm-lab-home.sh" tmux-dir "$LAB_HOME") || fail "lab tmux dir failed"
 export TMUX_TMPDIR="$LAB_TMUX_DIR"
 SESSION=fm-start-check
+# fm-spawn stages each task's temp root at the fixed /tmp/fm-<id>, outside the
+# registered temp root, so the spawn case uses a per-run id and removes it here.
+SPAWN_ID="startcheck$$"
 start_check_cleanup() {
+  chmod -R u+w /tmp/fm-"$SPAWN_ID" /tmp/fm-"$SPAWN_ID"+* 2>/dev/null || true
+  rm -rf /tmp/fm-"$SPAWN_ID" /tmp/fm-"$SPAWN_ID"+*
   tmux kill-server >/dev/null 2>&1 || true
   "$ROOT/bin/fm-lab-home.sh" teardown "$LAB_HOME" >/dev/null 2>&1 || true
   fm_test_cleanup
@@ -91,12 +96,12 @@ test_spawn_arms_marker() {
     fakebin=$(make_spawn_fakebin "$case_dir/fake" pi codex)
     fm_test_spawn_home "$home" "$harness"
     fm_git_worktree "$proj" "$wt" "wt-$harness"
-    fm_test_spawn_brief "$home" sc1
-    out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" sc1 "$proj" --mode no-mistakes --yolo off 2>&1) \
+    fm_test_spawn_brief "$home" "$SPAWN_ID"
+    out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" "$SPAWN_ID" "$proj" --mode no-mistakes --yolo off 2>&1) \
       || fail "$harness spawn failed: $out"
-    [ -f "$home/state/sc1.start-pending" ] || fail "$harness spawn did not arm the start check"
-    line=$(cat "$home/state/sc1.start-pending")
-    gen=$(fm_meta_get "$home/state/sc1.meta" busy_gen)
+    [ -f "$home/state/$SPAWN_ID.start-pending" ] || fail "$harness spawn did not arm the start check"
+    line=$(cat "$home/state/$SPAWN_ID.start-pending")
+    gen=$(fm_meta_get "$home/state/$SPAWN_ID.meta" busy_gen)
     case "$line" in
       [0-9]*" ${gen:--} $harness") ;;
       *) fail "$harness start record is not '<epoch> ${gen:--} $harness': $line" ;;
@@ -162,10 +167,20 @@ test_dead_agent_names_relaunch() {
   [ "$(fm_backend_agent_alive tmux "$SESSION:d1")" = dead ] || fail "fixture: missing window is not dead"
   start_check_tick 1200 || fail "tick failed"
   case "$START_CHECK_WAKE" in
-    *"harness=pi; worker exited before starting); relaunch: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-control.sh d1 relaunch") ;;
+    *"harness=pi; worker exited before starting); relaunch: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-control.sh d1 relaunch --note '"*"'") ;;
     *) fail "unexpected dead-agent reason: $START_CHECK_WAKE" ;;
   esac
-  pass "an exited worker is named with the relaunch command"
+  # A secondmate relaunch takes no note.
+  reset_state
+  open_pane keep "idle"
+  arm_task d2 pi 1000
+  printf 'kind=secondmate\n' >> "$STATE/d2.meta"
+  start_check_tick 1200 || fail "tick failed"
+  case "$START_CHECK_WAKE" in
+    *"worker exited before starting); relaunch: FM_HOME=$FM_HOME $SCRIPT_DIR/fm-control.sh d2 relaunch") ;;
+    *) fail "unexpected secondmate dead-agent reason: $START_CHECK_WAKE" ;;
+  esac
+  pass "an exited worker is named with a relaunch command that relaunch accepts for its kind"
 }
 
 test_pending_composer_names_submit() {

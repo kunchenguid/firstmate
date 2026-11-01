@@ -2873,7 +2873,7 @@ start_check_started() {  # <id> <meta> <epoch>
 START_CHECK_REASON=
 START_CHECK_TAIL=
 start_check_reason() {  # <id> <meta> <harness> <age>
-  local id=$1 meta=$2 harness=$3 age=$4 backend target home row name cstate head
+  local id=$1 meta=$2 harness=$3 age=$4 backend target home row name cstate head note
   backend=$(fm_backend_of_meta "$meta")
   target=$(fm_backend_target_of_meta "$meta")
   home="FM_HOME=$(printf '%q' "$FM_HOME")"
@@ -2895,8 +2895,15 @@ start_check_reason() {  # <id> <meta> <harness> <age>
     return 0
   fi
   if [ "$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null)" = dead ]; then
-    printf -v START_CHECK_REASON '%s; worker exited before starting); relaunch: %s %q %q relaunch' "$head" "$home" \
-      "$SCRIPT_DIR/fm-control.sh" "$id"
+    # A ship or scout relaunch must tell the replacement what happened; a
+    # secondmate's relaunch takes no note (bin/fm-control.sh owns both rules).
+    note=
+    case "$(fm_meta_get "$meta" kind)" in
+      secondmate) ;;
+      *) note=" --note 'The previous launch exited before it started the brief; start the brief from the beginning.'" ;;
+    esac
+    printf -v START_CHECK_REASON '%s; worker exited before starting); relaunch: %s %q %q relaunch%s' "$head" "$home" \
+      "$SCRIPT_DIR/fm-control.sh" "$id" "$note"
     return 0
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$(window_label "$target")" 2>/dev/null) || cstate=unknown
