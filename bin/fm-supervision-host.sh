@@ -81,12 +81,12 @@
 # docs/watcher-continuity.md "Durable queue and turn-end backstop" owns how
 # that transition makes rows still queued for main recoverable. A handled wake
 # with only routine outcomes never wakes main, and neither does any handled
-# wake while away: captain outcomes wait in
+# wake while away: main and captain outcomes wait in
 # the outcome store for the return drain's BRANCH OUTCOMES section. A handled
-# attended wake that recorded a captain outcome exits with one "supervision-host: branch-outcome:"
+# attended wake that recorded a main or captain outcome exits with one "supervision-host: branch-outcome:"
 # line naming its store rows, without the close it handled; main drains, where
 # the BRANCH OUTCOMES section (bin/fm-wake-drain.sh) presents every
-# unprocessed captain outcome until main acknowledges it. Otherwise the host
+# unprocessed main or captain outcome until main acknowledges it. Otherwise the host
 # parks on the successor.
 # Every other outcome exits with the close's own reason line plus one
 # "supervision-host:" line saying why main has this wake, after stopping the
@@ -1186,9 +1186,9 @@ handle_wake() {  # <reason-lines>
   return 1
 }
 
-# The captain outcomes one turn recorded, as store rows.
+# The acted-on (main or captain) outcomes one turn recorded, as store rows.
 turn_captain_seqs() {  # <turn>
-  awk -F '\t' -v turn="$1" '$1 == turn && $3 == "captain" { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null
+  awk -F '\t' -v turn="$1" '$1 == turn && ($3 == "captain" || $3 == "main") { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null
 }
 
 # Why an attended close stays with main exactly as the plain arm delivers it,
@@ -1347,14 +1347,14 @@ while :; do
     exit_to_main "the captain returned while the away session was handling this wake, but the recorded outcomes could not be verified; main must review them" \
       "$(turn_outcome_lookup_warning)"
   fi
-  # Attended captain outcomes are main's to process; away they wait for the
+  # Attended main and captain outcomes are main's to process; away they wait for the
   # return, including when the captain left while this turn ran. The close
   # itself was handled, so only the host's lines reach main.
   if [ -n "$LAST_TURN" ] && ! fm_afk_contract_away_present "$STATE"; then
     CAPTAIN_SEQS=$(turn_captain_seqs "$LAST_TURN")
     if [ -n "$CAPTAIN_SEQS" ]; then
       ARM_TEXT=
-      exit_to_main "branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
+      exit_to_main "branch-outcome: the supervision session handled this wake and recorded outcomes for you to act on (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
         "$HEALTH_NOTE"
     fi
   fi

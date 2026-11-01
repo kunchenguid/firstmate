@@ -903,6 +903,16 @@ const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
 if (captainRendered.text !== "⚓ [seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review") {
   throw new Error(`captain renderer changed the exact visible outcome: ${captainRendered.text}`);
 }
+// A main outcome is firstmate's to act on: its entry says so, so it never
+// reads as a call for the captain.
+const mainRendered = entryRenderers.get("fm-branch-visible-outcome")(
+  { ...captainEntries[0], data: { ...captainEntries[0].data, seq: 4, task: "task-10", verdict: "main", summary: "local branch ready to land" } },
+  { expanded: false },
+  renderTheme,
+);
+if (!mainRendered || mainRendered.text !== "⚓ [seq 4] [firstmate to act, not a captain call] task-10: local branch ready to land") {
+  throw new Error(`main renderer did not mark the outcome as firstmate's: ${mainRendered && mainRendered.text}`);
+}
 process.exit(0);
 EOF
   status=$?
@@ -1014,7 +1024,7 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
   if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
   const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
   const verdictDescription = report.parameters.properties.verdict.description;
-  if (!verdictDescription.includes("Verdict: routine or captain") ||
+  if (!verdictDescription.includes("Verdict: routine, main, or captain") ||
       !verdictDescription.includes("one owner of the rule") ||
       verdictDescription.includes("unconditionally")) {
     throw new Error(`branch provider received conflicting verdict semantics: ${verdictDescription}`);

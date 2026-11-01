@@ -15,11 +15,11 @@
 # the host's turn record; this script only compares against it.
 #
 # Usage:
-#   fm-branch-report.sh --task <id|fleet> --verdict routine|captain \
+#   fm-branch-report.sh --task <id|fleet> --verdict routine|main|captain \
 #       --summary <text> [--silent true|false] [--wake <text>]
 #
-# The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
-# or captain"); --silent true is legal only for a routine outcome.
+# The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine,
+# main, or captain"); --silent true is legal only for a routine outcome.
 # --wake defaults to the wake reason the host recorded for the turn.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
@@ -39,7 +39,7 @@
 # append, so every visible row is in the brief, queued, or both: the relay does
 # not depend on the host surviving its turn or on its owner delivering the
 # host's own handback. Silent outcomes remain in the store but are not queued
-# or relayed as notes. An attended turn queues nothing: its captain rows reach
+# or relayed as notes. An attended turn queues nothing: its main and captain rows reach
 # MAIN through the host's branch-outcome exit and the drain's BRANCH OUTCOMES
 # section (bin/fm-wake-drain.sh), and its routine rows stay in the store.
 set -u
@@ -78,10 +78,10 @@ done
 
 TASK=$(printf '%s' "$TASK" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 SUMMARY=$(printf '%s' "$SUMMARY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-case "$VERDICT" in routine|captain) ;; *) VERDICT= ;; esac
+case "$VERDICT" in routine|main|captain) ;; *) VERDICT= ;; esac
 case "$SILENT" in true|false) ;; *) usage ;; esac
 if [ -z "$TASK" ] || [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
-  echo "invalid report: --task, --verdict (routine|captain), and --summary are required" >&2
+  echo "invalid report: --task, --verdict (routine|main|captain), and --summary are required" >&2
   exit 2
 fi
 if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
@@ -132,8 +132,8 @@ if [ "$SILENT" = true ]; then
   exit 0
 fi
 if [ "$(turn_field posture)" = attended ]; then
-  if [ "$VERDICT" = captain ] && ! fm_afk_contract_away_present "$STATE"; then
-    printf 'recorded seq %s [captain]; MAIN processes it from its next drain\n' "$SEQ"
+  if [ "$VERDICT" != routine ] && ! fm_afk_contract_away_present "$STATE"; then
+    printf 'recorded seq %s [%s]; MAIN processes it from its next drain\n' "$SEQ" "$VERDICT"
   else
     printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
   fi
