@@ -202,7 +202,8 @@
 #   task metadata publication. Teardown holds that same lock while proving and
 #   returning a slot, so allocation cannot reuse a slot before its owner record
 #   is published. Under that same lock it writes the slot's owner claim, which is
-#   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
+#   what lets teardown leave a slot reassigned since untouched and a relaunch
+#   refuse to re-enter it; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
 #   could later be released out from under its successor. A spawn that aborts
@@ -2437,6 +2438,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     PROJ=$(fm_meta_get "$RELAUNCH_META" project)
     [ -n "$PROJ" ] || {
       echo "error: task $ID has no recorded project; refusing to relaunch" >&2
+      exit 1
+    }
+    RELAUNCH_OWNER_REFUSAL=$(fm_treehouse_slot_owner_relaunch_check "$RELAUNCH_WT" "$ID") || {
+      echo "error: $RELAUNCH_OWNER_REFUSAL" >&2
       exit 1
     }
   fi

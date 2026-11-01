@@ -1827,6 +1827,52 @@ test_checkpoint_refuses_uninspectable_head_and_status() {
   pass "fm-control relaunch: checkpoint inspection failures refuse before stopping"
 }
 
+# A slot's owner claim (bin/fm-wake-lib.sh) naming another task means the pool
+# handed the recorded copy on after this task's worker exited; relaunching into
+# it would put two tasks in one checkout.
+test_reassigned_slot_refuses_before_stopping_anything() {
+  local dir out rc before
+  dir=$(new_case reassigned rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'task=rl41\nhome=/elsewhere\n' > "$dir/.fm-slot-owner"
+  before=$(cat "$dir/home/state/rl40.meta")
+  out=$(run_control "$dir" rl40 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a slot claimed by another task should refuse"
+  assert_contains "$out" "reassigned to task rl41" "the refusal should name the claimant"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing"
+  [ "$before" = "$(cat "$dir/home/state/rl40.meta")" ] || fail "a refused relaunch must leave the durable record byte-identical"
+  [ "$(cat "$dir/.fm-slot-owner")" = $'task=rl41\nhome=/elsewhere' ] || fail "a refused relaunch must leave the claimant's claim alone"
+  pass "fm-control relaunch: a copy another task has since claimed refuses before the agent is touched"
+}
+
+test_spawn_relaunch_refuses_a_reassigned_or_unreadable_slot() {
+  local dir out rc
+  dir=$(new_case spawnreassigned rl42)
+  add_ship_task "$dir" rl42 claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'task=rl43\nhome=/elsewhere\n' > "$dir/.fm-slot-owner"
+  out=$(run_spawn "$dir" rl42 --relaunch); rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-spawn --relaunch into a slot claimed by another task must refuse"
+  assert_contains "$out" "reassigned to task rl43" "the refusal should name the claimant"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must launch nothing"
+  printf 'garbage\n' > "$dir/.fm-slot-owner"
+  out=$(run_spawn "$dir" rl42 --relaunch); rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-spawn --relaunch must refuse a slot claim it cannot read"
+  assert_contains "$out" "cannot be read" "the refusal should say the claim is unreadable"
+  pass "fm-spawn --relaunch: refuses a recorded copy another task claims, or whose claim cannot be read"
+}
+
+test_own_slot_claim_relaunches() {
+  local dir out
+  dir=$(new_case ownclaim rl44)
+  add_ship_task "$dir" rl44 claude
+  printf 'task=rl44\nhome=%s\n' "$dir/home" > "$dir/.fm-slot-owner"
+  out=$(run_control "$dir" rl44 relaunch --note "x") || fail "a slot this task still claims must relaunch: $out"
+  [ "$(meta_field "$dir" rl44 worktree)" = "$dir/wt" ] || fail "the relaunch must keep the recorded copy"
+  pass "fm-control relaunch: a copy the task still claims relaunches in place"
+}
+
 # --- 5. failure after the agent is stopped -----------------------------------
 
 test_launch_failure_keeps_the_prior_record_and_reports_it() {
@@ -3064,6 +3110,9 @@ test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
+test_reassigned_slot_refuses_before_stopping_anything
+test_spawn_relaunch_refuses_a_reassigned_or_unreadable_slot
+test_own_slot_claim_relaunches
 test_launch_failure_keeps_the_prior_record_and_reports_it
 test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record
