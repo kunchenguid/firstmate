@@ -2113,9 +2113,9 @@ test_note_codec_carries_punctuation_and_refuses_line_breaks() {
     . "$ROOT/bin/fm-backlog-transition-lib.sh"
     # Every byte the record can hold is carried: a leading dash is a value, not a
     # flag, and a non-ASCII byte is data rather than a control byte.
-    for text in "$text" "-a note that starts with a dash" "含中文的 note — still one line"; do
-      encoded_one=$(fm_backlog_note_encode "$text") || exit 1
-      [ "$(fm_backlog_note_decode "$encoded_one")" = "$text" ] || exit 2
+    for one in "$text" "-a note that starts with a dash" "含中文的 note — still one line"; do
+      encoded_one=$(fm_backlog_note_encode "$one") || exit 1
+      [ "$(fm_backlog_note_decode "$encoded_one")" = "$one" ] || exit 2
       [ "$(fm_backlog_note_encode "$(fm_backlog_note_decode "$encoded_one")")" = "$encoded_one" ] || exit 3
     done
     fm_backlog_note_encode "$text" || exit 4
