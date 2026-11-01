@@ -4033,9 +4033,11 @@ EOF
       if [ "$size" -gt "$offset" ]; then
         appended=$(tail -c +"$((offset + 1))" "$f"; printf '\001') || continue
         appended=${appended%$'\001'}
-        complete=${appended%$'\n'*$'\n'}
-        consumed=${#complete}
+        incomplete=${appended##*$'\n'}
+        complete=${appended%"$incomplete"}
+        consumed=0
         while IFS= read -r line; do
+          consumed=$((consumed + ${#line} + 1))
           status_line_verb "$line" line_verb
           status_line_note "$line" line_note
           if [ "$line_verb" = working ] && [ "$line_note" = 'validation started' ]; then
