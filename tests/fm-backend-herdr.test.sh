@@ -942,6 +942,26 @@ test_projection_reclaim_rollback_refuses_a_stale_registration() {
   pass "herdr stale registration: presentation reclaim never closes a stale-registration pane"
 }
 
+test_projection_cleanup_exact_succeeds_only_when_the_task_pane_closed() {
+  local closed refused absent
+  closed=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { printf "CLOSED %s;" "$2"; }
+    fm_backend_herdr_projection_cleanup_exact fmtest w1:p2 w1:p1; printf "rc=%s" "$?"' "$ROOT" 2>&1)
+  refused=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { [ "$2" != w1:p2 ] || return 1; printf "CLOSED %s;" "$2"; }
+    fm_backend_herdr_projection_cleanup_exact fmtest w1:p2 w1:p1; printf "rc=%s" "$?"' "$ROOT" 2>&1)
+  absent=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { printf "CLOSED %s;" "$2"; }
+    fm_backend_herdr_projection_cleanup_exact fmtest "" w1:p1; printf "rc=%s" "$?"' "$ROOT" 2>&1)
+  [ "$closed" = "CLOSED w1:p2;CLOSED w1:p1;rc=0" ] \
+    || fail "a closed task pane must report success after closing both panes, got '$closed'"
+  [ "$refused" = "CLOSED w1:p1;rc=1" ] \
+    || fail "a task pane left open must report failure and still close the seeded pane, got '$refused'"
+  [ "$absent" = "CLOSED w1:p1;rc=1" ] \
+    || fail "no task pane must never report a closed endpoint, got '$absent'"
+  pass "herdr projection abort cleanup reports success only when the task pane closed"
+}
+
 test_busy_state_never_reports_a_shell_only_pane_busy() {
   local sleep_bin shell_pid dir resp log fb out
   sleep_bin=$(command -v sleep) || fail "sleep not found"
@@ -6294,6 +6314,7 @@ test_process_state_tolerates_missing_and_malformed_process_fields
 test_process_state_shell_verdict_survives_several_shell_processes
 test_process_state_jq_calls_do_not_grow_with_foreground_processes
 test_projection_reclaim_rollback_refuses_a_stale_registration
+test_projection_cleanup_exact_succeeds_only_when_the_task_pane_closed
 test_busy_state_never_reports_a_shell_only_pane_busy
 test_cli_caches_the_selected_client_within_a_process
 test_cli_scopes_the_selected_client_to_its_session
