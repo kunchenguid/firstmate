@@ -1349,9 +1349,49 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     the window (repeating bounded re-surface, never a wedge).
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, run the catch-all status scan in
 #     the block below and escalate what it finds; that block owns its file set.
+reconcile_overdue_pause() {  # <state> <task> -> reconcile worker events after overdue decision
+  local state=$1 task=$2 statusf="$1/$2.status" marker="$1/.paused-overdue-$2" identity marker_identity offset size added line verb key resume=0 rc
+  [ -f "$marker" ] && [ -f "$statusf" ] || return 0
+  if [ "$(uname)" = Darwin ]; then
+    identity=$(/usr/bin/stat -f '%d %i' "$statusf" 2>/dev/null) || return 0
+  else
+    identity=$(stat -c '%d %i' "$statusf" 2>/dev/null) || return 0
+  fi
+  IFS=: read -r marker_identity offset < "$marker" || [ -n "$offset" ] || { rm -f "$marker"; return 0; }
+  size=$(_fm_status_file_size "$statusf") || return 0
+  case "$offset:$size" in *[!0-9:]*) rm -f "$marker"; return 0 ;; esac
+  if [ "$identity" != "$marker_identity" ] || [ "$size" -lt "$offset" ]; then
+    rm -f "$marker"; return 0
+  fi
+  [ "$size" -gt "$offset" ] || return 0
+  added=$(_fm_status_read_span "$statusf" "$offset" "$((size - offset))") || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      working|done|failed|paused|blocked) resume=1 ;;
+      resolved)
+        key=$(_fm_decision_key "$line" '') || key=
+        [ "$key" = "paused-overdue-$task" ] && { rm -f "$marker"; return 0; }
+        ;;
+    esac
+  done <<EOF
+$added
+EOF
+  [ "$resume" -eq 1 ] || return 0
+  fm_wake_status_append_self_announced "$state" "$statusf" "resolved [key=paused-overdue-$task]: worker pause changed"
+  rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || return 0
+  rm -f "$marker"
+}
+
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason dialog_name persisted append_rc size overdue_marker overdue_task
   now=$(_now)
+  for overdue_marker in "$state"/.paused-overdue-*; do
+    [ -f "$overdue_marker" ] || continue
+    overdue_task=${overdue_marker##*/}; overdue_task=${overdue_task#.paused-overdue-}
+    reconcile_overdue_pause "$state" "$overdue_task"
+  done
   migrate_watcher_pause_markers "$state"
 
   # (1) batch flush
