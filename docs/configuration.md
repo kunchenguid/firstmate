@@ -2687,20 +2687,16 @@ See [verification/public-followup.md](verification/public-followup.md) for the c
 Firstmate calls installed lifecycle hooks at fixed points, so an external module or plugin attaches by dropping an executable into a folder instead of editing Firstmate's scripts.
 The optional, gitignored `hooks/` directory in the operational home holds one `<event>.d/` folder per event, filled by hand or by a module's installer.
 No hooks ship with Firstmate.
-With no `hooks/<event>.d/` folder, each call point costs one directory test and behaves exactly as before.
-When `FM_HOOKS_EXTRA_DIR` is set, its `<event>.d/` folders run after the home's.
-The checkout's own `hooks/` is never searched implicitly, because one checkout's `bin/` serves every home and test run started from it, and an implicit checkout folder would run one home's hooks for all of them.
+With no event folder in either configured location, each call point is a silent no-op.
 [`bin/fm-hooks-lib.sh`](../bin/fm-hooks-lib.sh) owns where hooks live, and `bin/fm-hooks.sh --help` owns run order, timeouts, output, the run mirror, and exit status.
 
-Every executable in a folder runs in byte-wise file-name order with a JSON payload on stdin, the event name in `FM_HOOK_EVENT`, and `FM_HOME`, each bounded by `FM_HOOK_TIMEOUT` seconds (default 10).
-Only `pre-spawn`, `turn-end`, and `pre-merge` can stop anything: the first of their hooks that fails or times out refuses, with its stderr as the reason, and later hooks do not run.
-A failure or timeout of any other event is reported on stderr, appended to `FM_HOOK_LOG` when that is set, and ignored; the remaining hooks still run.
-Hooks run inside the calling script's locks, such as spawn's capacity lock, the merge control lock, and teardown's task record lock, so a hook must not call back into Firstmate commands for the same task.
+Hooks receive the event's JSON payload on stdin, the event name in `FM_HOOK_EVENT`, and `FM_HOME`.
+Hooks can run inside the calling script's locks, such as spawn's capacity lock, the merge control lock, and teardown's task record lock, so a hook must not call back into Firstmate commands for the same task.
 
 | Event | Called from | Payload keys | Effect |
 | --- | --- | --- | --- |
 | `session-start` | `bin/fm-session-start.sh`, after the closing reminder, in locked and read-only sessions | `home`, `harness`, `source`, `read_only`, `reemit` | Stdout is appended to the digest under `ADD-ON HOOKS (session-start)` |
-| `intake` | `bin/fm-wake-drain.sh`, for each presented captain inbox note, after the queue lock is released | `item_key`, `surface`, `place`, `text_file` | The merged output (below) is printed as `INTAKE <item_key>: <object>`; a note presented again before its wake is acknowledged is offered again |
+| `intake` | `bin/fm-wake-drain.sh`, for each presented captain inbox note, after the queue lock is released | `item_key`, `surface`, `place`, `text_file` | The merged output is printed as `INTAKE <item_key>: <object>`; a note presented again before its wake is acknowledged is offered again |
 | `pre-spawn` | `bin/fm-spawn.sh`, for a fresh launch, after launch gates and harness resolution and before any account, trust, worktree, endpoint, or record | `task_id`, `kind`, `project`, `project_dir`, `brief_file`, `harness`, `model`, `effort`, `mode`, `yolo` | Refusal exits 3 and a runner error exits 2, with nothing launched; output is ignored |
 | `post-spawn` | `bin/fm-spawn.sh`, after a fresh launch's verified start | `task_id`, `kind`, `endpoint`, `worktree`, `harness` | Ignored |
 | `watch-tick` | `bin/fm-watch.sh`, every poll cycle | `home`, `cycle`, `watcher_pid` | Ignored; runs detached with at most one run in flight, output in `state/.fm-hooks.log` |
@@ -2712,9 +2708,7 @@ Hooks run inside the calling script's locks, such as spawn's capacity lock, the 
 | `prompt-submit` | `bin/fm-dialog-hooks.sh`, from the tracked Claude `UserPromptSubmit` registration, for a primary session | `session_id`, `prompt_id`, `prompt`, `harness`, `home` | Ignored and never printed, so nothing reaches the model; failures go to `state/.fm-hooks.log` |
 | `stop` | `bin/fm-dialog-hooks.sh`, from the tracked Claude `Stop` registration, for a primary session, every stop | `session_id`, `prompt_id`, `last_assistant_message`, `stop_hook_active`, `transcript_path`, `harness`, `home` | Ignored like `prompt-submit`; never holds the stop |
 
-`pre-spawn` and `intake` hooks may print a sequence of JSON objects, which are merged into one object key by key and recursively, in run and print order.
-On a clash the value set first, by the earlier hook, is kept and the conflict is reported by key path and hook names, never by value; `FM_HOOK_MERGE_CONFLICT=refuse` makes a `pre-spawn` conflict refuse the spawn instead.
-Output that is not JSON objects is reported and ignored, and only `pre-spawn` hooks that succeeded contribute.
+`bin/fm-hooks.sh --help` defines the JSON output merge and conflict policy for `pre-spawn` and `intake`.
 Firstmate reads no key of the merged `pre-spawn` object, so a hook cannot change the harness, model, project, account, or delivery contract.
 Pre-spawn hooks run before Firstmate's own later launch checks, so a spawn a hook accepted can still be refused; `post-spawn` is the confirmation that a worker started.
 A relaunch keeps the task's original admission, so neither spawn event runs for `--relaunch`.
@@ -2722,9 +2716,9 @@ A remote secondmate launch runs the hooks of the home on the host that launches 
 
 `prompt-submit` and `stop` carry the primary's dialog, the submitted prompt and the turn's final assistant message as said, so a module such as a supervision host can follow it.
 Only Claude primaries call them, beside and independent of the [supervision host's dialog mirror](supervision-host.md#the-dialog-mirror); Cursor payloads, crewmate worktrees, and other harnesses emit nothing.
-A field the harness did not send is `null`.
-Their hooks run before the prompt or stop proceeds, so keep them fast; each is still bounded by `FM_HOOK_TIMEOUT`.
-With `FM_HOOK_MIRROR` set, every dialog run is mirrored even with no hook file installed, as digests unless `FM_HOOK_MIRROR_TEXT=1`.
+Missing harness fields are `null`, except `stop_hook_active`, which is `true` only when the harness sends the boolean `true` and otherwise is `false`.
+Their hooks run before the prompt or stop proceeds, so keep them fast; the tracked Claude registrations also impose a 30-second limit on each entire call.
+The call point requires an event folder even when `FM_HOOK_MIRROR` is set; direct runner calls can mirror dialog events without any folder (see `bin/fm-hooks.sh --help`).
 Tests: [`tests/fm-hooks.test.sh`](../tests/fm-hooks.test.sh) and the pre-spawn cases in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
 
 ## Trusted external process-event adapters (config/extensions.d)

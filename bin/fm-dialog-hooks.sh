@@ -5,10 +5,8 @@
 #
 # Claude runs it from the tracked .claude/settings.json UserPromptSubmit and
 # Stop registrations, beside bin/fm-host-mirror.sh and independent of it, with
-# the harness hook payload on stdin. UserPromptSubmit becomes prompt-submit
-# with {session_id, prompt_id, prompt, harness, home}; Stop becomes stop with
-# {session_id, prompt_id, last_assistant_message, stop_hook_active,
-# transcript_path, harness, home}; a field the harness did not send is null.
+# the harness hook payload on stdin. docs/configuration.md "Lifecycle hooks"
+# owns the event payloads and missing-field defaults.
 # The text is passed as said, byte for byte.
 #
 # Non-blocking by construction: the hooks run through bin/fm-hooks.sh (both

@@ -19,7 +19,8 @@
 # terminal stdin is the payload {}. The runner keeps no state of its own.
 #
 # Every hook runs under FM_HOOK_TIMEOUT seconds (a positive integer, default
-# 10) through bin/fm-timeout-lib.sh, which stops the hook's whole process
+# 10; invalid values, including all-zero strings, fall back to 10) through
+# bin/fm-timeout-lib.sh, which stops the hook's whole process
 # group at the bound. A hook that exits 124 or 137 is indistinguishable from
 # one that hit the bound (fm_timed_out) and is reported as timed out.
 #

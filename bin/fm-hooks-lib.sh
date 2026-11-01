@@ -21,7 +21,8 @@
 #       0 when at least one hook folder for <event> exists. A pure file test
 #       that forks nothing, so a call site that finds no folder costs one
 #       directory test and behaves exactly as it did before hooks existed.
-#       The caller's FM_HOME selects the home; an empty FM_HOME means no hooks.
+#       The caller's FM_HOME selects the home; an empty FM_HOME disables only
+#       the home folder, not an explicit FM_HOOKS_EXTRA_DIR.
 #
 #   fm_hooks_dirs <event>
 #       Prints each existing hook folder for <event>, one per line, in run
