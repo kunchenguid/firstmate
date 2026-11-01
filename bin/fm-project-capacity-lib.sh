@@ -44,11 +44,16 @@
 #     are counted, and
 #   - has no recorded PR handoff: the pr= line bin/fm-pr-check.sh records when a
 #     worker's PR is ready, after which the worker waits on review or merge and
-#     no longer uses local resources.
-# A place therefore frees when a PR-based ship records its ready PR, or when any
-# task is cleaned up and its record removed. A local-only ship and a scout have
-# no recorded handoff and hold their place until cleanup. A worker that is
-# steered back into work after its PR handoff is not counted again.
+#     no longer uses local resources, and
+#   - has not finished as a scout or local-only ship: its status log has no
+#     done event without a later working event.
+# A place therefore frees when a PR-based ship records its ready PR, when a
+# scout or local-only ship reports done, or when a task's record is removed.
+# No-mistakes and direct-PR ships keep their place after done until their PR
+# handoff or cleanup. Paused, blocked, or waiting workers without completion
+# keep their place. Later captain-held, resolved, needs-decision, paused, or
+# blocked events do not restore occupancy; only a later working event does.
+# A worker steered back into work after its PR handoff is not counted again.
 # The declaration is matched by the spawning clone's directory name, so clones
 # of one origin share the cap only when they use that same directory name. A
 # clone of that origin under a different directory name finds no declaration
@@ -64,12 +69,13 @@
 # count. A spawn on an uncapped project can still publish a holder for a capped
 # same-origin clone, so every backend takes that lock whenever the declaration
 # caps any project; Orca, which otherwise never takes it, is included. Freeing a
-# place needs no lock, because removing a record or adding pr= only ever lowers
-# the count.
+# place needs no lock, because removing a record, adding pr=, or reporting done
+# as a scout or local-only ship only ever lowers the count.
 #
 # Requires bin/fm-wake-lib.sh (root home, local homes, project lock path),
-# bin/fm-secondmate-registry-lib.sh (which the local-homes walk reads), and
-# bin/fm-backend.sh (fm_meta_get) to be sourced first. No side effects on source.
+# bin/fm-secondmate-registry-lib.sh (which the local-homes walk reads),
+# bin/fm-backend.sh (fm_meta_get), and bin/fm-classify-lib.sh (status_line_verb)
+# to be sourced first. No side effects on source.
 
 # Exit status of a spawn deferred because the project is at capacity: the
 # sysexits "temporary failure" code, so a caller can tell a deferral that leaves
@@ -176,6 +182,7 @@ fm_project_capacity_lookup() {  # <config-dir> <project-name>
 # could undercount the holders.
 fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> <own-id>
   local want=$1 own=$2 first=$3 self=$4 state meta kind project lock id label i
+  local status_file status_line status_verb finished
   local -a cache_dirs cache_locks
   FM_PROJECT_CAPACITY_OCCUPANTS=0
   FM_PROJECT_CAPACITY_OCCUPANT_IDS=
@@ -201,6 +208,9 @@ fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> 
       kind=$(fm_meta_get "$meta" kind)
       [ "$kind" != secondmate ] || continue
       [ -z "$(fm_meta_get "$meta" pr)" ] || continue
+      # Resolve the project and its lock before touching any status log: an
+      # unrelated project's task history must not cost a read while this
+      # spawn holds its own project lock.
       project=$(fm_meta_get "$meta" project)
       [ -n "$project" ] || continue
       lock=
@@ -218,6 +228,20 @@ fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> 
         cache_locks+=("$lock")
       fi
       [ -n "$lock" ] && [ "$lock" = "$want" ] || continue
+      if [ "$kind" = scout ] || { [ "$kind" = ship ] && [ "$(fm_meta_get "$meta" mode)" = local-only ]; }; then
+        status_file=${meta%.meta}.status
+        finished=0
+        if [ -f "$status_file" ] && [ -r "$status_file" ]; then
+          while IFS= read -r status_line || [ -n "$status_line" ]; do
+            status_line_verb "$status_line" status_verb
+            case "$status_verb" in
+              done) finished=1 ;;
+              working) finished=0 ;;
+            esac
+          done < "$status_file"
+        fi
+        [ "$finished" = 0 ] || continue
+      fi
       id=$(basename "$meta" .meta)
       label=$id
       [ "$state" = "$first" ] || label="$id in $(dirname "$state")"
