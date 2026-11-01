@@ -24,7 +24,33 @@ make_home() {  # <name> -> prints the home dir
 contract() {  # <home> <args...>
   local home=$1
   shift
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" "$@"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_AFK_CONTRACT_CREW_STATE_BIN="${CREW_STATE_STUB-$STUB_CREW_STATE}" "$CONTRACT" "$@"
+}
+
+# The current-state reader live-workers consults, replaced by a stub that
+# replays a recorded bin/fm-crew-state.sh line per task from
+# <state>/stub-crew-state/<id>. A task with no recorded line reads as a busy
+# worker, the state every ordinary task record in the older fixtures stood for.
+STUB_CREW_STATE="$TMP_ROOT/stub-crew-state.sh"
+cat > "$STUB_CREW_STATE" <<'SH'
+#!/usr/bin/env bash
+f="$FM_STATE_OVERRIDE/stub-crew-state/$1"
+if [ -f "$f" ]; then
+  [ -s "$f" ] || exit 1
+  cat "$f"
+else
+  printf 'state: working \302\267 source: pane \302\267 harness busy (stub)\n'
+fi
+SH
+chmod +x "$STUB_CREW_STATE"
+
+lane() {  # <home> <id> <crew-state line> [status line]
+  local home=$1 id=$2 line=$3 status=${4:-}
+  fm_write_meta "$home/state/$id.meta" "window=fm-$id" "kind=ship"
+  mkdir -p "$home/state/stub-crew-state"
+  printf '%s\n' "$line" > "$home/state/stub-crew-state/$id"
+  [ -z "$status" ] || printf '%s\n' "$status" > "$home/state/$id.status"
 }
 
 # A confirmed record in the retired version 1 shape, exactly as the clause
@@ -664,8 +690,74 @@ test_entry_without_spend_records_the_live_worker_count_never_below_the_floor() {
   pass "entry without --spend records the live worker count, never below the default floor, and an explicit --spend still wins"
 }
 
+# The spend cap counts lanes doing work, not records. This replays the fleet of
+# 31 October 2026: eight ordinary task records, none of them working - four
+# watching upstream reviews, two finished local-only records waiting to land,
+# one held for the captain, and the job that had just finished - which the old
+# count read as a full cap of eight.
+test_live_workers_counts_only_lanes_doing_work() {
+  local home out i
+  home=$(make_home live-oct31)
+  for i in 1 2 3 4; do
+    lane "$home" "upstream-$i" \
+      "state: paused · source: status-log · waiting on upstream review of https://github.com/o/r/pull/$i" \
+      "paused [at=1793430000]: waiting on upstream review of https://github.com/o/r/pull/$i"
+  done
+  lane "$home" catch-toggles-visit "state: done · source: status-log · ready in branch fm/catch-toggles-visit" \
+    'done [at=1793430000]: ready in branch fm/catch-toggles-visit'
+  lane "$home" throw-family "state: done · source: status-log · ready in branch fm/throw-family" \
+    'done [at=1793430000]: ready in branch fm/throw-family'
+  # Real bin/fm-crew-state.sh reads an idle captain-held lane as unknown with no
+  # current-state source, so the hold itself must keep it out of the count.
+  lane "$home" visit-adapter "state: unknown · source: none · no current-state source available" \
+    'captain-held [at=1793430000] [key=adapter-call]: tracked by visit-adapter-call'
+  lane "$home" just-finished "state: done · source: run-step · checks-passed"
+  fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
+  [ "$(contract "$home" live-workers)" = 0 ] \
+    || fail "eight parked records counted as live work: $(contract "$home" live-workers --explain)"
+  out=$(contract "$home" live-workers --explain)
+  assert_contains "$out" 'upstream-1: not counted - paused' 'the explanation did not name the declared wait'
+  assert_contains "$out" 'catch-toggles-visit: not counted - done' 'the explanation did not name the finished record'
+  assert_contains "$out" 'visit-adapter: not counted - held for the captain' 'the explanation did not name the captain hold'
+  assert_not_contains "$out" 'mate-1' 'a secondmate appeared in the worker explanation'
+  [ "$(printf '%s\n' "$out" | tail -1)" = 0 ] || fail "the explanation did not end with the count: $out"
+
+  home=$(make_home live-working)
+  for i in 1 2 3 4 5 6 7 8; do
+    lane "$home" "busy-$i" "state: working · source: pane · harness busy (thinking)"
+  done
+  [ "$(contract "$home" live-workers)" = 8 ] || fail "eight working lanes did not count eight"
+
+  # Anything not proven parked counts, so an unreadable or unverified lane
+  # (including one still starting) never lets the cap overshoot.
+  home=$(make_home live-mixed)
+  lane "$home" starting "state: unknown · source: none · no current-state source available"
+  lane "$home" unreadable-pane "state: unknown · source: pane · harness state unavailable (unknown)"
+  lane "$home" no-answer ""
+  : > "$home/state/stub-crew-state/no-answer"
+  lane "$home" gone "state: unknown · source: none · backend target gone: fm-gone"
+  lane "$home" decision "state: parked · source: run-step · awaiting approval"
+  lane "$home" blocked "state: blocked · source: status-log · need the daemon touched"
+  lane "$home" failed "state: failed · source: run-step · tests failed"
+  out=$(contract "$home" live-workers --explain)
+  [ "$(printf '%s\n' "$out" | tail -1)" = 3 ] || fail "the mixed fleet miscounted: $out"
+  assert_contains "$out" 'starting: counted' 'a starting lane was not counted'
+  assert_contains "$out" 'no-answer: counted' 'an unanswered state read was not counted'
+  assert_contains "$out" 'gone: not counted - no live endpoint' 'a dead endpoint was counted'
+  assert_contains "$out" 'blocked: not counted - blocked' 'a blocked lane was counted'
+
+  # With the real current-state reader, a record whose worker copy is gone is
+  # not a live endpoint.
+  home=$(make_home live-real-reader)
+  fm_write_meta "$home/state/gone-1.meta" "window=fm-gone-1" "kind=ship" "worktree=$home/no-such-copy"
+  [ "$(CREW_STATE_STUB='' contract "$home" live-workers)" = 0 ] \
+    || fail "a record with no worker copy counted with the real reader"
+  pass "live-workers counts only lanes doing work: eight parked records count zero, eight working lanes count eight, and unverified lanes still count"
+}
+
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
+test_live_workers_counts_only_lanes_doing_work
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
 test_entry_without_spend_records_the_live_worker_count_never_below_the_floor
 test_retired_two_step_entry_is_refused_by_name
