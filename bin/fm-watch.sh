@@ -4495,12 +4495,15 @@ EOF
   hygiene_running="$STATE/.record-hygiene-running"
   if [ -f "$hygiene_result" ]; then
     hygiene_report=$(cat "$hygiene_result")
-    if [ -n "$hygiene_report" ] && ! cmp -s <(printf '%s\n' "$hygiene_report") "$STATE/.record-hygiene-last"; then
-      hygiene_reason="check: record hygiene: $hygiene_report"
-      fm_wake_append check record-hygiene "$hygiene_reason" || exit 1
-      printf '%s\n' "$hygiene_report" > "$STATE/.record-hygiene-last"
-      rm -f "$hygiene_result" "$hygiene_running"
-      wake "$hygiene_reason"
+    if [ -n "$hygiene_report" ]; then
+      if ! cmp -s <(printf '%s\n' "$hygiene_report") "$STATE/.record-hygiene-last"; then
+        hygiene_reason="check: record hygiene: $hygiene_report"
+        fm_wake_append check record-hygiene "$hygiene_reason" || exit 1
+        printf '%s\n' "$hygiene_report" > "$STATE/.record-hygiene-last"
+        wake "$hygiene_reason"
+      fi
+    else
+      rm -f "$STATE/.record-hygiene-last"
     fi
     rm -f "$hygiene_result" "$hygiene_running"
   fi
