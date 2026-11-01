@@ -263,6 +263,16 @@ test_codex_footer_and_status_are_proof() {
   pass "a codex busy footer and a status line written after spawn each prove the start"
 }
 
+test_codex_dialog_overrides_footer_proof() {
+  reset_state
+  open_pane x3 $'Do you trust the contents of this directory?\nWorking (3s • esc to interrupt)'
+  arm_task x3 codex 1000
+  start_check_tick 1120 || fail "tick failed"
+  [ "$(count_wakes)" = 1 ] || fail "a codex trust dialog with a busy footer did not wake: $START_CHECK_WAKE"
+  [ ! -e "$STATE/x3.start-pending" ] || fail "the codex dialog start record survived its wake"
+  pass "a codex trust dialog overrides footer proof, while ordinary footer proof remains valid"
+}
+
 test_stale_records_are_dropped() {
   reset_state
   open_pane m1 "$PI_DIALOG"
@@ -337,6 +347,7 @@ fm_test_run \
   test_pending_composer_names_submit \
   test_no_signal_names_inspect \
   test_codex_footer_and_status_are_proof \
+  test_codex_dialog_overrides_footer_proof \
   test_stale_records_are_dropped \
   test_secondmate_launch_is_checked \
   test_one_wake_per_poll \

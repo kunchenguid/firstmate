@@ -2838,9 +2838,9 @@ START_CHECK_WAKE=
 # produced (a hook-written record, or a settled Muse or Cursor session). Idle
 # from the rendered-text fallbacks proves nothing, since a parked dialog renders
 # no busy footer either. Codex has no semantic source, so its rendered busy
-# footer counts.
+# footer counts unless the same tail shows a launch dialog.
 start_check_started() {  # <id> <meta> <epoch>
-  local id=$1 meta=$2 epoch=$3 f m verdict backend target
+  local id=$1 meta=$2 epoch=$3 f m verdict backend target tail
   for f in "$STATE/$id.status" "$STATE/$id.turn-ended"; do
     m=$(stat_mtime "$f") || continue
     [ "$m" -gt "$epoch" ] && return 0
@@ -2857,8 +2857,11 @@ start_check_started() {  # <id> <meta> <epoch>
       backend=$(fm_backend_of_meta "$meta")
       target=$(fm_backend_target_of_meta "$meta")
       watcher_capture "$backend" "$target" 40 "$(window_label "$target")" || return 1
-      printf '%s' "$WATCHER_CAPTURE" | grep -v '^[[:space:]]*$' | tail -6 \
-        | fm_busy_lines_match codex && return 0
+      tail=$(printf '%s' "$WATCHER_CAPTURE" | grep -v '^[[:space:]]*$' | tail -6)
+      case "$tail" in
+        *'Do you trust the contents of this directory?'* | *'Hooks need review'*) ;;
+        *) printf '%s\n' "$tail" | fm_busy_lines_match codex && return 0 ;;
+      esac
       ;;
   esac
   return 1
