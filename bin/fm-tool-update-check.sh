@@ -851,7 +851,7 @@ shim_backup() {
 ARM_BACKUP=
 
 # An unregistered shim is not inert: the watcher rejects it on every cycle and
-# wakes firstmate about unauthenticated state checks. So the one rule after a
+# wakes firstmate about untrusted state checks. So the one rule after a
 # failed or interrupted arm is that the home never holds a shim without a
 # matching trust binding. The shim a working home had is put back and kept only
 # when it is still bound; otherwise the shim goes, so the home is plainly not

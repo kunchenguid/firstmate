@@ -1081,7 +1081,7 @@ test_arm_refuses_a_symlink_at_the_shim_path() {
 test_a_failed_registration_leaves_no_unregistered_shim() {
   local home dir target stale_shim status
   # An unregistered shim in state/ is not inert: the watcher rejects it every
-  # cycle and wakes firstmate about unauthenticated state checks until someone
+  # cycle and wakes firstmate about untrusted state checks until someone
   # deletes it by hand. So a home that could not be armed has to come back to the
   # state it was in, and arm still has to say it failed.
   home=$(make_home arm-register-fail)
