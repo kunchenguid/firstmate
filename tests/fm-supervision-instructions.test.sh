@@ -284,6 +284,32 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
 
+# A parked Codex session reaches the renderer through the park's own
+# --capable verdict, which needs a live native session, so a fixture checkout
+# stands in for it and answers that one verdict.
+test_codex_park_ordinary_wake_line_leaves_continuity_to_the_stop_hook() {
+  local code home out ordinary
+  code="$TMP_ROOT/codex-park-code"
+  home="$TMP_ROOT/codex-park-home"
+  mkdir -p "$code/docs" "$home/state"
+  cp -R "$ROOT/bin" "$code/bin"
+  cp -R "$ROOT/docs/supervision-protocols" "$code/docs/supervision-protocols"
+  cat > "$code/bin/fm-codex-stop-park.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --capable ]
+SH
+  chmod +x "$code/bin/fm-codex-stop-park.sh"
+  out=$(FM_HOME="$home" "$code/bin/fm-supervision-instructions.sh" --harness codex)
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "bin/fm-codex-stop-park.sh" "a parked codex ordinary-wake line lost the Stop-hook owner"
+  assert_contains "$ordinary" "do not arm another cycle" "a parked codex ordinary-wake line does not forbid a model re-arm"
+  assert_not_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "a parked codex ordinary-wake line must not send the model to a foreground checkpoint"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$code/bin/fm-codex-stop-park.sh"
+  ordinary=$(FM_HOME="$home" "$code/bin/fm-supervision-instructions.sh" --harness codex | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "a codex session without the park must keep the foreground checkpoint line"
+  pass "a parked codex session's ordinary-wake line names the Stop hook and never the foreground checkpoint"
+}
+
 test_pi_signed_preserves_identity_with_pi_supervision_protocol() {
   local out ordinary
   out=$("$RENDER" --harness pi-signed)
@@ -380,6 +406,7 @@ test_quiet_mode_stanzas
 test_repair_lines
 test_omp_restart_guidance_depends_on_home_vs_checkout
 test_cross_harness_ordinary_continuation_and_repair_matrix
+test_codex_park_ordinary_wake_line_leaves_continuity_to_the_stop_hook
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config

@@ -352,6 +352,74 @@ test_latched_fallback_stays_quiet_without_supervision_need() {
   pass "a latched fallback does not force a Stop turn when nothing needs supervision"
 }
 
+# A park holds a live arm while supervision stops being needed, with
+# state/.wake-queue left <queued|empty>; echoes the Stop hook's exit code.
+settle_idle_case() {  # <name> <queued|empty> [VAR=VAL ...]
+  local name=$1 queue=$2 home
+  shift 2
+  home=$(make_home "$name" opted-in)
+  printf 'park\n' > "$home/arm-mode"
+  : > "$home/arm-hold"
+  [ "$queue" = empty ] || printf 'signal: fixture-task finished\n' > "$home/state/.wake-queue"
+  under_codex "$home" "$REGISTER"'
+    printf "%s" "$PAYLOAD" | "$PARK" &
+    park=$!
+    i=0
+    until [ "$(jq -r ".outcome // empty" "$FM_HOME/state/.codex-park.json" 2>/dev/null)" = waiting ] \
+      && [ -s "$FM_HOME/arm-ran" ]; do
+      i=$((i + 1)); [ "$i" -lt 200 ] || { echo "park never armed"; break; }
+      sleep 0.05
+    done
+    rm -f "$FM_HOME/state/fixture-task.meta"
+    i=0
+    while kill -0 "$park" 2>/dev/null && [ "$i" -lt 200 ]; do sleep 0.1; i=$((i + 1)); done
+    kill -0 "$park" 2>/dev/null && { echo "park still running"; kill "$park"; }
+    wait "$park"; echo "stop=$?"
+    rm -f "$FM_HOME/arm-hold"
+  ' "$@" > "$home/settle.out" 2>&1
+  printf '%s\n' "$home"
+}
+
+test_settle_idle_delivers_a_queued_result_once() {
+  local home out
+  home=$(settle_idle_case settle-queued queued)
+  out=$(cat "$home/settle.out")
+  assert_not_contains "$out" "park never armed" "fixture: $out"
+  assert_not_contains "$out" "park still running" "the park must settle once supervision is no longer needed: $out"
+  assert_contains "$out" "stop=0" "a delivered final result must exit cleanly: $out"
+  assert_equals delivered "$(outcome "$home")" "the park must record the delivered queued result"
+  assert_equals 1 "$(queue_count "$home")" "exactly one native queue delivery must hand over the queued result"
+  assert_contains "$(cat "$home/queue.log")" "queue --thread $SESSION_ID --message Firstmate watcher wake: a final result is queued" \
+    "the queued result must reach this session's thread"
+  assert_absent "$home/state/.codex-park-fallback" "a delivered final result must not latch fallback"
+  assert_absent "$home/state/.codex-park.lock" "the settled park must release its claim"
+  pass "a queued result left when supervision ends is delivered once and recorded as delivered"
+}
+
+test_settle_idle_failed_delivery_latches_fallback() {
+  local home out
+  home=$(settle_idle_case settle-failed queued FM_FAKE_CODEX_QUEUE_RC=1)
+  out=$(cat "$home/settle.out")
+  assert_not_contains "$out" "park still running" "the park must settle once supervision is no longer needed: $out"
+  assert_contains "$out" "stop=1" "a failed final delivery must fail the park: $out"
+  assert_equals delivery-failed "$(outcome "$home")" "the park must record the failed final delivery"
+  assert_equals "$SESSION_ID" "$(cat "$home/state/.codex-park-fallback" 2>/dev/null)" \
+    "a failed final delivery must latch this session to foreground fallback"
+  pass "a failed final delivery of a queued result latches the session to foreground fallback"
+}
+
+test_settle_idle_with_an_empty_queue_records_idle() {
+  local home out
+  home=$(settle_idle_case settle-empty empty)
+  out=$(cat "$home/settle.out")
+  assert_not_contains "$out" "park still running" "the park must settle once supervision is no longer needed: $out"
+  assert_contains "$out" "stop=0" "an idle settle must exit cleanly: $out"
+  assert_equals idle "$(outcome "$home")" "an empty queue must record idle"
+  assert_equals 0 "$(queue_count "$home")" "an empty queue must make no native queue delivery"
+  assert_absent "$home/state/.codex-park-fallback" "an idle settle must not latch fallback"
+  pass "an empty queue when supervision ends records idle with no delivery"
+}
+
 test_repeated_arm_failure_latches_fallback() {
   local home out
   home=$(make_home arm-failure opted-in)
@@ -468,6 +536,9 @@ test_stop_rearms_after_a_delivering_park_releases_its_claim delivered 1
 test_stop_rearms_after_a_delivering_park_releases_its_claim delivering 4
 test_failed_queue_delivery_latches_fallback
 test_latched_fallback_stays_quiet_without_supervision_need
+test_settle_idle_delivers_a_queued_result_once
+test_settle_idle_failed_delivery_latches_fallback
+test_settle_idle_with_an_empty_queue_records_idle
 test_repeated_arm_failure_latches_fallback
 test_watcher_exits_when_its_park_owner_is_gone
 test_host_quiet_boundary_retains_the_watcher
