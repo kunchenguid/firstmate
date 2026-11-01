@@ -3963,14 +3963,13 @@ fm_backend_herdr_resolve_watched_pane() {  # <session> <workspace-label> <tab-la
 # --- native event push: pane.agent_status_changed subscriber -----------------
 #
 # The push half of the immediate blocked-state escalation (AGENTS.md section 8,
-# docs/herdr-backend.md "Native pane.agent_status_changed push escalation").
+# docs/herdr-backend.md "Push events and polling fallback").
 # fm_backend_herdr_wait_transition is the watcher's bounded wait primitive for
 # herdr homes: instead of a blind sleep, it blocks on herdr's native event
-# stream and returns the instant a subscribed pane transitions to `blocked`, so
-# a crew waiting on the human wakes its supervisor sub-second instead of after
-# the ~240s stale-pane wedge timer. Everything not `blocked` is streamed too
-# (the policy, not the subscription, makes `blocked` the sole immediate action)
-# so `working` edges clear the per-pane dedupe marker. Polling stays the
+# stream and returns a fresh actionable transition under fm_transition_policy.
+# That shared owner also defines watched-pane opt-in and deduplication behavior.
+# All statuses are streamed so non-actionable edges can still update dedupe.
+# Polling stays the
 # permanent fail-closed backstop: below-capability, a connect/subscribe failure,
 # or a missing reader all fall back to the caller sleeping the same budget.
 
@@ -4060,7 +4059,7 @@ fm_backend_herdr_clear_transition() {  # <state_dir> <window>
 
 # fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to
 # <timeout_secs> for one of <pane_window...> ("<session>:<pane_id>") to reach a
-# fresh `blocked` edge, then prints the normalized record and returns 0.
+# fresh actionable edge, then prints the normalized record and returns 0.
 # Returns 1 on a clean timeout (the reader ran the full budget, no fresh
 # actionable edge - the caller has effectively already slept and just continues)
 # and 2 when the event path is unusable (not capable, socket unresolved, reader
