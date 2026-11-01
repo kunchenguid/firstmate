@@ -2457,6 +2457,12 @@ handle_paused_stale() {  # <window> <task> <hash>
   last=$(status_declared_wait_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  # A lane parked on review stopped its agent on purpose; bin/fm-park.sh's tick
+  # watches its PR and owns every wake for it.
+  if [ -f "$STATE/$task.review-park" ]; then
+    triage_log "absorbed stale (parked on review, watched by fm-park.sh tick): $win"
+    return 0
+  fi
   if status_is_captain_held "$last"; then
     if away_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
@@ -4081,9 +4087,18 @@ EOF
             triage_log "published merge outcome for $id but could not retire its authority record"
             exit 1
           fi
+          # Persist before retiring the poll; start only after releasing its control lock.
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --queue >/dev/null 2>&1 || true
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --detach >/dev/null 2>&1 || true
           touch "$STATE/.last-check"
+          # A merged lane eligible for merge-time cleanup, also one
+          # bin/fm-pr-merge.sh already recorded, is torn down by a detached
+          # bin/fm-park.sh land that only starts here, so this iteration never
+          # waits on a teardown; the tick reports its outcome.
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
@@ -4100,6 +4115,17 @@ EOF
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      touch "$STATE/.last-check"
+      wake "$reason"
+    fi
+    # Parked-on-review lanes, close detection, opt-in automatic parking, and
+    # the outcomes of detached park, relaunch, and cleanup actions
+    # (bin/fm-park.sh owns all of them, bounds the whole tick, and records its
+    # wake before printing it, so the watcher only rings).
+    park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
+    if [ -n "$park_out" ]; then
+      reason="check: park-on-review: $(printf '%s' "$park_out" | paste -sd ';' - | sed 's/;/; /g')"
       touch "$STATE/.last-check"
       wake "$reason"
     fi

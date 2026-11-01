@@ -14,6 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
+| Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review-configpark-on-review-configauto-land) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -798,6 +799,23 @@ The monitor only notifies; worker briefs and waiting rules are unchanged by the 
 With the file absent, nothing is armed and an already armed check prints nothing.
 Creating the flag takes effect at the next session start, or immediately after `bin/fm-pr-health.sh arm`.
 The flag is a home-local preference and is not inherited by secondmate homes.
+
+## Park on review (config/park-on-review, config/auto-land)
+
+The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review, while keeping its branch, PR, task record, instructions, and local copy. The complete park and cleanup behavior is owned by [`bin/fm-park.sh`](../bin/fm-park.sh); see its command help for invocation details.
+A lane parks only from a verified clean, ready-to-merge state: open and not a draft, no conflicts, CI green on the current head (on GitHub, with every check the base branch requires reported on it), no changes requested, zero unresolved review threads, and every automated reviewer (CodeRabbit, Greptile, or a login listed in `config/contribution-review-bots`) having submitted a review of the current head, or a quiet window having passed since CI finished on it (a bot comment alone does not prove a finished review).
+Anything else keeps the worker working, and the verdict is re-read from the forge immediately before the agent is stopped, so a head that moved in between refuses the park.
+A parked lane's local copy is durably leased so the worktree pool never hands it out, and new or edited comments (inline thread replies included), failing checks, requested changes, a conflict, an unresolved thread, or a new push relaunch a fresh worker in the same copy on the same branch with the trigger in its instructions.
+A branch that merely fell behind its base does not relaunch a parked lane.
+The park record is written as pending before the agent is stopped and marked parked once the stop is confirmed, so a park that dies midway is still watched and relaunched on feedback, reads as parking rather than stopped, and is settled on the next check: promoted to parked once its agent is confirmed dead, or dropped while the agent still runs.
+With the optional local, gitignored `config/auto-land` presence flag, unparked ship lanes are cleaned up when their merge poll sees the PR or merge request merged, including squash and merge-train merges and merges made through `bin/fm-pr-merge.sh`: the lane is torn down through `bin/fm-teardown.sh` (never forced, so unlanded or uncommitted work still refuses) and its local copy returned.
+The cleanup outcome or teardown refusal follows the merge notification as its own notification.
+Parking, relaunching, and cleanup run detached from the watcher, one at a time per lane, so a slow agent stop, relaunch, or teardown never delays supervision and is never cut short by the watcher's time budget. A merged lane's cleanup request is persisted in `state/<id>.review-park-land` before its merge poll is retired and consumed by the tick; it is bound to the merged PR, so an old request is discarded if the lane now records a different PR.
+The tick records action outcomes and close notices in a check wake before consuming them, so a failed wake write leaves the outcome available for a later tick.
+A PR or merge request closed without merging is reported once.
+A parked lane is always cleaned up, because no agent is left to do it; unparked lanes are not read or cleaned up unless `config/auto-land` or `config/park-on-review` is present.
+GitHub pull requests and GitLab merge requests are supported.
+Both flags are home-local preferences and are not inherited by secondmate homes.
 
 ## No-mistakes pipeline spend (config/pipeline-spend)
 
