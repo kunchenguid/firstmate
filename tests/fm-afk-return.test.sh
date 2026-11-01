@@ -553,6 +553,35 @@ test_return_brief_all_silent_window_does_not_point_at_drain() {
   pass "the all-silent return keeps the outcome stored without promising a drain presentation"
 }
 
+# On Pi the drain does not present branch outcomes, so a window whose only
+# outcome asks firstmate to act lists it in the brief, as firstmate's own work
+# and never under waiting on the captain, instead of reading as nothing.
+test_return_brief_lists_main_outcomes_on_a_pi_home() {
+  local dir fakebin out f
+  dir="$TMP_ROOT/window-main-only-pi"
+  install_runner "$dir"
+  for f in fm-supervision-engine-lib.sh fm-session-lock-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
+    cp "$ROOT/bin/$f" "$dir/bin/"
+  done
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/pi"
+  contract_in "$dir" enter --words 'watch the fleet' >/dev/null 2>&1 || fail "could not record the away posture"
+  outcome_in "$dir" append --task landing --verdict main --summary 'the landing branch is ready for firstmate to land' >/dev/null \
+    || fail "could not seed the main outcome"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$fakebin/pi" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "the main-only return did not clear: $out"
+  assert_contains "$out" $'  for firstmate to act on, not captain calls:\n    - landing: the landing branch is ready for firstmate to land' \
+    "a Pi home's brief did not list the main outcome"
+  assert_not_contains "$out" 'no routine outcomes recorded' "the main-only brief read as an empty window"
+  assert_not_contains "$(printf '%s\n' "$out" | sed -n '/^Waiting on you:/,/^Tried and failed/p')" 'landing branch is ready' \
+    "a main outcome was listed as waiting on the captain"
+  pass "a Pi home's return brief lists a main outcome as firstmate's own work"
+}
+
 # The drain is the only presenter of branch outcomes and owner of their read
 # cursor, so a drain that presented them but could not record the presentation
 # fails, and the return keeps catch-up gated until a check drains again and
@@ -1373,6 +1402,7 @@ test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_lists_landed_work_awaiting_cleanup
 test_return_brief_points_at_the_drain_on_a_host_home_only
 test_return_brief_all_silent_window_does_not_point_at_drain
+test_return_brief_lists_main_outcomes_on_a_pi_home
 test_return_keeps_catchup_gated_when_the_drain_cannot_record_outcomes
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated

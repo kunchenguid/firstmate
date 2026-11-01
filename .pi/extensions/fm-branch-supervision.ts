@@ -195,6 +195,7 @@ const PROCESSING_INSTRUCTION =
   "Each outcome says what was true when it was recorded and how long ago, so check the task's current state first. " +
   "An abbreviated line is incomplete: read the full outcome before acting on, relaying, or acknowledging it, using that line's lookup --seqs command. " +
   "First sort the outcomes by that current state into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished. " +
+  "An outcome marked main to act is firstmate's own work, not a captain call: act on it yourself and never present it to the captain as a question. " +
   "Your reply to the captain covers only the still-open outcomes: give the captain a visible response where one is due, answer or escalate a decision, or act on a blocker or failure. " +
   "Write that reply as if the settled outcomes had never been listed: leave them out entirely, without naming them, summarizing them, or saying they are settled, because checking them is all the processing they need. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
@@ -1075,7 +1076,7 @@ export default function (pi: ExtensionAPI) {
   async function processingRequestInput(rows: UnprocessedOutcome[]): Promise<string> {
     const through = rows[rows.length - 1].seq;
     const listed = rows
-      .map((row) => `[seq ${row.seq}, recorded ${row.recordedAgo} ago] ${row.task}: ${row.summary}`)
+      .map((row) => `[seq ${row.seq}, recorded ${row.recordedAgo} ago${row.verdict === "main" ? ", main to act, not a captain call" : ""}] ${row.task}: ${row.summary}`)
       .join("\n");
     const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
     try {
@@ -2433,8 +2434,8 @@ ${context.command}
         const open = remaining === null
           ? "the remaining outcomes could not be read"
           : remaining.length === 0
-            ? "no captain outcome remains unprocessed"
-            : `${remaining.length} newer captain outcome(s) remain unprocessed (seq ${remaining.map((row) => row.seq).join(", ")}) and will be presented again`;
+            ? "no main or captain outcome remains unprocessed"
+            : `${remaining.length} newer main or captain outcome(s) remain unprocessed (seq ${remaining.map((row) => row.seq).join(", ")}) and will be presented again`;
         return {
           content: [{ type: "text", text: `processed through seq ${through}; ${open}` }],
           details: undefined,

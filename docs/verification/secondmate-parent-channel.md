@@ -57,7 +57,7 @@ signal: $P/state/mate.status
 
 $ # Step 3: the mate holds a task for the captain; the hold reaches the parent from fm-captain-hold itself
 
-$ FM_HOME=$M bin/fm-captain-hold.sh hold child-call --title 'Pick the rollout window' --reason 'rollout window choice pending' --repo alpha
+$ FM_HOME=$M bin/fm-captain-hold.sh hold child-call --title 'Pick the rollout window' --class product-or-scope-expansion --reason 'rollout window choice pending' --repo alpha
 child-call
 
 $ # Step 4: the captain's answer is recorded in the mate home; the close reaches the parent from fm-captain-hold itself

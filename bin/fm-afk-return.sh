@@ -677,7 +677,7 @@ EOF
   routine_visible=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" && $6 != "true" { n++ } END { print n + 0 }')
   captain=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { n++ } END { print n + 0 }')
   # A main outcome asks firstmate to act and is never a captain call, so it is
-  # counted here and presented to firstmate by the drain, never listed above.
+  # counted and, where the drain does not present it, listed here, never above.
   mainrows=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "main" { n++ } END { print n + 0 }')
   visible_outcomes=$((routine_visible + mainrows + captain))
   printf '  %s outcome(s) handled by the away session (%s routine, %s for firstmate to act on, %s escalated above)\n' "$((routine + mainrows + captain))" "$routine" "$mainrows" "$captain"
@@ -685,13 +685,19 @@ EOF
     printf '  the drain'"'"'s BRANCH OUTCOMES section presents the visible outcomes: each task'"'"'s captain outcomes on one line until you acknowledge them, visible routine notes once, past its limit as a count\n'
   elif [ "$drained" -eq 1 ] && [ "$visible_outcomes" -gt 0 ]; then
     printf '  visible outcomes %s\n' "$pointer"
-  elif [ "$routine_visible" -gt 0 ]; then
-    printf '  %s routine outcome(s) recorded; the latest visible:\n' "$routine"
-    printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" && $6 != "true" { printf "    - %s: %s\n", $2, $5 }' | tail -5
-  elif [ "$routine" -gt 0 ]; then
-    printf '  %s routine outcome(s) recorded; none were visible.\n' "$routine"
   else
-    printf '  (no routine outcomes recorded in the store for this window)\n'
+    if [ "$mainrows" -gt 0 ]; then
+      printf '  for firstmate to act on, not captain calls:\n'
+      printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "main" { printf "    - %s: %s\n", $2, $5 }'
+    fi
+    if [ "$routine_visible" -gt 0 ]; then
+      printf '  %s routine outcome(s) recorded; the latest visible:\n' "$routine"
+      printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" && $6 != "true" { printf "    - %s: %s\n", $2, $5 }' | tail -5
+    elif [ "$routine" -gt 0 ]; then
+      printf '  %s routine outcome(s) recorded; none were visible.\n' "$routine"
+    elif [ "$mainrows" -eq 0 ]; then
+      printf '  (no routine outcomes recorded in the store for this window)\n'
+    fi
   fi
 
   # 7. cost.
