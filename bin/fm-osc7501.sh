@@ -286,7 +286,7 @@ osc_plan() { # <task> <kind> <state> <busy|idle>
   verb=$(printf '%s' "$line" | cut -f2)
   note=$(printf '%s' "$line" | cut -f3- | tr '\t\r\n' '   ')
   case "$verb" in
-    needs-decision | "$held")
+    needs-decision)
       W_STATE=blocked
       W_KIND=question
       W_MSG="Needs your decision: $note"
@@ -300,14 +300,20 @@ osc_plan() { # <task> <kind> <state> <busy|idle>
       return 0
       ;;
   esac
-  if [ "$act" = busy ]; then
-    W_STATE=working
-    return 0
-  fi
   line=$(last_status_line "$file" 2>/dev/null)
   verb=$(status_line_verb "$line" 2>/dev/null) || verb=
   note=$(status_line_note "$line" 2>/dev/null) || note=
   note=$(printf '%s' "$note" | tr '\t\r\n' '   ')
+  if [ "$verb" = "$held" ]; then
+    W_STATE=blocked
+    W_KIND=question
+    W_MSG="Needs your decision: $note"
+    return 0
+  fi
+  if [ "$act" = busy ]; then
+    W_STATE=working
+    return 0
+  fi
   case "$verb" in
     failed)
       W_STATE=error
