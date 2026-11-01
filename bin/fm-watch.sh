@@ -3390,6 +3390,52 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+# Heartbeat orphan sweep: bin/fm-progress-sweep.sh owns which of this home's
+# backlog items are idle with no typed reason. Each orphan is queued once as
+# `check: progress-orphan <id> <reason>`, keyed so an unacknowledged row is not
+# duplicated, and re-queued on a later heartbeat once firstmate acknowledged it
+# without giving the item a reason. A sweep that cannot read its sources is
+# itself queued once, because a silent guardrail is the failure it exists to
+# stop. The whole sweep is bounded by FM_PROGRESS_SWEEP_TIMEOUT_SECS (default
+# 20s, the turn-end guard's bound and far under the watcher stall bound), so a
+# slow read cannot hold event scanning or the beacon; a timeout is a sweep
+# failure. Returns 0 with PROGRESS_ORPHAN_REASON set when the heartbeat must
+# wake, 1 when there is nothing to report, and 2 when the queue append failed.
+PROGRESS_ORPHAN_REASON=
+PROGRESS_SWEEP_TIMEOUT=${FM_PROGRESS_SWEEP_TIMEOUT_SECS:-20}
+case "$PROGRESS_SWEEP_TIMEOUT" in ''|*[!0-9]*|0) PROGRESS_SWEEP_TIMEOUT=20 ;; esac
+progress_orphans_enqueue() {
+  local out rc queued cls id reason line count=0
+  PROGRESS_ORPHAN_REASON=
+  [ -x "$SCRIPT_DIR/fm-progress-sweep.sh" ] || return 1
+  queued=$'\n'$(fm_wake_queued_keys check)$'\n'
+  out=$(fm_run_timed "$PROGRESS_SWEEP_TIMEOUT" env FM_STATE_OVERRIDE="$STATE" FM_HOME="$FM_HOME" \
+    "$SCRIPT_DIR/fm-progress-sweep.sh" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fm_timed_out "$rc" && out="timed out after ${PROGRESS_SWEEP_TIMEOUT}s"
+    PROGRESS_ORPHAN_REASON="check: progress-sweep failed: $(printf '%s\n' "$out" | sed -n '1p')"
+    case "$queued" in
+      *$'\n'progress-sweep-error$'\n'*) ;;
+      *) fm_wake_append check progress-sweep-error "$PROGRESS_ORPHAN_REASON" || return 2 ;;
+    esac
+    return 0
+  fi
+  while IFS=$'\t' read -r cls id reason; do
+    [ "$cls" = orphan ] && [ -n "$id" ] || continue
+    line="check: progress-orphan $id $reason"
+    count=$((count + 1))
+    [ -n "$PROGRESS_ORPHAN_REASON" ] || PROGRESS_ORPHAN_REASON=$line
+    case "$queued" in *$'\n'"progress-orphan:$id"$'\n'*) continue ;; esac
+    fm_wake_append check "progress-orphan:$id" "$line" || return 2
+  done <<EOF
+$out
+EOF
+  [ "$count" -gt 0 ] || return 1
+  [ "$count" -eq 1 ] || PROGRESS_ORPHAN_REASON="$PROGRESS_ORPHAN_REASON (+$((count - 1)) more)"
+  triage_log "progress sweep: $count orphaned item(s)"
+  return 0
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr, rex), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -4500,10 +4546,16 @@ EOF
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
-    # every heartbeat.
+    # every heartbeat. An orphaned item (progress_orphans_enqueue) is never
+    # absorbed and resets the backoff streak, so it re-fires every base
+    # heartbeat until the item has a typed reason.
+    progress_orphans_enqueue
+    orphan_rc=$?
+    [ "$orphan_rc" -ne 2 ] || exit 1
     if afk_present; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
+      if [ "$orphan_rc" -eq 0 ]; then wake "heartbeat" actionable; fi
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant event the per-wake path absorbed by mistake.
@@ -4514,6 +4566,10 @@ EOF
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced || true
       wake "heartbeat" actionable
+    elif [ "$orphan_rc" -eq 0 ]; then
+      touch "$STATE/.last-heartbeat"
+      mark_all_captain_relevant_surfaced || true
+      wake "$PROGRESS_ORPHAN_REASON"
     else
       if ! mark_all_captain_relevant_surfaced; then
         fm_wake_append heartbeat heartbeat heartbeat || exit 1

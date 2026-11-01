@@ -76,11 +76,15 @@ REASON=$(cat "$ERR" 2>/dev/null || true)
 [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
 # shellcheck source=bin/fm-operational-input.sh
 . "$ROOT/bin/fm-operational-input.sh"
-fm_operational_input_encode turn-end-guard \
-  "TURN WOULD END BLIND - supervision is off. Repair missing watcher supervision according to the session-start operating block before ending the turn.
+# The guard's TURN WOULD END IDLE banner (supervision healthy, orphaned items)
+# is self-describing; every other refusal is the BLIND repair case.
+case "$REASON" in
+  *'TURN WOULD END IDLE'*) BODY=$REASON ;;
+  *) BODY="TURN WOULD END BLIND - supervision is off. Repair missing watcher supervision according to the session-start operating block before ending the turn.
 
-$REASON" \
-  PROMPT || exit 0
+$REASON" ;;
+esac
+fm_operational_input_encode turn-end-guard "$BODY" PROMPT || exit 0
 
 GROK_TURNEND_GUARD_ACTIVE=1 \
   GROK_HOME="${GROK_HOME:-$HOME/.grok}" \
