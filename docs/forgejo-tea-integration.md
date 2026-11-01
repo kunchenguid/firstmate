@@ -98,7 +98,7 @@ $ tea login list --output json
 ]
 ```
 
-Every Forgejo read parses this list as JSON with `jq`, matches the validated PR host against each login's bare hostname (stripping scheme, userinfo, port, and path), and refuses when zero or more than one login matches, rather than guessing.
+Every Forgejo read parses this list as JSON with `jq`, matches the validated PR authority, including its port, against each login URL's authority (stripping scheme, userinfo, and path while preserving the port), and refuses when zero or more than one login matches, rather than guessing.
 It never splits the output line by line, because a login printed as one compact object would then read its name where the url belongs.
 `fm_pr_forgejo_login` in `bin/fm-pr-lib.sh` owns that match for every sourcing script; `bin/fm-pr-poll.sh` is a static, standalone watcher body with no sourced dependency, so it keeps its own copy and re-derives the match on every poll instead of trusting a name recorded anywhere durable.
 
@@ -112,6 +112,7 @@ $ tea pulls create --login fm-fixture --repo fixture/fixture-repo --head merged-
   http://localhost:3980/fixture/fixture-repo/pulls/1
 ```
 
+Firstmate also accepts that URL with plain `http` and an optional port on the host, because a private LAN instance often has no TLS; GitHub, GitLab, and Gerrit URLs stay https-only.
 This never collides with GitHub's `.../pull/<n>` (singular), GitLab's `.../-/merge_requests/<n>`, or Gerrit's `.../c/<project>/+/<n>`.
 
 ## End to end: arming and polling a real pull request
@@ -138,7 +139,8 @@ $ state/task-f1.check.sh
 merged
 ```
 
-The `localhost:3980` login's actual port never appears in the canonical PR URL or the poll's host comparison - login matching only ever compares bare hostnames - so this reproduces correctly for an instance reachable on the standard port with no explicit port in its URL, which is the realistic self-hosted shape.
+Current login matching compares complete authorities, including ports, so a `localhost:3980` login matches neither `localhost` nor another port on `localhost`.
+The `https://localhost` commands in this record were captured before exact-authority matching; with the fixture login shown above, current commands must instead use `http://localhost:3980/fixture/fixture-repo/pulls/<n>`.
 
 ## A missing tea produces no wake, never a false merge
 

@@ -1140,6 +1140,8 @@ test_marks_producer_converges_and_notifies_once() {
   assert_equals auth "$(marks_run plan t1 | cut -f3)" "a credential blocker must be kind auth"
   mark_task_status "done [at=1700000300]: PR https://github.com/o/r/pull/9 checks green"
   assert_contains "$(marks_run plan t1)" $'done\t\tPR ready: PR https://' "a done line with a URL plans a PR-ready done mark"
+  mark_task_status "done [at=1700000350]: PR http://pi4:3001/o/r/pulls/9 merged"
+  assert_contains "$(marks_run plan t1)" $'done\t\tPR ready: PR http://' "a done line with a plain-http URL plans a PR-ready done mark"
   mark_task_status "failed [at=1700000400]: build broke"
   assert_contains "$(marks_run plan t1)" $'error\t\tFailed: build broke' "failed plans an error mark"
   mark_task_status "needs-decision [at=1700000500] [key=k2]: second call"
