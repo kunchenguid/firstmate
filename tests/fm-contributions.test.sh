@@ -1417,6 +1417,7 @@ test_records_beyond_one_read_batch_are_all_read() {
         pending:[{token:$token}],seen:[],verdict:null,observation:null}]}' > "$home/data/task$n/contributions.json"
   done
   real_jq=$(command -v jq)
+  # shellcheck disable=SC2016
   printf '#!/bin/sh\nn=0\nfor a; do [ "$a" = --rawfile ] && n=$((n + 1)); done\n[ "$n" -le 100 ] || { echo "jq given $n record files" >&2; exit 99; }\nexec %s "$@"\n' "$real_jq" > "$home/fakebin/jq"
   chmod +x "$home/fakebin/jq"
   actual=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq 'length') \
