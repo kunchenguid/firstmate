@@ -116,6 +116,10 @@
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,
 # without worker observations or cross-home collection, for the home-local poll.
+# --captain-calls prints only this home's live captain holds - the backlog
+# records whose hold_bucket is "live", the same classification Bearings'
+# Captain's Call reads - as {count,calls:[{id,title,class}]}, from the backlog
+# parse alone, so a per-turn reader (bin/fm-waiting-on-you.sh) stays cheap.
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
@@ -236,6 +240,7 @@ usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
        fm-fleet-snapshot.sh --secondmate-home-summary
+       fm-fleet-snapshot.sh --captain-calls
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
@@ -243,6 +248,9 @@ refreshes only its parent-side remote-summary cache as an observational side eff
 
 --contribution-input emits the canonical local backlog/tasks ownership pair only,
 without worker observations or cross-home collection.
+
+--captain-calls emits only this home's live captain holds as
+{count,calls:[{id,title,class}]}, from the backlog parse alone.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -293,6 +301,7 @@ case "${1:---json}" in
   --json) ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   --contribution-input) OUTPUT_MODE=contribution-input ;;
+  --captain-calls) OUTPUT_MODE=captain-calls ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -1981,6 +1990,13 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+if [ "$OUTPUT_MODE" = captain-calls ]; then
+  printf '%s\n' "$BACKLOG_JSON" | jq -c '
+    [.records[]? | select(.structured and .hold_bucket == "live")
+     | {id, title, class:(.hold_class // null)}]
+    | {count:length, calls:.}' || { echo "fm-fleet-snapshot: captain-call projection failed" >&2; exit 1; }
+  exit 0
+fi
 contribution_tasks_json() {
   local meta id merge_authority
   for meta in "$STATE"/*.meta; do
