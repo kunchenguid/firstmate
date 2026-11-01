@@ -165,7 +165,7 @@ The only sanctioned teardown is `tern_safe_kill_session <session_id> <want_name>
 
 - tern is experimental and has no dedicated real-backend CI lane.
 - Secondmate spawns are unsupported (`fm-spawn.sh` refuses `--secondmate` on `backend=tern`).
-- The away-mode `/afk` supervisor backend does not support tern; only `tmux`, `herdr`, and `rex` supervisor panes are accepted.
+- The away-mode `/afk` supervisor backend does not support tern; [supervisor backend configuration](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target) owns the supported transports and refuses the others.
 - Native agent state requires a Tern window control endpoint; remote-host or headless daemon access that can `ls`/`capture` may still lack `ctl`.
 - Multiplexers swallow TSP: a Tern block hosting tmux or Herdr never shows native Tern agent state.
 - There is no verified native push-event wait (`tern events` is not treated as an agent-transition stream; `has_push` stays herdr-only).
