@@ -1402,11 +1402,17 @@ test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
   printf 'paused: waiting for dependency\n' > "$statusf"
   printf 'idle prompt $\n' > "$pane"
   fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
-  : > "$state/.afk"
   printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$key"
   sleep 2
   FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
 
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
+    FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  ! grep -Fq "blocked [key=paused-overdue-$task]" "$statusf" \
+    || fail "attended housekeeping opened an away-only overdue decision"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
     FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
