@@ -233,6 +233,7 @@ If an announced-but-unacknowledged episode has an empty queue, the arm leaves th
 If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
 A Codex foreground checkpoint skips the announced-episode reopen transition, so an already-announced generation stays announced while the checkpoint continues its bounded supervision.
 Its ordinary arm check still announces a never-announced generation, including one made pending by a durable queue append during the checkpoint.
+A cycle that queued an [open-decision reminder](configuration.md#open-decision-reminders-configopen-decision-reminders) skips its recovery wake and closes with that reminder instead, whose drain presents the same queued rows and recovery generation.
 
 ### Generation reuse
 

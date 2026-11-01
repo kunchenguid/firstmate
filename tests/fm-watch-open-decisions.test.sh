@@ -9,7 +9,9 @@ set -eu
 TMP_ROOT=$(fm_test_tmproot fm-watch-open-decisions)
 export FM_HOME="$TMP_ROOT" FM_STATE_OVERRIDE="$TMP_ROOT/state"
 export FM_CONFIG_OVERRIDE="$TMP_ROOT/config"
-mkdir -p "$FM_STATE_OVERRIDE" "$FM_CONFIG_OVERRIDE"
+# Source ownership is machine-wide by default; keep every claim in this suite.
+export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims"
+mkdir -p "$FM_STATE_OVERRIDE" "$FM_CONFIG_OVERRIDE" "$TMP_ROOT/drain-root"
 # shellcheck source=bin/fm-watch.sh
 . "$ROOT/bin/fm-watch.sh"
 
@@ -188,31 +190,174 @@ test_timed_cursor_retirement() {
   pass "task retirement removes the timed cursor and ends reminders"
 }
 
-test_watcher_loop() {
-  local dir="$TMP_ROOT/watcher-loop" pid i=0
-  mkdir -p "$dir/state" "$dir/config"
-  fm_test_track_watcher_state "$dir/state"
-  touch "$dir/config/open-decision-reminders" "$dir/state/home-summary.json"
-  printf 'needs-decision [at=1000] [key=api]: choose\n' > "$dir/state/worker.status"
+# Run the real watcher for <dir> until its first actionable exit.
+watch_once() {  # <dir> <out>
+  local dir=$1 out=$2 pid i=0
   FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_CONFIG_OVERRIDE="$dir/config" \
-    FM_OPEN_DECISION_OVERDUE_SECS=100 FM_OPEN_DECISION_BACKOFF_MAX_SECS=400 \
-    bash "$ROOT/bin/fm-watch.sh" > "$dir/out" 2> "$dir/err" &
+    FM_OPEN_DECISION_OVERDUE_SECS=100 FM_OPEN_DECISION_BACKOFF_MAX_SECS=400 FM_SIGNAL_GRACE=1 \
+    bash "$ROOT/bin/fm-watch.sh" > "$out" 2> "$out.err" &
   pid=$!
-  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  while [ "$i" -lt 300 ] && kill -0 "$pid" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
   if kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
-    fail "real watcher failed to wake on an overdue record"
+    return 1
   fi
-  wait "$pid" || fail "real watcher exited unsuccessfully: $(cat "$dir/err")"
+  wait "$pid"
+}
+
+drain() {  # <dir> [drain-args...]; the tangle check reads an inert root
+  local dir=$1
+  shift
+  FM_ROOT_OVERRIDE="$TMP_ROOT/drain-root" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-wake-drain.sh" "$@"
+}
+
+# A decision old enough to be overdue was surfaced as an ordinary signal when
+# its worker wrote it, and firstmate drained and acknowledged that wake. Build
+# that state through the real watcher and drain, with reminders still off.
+reminder_case() {  # <dir>
+  local dir=$1 sequence generation
+  mkdir -p "$dir/state" "$dir/config"
+  fm_test_track_watcher_state "$dir/state"
+  fm_test_track_procevent_home "$dir" "$FM_PROCEVENT_CLAIM_ROOT"
+  touch "$dir/state/home-summary.json"
+  printf 'needs-decision [at=1000] [key=api]: choose\n' > "$dir/state/worker.status"
+  watch_once "$dir" "$dir/surface.out" || return 1
+  grep -F 'signal:' "$dir/surface.out" >/dev/null || return 1
+  drain "$dir" >/dev/null 2> "$dir/surface-drain.err" || return 1
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/surface-drain.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/surface-drain.err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  drain "$dir" --ack-through "$sequence" --recovery-generation "$generation" >/dev/null 2>&1 || return 1
+  [ ! -s "$dir/state/.wake-queue" ]
+}
+
+queued_reminders() {  # <dir>
+  awk -F '\t' '$3 == "check" && index($4, "open-decision:") == 1' "$1/state/.wake-queue" 2>/dev/null \
+    | awk 'END { print NR + 0 }'
+}
+
+pe() {  # <dir> <command>...
+  local dir=$1
+  shift
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-procevent.sh" "$@"
+}
+
+test_watcher_loop() {
+  local dir="$TMP_ROOT/watcher-loop"
+  reminder_case "$dir" || fail "could not surface and acknowledge the decision before it aged"
+  touch "$dir/config/open-decision-reminders"
+  watch_once "$dir" "$dir/out" \
+    || fail "real watcher failed to wake on an overdue record: $(cat "$dir/out.err")"
   grep -F 'check: open decision overdue: worker key=api age=' "$dir/out" >/dev/null \
-    || fail "real watcher did not print the reminder wake"
+    || fail "real watcher did not print the reminder wake: $(cat "$dir/out")"
   [ "$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')" = 1 ] \
     || fail "real watcher did not durably queue exactly one reminder"
   pass "the actual watcher wakes and exits on an overdue key without any recorded pane"
 }
 
+# A due reminder is queued at its own step but must not end the cycle there:
+# with many open keys one is due on almost every poll, and an early exit then
+# skipped process-event reconcile on every cycle. Reconcile is what refreshes
+# the owner lease each runner's guard requires and restarts a registered source
+# that has no live runner, as a guard that stopped it on a stale lease leaves it.
+test_reminder_cycle_still_reconciles_procevent() {
+  local dir="$TMP_ROOT/reminder-reconcile" lease before after owner i=0
+  reminder_case "$dir" || fail "could not surface and acknowledge the decision before it aged"
+  cat > "$dir/source.sh" <<'SH'
+#!/usr/bin/env bash
+# Blocks, bounded, until the trigger exists; nothing here completes on its own.
+while [ ! -e "$1" ] && [ "$SECONDS" -lt 120 ]; do sleep 0.1; done
+SH
+  chmod +x "$dir/source.sh"
+  pe "$dir" register lavish reminder-src -- "$dir/source.sh" "$dir/trigger" >/dev/null \
+    || fail "could not register the process-event source"
+  owner=$(pe "$dir" list | awk '$1 == "reminder-src" { print $3 }')
+  [ "$owner" = none ] || fail "the fixture source already had a runner: $owner"
+  lease=$(fm_procevent_owner_lease_path "$dir/state")
+  before=$(cat "$lease") || fail "registration left no owner lease"
+  touch "$dir/config/open-decision-reminders"
+  watch_once "$dir" "$dir/out" \
+    || fail "real watcher failed to wake on an overdue record: $(cat "$dir/out.err")"
+  [ "$(queued_reminders "$dir")" = 1 ] || fail "the reminder was not durably queued exactly once"
+  after=$(cat "$lease") || fail "the owner lease disappeared"
+  awk -v a="$after" -v b="$before" 'BEGIN { exit !(a > b) }' \
+    || fail "the reminder cycle never refreshed the process-event owner lease ($before -> $after)"
+  # The launch is detached; only this watcher's reconcile could have made it.
+  while [ "$i" -lt 100 ]; do
+    owner=$(pe "$dir" list | awk '$1 == "reminder-src" { print $3 }')
+    [ -z "$owner" ] || [ "$owner" = none ] || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$owner" ] && [ "$owner" != none ] \
+    || fail "the reminder cycle never restarted the source that had no runner"
+  pe "$dir" retire reminder-src >/dev/null 2>&1 || true
+  pass "a cycle that queues a reminder still refreshes the owner lease and restarts a stopped source"
+}
+
+# The same cycle still delivers a process-event result a runner had already
+# captured, and the reminder it queued reaches the same drain.
+test_reminder_cycle_still_delivers_procevent_result() {
+  local dir="$TMP_ROOT/reminder-delivery" i=0
+  reminder_case "$dir" || fail "could not surface and acknowledge the decision before it aged"
+  pe "$dir" register lavish delivery-src -- \
+    /bin/sh -c 'printf "session:\n  file: /a.html\n  status: waiting\n"' >/dev/null \
+    || fail "could not register the process-event source"
+  # Only the captured row matters here; a slow launch may miss its confirm window.
+  pe "$dir" reconcile >/dev/null 2>&1 || true
+  while [ "$i" -lt 300 ] \
+    && ! grep -F 'procevent lavish delivery-src 1' "$dir/state/.wake-queue" >/dev/null 2>&1; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -F 'procevent lavish delivery-src 1' "$dir/state/.wake-queue" >/dev/null \
+    || fail "the fixture captured no process-event result"
+  # The runner publishes before it releases its claim; retire after that release.
+  i=0
+  while [ "$i" -lt 100 ] && [ -e "$FM_PROCEVENT_CLAIM_ROOT/delivery-src.claim" ]; do sleep 0.1; i=$((i + 1)); done
+  pe "$dir" retire delivery-src >/dev/null || fail "could not retire the finished source"
+  touch "$dir/config/open-decision-reminders"
+  watch_once "$dir" "$dir/out" \
+    || fail "real watcher failed to wake: $(cat "$dir/out.err")"
+  grep -F 'check: process-event result captured: procevent:delivery-src:1' "$dir/out" >/dev/null \
+    || fail "the reminder cycle did not deliver the captured process-event result: $(cat "$dir/out")"
+  [ "$(queued_reminders "$dir")" = 1 ] || fail "the reminder was not durably queued exactly once"
+  drain "$dir" > "$dir/drain.out" 2>/dev/null || fail "drain after the wake failed"
+  grep -F 'procevent lavish delivery-src 1' "$dir/drain.out" >/dev/null \
+    || fail "the drain did not present the process-event result"
+  grep -F 'check: open decision overdue: worker key=api age=' "$dir/drain.out" >/dev/null \
+    || fail "the drain did not present the reminder queued in the same cycle"
+  pass "a cycle that queues a reminder still delivers a captured process-event result to the same drain"
+}
+
+# A later wake in the reminder's cycle can be a routine signal the attended
+# supervision branch may take. The branch drains only the rows it may claim,
+# never the reminder's check row, so main must still be the close's owner:
+# judged by the real offer rule both Pi and the supervision host route through.
+test_reminder_cycle_keeps_a_later_branch_wake_on_main() {
+  local dir="$TMP_ROOT/reminder-branch" offer
+  reminder_case "$dir" || fail "could not surface and acknowledge the decision before it aged"
+  printf 'project=demo\nwindow=fm-other\n' > "$dir/state/other.meta"
+  printf 'working: building the fixture\n' > "$dir/state/other.status"
+  touch "$dir/config/open-decision-reminders"
+  watch_once "$dir" "$dir/out" \
+    || fail "real watcher failed to wake: $(cat "$dir/out.err")"
+  grep -F "signal: $dir/state/other.status" "$dir/out" >/dev/null \
+    || fail "the cycle did not close with the routine signal: $(cat "$dir/out")"
+  [ "$(queued_reminders "$dir")" = 1 ] || fail "the reminder was not durably queued exactly once"
+  offer=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" node "$ROOT/bin/fm-branch-dispatch.mjs" offer < "$dir/out") \
+    || fail "the branch offer rule could not judge the close"
+  case "$offer" in
+    *eligible=0*) ;;
+    *) fail "a close carrying the queued reminder was offered to the branch: $(cat "$dir/out") -> $offer" ;;
+  esac
+  pass "a later branch-routable wake in a reminder cycle still closes on main"
+}
 fm_test_run test_disabled test_oldest_and_backoff test_numeric_keys_are_distinct \
   test_numeric_tasks_are_distinct test_resolution_and_reopen \
   test_wait_exemptions test_unknown_times_and_keyless test_timed_fold_is_incremental \
-  test_invalid_settings test_timed_cursor_retirement test_watcher_loop
+  test_invalid_settings test_timed_cursor_retirement test_watcher_loop \
+  test_reminder_cycle_still_reconciles_procevent test_reminder_cycle_still_delivers_procevent_result \
+  test_reminder_cycle_keeps_a_later_branch_wake_on_main

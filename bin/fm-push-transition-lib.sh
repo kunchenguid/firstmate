@@ -93,6 +93,11 @@ triage_log() {
 # resetting idle backoff; omitted kinds keep the wake reason's existing accounting.
 wake() {
   local output_status=0
+  # An open-decision reminder bin/fm-watch.sh queued earlier in this cycle
+  # leads any later close: routing reads the first line, and a branch never
+  # drains the reminder's check row, so the close must stay main's.
+  [ -z "${OPEN_DECISION_REMINDER:-}" ] || [ "$1" = "$OPEN_DECISION_REMINDER" ] \
+    || set -- "$OPEN_DECISION_REMINDER"$'\n'"$1" "${@:2}"
   case "${2:-$1}" in
     heartbeat*) echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak" ;;
     *) echo 0 > "$STATE/.heartbeat-streak" ;;

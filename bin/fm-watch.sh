@@ -3924,11 +3924,16 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
+  # A due open-decision reminder is queued durably here but delivered only at
+  # the end of the cycle. With many open keys one is due on almost every poll,
+  # so waking here ended every cycle before the process-event reconcile that
+  # keeps runner owner leases fresh, the checks, and the signal and pane scans.
+  # Any wake later in this cycle leads with the reminder line (wake()), so that
+  # close stays main's and main's drain presents the queued row.
   open_decision_reminder_tick || {
     echo 'watcher: open-decision reminder check failed' >&2
     exit 1
   }
-  [ -z "$OPEN_DECISION_REMINDER" ] || wake "$OPEN_DECISION_REMINDER"
 
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
@@ -3960,8 +3965,10 @@ while :; do
   procevent_surface_queued
 
   # A process-event result carries richer adapter-owned wake context than the
-  # generic recovery reason, so give that owner first refusal.
-  resurface_after_downtime
+  # generic recovery reason, so give that owner first refusal. A reminder queued
+  # above is this watcher's own undelivered row, not downtime residue, and this
+  # cycle already ends in its wake, so recovery yields to it.
+  [ -n "$OPEN_DECISION_REMINDER" ] || resurface_after_downtime
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation
@@ -4527,6 +4534,9 @@ EOF
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi
+
+  # Nothing else in this cycle woke, so deliver the reminder it queued.
+  [ -z "$OPEN_DECISION_REMINDER" ] || wake "$OPEN_DECISION_REMINDER"
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr, rex),
   # else the blind poll sleep. See event_wait_or_sleep.
