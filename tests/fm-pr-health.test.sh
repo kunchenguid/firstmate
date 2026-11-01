@@ -46,7 +46,7 @@ case "$1 $2" in
     n=
     for arg in "$@"; do case "$arg" in number=*) n=${arg#number=} ;; esac; done
     model "$n" | jq '[{data:{repository:{pullRequest:{
-      headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},reviewDecision:(.reviewDecision // "APPROVED"),
+      headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},reviewDecision:(if has("reviewDecision") then .reviewDecision else "APPROVED" end),
       commits:{nodes:[{commit:{oid:(.graphql_head // .head),checkSuites:{pageInfo:{hasNextPage:(.suites_truncated // false)},nodes:[(.suites // [])[]
         | {conclusion,app:{slug:"github-actions"},workflowRun:{workflow:{name}}}]}}}]},
       reviewRequests:{nodes:[range(.requests) | {requestedReviewer:{__typename:"User"}}]},
@@ -662,6 +662,19 @@ test_maintainer_author_and_approval_states_are_distinct() {
   pass 'maintainer-gated CI, required approval and author action notify distinctly once'
 }
 
+test_pending_reviewer_without_review_decision_is_recorded() {
+  local home
+  home=$(new_home pending-reviewer)
+  task "$home" ship1 pr=https://github.com/o/r/pull/47
+  pr "$home" 47 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 47 '.reviewDecision = null | .requests = 1'
+  arm "$home"
+  expect_silent "$home" 'a pending reviewer must not wake the task'
+  jq -e --arg head "$HEAD_A" '.prs["https://github.com/o/r/pull/47"].needs_approval | index($head) != null' \
+    "$home/state/pr-health.json" >/dev/null || fail 'pending reviewer with no review decision was not recorded'
+  pass 'pending review requests imply recorded human approval'
+}
+
 test_truncated_check_suites_are_retried() {
   local home
   home=$(new_home truncated-check-suites)
@@ -776,7 +789,7 @@ test_failed_event_read_is_retried() {
 
 failures=0
 for test_name in test_maintainer_author_and_approval_states_are_distinct \
-  test_truncated_check_suites_are_retried test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
+  test_pending_reviewer_without_review_decision_is_recorded test_truncated_check_suites_are_retried test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
   test_failed_event_read_is_retried test_full_notification_page_does_not_advance_cursor \
   test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
   test_conflict_once_per_latest_commit test_adopted_draft_red_required_check_after_pause_wakes_once \

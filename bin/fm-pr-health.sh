@@ -47,7 +47,8 @@
 #   - maintainer must approve CI: a check suite on the head concluded
 #     ACTION_REQUIRED, GitHub's hold on an outside contributor's workflows.
 #     Nothing ran, so the PR is not green even when its rollup is.
-#   - needs human approval: reviewDecision REVIEW_REQUIRED on a non-draft PR.
+#   - needs human approval: reviewDecision REVIEW_REQUIRED or pending review
+#     requests on a non-draft PR; this is recorded, not printed to the wake channel.
 #   - author must act: reviewDecision CHANGES_REQUESTED, or an explicit
 #     maintainer label pending-contributor-action, waiting-on-author,
 #     waiting-for-author or awaiting-author, with any "namespace:" prefix.
@@ -143,6 +144,7 @@ gh_read() { # deadline args... : one bounded forge read
 PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
 headRefOid
 reviewDecision
+reviewRequests(first:100){nodes{requestedReviewer{__typename}}}
 commits(last:1){nodes{commit{oid checkSuites(first:100){pageInfo{hasNextPage} nodes{conclusion app{slug} workflowRun{workflow{name}}}}}}}
 statusCheckRollup{contexts(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{__typename
 ... on CheckRun{name status conclusion startedAt isRequired(pullRequestNumber:$number)}
@@ -178,8 +180,8 @@ STEP='
       | ([if $g.reviewDecision == "CHANGES_REQUESTED" then "changes requested" else empty end]
           + [$author_labels[] | "maintainer marked it \(.)"]) as $author_reasons
       | (($author_reasons | length) > 0 and (($p.author_action // []) | index($head) | not)) as $author_new
-      | ($g.reviewDecision == "REVIEW_REQUIRED" and $r.draft != true
-          and (($p.needs_approval // []) | index($head) | not)) as $approval_new
+      | (($g.reviewDecision == "REVIEW_REQUIRED" or (($g.reviewRequests.nodes // []) | length) > 0)
+          and $r.draft != true and (($p.needs_approval // []) | index($head) | not)) as $approval_new
       | ($r.mergeable == false and ($conflicts | index($head) | not)) as $conflict_new
       | [$failing[] | select(. as $name | any($checks[]; .head == $head and .name == $name) | not)] as $new_failing
       | (($new_failing | length) > 0) as $checks_new
