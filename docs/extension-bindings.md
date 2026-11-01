@@ -219,7 +219,7 @@ An unknown enabled version refuses rather than downgrading.
 A missing or changed package never executes.
 A malformed binding, integrity mismatch, failed handshake, crash, nonzero exit, timeout, oversized stream, wrong request id, or invalid response never selects another adapter.
 A source invocation failure becomes a bounded host-produced `firstmate.process-event-extension-error.v1` result and remains unhandled; a deadline-driven failure names its `bound`, and a suspension-driven kill additionally carries `overrun_ms`.
-For the same source, a repeated complete host-error envelope reuses an existing unhandled capture only when its host-error sidecar, result evidence excluding the volatile `overrun_ms` field, adapter, and immutable extension identity all match.
+For the same source, a repeated complete host-error envelope reuses an existing unhandled capture only when its host-error sidecar, result evidence in which whether `overrun_ms` is present counts but its volatile value does not, adapter, and immutable extension identity all match.
 The stored result keeps the full envelope including the first capture's `overrun_ms`, so two suspension kills of one bound still share one capture sequence.
 A matching retry allocates no new result sequence and records no handled acknowledgement.
 Ordinary reconciliation continues to publish the retained evidence and retry polling, so old failure evidence does not block recovery.

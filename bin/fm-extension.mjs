@@ -1881,7 +1881,9 @@ function errorEvidence(error, extensionId, operation) {
     // deadline fired materially late and a bounded grace was granted, so a
     // genuine stall keeps the same evidence keys at its bound. The full
     // envelope, overrun included, is what the capture gate stores; reuse
-    // identity compares the same envelope with only overrun_ms excluded.
+    // identity keeps whether overrun_ms is present and ignores only its value,
+    // so a plain timeout and a suspension-driven timeout stay distinct while
+    // suspension kills with different measured overruns coalesce.
     // isSafeInteger pins emission to the plain-digit range the gate accepts.
     if (error.graceUsed === true && Number.isSafeInteger(error.overrunMs) && error.overrunMs >= 0) {
       evidence.overrun_ms = error.overrunMs;

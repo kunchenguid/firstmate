@@ -311,13 +311,15 @@ JS
 # The capture gate must accept every overrun_ms the host can emit (the host
 # validates JS safe integers, at most 16 digits) and reject beyond it, so a
 # long suspension can never silently lose the host-error identity that keeps
-# retries coalescing into one capture. The measured overrun differs on every
-# suspension kill, so identity ignores it while the stored evidence keeps the
-# first capture's value.
-overrun_boundary_case() { # <tag> <round1-overrun-ms> <round2-overrun-ms> <expect-host-error: yes|no> <expected-result-count after two rounds>
+# retries coalescing into one capture. Identity keeps WHETHER overrun_ms was
+# present and ignores only its measured value: a plain timeout and a
+# suspension-driven timeout stay distinct, while suspension kills differing
+# only by overrun coalesce, and the stored evidence keeps the first capture's
+# own value.
+overrun_boundary_case() { # <tag> <round1-overrun-ms|absent> <round2-overrun-ms|absent> <expected-host-error-sidecars> <expected-result-count after two rounds>
   (
     set -u
-    local case_root="$TMP_ROOT/overrun-$1" overrun1=$2 overrun2=$3 expect_marker=$4 expect_count=$5
+    local case_root="$TMP_ROOT/overrun-$1" overrun1=$2 overrun2=$3 expect_sidecars=$4 expect_count=$5
     local home source claim_root evidence inbox round_result_count overrun stored_overrun
     local saved_home=${HOME:-} saved_xdg=${XDG_STATE_HOME:-}
     home="$case_root/home"
@@ -351,7 +353,11 @@ SHIM
     inbox="$home/state/procevent-inbox"
     for round in 1 2; do
       if [ "$round" -eq 1 ]; then overrun=$overrun1; else overrun=$overrun2; fi
-      evidence=$(printf '{"schema":"firstmate.process-event-extension-error.v1","extension_id":"org.example.sleep-deadlines","operation":"source.poll","code":"timeout","bound":"invoke","overrun_ms":%s}' "$overrun")
+      if [ "$overrun" = absent ]; then
+        evidence=$(printf '{"schema":"firstmate.process-event-extension-error.v1","extension_id":"org.example.sleep-deadlines","operation":"source.poll","code":"timeout","bound":"invoke"}')
+      else
+        evidence=$(printf '{"schema":"firstmate.process-event-extension-error.v1","extension_id":"org.example.sleep-deadlines","operation":"source.poll","code":"timeout","bound":"invoke","overrun_ms":%s}' "$overrun")
+      fi
       if [ "$round" -eq 1 ]; then
         FM_SHIM_EVIDENCE="$evidence" FM_HOME="$home" \
           "$case_root/code/bin/fm-procevent.sh" start "$source" > "$case_root/start.out" 2>&1 \
@@ -365,32 +371,30 @@ SHIM
       settle_source "$home" "$claim_root" "$source" \
         || fail "$1 round $round runner did not settle"
       round_result_count=$(inbox_count "$inbox" "$source")
-      # A gate-accepted envelope coalesces into the first capture; a rejected
-      # envelope allocates a fresh result each round.
-      if [ "$expect_marker" = yes ]; then
+      # Round one always allocates the first capture; round two coalesces into
+      # it exactly when identity matches - same presence, any value.
+      if [ "$round" -eq 1 ]; then
         [ "$round_result_count" -eq 1 ] \
-          || fail "$1 round $round produced $round_result_count results, expected 1 coalesced capture"
+          || fail "$1 round 1 produced $round_result_count results, expected 1 first capture"
       else
-        [ "$round_result_count" -eq "$round" ] \
-          || fail "$1 round $round produced $round_result_count results, expected $round"
+        [ "$round_result_count" -eq "$expect_count" ] \
+          || fail "$1 round 2 produced $round_result_count results, expected $expect_count"
       fi
     done
     [ "$(inbox_count "$inbox" "$source")" -eq "$expect_count" ] \
       || fail "$1 did not settle at $expect_count captures"
-    if [ "$expect_marker" = yes ]; then
-      [ "$(host_error_count "$inbox" "$source")" -eq 1 ] \
-        || fail "an accepted overrun lost its host-error identity"
-      [ "$expect_count" -eq 1 ] \
-        || fail "an accepted overrun must coalesce retries into one capture"
+    [ "$(host_error_count "$inbox" "$source")" -eq "$expect_sidecars" ] \
+      || fail "$1 produced $(host_error_count "$inbox" "$source") host-error sidecars, expected $expect_sidecars"
+    if [ "$overrun1" = absent ]; then
+      stored_overrun=$(node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(value.overrun_ms))' "$inbox/$source.1.result") \
+        || fail "the stored capture evidence is not JSON"
+      [ "$stored_overrun" = undefined ] \
+        || fail "plain stored evidence gained an overrun_ms (${stored_overrun})"
+    else
       stored_overrun=$(node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(value.overrun_ms))' "$inbox/$source.1.result") \
         || fail "the stored capture evidence is not JSON"
       [ "$stored_overrun" = "$overrun1" ] \
         || fail "the stored capture lost its first overrun_ms (${stored_overrun})"
-    else
-      [ "$(host_error_count "$inbox" "$source")" -eq 0 ] \
-        || fail "an overrun beyond the capture gate cap was accepted as host-error identity"
-      [ "$expect_count" -eq 2 ] \
-        || fail "an overrun beyond the capture gate cap should not coalesce retries"
     fi
     export HOME="$saved_home"
     if [ -n "$saved_xdg" ]; then export XDG_STATE_HOME="$saved_xdg"; else unset XDG_STATE_HOME; fi
@@ -401,19 +405,27 @@ SHIM
 test_overrun_at_the_capture_gate_cap_keeps_host_error_identity() {
   # 9007199254740991 is Number.MAX_SAFE_INTEGER: the largest value the host
   # can emit, so the gate must accept it and keep retry dedupe working.
-  overrun_boundary_case cap 9007199254740991 9007199254740991 yes 1 || exit 1
+  overrun_boundary_case cap 9007199254740991 9007199254740991 1 1 || exit 1
   pass "an overrun at the capture gate cap keeps its host-error identity and retry coalescing"
 }
 
 test_overrun_differences_coalesce_into_one_capture() {
-  overrun_boundary_case drift 4000 4100 yes 1 || exit 1
+  overrun_boundary_case drift 4000 4100 1 1 || exit 1
   pass "two suspension kills differing only in overrun_ms coalesce into one capture"
+}
+
+test_plain_and_suspension_timeouts_stay_distinct() {
+  # Presence is part of identity: a plain timeout first, then a
+  # suspension-driven kill of the same source and bound, must allocate a
+  # second capture instead of coalescing into the plain one.
+  overrun_boundary_case mixed absent 4000 2 2 || exit 1
+  pass "a plain timeout and a suspension-driven timeout stay distinct captures"
 }
 
 test_overrun_beyond_the_capture_gate_cap_is_rejected() {
   # 17 digits cannot come from a host-validated safe integer; the gate must
   # reject the envelope instead of recording a host-error identity.
-  overrun_boundary_case beyond 10000000000000000 10000000000000000 no 2 || exit 1
+  overrun_boundary_case beyond 10000000000000000 10000000000000000 0 2 || exit 1
   pass "an overrun beyond the capture gate cap is rejected without host-error identity"
 }
 
@@ -442,4 +454,5 @@ fm_test_run \
   test_launch_ready_recovers_after_suspension \
   test_overrun_at_the_capture_gate_cap_keeps_host_error_identity \
   test_overrun_differences_coalesce_into_one_capture \
+  test_plain_and_suspension_timeouts_stay_distinct \
   test_overrun_beyond_the_capture_gate_cap_is_rejected

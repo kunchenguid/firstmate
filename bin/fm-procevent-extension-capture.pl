@@ -156,16 +156,22 @@ sub private_file_matches {
   }
   return $bytes eq $expected;
 }
-# A suspension-driven deadline kill carries the measured overrun, which differs
-# on every kill of the same bound. Identity - the host-error sidecar hash and
-# the comparison against a stored capture - excludes only that volatile field,
-# while the stored result keeps the full envelope the host emitted. Canonical
-# encoding keeps identity bytes stable across capture processes.
+# A suspension-driven deadline kill carries a measured overrun whose VALUE
+# differs on every kill of the same bound, while a plain timeout carries no
+# overrun at all. Identity - the host-error sidecar hash and the comparison
+# against a stored capture - therefore keeps WHETHER overrun_ms is present and
+# ignores only its value: a plain timeout and a suspension-driven timeout stay
+# two distinct captures, while two suspension-driven kills of one bound
+# coalesce regardless of how far each overran. The stored result keeps the
+# full envelope the host emitted. Canonical encoding keeps identity bytes
+# stable across capture processes.
 sub host_error_identity_bytes {
   my ($bytes) = @_;
   my $value = eval { decode_json($bytes) };
   return undef unless ref($value) eq 'HASH';
-  delete $value->{overrun_ms};
+  if (exists $value->{overrun_ms}) {
+    $value->{overrun_ms} = JSON::PP::true;
+  }
   return JSON::PP->new->canonical->encode($value) . "\n";
 }
 sub host_error_result_matches {
@@ -296,10 +302,11 @@ if ($rc == 70 && !$truncated && $written > 0 && $written <= 1024) {
   # Deadline failures extend the base four keys with bound, and with
   # overrun_ms only for a suspension-driven kill that received the bounded
   # grace. overrun_ms is capped at the host's own range (16 digits covers
-  # every JS safe integer the host validates). The mutable overrun is kept in
-  # the stored evidence but excluded from reuse identity, so repeated kills of
-  # one bound - each overrunning by its own measured amount - still reuse one
-  # unhandled capture.
+  # every JS safe integer the host validates). The measured overrun is kept in
+  # the stored evidence but only its value is excluded from reuse identity -
+  # presence still separates a plain timeout from a suspension-driven one - so
+  # repeated suspension kills of one bound, each overrunning by its own amount,
+  # still reuse one unhandled capture.
   my $deadline_keys = 0;
   if (ref($error) eq 'HASH' && keys(%$error) == 5
       && ($error->{bound} // '') =~ /\A[a-z0-9-]{1,32}\z/) {
