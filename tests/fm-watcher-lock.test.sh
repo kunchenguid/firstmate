@@ -559,12 +559,15 @@ leave_dead_link_locks() {  # <state> <lock>...
 }
 
 test_lock_reclaims_dead_steal_owner_without_nested_markers() {
-  local dir state lockdir fakebin lnlog rc
+  local dir state lockdir fakebin lnlog real_ln rc
   dir=$(make_case lock-dead-steal-owner)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   fakebin="$dir/fakebin"
   lnlog="$dir/ln.log"
+  # The host's own ln path, not a hardcoded /bin/ln: on a host that keeps only
+  # sh in /bin (NixOS) the fixture's shim would exec a path that does not exist.
+  real_ln=$(command -v ln)
   mkdir "$lockdir"
   printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
   leave_dead_link_locks "$state" "$lockdir.steal"
@@ -573,13 +576,14 @@ test_lock_reclaims_dead_steal_owner_without_nested_markers() {
 last=
 for arg do last=$arg; done
 printf '%s\n' "$last" >> "$FM_TEST_LN_LOG"
-exec /bin/ln "$@"
+exec "$FM_TEST_REAL_LN" "$@"
 SH
   chmod +x "$fakebin/ln"
   : > "$lnlog"
 
   rc=0
-  PATH="$fakebin:$PATH" FM_TEST_LN_LOG="$lnlog" FM_STATE_OVERRIDE="$state" bash -c '
+  PATH="$fakebin:$PATH" FM_TEST_LN_LOG="$lnlog" FM_TEST_REAL_LN="$real_ln" \
+    FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 8
     fm_lock_release "$2"
@@ -1036,8 +1040,10 @@ test_lock_reclaims_holder_whose_identity_no_longer_recomputes() {
   state="$dir/state"
   lockdir="$state/.watch.lock"
   # Naming the holder under the fixture root lets the suite's cleanup reap it
-  # if an assertion below fails before the kill at the end.
-  (exec -a "$dir/holder" sleep 300) >/dev/null 2>&1 &
+  # if an assertion below fails before the kill at the end. A python holder
+  # carries that name as its own argument instead of through `exec -a`, which a
+  # multicall sleep rejects by dispatching on argv[0] and exiting at once.
+  python3 -c 'import sys, time; time.sleep(300)' "$dir/holder" >/dev/null 2>&1 &
   live=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
     || fail "could not identify the fixture holder"
@@ -1088,8 +1094,10 @@ test_lock_keeps_live_daemon_holder_with_stale_identity() {
   state="$dir/state"
   lockdir="$state/.supervise-daemon.lock"
   # Naming the holder under the fixture root lets the suite's cleanup reap it
-  # if an assertion below fails before the kill at the end.
-  (exec -a "$dir/holder" sleep 300) >/dev/null 2>&1 &
+  # if an assertion below fails before the kill at the end. A python holder
+  # carries that name as its own argument instead of through `exec -a`, which a
+  # multicall sleep rejects by dispatching on argv[0] and exiting at once.
+  python3 -c 'import sys, time; time.sleep(300)' "$dir/holder" >/dev/null 2>&1 &
   live=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
     || fail "could not identify the fixture daemon"
@@ -1503,12 +1511,13 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
 }
 
 test_arm_term_during_steal_waits_for_watcher_cleanup_trap() {
-  local dir state fakebin armout armpid i dead pidfile status
+  local dir state fakebin armout armpid i dead pidfile real_ln status
   dir=$(make_case arm-term-mid-steal)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   pidfile="$dir/arm.pid"
+  real_ln=$(command -v ln)
   mkdir "$state/.watch.lock"
   dead=$(dead_pid)
   printf '%s\n' "$dead" > "$state/.watch.lock/pid"
@@ -1524,10 +1533,11 @@ case "$last" in
     [ -n "$arm_pid" ] && kill -TERM "$arm_pid" 2>/dev/null || true
     ;;
 esac
-exec /bin/ln "$@"
+exec "$FM_TEST_REAL_LN" "$@"
 SH
   chmod +x "$fakebin/ln"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_REAL_LN="$real_ln" \
     FM_TEST_ARM_PID_FILE="$pidfile" FM_POLL=5 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
   armpid=$!
@@ -1547,13 +1557,14 @@ SH
 }
 
 test_arm_term_waits_out_a_stalled_claim() {
-  local dir state fakebin armout pidfile release armpid status
+  local dir state fakebin armout pidfile release armpid real_ln status
   dir=$(make_case arm-term-stalled-startup)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   pidfile="$dir/arm.pid"
   release="$dir/release"
+  real_ln=$(command -v ln)
   cat > "$fakebin/ln" <<'SH'
 #!/usr/bin/env bash
 last=
@@ -1569,10 +1580,11 @@ case "$last" in
     while [ ! -e "$FM_TEST_RELEASE" ]; do sleep 0.05; done
     ;;
 esac
-exec /bin/ln "$@"
+exec "$FM_TEST_REAL_LN" "$@"
 SH
   chmod +x "$fakebin/ln"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_REAL_LN="$real_ln" \
     FM_TEST_ARM_PID_FILE="$pidfile" FM_TEST_RELEASE="$release" \
     FM_ARM_CONFIRM_TIMEOUT=2 FM_POLL=5 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
