@@ -1540,7 +1540,7 @@ SH
 }
 
 test_treehouse_pool_report_is_read_only_and_classifies_pools() {
-  local case_dir home root fakebin registered unregistered other_home_clone missing_date fractional_repo leased_repo many_repo clone_one clone_two bare_repo nested_slot jq_count_file real_jq jq_calls pool i out
+  local case_dir home root fakebin registered unregistered other_home_clone missing_date fractional_repo leased_repo many_repo clone_one clone_two bare_repo nested_slot jq_count_file real_jq jq_calls i out
   case_dir="$TMP_ROOT/pool-report"
   home="$case_dir/home"
   root="$case_dir/pools"
