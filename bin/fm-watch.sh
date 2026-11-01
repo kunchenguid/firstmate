@@ -130,10 +130,11 @@
 #   check: start <id>: no start signal <n>s after spawn (harness=<h>[; <cause>]); <command>
 #                          a launch fm-spawn.sh could not prove started still has
 #                          no start proof FM_START_CHECK_SECS (default 120) after
-#                          spawn: one wake per launch naming a recognized launch
-#                          dialog, an exited agent, or an unsubmitted brief, and
-#                          the command that clears it; the stale path stays quiet
-#                          for that pane meanwhile (start_check_tick)
+#                          spawn: one wake per launch naming an exited agent, a
+#                          vanished endpoint, a recognized launch dialog, or an
+#                          unsubmitted brief, and the command that clears it; the
+#                          stale path stays quiet for that pane meanwhile
+#                          (start_check_tick)
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
