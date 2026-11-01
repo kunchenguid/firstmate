@@ -288,8 +288,8 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
-# Extra "field=value" arguments are written before pr=, because
-# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
+# Extra "field=value" arguments are written before pr=, the order
+# bin/fm-pr-check.sh itself produces.
 write_poll_meta() {
   local state=$1 id=$2 url=$3 case_dir
   case_dir=$(cd "$state/../.." && pwd)
@@ -1467,6 +1467,75 @@ test_postrename_poll_validation_revokes_and_retries() {
     done
   done
   pass "post-rename poll validation faults revoke both names and allow a clean retry"
+}
+
+# A home keeps writing to a task's durable record after its pull request is
+# recorded: bin/fm-captain-hold.sh's completion appends decisions_reviewed= and
+# decision_keys=, and a control relaunch appends control_relaunch_tx=. Those
+# keys land after the recorded pr= identity. The merge watch must keep
+# authenticating across them, because a watch the sweep rejects is reported as
+# an unauthenticated check at every cycle and never reads the forge again, so
+# the merge it was armed for is never reported at all.
+test_record_keys_written_after_pr_keep_the_merge_watch() {
+  local dir state rc out
+  dir=$(make_case record-keys-after-pr)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/41 >/dev/null 2>"$dir/arm.err" \
+    || fail "could not arm the merge watch: $(cat "$dir/arm.err")"
+
+  printf 'decisions_reviewed=1\ndecision_keys=task-a-call\n' >> "$state/task-a.meta"
+  printf 'control_relaunch_tx=2963938.20261020T100431Z.8806\n' >> "$state/task-a.meta"
+
+  # The merge watch is the cycle's only check, so the cycle ends either on its
+  # forge result or on the rejection that replaces it.
+  retire_contributions_observer "$dir"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher cycle failed: $(cat "$dir/watch.err")"
+  out=$(cat "$dir/watch.out")
+  assert_no_grep 'rejected unauthenticated state checks' "$dir/watch.out" \
+    "a record key written after pr= disarmed the merge watch"
+  assert_no_grep 'unauthenticated-state-checks' "$state/.wake-queue" \
+    "a record key written after pr= queued an unauthenticated-check notification"
+  case "$out" in
+    *task-a.check.sh:*merged) ;;
+    *) fail "the merge watch did not report the merge: $out" ;;
+  esac
+  pass "record keys written after the recorded pr= keep the merge watch authenticating"
+}
+
+# The counter-direction: the watch stays bound to the exact check it was armed
+# with. One altered byte must still be refused as an unauthenticated check and
+# must never be executed, whatever else the record carries.
+test_altered_merge_watch_check_stays_rejected() {
+  local dir state rc
+  dir=$(make_case altered-watch-check)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/42 >/dev/null 2>"$dir/arm.err" \
+    || fail "could not arm the merge watch: $(cat "$dir/arm.err")"
+  printf 'decisions_reviewed=1\ndecision_keys=task-a-call\n' >> "$state/task-a.meta"
+
+  chmod 0600 "$state/task-a.check.sh"
+  printf 'printf "tampered\\n" > "%s"\n' "$dir/tampered" >> "$state/task-a.check.sh"
+
+  retire_contributions_observer "$dir"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher cycle failed: $(cat "$dir/watch.err")"
+  assert_grep 'rejected unauthenticated state checks' "$dir/watch.out" \
+    "an altered merge watch check was accepted"
+  assert_no_grep 'task-a.check.sh: merged' "$dir/watch.out" \
+    "an altered merge watch check reported a forge result"
+  [ ! -e "$dir/tampered" ] || fail "an altered merge watch check was executed"
+  pass "an altered merge watch check stays rejected and unexecuted"
 }
 
 test_bootstrap_leaves_unauthenticated_checks() {
@@ -3806,6 +3875,8 @@ test_device_rerecord_refuses_tampered_artifacts
 test_device_rerecord_serializes_direct_rearm
 test_device_rerecord_serializes_rerecord
 test_postrename_poll_validation_revokes_and_retries
+test_record_keys_written_after_pr_keep_the_merge_watch
+test_altered_merge_watch_check_stays_rejected
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained

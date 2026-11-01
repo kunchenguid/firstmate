@@ -450,8 +450,17 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# The task record's pull-request identity is read by key, not by position: a
+# record carries exactly one pr= line and at most one pr_head= line, and every
+# other key in it is unrelated to that identity wherever it sits. The record
+# stays writable for its whole life - a captain-call completion, a relaunch, and
+# a Relay request all add their own keys after the pull request was recorded -
+# and a merge watch is bound to the check it was armed with by hash and file
+# identity (fm_pr_poll_artifacts_valid), never by the record's line order. An
+# order-sensitive read would turn any later key into a silently disarmed merge
+# watch that the watcher reports as an unauthenticated check at every cycle.
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line value pr_count=0 head_count=0 head_invalid=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -472,23 +481,17 @@ fm_pr_metadata_identity_parse() {
           FM_PR_META_PATH=$FM_PR_PATH
           FM_PR_META_NUMBER=$FM_PR_NUMBER
         fi
-        seen_pr=1
         ;;
       pr_head=*)
-        if [ "$seen_pr" -eq 1 ]; then
-          value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
-        fi
-        ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
-      *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        head_count=$((head_count + 1))
+        value=${line#pr_head=}
+        fm_pr_head_valid "$value" || head_invalid=1
         ;;
     esac
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
-  [ "$post_pr_invalid" -eq 0 ] || return 1
+  [ "$head_count" -le 1 ] || return 1
+  [ "$head_invalid" -eq 0 ] || return 1
   [ -n "$FM_PR_META_URL" ]
 }
 
