@@ -25,7 +25,8 @@
 #      >= 1.4.11 (the lowest versions verified reporting on Rex,
 #      docs/verification/runtime-backends.md) send their own root records;
 #      a terminal keeps one root record per pane, so a firstmate record would
-#      only replace theirs
+#      only replace theirs. One of these harnesses whose version cannot be
+#      read counts as native, so no unprobed build shares the root record
 #
 # When all of that holds, arm daemonizes `watch`, which polls firstmate's own
 # durable signals for the task and emits records to /dev/tty. Every record
@@ -45,9 +46,9 @@
 #     done                -> done ("PR ready" when the note has a URL)
 #   otherwise idle
 #   A paused declaration has no separate mapping; activity decides as above.
-#   Unknown activity emits nothing and never heartbeats: a record the watcher
-#   is still showing is parked at idle once, so no stale claim outlives the
-#   evidence for it.
+#   Unknown activity writes nothing at all - no record, no heartbeat, no
+#   retirement, no final record - because only known activity proves the
+#   root record is the bridge's to write.
 #
 # Records go to the ROOT record (no id) with app=firstmate-<harness> and
 # title=fm-<task> so `hc get .status` and the app sidebar classify the worker;
@@ -59,8 +60,8 @@
 # that dropped one is repaired). Its lifetime is the agent incarnation: the
 # launch runs `disarm` right after the agent command returns, and the watcher
 # also exits when its recorded parent - the shell running the launch - dies.
-# Either way a final emit keeps done/error and otherwise parks the record at
-# idle; a TERM/HUP retires it the same way. One watcher per controlling
+# Either way, when activity is still known, a final emit keeps done/error and
+# otherwise parks the record at idle; a TERM/HUP retires it the same way. One watcher per controlling
 # terminal (<state>/.osc7501watch-<tty>): every arm retires the pane's
 # previous watcher before any gate, so a relaunch rebinds to the new agent and
 # a natively reporting agent never shares the pane with a stale writer.
@@ -228,8 +229,8 @@ EOF
 }
 
 # osc_native <harness> <agent-bin>: 0 when the launched agent reports
-# OSC 7501 itself at the probed version (floors: the header's gate 4). An
-# unprobed or failed probe reads as not native.
+# OSC 7501 itself at the probed version (floors: the header's gate 4). A
+# failed probe of a harness with a native floor reads as native.
 osc_native() {
   local floor ver
   case "$1" in
@@ -240,7 +241,7 @@ osc_native() {
     muse) floor=1.4.11 ;;
     *) return 1 ;;
   esac
-  ver=$(osc_probe_version "${2:-$1}") || return 1
+  ver=$(osc_probe_version "${2:-$1}") || return 0
   osc_version_ge "$ver" "$floor"
 }
 
@@ -258,20 +259,24 @@ osc_load_libs() {
   LIBS_LOADED=1
 }
 
-# osc_plan sets W_STATE, W_KIND, W_MSG; returns 1, emitting nothing, when the
-# activity is unknown. An empty harness means no live agent, which reads as
-# idle; backend and target let the classifier reach a harness whose only
-# activity source is its rendered pane.
-osc_plan() { # <task> <kind> <state> <harness> [backend] [target]
-  local task=$1 kind=$2 state_dir=$3 file line verb note held act=idle
+# osc_activity -> busy or idle from fm_busy_classify; 1 when unknown. Backend
+# and target let the classifier reach a harness whose only activity source is
+# its rendered pane.
+osc_activity() { # <harness> <task> <state> [backend] [target]
+  local act
+  act=$(fm_busy_classify "${4:-}" "${5:-}" "$1" "$2" "$3" 2>/dev/null) || return 1
+  act=${act%% *}
+  case "$act" in busy | idle) printf '%s' "$act" ;; *) return 1 ;; esac
+}
+
+# osc_plan sets W_STATE, W_KIND, W_MSG from the task's signals and its known
+# activity.
+osc_plan() { # <task> <kind> <state> <busy|idle>
+  local task=$1 kind=$2 state_dir=$3 act=$4 file line verb note held
   file="$state_dir/$task.status"
   W_STATE=
   W_KIND=
   W_MSG=
-  osc_load_libs || return 1
-  [ -z "$4" ] || act=$(fm_busy_classify "${5:-}" "${6:-}" "$4" "$task" "$state_dir" 2>/dev/null) || act=
-  act=${act%% *}
-  case "$act" in busy | idle) ;; *) return 1 ;; esac
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   line=$(status_open_decisions "$file" "$kind" 2>/dev/null | tail -n 1)
   verb=$(printf '%s' "$line" | cut -f2)
@@ -319,15 +324,17 @@ osc_plan() { # <task> <kind> <state> <harness> [backend] [target]
 
 # --- watcher ------------------------------------------------------------------
 
-# final record before exit: the agent is gone, so its activity no longer
-# counts; keep a result worth finding (done/error) and park everything else at
-# idle, never clearing records another program owns.
+# final record before exit, written only while activity is known: the agent
+# is gone, so a running turn no longer counts; keep a result worth finding
+# (done/error) and park everything else at idle.
 osc_final() {
-  if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" '' && { [ "$W_STATE" = 'done' ] || [ "$W_STATE" = error ]; }; then
-    printf '%s' "$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")" >&3 2>/dev/null
-  else
-    printf '%s' "$WATCH_IDLE" >&3 2>/dev/null
-  fi
+  osc_activity "$WATCH_HARNESS" "$WATCH_TASK" "$WATCH_STATE" "$WATCH_BACKEND" "$WATCH_TARGET" >/dev/null || return 0
+  osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" idle
+  case "$W_STATE" in
+    done | error) ;;
+    *) W_STATE=idle W_KIND='' W_MSG='' ;;
+  esac
+  printf '%s' "$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")" >&3 2>/dev/null
 }
 
 osc_watch() { # --task --kind --state --harness --parent
@@ -361,8 +368,7 @@ osc_watch() { # --task --kind --state --harness --parent
   FM_OSC_APP="firstmate-$WATCH_HARNESS"
   FM_OSC_APP="${FM_OSC_APP:0:$FM_OSC7501_APP_MAX}"
   WATCH_TITLE="fm-$WATCH_TASK"
-  WATCH_IDLE=$(osc_seq idle '' '' '' "$WATCH_TITLE" '')
-  local dev=${FM_OSC7501_TTY:-/dev/tty} hb=0 hb_ticks last='' seq
+  local dev=${FM_OSC7501_TTY:-/dev/tty} hb=0 hb_ticks last='' seq act
   exec 3>>"$dev" 2>/dev/null || exit 0
   osc_load_libs || exit 0
   trap 'osc_final; exit 0' TERM INT HUP
@@ -374,7 +380,8 @@ osc_watch() { # --task --kind --state --harness --parent
       osc_final
       break
     fi
-    if osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" "$WATCH_HARNESS" "$WATCH_BACKEND" "$WATCH_TARGET"; then
+    if act=$(osc_activity "$WATCH_HARNESS" "$WATCH_TASK" "$WATCH_STATE" "$WATCH_BACKEND" "$WATCH_TARGET"); then
+      osc_plan "$WATCH_TASK" "$WATCH_KIND" "$WATCH_STATE" "$act"
       seq=$(osc_seq "$W_STATE" '' "$W_KIND" '' "$WATCH_TITLE" "$W_MSG")
       if [ "$seq" != "$last" ]; then
         printf '%s' "$seq" >&3 2>/dev/null
@@ -387,8 +394,7 @@ osc_watch() { # --task --kind --state --harness --parent
           hb=0
         fi
       fi
-    elif [ -n "$last" ]; then
-      [ "$last" = "$WATCH_IDLE" ] || printf '%s' "$WATCH_IDLE" >&3 2>/dev/null
+    else
       last=''
     fi
     sleep "$FM_OSC7501_INTERVAL" 2>/dev/null &
