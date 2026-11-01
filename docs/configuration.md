@@ -2125,7 +2125,6 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - New tmux dispatches record their socket identity; liveness recovery and seat-release evidence use that owning socket, and older tracked generations without that identity remain counted and cannot authorize recovery.
 - Remote retirement releases a dispatched generation only with host destruction evidence matching its generation, home, backend, and target.
 - The startup wait accepts fractional `FM_CONTROL_LAUNCH_WAIT` and `FM_CONTROL_POLL` values, matching the control plane.
-- A v1 seat matching a task's model and generation keeps its validated endpoint route on import; missing route evidence leaves the imported seat counted and uncertain.
 - The primary supervisor holds a seat while its session is live, when `primary_model` names a pooled model; no primary busy record exists, so a live primary is indeterminate and counts.
 - While any pool is configured, every launch needs an explicit, verified `--model`.
   A harness default on any adapter or a raw launch command is refused because its actual model cannot be counted reliably.
