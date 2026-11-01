@@ -1884,9 +1884,3 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
-# Lifecycle post-merge hooks (docs/configuration.md "Lifecycle hooks"): only a
-# merge the forge confirmed reaches here, and a hook failure never changes the
-# reported outcome. sha is the head commit this script verified and merged,
-# empty when the forge path does not bind one.
-fm_hooks_emit post-merge task_id="$ID" pr_url="$URL" sha="${FM_PR_MERGE_HEAD:-}" \
-  provider="$PROVIDER" >/dev/null || true

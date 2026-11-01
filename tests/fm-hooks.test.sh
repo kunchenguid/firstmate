@@ -100,6 +100,9 @@ next	tab \\ back" n:=3 ok:=true "e=" "skip"' _ "$ROOT/bin/fm-hooks-lib.sh")
     .a == "plain" and .q == "say \"hi\"\nnext\ttab \\ back" and .n == 3 and .ok == true and .e == ""
     and (keys | length) == 5
   ' >/dev/null || fail "payload did not round-trip through jq: $out"
+  out=$(bash -c '. "$1"; fm_hooks_payload project_dir=/srv/app:=null "url=a=b" "x:=1"' _ "$ROOT/bin/fm-hooks-lib.sh")
+  printf '%s' "$out" | jq -e '.project_dir == "/srv/app:=null" and .url == "a=b" and .x == 1 and (keys | length) == 3' \
+    >/dev/null || fail "a ':=' inside a string value changed the key or type: $out"
   out=$(bash -c '. "$1"; fm_hooks_payload "c=$(printf "bell\001end")"' _ "$ROOT/bin/fm-hooks-lib.sh")
   printf '%s' "$out" | jq -e '.c == "bell\u0001end"' >/dev/null || fail "control byte was not escaped: $out"
   pass "payload fields are escaped into valid JSON, raw literals pass through"
@@ -172,6 +175,12 @@ test_blocking_timeout_refuses_within_the_bound() {
   [ "$elapsed" -lt 8 ] || fail "a slow blocking hook held the runner for ${elapsed}s"
   assert_contains "$(cat "$CASE_ERR")" '10-slow timed out after 1s' "the timeout reason is missing"
   assert_absent "$trace" "a hook after the timed-out one ran"
+  start=$(date +%s)
+  printf '{}' | FM_HOOK_TIMEOUT=00 FM_HOOK_LOG=/dev/null FM_HOME="$home" "$HOOKS" run pre-merge 2>"$CASE_ERR"; rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  expect_code 3 "$rc" "a slow blocking hook with FM_HOOK_TIMEOUT=00"
+  assert_contains "$(cat "$CASE_ERR")" '10-slow timed out after 10s' "FM_HOOK_TIMEOUT=00 did not fall back to 10s"
+  [ "$elapsed" -lt 20 ] || fail "FM_HOOK_TIMEOUT=00 disabled the deadline (${elapsed}s)"
   pass "a blocking hook that times out refuses within its bound"
 }
 
@@ -453,6 +462,32 @@ test_pre_merge_refusal_merges_and_records_nothing() {
   pass "a refusing pre-merge hook stops the merge before the forge or any record is touched"
 }
 
+# --- post-merge call site: bin/fm-merge-outcome-lib.sh ---------------------
+
+test_post_merge_fires_once_per_recorded_merge() {
+  local dir home url=https://github.com/example/repo/pull/9
+  dir="$TMP_ROOT/post-merge"
+  home=$(new_home post-merge)
+  hook "$home/hooks/post-merge.d" 10-log "cat >> '$dir/payloads'; echo >> '$dir/payloads'"
+  (
+    # shellcheck source=bin/fm-merge-outcome-lib.sh
+    . "$ROOT/bin/fm-merge-outcome-lib.sh"
+    FM_CONFIG_OVERRIDE="$home/config" fm_merge_outcome_report "$home" "$home/state" q1 "$url" poll \
+      || fail "the polled merge outcome was not recorded"
+    FM_CONFIG_OVERRIDE="$home/config" fm_merge_outcome_report "$home" "$home/state" q1 "$url" poll \
+      || fail "the repeated polled merge outcome failed"
+    FM_PR_MERGE_HEAD=abc123 FM_CONFIG_OVERRIDE="$home/config" \
+      fm_merge_outcome_report "$home" "$home/state" s1 "$url" self || fail "the self merge outcome was not recorded"
+    FM_CONFIG_OVERRIDE="$home/config" fm_merge_outcome_report "$home" "$home/state" s1 "$url" poll \
+      || fail "the poll after a self merge failed"
+  ) || exit 1
+  assert_equals 2 "$(jq -s length "$dir/payloads")" "post-merge did not fire exactly once per merge: $(cat "$dir/payloads")"
+  jq -e -s '.[0] == {task_id: "q1", pr_url: "'"$url"'", sha: "", provider: "github"}
+    and .[1] == {task_id: "s1", pr_url: "'"$url"'", sha: "abc123", provider: "github"}' "$dir/payloads" >/dev/null \
+    || fail "post-merge payloads are wrong: $(cat "$dir/payloads")"
+  pass "post-merge fires once per recorded merge, for a polled (queued) merge and a self merge"
+}
+
 test_no_hooks_is_a_silent_no_op
 test_emit_never_starts_the_runner_without_a_folder
 test_payload_builder_escapes_values
@@ -469,5 +504,6 @@ test_dialog_call_point_stays_out_of_other_hosts_and_worktrees
 test_unknown_event_is_a_usage_error
 test_intake_annotates_presented_inbox_notes
 test_pre_merge_refusal_merges_and_records_nothing
+test_post_merge_fires_once_per_recorded_merge
 
 echo 'fm-hooks: all tests passed'

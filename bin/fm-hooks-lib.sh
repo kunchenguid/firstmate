@@ -91,16 +91,11 @@ fm_hooks_json_string() {  # <text>: print it as one JSON string literal
 fm_hooks_payload() {  # [key=value | key:=json]...
   local field key sep='' body=''
   for field in "$@"; do
-    case $field in
-      *:=*)
-        key=${field%%:=*}
-        body+="$sep$(fm_hooks_json_string "$key"):${field#*:=}"
-        ;;
-      *=*)
-        key=${field%%=*}
-        body+="$sep$(fm_hooks_json_string "$key"):$(fm_hooks_json_string "${field#*=}")"
-        ;;
-      *) continue ;;
+    case $field in *=*) ;; *) continue ;; esac
+    key=${field%%=*}
+    case $key in
+      *:) body+="$sep$(fm_hooks_json_string "${key%:}"):${field#*=}" ;;
+      *) body+="$sep$(fm_hooks_json_string "$key"):$(fm_hooks_json_string "${field#*=}")" ;;
     esac
     sep=,
   done

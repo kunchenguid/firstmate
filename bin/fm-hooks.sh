@@ -273,7 +273,7 @@ fm_hooks_run() {  # <event> [args...]
   hooks=$(fm_hooks_list "$event")
   [ -n "$hooks" ] || [ "$dialog" = 1 ] || return 0
   limit=${FM_HOOK_TIMEOUT:-10}
-  case $limit in '' | *[!0-9]* | 0) limit=10 ;; esac
+  case $limit in *[!0-9]* | '') limit=10 ;; *[!0]*) ;; *) limit=10 ;; esac
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$FM_HOOKS_SCRIPT_DIR/fm-timeout-lib.sh"
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-hooks.XXXXXX") || return 75
