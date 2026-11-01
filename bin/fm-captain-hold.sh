@@ -1356,8 +1356,19 @@ close_answered() {  # <task-id> <release-0-or-1>
     esac
   fi
   if [ -n "$recorded" ]; then
-    fm_backlog_body_append_line "$DATA" "$id" "$recorded" \
+    # The body may already carry this sentence inside another line - a retention
+    # composes its deliverable with the same historical-record prose - and the
+    # append dedupes whole lines only, so it would persist a second, standalone
+    # copy of the same sentence.
+    fm_backlog_row_title_body "$DATA" "$id" \
       || { report_retained_artifact_failure "$id" "the answer's completion note"; return 1; }
+    case "$FM_BACKLOG_ROW_BODY" in
+      *"$recorded"*) ;;
+      *)
+        fm_backlog_body_append_line "$DATA" "$id" "$recorded" \
+          || { report_retained_artifact_failure "$id" "the answer's completion note"; return 1; }
+        ;;
+    esac
   fi
   fm_backlog_pr_title_strip "$DATA" "$id" || return 1
   if ! tasks_axi "done" "$id" >/dev/null; then
