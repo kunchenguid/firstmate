@@ -7,7 +7,13 @@ fm_remote_generation_resolve() {
   ledger=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     FM_CONFIG_OVERRIDE="$config" FM_DATA_OVERRIDE="$data" \
     "$SCRIPT_DIR/fm-fleet-seats.sh" show "$ID") || return 1
-  active=$(printf '%s\n' "${ledger:-null}" | jq -c '[.incarnations[]? | select(.lifecycle == "reserved" or .lifecycle == "confirmed")]') || return 1
+  # A home that never reserved a seat reads back empty. That is the ordinary
+  # uncapped case, so it must stay a no-op instead of failing a JSON decode the
+  # caller does not need.
+  active='[]'
+  if [ -n "$ledger" ]; then
+    active=$(printf '%s\n' "$ledger" | jq -c '[.incarnations[]? | select(.lifecycle == "reserved" or .lifecycle == "confirmed")]') || return 1
+  fi
   if [ "$active" != '[]' ]; then
     route=$(printf '%s\n' "$active" | jq -ce --arg host "$(fm_meta_get "$META" remote_host)" \
       --arg root "$(fm_meta_get "$META" remote_root)" --arg home "$(fm_meta_get "$META" home)" '
