@@ -496,6 +496,33 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
 }
 
+test_create_task_resolves_by_printed_ref_before_title_is_listed() {
+  local dir fb out title log
+  dir="$TMP_ROOT/create-task-ref"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-reftask)
+  # 1: workspace list --json (pre-create duplicate check) -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: new-workspace prints the new workspace's ref, as the real CLI does
+  printf 'OK workspace:7\n' > "$dir/responses/2.out"
+  # 3: workspace list --json (default id format) -> the new workspace is listed
+  #    with its ref but its title is not set yet, so a title lookup would miss it
+  printf '{"workspaces":[{"id":"dddddddd-3333-3333-3333-333333333333","ref":"workspace:7","title":"Shell"}]}' > "$dir/responses/3.out"
+  # 4: list-panes --json --id-format uuids -> default surface id
+  cmux_panes_response "$dir" 4 "eeeeeeee-4444-4444-4444-444444444444"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-reftask /tmp/proj' "$ROOT" ) \
+    || fail "create_task should resolve a fresh workspace by its printed ref even when its title is not listed yet"
+  [ "$out" = "dddddddd-3333-3333-3333-333333333333 eeeeeeee-4444-4444-4444-444444444444" ] \
+    || fail "create_task should echo '<workspace_id> <surface_id>' resolved from the printed ref, got '$out'"
+  log=$(cat "$dir/log")
+  assert_contains "$log" $'\x1f''new-workspace'$'\x1f''--name'$'\x1f'"$title" \
+    "create_task did not create the workspace under its scoped title"
+  assert_not_contains "$(sed -n 3p "$dir/log")" "--id-format" \
+    "the ref lookup must use the default id format, the only one that lists a ref beside the id"
+  pass "fm_backend_cmux_create_task: resolves the workspace by the ref cmux prints, even before its title is listed"
+}
+
 # --- target_ready / capture ---------------------------------------------------
 
 test_target_ready_fails_when_target_absent() {
@@ -1130,6 +1157,7 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_resolves_by_printed_ref_before_title_is_listed
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
